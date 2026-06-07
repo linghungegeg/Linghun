@@ -529,7 +529,7 @@ import {
 import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
 import { reduceTranscriptScroll } from "./shell/models/transcript-scroll-state.js";
 import {
-  buildTranscriptTextRows,
+  buildTranscriptScreenBuffer,
   reduceTranscriptSelection,
 } from "./shell/models/transcript-selection-state.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
@@ -1868,7 +1868,11 @@ async function runInkShell(
         return;
       }
       if (event.type === "transcript-mouse") {
-        const rows = buildTranscriptTextRows(blocks);
+        const currentView = controller.getViewModel();
+        const rows = buildTranscriptScreenBuffer(
+          currentView.blocks,
+          Math.max(8, currentView.width - 4),
+        ).rows;
         const result = reduceTranscriptSelection({
           state: context.transcriptSelectionState,
           event: event.event,
@@ -1885,7 +1889,9 @@ async function runInkShell(
           });
         }
         if (result.copyText) {
-          const copy = await writeTextToClipboard(result.copyText);
+          const copy = await writeTextToClipboard(result.copyText, {
+            stdout: output as NodeJS.WriteStream,
+          });
           if (!copy.ok && copy.error) {
             pushTransientNotification(context, `Copy failed: ${copy.error}`, "warning");
           } else if (copy.ok) {
@@ -1989,6 +1995,23 @@ async function runInkShell(
         const { buildHelpPanelData: build } = await import("./shell/models/help-panel.js");
         const entries = build(context.helpPanelState.group, 0, context.language).entries;
         const target = entries[context.helpPanelState.cursor];
+        if (!target) return;
+        context.helpPanelState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        blocks.push(createCommandBlock(commandSequence++, target.slash));
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        await processTuiLine(target.slash, context, gateway, shellOutput, store);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "help-select") {
+        if (!context.helpPanelState) return;
+        const { buildHelpPanelData: build } = await import("./shell/models/help-panel.js");
+        const entries = build(context.helpPanelState.group, 0, context.language).entries;
+        const target = entries[event.index];
         if (!target) return;
         context.helpPanelState = undefined;
         shell?.rerender();

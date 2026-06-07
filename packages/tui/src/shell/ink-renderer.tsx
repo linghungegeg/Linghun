@@ -3,7 +3,12 @@ import { render } from "ink";
 import React from "react";
 import { ShellApp } from "./components/ShellApp.js";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
-import { writeBestEffort } from "./terminal-interaction-runtime.js";
+import {
+  disableTerminalInteractionModes,
+  enableTerminalInteractionModes,
+  resolveTerminalInteractionModes,
+  writeBestEffort,
+} from "./terminal-interaction-runtime.js";
 import type { ShellController, ShellRenderOptions } from "./types.js";
 
 export type InkShellInstance = {
@@ -34,21 +39,24 @@ export function renderInkShell(
 ): InkShellInstance {
   const stdout = options.stdout as NodeJS.WriteStream | undefined;
   const capability = detectTerminalCapability();
-  const enableKittyKeyboard =
-    capability.kittyKeyboard || capability.keyboardProtocols.includes("csi-u");
+  const terminalInteractionModes = resolveTerminalInteractionModes({
+    capability,
+    appOwnedScreen: false,
+  });
   const useAlternateScreen = false;
   let instance: ReturnType<typeof render>;
 
   try {
+    enableTerminalInteractionModes(stdout, terminalInteractionModes);
     instance = render(<ShellApp controller={controller} capability={capability} />, {
       stdin: options.stdin as NodeJS.ReadStream | undefined,
       stdout,
       stderr: options.stderr as NodeJS.WriteStream | undefined,
       exitOnCtrlC: false,
       alternateScreen: useAlternateScreen,
-      kittyKeyboard: enableKittyKeyboard ? { mode: "enabled" } : undefined,
     });
   } catch (error) {
+    disableTerminalInteractionModes(stdout, terminalInteractionModes);
     showTerminalCursor(stdout);
     throw error;
   }
@@ -74,6 +82,7 @@ export function renderInkShell(
     } catch {
       // stdout/stdin may already be closed (e.g. Windows cmd window close)
     }
+    disableTerminalInteractionModes(stdout, terminalInteractionModes);
     showTerminalCursor(stdout);
     // Unref stdin to prevent the process from hanging on exit
     const stdin = options.stdin as { unref?: () => void } | undefined;

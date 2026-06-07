@@ -5,6 +5,7 @@ import {
   type OwnerContext,
   type OwnerKeyShape,
   isNavigationKey,
+  isVerticalNavigationKey,
   selectInputOwner,
   shouldOwnerBePaste,
 } from "./input-owner-controller.js";
@@ -69,6 +70,13 @@ describe("isNavigationKey", () => {
     expect(isNavigationKey(noKey)).toBe(false);
     expect(isNavigationKey({ ...noKey, return: true })).toBe(false);
   });
+
+  it("keeps slash vertical navigation distinct from left/right cursor movement", () => {
+    expect(isVerticalNavigationKey({ ...noKey, upArrow: true } as OwnerKeyShape)).toBe(true);
+    expect(isVerticalNavigationKey({ ...noKey, downArrow: true } as OwnerKeyShape)).toBe(true);
+    expect(isVerticalNavigationKey({ ...noKey, leftArrow: true } as OwnerKeyShape)).toBe(false);
+    expect(isVerticalNavigationKey({ ...noKey, rightArrow: true } as OwnerKeyShape)).toBe(false);
+  });
 });
 
 describe("selectInputOwner — permission has highest priority", () => {
@@ -125,8 +133,11 @@ describe("selectInputOwner — panel second", () => {
     expect(selectInputOwner("", { ...noKey, upArrow: true } as OwnerKeyShape, ctx)).toBe("panel");
     expect(selectInputOwner("", { ...noKey, downArrow: true } as OwnerKeyShape, ctx)).toBe("panel");
     expect(selectInputOwner("", { ...noKey, return: true }, ctx)).toBe("panel");
-    expect(selectInputOwner("", { ...noKey, return: true, shift: true }, ctx)).toBe("composer");
-    expect(selectInputOwner("", { ...noKey, return: true, meta: true }, ctx)).toBe("composer");
+    expect(selectInputOwner("", { ...noKey, return: true, shift: true }, ctx)).toBe("panel");
+    expect(selectInputOwner("\r", { ...noKey, return: true, meta: true }, ctx)).toBe("panel");
+    expect(
+      selectInputOwner("\x1B[13;2u", { ...noKey, return: true, shift: true }, ctx),
+    ).toBe("composer");
     expect(selectInputOwner("x", noKey, ctx)).toBe("panel");
     expect(selectInputOwner("x", { ...noKey, ctrl: true }, ctx)).toBe("composer");
   });
@@ -141,14 +152,53 @@ describe("selectInputOwner — panel second", () => {
     );
     expect(selectInputOwner("", { ...noKey, tab: true }, ctx)).toBe("panel");
   });
+
+  it("interactive panel owns explicit numeric shortcuts only when enabled", () => {
+    expect(
+      selectInputOwner("2", noKey, {
+        ...idleCtx,
+        panelActive: true,
+        panelInteractive: true,
+        panelNumericShortcuts: true,
+      }),
+    ).toBe("panel");
+    expect(
+      selectInputOwner("2", noKey, {
+        ...idleCtx,
+        panelActive: true,
+        panelInteractive: true,
+      }),
+    ).toBe("composer");
+  });
+
+  it("interactive panel owns Space only when enabled", () => {
+    expect(
+      selectInputOwner(" ", noKey, {
+        ...idleCtx,
+        panelActive: true,
+        panelInteractive: true,
+        panelSpaceAction: true,
+      }),
+    ).toBe("panel");
+    expect(
+      selectInputOwner(" ", noKey, {
+        ...idleCtx,
+        panelActive: true,
+        panelInteractive: true,
+      }),
+    ).toBe("composer");
+  });
 });
 
 describe("selectInputOwner — slash third", () => {
   it("slash owner on Enter when slash candidates visible", () => {
     const ctx: OwnerContext = { ...idleCtx, slashVisible: true };
     expect(selectInputOwner("", { ...noKey, return: true }, ctx)).toBe("slash");
-    expect(selectInputOwner("", { ...noKey, return: true, shift: true }, ctx)).toBe("composer");
-    expect(selectInputOwner("", { ...noKey, return: true, meta: true }, ctx)).toBe("composer");
+    expect(selectInputOwner("", { ...noKey, return: true, shift: true }, ctx)).toBe("slash");
+    expect(selectInputOwner("\r", { ...noKey, return: true, meta: true }, ctx)).toBe("slash");
+    expect(
+      selectInputOwner("\x1B[13;2u", { ...noKey, return: true, shift: true }, ctx),
+    ).toBe("composer");
   });
 
   it("slash owner on Tab when visible", () => {
@@ -165,6 +215,12 @@ describe("selectInputOwner — slash third", () => {
     const ctx: OwnerContext = { ...idleCtx, slashVisible: true };
     expect(selectInputOwner("", { ...noKey, upArrow: true } as OwnerKeyShape, ctx)).toBe("slash");
     expect(selectInputOwner("", { ...noKey, downArrow: true } as OwnerKeyShape, ctx)).toBe("slash");
+    expect(selectInputOwner("", { ...noKey, leftArrow: true } as OwnerKeyShape, ctx)).toBe(
+      "composer",
+    );
+    expect(selectInputOwner("", { ...noKey, rightArrow: true } as OwnerKeyShape, ctx)).toBe(
+      "composer",
+    );
   });
 
   it("slash visible but ordinary char → falls through to composer", () => {

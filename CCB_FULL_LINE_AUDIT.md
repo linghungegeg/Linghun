@@ -1,0 +1,274 @@
+# CCB 全量逐行审计报告
+**扫描时间**: 2026-06-06T18:27:31.517Z
+**文件总数**: 2674
+**总行数**: 614222
+**发现问题总数**: 1972
+
+## 严重度分布
+| 严重度 | 数量 |
+|--------|------|
+| high | 3 |
+| medium | 715 |
+| low | 817 |
+| info | 437 |
+
+## 超大文件 (>500行)
+- src/screens/REPL.tsx (6542行)
+- src/utils/messages.ts (5979行)
+- src/cli/print.ts (5840行)
+- src/main.tsx (5587行)
+- src/utils/hooks.ts (5191行)
+- src/utils/sessionStorage.ts (5121行)
+- packages/@ant/computer-use-mcp/src/toolCalls.ts (4471行)
+- src/utils/bash/bashParser.ts (4433行)
+- src/utils/attachments.ts (4079行)
+- src/services/api/claude.ts (3568行)
+- src/services/mcp/client.ts (3460行)
+- src/utils/plugins/pluginLoader.ts (3306行)
+- src/commands/insights.ts (3206行)
+- src/bridge/bridgeMain.ts (2997行)
+- src/utils/bash/ast.ts (2680行)
+- src/components/PromptInput/PromptInput.tsx (2651行)
+- src/utils/plugins/marketplaceManager.ts (2644行)
+- packages/builtin-tools/src/tools/BashTool/bashSecurity.ts (2635行)
+- packages/builtin-tools/src/tools/BashTool/bashPermissions.ts (2622行)
+- packages/@ant/ink/src/core/yoga-layout/index.ts (2582行)
+- src/commands/plugin/ManagePlugins.tsx (2504行)
+- src/bridge/replBridge.ts (2478行)
+- src/services/mcp/auth.ts (2466行)
+- src/components/Settings/Config.tsx (2180行)
+- packages/builtin-tools/src/tools/PowerShellTool/pathValidation.ts (2059行)
+- src/query.ts (2046行)
+- src/utils/auth.ts (2000行)
+- packages/builtin-tools/src/tools/BashTool/readOnlyValidation.ts (1991行)
+- src/entrypoints/sdk/coreSchemas.ts (1899行)
+- src/utils/shell/readOnlyCommandValidation.ts (1894行)
+- packages/@ant/ink/src/core/ink.tsx (1881行)
+- src/utils/config.ts (1877行)
+- src/services/tools/toolExecution.ts (1832行)
+- packages/builtin-tools/src/tools/PowerShellTool/readOnlyValidation.ts (1824行)
+- src/utils/powershell/parser.ts (1806行)
+- src/utils/permissions/filesystem.ts (1783行)
+- src/bootstrap/state.ts (1762行)
+- src/services/compact/compact.ts (1752行)
+- src/utils/nativeInstaller/installer.ts (1706行)
+- src/utils/plugins/schemas.ts (1684行)
+- packages/builtin-tools/src/tools/PowerShellTool/powershellPermissions.ts (1649行)
+- packages/builtin-tools/src/tools/AgentTool/AgentTool.tsx (1609行)
+- src/utils/swarm/inProcessRunner.ts (1603行)
+- src/services/mcp/config.ts (1587行)
+- src/hooks/useTypeahead.tsx (1583行)
+- src/utils/Cursor.ts (1530行)
+- packages/@ant/ink/src/core/screen.ts (1526行)
+- src/utils/permissions/permissionSetup.ts (1522行)
+- src/utils/worktree.ts (1517行)
+- src/utils/permissions/yoloClassifier.ts (1511行)
+
+## 空catch (high severity - 3)
+- src/hooks/notifs/useStartupNotification.ts:39 — `.catch(logError)`
+- src/services/api/metricsOptOut.ts:144 — `void refreshMetricsStatus().catch(logError)`
+- src/utils/debug.ts:182 — `.catch(noop)`
+
+## 硬编码URL (medium - 715次)
+- src/bridge/bridgeMain.ts:1063 — `void import('./createSession.js')`
+- src/bridge/bridgeMain.ts:1179 — `void fetchSessionTitle(compatSessionId, config.apiBaseUrl)`
+- src/bridge/initReplBridge.ts:328 — `void updateBridgeSessionTitle(bridgeSessionId, derived, {`
+- src/bridge/initReplBridge.ts:340 — `void generateSessionTitle(input, AbortSignal.timeout(15_000)).then(`
+- src/bridge/jwtUtils.ts:130 — `void doRefresh(sessionId, gen)`
+- src/bridge/remoteBridgeCore.ts:218 — `void archiveSession(`
+- src/bridge/remoteBridgeCore.ts:259 — `void archiveSession(`
+- src/bridge/remoteBridgeCore.ts:488 — `void recoverFromAuthFailure()`
+- src/bridge/replBridge.ts:980 — `void reconnectEnvironmentWithSession().then(success => {`
+- src/bridge/replBridge.ts:1012 — `void reconnectEnvironmentWithSession()`
+- src/bridge/replBridge.ts:1034 — `void reconnectEnvironmentWithSession()`
+- src/bridge/replBridge.ts:1140 — `void writeBridgePointer(dir, {`
+- src/bridge/replBridge.ts:1440 — `void createV2ReplTransport({`
+- src/bridge/replBridge.ts:1556 — `void startWorkPollLoop(pollOpts)`
+- src/bridge/replBridge.ts:1572 — `void writeBridgePointer(dir, {`
+- src/buddy/companionReact.ts:55 — `void callBuddyReactAPI(companion, transcript, addressed)`
+- src/cli/handlers/util.tsx:43 — `void resolve();`
+- src/cli/handlers/util.tsx:79 — `void resolve();`
+- src/cli/handlers/util.tsx:103 — `void resolve();`
+- src/cli/print.ts:520 — `void downloadUserSettings()`
+- src/cli/print.ts:581 — `void initializeGrowthBook()`
+- src/cli/print.ts:1052 — `void gracefulShutdown(0)`
+- src/cli/print.ts:1390 — `void executeNotificationHooks({`
+- src/cli/print.ts:1485 — `void updateSdkMcp()`
+- src/cli/print.ts:1770 — `void installPluginsAndApplyMcpInBackground()`
+- src/cli/print.ts:1845 — `void updateSdkMcp()`
+- src/cli/print.ts:1855 — `void getCommands(cwd()).then(newCommands => {`
+- src/cli/print.ts:2357 — `void executeFilePersistence(`
+- src/cli/print.ts:2599 — `void run()`
+- src/cli/print.ts:2717 — `void run()`
+- src/cli/print.ts:2733 — `void run()`
+- src/cli/print.ts:2772 — `void run()`
+- src/cli/print.ts:2816 — `void run()`
+- src/cli/print.ts:2822 — `void run()`
+- src/cli/print.ts:2879 — `void run()`
+- src/cli/print.ts:2966 — `void run()`
+- src/cli/print.ts:3117 — `void run()`
+- src/cli/print.ts:3269 — `void updateSdkMcp()`
+- src/cli/print.ts:4139 — `void run()`
+- src/cli/print.ts:4340 — `void run()`
+- src/cli/remoteIO.ts:136 — `void gracefulShutdown(1, 'other')`
+- src/commands/autonomyPanel.tsx:29 — `void listAutonomyFlows().then(items => {`
+- src/commands/break-cache/panel.tsx:74 — `run: () => void runBreakCacheAction('status', onDone),`
+- src/commands/break-cache/panel.tsx:79 — `run: () => void runBreakCacheAction('once', onDone),`
+- src/commands/break-cache/panel.tsx:84 — `run: () => void runBreakCacheAction('always', onDone),`
+- src/commands/break-cache/panel.tsx:89 — `run: () => void runBreakCacheAction('off', onDone),`
+- src/commands/break-cache/panel.tsx:94 — `run: () => void runBreakCacheAction('--clear', onDone),`
+- src/commands/btw/btw.tsx:83 — `void fetchResponse();`
+- src/commands/chrome/chrome.tsx:48 — `void openBrowser(url);`
+- src/commands/chrome/chrome.tsx:50 — `void openInChrome(url);`
+- src/commands/chrome/chrome.tsx:63 — `void isChromeExtensionInstalled().then(installed => {`
+- src/commands/clear/caches.ts:96 — `void import(`
+- src/commands/clear/caches.ts:106 — `void import('../../utils/attributionHooks.js').then(`
+- src/commands/clear/caches.ts:129 — `void import(`
+- src/commands/clear/caches.ts:133 — `void import(`
+- src/commands/clear/caches.ts:139 — `void import(`
+- src/commands/clear/caches.ts:143 — `void import('@claude-code-best/builtin-tools/tools/SkillTool/prompt.js').then(`
+- src/commands/clear/conversation.ts:195 — `void evictTaskOutput(taskId)`
+- src/commands/clear/conversation.ts:250 — `void initTaskOutputAsSymlink(`
+- src/commands/copy/copy.tsx:201 — `void handleWrite(focusedRef.current);`
+- src/commands/copy/copy.tsx:216 — `void handleSelect(selected);`
+- src/commands/ide/ide.tsx:449 — `void clearServerCache('ide', ideClient.config);`
+- src/commands/install-github-app/install-github-app.tsx:155 — `void checkGitHubCLI();`
+- src/commands/install-github-app/install-github-app.tsx:541 — `void runSetupGitHubActions(token, 'CLAUDE_CODE_OAUTH_TOKEN');`
+- src/commands/install-github-app/install-github-app.tsx:698 — `void checkExistingSecret();`
+- src/commands/install-github-app/OAuthFlowStep.tsx:149 — `void startOAuth();`
+- src/commands/install-github-app/OAuthFlowStep.tsx:173 — `void setClipboard(oauthStatus.url).then(raw => {`
+- src/commands/install.tsx:182 — `void run();`
+- src/commands/local-vault/launchLocalVault.tsx:114 — `void listKeys().then(keys => {`
+- src/commands/local-vault/launchLocalVault.tsx:146 — `void deleteSecret(key).then(removed => {`
+- src/commands/local-vault/launchLocalVault.tsx:154 — `void setSecret(k, v)`
+- src/commands/local-vault/launchLocalVault.tsx:198 — `void getSecret(key).then(v => {`
+- src/commands/local-vault/launchLocalVault.tsx:226 — `void getSecret(k)`
+- src/commands/login/login.tsx:43 — `void refreshRemoteManagedSettings();`
+- src/commands/login/login.tsx:45 — `void refreshPolicyLimits();`
+- src/commands/login/login.tsx:55 — `void enrollTrustedDevice();`
+- src/commands/login/login.tsx:59 — `void checkAndDisableAutoModeIfNeeded(appState.toolPermissionContext, context.set`
+- src/commands/login/WorkspaceKeyInput.tsx:216 — `void handleSave(key);`
+- src/commands/mcp/mcp.tsx:45 — `void toggleMcpServer(s.name);`
+- src/commands/model/model.tsx:215 — `void handleModelChange();`
+- src/commands/plugin/AddMarketplace.tsx:123 — `void handleAdd();`
+- src/commands/plugin/BrowseMarketplace.tsx:252 — `void loadMarketplaceData();`
+- src/commands/plugin/BrowseMarketplace.tsx:322 — `void loadPluginsForMarketplace(selectedMarketplace);`
+- src/commands/plugin/BrowseMarketplace.tsx:473 — `void installSelectedPlugins();`
+- src/commands/plugin/BrowseMarketplace.tsx:514 — `void installSelectedPlugins();`
+- src/commands/plugin/BrowseMarketplace.tsx:547 — `void handleSinglePluginInstall(selectedPlugin, 'user');`
+- src/commands/plugin/BrowseMarketplace.tsx:549 — `void handleSinglePluginInstall(selectedPlugin, 'project');`
+- src/commands/plugin/BrowseMarketplace.tsx:551 — `void handleSinglePluginInstall(selectedPlugin, 'local');`
+- src/commands/plugin/BrowseMarketplace.tsx:553 — `void openBrowser(hasHomepage);`
+- src/commands/plugin/BrowseMarketplace.tsx:555 — `void openBrowser(`https://github.com/${githubRepo}`);`
+- src/commands/plugin/BrowseMarketplace.tsx:573 — `void onInstallComplete();`
+- src/commands/plugin/DiscoverPlugins.tsx:235 — `void loadAllPlugins();`
+- src/commands/plugin/DiscoverPlugins.tsx:406 — `void installSelectedPlugins();`
+- src/commands/plugin/DiscoverPlugins.tsx:450 — `void installSelectedPlugins();`
+- src/commands/plugin/DiscoverPlugins.tsx:486 — `void handleSinglePluginInstall(selectedPlugin, 'user');`
+- src/commands/plugin/DiscoverPlugins.tsx:488 — `void handleSinglePluginInstall(selectedPlugin, 'project');`
+- src/commands/plugin/DiscoverPlugins.tsx:490 — `void handleSinglePluginInstall(selectedPlugin, 'local');`
+- src/commands/plugin/DiscoverPlugins.tsx:492 — `void openBrowser(hasHomepage);`
+- src/commands/plugin/DiscoverPlugins.tsx:494 — `void openBrowser(`https://github.com/${githubRepo}`);`
+- src/commands/plugin/DiscoverPlugins.tsx:512 — `void onInstallComplete();`
+
+## 按文件分布（前100个问题最多的文件）
+- src/screens/REPL.tsx: 67 个问题
+- src/components/Settings/Config.tsx: 58 个问题
+- src/main.tsx: 53 个问题
+- src/cli/print.ts: 46 个问题
+- src/hooks/useReplBridge.tsx: 23 个问题
+- src/tasks/RemoteAgentTask/RemoteAgentTask.tsx: 20 个问题
+- src/components/PromptInput/PromptInput.tsx: 19 个问题
+- src/commands/plugin/ManagePlugins.tsx: 18 个问题
+- src/hooks/useInboxPoller.ts: 18 个问题
+- src/utils/permissions/filesystem.ts: 18 个问题
+- src/services/api/openai/responsesAdapter.ts: 17 个问题
+- src/services/acp/bridge.ts: 16 个问题
+- src/utils/plugins/validatePlugin.ts: 15 个问题
+- src/components/TrustDialog/utils.ts: 14 个问题
+- src/utils/ide.ts: 14 个问题
+- src/components/ConsoleOAuthFlow.tsx: 13 个问题
+- src/components/tasks/BackgroundTasksDialog.tsx: 13 个问题
+- src/services/mcp/client.ts: 13 个问题
+- src/utils/model/configs.ts: 13 个问题
+- src/utils/auth.ts: 12 个问题
+- src/utils/cronScheduler.ts: 12 个问题
+- packages/remote-control-server/web/src/lib/rcs-chat-adapter.ts: 12 个问题
+- src/commands/ultraplan.tsx: 11 个问题
+- src/commands/plugin/BrowseMarketplace.tsx: 10 个问题
+- src/components/teams/TeamsDialog.tsx: 10 个问题
+- src/services/PromptSuggestion/speculation.ts: 10 个问题
+- src/services/tools/toolExecution.ts: 10 个问题
+- packages/remote-control-server/web/src/components/EventStream.tsx: 10 个问题
+- src/bridge/replBridge.ts: 9 个问题
+- src/commands/insights.ts: 9 个问题
+- src/commands/plugin/DiscoverPlugins.tsx: 9 个问题
+- src/components/permissions/ExitPlanModePermissionRequest/ExitPlanModePermissionRequest.tsx: 9 个问题
+- src/components/permissions/rules/PermissionRuleList.tsx: 9 个问题
+- src/hooks/useVoice.ts: 9 个问题
+- src/services/mcp/useManageMCPConnections.ts: 9 个问题
+- src/tasks/LocalAgentTask/LocalAgentTask.tsx: 9 个问题
+- src/utils/claudemd.ts: 9 个问题
+- src/utils/plugins/marketplaceManager.ts: 9 个问题
+- src/utils/plugins/schemas.ts: 9 个问题
+- packages/builtin-tools/src/tools/AgentTool/agentMemory.ts: 9 个问题
+- packages/remote-control-server/web/components/ChatInterface.tsx: 9 个问题
+- packages/remote-control-server/web/src/lib/rcs-transport.ts: 9 个问题
+- src/bridge/sessionRunner.ts: 8 个问题
+- src/commands/resume/resume.tsx: 8 个问题
+- src/hooks/useTypeahead.tsx: 8 个问题
+- src/QueryEngine.ts: 8 个问题
+- src/services/api/claude.ts: 8 个问题
+- src/services/mcp/elicitationHandler.ts: 8 个问题
+- src/services/skillSearch/localSearch.ts: 8 个问题
+- src/setup.ts: 8 个问题
+- src/tasks/LocalMainSessionTask.ts: 8 个问题
+- src/tasks/LocalShellTask/LocalShellTask.tsx: 8 个问题
+- src/utils/deepLink/terminalLauncher.ts: 8 个问题
+- src/utils/markdownConfigLoader.ts: 8 个问题
+- src/utils/plugins/pluginLoader.ts: 8 个问题
+- packages/@ant/ink/src/core/termio/osc.ts: 8 个问题
+- packages/@ant/model-provider/src/providers/gemini/convertMessages.ts: 8 个问题
+- src/context/notifications.tsx: 7 个问题
+- src/interactiveHelpers.tsx: 7 个问题
+- src/query.ts: 7 个问题
+- src/utils/claudeInChrome/setup.ts: 7 个问题
+- src/utils/model/bedrock.ts: 7 个问题
+- src/utils/swarm/inProcessRunner.ts: 7 个问题
+- src/commands/clear/caches.ts: 6 个问题
+- src/commands/pipes/pipes.ts: 6 个问题
+- src/components/agents/new-agent-creation/wizard-steps/MemoryStep.tsx: 6 个问题
+- src/components/mcp/MCPListPanel.tsx: 6 个问题
+- src/components/mcp/MCPRemoteServerMenu.tsx: 6 个问题
+- src/components/permissions/FallbackPermissionRequest.tsx: 6 个问题
+- src/components/permissions/FilePermissionDialog/permissionOptions.tsx: 6 个问题
+- src/constants/oauth.ts: 6 个问题
+- src/services/acp/agent.ts: 6 个问题
+- src/services/skillLearning/runtimeObserver.ts: 6 个问题
+- src/services/skillSearch/intentNormalize.ts: 6 个问题
+- src/services/skillSearch/prefetch.ts: 6 个问题
+- src/skills/bundled/keybindings.ts: 6 个问题
+- src/utils/computerUse/wrapper.tsx: 6 个问题
+- src/utils/doctorDiagnostic.ts: 6 个问题
+- src/utils/hooks/hooksSettings.ts: 6 个问题
+- src/utils/settings/types.ts: 6 个问题
+- packages/@ant/model-provider/src/shared/openaiConvertTools.ts: 6 个问题
+- packages/weixin/src/server.ts: 6 个问题
+- src/commands/break-cache/panel.tsx: 5 个问题
+- src/commands/cache-log/index.ts: 5 个问题
+- src/commands/local-vault/launchLocalVault.tsx: 5 个问题
+- src/commands/login/login.tsx: 5 个问题
+- src/commands/model/model.tsx: 5 个问题
+- src/commands/plugin/ManageMarketplaces.tsx: 5 个问题
+- src/commands/thinkback/thinkback.tsx: 5 个问题
+- src/components/permissions/SkillPermissionRequest/SkillPermissionRequest.tsx: 5 个问题
+- src/components/PromptInput/PromptInputFooter.tsx: 5 个问题
+- src/components/StatusLine.tsx: 5 个问题
+- src/entrypoints/init.ts: 5 个问题
+- src/hooks/useDiffInIDE.ts: 5 个问题
+- src/screens/ResumeConversation.tsx: 5 个问题
+- src/services/langfuse/convert.ts: 5 个问题
+- src/skills/bundled/updateConfig.ts: 5 个问题
+- src/skills/loadSkillsDir.ts: 5 个问题
+- src/utils/api.ts: 5 个问题
+- src/utils/backgroundHousekeeping.ts: 5 个问题

@@ -248,7 +248,17 @@ describe("TUI Interaction Contract — 自研拖选复制语义", () => {
   });
 
   it("拖到视口上/下边缘时给出 bounded autoscroll delta 并保持 selectedText", () => {
-    const rows = Array.from({ length: 20 }, (_, index) => ({ index, text: `row ${index}` }));
+    const rows = buildTranscriptTextRows([
+      {
+        id: "assistant-rows",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "",
+        fullText: Array.from({ length: 20 }, (_, index) => `row ${index}`).join("\n"),
+        messageKind: "assistant_text",
+      },
+    ]);
     const geometry = { x: 0, y: 0, width: 20, height: 4, contentHeight: 20, topOffset: 10 };
     const down = reduceTranscriptSelection({
       state: undefined,
@@ -310,7 +320,7 @@ describe("TUI Interaction Contract — 输入归属", () => {
     expect(selectInputOwner("a", baseKey, ctx)).toBe("composer");
   });
 
-  it("panel 或 slash 可见时 Shift+Enter 仍归 Composer 换行", () => {
+  it("panel 或 slash 可见时不可区分的 modified Enter 不伪装成 Composer 换行", () => {
     const modifiedEnter = key({ return: true, shift: true });
     expect(
       selectInputOwner("", modifiedEnter, {
@@ -320,14 +330,14 @@ describe("TUI Interaction Contract — 输入归属", () => {
         pastePending: false,
         slashVisible: false,
       }),
-    ).toBe("composer");
+    ).toBe("panel");
     expect(
       selectInputOwner("", modifiedEnter, {
         permissionActive: false,
         pastePending: false,
         slashVisible: true,
       }),
-    ).toBe("composer");
+    ).toBe("slash");
   });
 
   it("permission 关闭后 Composer 恢复输入", () => {

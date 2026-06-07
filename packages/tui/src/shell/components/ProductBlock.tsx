@@ -146,6 +146,7 @@ export function ProductBlock({
               tone={tone}
               wrapWidth={Math.max(8, width - 6)}
               selectionLineIndexes={block.selectionLineIndexes}
+              selectionLineRanges={block.selectionLineRanges}
             />
           </Box>
         ) : (
@@ -156,6 +157,7 @@ export function ProductBlock({
             tone={tone}
             wrapWidth={Math.max(8, width)}
             selectionLineIndexes={block.selectionLineIndexes}
+            selectionLineRanges={block.selectionLineRanges}
           />
         )}
         {nextAction ? (
@@ -182,6 +184,7 @@ export function ProductBlock({
           dim
           wrapWidth={Math.max(8, width)}
           selectionLineIndexes={block.selectionLineIndexes}
+          selectionLineRanges={block.selectionLineRanges}
         />
         {nextAction ? (
           <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
@@ -245,6 +248,7 @@ export function ProductBlock({
             tone="error"
             wrapWidth={innerWidth}
             selectionLineIndexes={block.selectionLineIndexes}
+            selectionLineRanges={block.selectionLineRanges}
           />
         ) : null}
         {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} /> : null}

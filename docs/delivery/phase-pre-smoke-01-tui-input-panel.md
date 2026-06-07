@@ -6,7 +6,8 @@ Close the P0 user smoke issues for Delete, Shift+Enter, mouse drag selection/cop
 
 ## Completed Functions
 
-- Added terminal input normalization for Delete, Backspace, raw DEL/BS, CSI-u/modifyOtherKeys newline paths, Shift+Enter, Alt/Meta+Enter, and Ctrl+J.
+- Added terminal input normalization for Delete, Backspace, raw DEL/BS, CSI-u/modifyOtherKeys newline paths, and Ctrl+J.
+- 2026-06-07 repair: when Windows Terminal + PowerShell/cmd only delivers plain `\r`, Linghun no longer claims Shift/Meta Enter is distinguishable. Use Ctrl+J, `\`+Enter, or configure the terminal to send CSI-u / modifyOtherKeys.
 - Wired Composer to dispatch normalized edit/newline actions instead of relying only on Ink key flags.
 - Wired SGR mouse down/drag/up/wheel into transcript selection and scroll events.
 - Added transcript selection reducer coverage for left drag, viewport mapping, selected text, and edge autoscroll behavior.
@@ -18,9 +19,10 @@ In the TUI:
 
 ```text
 Delete               deletes the character at cursor
-Shift+Enter          inserts a newline
-Alt/Meta+Enter       inserts a newline fallback
-Ctrl+J               inserts a newline fallback
+CSI-u/modifyOtherKeys Enter  inserts a newline when the terminal sends a distinguishable sequence
+Ctrl+J                     inserts a newline fallback
+\+Enter                   inserts a newline fallback
+Plain \r from WT/cmd       ordinary Enter; Shift/Meta cannot be detected by the app
 Left mouse drag      selects transcript text
 Drag to edge         scrolls transcript while extending selection
 Mouse up             copies selection best-effort

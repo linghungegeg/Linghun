@@ -2,8 +2,9 @@ import { Box, Text } from "ink";
 import { createContext, useContext } from "react";
 import type React from "react";
 import { memo, useRef } from "react";
-import { wrapText } from "../text-utils.js";
+import { charWidth, wrapText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
+import type { ProductBlockSelectionRange } from "../types.js";
 
 /**
  * D.13Q-UX — MessageMarkdown
@@ -50,6 +51,7 @@ export type MessageMarkdownProps = {
   tone?: "default" | "error" | "diagnostic";
   wrapWidth?: number;
   selectionLineIndexes?: number[];
+  selectionLineRanges?: ProductBlockSelectionRange[];
 };
 
 type MdLine =
@@ -171,6 +173,139 @@ function InlineRow({
   );
 }
 
+function InlineText({
+  value,
+  theme,
+  dim,
+  tone,
+  selected,
+}: {
+  value: string;
+  theme: ShellTheme;
+  dim: boolean;
+  tone: MessageMarkdownProps["tone"];
+  selected?: boolean;
+}): React.ReactNode {
+  const baseColor = dim
+    ? theme.dim
+    : tone === "error"
+      ? theme.error
+      : tone === "diagnostic"
+        ? theme.diagnostic
+        : theme.assistantText;
+  const codeColor = theme.diagnostic ?? theme.accent;
+  const tokens = tokenizeInline(value);
+  return (
+    <Text
+      color={selected ? "white" : baseColor}
+      backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
+      dimColor={selected ? false : dim}
+    >
+      {tokens.map((token, tokenIndex) => {
+        const key = `${tokenIndex}-${token.kind}-${token.value}`;
+        if (token.kind === "code") {
+          return (
+            <Text key={key} color={selected ? "white" : codeColor} dimColor={selected ? false : dim}>
+              {token.value}
+            </Text>
+          );
+        }
+        if (token.kind === "bold") {
+          return (
+            <Text
+              key={key}
+              bold
+              color={selected ? "white" : baseColor}
+              dimColor={selected ? false : dim}
+            >
+              {token.value}
+            </Text>
+          );
+        }
+        return <Text key={key}>{token.value}</Text>;
+      })}
+    </Text>
+  );
+}
+
+function InlineCellRangeRow({
+  value,
+  ranges,
+  theme,
+  dim,
+  tone,
+}: {
+  value: string;
+  ranges: ProductBlockSelectionRange[];
+  theme: ShellTheme;
+  dim: boolean;
+  tone: MessageMarkdownProps["tone"];
+}): React.ReactNode {
+  const segments = splitLineBySelectionRanges(value, ranges);
+  return (
+    <Text>
+      {segments.map((segment, index) => (
+        <InlineText
+          key={`${index}-${segment.selected ? "selected" : "plain"}-${segment.text}`}
+          value={segment.text}
+          theme={theme}
+          dim={dim}
+          tone={tone}
+          selected={segment.selected}
+        />
+      ))}
+    </Text>
+  );
+}
+
+function splitLineBySelectionRanges(
+  value: string,
+  ranges: ProductBlockSelectionRange[],
+): Array<{ text: string; selected: boolean }> {
+  const chars = Array.from(value);
+  const totalWidth = chars.reduce((width, char) => width + Math.max(1, charWidth(char)), 0);
+  const normalized = ranges
+    .map((range) => ({
+      start: Math.max(0, Math.min(totalWidth, range.startColumn)),
+      end: Math.max(0, Math.min(totalWidth, range.endColumn)),
+    }))
+    .filter((range) => range.end > range.start)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  if (normalized.length === 0) return [{ text: value, selected: false }];
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of normalized) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end) {
+      previous.end = Math.max(previous.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  const segments: Array<{ text: string; selected: boolean }> = [];
+  let current = "";
+  let currentSelected: boolean | undefined;
+  let column = 0;
+  const pushCurrent = () => {
+    if (currentSelected === undefined || current.length === 0) return;
+    segments.push({ text: current, selected: currentSelected });
+    current = "";
+  };
+  for (const char of chars) {
+    const width = Math.max(1, charWidth(char));
+    const charStart = column;
+    const charEnd = column + width;
+    const selected = merged.some((range) => range.start < charEnd && range.end > charStart);
+    if (currentSelected !== selected) {
+      pushCurrent();
+      currentSelected = selected;
+    }
+    current += char;
+    column = charEnd;
+  }
+  pushCurrent();
+  return segments;
+}
+
 function codePrefix(theme: ShellTheme, dim: boolean): React.ReactNode {
   return (
     <Text color={theme.dim ?? theme.muted} dimColor={dim}>
@@ -185,12 +320,14 @@ function CodeLine({
   theme,
   dim,
   selected,
+  ranges,
 }: {
   line: string;
   lang?: string;
   theme: ShellTheme;
   dim: boolean;
   selected?: boolean;
+  ranges?: ProductBlockSelectionRange[];
 }): React.ReactNode {
   const isDiff = lang === "diff" || lang === "patch";
   const color =
@@ -200,6 +337,23 @@ function CodeLine({
         ? (theme.error ?? theme.status.fail)
         : (theme.diagnostic ?? theme.accent);
   const dimLine = dim || (isDiff && !line.startsWith("+") && !line.startsWith("-"));
+  if (ranges && ranges.length > 0) {
+    const segments = splitLineBySelectionRanges(line.length === 0 ? " " : line, ranges);
+    return (
+      <Text>
+        {segments.map((segment, index) => (
+          <Text
+            key={`${index}-${segment.selected ? "selected" : "plain"}-${segment.text}`}
+            color={segment.selected ? "white" : color}
+            backgroundColor={segment.selected && theme.mode !== "no-color" ? "blue" : undefined}
+            dimColor={segment.selected ? false : dimLine}
+          >
+            {segment.text}
+          </Text>
+        ))}
+      </Text>
+    );
+  }
   return (
     <Text
       color={selected ? "white" : color}
@@ -218,10 +372,17 @@ export function MessageMarkdown({
   tone = "default",
   wrapWidth,
   selectionLineIndexes,
+  selectionLineRanges,
 }: MessageMarkdownProps): React.ReactNode {
   if (!text || text.length === 0) return null;
   const lines = text.replace(/\r/g, "").split("\n");
   const selectedLines = new Set(selectionLineIndexes ?? []);
+  const selectedRangesByLine = new Map<number, ProductBlockSelectionRange[]>();
+  for (const range of selectionLineRanges ?? []) {
+    const existing = selectedRangesByLine.get(range.lineIndex) ?? [];
+    existing.push(range);
+    selectedRangesByLine.set(range.lineIndex, existing);
+  }
   const rendered: React.ReactNode[] = [];
   let inCode = false;
   let codeLang: string | undefined;
@@ -244,6 +405,7 @@ export function MessageMarkdown({
               theme={theme}
               dim={dim}
               selected={selectedLines.has(lineIndex)}
+              ranges={selectedRangesByLine.get(lineIndex)}
             />
           </Box>
         ))}
@@ -278,6 +440,7 @@ export function MessageMarkdown({
       continue;
     }
     if (cls.kind === "list") {
+      const ranges = selectedRangesByLine.get(lineIndex) ?? [];
       rendered.push(
         <Box key={`list-${blockIndex++}`} flexDirection="row">
           <Text
@@ -289,15 +452,43 @@ export function MessageMarkdown({
           >
             {cls.bullet}{" "}
           </Text>
-          <InlineRow
-            value={cls.rest}
-            theme={theme}
-            dim={dim}
-            tone={tone}
-            wrapWidth={wrapWidth ? Math.max(8, wrapWidth - 2) : undefined}
-            selected={selectedLines.has(lineIndex)}
-          />
+          {ranges.length > 0 ? (
+            <InlineCellRangeRow
+              value={cls.rest}
+              ranges={ranges.map((range) => ({
+                ...range,
+                startColumn: Math.max(0, range.startColumn - 2),
+                endColumn: Math.max(0, range.endColumn - 2),
+              }))}
+              theme={theme}
+              dim={dim}
+              tone={tone}
+            />
+          ) : (
+            <InlineRow
+              value={cls.rest}
+              theme={theme}
+              dim={dim}
+              tone={tone}
+              wrapWidth={wrapWidth ? Math.max(8, wrapWidth - 2) : undefined}
+              selected={selectedLines.has(lineIndex)}
+            />
+          )}
         </Box>,
+      );
+      continue;
+    }
+    const ranges = selectedRangesByLine.get(lineIndex) ?? [];
+    if (ranges.length > 0) {
+      rendered.push(
+        <InlineCellRangeRow
+          key={`para-${blockIndex++}`}
+          value={cls.raw}
+          ranges={ranges}
+          theme={theme}
+          dim={dim}
+          tone={tone}
+        />,
       );
       continue;
     }

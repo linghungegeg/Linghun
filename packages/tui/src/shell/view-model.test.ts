@@ -360,7 +360,7 @@ describe("Ink shell selection", () => {
     expect(output.text).not.toContain("\x1b[2J\x1b[H");
   });
 
-  it("enables extended keyboard reporting for Shift+Enter-capable terminals and restores it on exit", async () => {
+  it("enables extended keyboard protocols and restores them on exit", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("WT_SESSION", "test-windows-terminal");
@@ -392,7 +392,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("enables SGR mouse tracking so transcript wheel reaches the scroll reducer", async () => {
+  it("keeps SGR mouse tracking off on the main screen so native selection owns copy", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -412,11 +412,8 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("\x1B[?1000h\x1B[?1002h\x1B[?1006h");
-    expect(output.text).toContain("\x1B[?1006l\x1B[?1002l\x1B[?1000l");
-    expect(output.text.indexOf("\x1B[?1000h\x1B[?1002h\x1B[?1006h")).toBeLessThan(
-      output.text.lastIndexOf("\x1B[?1006l\x1B[?1002l\x1B[?1000l"),
-    );
+    expect(output.text).not.toContain("\x1B[?1000h\x1B[?1002h\x1B[?1006h");
+    expect(output.text).not.toContain("\x1B[?1006l\x1B[?1002l\x1B[?1000l");
   });
 
   it("does not add beforeExit listener when waiting after unmount", async () => {
@@ -584,8 +581,13 @@ describe("Ink shell selection", () => {
     expect(plainRendered).not.toContain("/model setup");
   });
 
-  it("keeps Shift+Enter as a composer newline instead of submitting", () => {
-    expect(handleComposerInput("hello", "", { return: true, shift: true })).toEqual({
+  it("does not pretend Shift+Enter is distinguishable when the terminal only sends Enter", () => {
+    expect(handleComposerInput("hello", "\r", { return: true, shift: true })).toEqual({
+      kind: "emit",
+      event: { type: "submit", text: "hello" },
+      nextText: "",
+    });
+    expect(handleComposerInput("hello", "\x1B[13;2u", { return: false })).toEqual({
       kind: "append",
       text: "\n",
     });
@@ -1831,13 +1833,13 @@ describe("D.12C — Composer cursor alignment closure", () => {
       masking: false,
       noColor: false,
     });
-    expect(lines).toEqual(["> 我能帮您做点什么？"]);
+    expect(lines).toEqual(["我能帮您做点什么？"]);
     // No fake cursor characters
     expect(lines.join("")).not.toContain("\u258C");
     expect(lines.join("")).not.toContain("|");
-    // cursorCol should be at end of placeholder line
+    // cursorCol is relative to the editor surface, not the visual prompt marker.
     expect(cursorRow).toBe(0);
-    expect(cursorCol).toBeGreaterThan(0);
+    expect(cursorCol).toBe(0);
 
     // Plain renderer shows placeholder inside composer box as hint (no "> " prefix)
     const rendered = renderPlainShell(createShellViewModel(createContext(), { width: 80 }));
@@ -1853,10 +1855,10 @@ describe("D.12C — Composer cursor alignment closure", () => {
       masking: false,
       noColor: false,
     });
-    expect(lines).toEqual(["> 修复光标"]);
-    // cursor at end of "> 修复光标" (2 + 4*2 = 10)
+    expect(lines).toEqual(["修复光标"]);
+    // cursor at end of "修复光标" (4*2 = 8)
     expect(cursorRow).toBe(0);
-    expect(cursorCol).toBe(10);
+    expect(cursorCol).toBe(8);
   });
 
   it("soft-wraps long single-line Composer input instead of horizontal ellipsis", () => {
@@ -1879,11 +1881,11 @@ describe("D.12C — Composer cursor alignment closure", () => {
       masking: false,
       noColor: false,
     });
-    expect(lines).toEqual(["> 第一行", "  第二行", "  第三行"]);
+    expect(lines).toEqual(["第一行", "第二行", "第三行"]);
     expect(lines.join("\n")).not.toContain("\u258C");
     expect(cursorRow).toBe(2);
-    // "  第三行" = 2 + 3*2 = 8
-    expect(cursorCol).toBe(8);
+    // "第三行" = 3*2 = 6
+    expect(cursorCol).toBe(6);
   });
 
   it("no-color Composer render has no fake cursor characters", () => {
@@ -1893,10 +1895,10 @@ describe("D.12C — Composer cursor alignment closure", () => {
       masking: false,
       noColor: true,
     });
-    expect(lines).toEqual(["> 修复光标"]);
+    expect(lines).toEqual(["修复光标"]);
     expect(lines.join("\n")).not.toContain("\u258C");
     expect(lines.join("\n")).not.toContain("|");
-    expect(cursorCol).toBe(10);
+    expect(cursorCol).toBe(8);
 
     const rendered = renderPlainShell(
       createShellViewModel(createContext(), { noColor: true, width: 80 }),
@@ -2496,8 +2498,8 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       masking: false,
       noColor: false,
     });
-    // "> " (2) + "你好世界" (4*2=8) = 10
-    expect(cursorCol).toBe(10);
+    // "你好世界" (4*2=8)
+    expect(cursorCol).toBe(8);
   });
 
   it("masking cursor position uses masked length", () => {
@@ -2507,8 +2509,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       masking: true,
       noColor: false,
     });
-    // "> " (2) + "******" (6) = 8
-    expect(cursorCol).toBe(8);
+    expect(cursorCol).toBe(6);
     expect(lines[0]).toContain("******");
   });
 
@@ -2840,7 +2841,7 @@ describe("Windows TTY terminal capability detection", () => {
       ).toBe(true);
       const capability = detectTerminalCapability();
       expect(capability.tier).toBe("basic");
-      expect(capability.shiftEnter).toBe(true);
+      expect(capability.shiftEnter).toBe(false);
       expect(capability.keyboardProtocols).toEqual(["csi-u", "modifyOtherKeys"]);
     } else {
       // On non-Windows, verify that LINGHUN_TERMINAL_TIER=basic gives Ink
@@ -2869,7 +2870,7 @@ describe("Windows TTY terminal capability detection", () => {
     resetTerminalCapabilityCache();
 
     const capability = detectTerminalCapability();
-    expect(capability.shiftEnter).toBe(true);
+    expect(capability.shiftEnter).toBe(false);
     expect(capability.keyboardProtocols).toEqual(["csi-u", "modifyOtherKeys"]);
   });
 
@@ -2883,7 +2884,7 @@ describe("Windows TTY terminal capability detection", () => {
 
     const capability = detectTerminalCapability();
     expect(capability.tier).toBe("modern");
-    expect(capability.shiftEnter).toBe(true);
+    expect(capability.shiftEnter).toBe(false);
     expect(capability.keyboardProtocols).toEqual(["csi-u", "modifyOtherKeys"]);
   });
 
@@ -3136,14 +3137,12 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     });
     // cursor at row=1 (line2), col=2 ("li|ne2")
     expect(cursorRow).toBe(1);
-    // "> " prefix only on first line; continuation "  " on others
-    // "  " (2) + "li" (2) = 4
-    expect(cursorCol).toBe(4);
+    expect(cursorCol).toBe(2);
   });
 
-  it("Composer preserves continuation prefix spaces after multiline input", async () => {
+  it("Composer renders multiline input on the editor surface", async () => {
     const source = await readFile(join(SRC_ROOT, "shell", "components", "Composer.tsx"), "utf8");
-    expect(source).toContain("{sliceWidth(line, maxWidth)}");
+    expect(source).toContain("sliceWidth(line");
     expect(source).not.toContain("{fitText(line, maxWidth)}");
 
     const buf = createEditBuffer("line1\nline2");
@@ -3155,10 +3154,10 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
       maxWidth: 80,
     });
 
-    expect(lines[0]).toBe("> line1");
-    expect(lines[1]).toBe("  line2");
+    expect(lines[0]).toBe("line1");
+    expect(lines[1]).toBe("line2");
     expect(cursorRow).toBe(1);
-    expect(cursorCol).toBe(7);
+    expect(cursorCol).toBe(5);
   });
 
   // =========================================================================
@@ -3349,8 +3348,7 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     });
     expect(lines[0]).toContain("*********");
     expect(lines[0]).not.toContain("sk-abc123");
-    // "> " (2) + 9 masked chars = 11
-    expect(cursorCol).toBe(11);
+    expect(cursorCol).toBe(9);
   });
 
   // =========================================================================
@@ -3515,8 +3513,7 @@ describe("D.13D anchored cursor + Task region", () => {
       noColor: false,
     });
     expect(lines[0]).not.toContain("sk-secret");
-    // "> " prefix (width 2) + masked length
-    expect(cursorCol).toBeGreaterThanOrEqual(2);
+    expect(cursorCol).toBe(13);
   });
 
   it("permission pending: composer keeps input ownership (placeholder swap, no fake input)", () => {
@@ -6224,7 +6221,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(`${failed?.summary}\n${failed?.fullText}`).toContain("raw diagnostic stack");
   });
 
-  it("transcriptSelectionState 给 app-owned transcript selection 挂可见高亮行", () => {
+  it("transcriptSelectionState 给 app-owned transcript selection 挂可见高亮 cell 范围", () => {
     const ctx = createContext() as TuiContext & {
       transcriptSelectionState?: {
         dragging: boolean;
@@ -6253,6 +6250,10 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
       outputBlocks: [block],
     });
     expect(view.blocks[0]?.selectionLineIndexes).toEqual([0, 1]);
+    expect(view.blocks[0]?.selectionLineRanges).toEqual([
+      { lineIndex: 0, startColumn: 0, endColumn: 6 },
+      { lineIndex: 1, startColumn: 0, endColumn: 4 },
+    ]);
     expect(view.blocks[0]?.fullText).toBe("第一行\n第二行\n第三行");
   });
 });

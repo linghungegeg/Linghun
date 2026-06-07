@@ -46,21 +46,44 @@ describe("terminal input normalization", () => {
     });
   });
 
-  it("recognizes Shift/Alt Enter through Ink, CSI-u, and modifyOtherKeys", () => {
+  it("does not guess plain CR as Shift/Meta Enter when terminals only send CR", () => {
+    expect(normalizeTerminalInput("\r", { ...key, return: true })).toEqual({ type: "ignore" });
+    expect(normalizeTerminalInput("\r", { ...key, return: true, shift: true })).toEqual({
+      type: "ignore",
+    });
+    expect(normalizeTerminalInput("\r", { ...key, return: true, meta: true })).toEqual({
+      type: "ignore",
+    });
+  });
+
+  it("does not accept enhanced Enter key metadata without a parsed sequence", () => {
     expect(normalizeTerminalInput("", { ...key, return: true, shift: true })).toEqual({
-      type: "newline",
+      type: "ignore",
     });
     expect(normalizeTerminalInput("", { ...key, return: true, meta: true })).toEqual({
-      type: "newline",
+      type: "ignore",
     });
+    expect(normalizeTerminalInput("x", { ...key, return: true, shift: true })).toEqual({
+      type: "ignore",
+    });
+  });
+
+  it("recognizes multiline Enter only through Ctrl+J, LF, configured ESC+CR, CSI-u, and modifyOtherKeys", () => {
+    expect(normalizeTerminalInput("j", { ...key, ctrl: true })).toEqual({ type: "newline" });
+    expect(normalizeTerminalInput("\n", key)).toEqual({ type: "newline" });
+    expect(normalizeTerminalInput("\x1B\r", key)).toEqual({ type: "newline" });
+    expect(isMultilineEnterSequence("\x1B\r")).toBe(true);
     expect(isMultilineEnterSequence("\x1B[13;2u")).toBe(true);
     expect(isMultilineEnterSequence("[13;2u")).toBe(true);
     expect(isMultilineEnterSequence("\x1B[10;3u")).toBe(true);
+    expect(isMultilineEnterSequence("\x1B[13;1u")).toBe(false);
     expect(isMultilineEnterSequence("\x1B[13;2~")).toBe(true);
     expect(isMultilineEnterSequence("[13;2~")).toBe(true);
     expect(isMultilineEnterSequence("\x1B[13;5~")).toBe(true);
+    expect(isMultilineEnterSequence("\x1B[13;1~")).toBe(false);
     expect(isMultilineEnterSequence("\x1B[27;2;13~")).toBe(true);
     expect(isMultilineEnterSequence("[27;2;13~")).toBe(true);
+    expect(isMultilineEnterSequence("\x1B[27;1;13~")).toBe(false);
     expect(isMultilineEnterSequence("\x1B[1;2C")).toBe(false);
   });
 

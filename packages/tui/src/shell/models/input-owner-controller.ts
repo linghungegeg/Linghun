@@ -30,6 +30,10 @@ export type OwnerContext = {
   panelActive?: boolean;
   /** True when the active panel owns row navigation/actions, not only Esc close. */
   panelInteractive?: boolean;
+  /** True when the active panel exposes numeric row shortcuts. */
+  panelNumericShortcuts?: boolean;
+  /** True when the active panel treats Space as an action/close key. */
+  panelSpaceAction?: boolean;
   /** pastePendingRef.current → paste 聚合窗口内。 */
   pastePending: boolean;
   /** slashCandidates.length > 0 && !slashHidden → slash 候选可见。 */
@@ -96,7 +100,16 @@ export function shouldOwnerBePaste(
 export function selectInputOwner(input: string, key: OwnerKeyShape, ctx: OwnerContext): InputOwner {
   if (ctx.permissionActive) return "permission";
 
-  if (ctx.panelActive && isPanelKey(input, key, ctx.panelInteractive === true)) return "panel";
+  if (
+    ctx.panelActive &&
+    isPanelKey(input, key, {
+      interactive: ctx.panelInteractive === true,
+      numericShortcuts: ctx.panelNumericShortcuts === true,
+      spaceAction: ctx.panelSpaceAction === true,
+    })
+  ) {
+    return "panel";
+  }
 
   // paste 优先：pending 期间的 Enter/Esc 也算 paste owner（用于吞 Enter / 取消粘贴）；
   // 大 chunk 或 pending 中的普通字符同样 paste。
@@ -106,12 +119,12 @@ export function selectInputOwner(input: string, key: OwnerKeyShape, ctx: OwnerCo
   if (ctx.slashVisible) {
     // slash 只接管导航/确认按键，普通字符仍走 composer（不阻断输入）。
     if (
-      (key.return && !isModifiedEnter(key)) ||
+      (key.return && !isModifiedEnter(input, key)) ||
       key.escape ||
       key.tab ||
       // 数组按键的判定在 Composer 里仍依赖 ink Key 字段，这里只识别"导航类"
       // 这一概念。selectInputOwner 不关心是 ↑ 还是 ↓。
-      isNavigationKey(key)
+      isVerticalNavigationKey(key)
     ) {
       return "slash";
     }
@@ -133,16 +146,33 @@ export function isNavigationKey(key: OwnerKeyShape): boolean {
   );
 }
 
-function isPanelKey(input: string, key: OwnerKeyShape, interactive: boolean): boolean {
+export function isVerticalNavigationKey(key: OwnerKeyShape): boolean {
+  const k = key as Record<string, unknown>;
+  return Boolean(k.upArrow) || Boolean(k.downArrow);
+}
+
+function isPanelKey(
+  input: string,
+  key: OwnerKeyShape,
+  options: { interactive: boolean; numericShortcuts: boolean; spaceAction: boolean },
+): boolean {
   if (key.escape) return true;
-  if (!interactive) return false;
-  if (isModifiedEnter(key)) return false;
+  if (!options.interactive) return false;
+  if (isModifiedEnter(input, key)) return false;
   if (key.return || key.tab || isNavigationKey(key)) return true;
+  if (options.numericShortcuts && /^[1-9]$/.test(input) && !key.ctrl && !key.meta) return true;
+  if (options.spaceAction && input === " " && !key.ctrl && !key.meta) return true;
   return input.toLowerCase() === "x" && !key.ctrl && !key.meta;
 }
 
-function isModifiedEnter(key: OwnerKeyShape): boolean {
-  return Boolean(key.return && (key.shift || key.meta));
+function isModifiedEnter(input: string, key: OwnerKeyShape): boolean {
+  return Boolean(
+    key.return &&
+      (key.shift || key.meta) &&
+      input.length > 0 &&
+      input !== "\r" &&
+      input !== "\n",
+  );
 }
 
 /** 调试 / 测试辅助：返回 owner 选择的稳定优先级数组。 */

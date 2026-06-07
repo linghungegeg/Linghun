@@ -1,4 +1,9 @@
-import type { ProductBlockViewModel, TranscriptScrollView } from "../types.js";
+import type {
+  ProductBlockSelectionRange,
+  ProductBlockViewModel,
+  TranscriptScrollView,
+} from "../types.js";
+import { charWidth } from "../text-utils.js";
 
 export type TranscriptMouseButton = "left" | "wheel-up" | "wheel-down" | "other";
 
@@ -25,6 +30,22 @@ export type TranscriptTextRow = {
   blockId?: string;
   lineInBlock?: number;
   text: string;
+  cells: TranscriptScreenCell[];
+  sourceColumnStart?: number;
+  softWrapped?: boolean;
+  noSelect?: boolean;
+};
+
+export type TranscriptScreenCell = {
+  char: string;
+  selectableText: string;
+  width: number;
+  noSelect?: boolean;
+};
+
+export type TranscriptScreenBuffer = {
+  rows: TranscriptTextRow[];
+  width: number;
 };
 
 export type TranscriptSelectionPoint = {
@@ -60,23 +81,123 @@ const EDGE_AUTOSCROLL_LINES = 2;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: SGR mouse input may start with ESC.
 const SGR_MOUSE_RE = /^\u001B?\[<(\d+);(\d+);(\d+)([mM])$/u;
 
-export function buildTranscriptTextRows(blocks: ProductBlockViewModel[]): TranscriptTextRow[] {
+export function buildTranscriptScreenBuffer(
+  blocks: ProductBlockViewModel[],
+  width = Number.POSITIVE_INFINITY,
+): TranscriptScreenBuffer {
   const rows: TranscriptTextRow[] = [];
   for (const block of blocks) {
-    const body = block.fullText ?? block.summary ?? block.title ?? "";
+    const noSelect = isNoSelectBlock(block);
+    const body = screenTextForBlock(block);
     const lines = body.replace(/\r/g, "").split("\n");
     for (let lineInBlock = 0; lineInBlock < lines.length; lineInBlock++) {
-      rows.push({
-        index: rows.length,
+      appendScreenRows(rows, {
         blockId: block.id,
         lineInBlock,
         text: lines[lineInBlock] ?? "",
+        width,
+        noSelect,
       });
     }
-    if (body.trim().length > 0) rows.push({ index: rows.length, text: "" });
+    if (body.trim().length > 0) appendScreenRows(rows, { text: "", width, noSelect: true });
   }
   if (rows.length > 0 && rows.at(-1)?.text === "") rows.pop();
-  return rows;
+  return { rows, width };
+}
+
+export function buildTranscriptTextRows(
+  blocks: ProductBlockViewModel[],
+  width = Number.POSITIVE_INFINITY,
+): TranscriptTextRow[] {
+  return buildTranscriptScreenBuffer(blocks, width).rows;
+}
+
+function screenTextForBlock(block: ProductBlockViewModel): string {
+  if (block.messageKind === "user_text") return block.fullText ?? block.title ?? "";
+  return block.fullText ?? block.summary ?? block.title ?? "";
+}
+
+function isNoSelectBlock(block: ProductBlockViewModel): boolean {
+  if (block.messageKind === "command_transcript" || block.messageKind === "status") return true;
+  if (block.kind === "home" || block.kind === "setup" || block.kind === "permission") return true;
+  return false;
+}
+
+function appendScreenRows(
+  rows: TranscriptTextRow[],
+  input: {
+    text: string;
+    width: number;
+    blockId?: string;
+    lineInBlock?: number;
+    noSelect?: boolean;
+  },
+): void {
+  const wrapWidth = Number.isFinite(input.width) ? Math.max(1, Math.floor(input.width)) : Infinity;
+  const sourceCells = cellsFromText(input.text, input.noSelect === true);
+  if (sourceCells.length === 0) {
+    rows.push({
+      index: rows.length,
+      blockId: input.blockId,
+      lineInBlock: input.lineInBlock,
+      text: "",
+      cells: [],
+      noSelect: input.noSelect,
+    });
+    return;
+  }
+  let current: TranscriptScreenCell[] = [];
+  let currentWidth = 0;
+  let sourceColumnStart = 0;
+  let softWrapped = false;
+  for (const cell of sourceCells) {
+    const nextWidth = Math.max(1, cell.width);
+    if (current.length > 0 && currentWidth + nextWidth > wrapWidth) {
+      rows.push(createScreenRow(rows.length, input, current, softWrapped, sourceColumnStart));
+      sourceColumnStart += current.length;
+      current = [];
+      currentWidth = 0;
+      softWrapped = true;
+    }
+    current.push(cell);
+    currentWidth += nextWidth;
+  }
+  rows.push(createScreenRow(rows.length, input, current, softWrapped, sourceColumnStart));
+}
+
+function createScreenRow(
+  index: number,
+  input: {
+    blockId?: string;
+    lineInBlock?: number;
+    noSelect?: boolean;
+  },
+  cells: TranscriptScreenCell[],
+  softWrapped: boolean,
+  sourceColumnStart: number,
+): TranscriptTextRow {
+  return {
+    index,
+    blockId: input.blockId,
+    lineInBlock: input.lineInBlock,
+    text: cells.map((cell) => cell.selectableText).join(""),
+    cells,
+    sourceColumnStart,
+    softWrapped,
+    noSelect: input.noSelect,
+  };
+}
+
+function cellsFromText(text: string, noSelect: boolean): TranscriptScreenCell[] {
+  const cells: TranscriptScreenCell[] = [];
+  for (const char of Array.from(text)) {
+    const width = Math.max(1, charWidth(char));
+    cells.push({ char, selectableText: noSelect ? "" : char, width, noSelect });
+    for (let index = 1; index < width; index++) {
+      cells.push({ char: "", selectableText: "", width: 0, noSelect: true });
+    }
+  }
+  return cells;
 }
 
 export function parseSgrMouseEvent(input: string): TranscriptMouseEvent | undefined {
@@ -200,9 +321,39 @@ export function selectionLineIndexesForBlock(
   const selected = new Set<number>();
   for (const row of rows) {
     if (row.blockId !== blockId || row.lineInBlock === undefined) continue;
+    if (row.noSelect) continue;
     if (selectionContainsRow(selection, row.index)) selected.add(row.lineInBlock);
   }
   return [...selected].sort((a, b) => a - b);
+}
+
+export function selectionLineRangesForBlock(
+  selection: TranscriptSelectionState | undefined,
+  rows: TranscriptTextRow[],
+  blockId: string,
+): ProductBlockSelectionRange[] {
+  if (!selection?.anchor || !selection.focus) return [];
+  const range = orderedPoints(selection.anchor, selection.focus);
+  const selectedRows = rows.slice(range.start.row, range.end.row + 1);
+  const ranges: ProductBlockSelectionRange[] = [];
+  for (let index = 0; index < selectedRows.length; index++) {
+    const row = selectedRows[index];
+    if (!row || row.noSelect || row.blockId !== blockId || row.lineInBlock === undefined) continue;
+    const start =
+      selectedRows.length === 1 || index === 0 ? Math.max(0, range.start.column) : 0;
+    const end =
+      selectedRows.length === 1 || index === selectedRows.length - 1
+        ? Math.max(start, range.end.column)
+        : row.cells.length;
+    if (end <= start) continue;
+    const sourceColumnStart = row.sourceColumnStart ?? 0;
+    ranges.push({
+      lineIndex: row.lineInBlock,
+      startColumn: sourceColumnStart + start,
+      endColumn: sourceColumnStart + Math.min(end, row.cells.length),
+    });
+  }
+  return ranges;
 }
 
 function withSelectedText(
@@ -221,15 +372,22 @@ export function selectedTextFromRows(
   const range = orderedPoints(anchor, focus);
   const selected = rows.slice(range.start.row, range.end.row + 1);
   if (selected.length === 0) return "";
-  return selected
-    .map((row, index) => {
-      if (selected.length === 1)
-        return sliceColumns(row.text, range.start.column, range.end.column);
-      if (index === 0) return sliceColumns(row.text, range.start.column, undefined);
-      if (index === selected.length - 1) return sliceColumns(row.text, 0, range.end.column);
-      return row.text;
-    })
-    .join("\n");
+  const parts: string[] = [];
+  for (let index = 0; index < selected.length; index++) {
+    const row = selected[index];
+    if (!row || row.noSelect) continue;
+    const text =
+      selected.length === 1
+        ? sliceRowCells(row, range.start.column, range.end.column)
+        : index === 0
+          ? sliceRowCells(row, range.start.column, undefined)
+          : index === selected.length - 1
+            ? sliceRowCells(row, 0, range.end.column)
+            : selectableTextFromRow(row);
+    if (parts.length > 0 && !row.softWrapped) parts.push("\n");
+    parts.push(text);
+  }
+  return parts.join("");
 }
 
 function orderedPoints(
@@ -241,9 +399,16 @@ function orderedPoints(
   return a.column <= b.column ? { start: a, end: b } : { start: b, end: a };
 }
 
-function sliceColumns(text: string, start: number, end: number | undefined): string {
-  const chars = Array.from(text);
-  return chars.slice(Math.max(0, start), end === undefined ? undefined : Math.max(0, end)).join("");
+function sliceRowCells(row: TranscriptTextRow, start: number, end: number | undefined): string {
+  const cells = row.cells.length > 0 ? row.cells : cellsFromText(row.text, row.noSelect === true);
+  return cells
+    .slice(Math.max(0, start), end === undefined ? undefined : Math.max(0, end))
+    .map((cell) => (cell.noSelect ? "" : cell.selectableText))
+    .join("");
+}
+
+function selectableTextFromRow(row: TranscriptTextRow): string {
+  return sliceRowCells(row, 0, undefined);
 }
 
 function pointFromMouse(
@@ -256,7 +421,7 @@ function pointFromMouse(
   const column = clamp(
     Math.floor(event.x - geometry.x),
     0,
-    Array.from(rows[row]?.text ?? "").length,
+    rows[row]?.cells.length ?? Array.from(rows[row]?.text ?? "").length,
   );
   return { row, column };
 }
@@ -297,7 +462,7 @@ function clamp(value: number, min: number, max: number): number {
 
 function buttonFromCode(code: number): TranscriptMouseButton {
   if ((code & 64) === 64) return (code & 1) === 1 ? "wheel-down" : "wheel-up";
-  if ((code & 3) === 0) return "left";
+  if ((code & 3) === 0 || (code & 3) === 3) return "left";
   return "other";
 }
 

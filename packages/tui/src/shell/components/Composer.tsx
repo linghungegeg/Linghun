@@ -1,4 +1,4 @@
-import { Box, type DOMElement, Text, useInput, useStdout } from "ink";
+import { Box, type DOMElement, Text, useInput } from "ink";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -15,11 +15,7 @@ import {
   sanitizeTerminalText,
 } from "../models/terminal-input-runtime.js";
 import type { TerminalCapability } from "../terminal-capability.js";
-import {
-  disableTerminalInteractionModes,
-  enableTerminalInteractionModes,
-  resolveTerminalInteractionModes,
-} from "../terminal-interaction-runtime.js";
+import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
 import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type {
@@ -444,7 +440,7 @@ export function isMultilineEnterSequence(input: string): boolean {
 }
 
 const COMPOSER_MAX_VISIBLE_LINES = 5;
-const PROMPT_MARKER = "> ";
+const PROMPT_MARKER = "› ";
 const PROMPT_MARKER_CONTINUATION = " ".repeat(displayWidthOf(PROMPT_MARKER));
 
 const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
@@ -517,6 +513,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   const configPanelActive = Boolean(
     view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel,
+  );
+  const terminalInteractionModes = useMemo(
+    () => resolveTerminalInteractionModes({ capability, appOwnedScreen: false }),
+    [capability],
   );
 
   const text = bufferToString(buffer);
@@ -661,6 +661,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   useInput(
     (input, key) => {
       if (isSgrMouseInput(input)) {
+        if (!terminalInteractionModes.mouseTracking) return;
         const mouse = parseSgrMouseEvent(input);
         if (!isTranscriptMouseTarget(mouse, view.transcriptViewportGeometry)) return;
         if (mouse?.button === "wheel-up") {
@@ -683,10 +684,13 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         panelInteractive: Boolean(
           view.configPanel ||
             view.helpPanel ||
+            view.btwPanel ||
             view.sessionsPanel ||
             view.commandPanel ||
             commandPanelConsumesInput,
         ),
+        panelNumericShortcuts: Boolean(view.helpPanel),
+        panelSpaceAction: Boolean(view.btwPanel),
         pastePending: pastePendingRef.current,
         slashVisible: slashCandidates.length > 0 && !slashHidden,
       });
@@ -795,23 +799,21 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           else emitInput({ type: "escape" });
           return;
         }
-        if (terminalAction.type === "newline") {
-          updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
-          return;
-        }
         if (view.helpPanel) {
           if (!key.ctrl && !key.meta && /^[1-9]$/.test(input)) {
             const idx = Number(input) - 1;
             if (idx < view.helpPanel.entries.length) {
-              const delta = idx - view.helpPanel.cursor;
-              if (delta !== 0) emitInput({ type: "help-move", delta: delta as -1 | 1 });
-              emitInput({ type: "help-enter" });
+              emitInput({ type: "help-select", index: idx });
             }
           } else if (key.return) emitInput({ type: "help-enter" });
           else if (key.upArrow) emitInput({ type: "help-move", delta: -1 });
           else if (key.downArrow) emitInput({ type: "help-move", delta: 1 });
           else if (key.tab || key.rightArrow) emitInput({ type: "help-switch-group", delta: 1 });
           else if (key.leftArrow) emitInput({ type: "help-switch-group", delta: -1 });
+          return;
+        }
+        if (view.btwPanel) {
+          if (key.return || input === " ") emitInput({ type: "btw-close" });
           return;
         }
         if (view.configPanel) {
@@ -911,7 +913,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           }
           return;
         }
-        if (key.return && !key.shift) {
+        if (key.return) {
           if (slashSelection >= 0 && !text.includes(" ")) {
             const picked = slashCandidates[slashSelectionClamped];
             if (picked && picked.slash !== text) {
@@ -937,15 +939,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
 
       // ─── 4. Composer default owner ────────────────────────────────────────
-
-      if (!key.ctrl && !key.meta && text.length === 0 && /^[1-4]$/.test(input)) {
-        const index = Number(input) - 1;
-        const suggestion = view.taskSuggestions?.[index];
-        if (suggestion) {
-          emitInput({ type: "task-suggestion-action", suggestionId: suggestion.id });
-        }
-        return;
-      }
 
       // Main transcript scroll keys（PageUp / PageDown / Home / End）。
       // 仅在 task / pending 模式生效；home 模式无 transcript 滚动需求。
@@ -983,7 +976,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
 
       // ─── Submit: Enter（无 shift / fallback modifier）──────────────────
-      if (key.return && !key.shift && !key.meta) {
+      if (key.return) {
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
           const index = Math.max(
             0,
@@ -1062,6 +1055,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           setSlashSelection(-1);
           return;
         }
+        if (view.composer.busy) {
+          clearHintNotice();
+          emitInput({ type: "interrupt" });
+          return;
+        }
         if (text.length > 0) {
           const now = Date.now();
           if (now - lastEscAtRef.current < DOUBLE_PRESS_WINDOW_MS) {
@@ -1084,9 +1082,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           clearHintNotice();
           return;
         }
-        // 空 buffer → 走上层 escape 链路（既有交互行为）。
         clearHintNotice();
-        emitInput({ type: "escape" });
+        emitInput(view.composer.busy ? { type: "interrupt" } : { type: "escape" });
         return;
       }
 
@@ -1262,8 +1259,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     },
     { isActive: true },
   );
-  useTerminalInteractionModes(capability);
-
   // ─── Render ─────────────────────────────────────────────────────────────
   // Pick placeholder. Permission active wins over setup, which wins over task.
   const placeholderText =
@@ -1337,14 +1332,19 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           }
         />
       ) : null}
-      <Box ref={anchorRef} width="100%" flexDirection="column">
-        {lines.map((line, index) => {
-          return (
-            <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-              {sliceWidth(line, maxWidth)}
-            </Text>
-          );
-        })}
+      <Box width="100%" flexDirection="row" alignItems="flex-start">
+        <Text color={theme.muted} dimColor={!text}>
+          {PROMPT_MARKER}
+        </Text>
+        <Box ref={anchorRef} flexDirection="column" width={Math.max(4, maxWidth - displayWidthOf(PROMPT_MARKER))}>
+          {lines.map((line, index) => {
+            return (
+              <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
+                {sliceWidth(line, Math.max(4, maxWidth - displayWidthOf(PROMPT_MARKER)))}
+              </Text>
+            );
+          })}
+        </Box>
       </Box>
       {showUnknownHint ? (
         <Text color={theme.muted}>
@@ -1457,17 +1457,6 @@ function PermissionActionRow({
   );
 }
 
-function useTerminalInteractionModes(capability: TerminalCapability): void {
-  const { stdout } = useStdout();
-  useEffect(() => {
-    const modes = resolveTerminalInteractionModes({ capability });
-    enableTerminalInteractionModes(stdout, modes);
-    return () => {
-      disableTerminalInteractionModes(stdout, modes);
-    };
-  }, [capability, stdout]);
-}
-
 function buildPermissionActions(
   language: ShellViewModel["language"],
   actions?: { id: PermissionActionId; label: string; shortcut?: string }[],
@@ -1550,12 +1539,11 @@ export function formatComposerRenderLines({
   const displayText = text ? (masking ? "*".repeat(buffer.chars.length) : text) : "";
 
   if (!displayText) {
-    const line = `${PROMPT_MARKER}${placeholder}`;
     return {
-      lines: [line],
+      lines: [placeholder],
       truncatedAbove: 0,
       truncatedBelow: 0,
-      cursorCol: displayWidthOf(PROMPT_MARKER),
+      cursorCol: 0,
       cursorRow: 0,
     };
   }
@@ -1569,20 +1557,16 @@ export function formatComposerRenderLines({
     rawLineIndex: number;
     startChar: number;
     endChar: number;
-    prompt: string;
   }> = [];
   let cursorSoftIndex = 0;
-  let cursorOutCol = displayWidthOf(PROMPT_MARKER);
+  let cursorOutCol = 0;
 
   for (let rawIndex = 0; rawIndex < rawLines.length; rawIndex++) {
     const rawLine = rawLines[rawIndex] ?? "";
     const chars = Array.from(masking ? "*".repeat(Array.from(rawLine).length) : rawLine);
-    const isFirstRawLine = rawIndex === 0;
     let startChar = 0;
     while (startChar < chars.length || (chars.length === 0 && startChar === 0)) {
-      const prompt = isFirstRawLine && startChar === 0 ? PROMPT_MARKER : PROMPT_MARKER_CONTINUATION;
-      const promptWidth = displayWidthOf(prompt);
-      const budget = Math.max(4, composerWidth - promptWidth);
+      const budget = Math.max(4, composerWidth - displayWidthOf(PROMPT_MARKER));
       let width = 0;
       let endChar = startChar;
       while (endChar < chars.length) {
@@ -1594,14 +1578,14 @@ export function formatComposerRenderLines({
       if (endChar === startChar && chars.length > 0) endChar++;
       const text = chars.slice(startChar, endChar).join("");
       const softIndex = softLines.length;
-      softLines.push({ text, rawLineIndex: rawIndex, startChar, endChar, prompt });
+      softLines.push({ text, rawLineIndex: rawIndex, startChar, endChar });
       if (rawIndex === cursorLineIndex && cursorCharCol >= startChar && cursorCharCol <= endChar) {
         cursorSoftIndex = softIndex;
         let cursorWidth = 0;
         for (let i = startChar; i < cursorCharCol && i < chars.length; i++) {
           cursorWidth += charWidth(chars[i] ?? "");
         }
-        cursorOutCol = promptWidth + cursorWidth;
+        cursorOutCol = cursorWidth;
       }
       if (chars.length === 0) break;
       startChar = endChar;
@@ -1620,9 +1604,7 @@ export function formatComposerRenderLines({
       startLine = Math.max(0, endLineExclusive - COMPOSER_MAX_VISIBLE_LINES);
     }
   }
-  const renderedLines = softLines
-    .slice(startLine, endLineExclusive)
-    .map((line) => `${line.prompt}${line.text}`);
+  const renderedLines = softLines.slice(startLine, endLineExclusive).map((line) => line.text);
   const truncatedAbove = startLine;
   const truncatedBelow = totalLines - endLineExclusive;
   const cursorVisibleRow = Math.max(
@@ -1773,13 +1755,18 @@ export function handleComposerInput(
   input: string,
   key: ComposerKey,
 ): ComposerDecision {
+  const normalized = normalizeTerminalInput(input, {
+    backspace: key.backspace === true,
+    delete: key.delete === true,
+    ctrl: key.ctrl === true,
+    meta: key.meta === true,
+    return: key.return === true,
+    shift: key.shift === true,
+  });
   if (key.escape) {
     return { kind: "emit", event: { type: "escape" }, nextText: "" };
   }
-  if (key.return && key.shift) {
-    return { kind: "append", text: "\n" };
-  }
-  if (isMultilineEnterSequence(input)) {
+  if (normalized.type === "newline") {
     return { kind: "append", text: "\n" };
   }
   if (key.return) {
@@ -1790,14 +1777,14 @@ export function handleComposerInput(
       nextText: "",
     };
   }
-  if (key.backspace || key.delete) {
+  if (normalized.type === "backspace" || normalized.type === "delete") {
     return { kind: "set", text: Array.from(text).slice(0, -1).join("") };
   }
-  if (key.ctrl || key.meta || input === "\r" || input === "\n") {
+  if (normalized.type === "ignore") {
     return { kind: "ignore" };
   }
-  if (input) {
-    return { kind: "append", text: input };
+  if (normalized.type === "text") {
+    return { kind: "append", text: normalized.text };
   }
   return { kind: "ignore" };
 }

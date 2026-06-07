@@ -24,8 +24,9 @@ import {
 } from "./models/permission-explanation.js";
 import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
 import {
-  buildTranscriptTextRows,
+  buildTranscriptScreenBuffer,
   selectionLineIndexesForBlock,
+  selectionLineRangesForBlock,
   type TranscriptSelectionState,
 } from "./models/transcript-selection-state.js";
 import { charWidth, displayWidth, truncateMiddle } from "./text-utils.js";
@@ -333,7 +334,9 @@ export function createShellViewModel(
   const transcriptSelectionState = (
     context as { transcriptSelectionState?: TranscriptSelectionState }
   ).transcriptSelectionState;
-  const transcriptRows = transcriptSelectionState ? buildTranscriptTextRows(fittedBlocks) : [];
+  const transcriptRows = transcriptSelectionState
+    ? buildTranscriptScreenBuffer(fittedBlocks, Math.max(8, width - 4)).rows
+    : [];
   const fullFittedBlocks = transcriptSelectionState
     ? fittedBlocks.map((block) => {
         const selectionLineIndexes = selectionLineIndexesForBlock(
@@ -341,7 +344,14 @@ export function createShellViewModel(
           transcriptRows,
           block.id,
         );
-        return selectionLineIndexes.length > 0 ? { ...block, selectionLineIndexes } : block;
+        const selectionLineRanges = selectionLineRangesForBlock(
+          transcriptSelectionState,
+          transcriptRows,
+          block.id,
+        );
+        return selectionLineIndexes.length > 0 || selectionLineRanges.length > 0
+          ? { ...block, selectionLineIndexes, selectionLineRanges }
+          : block;
       })
     : fittedBlocks;
 

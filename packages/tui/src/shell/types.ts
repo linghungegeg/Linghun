@@ -19,6 +19,12 @@ export type ProductBlockKind =
 
 export type ProductBlockStatus = "info" | "running" | "pass" | "partial" | "fail" | "blocked";
 
+export type ProductBlockSelectionRange = {
+  lineIndex: number;
+  startColumn: number;
+  endColumn: number;
+};
+
 /**
  * D.13Q-UX — 消息语义维度（与 ProductBlockKind 的"用途"维度正交）。
  *
@@ -76,8 +82,10 @@ export type ProductBlockViewModel = {
    * 着色；notification / status 等不进 transcript 主流。未设时回退到旧路径。
    */
   messageKind?: MessageBlockKind;
-  /** Line indexes highlighted by the app-owned transcript selection substrate. */
+  /** Whole-line compatibility fallback for older app-owned transcript selection rendering. */
   selectionLineIndexes?: number[];
+  /** Cell-column ranges highlighted by the app-owned transcript selection substrate. */
+  selectionLineRanges?: ProductBlockSelectionRange[];
 };
 
 export type CtrlOExpandView = {
@@ -479,12 +487,14 @@ export type ShellInputEvent =
   /**
    * D.13Q-UX Closure — HelpPanel 事件：core / advanced / details 三组导航。
    * help-open 由 index.ts 拦截 /help 后触发；help-move 上下选择；
-   * help-switch-group Tab/左右切组；help-enter 派发选中 slash；help-close Esc。
+   * help-switch-group Tab/左右切组；help-enter 派发选中 slash；
+   * help-select 由数字快捷键直接选择对应项；help-close Esc。
    */
   | { type: "help-open"; group?: "core" | "advanced" | "details" }
   | { type: "help-move"; delta: -1 | 1 }
   | { type: "help-switch-group"; delta: -1 | 1 }
   | { type: "help-enter" }
+  | { type: "help-select"; index: number }
   | { type: "help-close" }
   /**
    * D.13Q-UX Closure — BtwPanel 事件：side question 独立面板，

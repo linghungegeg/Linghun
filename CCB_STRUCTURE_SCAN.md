@@ -1,0 +1,814 @@
+# CCB 结构扫描报告
+扫描时间: 2026-06-06T17:58:45.051Z
+
+
+## API核心 (src/services/api)
+- 文件数: 31 | 总行数: 12822 | 导出符号: 103
+- 超大文件(>500行): src/services/api/claude.ts(3568行), src/services/api/errors.ts(1211行), src/services/api/filesApi.ts(749行), src/services/api/logging.ts(811行), src/services/api/openai/index.ts(544行), src/services/api/promptCacheBreakDetection.ts(793行), src/services/api/sessionIngress.ts(515行), src/services/api/withRetry.ts(820行)
+- 主要导出: createAdminRequest, getMyAdminRequests, checkAdminRequestEligibility, fetchBootstrapData, getExtraBodyParams, getPromptCachingEnabled, getCacheControl, configureTaskBudgetParams, getAPIMetadata, verifyApiKey, userMessageToMessageParam, assistantMessageToMessageParam, queryModelWithoutStreaming, stripExcessMediaItems, getAnthropicClient, CLIENT_REQUEST_ID_HEADER, getLastApiRequests, clearApiRequestCache, clearDumpState, clearAllDumpState, addApiRequestToCache, getDumpPromptsPath, createDumpPromptsFetch, API_ERROR_MESSAGE_PREFIX, startsWithApiErrorPrefix, PROMPT_TOO_LONG_ERROR_MESSAGE, isPromptTooLongMessage, parsePromptTooLongTokenCounts, getPromptTooLongTokenGap, isMediaSizeError
+  - src/services/api/adminRequests.ts (120行): createAdminRequest, getMyAdminRequests, checkAdminRequestEligibility
+  - src/services/api/bedrockClient.ts (66行): (无导出)
+  - src/services/api/bootstrap.ts (142行): fetchBootstrapData
+  - src/services/api/claude.ts (3568行): getExtraBodyParams, getPromptCachingEnabled, getCacheControl, configureTaskBudgetParams, getAPIMetadata
+  - src/services/api/client.ts (390行): getAnthropicClient, CLIENT_REQUEST_ID_HEADER
+  - src/services/api/dumpPrompts.ts (227行): getLastApiRequests, clearApiRequestCache, clearDumpState, clearAllDumpState, addApiRequestToCache
+  - src/services/api/emptyUsage.ts (5行): (无导出)
+  - src/services/api/errors.ts (1211行): API_ERROR_MESSAGE_PREFIX, startsWithApiErrorPrefix, PROMPT_TOO_LONG_ERROR_MESSAGE, isPromptTooLongMessage, parsePromptTooLongTokenCounts
+  - src/services/api/errorUtils.ts (9行): (无导出)
+  - src/services/api/filesApi.ts (749行): downloadFile, buildDownloadPath, downloadAndSaveFile, downloadSessionFiles, uploadFile
+  - src/services/api/firstTokenDate.ts (61行): fetchAndStoreClaudeCodeFirstTokenDate
+  - src/services/api/gemini/client.ts (98行): (无导出)
+  - src/services/api/gemini/index.ts (229行): (无导出)
+  - src/services/api/grok/client.ts (45行): getGrokClient, clearGrokClientCache
+  - src/services/api/grok/index.ts (247行): (无导出)
+  - src/services/api/grove.ts (358行): getGroveSettings, markGroveNoticeViewed, updateGroveSettings, isQualifiedForGrove, getGroveNoticeConfig
+  - src/services/api/logging.ts (811行): logAPIQuery, logAPIError, logAPISuccessAndDuration
+  - src/services/api/metricsOptOut.ts (160行): checkMetricsEnabled, _clearMetricsEnabledCacheForTesting
+  - src/services/api/openai/chatgptAuth.ts (362行): requestChatGPTDeviceCode, completeChatGPTDeviceLogin, isChatGPTAuthEnabled, removeChatGPTAuth, getValidChatGPTAuth
+  - src/services/api/openai/client.ts (79行): getOpenAIClient, clearOpenAIClientCache
+  - src/services/api/openai/index.ts (544行): (无导出)
+  - src/services/api/openai/requestBody.ts (127行): isOpenAIThinkingEnabled, resolveOpenAIMaxTokens, buildOpenAIRequestBody
+  - src/services/api/openai/responsesAdapter.ts (481行): buildResponsesRequest, createChatGPTResponsesStream
+  - src/services/api/overageCreditGrant.ts (138行): getCachedOverageCreditGrant, invalidateOverageCreditGrantCache, refreshOverageCreditGrantCache, formatGrantAmount
+  - src/services/api/promptCacheBreakDetection.ts (793行): CACHE_TTL_1HOUR_MS, recordPromptState, checkResponseForCacheBreak, notifyCacheDeletion, notifyCompaction
+  - src/services/api/referral.ts (282行): fetchReferralEligibility, fetchReferralRedemptions, checkCachedPassesEligibility, formatCreditAmount, getCachedReferrerReward
+  - src/services/api/sessionIngress.ts (515行): appendSessionLog, getSessionLogs, getSessionLogsViaOAuth, getTeleportEvents, clearSession
+  - src/services/api/ultrareviewPreflight.ts (82行): fetchUltrareviewPreflight
+  - src/services/api/ultrareviewQuota.ts (39行): fetchUltrareviewQuota
+  - src/services/api/usage.ts (64行): fetchUtilization
+  - src/services/api/withRetry.ts (820行): BASE_DELAY_MS, getRetryDelay, parseMaxTokensContextOverflowError, is529Error, getDefaultMaxRetries
+
+## UI组件 (src/components)
+- 文件数: 405 | 总行数: 68444 | 导出符号: 535
+- 超大文件(>500行): src/components/ConsoleOAuthFlow.tsx(1408行), src/components/CustomSelect/select.tsx(808行), src/components/CustomSelect/use-select-navigation.ts(654行), src/components/Feedback.tsx(667行), src/components/FullscreenLayout.tsx(550行), src/components/LogSelector.tsx(1257行), src/components/mcp/ElicitationDialog.tsx(1335行), src/components/mcp/MCPRemoteServerMenu.tsx(777行), src/components/Message.tsx(511行), src/components/messages/AttachmentMessage.tsx(508行), src/components/messages/CollapsedReadSearchContent.tsx(519行), src/components/Messages.tsx(1126行), src/components/MessageSelector.tsx(863行), src/components/permissions/BashPermissionRequest/BashPermissionRequest.tsx(529行), src/components/permissions/ExitPlanModePermissionRequest/ExitPlanModePermissionRequest.tsx(898行), src/components/permissions/rules/PermissionRuleList.tsx(703行), src/components/PromptInput/PromptInput.tsx(2651行), src/components/PromptInput/PromptInputFooterLeftSide.tsx(628行), src/components/ScrollKeybindingHandler.tsx(1047行), src/components/Settings/Config.tsx(2180行), src/components/Spinner.tsx(544行), src/components/Stats.tsx(1028行), src/components/StatusLine.tsx(578行), src/components/tasks/BackgroundTasksDialog.tsx(828行), src/components/tasks/RemoteSessionDetailDialog.tsx(544行), src/components/teams/TeamsDialog.tsx(650行), src/components/VirtualMessageList.tsx(1030行)
+- 主要导出: AgentProgressLine, AgentDetail, AgentEditor, formatAgentAsMarkdown, getNewAgentFilePath, getActualAgentFilePath, getNewRelativeAgentFilePath, getActualRelativeAgentFilePath, saveAgentToFile, updateAgentFile, deleteAgentFromFile, AgentNavigationFooter, AgentsList, AgentsMenu, ColorPicker, generateAgent, ModelSelector, CreateAgentWizard, ColorStep, ConfirmStep, ConfirmStepWrapper, DescriptionStep, GenerateStep, LocationStep, MemoryStep, MethodStep, ModelStep, PromptStep, ToolsStep, TypeStep
+  - src/components/AgentProgressLine.tsx (99行): AgentProgressLine
+  - src/components/agents/AgentDetail.tsx (134行): AgentDetail
+  - src/components/agents/AgentEditor.tsx (229行): AgentEditor
+  - src/components/agents/agentFileUtils.ts (273行): formatAgentAsMarkdown, getNewAgentFilePath, getActualAgentFilePath, getNewRelativeAgentFilePath, getActualRelativeAgentFilePath
+  - src/components/agents/AgentNavigationFooter.tsx (20行): AgentNavigationFooter
+  - src/components/agents/AgentsList.tsx (286行): AgentsList
+  - src/components/agents/AgentsMenu.tsx (347行): AgentsMenu
+  - src/components/agents/ColorPicker.tsx (83行): ColorPicker
+  - src/components/agents/generateAgent.ts (219行): generateAgent
+  - src/components/agents/ModelSelector.tsx (47行): ModelSelector
+  - src/components/agents/new-agent-creation/CreateAgentWizard.tsx (58行): CreateAgentWizard
+  - src/components/agents/new-agent-creation/types.ts (3行): (无导出)
+  - src/components/agents/new-agent-creation/wizard-steps/ColorStep.tsx (51行): ColorStep
+  - src/components/agents/new-agent-creation/wizard-steps/ConfirmStep.tsx (149行): ConfirmStep
+  - src/components/agents/new-agent-creation/wizard-steps/ConfirmStepWrapper.tsx (108行): ConfirmStepWrapper
+  - src/components/agents/new-agent-creation/wizard-steps/DescriptionStep.tsx (87行): DescriptionStep
+  - src/components/agents/new-agent-creation/wizard-steps/GenerateStep.tsx (176行): GenerateStep
+  - src/components/agents/new-agent-creation/wizard-steps/LocationStep.tsx (49行): LocationStep
+  - src/components/agents/new-agent-creation/wizard-steps/MemoryStep.tsx (87行): MemoryStep
+  - src/components/agents/new-agent-creation/wizard-steps/MethodStep.tsx (58行): MethodStep
+  - src/components/agents/new-agent-creation/wizard-steps/ModelStep.tsx (32行): ModelStep
+  - src/components/agents/new-agent-creation/wizard-steps/PromptStep.tsx (88行): PromptStep
+  - src/components/agents/new-agent-creation/wizard-steps/ToolsStep.tsx (41行): ToolsStep
+  - src/components/agents/new-agent-creation/wizard-steps/TypeStep.tsx (76行): TypeStep
+  - src/components/agents/SnapshotUpdateDialog.ts (80行): SnapshotUpdateDialog, buildMergePrompt
+  - src/components/agents/ToolSelector.tsx (425行): ToolSelector
+  - src/components/agents/types.ts (28行): AGENT_PATHS
+  - src/components/agents/utils.ts (19行): getAgentSourceDisplayName
+  - src/components/agents/validateAgent.ts (110行): validateAgentType, validateAgent
+  - src/components/AntModelSwitchCallout.tsx (13行): AntModelSwitchCallout, shouldShowModelSwitchCallout
+  - src/components/App.tsx (37行): App
+  - src/components/ApproveApiKey.tsx (66行): ApproveApiKey
+  - src/components/AutoModeOptInDialog.tsx (80行): AUTO_MODE_DESCRIPTION, AutoModeOptInDialog
+  - src/components/AutoUpdater.tsx (241行): AutoUpdater
+  - src/components/AutoUpdaterWrapper.tsx (80行): AutoUpdaterWrapper
+  - src/components/AwsAuthStatusBox.tsx (66行): AwsAuthStatusBox
+  - src/components/BaseTextInput.tsx (148行): BaseTextInput
+  - src/components/BashModeProgress.tsx (36行): BashModeProgress
+  - src/components/BridgeDialog.tsx (153行): BridgeDialog
+  - src/components/BuiltinStatusLine.tsx (129行): formatCountdown, BuiltinStatusLine
+  - src/components/BypassPermissionsModeDialog.tsx (67行): BypassPermissionsModeDialog
+  - src/components/ChannelDowngradeDialog.tsx (48行): ChannelDowngradeDialog
+  - src/components/ClaudeCodeHint/PluginHintMenu.tsx (94行): PluginHintMenu
+  - src/components/ClaudeInChromeOnboarding.tsx (71行): ClaudeInChromeOnboarding
+  - src/components/ClaudeMdExternalIncludesDialog.tsx (92行): ClaudeMdExternalIncludesDialog
+  - src/components/ClickableImageRef.tsx (52行): ClickableImageRef
+  - src/components/CompactSummary.tsx (106行): CompactSummary
+  - src/components/ConfigurableShortcutHint.tsx (44行): ConfigurableShortcutHint
+  - src/components/ConsoleOAuthFlow.tsx (1408行): ConsoleOAuthFlow
+  - src/components/ContextSuggestions.tsx (37行): ContextSuggestions
+  - src/components/ContextVisualization.tsx (441行): ContextVisualization
+  - src/components/CoordinatorAgentStatus.tsx (214行): getVisibleAgentTasks, CoordinatorTaskPanel, useCoordinatorTaskCount
+  - src/components/CostThresholdDialog.tsx (28行): CostThresholdDialog
+  - src/components/CtrlOToExpand.tsx (36行): SubAgentProvider, CtrlOToExpand, ctrlOToExpand
+  - src/components/CustomSelect/index.ts (4行): (无导出)
+  - src/components/CustomSelect/option-map.ts (51行): (无导出)
+  - src/components/CustomSelect/select-input-option.tsx (373行): SelectInputOption
+  - src/components/CustomSelect/select-option.tsx (65行): SelectOption
+  - src/components/CustomSelect/select.tsx (808行): Select
+  - src/components/CustomSelect/SelectMulti.tsx (181行): SelectMulti
+  ... 还有 345 个文件
+
+## 工具函数 (src/utils)
+- 文件数: 634 | 总行数: 200050 | 导出符号: 2525
+- 超大文件(>500行): src/utils/analyzeContext.ts(1413行), src/utils/api.ts(740行), src/utils/attachments.ts(4079行), src/utils/auth.ts(2000行), src/utils/autonomyAuthority.ts(574行), src/utils/autonomyFlows.ts(1117行), src/utils/autonomyRuns.ts(1155行), src/utils/autoUpdater.ts(560行), src/utils/bash/ast.ts(2680行), src/utils/bash/bashParser.ts(4433行), src/utils/bash/commands.ts(1340行), src/utils/bash/heredoc.ts(734行), src/utils/bash/ShellSnapshot.ts(584行), src/utils/bash/treeSitterAnalysis.ts(507行), src/utils/claudeInChrome/chromeNativeHost.ts(528行), src/utils/claudeInChrome/common.ts(541行), src/utils/claudemd.ts(1477行), src/utils/cleanup.ts(603行), src/utils/collapseReadSearch.ts(1182行), src/utils/commitAttribution.ts(963行), src/utils/computerUse/executor.ts(729行), src/utils/computerUse/executorCrossPlatform.ts(1155行), src/utils/computerUse/platforms/linux.ts(518行), src/utils/computerUse/platforms/win32.ts(985行), src/utils/computerUse/win32/windowMessage.ts(654行), src/utils/config.ts(1877行), src/utils/conversationRecovery.ts(627行), src/utils/cronScheduler.ts(566行), src/utils/Cursor.ts(1530行), src/utils/deepLink/terminalLauncher.ts(558行), src/utils/doctorDiagnostic.ts(626行), src/utils/fastMode.ts(536行), src/utils/file.ts(587行), src/utils/fileHistory.ts(1117行), src/utils/forkedAgent.ts(699行), src/utils/fsOperations.ts(771行), src/utils/git/gitFilesystem.ts(700行), src/utils/git.ts(927行), src/utils/gitDiff.ts(533行), src/utils/gracefulShutdown.ts(531行), src/utils/handlePromptSubmit.ts(703行), src/utils/hooks.ts(5191行), src/utils/ide.ts(1495行), src/utils/imageResizer.ts(896行), src/utils/markdownConfigLoader.ts(601行), src/utils/messageQueueManager.ts(549行), src/utils/messages.ts(5979行), src/utils/model/model.ts(700行), src/utils/model/modelOptions.ts(661行), src/utils/nativeInstaller/download.ts(524行), src/utils/nativeInstaller/installer.ts(1706行), src/utils/permissions/filesystem.ts(1783行), src/utils/permissions/permissions.ts(1506行), src/utils/permissions/permissionSetup.ts(1522行), src/utils/permissions/yoloClassifier.ts(1511行), src/utils/pipeRegistry.ts(521行), src/utils/pipeTransport.ts(724行), src/utils/plugins/installedPluginsManager.ts(1269行), src/utils/plugins/loadPluginCommands.ts(947行), src/utils/plugins/marketplaceHelpers.ts(593行), src/utils/plugins/marketplaceManager.ts(2644行), src/utils/plugins/mcpbHandler.ts(967行), src/utils/plugins/mcpPluginIntegration.ts(635行), src/utils/plugins/pluginInstallationHelpers.ts(601行), src/utils/plugins/pluginLoader.ts(3306行), src/utils/plugins/schemas.ts(1684行), src/utils/plugins/validatePlugin.ts(904行), src/utils/powershell/parser.ts(1806行), src/utils/processUserInput/processSlashCommand.tsx(1210行), src/utils/processUserInput/processUserInput.ts(620行), src/utils/queryHelpers.ts(603行), src/utils/ripgrep.ts(694行), src/utils/sandbox/sandbox-adapter.ts(986行), src/utils/searchExtraTools.ts(721行), src/utils/sessionRestore.ts(552行), src/utils/sessionStorage.ts(5121行), src/utils/sessionStoragePortable.ts(792行), src/utils/settings/settings.ts(1004行), src/utils/settings/types.ts(1197行), src/utils/shell/readOnlyCommandValidation.ts(1894行), src/utils/stats.ts(1062行), src/utils/suggestions/commandSuggestions.ts(577行), src/utils/swarm/backends/registry.ts(586行), src/utils/swarm/backends/TmuxBackend.ts(801行), src/utils/swarm/inProcessRunner.ts(1603行), src/utils/swarm/permissionSync.ts(929行), src/utils/swarm/teamHelpers.ts(684行), src/utils/tasks.ts(863行), src/utils/teammateMailbox.ts(1462行), src/utils/telemetry/instrumentation.ts(832行), src/utils/telemetry/perfettoTracing.ts(1121行), src/utils/telemetry/sessionTracing.ts(928行), src/utils/teleport/api.ts(545行), src/utils/teleport.tsx(1350行), src/utils/theme.ts(640行), src/utils/toolResultStorage.ts(1042行), src/utils/udsMessaging.ts(743行), src/utils/words.ts(801行), src/utils/worktree.ts(1517行)
+- 主要导出: createAbortController, createChildAbortController, activityManager, isAdvisorBlock, isAdvisorEnabled, canUserConfigureAdvisor, getExperimentAdvisorModels, modelSupportsAdvisor, isValidAdvisorModel, getInitialAdvisorSetting, getAdvisorUsage, ADVISOR_TOOL_INSTRUCTIONS, getAgentContext, runWithAgentContext, isSubagentContext, isTeammateAgentContext, getSubagentLogName, consumeInvokingRequestId, agenticSessionSearch, formatAgentId, parseAgentId, generateRequestId, isAgentSwarmsEnabled, filterParentToolsForFork, TOOL_TOKEN_COUNT_OVERHEAD, countToolDefinitionTokens, countMcpToolTokens, analyzeContextUsage, ansiToPng, DEFAULT_FG
+  - src/utils/abortController.ts (100行): createAbortController, createChildAbortController
+  - src/utils/activityManager.ts (165行): activityManager
+  - src/utils/advisor.ts (148行): isAdvisorBlock, isAdvisorEnabled, canUserConfigureAdvisor, getExperimentAdvisorModels, modelSupportsAdvisor
+  - src/utils/agentContext.ts (179行): getAgentContext, runWithAgentContext, isSubagentContext, isTeammateAgentContext, getSubagentLogName
+  - src/utils/agenticSessionSearch.ts (308行): agenticSessionSearch
+  - src/utils/agentId.ts (69行): formatAgentId, parseAgentId, generateRequestId
+  - src/utils/agentSwarmsEnabled.ts (18行): isAgentSwarmsEnabled
+  - src/utils/agentToolFilter.ts (24行): filterParentToolsForFork
+  - src/utils/analyzeContext.ts (1413行): TOOL_TOKEN_COUNT_OVERHEAD, countToolDefinitionTokens, countMcpToolTokens, analyzeContextUsage
+  - src/utils/ansiToPng.ts (335行): ansiToPng
+  - src/utils/ansiToSvg.ts (273行): DEFAULT_FG, DEFAULT_BG, parseAnsi, ansiToSvg
+  - src/utils/api.ts (740行): toolToAPISchema, logAPIPrefix, splitSysPromptPrefix, appendSystemContext, prependUserContext
+  - src/utils/apiPreconnect.ts (72行): preconnectAnthropicApi
+  - src/utils/appleTerminalBackup.ts (125行): markTerminalSetupInProgress, markTerminalSetupComplete, getTerminalPlistPath, backupTerminalPreferences, checkAndRestoreTerminalBackup
+  - src/utils/argumentSubstitution.ts (146行): parseArguments, parseArgumentNames, generateProgressiveArgumentHint, substituteArguments
+  - src/utils/array.ts (14行): intersperse, count, uniq
+  - src/utils/asciicast.ts (207行): getRecordFilePath, _resetRecordingStateForTesting, renameRecordingForSession, installAsciicastRecorder
+  - src/utils/attachments.ts (4079行): TODO_REMINDER_CONFIG, PLAN_MODE_ATTACHMENT_CONFIG, AUTO_MODE_ATTACHMENT_CONFIG, RELEVANT_MEMORIES_CONFIG, VERIFY_PLAN_REMINDER_CONFIG
+  - src/utils/attribution.ts (379行): getAttributionTexts, countUserPromptsInMessages, getEnhancedPRAttribution
+  - src/utils/attributionEmail.ts (28行): getAttributionEmail
+  - src/utils/attributionHooks.ts (5行): clearAttributionCaches, sweepFileContentCache, registerAttributionHooks
+  - src/utils/attributionModel.ts (25行): getRealModelName
+  - src/utils/attributionTrailer.ts (7行): buildPRTrailers
+  - src/utils/auth.ts (2000行): isAnthropicAuthEnabled, getAuthTokenSource, getAnthropicApiKey, hasAnthropicApiKeyAuth, getAnthropicApiKeyWithSource
+  - src/utils/authFileDescriptor.ts (197行): CCR_OAUTH_TOKEN_PATH, CCR_API_KEY_PATH, CCR_SESSION_INGRESS_TOKEN_PATH, maybePersistTokenForSubprocesses, readTokenFromWellKnownFile
+  - src/utils/authPortable.ts (20行): maybeRemoveApiKeyFromMacOSKeychainThrows, normalizeApiKeyForConfig
+  - src/utils/autoModeDenials.ts (27行): recordAutoModeDenial, getAutoModeDenials
+  - src/utils/autonomyAuthority.ts (574行): AUTONOMY_DIR, AUTONOMY_DIR_POSIX, AUTONOMY_AGENTS_FILENAME, AUTONOMY_HEARTBEAT_FILENAME, AUTONOMY_AGENTS_PATH_POSIX
+  - src/utils/autonomyCommandSpec.ts (80行): AUTONOMY_COMMAND_NAME, AUTONOMY_COMMAND_DESCRIPTION, AUTONOMY_ARGUMENT_HINT, AUTONOMY_USAGE, AUTONOMY_CLI
+  - src/utils/autonomyFlows.ts (1117行): DEFAULT_AUTONOMY_OWNER_KEY, resolveAutonomyFlowsPath, listAutonomyFlows, createManagedAutonomyFlowKey, startManagedAutonomyFlow
+  - src/utils/autonomyPersistence.ts (83行): retainActiveFirst, getAutonomyPersistenceLockCountForTests, withAutonomyPersistenceLock
+  - src/utils/autonomyQueueLifecycle.ts (262行): partitionConsumableQueuedAutonomyCommands, claimConsumableQueuedAutonomyCommands, cancelQueuedAutonomyCommands, sanitizeAutonomyFailureForPersistence, finalizeAutonomyCommandsForTurn
+  - src/utils/autonomyRuns.ts (1155行): STALE_ACTIVE_RUN_ERROR_PREFIX, resolveAutonomyRunsPath, listAutonomyRuns, getAutonomyRunById, hasActiveAutonomyRunForSource
+  - src/utils/autonomyStatus.ts (222行): formatAutonomyDeepStatusSections, formatAutonomyDeepStatus
+  - src/utils/autoRunIssue.tsx (94行): AutoRunIssueNotification, shouldAutoRunIssue, getAutoRunCommand, getAutoRunIssueReasonText
+  - src/utils/autoUpdater.ts (560行): assertMinVersion, getMaxVersion, getMaxVersionMessage, shouldSkipVersion, getLockFilePath
+  - src/utils/aws.ts (75行): isAwsCredentialsProviderError, isValidAwsStsOutput, checkStsCallerIdentity, clearAwsIniCache
+  - src/utils/awsAuthStatusManager.ts (82行): (无导出)
+  - src/utils/background/remote/preconditions.ts (236行): checkNeedsClaudeAiLogin, checkIsGitClean, checkHasRemoteEnvironment, checkIsInGitRepo, checkHasGitRemote
+  - src/utils/background/remote/remoteSession.ts (99行): checkBackgroundRemoteSessionEligibility
+  - src/utils/backgroundHousekeeping.ts (95行): startBackgroundHousekeeping
+  - src/utils/bash/ast.ts (2680行): nodeTypeId, parseForSecurity, parseForSecurityFromAst, checkSemantics
+  - src/utils/bash/bashParser.ts (4433行): ensureParserInitialized, getParserModule, SHELL_KEYWORDS
+  - src/utils/bash/bashPipeCommand.ts (295行): rearrangePipeCommand
+  - src/utils/bash/commands.ts (1340行): splitCommandWithOperators, filterControlOperators, splitCommand_DEPRECATED, isHelpCommand, getCommandSubcommandPrefix
+  - src/utils/bash/heredoc.ts (734行): extractHeredocs, restoreHeredocs, containsHeredoc
+  - src/utils/bash/ParsedCommand.ts (319行): buildParsedCommandFromRoot, ParsedCommand
+  - src/utils/bash/parser.ts (231行): ensureInitialized, parseCommand, PARSE_ABORTED, parseCommandRaw, extractCommandArguments
+  - src/utils/bash/prefix.ts (205行): getCommandPrefixStatic, getCompoundCommandPrefixesStatic
+  - src/utils/bash/registry.ts (54行): loadFigSpec, getCommandSpec
+  - src/utils/bash/shellCompletion.ts (260行): getShellCompletions
+  - src/utils/bash/shellPrefix.ts (29行): formatShellPrefixCommand
+  - src/utils/bash/shellQuote.ts (304行): tryParseShellCommand, tryQuoteShellArgs, hasMalformedTokens, hasShellQuoteSingleQuoteBug, quote
+  - src/utils/bash/shellQuoting.ts (129行): quoteShellCommand, hasStdinRedirect, shouldAddStdinRedirect, rewriteWindowsNullRedirect
+  - src/utils/bash/ShellSnapshot.ts (584行): createRipgrepShellIntegration, createFindGrepShellIntegration, createAndSaveSnapshot
+  - src/utils/bash/specs/alias.ts (15行): (无导出)
+  - src/utils/bash/specs/index.ts (19行): (无导出)
+  - src/utils/bash/specs/nohup.ts (14行): (无导出)
+  - src/utils/bash/specs/pyright.ts (92行): (无导出)
+  - src/utils/bash/specs/sleep.ts (14行): (无导出)
+  ... 还有 574 个文件
+
+## React Hooks (src/hooks)
+- 文件数: 113 | 总行数: 21467 | 导出符号: 151
+- 超大文件(>500行): src/hooks/fileSuggestions.ts(807行), src/hooks/toolPermission/handlers/interactiveHandler.ts(715行), src/hooks/useInboxPoller.ts(970行), src/hooks/usePipeIpc.ts(621行), src/hooks/useRemoteSession.ts(617行), src/hooks/useReplBridge.tsx(919行), src/hooks/useTextInput.ts(531行), src/hooks/useTypeahead.tsx(1583行), src/hooks/useVirtualScroll.ts(721行), src/hooks/useVoice.ts(1171行), src/hooks/useVoiceIntegration.tsx(680行)
+- 主要导出: onIndexBuildComplete, clearFileSuggestionCaches, pathListSignature, getDirectoryNamesAsync, getPathsForSuggestions, findLongestCommonPrefix, startBackgroundCacheRefresh, generateFileSuggestions, applyFileSuggestion, useAntOrgWarningNotification, useCanSwitchToExistingSubscription, useDeprecationWarningNotification, useFastModeNotification, useIDEStatusIndicator, useInstallMessages, useLspInitializationNotification, useMcpConnectivityStatus, useModelMigrationNotifications, useNpmDeprecationNotification, usePluginAutoupdateNotification, usePluginInstallationStatus, useRateLimitWarningNotification, useSettingsErrors, useStartupNotification, useTeammateLifecycleNotification, renderPlaceholder, getLatestChannelContextHint, generateUnifiedSuggestions, useAfterFirstRender, useApiKeyVerification
+  - src/hooks/fileSuggestions.ts (807行): onIndexBuildComplete, clearFileSuggestionCaches, pathListSignature, getDirectoryNamesAsync, getPathsForSuggestions
+  - src/hooks/notifs/useAntOrgWarningNotification.ts (3行): useAntOrgWarningNotification
+  - src/hooks/notifs/useCanSwitchToExistingSubscription.tsx (67行): useCanSwitchToExistingSubscription
+  - src/hooks/notifs/useDeprecationWarningNotification.tsx (31行): useDeprecationWarningNotification
+  - src/hooks/notifs/useFastModeNotification.tsx (112行): useFastModeNotification
+  - src/hooks/notifs/useIDEStatusIndicator.tsx (124行): useIDEStatusIndicator
+  - src/hooks/notifs/useInstallMessages.tsx (23行): useInstallMessages
+  - src/hooks/notifs/useLspInitializationNotification.tsx (135行): useLspInitializationNotification
+  - src/hooks/notifs/useMcpConnectivityStatus.tsx (113行): useMcpConnectivityStatus
+  - src/hooks/notifs/useModelMigrationNotifications.tsx (54行): useModelMigrationNotifications
+  - src/hooks/notifs/useNpmDeprecationNotification.tsx (24行): useNpmDeprecationNotification
+  - src/hooks/notifs/usePluginAutoupdateNotification.tsx (59行): usePluginAutoupdateNotification
+  - src/hooks/notifs/usePluginInstallationStatus.tsx (68行): usePluginInstallationStatus
+  - src/hooks/notifs/useRateLimitWarningNotification.tsx (65行): useRateLimitWarningNotification
+  - src/hooks/notifs/useSettingsErrors.tsx (42行): useSettingsErrors
+  - src/hooks/notifs/useStartupNotification.ts (42行): useStartupNotification
+  - src/hooks/notifs/useTeammateShutdownNotification.ts (79行): useTeammateLifecycleNotification
+  - src/hooks/renderPlaceholder.ts (52行): renderPlaceholder
+  - src/hooks/toolPermission/handlers/coordinatorHandler.ts (66行): (无导出)
+  - src/hooks/toolPermission/handlers/interactiveHandler.ts (715行): getLatestChannelContextHint
+  - src/hooks/toolPermission/handlers/swarmWorkerHandler.ts (160行): (无导出)
+  - src/hooks/toolPermission/PermissionContext.ts (390行): (无导出)
+  - src/hooks/toolPermission/permissionLogging.ts (239行): (无导出)
+  - src/hooks/unifiedSuggestions.ts (203行): generateUnifiedSuggestions
+  - src/hooks/useAfterFirstRender.ts (18行): useAfterFirstRender
+  - src/hooks/useApiKeyVerification.ts (85行): useApiKeyVerification
+  - src/hooks/useArrowKeyHistory.tsx (268行): useArrowKeyHistory
+  - src/hooks/useAssistantHistory.ts (251行): useAssistantHistory
+  - src/hooks/useAwaySummary.ts (160行): useAwaySummary
+  - src/hooks/useBackgroundAgentTasks.ts (20行): useBackgroundAgentTasks
+  - src/hooks/useBackgroundTaskNavigation.ts (262行): useBackgroundTaskNavigation
+  - src/hooks/useBlink.ts (39行): useBlink
+  - src/hooks/useCancelRequest.ts (277行): CancelRequestHandler
+  - src/hooks/useCanUseTool.tsx (295行): (无导出)
+  - src/hooks/useChromeExtensionNotification.tsx (55行): useChromeExtensionNotification
+  - src/hooks/useClaudeCodeHintRecommendation.tsx (109行): useClaudeCodeHintRecommendation
+  - src/hooks/useClipboardImageHint.ts (78行): useClipboardImageHint
+  - src/hooks/useCommandKeybindings.tsx (77行): CommandKeybindingHandlers
+  - src/hooks/useCommandQueue.ts (16行): useCommandQueue
+  - src/hooks/useCopyOnSelect.ts (99行): useCopyOnSelect, useSelectionBgColor
+  - src/hooks/useDeferredHookMessages.ts (47行): useDeferredHookMessages
+  - src/hooks/useDiffData.ts (111行): useDiffData
+  - src/hooks/useDiffInIDE.ts (380行): useDiffInIDE, computeEditsFromContents
+  - src/hooks/useDirectConnect.ts (233行): useDirectConnect
+  - src/hooks/useDoublePress.ts (4行): (无导出)
+  - src/hooks/useDynamicConfig.ts (23行): useDynamicConfig
+  - src/hooks/useElapsedTime.ts (38行): useElapsedTime
+  - src/hooks/useExitOnCtrlCD.ts (96行): useExitOnCtrlCD
+  - src/hooks/useExitOnCtrlCDWithKeybindings.ts (25行): useExitOnCtrlCDWithKeybindings
+  - src/hooks/useFileHistorySnapshotInit.ts (26行): useFileHistorySnapshotInit
+  - src/hooks/useGlobalKeybindings.tsx (245行): GlobalKeybindingHandlers
+  - src/hooks/useHistorySearch.ts (303行): useHistorySearch
+  - src/hooks/useIdeAtMentioned.ts (77行): useIdeAtMentioned
+  - src/hooks/useIdeConnectionStatus.ts (34行): useIdeConnectionStatus
+  - src/hooks/useIDEIntegration.tsx (79行): useIDEIntegration
+  - src/hooks/useIdeLogging.ts (42行): useIdeLogging
+  - src/hooks/useIdeSelection.ts (151行): useIdeSelection
+  - src/hooks/useInboxPoller.ts (970行): useInboxPoller
+  - src/hooks/useInputBuffer.ts (133行): useInputBuffer
+  - src/hooks/useIssueFlagBanner.ts (132行): isSessionContainerCompatible, hasFrictionSignal, useIssueFlagBanner
+  ... 还有 53 个文件
+
+## 键绑定 (src/keybindings)
+- 文件数: 14 | 总行数: 2007 | 导出符号: 32
+- 超大文件(>500行): src/keybindings/validate.ts(502行)
+- 主要导出: DEFAULT_BINDINGS, KeybindingSetup, isKeybindingCustomizationEnabled, getKeybindingsPath, loadKeybindings, loadKeybindingsSync, loadKeybindingsSyncWithWarnings, initializeKeybindingWatcher, disposeKeybindingWatcher, subscribeToKeybindingChanges, getCachedKeybindingWarnings, resetKeybindingLoaderForTesting, NON_REBINDABLE, TERMINAL_RESERVED, MACOS_RESERVED, getReservedShortcuts, normalizeKeyForComparison, KEYBINDING_CONTEXTS, KEYBINDING_CONTEXT_DESCRIPTIONS, KEYBINDING_ACTIONS, KeybindingBlockSchema, KeybindingsSchema, getShortcutDisplay, generateKeybindingsTemplate, useShortcutDisplay, checkDuplicateKeysInJson, validateUserConfig, checkDuplicates, checkReservedShortcuts, validateBindings
+  - src/keybindings/defaultBindings.ts (353行): DEFAULT_BINDINGS
+  - src/keybindings/KeybindingContext.tsx (8行): (无导出)
+  - src/keybindings/KeybindingProviderSetup.tsx (92行): KeybindingSetup
+  - src/keybindings/loadUserBindings.ts (473行): isKeybindingCustomizationEnabled, getKeybindingsPath, loadKeybindings, loadKeybindingsSync, loadKeybindingsSyncWithWarnings
+  - src/keybindings/parser.ts (11行): (无导出)
+  - src/keybindings/reservedShortcuts.ts (128行): NON_REBINDABLE, TERMINAL_RESERVED, MACOS_RESERVED, getReservedShortcuts, normalizeKeyForComparison
+  - src/keybindings/resolver.ts (10行): (无导出)
+  - src/keybindings/schema.ts (240行): KEYBINDING_CONTEXTS, KEYBINDING_CONTEXT_DESCRIPTIONS, KEYBINDING_ACTIONS, KeybindingBlockSchema, KeybindingsSchema
+  - src/keybindings/shortcutFormat.ts (64行): getShortcutDisplay
+  - src/keybindings/template.ts (53行): generateKeybindingsTemplate
+  - src/keybindings/types.ts (10行): (无导出)
+  - src/keybindings/useKeybinding.ts (3行): (无导出)
+  - src/keybindings/useShortcutDisplay.ts (60行): useShortcutDisplay
+  - src/keybindings/validate.ts (502行): checkDuplicateKeysInJson, validateUserConfig, checkDuplicates, checkReservedShortcuts, validateBindings
+
+## Job/后台 (src/jobs)
+- 文件数: 3 | 总行数: 258 | 导出符号: 7
+- 超大文件(>500行): 无
+- 主要导出: classifyAndWriteState, getJobDir, createJob, readJobState, appendJobReply, listTemplates, loadTemplate
+  - src/jobs/classifier.ts (68行): classifyAndWriteState
+  - src/jobs/state.ts (103行): getJobDir, createJob, readJobState, appendJobReply
+  - src/jobs/templates.ts (87行): listTemplates, loadTemplate
+
+## Context (src/context)
+- 文件数: 9 | 总行数: 839 | 导出符号: 32
+- 超大文件(>500行): 无
+- 主要导出: FpsMetricsProvider, useFpsMetrics, MailboxProvider, useMailbox, ModalContext, useIsInsideModal, useModalOrTerminalSize, useModalScrollRef, useNotifications, getNext, useRegisterOverlay, useIsOverlayActive, useIsModalOverlayActive, PromptOverlayProvider, usePromptOverlay, usePromptOverlayDialog, useSetPromptOverlay, useSetPromptOverlayDialog, useQueuedMessage, QueuedMessageProvider, createStatsStore, StatsContext, StatsProvider, useStats, useCounter, useGauge, useTimer, useSet, VoiceProvider, useVoiceState
+  - src/context/fpsMetrics.tsx (20行): FpsMetricsProvider, useFpsMetrics
+  - src/context/mailbox.tsx (22行): MailboxProvider, useMailbox
+  - src/context/modalContext.tsx (46行): ModalContext, useIsInsideModal, useModalOrTerminalSize, useModalScrollRef
+  - src/context/notifications.tsx (291行): useNotifications, getNext
+  - src/context/overlayContext.tsx (110行): useRegisterOverlay, useIsOverlayActive, useIsModalOverlayActive
+  - src/context/promptOverlayContext.tsx (84行): PromptOverlayProvider, usePromptOverlay, usePromptOverlayDialog, useSetPromptOverlay, useSetPromptOverlayDialog
+  - src/context/QueuedMessageContext.tsx (37行): useQueuedMessage, QueuedMessageProvider
+  - src/context/stats.tsx (159行): createStatsStore, StatsContext, StatsProvider, useStats, useCounter
+  - src/context/voice.tsx (70行): VoiceProvider, useVoiceState, useSetVoiceState, useGetVoiceState
+
+## 命令 (src/commands)
+- 文件数: 319 | 总行数: 39871 | 导出符号: 280
+- 超大文件(>500行): src/commands/ide/ide.tsx(541行), src/commands/insights.ts(3206行), src/commands/install-github-app/install-github-app.tsx(714行), src/commands/issue/index.ts(519行), src/commands/local-memory/launchLocalMemory.tsx(528行), src/commands/perf-issue/index.ts(571行), src/commands/plugin/BrowseMarketplace.tsx(901行), src/commands/plugin/DiscoverPlugins.tsx(825行), src/commands/plugin/ManageMarketplaces.tsx(890行), src/commands/plugin/ManagePlugins.tsx(2504行), src/commands/plugin/PluginSettings.tsx(896行), src/commands/terminalSetup/terminalSetup.tsx(652行), src/commands/ultraplan.tsx(508行)
+- 主要导出: call, validateDirectoryForWorkspace, addDirHelpMessage, call, listAgents, createAgent, deleteAgent, runAgent, AgentsPlatformView, callAgentsPlatform, splitCronAndPrompt, parseAgentsPlatformArgs, computeDefaultInstallDir, NewInstallWizard, call, isAssistantEnabled, call, AutofixProgress, createAutofixTeammate, callAutofixPr, getActiveMonitor, trySetActiveMonitor, setActiveMonitor, clearActiveMonitor, isMonitoring, parsePrNumber, parseAutofixArgs, detectAutofixSkills, formatSkillsHint, getAutonomyPanelBaseActionCountForTests
+  - src/commands/add-dir/add-dir.tsx (130行): call
+  - src/commands/add-dir/index.ts (12行): (无导出)
+  - src/commands/add-dir/validation.ts (111行): validateDirectoryForWorkspace, addDirHelpMessage
+  - src/commands/advisor.ts (110行): (无导出)
+  - src/commands/agents/agents.tsx (14行): call
+  - src/commands/agents/index.ts (11行): (无导出)
+  - src/commands/agents-platform/agentsApi.ts (207行): listAgents, createAgent, deleteAgent, runAgent
+  - src/commands/agents-platform/AgentsPlatformView.tsx (97行): AgentsPlatformView
+  - src/commands/agents-platform/index.ts (30行): (无导出)
+  - src/commands/agents-platform/launchAgentsPlatform.tsx (133行): callAgentsPlatform
+  - src/commands/agents-platform/parseArgs.ts (103行): splitCronAndPrompt, parseAgentsPlatformArgs
+  - src/commands/ant-trace/index.d.ts (4行): (无导出)
+  - src/commands/assistant/assistant.tsx (176行): computeDefaultInstallDir, NewInstallWizard, call
+  - src/commands/assistant/gate.ts (22行): isAssistantEnabled
+  - src/commands/assistant/index.ts (17行): (无导出)
+  - src/commands/attach/attach.ts (138行): call
+  - src/commands/attach/index.ts (12行): (无导出)
+  - src/commands/autofix-pr/AutofixProgress.tsx (85行): AutofixProgress
+  - src/commands/autofix-pr/index.ts (37行): (无导出)
+  - src/commands/autofix-pr/inProcessAgent.ts (31行): createAutofixTeammate
+  - src/commands/autofix-pr/launchAutofixPr.ts (336行): callAutofixPr
+  - src/commands/autofix-pr/monitorState.ts (60行): getActiveMonitor, trySetActiveMonitor, setActiveMonitor, clearActiveMonitor, isMonitoring
+  - src/commands/autofix-pr/parseArgs.ts (39行): parsePrNumber, parseAutofixArgs
+  - src/commands/autofix-pr/skillDetect.ts (17行): detectAutofixSkills, formatSkillsHint
+  - src/commands/autonomy.ts (14行): (无导出)
+  - src/commands/autonomyPanel.tsx (209行): getAutonomyPanelBaseActionCountForTests, call
+  - src/commands/backfill-sessions/index.d.ts (4行): (无导出)
+  - src/commands/branch/branch.ts (301行): deriveFirstPrompt, call
+  - src/commands/branch/index.ts (15行): (无导出)
+  - src/commands/break-cache/index.d.ts (4行): (无导出)
+  - src/commands/break-cache/index.ts (326行): getBreakCacheMarkerPath, getBreakCacheAlwaysPath, getBreakCacheStatsPath, callBreakCache, breakCacheNonInteractive
+  - src/commands/break-cache/panel.tsx (152行): call
+  - src/commands/bridge/bridge.tsx (276行): call
+  - src/commands/bridge/index.ts (27行): (无导出)
+  - src/commands/bridge-kick.ts (201行): (无导出)
+  - src/commands/brief.ts (131行): (无导出)
+  - src/commands/btw/btw.tsx (193行): call
+  - src/commands/btw/index.ts (14行): (无导出)
+  - src/commands/buddy/buddy.ts (172行): call
+  - src/commands/buddy/index.ts (17行): (无导出)
+  - src/commands/bughunter/index.d.ts (4行): (无导出)
+  - src/commands/cache-log/index.ts (102行): callCacheLog, cacheLogNonInteractive
+  - src/commands/cache-log/panel.tsx (180行): call
+  - src/commands/chrome/chrome.tsx (197行): call
+  - src/commands/chrome/index.ts (14行): (无导出)
+  - src/commands/claim-main/claim-main.ts (77行): call
+  - src/commands/claim-main/index.ts (13行): (无导出)
+  - src/commands/clear/caches.ts (147行): clearSessionCaches
+  - src/commands/clear/clear.ts (8行): call
+  - src/commands/clear/conversation.ts (282行): clearConversation
+  - src/commands/clear/index.ts (20行): (无导出)
+  - src/commands/color/color.ts (94行): call
+  - src/commands/color/index.ts (17行): (无导出)
+  - src/commands/commit-push-pr.ts (159行): (无导出)
+  - src/commands/commit.ts (93行): (无导出)
+  - src/commands/compact/compact.ts (289行): call
+  - src/commands/compact/index.ts (16行): (无导出)
+  - src/commands/config/config.tsx (7行): call
+  - src/commands/config/index.ts (12行): (无导出)
+  - src/commands/context/context-noninteractive.ts (326行): collectContextData, call
+  ... 还有 259 个文件
+
+## 远程桥接 (src/bridge)
+- 文件数: 36 | 总行数: 13249 | 导出符号: 120
+- 超大文件(>500行): src/bridge/bridgeApi.ts(544行), src/bridge/bridgeMain.ts(2997行), src/bridge/bridgeMessaging.ts(566行), src/bridge/bridgeUI.ts(531行), src/bridge/initReplBridge.ts(575行), src/bridge/remoteBridgeCore.ts(1056行), src/bridge/replBridge.ts(2478行), src/bridge/sessionRunner.ts(551行)
+- 主要导出: validateBridgeId, createBridgeApiClient, isExpiredErrorType, isSuppressible403, getBridgeTokenOverride, getBridgeBaseUrlOverride, getBridgeAccessToken, getBridgeBaseUrl, isSelfHostedBridge, registerBridgeDebugHandle, clearBridgeDebugHandle, getBridgeDebugHandle, injectBridgeFault, wrapApiForFaultInjection, isBridgeEnabled, isBridgeEnabledBlocking, getBridgeDisabledReason, isEnvLessBridgeEnabled, isCseShimEnabled, checkBridgeMinVersion, getCcrAutoConnectDefault, isCcrMirrorEnabled, runBridgeLoop, isConnectionError, isServerError, parseArgs, bridgeMain, runBridgeHeadless, isSDKMessage, isSDKControlResponse
+  - src/bridge/bridgeApi.ts (544行): validateBridgeId, createBridgeApiClient, isExpiredErrorType, isSuppressible403
+  - src/bridge/bridgeConfig.ts (47行): getBridgeTokenOverride, getBridgeBaseUrlOverride, getBridgeAccessToken, getBridgeBaseUrl, isSelfHostedBridge
+  - src/bridge/bridgeDebug.ts (136行): registerBridgeDebugHandle, clearBridgeDebugHandle, getBridgeDebugHandle, injectBridgeFault, wrapApiForFaultInjection
+  - src/bridge/bridgeEnabled.ts (216行): isBridgeEnabled, isBridgeEnabledBlocking, getBridgeDisabledReason, isEnvLessBridgeEnabled, isCseShimEnabled
+  - src/bridge/bridgeMain.ts (2997行): runBridgeLoop, isConnectionError, isServerError, parseArgs, bridgeMain
+  - src/bridge/bridgeMessaging.ts (566行): isSDKMessage, isSDKControlResponse, isSDKControlRequest, isEligibleBridgeMessage, extractTitleText
+  - src/bridge/bridgePermissionCallbacks.ts (105行): (无导出)
+  - src/bridge/bridgePointer.ts (211行): BRIDGE_POINTER_TTL_MS, getBridgePointerPath, writeBridgePointer, readBridgePointer, readBridgePointerAcrossWorktrees
+  - src/bridge/bridgeResultScheduling.ts (29行): hasPendingBridgeMessages, isTranscriptResetResultReady, shouldDeferBridgeResult
+  - src/bridge/bridgeStatusUtil.ts (169行): TOOL_DISPLAY_EXPIRY_MS, SHIMMER_INTERVAL_MS, timestamp, abbreviateActivity, buildBridgeConnectUrl
+  - src/bridge/bridgeUI.ts (531行): createBridgeLogger
+  - src/bridge/capacityWake.ts (57行): createCapacityWake
+  - src/bridge/codeSessionApi.ts (169行): createCodeSession, fetchRemoteCredentials
+  - src/bridge/createSession.ts (399行): createBridgeSession, getBridgeSession, archiveBridgeSession, updateBridgeSessionTitle
+  - src/bridge/debugUtils.ts (142行): redactSecrets, debugTruncate, debugBody, describeAxiosError, extractHttpStatus
+  - src/bridge/envLessBridgeConfig.ts (166行): DEFAULT_ENV_LESS_BRIDGE_CONFIG, getEnvLessBridgeConfig, checkEnvLessBridgeMinVersion, shouldShowAppUpgradeMessage
+  - src/bridge/flushGate.ts (72行): (无导出)
+  - src/bridge/inboundAttachments.ts (176行): extractInboundAttachments, resolveInboundAttachments, prependPathRefs, resolveAndPrepend
+  - src/bridge/inboundMessages.ts (83行): extractInboundMessageFields, normalizeImageBlocks
+  - src/bridge/initReplBridge.ts (575行): initReplBridge
+  - src/bridge/jwtUtils.ts (257行): decodeJwtPayload, decodeJwtExpiry, createTokenRefreshScheduler
+  - src/bridge/peerSessions.ts (117行): listBridgePeers, postInterClaudeMessage
+  - src/bridge/pollConfig.ts (111行): getPollIntervalConfig
+  - src/bridge/pollConfigDefaults.ts (83行): DEFAULT_POLL_CONFIG
+  - src/bridge/rcDebugLog.ts (43行): rcLog, rcLogClear
+  - src/bridge/remoteBridgeCore.ts (1056行): initEnvLessBridgeCore, fetchRemoteCredentials
+  - src/bridge/remoteInterruptHandling.ts (14行): handleRemoteInterrupt
+  - src/bridge/replBridge.ts (2478行): initBridgeCore
+  - src/bridge/replBridgeHandle.ts (37行): setReplBridgeHandle, getReplBridgeHandle, getSelfBridgeCompatId
+  - src/bridge/replBridgeTransport.ts (371行): createV1ReplTransport, createV2ReplTransport
+  - src/bridge/sessionIdCompat.ts (58行): setCseShimGate, toCompatSessionId, toInfraSessionId
+  - src/bridge/sessionRunner.ts (551行): safeFilenameId, createSessionSpawner
+  - src/bridge/trustedDevice.ts (211行): getTrustedDeviceToken, clearTrustedDeviceTokenCache, clearTrustedDeviceToken, enrollTrustedDevice
+  - src/bridge/types.ts (263行): DEFAULT_SESSION_TIMEOUT_MS, BRIDGE_LOGIN_INSTRUCTION, BRIDGE_LOGIN_ERROR, REMOTE_CONTROL_DISCONNECTED_MSG
+  - src/bridge/webhookSanitizer.ts (81行): sanitizeInboundWebhookContent
+  - src/bridge/workSecret.ts (128行): decodeWorkSecret, buildSdkUrl, sameSessionId, buildCCRv2SdkUrl, registerWorker
+
+## Buddy (src/buddy)
+- 文件数: 8 | 总行数: 1490 | 导出符号: 31
+- 超大文件(>500行): src/buddy/sprites.ts(515行)
+- 主要导出: roll, rollWithSeed, generateSeed, companionUserId, inferLegacyCompanionBones, getCompanion, CompanionCard, triggerCompanionReaction, MIN_COLS_FOR_FULL_SPRITE, companionReservedColumns, CompanionSprite, CompanionFloatingBubble, companionIntroText, getCompanionIntroAttachment, renderSprite, spriteFrameCount, renderFace, RARITIES, duck, goose, blob, cat, dragon, octopus, owl, penguin, turtle, isBuddyTeaserWindow, isBuddyLive, useBuddyNotification
+  - src/buddy/companion.ts (162行): roll, rollWithSeed, generateSeed, companionUserId, inferLegacyCompanionBones
+  - src/buddy/CompanionCard.tsx (110行): CompanionCard
+  - src/buddy/companionReact.ts (161行): triggerCompanionReaction
+  - src/buddy/CompanionSprite.tsx (291行): MIN_COLS_FOR_FULL_SPRITE, companionReservedColumns, CompanionSprite, CompanionFloatingBubble
+  - src/buddy/prompt.ts (37行): companionIntroText, getCompanionIntroAttachment
+  - src/buddy/sprites.ts (515行): renderSprite, spriteFrameCount, renderFace
+  - src/buddy/types.ts (150行): RARITIES, duck, goose, blob, cat
+  - src/buddy/useBuddyNotification.tsx (64行): isBuddyTeaserWindow, isBuddyLive, useBuddyNotification, findBuddyTriggerPositions
+
+## 启动 (src/bootstrap)
+- 文件数: 1 | 总行数: 1762 | 导出符号: 10
+- 超大文件(>500行): src/bootstrap/state.ts(1762行)
+- 主要导出: getSessionId, regenerateSessionId, getParentSessionId, switchSession, onSessionSwitch, getSessionProjectDir, getOriginalCwd, getProjectRoot, setOriginalCwd, setProjectRoot
+  - src/bootstrap/state.ts (1762行): getSessionId, regenerateSessionId, getParentSessionId, switchSession, onSessionSwitch
+
+## CLI (src/cli)
+- 文件数: 31 | 总行数: 13827 | 导出符号: 79
+- 超大文件(>500行): src/cli/handlers/plugins.ts(841行), src/cli/print.ts(5840行), src/cli/structuredIO.ts(885行), src/cli/transports/ccrClient.ts(1016行), src/cli/transports/SSETransport.ts(742行), src/cli/transports/WebSocketTransport.ts(809行)
+- 主要导出: selectEngine, tailLog, listLiveSessions, findSession, psHandler, logsHandler, attachHandler, killHandler, handleBgStart, handleBgFlag, cliError, cliOk, agentsHandler, taskCreateHandler, taskListHandler, taskGetHandler, taskUpdateHandler, taskDirHandler, logHandler, errorHandler, exportHandler, completionHandler, installOAuthTokens, authLogin, authStatus, authLogout, autoModeDefaultsHandler, autoModeConfigHandler, autoModeCritiqueHandler, parseAutonomyLimit
+  - src/cli/bg/engine.ts (50行): (无导出)
+  - src/cli/bg/engines/detached.ts (60行): (无导出)
+  - src/cli/bg/engines/index.ts (23行): selectEngine
+  - src/cli/bg/engines/tmux.ts (71行): (无导出)
+  - src/cli/bg/tail.ts (71行): tailLog
+  - src/cli/bg.ts (342行): listLiveSessions, findSession, psHandler, logsHandler, attachHandler
+  - src/cli/exit.ts (31行): cliError, cliOk
+  - src/cli/handlers/agents.ts (68行): agentsHandler
+  - src/cli/handlers/ant.ts (217行): taskCreateHandler, taskListHandler, taskGetHandler, taskUpdateHandler, taskDirHandler
+  - src/cli/handlers/auth.ts (335行): installOAuthTokens, authLogin, authStatus, authLogout
+  - src/cli/handlers/autoMode.ts (175行): autoModeDefaultsHandler, autoModeConfigHandler, autoModeCritiqueHandler
+  - src/cli/handlers/autonomy.ts (234行): parseAutonomyLimit, getAutonomyStatusText, getAutonomyDeepSectionText, autonomyStatusHandler, getAutonomyRunsText
+  - src/cli/handlers/mcp.tsx (374行): mcpServeHandler, mcpRemoveHandler, mcpListHandler, mcpGetHandler, mcpAddJsonHandler
+  - src/cli/handlers/plugins.ts (841行): handleMarketplaceError, pluginValidateHandler, pluginListHandler, marketplaceAddHandler, marketplaceListHandler
+  - src/cli/handlers/templateJobs.ts (159行): templatesMain
+  - src/cli/handlers/util.tsx (111行): setupTokenHandler, doctorHandler, installHandler
+  - src/cli/ndjsonSafeStringify.ts (33行): ndjsonSafeStringify
+  - src/cli/print.ts (5840行): joinPromptValues, canBatchWith, runHeadless, createCanUseToolWithPermissionPrompt, getCanUseToolFn
+  - src/cli/remoteIO.ts (259行): (无导出)
+  - src/cli/rollback.ts (71行): rollback
+  - src/cli/structuredIO.ts (885行): SANDBOX_NETWORK_ACCESS_TOOL_NAME
+  - src/cli/transports/ccrClient.ts (1016行): createStreamAccumulator, accumulateStreamEvents, clearStreamAccumulatorForMessage
+  - src/cli/transports/HybridTransport.ts (288行): (无导出)
+  - src/cli/transports/SerialBatchEventUploader.ts (276行): (无导出)
+  - src/cli/transports/SSETransport.ts (742行): parseSSEFrames
+  - src/cli/transports/Transport.ts (3行): (无导出)
+  - src/cli/transports/transportUtils.ts (46行): getTransportForUrl
+  - src/cli/transports/WebSocketTransport.ts (809行): (无导出)
+  - src/cli/transports/WorkerStateUploader.ts (132行): (无导出)
+  - src/cli/up.ts (96行): up
+  - src/cli/updateCCB.ts (169行): updateCCB
+
+## 常量 (src/constants)
+- 文件数: 23 | 总行数: 3434 | 导出符号: 109
+- 超大文件(>500行): src/constants/promptEngineeringAudit.runner.ts(730行), src/constants/prompts.ts(870行)
+- 主要导出: API_IMAGE_MAX_BASE64_SIZE, IMAGE_TARGET_RAW_SIZE, IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT, PDF_TARGET_RAW_SIZE, API_PDF_MAX_PAGES, PDF_EXTRACT_SIZE_THRESHOLD, PDF_MAX_EXTRACT_SIZE, PDF_MAX_PAGES_PER_READ, PDF_AT_MENTION_INLINE_THRESHOLD, CLAUDE_CODE_20250219_BETA_HEADER, INTERLEAVED_THINKING_BETA_HEADER, CONTEXT_1M_BETA_HEADER, CONTEXT_MANAGEMENT_BETA_HEADER, STRUCTURED_OUTPUTS_BETA_HEADER, WEB_SEARCH_BETA_HEADER, SEARCH_EXTRA_TOOLS_BETA_HEADER_1P, SEARCH_EXTRA_TOOLS_BETA_HEADER_3P, EFFORT_BETA_HEADER, TASK_BUDGETS_BETA_HEADER, getLocalISODate, getSessionStartDate, getLocalMonthYear, CYBER_RISK_INSTRUCTION, E_TOOL_USE_SUMMARY_GENERATION_FAILED, BLACK_CIRCLE, BULLET_OPERATOR, TEARDROP_ASTERISK, UP_ARROW, DOWN_ARROW
+  - src/constants/apiLimits.ts (95行): API_IMAGE_MAX_BASE64_SIZE, IMAGE_TARGET_RAW_SIZE, IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT, PDF_TARGET_RAW_SIZE
+  - src/constants/betas.ts (51行): CLAUDE_CODE_20250219_BETA_HEADER, INTERLEAVED_THINKING_BETA_HEADER, CONTEXT_1M_BETA_HEADER, CONTEXT_MANAGEMENT_BETA_HEADER, STRUCTURED_OUTPUTS_BETA_HEADER
+  - src/constants/common.ts (34行): getLocalISODate, getSessionStartDate, getLocalMonthYear
+  - src/constants/cyberRiskInstruction.ts (25行): CYBER_RISK_INSTRUCTION
+  - src/constants/errorIds.ts (16行): E_TOOL_USE_SUMMARY_GENERATION_FAILED
+  - src/constants/figures.ts (47行): BLACK_CIRCLE, BULLET_OPERATOR, TEARDROP_ASTERISK, UP_ARROW, DOWN_ARROW
+  - src/constants/files.ts (157行): BINARY_EXTENSIONS, hasBinaryExtension, isBinaryContent
+  - src/constants/github-app.ts (145行): PR_TITLE, GITHUB_ACTION_SETUP_DOCS_URL, WORKFLOW_CONTENT, PR_BODY, CODE_REVIEW_PLUGIN_WORKFLOW_CONTENT
+  - src/constants/keys.ts (16行): getGrowthBookClientKey
+  - src/constants/messages.ts (2行): NO_CONTENT_MESSAGE
+  - src/constants/oauth.ts (235行): fileSuffixForOauthConfig, CLAUDE_AI_INFERENCE_SCOPE, CLAUDE_AI_PROFILE_SCOPE, OAUTH_BETA_HEADER, CONSOLE_OAUTH_SCOPES
+  - src/constants/outputStyles.ts (212行): DEFAULT_OUTPUT_STYLE_NAME, OUTPUT_STYLE_CONFIG, getAllOutputStyles, clearAllOutputStylesCache, getOutputStyleConfig
+  - src/constants/product.ts (95行): PRODUCT_URL, CLAUDE_AI_BASE_URL, CLAUDE_AI_STAGING_BASE_URL, CLAUDE_AI_LOCAL_BASE_URL, isRemoteSessionStaging
+  - src/constants/promptEngineeringAudit.runner.ts (730行): (无导出)
+  - src/constants/prompts.ts (870行): CLAUDE_CODE_DOCS_MAP_URL, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, prependBullets, getSystemPrompt, computeEnvInfo
+  - src/constants/querySource.ts (3行): (无导出)
+  - src/constants/spinnerVerbs.ts (205行): getSpinnerVerbs, SPINNER_VERBS
+  - src/constants/system.ts (96行): CLI_SYSPROMPT_PREFIXES, getCLISyspromptPrefix, getAttributionHeader
+  - src/constants/systemPromptSections.ts (69行): systemPromptSection, DANGEROUS_uncachedSystemPromptSection, resolveSystemPromptSections, clearSystemPromptSections
+  - src/constants/toolLimits.ts (57行): DEFAULT_MAX_RESULT_SIZE_CHARS, MAX_TOOL_RESULT_TOKENS, BYTES_PER_TOKEN, MAX_TOOL_RESULT_BYTES, MAX_TOOL_RESULTS_PER_MESSAGE_CHARS
+  - src/constants/tools.ts (174行): ALL_AGENT_DISALLOWED_TOOLS, CUSTOM_AGENT_DISALLOWED_TOOLS, ASYNC_AGENT_ALLOWED_TOOLS, IN_PROCESS_TEAMMATE_ALLOWED_TOOLS, COORDINATOR_MODE_ALLOWED_TOOLS
+  - src/constants/turnCompletionVerbs.ts (13行): TURN_COMPLETION_VERBS
+  - src/constants/xml.ts (87行): COMMAND_NAME_TAG, COMMAND_MESSAGE_TAG, COMMAND_ARGS_TAG, BASH_INPUT_TAG, BASH_STDOUT_TAG
+
+## 协调器 (src/coordinator)
+- 文件数: 2 | 总行数: 438 | 导出符号: 5
+- 超大文件(>500行): 无
+- 主要导出: isCoordinatorMode, matchSessionMode, getCoordinatorUserContext, getCoordinatorSystemPrompt, getCoordinatorAgents
+  - src/coordinator/coordinatorMode.ts (370行): isCoordinatorMode, matchSessionMode, getCoordinatorUserContext, getCoordinatorSystemPrompt
+  - src/coordinator/workerAgent.ts (68行): getCoordinatorAgents
+
+## 守护进程 (src/daemon)
+- 文件数: 3 | 总行数: 700 | 导出符号: 8
+- 超大文件(>500行): 无
+- 主要导出: daemonMain, getDaemonStateFilePath, writeDaemonState, readDaemonState, removeDaemonState, queryDaemonStatus, stopDaemonByPid, runDaemonWorker
+  - src/daemon/main.ts (429行): daemonMain
+  - src/daemon/state.ts (158行): getDaemonStateFilePath, writeDaemonState, readDaemonState, removeDaemonState, queryDaemonStatus
+  - src/daemon/workerRegistry.ts (113行): runDaemonWorker
+
+## 入口 (src/entrypoints)
+- 文件数: 14 | 总行数: 4603 | 导出符号: 38
+- 超大文件(>500行): src/entrypoints/sdk/controlSchemas.ts(661行), src/entrypoints/sdk/coreSchemas.ts(1899行)
+- 主要导出: tool, createSdkMcpServer, query, query, query, unstable_v2_createSession, unstable_v2_resumeSession, unstable_v2_prompt, getSessionMessages, listSessions, init, initializeTelemetryAfterTrust, startMCPServer, SandboxNetworkConfigSchema, SandboxFilesystemConfigSchema, SandboxSettingsSchema, JSONRPCMessagePlaceholder, SDKHookCallbackMatcherSchema, SDKControlInitializeRequestSchema, SDKControlInitializeResponseSchema, SDKControlInterruptRequestSchema, SDKControlPermissionRequestSchema, SDKControlSetPermissionModeRequestSchema, SDKControlSetModelRequestSchema, SDKControlSetMaxThinkingTokensRequestSchema, SDKControlMcpStatusRequestSchema, ModelUsageSchema, OutputFormatTypeSchema, BaseOutputFormatSchema, JsonSchemaOutputFormatSchema
+  - src/entrypoints/agentSdkTypes.ts (446行): tool, createSdkMcpServer, query, query, query
+  - src/entrypoints/cli.tsx (383行): (无导出)
+  - src/entrypoints/init.ts (380行): init, initializeTelemetryAfterTrust
+  - src/entrypoints/mcp.ts (197行): startMCPServer
+  - src/entrypoints/sandboxTypes.ts (157行): SandboxNetworkConfigSchema, SandboxFilesystemConfigSchema, SandboxSettingsSchema
+  - src/entrypoints/sdk/controlSchemas.ts (661行): JSONRPCMessagePlaceholder, SDKHookCallbackMatcherSchema, SDKControlInitializeRequestSchema, SDKControlInitializeResponseSchema, SDKControlInterruptRequestSchema
+  - src/entrypoints/sdk/controlTypes.ts (55行): (无导出)
+  - src/entrypoints/sdk/coreSchemas.ts (1899行): ModelUsageSchema, OutputFormatTypeSchema, BaseOutputFormatSchema, JsonSchemaOutputFormatSchema, OutputFormatSchema
+  - src/entrypoints/sdk/coreTypes.generated.ts (258行): (无导出)
+  - src/entrypoints/sdk/coreTypes.ts (63行): HOOK_EVENTS, EXIT_REASONS
+  - src/entrypoints/sdk/runtimeTypes.ts (83行): (无导出)
+  - src/entrypoints/sdk/sdkUtilityTypes.ts (6行): (无导出)
+  - src/entrypoints/sdk/settingsTypes.generated.ts (5行): (无导出)
+  - src/entrypoints/sdk/toolTypes.ts (10行): (无导出)
+
+## 内存目录 (src/memdir)
+- 文件数: 9 | 总行数: 1681 | 导出符号: 44
+- 超大文件(>500行): src/memdir/memdir.ts(508行)
+- 主要导出: findRelevantMemories, ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, MAX_ENTRYPOINT_BYTES, truncateEntrypointContent, DIR_EXISTS_GUIDANCE, DIRS_EXIST_GUIDANCE, ensureMemoryDirExists, buildMemoryLines, buildMemoryPrompt, buildSearchingPastContextSection, memoryAgeDays, memoryAge, memoryFreshnessText, memoryFreshnessNote, scanMemoryFiles, formatMemoryManifest, logMemoryRecallShape, logMemoryWriteShape, MEMORY_TYPES, parseMemoryType, TYPES_SECTION_COMBINED, TYPES_SECTION_INDIVIDUAL, WHAT_NOT_TO_SAVE_SECTION, MEMORY_DRIFT_CAVEAT, WHEN_TO_ACCESS_SECTION, TRUSTING_RECALL_SECTION, MEMORY_FRONTMATTER_EXAMPLE, isAutoMemoryEnabled, isExtractModeActive
+  - src/memdir/findRelevantMemories.ts (148行): findRelevantMemories
+  - src/memdir/memdir.ts (508行): ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, MAX_ENTRYPOINT_BYTES, truncateEntrypointContent, DIR_EXISTS_GUIDANCE
+  - src/memdir/memoryAge.ts (54行): memoryAgeDays, memoryAge, memoryFreshnessText, memoryFreshnessNote
+  - src/memdir/memoryScan.ts (95行): scanMemoryFiles, formatMemoryManifest
+  - src/memdir/memoryShapeTelemetry.ts (16行): logMemoryRecallShape, logMemoryWriteShape
+  - src/memdir/memoryTypes.ts (187行): MEMORY_TYPES, parseMemoryType, TYPES_SECTION_COMBINED, TYPES_SECTION_INDIVIDUAL, WHAT_NOT_TO_SAVE_SECTION
+  - src/memdir/paths.ts (279行): isAutoMemoryEnabled, isExtractModeActive, getMemoryBaseDir, hasAutoMemPathOverride, getAutoMemPath
+  - src/memdir/teamMemPaths.ts (293行): isTeamMemoryEnabled, getTeamMemPath, getTeamMemEntrypoint, isTeamMemPath, validateTeamMemWritePath
+  - src/memdir/teamMemPrompts.ts (101行): buildCombinedMemoryPrompt
+
+## 迁移 (src/migrations)
+- 文件数: 10 | 总行数: 524 | 导出符号: 10
+- 超大文件(>500行): 无
+- 主要导出: migrateBypassPermissionsAcceptedToSettings, migrateEnableAllProjectMcpServersToSettings, migrateFennecToOpus, migrateLegacyOpusToCurrent, migrateOpusToOpus1m, migrateReplBridgeEnabledToRemoteControlAtStartup, migrateSonnet1mToSonnet45, migrateSonnet45ToSonnet46, resetAutoModeOptInForDefaultOffer, resetProToOpusDefault
+  - src/migrations/migrateBypassPermissionsAcceptedToSettings.ts (41行): migrateBypassPermissionsAcceptedToSettings
+  - src/migrations/migrateEnableAllProjectMcpServersToSettings.ts (119行): migrateEnableAllProjectMcpServersToSettings
+  - src/migrations/migrateFennecToOpus.ts (46行): migrateFennecToOpus
+  - src/migrations/migrateLegacyOpusToCurrent.ts (58行): migrateLegacyOpusToCurrent
+  - src/migrations/migrateOpusToOpus1m.ts (16行): migrateOpusToOpus1m
+  - src/migrations/migrateReplBridgeEnabledToRemoteControlAtStartup.ts (23行): migrateReplBridgeEnabledToRemoteControlAtStartup
+  - src/migrations/migrateSonnet1mToSonnet45.ts (49行): migrateSonnet1mToSonnet45
+  - src/migrations/migrateSonnet45ToSonnet46.ts (68行): migrateSonnet45ToSonnet46
+  - src/migrations/resetAutoModeOptInForDefaultOffer.ts (52行): resetAutoModeOptInForDefaultOffer
+  - src/migrations/resetProToOpusDefault.ts (52行): resetProToOpusDefault
+
+## 技能 (src/skills)
+- 文件数: 23 | 总行数: 4322 | 导出符号: 40
+- 超大文件(>500行): src/skills/loadSkillsDir.ts(1087行)
+- 主要导出: registerBatchSkill, registerClaudeApiSkill, SKILL_MODEL_VARS, SKILL_PROMPT, SKILL_FILES, registerClaudeInChromeSkill, registerCronListSkill, registerCronDeleteSkill, registerDebugSkill, registerDreamSkill, initBundledSkills, registerKeybindingsSkill, registerLoopSkill, registerLoremIpsumSkill, registerRememberSkill, registerScheduleRemoteAgentsSkill, registerSimplifySkill, registerSkillifySkill, registerStuckSkill, registerUpdateConfigSkill, registerVerifySkill, SKILL_MD, SKILL_FILES, registerBundledSkill, getBundledSkills, clearBundledSkills, getBundledSkillExtractDir, getSkillsPath, estimateSkillFrontmatterTokens, parseSkillFrontmatterFields
+  - src/skills/bundled/batch.ts (125行): registerBatchSkill
+  - src/skills/bundled/claudeApi.ts (197行): registerClaudeApiSkill
+  - src/skills/bundled/claudeApiContent.ts (76行): SKILL_MODEL_VARS, SKILL_PROMPT, SKILL_FILES
+  - src/skills/bundled/claudeInChrome.ts (35行): registerClaudeInChromeSkill
+  - src/skills/bundled/cronManage.ts (55行): registerCronListSkill, registerCronDeleteSkill
+  - src/skills/bundled/debug.ts (104行): registerDebugSkill
+  - src/skills/bundled/dream.ts (45行): registerDreamSkill
+  - src/skills/bundled/index.ts (72行): initBundledSkills
+  - src/skills/bundled/keybindings.ts (340行): registerKeybindingsSkill
+  - src/skills/bundled/loop.ts (93行): registerLoopSkill
+  - src/skills/bundled/loremIpsum.ts (283行): registerLoremIpsumSkill
+  - src/skills/bundled/remember.ts (83行): registerRememberSkill
+  - src/skills/bundled/scheduleRemoteAgents.ts (448行): registerScheduleRemoteAgentsSkill
+  - src/skills/bundled/simplify.ts (70行): registerSimplifySkill
+  - src/skills/bundled/skillify.ts (199行): registerSkillifySkill
+  - src/skills/bundled/stuck.ts (80行): registerStuckSkill
+  - src/skills/bundled/updateConfig.ts (476行): registerUpdateConfigSkill
+  - src/skills/bundled/verify.ts (31行): registerVerifySkill
+  - src/skills/bundled/verifyContent.ts (14行): SKILL_MD, SKILL_FILES
+  - src/skills/bundledSkills.ts (221行): registerBundledSkill, getBundledSkills, clearBundledSkills, getBundledSkillExtractDir
+  - src/skills/loadSkillsDir.ts (1087行): getSkillsPath, estimateSkillFrontmatterTokens, parseSkillFrontmatterFields, createSkillCommand, getSkillDirCommands
+  - src/skills/mcpSkillBuilders.ts (45行): registerMCPSkillBuilders, getMCPSkillBuilders
+  - src/skills/mcpSkills.ts (143行): fetchMcpSkillsForClient
+
+## 状态管理 (src/state)
+- 文件数: 6 | 总行数: 1151 | 导出符号: 16
+- 超大文件(>500行): src/state/AppStateStore.ts(575行)
+- 主要导出: AppStoreContext, AppStateProvider, useAppState, useSetAppState, useAppStateStore, useAppStateMaybeOutsideOfProvider, IDLE_SPECULATION_STATE, getDefaultAppState, externalMetadataToAppState, onChangeAppState, getViewedTeammateTask, getActiveAgentForInput, createStore, enterTeammateView, exitTeammateView, stopOrDismissAgent
+  - src/state/AppState.tsx (163行): AppStoreContext, AppStateProvider, useAppState, useSetAppState, useAppStateStore
+  - src/state/AppStateStore.ts (575行): IDLE_SPECULATION_STATE, getDefaultAppState
+  - src/state/onChangeAppState.ts (159行): externalMetadataToAppState, onChangeAppState
+  - src/state/selectors.ts (77行): getViewedTeammateTask, getActiveAgentForInput
+  - src/state/store.ts (35行): createStore
+  - src/state/teammateViewHelpers.ts (142行): enterTeammateView, exitTeammateView, stopOrDismissAgent
+
+## 工具实现 (packages/builtin-tools/src/tools)
+- 文件数: 315 | 总行数: 56581 | 导出符号: 579
+- 超大文件(>500行): packages/builtin-tools/src/tools/AgentTool/AgentTool.tsx(1609行), packages/builtin-tools/src/tools/AgentTool/agentToolUtils.ts(699行), packages/builtin-tools/src/tools/AgentTool/loadAgentsDir.ts(757行), packages/builtin-tools/src/tools/AgentTool/runAgent.ts(960行), packages/builtin-tools/src/tools/AgentTool/UI.tsx(1006行), packages/builtin-tools/src/tools/BashTool/bashPermissions.ts(2622行), packages/builtin-tools/src/tools/BashTool/bashSecurity.ts(2635行), packages/builtin-tools/src/tools/BashTool/BashTool.tsx(1330行), packages/builtin-tools/src/tools/BashTool/pathValidation.ts(1304行), packages/builtin-tools/src/tools/BashTool/readOnlyValidation.ts(1991行), packages/builtin-tools/src/tools/BashTool/sedValidation.ts(688行), packages/builtin-tools/src/tools/FileEditTool/FileEditTool.ts(611行), packages/builtin-tools/src/tools/FileEditTool/utils.ts(897行), packages/builtin-tools/src/tools/FileReadTool/FileReadTool.ts(1195行), packages/builtin-tools/src/tools/GrepTool/GrepTool.ts(575行), packages/builtin-tools/src/tools/LocalMemoryRecallTool/LocalMemoryRecallTool.ts(554行), packages/builtin-tools/src/tools/LSPTool/formatters.ts(593行), packages/builtin-tools/src/tools/LSPTool/LSPTool.ts(861行), packages/builtin-tools/src/tools/MCPTool/classifyForCollapse.ts(605行), packages/builtin-tools/src/tools/PowerShellTool/pathValidation.ts(2059行), packages/builtin-tools/src/tools/PowerShellTool/powershellPermissions.ts(1649行), packages/builtin-tools/src/tools/PowerShellTool/powershellSecurity.ts(1091行), packages/builtin-tools/src/tools/PowerShellTool/PowerShellTool.tsx(1151行), packages/builtin-tools/src/tools/PowerShellTool/readOnlyValidation.ts(1824行), packages/builtin-tools/src/tools/SearchExtraToolsTool/SearchExtraToolsTool.ts(603行), packages/builtin-tools/src/tools/SendMessageTool/SendMessageTool.ts(1031行), packages/builtin-tools/src/tools/SkillTool/SkillTool.ts(1113行), packages/builtin-tools/src/tools/TaskOutputTool/TaskOutputTool.tsx(520行), packages/builtin-tools/src/tools/WebFetchTool/utils.ts(567行)
+- 主要导出: AGENT_COLORS, AGENT_COLOR_TO_THEME_COLOR, getAgentColor, setAgentColor, AGENT_SOURCE_GROUPS, resolveAgentOverrides, resolveAgentModelDisplay, getOverrideSourceLabel, compareAgentsByName, getAgentMemoryDir, isAgentMemoryPath, getAgentMemoryEntrypoint, getMemoryScopeDisplay, loadAgentMemoryPrompt, getSnapshotDirForAgent, checkAgentMemorySnapshot, initializeFromSnapshot, replaceFromSnapshot, markSnapshotSynced, inputSchema, outputSchema, AgentTool, filterToolsForAgent, resolveAgentTools, agentToolResultSchema, countToolUses, finalizeAgentTool, getLastToolUseName, emitTaskProgress, classifyHandoffIfNeeded
+  - packages/builtin-tools/src/tools/AgentTool/agentColorManager.ts (67行): AGENT_COLORS, AGENT_COLOR_TO_THEME_COLOR, getAgentColor, setAgentColor
+  - packages/builtin-tools/src/tools/AgentTool/agentDisplay.ts (105行): AGENT_SOURCE_GROUPS, resolveAgentOverrides, resolveAgentModelDisplay, getOverrideSourceLabel, compareAgentsByName
+  - packages/builtin-tools/src/tools/AgentTool/agentMemory.ts (175行): getAgentMemoryDir, isAgentMemoryPath, getAgentMemoryEntrypoint, getMemoryScopeDisplay, loadAgentMemoryPrompt
+  - packages/builtin-tools/src/tools/AgentTool/agentMemorySnapshot.ts (198行): getSnapshotDirForAgent, checkAgentMemorySnapshot, initializeFromSnapshot, replaceFromSnapshot, markSnapshotSynced
+  - packages/builtin-tools/src/tools/AgentTool/AgentTool.tsx (1609行): inputSchema, outputSchema, AgentTool
+  - packages/builtin-tools/src/tools/AgentTool/agentToolUtils.ts (699行): filterToolsForAgent, resolveAgentTools, agentToolResultSchema, countToolUses, finalizeAgentTool
+  - packages/builtin-tools/src/tools/AgentTool/built-in/claudeCodeGuideAgent.ts (206行): CLAUDE_CODE_GUIDE_AGENT_TYPE, CLAUDE_CODE_GUIDE_AGENT
+  - packages/builtin-tools/src/tools/AgentTool/built-in/exploreAgent.ts (84行): EXPLORE_AGENT_MIN_QUERIES, EXPLORE_AGENT
+  - packages/builtin-tools/src/tools/AgentTool/built-in/generalPurposeAgent.ts (35行): GENERAL_PURPOSE_AGENT
+  - packages/builtin-tools/src/tools/AgentTool/built-in/planAgent.ts (93行): PLAN_AGENT
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/BashTool/toolName.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/ExitPlanModeTool/constants.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/FileEditTool/constants.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/FileReadTool/prompt.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/FileWriteTool/prompt.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/GlobTool/prompt.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/GrepTool/prompt.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/NotebookEditTool/constants.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/SendMessageTool/constants.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/WebFetchTool/prompt.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/tools/WebSearchTool/prompt.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/utils/auth.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/utils/embeddedTools.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/src/utils/settings/settings.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/built-in/statuslineSetup.ts (145行): STATUSLINE_SETUP_AGENT
+  - packages/builtin-tools/src/tools/AgentTool/built-in/verificationAgent.ts (166行): VERIFICATION_AGENT
+  - packages/builtin-tools/src/tools/AgentTool/builtInAgents.ts (73行): areExplorePlanAgentsEnabled, getBuiltInAgents
+  - packages/builtin-tools/src/tools/AgentTool/constants.ts (13行): AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, VERIFICATION_AGENT_TYPE, ONE_SHOT_BUILTIN_AGENT_TYPES
+  - packages/builtin-tools/src/tools/AgentTool/filterIncompleteToolCalls.ts (111行): filterIncompleteToolCalls
+  - packages/builtin-tools/src/tools/AgentTool/forkSubagent.ts (217行): isForkSubagentEnabled, FORK_SUBAGENT_TYPE, FORK_AGENT, isInForkChild, buildForkedMessages
+  - packages/builtin-tools/src/tools/AgentTool/loadAgentsDir.ts (757行): isBuiltInAgent, isCustomAgent, isPluginAgent, getActiveAgentsFromList, hasRequiredMcpServers
+  - packages/builtin-tools/src/tools/AgentTool/prompt.ts (199行): formatAgentLine, shouldInjectAgentListInMessages, getPrompt
+  - packages/builtin-tools/src/tools/AgentTool/resumeAgent.ts (267行): resumeAgentBackground
+  - packages/builtin-tools/src/tools/AgentTool/runAgent.ts (960行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/components/ConfigurableShortcutHint.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/components/CtrlOToExpand.ts (4行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/components/design-system/Byline.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/components/design-system/KeyboardShortcutHint.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/Tool.ts (5行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/types/message.ts (4行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/utils/debug.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/utils/promptCategory.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/src/utils/settings/constants.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AgentTool/UI.tsx (1006行): AgentPromptDisplay, AgentResponseDisplay, renderToolResultMessage, renderToolUseMessage, renderToolUseTag
+  - packages/builtin-tools/src/tools/AskUserQuestionTool/AskUserQuestionTool.tsx (314行): _sdkInputSchema, _sdkOutputSchema, AskUserQuestionTool
+  - packages/builtin-tools/src/tools/AskUserQuestionTool/prompt.ts (45行): ASK_USER_QUESTION_TOOL_NAME, ASK_USER_QUESTION_TOOL_CHIP_WIDTH, DESCRIPTION, PREVIEW_FEATURE_PROMPT, ASK_USER_QUESTION_TOOL_PROMPT
+  - packages/builtin-tools/src/tools/AskUserQuestionTool/src/bootstrap/state.ts (4行): (无导出)
+  - packages/builtin-tools/src/tools/AskUserQuestionTool/src/components/MessageResponse.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AskUserQuestionTool/src/constants/figures.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/AskUserQuestionTool/src/utils/permissions/PermissionMode.ts (3行): (无导出)
+  - packages/builtin-tools/src/tools/BashTool/bashCommandHelpers.ts (266行): checkCommandOperatorPermissions
+  - packages/builtin-tools/src/tools/BashTool/bashPermissions.ts (2622行): MAX_SUBCOMMANDS_FOR_SECURITY_CHECK, MAX_SUGGESTED_RULES_FOR_COMPOUND, getSimpleCommandPrefix, getFirstWordPrefix, permissionRuleExtractPrefix
+  - packages/builtin-tools/src/tools/BashTool/bashSecurity.ts (2635行): stripSafeHeredocSubstitutions, hasSafeHeredocSubstitution, bashCommandIsSafe_DEPRECATED, bashCommandIsSafeAsync_DEPRECATED
+  - packages/builtin-tools/src/tools/BashTool/BashTool.tsx (1330行): isSearchOrReadBashCommand, detectBlockedSleepPattern, BashTool
+  - packages/builtin-tools/src/tools/BashTool/BashToolResultMessage.tsx (121行): (无导出)
+  - packages/builtin-tools/src/tools/BashTool/commandSemantics.ts (141行): interpretCommandResult
+  - packages/builtin-tools/src/tools/BashTool/commentLabel.ts (14行): extractBashCommentLabel
+  - packages/builtin-tools/src/tools/BashTool/destructiveCommandWarning.ts (103行): getDestructiveCommandWarning
+  - packages/builtin-tools/src/tools/BashTool/modeValidation.ts (116行): checkPermissionMode, getAutoAllowedCommands
+  - packages/builtin-tools/src/tools/BashTool/pathValidation.ts (1304行): PATH_EXTRACTORS, COMMAND_OPERATION_TYPE, createPathChecker, checkPathConstraints, stripWrappersFromArgv
+  ... 还有 255 个文件
+
+## MCP Client (packages/mcp-client/src)
+- 文件数: 12 | 总行数: 1909 | 导出符号: 35
+- 超大文件(>500行): packages/mcp-client/src/connection.ts(540行)
+- 主要导出: memoizeWithLRU, DEFAULT_CONNECTION_TIMEOUT_MS, MAX_MCP_DESCRIPTION_LENGTH, MAX_ERRORS_BEFORE_RECONNECT, createMcpClient, withConnectionTimeout, captureStderr, isTerminalConnectionError, isMcpSessionExpiredError, installConnectionMonitor, terminateWithSignalEscalation, MCP_FETCH_CACHE_SIZE, discoverTools, createCachedToolDiscovery, callMcpTool, createMcpManager, recursivelySanitizeUnicode, normalizeNameForMCP, getMcpPrefix, buildMcpToolName, mcpInfoFromString, getToolNameForPermissionCheck, getMcpDisplayName, extractMcpToolDisplayName, createLinkedTransportPair, ConfigScope, TransportType, McpStdioServerConfigSchema, McpSSEServerConfigSchema, McpSSEIDEServerConfigSchema
+  - packages/mcp-client/src/cache.ts (59行): memoizeWithLRU
+  - packages/mcp-client/src/connection.ts (540行): DEFAULT_CONNECTION_TIMEOUT_MS, MAX_MCP_DESCRIPTION_LENGTH, MAX_ERRORS_BEFORE_RECONNECT, createMcpClient, withConnectionTimeout
+  - packages/mcp-client/src/discovery.ts (155行): MCP_FETCH_CACHE_SIZE, discoverTools, createCachedToolDiscovery
+  - packages/mcp-client/src/errors.ts (81行): (无导出)
+  - packages/mcp-client/src/execution.ts (174行): callMcpTool
+  - packages/mcp-client/src/index.ts (125行): (无导出)
+  - packages/mcp-client/src/interfaces.ts (75行): (无导出)
+  - packages/mcp-client/src/manager.ts (271行): createMcpManager
+  - packages/mcp-client/src/sanitization.ts (37行): recursivelySanitizeUnicode
+  - packages/mcp-client/src/strings.ts (87行): normalizeNameForMCP, getMcpPrefix, buildMcpToolName, mcpInfoFromString, getToolNameForPermissionCheck
+  - packages/mcp-client/src/transport/InProcessTransport.ts (64行): createLinkedTransportPair
+  - packages/mcp-client/src/types.ts (241行): ConfigScope, TransportType, McpStdioServerConfigSchema, McpSSEServerConfigSchema, McpSSEIDEServerConfigSchema
+
+## 微信 (packages/weixin/src)
+- 文件数: 12 | 总行数: 1958 | 导出符号: 47
+- 超大文件(>500行): 无
+- 主要导出: DEFAULT_BASE_URL, CDN_BASE_URL, getStateDir, loadAccount, saveAccount, clearAccount, getUpdates, sendMessage, getUploadUrl, getConfig, sendTyping, handleWeixinCli, startLogin, waitForLogin, encryptAesEcb, decryptAesEcb, aesEcbPaddedSize, buildCdnDownloadUrl, buildCdnUploadUrl, parseAesKey, downloadAndDecrypt, uploadFile, guessMediaType, downloadRemoteToTemp, getContextToken, extractPermissionReply, startPollLoop, loadAccessConfig, saveAccessConfig, isAllowed
+  - packages/weixin/src/accounts.ts (58行): DEFAULT_BASE_URL, CDN_BASE_URL, getStateDir, loadAccount, saveAccount
+  - packages/weixin/src/api.ts (149行): getUpdates, sendMessage, getUploadUrl, getConfig, sendTyping
+  - packages/weixin/src/cli.ts (127行): handleWeixinCli
+  - packages/weixin/src/index.ts (116行): (无导出)
+  - packages/weixin/src/login.ts (135行): startLogin, waitForLogin
+  - packages/weixin/src/media.ts (162行): encryptAesEcb, decryptAesEcb, aesEcbPaddedSize, buildCdnDownloadUrl, buildCdnUploadUrl
+  - packages/weixin/src/monitor.ts (306行): getContextToken, extractPermissionReply, startPollLoop
+  - packages/weixin/src/pairing.ts (105行): loadAccessConfig, saveAccessConfig, isAllowed, addPendingPairing, confirmPairing
+  - packages/weixin/src/permissions.ts (84行): setActivePermissionChat, getActivePermissionChat, savePendingPermission, consumePendingPermission, clearPermissionStateForTests
+  - packages/weixin/src/send.ts (181行): markdownToPlainText, sendText, sendMediaFile
+  - packages/weixin/src/server.ts (356行): createWeixinMcpServer, runWeixinMcpServer
+  - packages/weixin/src/types.ts (179行): MessageType, MessageItemType, MessageState, UploadMediaType, TypingStatus
+
+## Ink Hooks (packages/@ant/ink/src/hooks)
+- 文件数: 19 | 总行数: 1282 | 导出符号: 21
+- 超大文件(>500行): 无
+- 主要导出: useAnimationFrame, useDeclaredCursor, useAnimationTimer, useInterval, useSearchHighlight, useSelection, useHasSelection, useTabStatus, useTerminalFocus, useTerminalTitle, useTerminalViewport, DOUBLE_PRESS_TIMEOUT_MS, useDoublePress, useExitOnCtrlCDWithKeybindings, useMinDisplayTime, useSearchInput, TerminalWriteContext, TerminalWriteProvider, useTerminalNotification, useTerminalSize, useTimeout
+  - packages/@ant/ink/src/hooks/use-animation-frame.ts (58行): useAnimationFrame
+  - packages/@ant/ink/src/hooks/use-app.ts (9行): (无导出)
+  - packages/@ant/ink/src/hooks/use-declared-cursor.ts (74行): useDeclaredCursor
+  - packages/@ant/ink/src/hooks/use-input.ts (93行): (无导出)
+  - packages/@ant/ink/src/hooks/use-interval.ts (68行): useAnimationTimer, useInterval
+  - packages/@ant/ink/src/hooks/use-search-highlight.ts (54行): useSearchHighlight
+  - packages/@ant/ink/src/hooks/use-selection.ts (105行): useSelection, useHasSelection
+  - packages/@ant/ink/src/hooks/use-stdin.ts (9行): (无导出)
+  - packages/@ant/ink/src/hooks/use-tab-status.ts (73行): useTabStatus
+  - packages/@ant/ink/src/hooks/use-terminal-focus.ts (17行): useTerminalFocus
+  - packages/@ant/ink/src/hooks/use-terminal-title.ts (32行): useTerminalTitle
+  - packages/@ant/ink/src/hooks/use-terminal-viewport.ts (97行): useTerminalViewport
+  - packages/@ant/ink/src/hooks/useDoublePress.ts (63行): DOUBLE_PRESS_TIMEOUT_MS, useDoublePress
+  - packages/@ant/ink/src/hooks/useExitOnCtrlCD.ts (96行): useExitOnCtrlCDWithKeybindings
+  - packages/@ant/ink/src/hooks/useMinDisplayTime.ts (36行): useMinDisplayTime
+  - packages/@ant/ink/src/hooks/useSearchInput.ts (231行): useSearchInput
+  - packages/@ant/ink/src/hooks/useTerminalNotification.ts (136行): TerminalWriteContext, TerminalWriteProvider, useTerminalNotification
+  - packages/@ant/ink/src/hooks/useTerminalSize.ts (16行): useTerminalSize
+  - packages/@ant/ink/src/hooks/useTimeout.ts (15行): useTimeout
+
+## Ink Components (packages/@ant/ink/src/components)
+- 文件数: 18 | 总行数: 1975 | 导出符号: 10
+- 超大文件(>500行): packages/@ant/ink/src/components/App.tsx(781行)
+- 主要导出: AlternateScreen, setAppCallbacks, handleMouseEvent, createClock, ClockContext, ClockProvider, NoSelect, RawAnsi, TerminalFocusProvider, TerminalSizeContext
+  - packages/@ant/ink/src/components/AlternateScreen.tsx (72行): AlternateScreen
+  - packages/@ant/ink/src/components/App.tsx (781行): setAppCallbacks, handleMouseEvent
+  - packages/@ant/ink/src/components/AppContext.ts (22行): (无导出)
+  - packages/@ant/ink/src/components/Box.tsx (119行): (无导出)
+  - packages/@ant/ink/src/components/Button.tsx (106行): (无导出)
+  - packages/@ant/ink/src/components/ClockContext.tsx (94行): createClock, ClockContext, ClockProvider
+  - packages/@ant/ink/src/components/CursorDeclarationContext.ts (33行): (无导出)
+  - packages/@ant/ink/src/components/ErrorOverview.tsx (137行): (无导出)
+  - packages/@ant/ink/src/components/Link.tsx (28行): (无导出)
+  - packages/@ant/ink/src/components/Newline.tsx (18行): (无导出)
+  - packages/@ant/ink/src/components/NoSelect.tsx (42行): NoSelect
+  - packages/@ant/ink/src/components/RawAnsi.tsx (34行): RawAnsi
+  - packages/@ant/ink/src/components/ScrollBox.tsx (240行): (无导出)
+  - packages/@ant/ink/src/components/Spacer.tsx (11行): (无导出)
+  - packages/@ant/ink/src/components/StdinContext.ts (50行): (无导出)
+  - packages/@ant/ink/src/components/TerminalFocusContext.tsx (37行): TerminalFocusProvider
+  - packages/@ant/ink/src/components/TerminalSizeContext.tsx (9行): TerminalSizeContext
+  - packages/@ant/ink/src/components/Text.tsx (142行): (无导出)
+
+## Ink Core (packages/@ant/ink/src/core)
+- 文件数: 74 | 总行数: 20097 | 导出符号: 191
+- 超大文件(>500行): packages/@ant/ink/src/core/ink.tsx(1881行), packages/@ant/ink/src/core/log-update.ts(775行), packages/@ant/ink/src/core/output.ts(800行), packages/@ant/ink/src/core/parse-keypress.ts(801行), packages/@ant/ink/src/core/reconciler.ts(509行), packages/@ant/ink/src/core/render-node-to-output.ts(1463行), packages/@ant/ink/src/core/screen.ts(1526行), packages/@ant/ink/src/core/selection.ts(918行), packages/@ant/ink/src/core/styles.ts(772行), packages/@ant/ink/src/core/termio/osc.ts(520行), packages/@ant/ink/src/core/yoga-layout/index.ts(2582行)
+- 主要导出: Ansi, reorderBidi, getClearTerminalSequence, clearTerminal, CHALK_BOOSTED_FOR_XTERMJS, CHALK_CLAMPED_FOR_TMUX, colorize, applyTextStyles, applyColor, FRAME_INTERVAL_MS, createNode, appendChildNode, insertBeforeNode, removeChildNode, setAttribute, setStyle, setTextStyles, createTextNode, markDirty, scheduleRenderFrom, HANDLER_FOR_EVENT, EVENT_HANDLER_PROPS, getRootNode, getFocusManager, emptyFrame, shouldClearScreen, hitTest, dispatchClick, dispatchHover, dispatchMouseAction
+  - packages/@ant/ink/src/core/Ansi.tsx (292行): Ansi
+  - packages/@ant/ink/src/core/bidi.ts (154行): reorderBidi
+  - packages/@ant/ink/src/core/clearTerminal.ts (75行): getClearTerminalSequence, clearTerminal
+  - packages/@ant/ink/src/core/colorize.ts (232行): CHALK_BOOSTED_FOR_XTERMJS, CHALK_CLAMPED_FOR_TMUX, colorize, applyTextStyles, applyColor
+  - packages/@ant/ink/src/core/constants.ts (3行): FRAME_INTERVAL_MS
+  - packages/@ant/ink/src/core/cursor.ts (3行): (无导出)
+  - packages/@ant/ink/src/core/devtools.ts (3行): (无导出)
+  - packages/@ant/ink/src/core/dom.ts (485行): createNode, appendChildNode, insertBeforeNode, removeChildNode, setAttribute
+  - packages/@ant/ink/src/core/events/click-event.ts (39行): (无导出)
+  - packages/@ant/ink/src/core/events/dispatcher.ts (238行): (无导出)
+  - packages/@ant/ink/src/core/events/emitter.ts (40行): (无导出)
+  - packages/@ant/ink/src/core/events/event-handlers.ts (85行): HANDLER_FOR_EVENT, EVENT_HANDLER_PROPS
+  - packages/@ant/ink/src/core/events/event.ts (12行): (无导出)
+  - packages/@ant/ink/src/core/events/focus-event.ts (22行): (无导出)
+  - packages/@ant/ink/src/core/events/input-event.ts (206行): (无导出)
+  - packages/@ant/ink/src/core/events/keyboard-event.ts (52行): (无导出)
+  - packages/@ant/ink/src/core/events/mouse-action-event.ts (47行): (无导出)
+  - packages/@ant/ink/src/core/events/paste-event.ts (3行): (无导出)
+  - packages/@ant/ink/src/core/events/resize-event.ts (3行): (无导出)
+  - packages/@ant/ink/src/core/events/terminal-event.ts (108行): (无导出)
+  - packages/@ant/ink/src/core/events/terminal-focus-event.ts (20行): (无导出)
+  - packages/@ant/ink/src/core/focus.ts (182行): getRootNode, getFocusManager
+  - packages/@ant/ink/src/core/frame.ts (125行): emptyFrame, shouldClearScreen
+  - packages/@ant/ink/src/core/get-max-width.ts (28行): (无导出)
+  - packages/@ant/ink/src/core/hit-test.ts (172行): hitTest, dispatchClick, dispatchHover, dispatchMouseAction
+  - packages/@ant/ink/src/core/ink.tsx (1881行): drainStdin
+  - packages/@ant/ink/src/core/instances.ts (11行): (无导出)
+  - packages/@ant/ink/src/core/layout/engine.ts (7行): createLayoutNode
+  - packages/@ant/ink/src/core/layout/geometry.ts (98行): edges, edges, edges, edges, addEdges
+  - packages/@ant/ink/src/core/layout/node.ts (153行): LayoutEdge, LayoutGutter, LayoutDisplay, LayoutFlexDirection, LayoutAlign
+  - packages/@ant/ink/src/core/layout/yoga.ts (309行): createYogaLayoutNode
+  - packages/@ant/ink/src/core/line-width-cache.ts (25行): lineWidth
+  - packages/@ant/ink/src/core/log-update.ts (775行): (无导出)
+  - packages/@ant/ink/src/core/measure-element.ts (24行): (无导出)
+  - packages/@ant/ink/src/core/measure-text.ts (48行): (无导出)
+  - packages/@ant/ink/src/core/node-cache.ts (55行): nodeCache, pendingClears, addPendingClear, consumeAbsoluteRemovedFlag
+  - packages/@ant/ink/src/core/optimizer.ts (94行): optimize
+  - packages/@ant/ink/src/core/output.ts (800行): (无导出)
+  - packages/@ant/ink/src/core/parse-keypress.ts (801行): DECRPM_STATUS, INITIAL_STATE, parseMultipleKeypresses, nonAlphanumericKeys
+  - packages/@ant/ink/src/core/reconciler.ts (509行): getOwnerChain, isDebugRepaintsEnabled, dispatcher, recordYogaMs, getLastYogaMs
+  - packages/@ant/ink/src/core/render-border.ts (232行): CUSTOM_BORDER_STYLES
+  - packages/@ant/ink/src/core/render-node-to-output.ts (1463行): resetLayoutShifted, didLayoutShift, resetScrollHint, getScrollHint, resetScrollDrainNode
+  - packages/@ant/ink/src/core/render-to-screen.ts (228行): renderToScreen, scanPositions, applyPositionedHighlight
+  - packages/@ant/ink/src/core/renderer.ts (180行): (无导出)
+  - packages/@ant/ink/src/core/root.ts (186行): renderSync, createRoot
+  - packages/@ant/ink/src/core/screen.ts (1526行): isEmptyCellAt, isCellEmpty, createScreen, resetScreen, migrateScreenPools
+  - packages/@ant/ink/src/core/searchHighlight.ts (94行): applySearchHighlight
+  - packages/@ant/ink/src/core/selection.ts (918行): createSelectionState, startSelection, updateSelection, finishSelection, clearSelection
+  - packages/@ant/ink/src/core/squash-text-nodes.ts (93行): squashTextNodesToSegments
+  - packages/@ant/ink/src/core/stringWidth.ts (223行): stringWidth
+  - packages/@ant/ink/src/core/styles.ts (772行): (无导出)
+  - packages/@ant/ink/src/core/supports-hyperlinks.ts (58行): ADDITIONAL_HYPERLINK_TERMINALS, supportsHyperlinks
+  - packages/@ant/ink/src/core/tabstops.ts (47行): expandTabs
+  - packages/@ant/ink/src/core/terminal-focus-state.ts (48行): setTerminalFocused, getTerminalFocused, getTerminalFocusState, subscribeTerminalFocus, resetTerminalFocusState
+  - packages/@ant/ink/src/core/terminal-querier.ts (213行): decrqm, da1, da2, kittyKeyboard, cursorPosition
+  - packages/@ant/ink/src/core/terminal.ts (247行): isProgressReportingAvailable, isSynchronizedOutputSupported, setXtversionName, isXtermJs, supportsExtendedKeys
+  - packages/@ant/ink/src/core/termio/ansi.ts (76行): C0, ESC, BEL, SEP, ESC_TYPE
+  - packages/@ant/ink/src/core/termio/csi.ts (320行): CSI_PREFIX, CSI_RANGE, isCSIParam, isCSIIntermediate, isCSIFinal
+  - packages/@ant/ink/src/core/termio/dec.ts (61行): DEC, decset, decreset, BSU, ESU
+  - packages/@ant/ink/src/core/termio/esc.ts (68行): parseEsc
+  ... 还有 14 个文件
+
+## Model Provider (packages/@ant/model-provider/src)
+- 文件数: 21 | 总行数: 2588 | 导出符号: 30
+- 超大文件(>500行): 无
+- 主要导出: registerClientFactories, getClientFactories, extractConnectionErrorDetails, getSSLErrorHint, sanitizeAPIError, formatAPIError, registerHooks, getHooks, anthropicMessagesToGemini, anthropicToolsToGemini, anthropicToolChoiceToGemini, resolveGeminiModel, GEMINI_THOUGHT_SIGNATURE_FIELD, resolveGrokModel, resolveOpenAIModel, anthropicMessagesToOpenAI, anthropicToolsToOpenAI, anthropicToolChoiceToOpenAI, API_ERROR_MESSAGE_PREFIX, PROMPT_TOO_LONG_ERROR_MESSAGE, CREDIT_BALANCE_TOO_LOW_ERROR_MESSAGE, INVALID_API_KEY_ERROR_MESSAGE, INVALID_API_KEY_ERROR_MESSAGE_EXTERNAL, ORG_DISABLED_ERROR_MESSAGE_ENV_KEY_WITH_OAUTH, ORG_DISABLED_ERROR_MESSAGE_ENV_KEY, TOKEN_REVOKED_ERROR_MESSAGE, CCR_AUTH_ERROR_MESSAGE, REPEATED_529_ERROR_MESSAGE, asSystemPrompt, EMPTY_USAGE
+  - packages/@ant/model-provider/src/client/index.ts (28行): registerClientFactories, getClientFactories
+  - packages/@ant/model-provider/src/client/types.ts (36行): (无导出)
+  - packages/@ant/model-provider/src/errorUtils.ts (239行): extractConnectionErrorDetails, getSSLErrorHint, sanitizeAPIError, formatAPIError
+  - packages/@ant/model-provider/src/hooks/index.ts (28行): registerHooks, getHooks
+  - packages/@ant/model-provider/src/hooks/types.ts (49行): (无导出)
+  - packages/@ant/model-provider/src/index.ts (70行): (无导出)
+  - packages/@ant/model-provider/src/providers/gemini/convertMessages.ts (318行): anthropicMessagesToGemini
+  - packages/@ant/model-provider/src/providers/gemini/convertTools.ts (284行): anthropicToolsToGemini, anthropicToolChoiceToGemini
+  - packages/@ant/model-provider/src/providers/gemini/modelMapping.ts (36行): resolveGeminiModel
+  - packages/@ant/model-provider/src/providers/gemini/streamAdapter.ts (244行): (无导出)
+  - packages/@ant/model-provider/src/providers/gemini/types.ts (87行): GEMINI_THOUGHT_SIGNATURE_FIELD
+  - packages/@ant/model-provider/src/providers/grok/modelMapping.ts (84行): resolveGrokModel
+  - packages/@ant/model-provider/src/providers/openai/modelMapping.ts (56行): resolveOpenAIModel
+  - packages/@ant/model-provider/src/shared/openaiConvertMessages.ts (269行): anthropicMessagesToOpenAI
+  - packages/@ant/model-provider/src/shared/openaiConvertTools.ts (151行): anthropicToolsToOpenAI, anthropicToolChoiceToOpenAI
+  - packages/@ant/model-provider/src/shared/openaiStreamAdapter.ts (338行): (无导出)
+  - packages/@ant/model-provider/src/types/errors.ts (55行): API_ERROR_MESSAGE_PREFIX, PROMPT_TOO_LONG_ERROR_MESSAGE, CREDIT_BALANCE_TOO_LOW_ERROR_MESSAGE, INVALID_API_KEY_ERROR_MESSAGE, INVALID_API_KEY_ERROR_MESSAGE_EXTERNAL
+  - packages/@ant/model-provider/src/types/index.ts (7行): (无导出)
+  - packages/@ant/model-provider/src/types/message.ts (148行): (无导出)
+  - packages/@ant/model-provider/src/types/systemPrompt.ts (11行): asSystemPrompt
+  - packages/@ant/model-provider/src/types/usage.ts (50行): EMPTY_USAGE
+
+## 汇总
+- 扫描目录: 27
+- 文件总计: 2165
+- 行数总计: 479329

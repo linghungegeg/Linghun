@@ -45,10 +45,11 @@ export function normalizeTerminalInput(input: string, key: TerminalInputKey): Te
   }
 
   if (isMultilineEnterSequence(input)) return { type: "newline" };
-  if (key.return && (key.shift || key.meta)) return { type: "newline" };
   if ((key.ctrl && input === "j") || input === "\n") return { type: "newline" };
 
-  if (key.ctrl || key.meta || input === "\r" || input === "\n") return { type: "ignore" };
+  if (key.ctrl || key.meta || key.return || input === "\r" || input === "\n") {
+    return { type: "ignore" };
+  }
   if (!input) return { type: "ignore" };
   return { type: "text", text: sanitizeTerminalText(input) };
 }
@@ -65,6 +66,7 @@ export function isBackspaceSequence(input: string): boolean {
 
 export function isMultilineEnterSequence(input: string): boolean {
   return (
+    input === "\x1B\r" ||
     isCsiU(input, [10, 13, 57414]) ||
     isCsiTilde(input, [10, 13, 57414]) ||
     isModifyOtherKeys(input, [10, 13, 57414])

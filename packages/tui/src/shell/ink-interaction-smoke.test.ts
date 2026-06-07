@@ -310,7 +310,7 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
-  it("routes SGR wheel only when the pointer is inside the transcript viewport", async () => {
+  it("ignores SGR mouse sequences on the main screen so terminal-native selection keeps ownership", async () => {
     const view = {
       ...baseTaskView(),
       commandPanel: undefined,
@@ -328,91 +328,13 @@ describe("Ink TTY interaction smoke", () => {
     await writeInput(input, shell, "\x1b[<64;10;5M");
     await writeInput(input, shell, "\x1b[<65;10;5M");
     await writeInput(input, shell, "\x1b[<65;10;20M");
-
-    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
-    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "transcript-scroll" && "action" in event && event.action === "wheelDown",
-      ),
-    ).toHaveLength(1);
-
-    shell.unmount();
-  });
-
-  it("routes SGR left down/drag/up to transcript mouse events", async () => {
-    const view = {
-      ...baseTaskView(),
-      commandPanel: undefined,
-      transcriptViewportGeometry: {
-        x: 0,
-        y: 2,
-        width: 80,
-        height: 8,
-        contentHeight: 40,
-        topOffset: 20,
-      },
-    };
-    const { input, events, shell } = await renderWithEvents(() => view);
-
     await writeInput(input, shell, "\x1b[<0;10;5M");
     await writeInput(input, shell, "\x1b[<32;12;6M");
     await writeInput(input, shell, "\x1b[<0;12;6m");
 
-    expect(events).toContainEqual({
-      type: "transcript-mouse",
-      event: { x: 9, y: 4, button: "left", action: "down" },
-    });
-    expect(events).toContainEqual({
-      type: "transcript-mouse",
-      event: { x: 11, y: 5, button: "left", action: "drag" },
-    });
-    expect(events).toContainEqual({
-      type: "transcript-mouse",
-      event: { x: 11, y: 5, button: "left", action: "up" },
-    });
-
-    shell.unmount();
-  });
-
-  it("does not start transcript selection from outside the viewport but lets active drags finish outside", async () => {
-    const view = {
-      ...baseTaskView(),
-      commandPanel: undefined,
-      transcriptViewportGeometry: {
-        x: 0,
-        y: 2,
-        width: 80,
-        height: 8,
-        contentHeight: 40,
-        topOffset: 20,
-      },
-    };
-    const { input, events, shell } = await renderWithEvents(() => view);
-
-    await writeInput(input, shell, "\x1b[<0;10;20M");
-    expect(events).not.toContainEqual({
-      type: "transcript-mouse",
-      event: { x: 9, y: 19, button: "left", action: "down" },
-    });
-
-    await writeInput(input, shell, "\x1b[<0;10;5M");
-    await writeInput(input, shell, "\x1b[<32;12;20M");
-    await writeInput(input, shell, "\x1b[<0;12;20m");
-
-    expect(events).toContainEqual({
-      type: "transcript-mouse",
-      event: { x: 9, y: 4, button: "left", action: "down" },
-    });
-    expect(events).toContainEqual({
-      type: "transcript-mouse",
-      event: { x: 11, y: 19, button: "left", action: "drag" },
-    });
-    expect(events).toContainEqual({
-      type: "transcript-mouse",
-      event: { x: 11, y: 19, button: "left", action: "up" },
-    });
+    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
+    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
+    expect(events.some((event) => event.type === "transcript-mouse")).toBe(false);
 
     shell.unmount();
   });
@@ -466,7 +388,7 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
-  it("selects task suggestions with arrows, Enter, and number keys", async () => {
+  it("selects task suggestions with arrows and Enter", async () => {
     let view: ShellViewModel = {
       ...baseTaskView(),
       commandPanel: undefined,
@@ -502,13 +424,81 @@ describe("Ink TTY interaction smoke", () => {
       suggestionId: "setup:resume",
     });
 
+    shell.unmount();
+  });
+
+  it("Esc interrupts a busy task when no overlay owner is active", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      composer: {
+        ...baseTaskView().composer,
+        busy: true,
+      },
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    await writeInput(input, shell, "\x1b");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await shell.waitUntilRenderFlush();
+
+    expect(events).toContainEqual({ type: "interrupt" });
+    expect(events).not.toContainEqual({ type: "escape" });
+    shell.unmount();
+  });
+
+  it("keeps empty composer number input as text instead of globally selecting suggestions", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      taskSuggestions: [
+        {
+          id: "tool_error:details:block-1",
+          source: "tool_error",
+          label: "查看完整错误",
+          action: { kind: "slash", command: "/details" },
+        },
+      ],
+      taskSuggestionCursor: 0,
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
     input.write("1");
     await shell.waitUntilRenderFlush();
-    expect(events).toContainEqual({
+    input.write("\r");
+    await shell.waitUntilRenderFlush();
+
+    expect(events).toContainEqual({ type: "submit", text: "1" });
+    expect(events).not.toContainEqual({
       type: "task-suggestion-action",
       suggestionId: "tool_error:details:block-1",
     });
 
+    shell.unmount();
+  });
+
+  it("routes HelpPanel numeric shortcuts directly to the selected entry", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      helpPanel: {
+        group: "core",
+        cursor: 0,
+        entries: [
+          { slash: "/help", description: "Help" },
+          { slash: "/model", description: "Model" },
+          { slash: "/sessions", description: "Sessions" },
+        ],
+      },
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    input.write("3");
+    await shell.waitUntilRenderFlush();
+
+    expect(events).toContainEqual({ type: "help-select", index: 2 });
+    expect(events).not.toContainEqual({ type: "help-move", delta: 1 });
+    expect(events).not.toContainEqual({ type: "help-enter" });
     shell.unmount();
   });
 
@@ -533,10 +523,9 @@ describe("Ink TTY interaction smoke", () => {
     await expectSubmit([..."plain", "\r"], "plain");
     await expectSubmit([..."foo\\", "\r", ..."bar", "\r"], "foo\nbar");
     await expectSubmit([..."baz", "\x0a", ..."qux", "\r"], "baz\nqux");
-    await expectSubmit([..."csi", "\x1b[13;2u", ..."enter", "\r"], "csi\nenter");
   });
 
-  it("keeps Shift+Enter newline when slash suggestions are visible", async () => {
+  it("keeps Ctrl+J newline when slash suggestions are visible", async () => {
     const view: ShellViewModel = {
       ...baseTaskView(),
       commandPanel: undefined,
@@ -546,7 +535,7 @@ describe("Ink TTY interaction smoke", () => {
     };
     const { input, events, shell } = await renderWithEvents(() => view);
 
-    for (const value of ["/", "h", "\x1b[13;2u", ..."body", "\r"]) {
+    for (const value of ["/", "h", "\x0a", ..."body", "\r"]) {
       await writeInput(input, shell, value);
     }
 

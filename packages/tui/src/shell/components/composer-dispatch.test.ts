@@ -217,6 +217,7 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(isMultilineEnterSequence("\x1B[10;3u")).toBe(true);
       expect(isMultilineEnterSequence("\x1B[57414;2u")).toBe(true);
       expect(isMultilineEnterSequence("\x1B[13;2:1u")).toBe(true);
+      expect(isMultilineEnterSequence("\x1B\r")).toBe(true);
       expect(isMultilineEnterSequence("\x1B[27;2;13~")).toBe(true);
       expect(isMultilineEnterSequence("\x1B[27;2;57414~")).toBe(true);
       expect(isMultilineEnterSequence("\x1B[1;2C")).toBe(false);
@@ -281,7 +282,7 @@ describe("Composer dispatcher behavior boundaries", () => {
   // 真实 cursor 锚点 smoke：直接断言 formatComposerRenderLines 的 (row,col) 输出。
   // 这是 useAnchoredCursor 喂入 setCursorPosition 的源头；row/col 错则锚点错。
   describe("cursor anchor coordinates (formatComposerRenderLines)", () => {
-    it("typing 'heet' → cursor at end-of-line (row=0, col=6 = '> '+'heet')", () => {
+    it("typing 'heet' → cursor at end of the editor surface", () => {
       const buf = bufferInsert(createEditBuffer(""), "heet");
       const r = formatComposerRenderLines({
         buffer: buf,
@@ -290,14 +291,14 @@ describe("Composer dispatcher behavior boundaries", () => {
         noColor: true,
         maxWidth: 80,
       });
-      expect(r.lines[0]).toBe("> heet");
+      expect(r.lines[0]).toBe("heet");
       expect(r.cursorRow).toBe(0);
-      expect(r.cursorCol).toBe(6);
+      expect(r.cursorCol).toBe(4);
       expect(r.truncatedAbove).toBe(0);
       expect(r.truncatedBelow).toBe(0);
     });
 
-    it("empty buffer with placeholder → cursor at PROMPT_MARKER end (col=2)", () => {
+    it("empty buffer with placeholder → cursor starts at the editor surface", () => {
       const r = formatComposerRenderLines({
         buffer: createEditBuffer(""),
         placeholder: "type here",
@@ -306,11 +307,11 @@ describe("Composer dispatcher behavior boundaries", () => {
         maxWidth: 80,
       });
       expect(r.cursorRow).toBe(0);
-      expect(r.cursorCol).toBe(2);
+      expect(r.cursorCol).toBe(0);
     });
 
     it("multiline buffer → cursor row tracks EditBuffer line, col tracks display width", () => {
-      // "abc\ndef" cursor=6 → row=1, col after prompt-cont width(2) + "de" width(2) = 4
+      // "abc\ndef" cursor=6 → row=1, col after "de" width(2)
       const buf: EditBuffer = { ...createEditBuffer("abc\ndef"), cursor: 6 };
       const r = formatComposerRenderLines({
         buffer: buf,
@@ -319,13 +320,13 @@ describe("Composer dispatcher behavior boundaries", () => {
         noColor: true,
         maxWidth: 80,
       });
-      expect(r.lines).toEqual(["> abc", "  def"]);
+      expect(r.lines).toEqual(["abc", "def"]);
       expect(r.cursorRow).toBe(1);
-      expect(r.cursorCol).toBe(4);
+      expect(r.cursorCol).toBe(2);
     });
 
     it("CJK in cursor line → col advances by 2 per fullwidth char", () => {
-      // "你好" cursor=2（末尾） → row=0, col = '> '(2) + '你'(2) + '好'(2) = 6
+      // "你好" cursor=2（末尾） → row=0, col = '你'(2) + '好'(2) = 4
       const buf = bufferInsert(createEditBuffer(""), "你好");
       const r = formatComposerRenderLines({
         buffer: buf,
@@ -334,9 +335,9 @@ describe("Composer dispatcher behavior boundaries", () => {
         noColor: true,
         maxWidth: 80,
       });
-      expect(r.lines[0]).toBe("> 你好");
+      expect(r.lines[0]).toBe("你好");
       expect(r.cursorRow).toBe(0);
-      expect(r.cursorCol).toBe(6);
+      expect(r.cursorCol).toBe(4);
     });
 
     it("masked buffer → cursor still at end, line is asterisks", () => {
@@ -348,12 +349,12 @@ describe("Composer dispatcher behavior boundaries", () => {
         noColor: true,
         maxWidth: 80,
       });
-      expect(r.lines[0]).toBe("> ******");
-      expect(r.cursorCol).toBe(8);
+      expect(r.lines[0]).toBe("******");
+      expect(r.cursorCol).toBe(6);
     });
 
     it("very wide content with cursor at end → cursor lands inside viewport (no off-screen)", () => {
-      // 60 'a' fits within maxWidth=80-(prompt 2)=78 budget; cursor at end col = 2 + 60 = 62
+      // 60 'a' fits within maxWidth=80-(prompt 2)=78 budget; cursor at end col = 60
       const buf = bufferInsert(createEditBuffer(""), "a".repeat(60));
       const r = formatComposerRenderLines({
         buffer: buf,
@@ -364,7 +365,7 @@ describe("Composer dispatcher behavior boundaries", () => {
       });
       expect(r.cursorRow).toBe(0);
       expect(r.cursorCol).toBeLessThanOrEqual(80);
-      expect(r.cursorCol).toBe(62);
+      expect(r.cursorCol).toBe(60);
     });
 
     it("narrow long content keeps cursor inside the rendered viewport", () => {
