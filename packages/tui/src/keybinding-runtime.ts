@@ -83,6 +83,8 @@ export function normalizeKeyEvent(event: KeyEventLike): string {
   if (event.tab) return "tab";
   if (event.backspace) return "backspace";
   if (event.delete) return "delete";
+  if ((event.return || event.name === "return") && event.shift) return "shift+enter";
+  if ((event.return || event.name === "return") && event.meta) return "meta+enter";
   if (event.return || event.name === "return") return "enter";
   if (event.escape || event.name === "escape") return "escape";
   const parts: string[] = [];

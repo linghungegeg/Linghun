@@ -1,4 +1,4 @@
-import { Box, type DOMElement, Text, useInput } from "ink";
+import { Box, type DOMElement, Text, useInput, useStdout } from "ink";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -15,6 +15,11 @@ import {
   sanitizeTerminalText,
 } from "../models/terminal-input-runtime.js";
 import type { TerminalCapability } from "../terminal-capability.js";
+import {
+  disableTerminalInteractionModes,
+  enableTerminalInteractionModes,
+  resolveTerminalInteractionModes,
+} from "../terminal-interaction-runtime.js";
 import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type {
@@ -57,7 +62,13 @@ function isTranscriptMouseTarget(
   if (mouse.action === "wheel") return isTranscriptWheelTarget(mouse, geometry);
   if (mouse.button !== "left") return false;
   if (!geometry) return false;
-  return mouse.x >= geometry.x && mouse.x < geometry.x + geometry.width;
+  if (mouse.action === "drag" || mouse.action === "up") return true;
+  return (
+    mouse.x >= geometry.x &&
+    mouse.x < geometry.x + geometry.width &&
+    mouse.y >= geometry.y &&
+    mouse.y < geometry.y + geometry.height
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -663,13 +674,18 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
       const buffer = bufferRef.current;
       const text = bufferToString(buffer);
+      const terminalAction = normalizeTerminalInput(input, key);
       // D.13E Step 2 — Owner-priority dispatcher 显式化：
       // 用 selectInputOwner 决定本次事件归属，permission > panel > paste > slash > composer。
       const owner = selectInputOwner(input, key, {
         permissionActive,
         panelActive: configPanelActive || commandPanelActive,
         panelInteractive: Boolean(
-          view.configPanel || view.helpPanel || view.sessionsPanel || commandPanelConsumesInput,
+          view.configPanel ||
+            view.helpPanel ||
+            view.sessionsPanel ||
+            view.commandPanel ||
+            commandPanelConsumesInput,
         ),
         pastePending: pastePendingRef.current,
         slashVisible: slashCandidates.length > 0 && !slashHidden,
@@ -779,6 +795,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           else emitInput({ type: "escape" });
           return;
         }
+        if (terminalAction.type === "newline") {
+          updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
+          return;
+        }
         if (view.helpPanel) {
           if (!key.ctrl && !key.meta && /^[1-9]$/.test(input)) {
             const idx = Number(input) - 1;
@@ -825,6 +845,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           }
           return;
         }
+        if (view.commandPanel) return;
       }
       if (configPanelActive) return;
 
@@ -849,6 +870,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       // ─── 4. Slash candidates owner（统一消费并 return；禁止 fall-through）────
       const slashVisible = slashCandidates.length > 0 && !slashHidden;
       if (owner === "slash") {
+        if (terminalAction.type === "newline") {
+          updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
+          return;
+        }
         if (key.escape) {
           setSlashHidden(true);
           setSlashSelection(-1);
@@ -944,7 +969,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         return;
       }
 
-      const terminalAction = normalizeTerminalInput(input, key);
       if (terminalAction.type === "newline") {
         updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
         return;
@@ -1238,6 +1262,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     },
     { isActive: true },
   );
+  useTerminalInteractionModes(capability);
 
   // ─── Render ─────────────────────────────────────────────────────────────
   // Pick placeholder. Permission active wins over setup, which wins over task.
@@ -1430,6 +1455,17 @@ function PermissionActionRow({
       </Text>
     </Box>
   );
+}
+
+function useTerminalInteractionModes(capability: TerminalCapability): void {
+  const { stdout } = useStdout();
+  useEffect(() => {
+    const modes = resolveTerminalInteractionModes({ capability });
+    enableTerminalInteractionModes(stdout, modes);
+    return () => {
+      disableTerminalInteractionModes(stdout, modes);
+    };
+  }, [capability, stdout]);
 }
 
 function buildPermissionActions(

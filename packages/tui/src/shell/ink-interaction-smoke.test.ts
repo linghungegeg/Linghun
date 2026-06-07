@@ -167,8 +167,8 @@ describe("Ink TTY interaction smoke", () => {
     expect(events).toContainEqual({ type: "transcript-scroll", action: "halfPageDown" });
     expect(events).toContainEqual({ type: "transcript-scroll", action: "top" });
     expect(events).toContainEqual({ type: "transcript-scroll", action: "bottom" });
-    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
-    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
+    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
+    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
 
     input.write("\x1b");
     await new Promise((resolve) => setTimeout(resolve, 80));
@@ -290,6 +290,26 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("absorbs panel navigation keys for non-selectable CommandPanel rows", async () => {
+    const view = {
+      ...baseTaskView(),
+      commandPanel: {
+        title: "/index status",
+        summary: ["索引 ready"],
+        detailsText: "Index status",
+      },
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    await writeInput(input, shell, "\x1b[B");
+    await writeInput(input, shell, "\r");
+
+    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
+    expect(events).not.toContainEqual({ type: "submit", text: "" });
+    expect(events).not.toContainEqual({ type: "empty-submit" });
+    shell.unmount();
+  });
+
   it("routes SGR wheel only when the pointer is inside the transcript viewport", async () => {
     const view = {
       ...baseTaskView(),
@@ -351,6 +371,47 @@ describe("Ink TTY interaction smoke", () => {
     expect(events).toContainEqual({
       type: "transcript-mouse",
       event: { x: 11, y: 5, button: "left", action: "up" },
+    });
+
+    shell.unmount();
+  });
+
+  it("does not start transcript selection from outside the viewport but lets active drags finish outside", async () => {
+    const view = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      transcriptViewportGeometry: {
+        x: 0,
+        y: 2,
+        width: 80,
+        height: 8,
+        contentHeight: 40,
+        topOffset: 20,
+      },
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    await writeInput(input, shell, "\x1b[<0;10;20M");
+    expect(events).not.toContainEqual({
+      type: "transcript-mouse",
+      event: { x: 9, y: 19, button: "left", action: "down" },
+    });
+
+    await writeInput(input, shell, "\x1b[<0;10;5M");
+    await writeInput(input, shell, "\x1b[<32;12;20M");
+    await writeInput(input, shell, "\x1b[<0;12;20m");
+
+    expect(events).toContainEqual({
+      type: "transcript-mouse",
+      event: { x: 9, y: 4, button: "left", action: "down" },
+    });
+    expect(events).toContainEqual({
+      type: "transcript-mouse",
+      event: { x: 11, y: 19, button: "left", action: "drag" },
+    });
+    expect(events).toContainEqual({
+      type: "transcript-mouse",
+      event: { x: 11, y: 19, button: "left", action: "up" },
     });
 
     shell.unmount();
@@ -473,6 +534,25 @@ describe("Ink TTY interaction smoke", () => {
     await expectSubmit([..."foo\\", "\r", ..."bar", "\r"], "foo\nbar");
     await expectSubmit([..."baz", "\x0a", ..."qux", "\r"], "baz\nqux");
     await expectSubmit([..."csi", "\x1b[13;2u", ..."enter", "\r"], "csi\nenter");
+  });
+
+  it("keeps Shift+Enter newline when slash suggestions are visible", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      activity: undefined,
+      blocks: [],
+      taskSuggestions: undefined,
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    for (const value of ["/", "h", "\x1b[13;2u", ..."body", "\r"]) {
+      await writeInput(input, shell, value);
+    }
+
+    expect(events).toContainEqual({ type: "submit", text: "/h\nbody" });
+    expect(events).not.toContainEqual({ type: "submit", text: "/h" });
+    shell.unmount();
   });
 
   it("keeps Delete flowing to the editor instead of keybinding chord pending", async () => {

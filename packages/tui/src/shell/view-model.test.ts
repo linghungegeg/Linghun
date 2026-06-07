@@ -6224,7 +6224,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(`${failed?.summary}\n${failed?.fullText}`).toContain("raw diagnostic stack");
   });
 
-  it("transcriptSelectionState 不再给普通主屏 block 挂蓝底 selectionLineIndexes", () => {
+  it("transcriptSelectionState 给 app-owned transcript selection 挂可见高亮行", () => {
     const ctx = createContext() as TuiContext & {
       transcriptSelectionState?: {
         dragging: boolean;
@@ -6252,7 +6252,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
       viewMode: "task",
       outputBlocks: [block],
     });
-    expect(view.blocks[0]?.selectionLineIndexes).toBeUndefined();
+    expect(view.blocks[0]?.selectionLineIndexes).toEqual([0, 1]);
     expect(view.blocks[0]?.fullText).toBe("第一行\n第二行\n第三行");
   });
 });

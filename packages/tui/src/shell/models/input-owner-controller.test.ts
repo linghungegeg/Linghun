@@ -125,6 +125,8 @@ describe("selectInputOwner — panel second", () => {
     expect(selectInputOwner("", { ...noKey, upArrow: true } as OwnerKeyShape, ctx)).toBe("panel");
     expect(selectInputOwner("", { ...noKey, downArrow: true } as OwnerKeyShape, ctx)).toBe("panel");
     expect(selectInputOwner("", { ...noKey, return: true }, ctx)).toBe("panel");
+    expect(selectInputOwner("", { ...noKey, return: true, shift: true }, ctx)).toBe("composer");
+    expect(selectInputOwner("", { ...noKey, return: true, meta: true }, ctx)).toBe("composer");
     expect(selectInputOwner("x", noKey, ctx)).toBe("panel");
     expect(selectInputOwner("x", { ...noKey, ctrl: true }, ctx)).toBe("composer");
   });
@@ -145,6 +147,8 @@ describe("selectInputOwner — slash third", () => {
   it("slash owner on Enter when slash candidates visible", () => {
     const ctx: OwnerContext = { ...idleCtx, slashVisible: true };
     expect(selectInputOwner("", { ...noKey, return: true }, ctx)).toBe("slash");
+    expect(selectInputOwner("", { ...noKey, return: true, shift: true }, ctx)).toBe("composer");
+    expect(selectInputOwner("", { ...noKey, return: true, meta: true }, ctx)).toBe("composer");
   });
 
   it("slash owner on Tab when visible", () => {

@@ -3,12 +3,8 @@ import { render } from "ink";
 import React from "react";
 import { ShellApp } from "./components/ShellApp.js";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
+import { writeBestEffort } from "./terminal-interaction-runtime.js";
 import type { ShellController, ShellRenderOptions } from "./types.js";
-
-const ENABLE_MODIFY_OTHER_KEYS = "\x1B[>4;2m";
-const DISABLE_MODIFY_OTHER_KEYS = "\x1B[>4m";
-export const ENABLE_SGR_MOUSE = "\x1B[?1000h\x1B[?1002h\x1B[?1006h";
-export const DISABLE_SGR_MOUSE = "\x1B[?1006l\x1B[?1002l\x1B[?1000l";
 
 export type InkShellInstance = {
   rerender: () => void;
@@ -38,22 +34,12 @@ export function renderInkShell(
 ): InkShellInstance {
   const stdout = options.stdout as NodeJS.WriteStream | undefined;
   const capability = detectTerminalCapability();
-  const enableModifyOtherKeys = capability.keyboardProtocols.includes("modifyOtherKeys");
   const enableKittyKeyboard =
     capability.kittyKeyboard || capability.keyboardProtocols.includes("csi-u");
-  const enableMouseTracking =
-    process.env.LINGHUN_TUI_MOUSE === "1" ||
-    (process.env.LINGHUN_TUI_MOUSE !== "0" && capability.tier !== "legacy");
   const useAlternateScreen = false;
   let instance: ReturnType<typeof render>;
 
   try {
-    if (enableModifyOtherKeys) {
-      writeBestEffort(stdout, ENABLE_MODIFY_OTHER_KEYS);
-    }
-    if (enableMouseTracking) {
-      writeBestEffort(stdout, ENABLE_SGR_MOUSE);
-    }
     instance = render(<ShellApp controller={controller} capability={capability} />, {
       stdin: options.stdin as NodeJS.ReadStream | undefined,
       stdout,
@@ -63,12 +49,6 @@ export function renderInkShell(
       kittyKeyboard: enableKittyKeyboard ? { mode: "enabled" } : undefined,
     });
   } catch (error) {
-    if (enableMouseTracking) {
-      writeBestEffort(stdout, DISABLE_SGR_MOUSE);
-    }
-    if (enableModifyOtherKeys) {
-      writeBestEffort(stdout, DISABLE_MODIFY_OTHER_KEYS);
-    }
     showTerminalCursor(stdout);
     throw error;
   }
@@ -93,12 +73,6 @@ export function renderInkShell(
       instance.unmount();
     } catch {
       // stdout/stdin may already be closed (e.g. Windows cmd window close)
-    }
-    if (enableModifyOtherKeys) {
-      writeBestEffort(stdout, DISABLE_MODIFY_OTHER_KEYS);
-    }
-    if (enableMouseTracking) {
-      writeBestEffort(stdout, DISABLE_SGR_MOUSE);
     }
     showTerminalCursor(stdout);
     // Unref stdin to prevent the process from hanging on exit
@@ -155,14 +129,6 @@ export function renderInkShell(
 
 function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {
   writeBestEffort(stdout, "\x1B[?25h");
-}
-
-function writeBestEffort(stdout: NodeJS.WriteStream | undefined, text: string): void {
-  try {
-    stdout?.write(text);
-  } catch {
-    // stdout may already be closed
-  }
 }
 
 export function isNoColorTerminal(): boolean {

@@ -23,6 +23,11 @@ import {
   explainSemantic,
 } from "./models/permission-explanation.js";
 import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
+import {
+  buildTranscriptTextRows,
+  selectionLineIndexesForBlock,
+  type TranscriptSelectionState,
+} from "./models/transcript-selection-state.js";
 import { charWidth, displayWidth, truncateMiddle } from "./text-utils.js";
 import type {
   BackgroundTaskSummary,
@@ -324,10 +329,21 @@ export function createShellViewModel(
     });
   }
 
-  // Phase 7.10: ordinary main-screen transcript no longer renders app-owned
-  // blue selection. Native terminal selection/copy is the default surface.
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
-  const fullFittedBlocks = fittedBlocks;
+  const transcriptSelectionState = (
+    context as { transcriptSelectionState?: TranscriptSelectionState }
+  ).transcriptSelectionState;
+  const transcriptRows = transcriptSelectionState ? buildTranscriptTextRows(fittedBlocks) : [];
+  const fullFittedBlocks = transcriptSelectionState
+    ? fittedBlocks.map((block) => {
+        const selectionLineIndexes = selectionLineIndexesForBlock(
+          transcriptSelectionState,
+          transcriptRows,
+          block.id,
+        );
+        return selectionLineIndexes.length > 0 ? { ...block, selectionLineIndexes } : block;
+      })
+    : fittedBlocks;
 
   const viewMode = effectiveViewMode;
 

@@ -316,4 +316,21 @@ describe("Phase G keybinding engine", () => {
       pending: false,
     });
   });
+
+  it("does not map Shift+Enter or Meta+Enter to the default submit binding", () => {
+    expect(
+      resolveKeybinding(DEFAULT_KEYBINDINGS, "chat", {
+        input: "",
+        return: true,
+        shift: true,
+      }),
+    ).toEqual({ chordBuffer: [], pending: false });
+    expect(
+      resolveKeybinding(DEFAULT_KEYBINDINGS, "chat", {
+        input: "",
+        return: true,
+        meta: true,
+      }),
+    ).toEqual({ chordBuffer: [], pending: false });
+  });
 });

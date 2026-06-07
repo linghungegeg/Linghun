@@ -109,8 +109,10 @@ export function reduceTranscriptSelection(
     return { state: input.state, consumed: false };
   }
   if (event.action === "wheel") return { state: input.state, consumed: false };
-  if (!isInsideTranscriptX(event.x, geometry)) {
-    if (input.state?.dragging && event.action === "up") return { state: undefined, consumed: true };
+  if (!isInsideTranscript(event, geometry)) {
+    if (input.state?.dragging && (event.action === "drag" || event.action === "up")) {
+      return finishOrUpdateOutOfBoundsDrag(input);
+    }
     return { state: input.state, consumed: false };
   }
 
@@ -154,6 +156,30 @@ export function reduceTranscriptSelection(
   }
 
   return { state: input.state, consumed: false };
+}
+
+function finishOrUpdateOutOfBoundsDrag(input: TranscriptSelectionInput): TranscriptSelectionResult {
+  const { event, geometry, rows } = input;
+  if (!geometry || !input.state?.anchor || rows.length === 0) {
+    return { state: undefined, consumed: true };
+  }
+  const point = pointFromMouse(event, geometry, rows);
+  if (event.action === "drag") {
+    const next = withSelectedText({ ...input.state, dragging: true, focus: point }, rows);
+    return {
+      state: next,
+      scrollDelta: autoScrollDeltaForMouse(event.y, geometry, input.scroll),
+      consumed: true,
+    };
+  }
+  const next = withSelectedText({ ...input.state, dragging: false, focus: point }, rows);
+  const copyText = next.selectedText?.trimEnd();
+  if (!copyText) return { state: undefined, consumed: true };
+  return {
+    state: { ...next, copiedText: copyText },
+    copyText,
+    consumed: true,
+  };
 }
 
 export function selectionContainsRow(
@@ -251,8 +277,16 @@ function autoScrollDeltaForMouse(
   return 0;
 }
 
-function isInsideTranscriptX(x: number, geometry: TranscriptViewportGeometry): boolean {
-  return x >= geometry.x && x < geometry.x + geometry.width;
+function isInsideTranscript(
+  event: TranscriptMouseEvent,
+  geometry: TranscriptViewportGeometry,
+): boolean {
+  return (
+    event.x >= geometry.x &&
+    event.x < geometry.x + geometry.width &&
+    event.y >= geometry.y &&
+    event.y < geometry.y + geometry.height
+  );
 }
 
 function clamp(value: number, min: number, max: number): number {

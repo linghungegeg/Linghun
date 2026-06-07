@@ -68,6 +68,42 @@ describe("transcript selection reducer", () => {
     expect(dragUp.scrollDelta).toBe(1);
   });
 
+  it("finishes copy when release happens outside the transcript viewport during a drag", () => {
+    const down = reduceTranscriptSelection({
+      state: undefined,
+      event: { x: 0, y: 0, button: "left", action: "down" },
+      rows,
+      geometry,
+    });
+    const drag = reduceTranscriptSelection({
+      state: down.state,
+      event: { x: 5, y: 1, button: "left", action: "drag" },
+      rows,
+      geometry,
+    });
+    const up = reduceTranscriptSelection({
+      state: drag.state,
+      event: { x: 99, y: 5, button: "left", action: "up" },
+      rows,
+      geometry,
+    });
+
+    expect(up.consumed).toBe(true);
+    expect(up.copyText).toBe("row 2\nrow 3\nrow 4");
+    expect(up.state?.copiedText).toBe("row 2\nrow 3\nrow 4");
+  });
+
+  it("does not consume out-of-bounds left events without an active drag", () => {
+    const result = reduceTranscriptSelection({
+      state: undefined,
+      event: { x: 99, y: 0, button: "left", action: "up" },
+      rows,
+      geometry,
+    });
+    expect(result.consumed).toBe(false);
+    expect(result.state).toBeUndefined();
+  });
+
   it("does not consume left selection without viewport geometry", () => {
     expect(
       reduceTranscriptSelection({

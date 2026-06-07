@@ -106,7 +106,7 @@ export function selectInputOwner(input: string, key: OwnerKeyShape, ctx: OwnerCo
   if (ctx.slashVisible) {
     // slash 只接管导航/确认按键，普通字符仍走 composer（不阻断输入）。
     if (
-      key.return ||
+      (key.return && !isModifiedEnter(key)) ||
       key.escape ||
       key.tab ||
       // 数组按键的判定在 Composer 里仍依赖 ink Key 字段，这里只识别"导航类"
@@ -136,8 +136,13 @@ export function isNavigationKey(key: OwnerKeyShape): boolean {
 function isPanelKey(input: string, key: OwnerKeyShape, interactive: boolean): boolean {
   if (key.escape) return true;
   if (!interactive) return false;
+  if (isModifiedEnter(key)) return false;
   if (key.return || key.tab || isNavigationKey(key)) return true;
   return input.toLowerCase() === "x" && !key.ctrl && !key.meta;
+}
+
+function isModifiedEnter(key: OwnerKeyShape): boolean {
+  return Boolean(key.return && (key.shift || key.meta));
 }
 
 /** 调试 / 测试辅助：返回 owner 选择的稳定优先级数组。 */

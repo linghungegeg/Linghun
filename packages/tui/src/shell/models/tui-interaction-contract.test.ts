@@ -310,6 +310,26 @@ describe("TUI Interaction Contract — 输入归属", () => {
     expect(selectInputOwner("a", baseKey, ctx)).toBe("composer");
   });
 
+  it("panel 或 slash 可见时 Shift+Enter 仍归 Composer 换行", () => {
+    const modifiedEnter = key({ return: true, shift: true });
+    expect(
+      selectInputOwner("", modifiedEnter, {
+        permissionActive: false,
+        panelActive: true,
+        panelInteractive: true,
+        pastePending: false,
+        slashVisible: false,
+      }),
+    ).toBe("composer");
+    expect(
+      selectInputOwner("", modifiedEnter, {
+        permissionActive: false,
+        pastePending: false,
+        slashVisible: true,
+      }),
+    ).toBe("composer");
+  });
+
   it("permission 关闭后 Composer 恢复输入", () => {
     const ctx: OwnerContext = { permissionActive: false, pastePending: false, slashVisible: false };
     expect(selectInputOwner("a", baseKey, ctx)).toBe("composer");

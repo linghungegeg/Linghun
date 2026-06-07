@@ -1649,6 +1649,12 @@ async function runInkShell(
       process.once("SIGINT", sigintHandler);
       if (event.type === "escape") {
         submittedPending = false;
+        if (context.transcriptSelectionState) {
+          context.transcriptSelectionState = undefined;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
         if (context.ctrlOExpandState?.active) {
           context.ctrlOExpandState = { active: false };
           shell?.rerender();
@@ -1882,6 +1888,13 @@ async function runInkShell(
           const copy = await writeTextToClipboard(result.copyText);
           if (!copy.ok && copy.error) {
             pushTransientNotification(context, `Copy failed: ${copy.error}`, "warning");
+          } else if (copy.ok) {
+            const lineCount = Math.max(1, result.copyText.split("\n").length);
+            const message =
+              context.language === "en-US"
+                ? `Copied ${lineCount} line${lineCount === 1 ? "" : "s"}`
+                : `已复制 ${lineCount} 行`;
+            pushTransientNotification(context, message, "success");
           }
         }
         shell?.rerender();
