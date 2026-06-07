@@ -90,7 +90,7 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
   const planId = `wf-plan-${Date.now()}`;
   const phaseId = "phase-1";
   const requestedAgents = normalizePositiveInt(input.agents);
-  const runningCap = normalizePositiveInt(input.runningCap) ?? 3;
+  const runningCap = normalizePositiveInt(input.runningCap) ?? requestedAgents;
 
   const references: WorkflowPlan["references"] = [];
   const evidence: WorkflowPlan["evidence"] = [];
@@ -194,7 +194,7 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
         }),
       },
     ],
-    budget: { maxRunningAgents: runningCap },
+    budget: runningCap ? { maxRunningAgents: runningCap } : undefined,
     evidence,
     references,
     stopConditions: ["stop after each phase and wait for explicit user confirmation"],
@@ -204,7 +204,7 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
 function buildSlicesForGoal(
   goal: string,
   permissionMode: PermissionMode,
-  options: { requestedAgents?: number; runningCap: number; multiAgent: boolean; teamName?: string },
+  options: { requestedAgents?: number; runningCap?: number; multiAgent: boolean; teamName?: string },
 ) {
   const readonlyAuditGoal = isReadonlyAuditGoal(goal);
   const multiSliceGoal =
@@ -301,8 +301,8 @@ function buildSlicesForGoal(
         maxDurationMs: 120_000,
         ...(useDurableJobBatch
           ? {
-              requestedAgents: options.requestedAgents ?? options.runningCap,
-              maxRunningAgents: options.runningCap,
+              ...(options.requestedAgents ? { requestedAgents: options.requestedAgents } : {}),
+              ...(options.runningCap ? { maxRunningAgents: options.runningCap } : {}),
             }
           : {}),
       },

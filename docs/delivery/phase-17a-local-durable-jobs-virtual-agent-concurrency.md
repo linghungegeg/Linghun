@@ -28,7 +28,7 @@ Phase 17A 本轮完成终端运行侧的 Local Durable Jobs + Virtual Agent Conc
 - 新增 `/job` 命令最小闭环：`list/run/create/status/logs/report/pause/resume/cancel`。
 - job state 持久化到 `resolveStoragePaths(context.config, context.projectPath).jobs/<jobId>/state.json`。
 - job start 生成/验证 `HandoffPacket`；缺 verification/evidence/index 等关键字段时进入 `blocked`，`pauseReason=needs_handoff_repair:*`，不启动运行态 agent，也不生成 PASS evidence。
-- created count 与真实 running count 分离：用户可创建多个 job agents，但默认真实运行 cap 固定为 3，额外 agent 为 sleeping。
+- created count 与真实 running count 分离：用户可创建多个 job agents；当前 running cap 由显式 `--running-cap` 或 requested agents 派生，受 resource guard 动态裁剪，额外 agent 为 sleeping。
 - job 复用 `BackgroundTaskState` 和 `background_task_update` transcript，不创建孤立任务表。
 - `/job report` 输出 task graph、agent assignment、budget、status、verification、adopted/rejected conclusions、pause reason、log paths。
 - `/job logs` 只显示 bounded tail，并给出 full output path；raw long output 不进入主屏。
@@ -100,9 +100,9 @@ Job state 包含：
 
 ### Virtual Agent Concurrency Lite
 
-- 默认真实 running agent cap = 3。
-- `--agents 5 --multi-agent` 会创建 5 个 agent metadata，但只有 3 个 `running`，其余 `sleeping`。
-- 8 agent 明确只写为 benchmark/high-config candidate，不作为默认能力承诺。
+- 当前默认不再使用用户可见固定 3/4 cap，也不保留 hidden fixed 20 agent cap；未显式传 `--running-cap` 时按 requested agents 派生，并受 resource guard 动态裁剪。
+- `--agents 5 --multi-agent` 会创建 5 个 agent metadata；可运行数量由 requested/explicit cap、已有 running agents 与 resource guard 共同决定，其余为 `sleeping`。
+- 8 agent 不是特殊默认上限；高并发仍必须受 resource guard、预算和验证边界约束。
 - agent summary 明确只传 trimmed handoff/evidence/cache/index refs，不注入完整 transcript/source/index/log output。
 - `blocked/sleeping/cancelled/stale` 不产生 PASS evidence。
 
@@ -327,7 +327,7 @@ git diff --check
 
 本阶段未运行 native benchmark，也未启用 8-agent high-config。当前性能边界：
 
-- 默认 running agent cap = 3。
+- running agent cap 由 requested/explicit cap 派生，受 resource guard 动态裁剪；不再有固定 3/4/20 agent cap。
 - job metadata、logs、report 为轻量文件写入。
 - 不做后台全仓扫描，不重复注入完整 transcript/source/index/log。
 - 继续复用 Workspace Reference Cache、Workspace Snapshot Lite 与 codebase-memory status。
@@ -398,7 +398,7 @@ git diff --check
 
 - Local durable jobs：DONE，state/log/full-output/report/status/cancel/pause/resume/list/run path added。
 - Job/report evidence integrity：DONE，blocked/cancelled/stale/timeout/overbudget/maxSteps stop not PASS；worker loop completion 转为 completed lifecycle 但 result/verification/background result 仍只是 partial。
-- Multi-agent claim consistency：DONE，created vs running separated，默认 cap=3；8 agent 仅 benchmark/high-config candidate。
+- Multi-agent claim consistency：DONE，created vs running separated；历史默认 cap=3/20 口径已被后续 dynamic cap runtime 取代，当前按 requested/explicit cap + resource guard 裁剪；8 agent 不再作为特殊默认边界。
 - Long-running background jobs：DONE in bounded terminal-scope，durable metadata、bounded worker loop、per-step report/log/background event、resume/recovery stop condition 已覆盖；无限自治 daemon / native supervisor DEFERRED。
 - Agent heartbeat/stale fields：DONE Lite，running persisted job 缺 owner/session/heartbeat 或 heartbeat 过期保守 stale。
 - Background task paused/compact/job/mcp typed states：DONE for job path，durable status 映射回统一 `BackgroundTaskState`。

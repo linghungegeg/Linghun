@@ -34,10 +34,7 @@ import {
   mapDurableJobToBackgroundStatus,
 } from "./job-runner-presenter.js";
 import {
-  DEFAULT_JOB_RUNNING_AGENT_CAP,
-  JOB_AGENT_HIGH_CONFIG_CANDIDATE,
   JOB_RECOVERY_HEARTBEAT_STALE_MS,
-  MAX_AGENTS,
   type ParsedJobRunOptions,
   appendJobLog,
   createDurableJobAgents,
@@ -510,13 +507,21 @@ async function stopRunnerForDurableJob(context: TuiContext, job: DurableJobState
 }
 
 export async function handleBackgroundCommand(
-  _args: string[],
+  args: string[],
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
   await hydrateDurableJobBackgroundTasks(context);
   deps().refreshBackgroundLifecycle(context);
-  const tasks = context.backgroundTasks.filter(isDefaultBackgroundListTask);
+  const action = args[0]?.toLowerCase();
+  if (action === "clear" || action === "dismiss") {
+    const { dismissBackgroundTask } = await import("./background-control-runtime.js");
+    dismissBackgroundTask(args[1] ?? "", context, output);
+    return;
+  }
+  const tasks = context.backgroundTasks
+    .filter(isDefaultBackgroundListTask)
+    .filter((task) => !context.dismissedBackgroundTaskIds?.has(task.id));
   // D.13Q-UX Task Surface — ink session 走降噪 CommandPanel；
   // plain TUI / 非交互保留旧 writeLine 行为，避免破坏既有字符串断言。
   if (context.isInkSession) {
@@ -924,12 +929,9 @@ export async function createDurableJob(
   const missing = preflight.missing;
   const resourceGuard = start
     ? (deps().checkResourceGuard(context, "model") ??
-      deps().checkBackgroundStartGuard(context, "job", true))
+      deps().checkBackgroundStartGuard(context, "job", false))
     : null;
-  const runningCap = Math.max(
-    1,
-    Math.min(options.runningCap ?? DEFAULT_JOB_RUNNING_AGENT_CAP, DEFAULT_JOB_RUNNING_AGENT_CAP),
-  );
+  const runningCap = Math.max(1, options.runningCap ?? options.requestedAgents);
   const status: DurableJobStatus = !start
     ? "created"
     : missing.length > 0
@@ -964,8 +966,8 @@ export async function createDurableJob(
       maxSteps: options.maxSteps,
       note:
         options.runningCap !== undefined
-          ? `${runningCap} running agents requested for this job; ${DEFAULT_JOB_RUNNING_AGENT_CAP} remains the default cap and ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only.`
-          : `${runningCap} running agents is the default cap; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only, not default.`,
+          ? `${runningCap} running agents requested for this job; resource guard still applies, not a default 3/4/20 user cap.`
+          : `${runningCap} running agents derived from the requested agent count; resource guard still applies, not a default 3/4/20 user cap.`,
       usedTokens: 0,
       remainingTokens: options.maxTokens,
       usedSteps: 0,
@@ -1105,7 +1107,7 @@ function formatInitialJobCapReason(
   ].filter(Boolean);
   if (status === "running") {
     const suffix = generated.length > 0 ? `;${generated.join(";")}` : "";
-    return `dynamic cap min(default ${input.runningCap}, requested ${input.requestedAgents})${suffix}`;
+    return `dynamic cap requested ${input.runningCap}/${input.requestedAgents}; resource guard applies${suffix}`;
   }
   if (input.pauseReason) return input.pauseReason;
   if (status === "created") return "planned_not_started:/job create only";
@@ -1121,7 +1123,7 @@ function resolveEffectiveJobAgentCap(
     (task) =>
       task.id !== ignoreTaskId && task.kind === "agent" && isRuntimeActiveBackgroundTask(task),
   ).length;
-  return Math.max(0, Math.min(requestedCap, DEFAULT_JOB_RUNNING_AGENT_CAP - runningAgents));
+  return Math.max(0, requestedCap - runningAgents);
 }
 
 function hasRunnableJobAgents(job: DurableJobState): boolean {
@@ -1227,7 +1229,6 @@ async function startDurableJobAgentRun(
   assignment.statusReason = agent.status === "running" ? "started" : "route_unusable";
   assignment.summary = agent.summary;
   context.agents.unshift(agent);
-  context.agents = context.agents.slice(0, MAX_AGENTS);
   const background = createAgentBackgroundTask(agent, context);
   rememberBackgroundTask(context, background);
   if (agent.status === "running") {
@@ -1441,6 +1442,9 @@ export async function transitionDurableJob(
 export async function hydrateDurableJobBackgroundTasks(context: TuiContext): Promise<void> {
   const jobs = await listDurableJobs(context);
   for (const job of jobs) {
+    if (context.dismissedBackgroundTaskIds?.has(job.id)) {
+      continue;
+    }
     const recovered = await recoverDurableJobForContext(context, job);
     if (
       recovered.status === "running" ||
@@ -2058,17 +2062,9 @@ export async function handleForkCommand(
     (context.workflows.activeRun?.status === "running"
       ? context.workflows.activeRun.id
       : undefined);
-  const guard = deps().checkBackgroundStartGuard(context, "agent", true, workflowTaskId);
+  const guard = deps().checkBackgroundStartGuard(context, "agent", false, workflowTaskId);
   if (guard) {
     writeLine(output, guard);
-    return;
-  }
-  const runningCount = listCancellableAgents(context).length;
-  if (runningCount >= DEFAULT_JOB_RUNNING_AGENT_CAP) {
-    writeLine(
-      output,
-      `最多同时运行 ${DEFAULT_JOB_RUNNING_AGENT_CAP} 个 agent；请先 /agents cancel <id> 或等待完成。`,
-    );
     return;
   }
 
@@ -2129,7 +2125,6 @@ export async function handleForkCommand(
     updatedAt: now,
   };
   context.agents.unshift(agent);
-  context.agents = context.agents.slice(0, MAX_AGENTS);
   const background = createAgentBackgroundTask(agent, context);
   if (workflowTaskId) background.workflowRunId = workflowTaskId;
   rememberBackgroundTask(context, background);
@@ -3546,16 +3541,15 @@ async function appendAgentHydrateWarning(context: TuiContext, message: string): 
 }
 
 function isDefaultBackgroundListTask(task: BackgroundTaskState): boolean {
-  if (task.kind === "agent") {
-    return task.status === "running";
-  }
   return (
     task.status === "running" ||
     task.status === "paused" ||
     task.status === "blocked" ||
     task.status === "stale" ||
     task.status === "timeout" ||
-    task.status === "cancelled"
+    task.status === "cancelled" ||
+    task.status === "completed" ||
+    task.status === "failed"
   );
 }
 

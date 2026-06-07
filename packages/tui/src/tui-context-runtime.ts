@@ -490,6 +490,8 @@ export type TuiContext = {
   transcriptScrollState?: import("./shell/types.js").TranscriptScrollView;
   /** Phase 7.18 — visible-only transcript virtualization row-height cache. */
   transcriptBlockHeightCache?: Record<string, { height: number; width: number; textHash: string }>;
+  /** Visible-only dismissed background ids; transcript/logs/durable state stay intact. */
+  dismissedBackgroundTaskIds?: Set<string>;
 };
 
 export const VERIFICATION_COMMAND_TIMEOUT_MS = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS;
@@ -514,14 +516,12 @@ export const MAX_BACKGROUND_TASKS = 50;
 export const WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT = 8;
 export const BACKGROUND_RUNNING_GLOBAL_CAP = readPositiveIntEnv(
   "LINGHUN_BACKGROUND_RUNNING_GLOBAL_CAP",
-  4,
+  MAX_BACKGROUND_TASKS,
 );
 export const BACKGROUND_KIND_CAPS: Partial<Record<BackgroundTaskState["kind"], number>> = {
   bash: 1,
   verification: 1,
   index: 1,
-  agent: 3,
-  job: 1,
 };
 export const MAX_CHECKPOINTS = 20;
 export const MAX_ROUTE_DECISIONS = 50;

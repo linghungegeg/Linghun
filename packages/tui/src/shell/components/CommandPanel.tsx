@@ -28,8 +28,13 @@ const HINT_TEXT = {
 } as const;
 
 const SELECTABLE_HINT_TEXT = {
-  "zh-CN": "↑/↓ 选择 · Enter 详情 · x 停止 · Esc 关闭",
-  "en-US": "↑/↓ select · Enter details · x stop · Esc close",
+  "zh-CN": "↑/↓ 选择 · x 停止/清理 · Esc 关闭",
+  "en-US": "↑/↓ select · x stop/clear · Esc close",
+} as const;
+
+const DETAILS_HINT_TEXT = {
+  "zh-CN": "Ctrl+O 详情",
+  "en-US": "Ctrl+O details",
 } as const;
 
 const MAX_SELECTABLE_ROWS = 8;
@@ -59,6 +64,9 @@ export function CommandPanel({
   const maxScrollOffset = Math.max(0, selectableRows.length - MAX_SELECTABLE_ROWS);
   const scrollOffset = Math.max(0, Math.min(panel.scrollOffset ?? 0, maxScrollOffset));
   const selectedDetailsText = selectableRows[cursor]?.detailsText;
+  const hasDetailsText = Boolean((selectedDetailsText ?? panel.detailsText ?? "").trim());
+  const detailsHint = DETAILS_HINT_TEXT[language] ?? DETAILS_HINT_TEXT["zh-CN"];
+  const renderedHint = hasDetailsText ? `${hint} · ${detailsHint}` : hint;
   const expandedDetailsText = panel.expanded
     ? (selectedDetailsText ?? panel.detailsText)
     : undefined;
@@ -149,7 +157,7 @@ export function CommandPanel({
         </Box>
       ) : null}
       <Text color={theme.dim ?? theme.muted} dimColor>
-        {fitText(hint, innerWidth)}
+        {fitText(renderedHint, innerWidth)}
       </Text>
     </Box>
   );

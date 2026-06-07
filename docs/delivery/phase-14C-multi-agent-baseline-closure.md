@@ -54,7 +54,7 @@
 | 任务创建 | **已接主链** | `handleForkCommand`（agent）、`createDurableJob`（job） |
 | 任务状态/查看 | **已接主链** | `/agents`/`/agents show`、`/job status`/`report`/`logs`、`/background` |
 | 取消 | **已接主链** | `cancelAgent`、`/job cancel`→`transitionDurableJob("cancelled")` |
-| 并发上限 | **已修复（去重）** | `checkBackgroundStartGuard(context,"agent",true)` 复用统一 resource guard + `BACKGROUND_KIND_CAPS.agent=3`；`handleForkCommand` 裸字面量 `>= 3` 改用导入的 `DEFAULT_JOB_RUNNING_AGENT_CAP`；删除 `job-agent-command-runtime.ts` 本地重复声明的 `DEFAULT_JOB_RUNNING_AGENT_CAP`/`MAX_AGENTS`/`JOB_AGENT_HIGH_CONFIG_CANDIDATE`/`JOB_RECOVERY_HEARTBEAT_STALE_MS` 及死代码 `BACKGROUND_RUNNING_GLOBAL_CAP`/`BACKGROUND_KIND_CAPS`，统一从 `job-runtime.ts` import |
+| 并发上限 | **已修复（去重，后续又移除固定 agent cap）** | D.14C 当时完成并发常量去重；Phase 17A/07-18-1 后续源码修复已移除固定默认 3/4/20 agent 上限，改为显式/请求 cap + resource guard。bash / verification / index 等重任务保护仍保留。 |
 | 结果归档/evidence | **已接主链 + 边界正确** | `completeAgent` 写 `agent_end` + `createRoleHandoff` 入 `context.roleHandoffs`；job 用独立 `job.evidenceRefs`。agent 结果**不进 `context.evidence`**，天然不污染 D.13U/D.13V final gate（已验证） |
 | transcript | **已接主链** | agent 独立 `child` session + `agent_start`/`agent_end` 父会话事件 |
 | 权限确认 | **已接主链** | `runWorkerAgent` 复用 `decidePermission("Write",...)`，非 allow 即拒，无旁路 |
@@ -66,7 +66,7 @@
 | 文件 | 改动 |
 | --- | --- |
 | `packages/tui/src/index.ts` | +11：(a) `handleNaturalInput` 重接 `formatCompositeStatusQuery` 本地综合状态应答（窄触发，含注释）；(b) `configureJobAgentCommandRuntime` 注入 `captureFailureLearning` dep |
-| `packages/tui/src/job-agent-command-runtime.ts` | (a) 从 `job-runtime.ts` import 并发常量，删除本地重复 + 死代码；(b) `JobAgentCommandRuntimeDeps` 加 `captureFailureLearning`；(c) `handleForkCommand` 裸 `>=3` 改用 `DEFAULT_JOB_RUNNING_AGENT_CAP`；(d) `completeAgent` 用 try/catch 包裹 `runAgentWork`，异常走新增 `failAgent`：标记 agent/task failed、记 `agent_end(failed)`、搭车 `captureFailureLearning(category=tool_failure)`、写用户可见失败说明 |
+| `packages/tui/src/job-agent-command-runtime.ts` | (a) D.14C 当时完成并发常量去重；后续 Phase 17A/07-18-1 已删除固定 agent cap 常量引用；(b) `JobAgentCommandRuntimeDeps` 加 `captureFailureLearning`；(c) `completeAgent` 用 try/catch 包裹 `runAgentWork`，异常走新增 `failAgent`：标记 agent/task failed、记 `agent_end(failed)`、搭车 `captureFailureLearning(category=tool_failure)`、写用户可见失败说明 |
 | `packages/tui/src/index.test.ts` | Phase 06 块 `beforeEach` env 隔离；mock SSE content-type；~12 个陈旧断言/夹具对齐现状（保留意图）；新增 `D.14C` describe 块（3 测试：agent 真实失败→D.14B、用户取消不误记、源码不变式） |
 
 ## 4. index.ts 行数前后对比
@@ -166,7 +166,7 @@ scope_actually_done:
   - root cause D: re-wired formatCompositeStatusQuery local composite-status answer (user decision), narrow guard, ordinary NL still reaches model (verified)
   - multi-agent: wired agent real-failure into D.14B (failAgent + captureFailureLearning, category tool_failure)
   - multi-agent: completeAgent try/catch (worker exception no longer orphans)
-  - multi-agent: dedup concurrency constants to job-runtime.ts single source; handleForkCommand uses DEFAULT_JOB_RUNNING_AGENT_CAP
+  - multi-agent: D.14C deduped concurrency constants; later Phase 17A/07-18-1 removed fixed agent cap constants and aligned runtime to explicit/requested cap + resource guard
   - new tests: D.14C (agent failure->D.14B, cancel-not-misrecorded, source invariant)
 
 forbidden_next_without_user_confirmation:

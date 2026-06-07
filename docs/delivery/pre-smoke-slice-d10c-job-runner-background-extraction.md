@@ -94,7 +94,7 @@
 
 | 常量 | 目标文件 | 状态 |
 |------|----------|------|
-| DEFAULT_JOB_RUNNING_AGENT_CAP | job-runtime.ts | MOVED |
+| fixed agent running cap constants | job-runtime.ts | HISTORICAL_MOVED_THEN_REMOVED — Phase 17A/07-18-1 改为显式/请求 cap + resource guard |
 | JOB_AGENT_HIGH_CONFIG_CANDIDATE | job-runtime.ts | MOVED |
 | DEFAULT_JOB_TIMEOUT_MS | job-runtime.ts | MOVED |
 | DEFAULT_JOB_BUDGET_TOKENS | job-runtime.ts | MOVED |
@@ -102,7 +102,7 @@
 | JOB_RECOVERY_HEARTBEAT_STALE_MS | job-runtime.ts | MOVED |
 | DEFAULT_JOB_MAX_STEPS | job-runtime.ts | MOVED |
 | MAX_JOB_MAX_STEPS | job-runtime.ts | MOVED |
-| MAX_AGENTS | job-runtime.ts | MOVED |
+| fixed 20 agent hidden cap | job-runtime.ts | HISTORICAL_MOVED_THEN_REMOVED — 不再保留固定 20 agent hidden cap |
 | NATIVE_RUNNER_* (5 constants) | runner-runtime.ts | MOVED |
 
 ## 适配策略

@@ -181,13 +181,10 @@ import {
 import {
   DEFAULT_JOB_BUDGET_TOKENS,
   DEFAULT_JOB_MAX_STEPS,
-  DEFAULT_JOB_RUNNING_AGENT_CAP,
   DEFAULT_JOB_TIMEOUT_MS,
-  JOB_AGENT_HIGH_CONFIG_CANDIDATE,
   JOB_LOG_TAIL_LINES,
   JOB_RECOVERY_HEARTBEAT_STALE_MS,
   type JobContext,
-  MAX_AGENTS,
   MAX_JOB_MAX_STEPS,
   type ParsedJobRunOptions,
   appendJobLog,
@@ -1306,6 +1303,21 @@ function findLatestCtrlOExpandableBlock(
   return [...blocks].reverse().find(isCtrlOExpandableBlock);
 }
 
+function toggleCurrentCommandPanelDetails(context: TuiContext): boolean {
+  const panel = context.commandPanelState;
+  if (!panel) return false;
+  const selectableRows = (panel.sections ?? [])
+    .flatMap((section) => section.rows)
+    .filter((row): row is Exclude<typeof row, string> => typeof row !== "string");
+  const cursor = Math.max(0, Math.min(panel.cursor ?? 0, selectableRows.length - 1));
+  const selectedDetails = selectableRows[cursor]?.detailsText?.trim();
+  const panelDetails = panel.detailsText?.trim();
+  if (!selectedDetails && !panelDetails) return false;
+  context.commandPanelState = { ...panel, expanded: !panel.expanded };
+  context.ctrlOExpandState = { active: false };
+  return true;
+}
+
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const input = options.stdin ?? defaultStdin;
   const output = options.stdout ?? defaultStdout;
@@ -1745,11 +1757,15 @@ async function runInkShell(
       // 出现 /details，transcript 命令行也不会多出一条 ❯ /details。/details slash
       // 仍保留为兼容命令（显式诊断走原 handleDetailsCommand 链路）。
       //
-      // Ctrl+O 是 transcript/message verbose expand，不是高级 CommandPanel。
-      // 有可展开 output block 时只切换 view-model 的 block 展开态；无可展开内容
-      // 时只显示轻提示，不写 transcript，不触发 /details，也不靠 Esc 退出。
+      // Ctrl+O 优先展开当前 command/background/session 面板详情；没有面板详情时，
+      // 再展开最近一个可折叠 output block。没有真实可展开对象时保持安静。
       if (event.type === "toggle-details") {
         submittedPending = false;
+        if (toggleCurrentCommandPanelDetails(context)) {
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
         const expandableBlock = findLatestCtrlOExpandableBlock(blocks);
         if (expandableBlock) {
           const isSameBlockExpanded =
@@ -1764,18 +1780,6 @@ async function runInkShell(
           return;
         }
         context.ctrlOExpandState = { active: false };
-        if (!context.notifications) context.notifications = [];
-        context.notifications.push({
-          key: "ctrl-o-empty",
-          text:
-            context.language === "en-US"
-              ? "Nothing to expand right now."
-              : "当前没有可展开的完整内容。",
-          priority: "low",
-          timeoutMs: 4000,
-          createdAt: Date.now(),
-          tone: "dim",
-        });
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

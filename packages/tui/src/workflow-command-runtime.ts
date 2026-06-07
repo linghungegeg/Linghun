@@ -28,7 +28,7 @@ import {
   handleForkCommand,
   handleJobCommand,
 } from "./job-agent-command-runtime.js";
-import { DEFAULT_JOB_RUNNING_AGENT_CAP, getDurableJobStatePath } from "./job-runtime.js";
+import { getDurableJobStatePath } from "./job-runtime.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
 import {
   isRuntimeActiveBackgroundTask,
@@ -883,7 +883,7 @@ async function runWorkflowPlanSteps(
       steps: stepStates,
       multiAgent: options.multiAgent === true,
       agents: options.agents,
-      runningCap: normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents),
+      runningCap: getWorkflowRunningCap(plan, options, phase.id),
       teamName: options.teamName,
     },
     createdAt: startedAt,
@@ -960,7 +960,7 @@ async function runWorkflowPlanSteps(
           context,
           output,
           runId,
-          normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents),
+          getWorkflowRunningCap(plan, options, phase.id),
         ),
       })),
     );
@@ -2078,7 +2078,7 @@ function getCurrentWorkflowStepRequest(
   const bridge = bridgeWorkflowPlanToMainChainRequests(runningPlan, {
     currentPhaseId: phaseId,
     confirmedPhaseStopPoints: options.phaseGateConfirmed === true ? [phaseId] : [],
-    runningCap: normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents),
+    runningCap: getWorkflowRunningCap(plan, options, phaseId),
   });
   return (
     bridge.requests.find((request) => request.sliceId === stepId) ?? {
@@ -2130,7 +2130,7 @@ function selectRunnableWorkflowBatch(
   steps: WorkflowStepState[],
   options: RunWorkflowExecutionOptions,
 ): WorkflowBatchItem[] {
-  const cap = normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents);
+  const cap = getWorkflowRunningCap(plan, options, phaseId);
   const batch: WorkflowBatchItem[] = [];
   const candidates = steps.filter((step) => {
     if (step.status !== "queued") return false;
@@ -2163,11 +2163,30 @@ function selectRunnableWorkflowBatch(
   return batch;
 }
 
-function normalizeWorkflowRunningCap(value: number | undefined): number {
+function normalizeWorkflowRunningCap(value: number | undefined): number | undefined {
   if (!Number.isFinite(value) || value === undefined || value < 1) {
-    return DEFAULT_JOB_RUNNING_AGENT_CAP;
+    return undefined;
   }
   return Math.max(1, Math.floor(value));
+}
+
+function getWorkflowRunningCap(
+  plan: NormalizedWorkflowPlan,
+  options: RunWorkflowExecutionOptions,
+  phaseId?: string,
+): number {
+  return (
+    normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents) ??
+    deriveWorkflowRunningCap(plan, phaseId)
+  );
+}
+
+function deriveWorkflowRunningCap(plan: NormalizedWorkflowPlan, phaseId?: string): number {
+  const phase =
+    plan.phases.find((item) => item.id === phaseId) ??
+    plan.phases.find((item) => item.id === plan.currentPhaseId) ??
+    plan.phases[0];
+  return Math.max(1, phase?.slices.length ?? 1);
 }
 
 export async function runWorkflowVerificationStep(

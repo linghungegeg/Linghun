@@ -1,8 +1,6 @@
 import type { PermissionMode } from "@linghun/shared";
 import type { AgentType, DurableJobAgentStatus } from "./tui-data-types.js";
 
-export const DEFAULT_WORKFLOW_RUNNING_CAP = 3;
-
 export type WorkflowPlanSource = "natural" | "slash" | "workflow-template" | "handoff" | "manual";
 
 export type WorkflowSliceStatus =
@@ -257,7 +255,9 @@ export function normalizeWorkflowPlan(
   validateBudget(input.budget, "$.budget", errors);
 
   const permissionMode = options.permissionMode ?? input.permissionMode ?? "default";
-  const runningCap = normalizeRunningCap(options.runningCap ?? input.budget?.maxRunningAgents);
+  const runningCap =
+    normalizeRunningCap(options.runningCap ?? input.budget?.maxRunningAgents) ??
+    deriveWorkflowRunningCap(phases);
   const phaseIds = new Set(phases.map((phase) => phase.id).filter(Boolean));
   const sliceIds = new Set(
     phases.flatMap((phase) =>
@@ -456,11 +456,19 @@ export function projectWorkflowPlan(plan: NormalizedWorkflowPlan): WorkflowPlanP
   };
 }
 
-function normalizeRunningCap(value: number | undefined): number {
+function normalizeRunningCap(value: number | undefined): number | undefined {
   if (!Number.isFinite(value) || value === undefined || value < 1) {
-    return DEFAULT_WORKFLOW_RUNNING_CAP;
+    return undefined;
   }
   return Math.max(1, Math.floor(value));
+}
+
+function deriveWorkflowRunningCap(phases: WorkflowPhase[]): number {
+  const sliceCount = phases.reduce(
+    (total, phase) => total + (Array.isArray(phase.slices) ? phase.slices.length : 0),
+    0,
+  );
+  return Math.max(1, sliceCount);
 }
 
 function validateDuplicateIds(

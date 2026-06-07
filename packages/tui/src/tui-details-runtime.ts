@@ -2,7 +2,7 @@
 // Pure /details command helpers extracted from packages/tui/src/index.ts as
 // part of the D.13 mechanical split. Behavior is unchanged. The
 // handleDetailsCommand / runDetailsCommandBody coordinators stay in index.ts
-// because they depend on writeLine, formatError, MAX_AGENTS, MAX_CHECKPOINTS
+// because they depend on writeLine, formatError, and MAX_CHECKPOINTS
 // and other index-side helpers that would create cross-module cycles
 // (Path A safety valve #2).
 //

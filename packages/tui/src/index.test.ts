@@ -5596,8 +5596,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(restoredRunning?.status).toBe("stale"); // running -> stale on restore
 
     // Verify background task restoration. Terminal history stays in context.agents
-    // for /agents, while stale/resumable also reaches runtime snapshot. Ordinary
-    // /background/footer filters keep it out of the main-screen summary.
+    // for /agents, while stale/resumable reaches the background surface so the
+    // user can inspect or dismiss it explicitly.
     const bgBlocked = context.backgroundTasks.find((t) => t.id === "agent-blocked-01");
     const bgCancelled = context.backgroundTasks.find((t) => t.id === "agent-cancelled-02");
     const bgFailed = context.backgroundTasks.find((t) => t.id === "agent-failed-03");
@@ -5620,8 +5620,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     const backgroundOutput = new MemoryOutput();
     await handleSlashCommand("/background", context, backgroundOutput);
-    expect(backgroundOutput.text).toContain("没有后台任务");
-    expect(backgroundOutput.text).not.toContain("agent-running-05");
+    expect(backgroundOutput.text).toContain("Agent running-worker");
+    expect(backgroundOutput.text).toContain("stale");
+    expect(backgroundOutput.text).not.toContain("没有后台任务");
 
     const snapshot = (await import("./runtime-status-snapshot.js")).createRuntimeStatusSnapshot({
       language: context.language,
@@ -5855,9 +5856,9 @@ describe("Phase 06 TUI slash commands", () => {
     };
     expect(persisted.status).toBe("blocked");
     expect(persisted.worker?.status).toBe("blocked");
-    expect(persisted.worker?.completedSteps).toBe(3);
+    expect(persisted.worker?.completedSteps).toBe(5);
     expect(persisted.result?.status).toBe("blocked");
-    expect(persisted.budget?.usedSteps).toBe(3);
+    expect(persisted.budget?.usedSteps).toBe(5);
     expect(persisted.budget?.maxSteps).toBe(4);
     expect(persisted.budget?.usedTokens).toBeGreaterThan(0);
     expect(persisted.agents).toHaveLength(5);
@@ -5867,8 +5868,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.agents?.filter((agent) => agent.status === "completed")).toHaveLength(1);
     expect(persisted.agents?.[0]?.status).toBe("blocked");
     expect(persisted.agents?.[0]).toHaveProperty("runId");
-    expect(persisted.budget?.maxRunningAgents).toBe(3);
-    expect(persisted.budget?.note).toContain("8 is benchmark/high-config candidate only");
+    expect(persisted.budget?.maxRunningAgents).toBe(5);
+    expect(persisted.budget?.note).toContain("not a default 3/4/20 user cap");
     expect(persisted.agents?.[0]?.summary).toContain("模型网关未就绪");
     const report = await readFile(persisted.reportPath ?? "", "utf8");
     expect(report).toContain("Node/TUI runtime remains default");
@@ -5876,13 +5877,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(report).toContain("run agent-");
     expect(report).toContain("no full transcript/source/index/log output is injected");
     expect(report).toContain("## Worker result");
-    expect(report).toContain("max steps 4; used steps 3");
+    expect(report).toContain("max steps 4; used steps 5");
     expect(report).toContain("verification: partial");
     const log = await readFile(persisted.logPath ?? "", "utf8");
-    expect(log).toContain("agent step 3/5");
+    expect(log).toContain("agent step 5/5");
     expect(log).toContain("agent_blocked");
     const fullOutput = await readFile(persisted.fullOutputPath ?? "", "utf8");
-    expect(fullOutput).toContain("agent step 3/5");
+    expect(fullOutput).toContain("agent step 5/5");
     expect(fullOutput).not.toContain("full transcript");
     expect(fullOutput).not.toContain("full source");
 
@@ -5894,7 +5895,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(output.text).toContain("本地 durable metadata + 统一后台任务");
     expect(output.text).toContain(
-      "agents: planned 5; scheduled 3; started 3; running 0; queued 0; skipped 0; limited 0; effective cap 3",
+      "agents: planned 5; scheduled 5; started 5; running 0; queued 0; skipped 0; limited 0; effective cap 5",
     );
     expect(output.text).toContain(
       `${jobId}  lifecycle blocked (needs a concrete fix before resume)  result blocked (needs a concrete fix before resume)  label implement-durable-loop-planner`,
@@ -5947,7 +5948,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.status).toBe("completed");
     expect(persisted.verification?.status).toBe("partial");
     expect(persisted.verification?.summary).toContain("not verification evidence");
-    expect(persisted.effectiveAgentCap).toBe(3);
+    expect(persisted.effectiveAgentCap).toBe(4);
     expect(persisted.capReason).toContain("runtime_dynamic_cap");
     expect(persisted.capReason).not.toBe("not_running");
     expect(persisted.capReason).not.toContain("effectiveCap=0");
@@ -5992,7 +5993,7 @@ describe("Phase 06 TUI slash commands", () => {
     const barrier = mockOpenAiBarrierFetch("job child done");
 
     const run = handleSlashCommand(
-      "/job run concurrent child scheduling --multi-agent --agents 6 --tokens 50000",
+      "/job run concurrent child scheduling --multi-agent --agents 6 --running-cap 3 --tokens 50000",
       context,
       output,
     );
@@ -6185,7 +6186,7 @@ describe("Phase 06 TUI slash commands", () => {
     const job = await readDurableJobState(
       join(resolveStoragePaths(config, project).jobs, jobId ?? "missing", "state.json"),
     );
-    expect(job?.effectiveAgentCap).toBe(3);
+    expect(job?.effectiveAgentCap).toBe(5);
     expect(job?.capReason).toContain("runtime_dynamic_cap");
     expect(context.backgroundTasks.find((task) => task.id === "job-stale-cap")?.status).toBe(
       "stale",
@@ -11400,6 +11401,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("已保存：report.md。");
     expect(output.text).toContain("证据：Write:");
+    expect(output.text).not.toContain("未完成保存");
+    expect(output.text).not.toContain("没有 Write 能力");
     await expect(readFile(join(project, "report.md"), "utf8")).resolves.toBe("# Report");
     const session = (
       await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
@@ -16138,7 +16141,7 @@ describe("Phase 06 TUI slash commands", () => {
       ]),
     ].join("\n");
     expect(mainSurface).toContain("Verification");
-    expect(mainSurface).not.toContain("Agent");
+    expect(mainSurface).toContain("Agent");
     expect(mainSurface).toContain("Index");
     expect(mainSurface).toContain("Bash / job");
     expect(mainSurface).toContain("typecheck");
@@ -16161,7 +16164,7 @@ describe("Phase 06 TUI slash commands", () => {
     ]) {
       expect(mainSurface).not.toContain(banned);
     }
-    expect(panel?.detailsText).not.toContain("agent-panel");
+    expect(panel?.detailsText).toContain("/details background agent-panel");
     expect(panel?.detailsText).toContain("/details background verify-panel");
     expect(panel?.detailsText).toContain("/job report job-timeout-panel");
     expect(panel?.detailsText).toContain(".linghun/jobs/job-timeout-panel/job.log");
@@ -16239,7 +16242,35 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.commandPanelState?.scrollOffset).toBe(1);
   });
 
-  it("guards foreground model requests and background resource caps", async () => {
+  it("/background dismiss clears non-running tasks while preserving running tasks", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-dismiss-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("bash", { id: "bg-running", status: "running" }),
+      createBackgroundTaskFixture("agent", { id: "bg-failed", status: "failed" }),
+      createBackgroundTaskFixture("job", { id: "bg-completed", status: "completed" }),
+    ];
+
+    await handleSlashCommand("/background dismiss bg-running", context, output);
+    expect(output.text).toContain("running 后台任务只能 stop/cancel");
+    expect(context.backgroundTasks.some((task) => task.id === "bg-running")).toBe(true);
+
+    output.text = "";
+    await handleSlashCommand("/background dismiss bg-failed", context, output);
+    expect(output.text).toContain("已清理");
+    expect(output.text).toContain("transcript 和日志仍保留");
+    expect(context.backgroundTasks.some((task) => task.id === "bg-failed")).toBe(false);
+    expect(context.dismissedBackgroundTaskIds?.has("bg-failed")).toBe(true);
+
+    output.text = "";
+    await handleSlashCommand("/background clear bg-completed", context, output);
+    expect(context.backgroundTasks.some((task) => task.id === "bg-completed")).toBe(false);
+  });
+
+  it("guards foreground model requests and heavyweight background resource caps", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -16252,14 +16283,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已有前台模型请求正在运行");
     context.activeAbortController = undefined;
 
-    context.backgroundTasks = [
-      createBackgroundTaskFixture("mcp"),
-      createBackgroundTaskFixture("job"),
-      createBackgroundTaskFixture("compact"),
-      createBackgroundTaskFixture("bash"),
-    ];
+    context.backgroundTasks = Array.from({ length: 50 }, (_, index) =>
+      createBackgroundTaskFixture(index % 2 === 0 ? "compact" : "bash", {
+        id: `heavy-${index}`,
+      }),
+    );
     await handleSlashCommand("/verify smoke", context, output);
-    expect(output.text).toContain("后台任务已达到全局上限 4");
+    expect(output.text).toContain("后台任务已达到全局上限 50");
 
     context.backgroundTasks = [createBackgroundTaskFixture("bash")];
     await handleSlashCommand("/bash node --version", context, output);
@@ -16277,13 +16307,13 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/index refresh", context, output);
     expect(output.text).toContain("index 后台任务已达到上限 1");
 
-    context.backgroundTasks = [
-      createBackgroundTaskFixture("agent"),
-      createBackgroundTaskFixture("agent"),
-      createBackgroundTaskFixture("agent"),
-    ];
+    output.text = "";
+    context.backgroundTasks = Array.from({ length: 6 }, (_, index) =>
+      createBackgroundTaskFixture("agent", { id: `agent-running-${index}` }),
+    );
     await handleSlashCommand("/fork explorer inspect cache", context, output);
-    expect(output.text).toContain("agent 后台任务已达到上限 3");
+    expect(output.text).not.toContain("agent 后台任务已达到上限 3");
+    expect(output.text).not.toContain("最多同时运行 3 个 agent");
 
     output.text = "";
     context.backgroundTasks = [
@@ -16309,7 +16339,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("full-access");
   });
 
-  it("/background keeps idle teammate summaries out of the active task surface", async () => {
+  it("/background exposes terminal teammate rows so they can be dismissed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-background-idle-teammate-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -16327,10 +16357,14 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/background", context, output);
 
-    expect(output.text).toContain("没有后台任务");
-    expect(output.text).not.toContain("Agent idle");
-    expect(output.text).not.toContain("idle: last result");
+    expect(output.text).toContain("Agent idle");
+    expect(output.text).toContain("completed");
     expect(context.backgroundTasks.filter((task) => task.status === "running")).toHaveLength(0);
+
+    output.text = "";
+    await handleSlashCommand("/background dismiss agent-idle-summary", context, output);
+    expect(output.text).toContain("已清理");
+    expect(context.backgroundTasks.some((task) => task.id === "agent-idle-summary")).toBe(false);
   });
 
   it("does not let a workflow-owned running agent heavy guard block another agent in the same workflow cap", async () => {
@@ -16368,8 +16402,10 @@ describe("Phase 06 TUI slash commands", () => {
     ).toHaveLength(2);
 
     context.workflows.activeRun = undefined;
+    output.text = "";
     await handleSlashCommand("/fork explorer outside workflow blocked", context, output);
-    expect(output.text).toContain("已有 agent 重任务正在运行");
+    expect(output.text).not.toContain("已有 agent 重任务正在运行");
+    expect(output.text).toContain("outside workflow blocked");
   });
 
   it("marks stale background tasks and preserves log traceability", async () => {
@@ -17278,6 +17314,21 @@ describe("Phase 06 TUI slash commands", () => {
       storage: { ...context.config.storage, jobs: { scope: "project" } },
     };
     const job = await persistDurableJobFixture(project, context.config, "running");
+    const now = new Date().toISOString();
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-command-panel-job-stop",
+      kind: "test_result",
+      source: "vitest",
+      summary: "CommandPanel job stop fixture evidence",
+      supportsClaims: ["command-panel-job-stop"],
+      createdAt: now,
+    });
+    job.handoffPacket = createHandoffPacket(context, [], undefined, session.id);
+    job.ownerSessionId = session.id;
+    job.ownerPid = process.pid;
+    job.heartbeatAt = now;
+    await persistDurableJob(job);
     context.backgroundTasks = [
       createBackgroundTaskFixture("job", {
         id: job.id,
@@ -17318,6 +17369,29 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundAbortControllers?.has("bash-panel-stop")).toBe(false);
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
+    expect(output.text).toBe("");
+  });
+
+  it("CommandPanel x dismisses selected terminal background rows instead of pretending to stop them", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-x-dismiss-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", {
+        id: "agent-panel-failed",
+        title: "Agent failed row",
+        status: "failed",
+      }),
+    ];
+    await handleSlashCommand("/background", context, output);
+
+    await __testStopCommandPanelSelection(context, output);
+
+    expect(context.backgroundTasks.some((task) => task.id === "agent-panel-failed")).toBe(false);
+    expect(context.dismissedBackgroundTaskIds?.has("agent-panel-failed")).toBe(true);
     expect(output.text).toBe("");
   });
 
@@ -25019,6 +25093,56 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(downgrade?.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("no-tool provider final answer waits for final gate before Ink preview", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-no-tool-final-preview-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      providers: Object.fromEntries(
+        Object.entries(defaultConfig.providers).map(([id, provider]) => [
+          id,
+          { ...provider, supportsTools: false },
+        ]),
+      ),
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(context, blocks);
+    const finalText = "纯文本最终答复。";
+    let releaseStream!: () => void;
+    let markDeltaProcessed!: () => void;
+    const deltaProcessed = new Promise<void>((resolve) => {
+      markDeltaProcessed = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const gateway = {
+      stream: vi.fn(async function* () {
+        yield { type: "assistant_text_delta", text: finalText } as const;
+        markDeltaProcessed();
+        await release;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+      }),
+    } as unknown as Parameters<typeof __testSendMessage>[2];
+
+    const pending = __testSendMessage("普通纯文本回答", context, gateway, output);
+    await deltaProcessed;
+
+    expect(context.streamingAssistant?.text ?? "").not.toContain(finalText);
+    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
+      finalText,
+    );
+
+    releaseStream();
+    await pending;
+
+    expect(context.streamingAssistant).toBeUndefined();
+    const finalBlocks = blocks.filter((block) => (block.fullText ?? "").includes(finalText));
+    expect(finalBlocks).toHaveLength(1);
+  });
+
   // Phase 7.17 — streaming preview 不写 block；长 final assistant block 在 commit 后仍可 compact。
   it("Phase 7.17: appendAssistantDelta 不触发历史 block，final commit 后可 compact", async () => {
     const fs = await import("node:fs/promises");
@@ -26958,9 +27082,10 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
       "captureFailureLearning",
     );
 
-    // 并发常量单一来源：job-agent-command-runtime 不再本地重复声明。
+    // 并发常量单一来源：job-agent-command-runtime 不再本地重复声明或引用固定 agent cap。
     expect(agentSrc).not.toContain("const DEFAULT_JOB_RUNNING_AGENT_CAP = 3");
     expect(agentSrc).not.toContain("const MAX_AGENTS = 20");
+    expect(agentSrc).not.toContain("MAX_AGENTS");
     expect(agentSrc).not.toContain("const BACKGROUND_KIND_CAPS");
   });
 

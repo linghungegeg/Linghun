@@ -6,7 +6,6 @@ import {
   bridgeWorkflowPlanToMainChainRequests,
 } from "./workflow-agent-runtime-bridge.js";
 import {
-  DEFAULT_WORKFLOW_RUNNING_CAP,
   type NormalizedWorkflowPlan,
   type WorkflowPlan,
   normalizeWorkflowPlan,
@@ -230,7 +229,7 @@ describe("D.14H-C workflow agent runtime bridge", () => {
     expect(blocked.reason).toContain("slice dependency not satisfied");
   });
 
-  it("keeps the default running cap at 3 and queues excess mutating proposals", () => {
+  it("derives runnable slots from current phase slices instead of a fixed default", () => {
     const slices = Array.from({ length: 4 }, (_, index) => ({
       id: `slice-${index + 1}`,
       title: `Slice ${index + 1}`,
@@ -261,11 +260,11 @@ describe("D.14H-C workflow agent runtime bridge", () => {
       }),
     );
 
-    expect(result.runningCap).toBe(DEFAULT_WORKFLOW_RUNNING_CAP);
-    expect(result.runnableSlots).toBe(DEFAULT_WORKFLOW_RUNNING_CAP);
-    expect(result.summary.runnable).toBe(3);
-    expect(result.summary.queued).toBe(1);
-    expect(requestBySlice(result.requests, "slice-4").reason).toContain("running cap 3 reached");
+    expect(result.runningCap).toBe(4);
+    expect(result.runnableSlots).toBe(4);
+    expect(result.summary.runnable).toBe(4);
+    expect(result.summary.queued).toBe(0);
+    expect(requestBySlice(result.requests, "slice-4").reason).not.toContain("running cap 3");
   });
 
   it("exposes runnable slots when explicit runningCap is passed to the bridge", () => {

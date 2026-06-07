@@ -1194,6 +1194,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     waiting_first_delta: "thinking",
     tool_running: "tool_running",
     continuing_after_tool: "continuing",
+    verifying_final_answer: "continuing",
     permission_waiting: "permission_waiting",
     request_failed: "error",
     error: "error",
@@ -1210,6 +1211,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       thinking: "正在思考…",
       tool_running: toolName ? `正在运行 ${toolName}…` : "正在运行工具…",
       continuing: "工具完成，继续处理…",
+      verifying_final_answer: "正在验证最终回答…",
       permission_waiting: "等待权限确认…",
       error: shellText["zh-CN"].activityError,
       completed: shellText["zh-CN"].activityCompleted,
@@ -1218,6 +1220,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       thinking: "Thinking…",
       tool_running: toolName ? `Running ${toolName}…` : "Running tool…",
       continuing: "Continuing after tool…",
+      verifying_final_answer: "Verifying final answer…",
       permission_waiting: "Waiting for permission…",
       error: shellText["en-US"].activityError,
       completed: shellText["en-US"].activityCompleted,
@@ -1231,7 +1234,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
   }
   return {
     phase: mapped,
-    text: texts[mapped] ?? "",
+    text: texts[phase] ?? texts[mapped] ?? "",
     toolName: toolName ?? undefined,
     elapsed,
   };

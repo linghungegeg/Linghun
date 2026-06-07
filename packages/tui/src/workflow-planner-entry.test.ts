@@ -285,6 +285,23 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     );
   });
 
+  it("does not invent a hidden multi-agent running cap when agents are not explicit", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        goal: "复杂 workflow multi-agent review",
+        permissionMode: "full-access",
+        multiAgent: true,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const implement = result.plan.phases[0].slices.find((slice) => slice.id === "slice-implement");
+    expect(result.plan.budget.maxRunningAgents).toBe(result.plan.phases[0].slices.length);
+    expect(result.bridgeResult.runningCap).toBe(result.plan.phases[0].slices.length);
+    expect(implement?.budget?.requestedAgents).toBeUndefined();
+    expect(implement?.budget?.maxRunningAgents).toBeUndefined();
+  });
+
   it("does not generate mutating implement slice for explicit readonly audit goals", () => {
     const result = generateWorkflowPlanPreview(
       goal({

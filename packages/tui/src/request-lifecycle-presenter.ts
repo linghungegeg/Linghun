@@ -6,7 +6,8 @@ export type RequestActivityPhase =
   | "waiting_first_delta"
   | "tool_running"
   | "continuing_after_tool"
-  | "permission_waiting";
+  | "permission_waiting"
+  | "verifying_final_answer";
 
 export function formatRequestActivity(
   phase: RequestActivityPhase,
@@ -31,6 +32,9 @@ export function formatRequestActivity(
     if (phase === "permission_waiting") {
       return "Waiting for your approval; the model request is paused.";
     }
+    if (phase === "verifying_final_answer") {
+      return "Verifying the final answer before showing it.";
+    }
     return "Thinking…";
   }
   if (phase === "request_started_report") {
@@ -47,6 +51,9 @@ export function formatRequestActivity(
   }
   if (phase === "permission_waiting") {
     return "正在等待你的批准；模型请求已暂停。";
+  }
+  if (phase === "verifying_final_answer") {
+    return "正在验证最终回答，验证后再显示。";
   }
   return "正在思考…";
 }

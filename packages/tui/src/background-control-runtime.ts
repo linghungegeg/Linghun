@@ -13,7 +13,6 @@ import {
 import { formatBackgroundDetails } from "./job-runner-presenter.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
 import { appendJobLog, rescheduleDurableJobAgents } from "./job-runtime.js";
-import { MAX_AGENTS } from "./job-runtime.js";
 import { clearRequestActivity } from "./model-stream-runtime.js";
 import {
   type RunnerContext,
@@ -126,10 +125,11 @@ export function checkResourceGuard(
   const activeTasks = context.backgroundTasks.filter(
     (task) => task.id !== ignoreTaskId && isRuntimeActiveBackgroundTask(task),
   );
-  if (activeTasks.length >= BACKGROUND_RUNNING_GLOBAL_CAP) {
+  const resourceCountedTasks = activeTasks.filter((task) => isResourceGuardCountedKind(task.kind));
+  if (resourceCountedTasks.length >= BACKGROUND_RUNNING_GLOBAL_CAP) {
     return `并发上限：后台任务已达到全局上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。这是 resource/concurrency cap，不是权限拒绝。`;
   }
-  const capTasks = activeTasks.filter(
+  const capTasks = resourceCountedTasks.filter(
     (task) => !ignoreTaskId || task.workflowRunId !== ignoreTaskId || task.kind !== "agent",
   );
   if (kind === "heavy") {
@@ -137,9 +137,7 @@ export function checkResourceGuard(
       (task) =>
         task.kind === "verification" ||
         task.kind === "index" ||
-        task.kind === "agent" ||
-        task.kind === "bash" ||
-        task.kind === "job",
+        task.kind === "bash",
     );
     return heavy
       ? `并发上限：已有 ${heavy.kind} 重任务正在运行。请等待完成、查看 /background，或先 /interrupt。这是 resource/concurrency cap，不是权限拒绝。`
@@ -150,6 +148,10 @@ export function checkResourceGuard(
     return `并发上限：${kind} 后台任务已达到上限 ${cap}；请等待完成、查看 /background，或用 /interrupt 取消后重试。这是 resource/concurrency cap，不是权限拒绝。`;
   }
   return null;
+}
+
+function isResourceGuardCountedKind(kind: BackgroundTaskState["kind"]): boolean {
+  return kind === "bash" || kind === "verification" || kind === "index" || kind === "compact";
 }
 
 export function checkBackgroundStartGuard(
@@ -260,6 +262,12 @@ export async function stopCommandPanelSelection(
   const taskRef = rows[cursor]?.taskRef;
   if (!taskRef) return;
   const dispatchOutput = context.isInkSession ? createSilentOutput() : output;
+  if (dismissCommandPanelTaskRef(taskRef.id, context, dispatchOutput)) {
+    if (context.isInkSession) {
+      await handleBackgroundCommand([], context, createSilentOutput());
+    }
+    return;
+  }
   if (taskRef.kind === "agent") {
     await cancelAgentByRef(taskRef.id, context, dispatchOutput);
   } else if (taskRef.kind === "job") {
@@ -343,6 +351,61 @@ async function stopSingleBackgroundTask(
       : context.language === "en-US"
         ? `${task.title} has no live abort controller; marked stale.`
         : `${task.title} 没有可用取消 controller；已标记为 stale。`,
+  );
+  return true;
+}
+
+function isDismissibleBackgroundStatus(status: BackgroundTaskState["status"]): boolean {
+  return status !== "running";
+}
+
+function dismissCommandPanelTaskRef(taskId: string, context: TuiContext, output: Writable): boolean {
+  const task = findBackgroundTask(context, taskId);
+  if (!task || !isDismissibleBackgroundStatus(task.status)) {
+    return false;
+  }
+  dismissBackgroundTask(task.id, context, output);
+  return true;
+}
+
+export function dismissBackgroundTask(
+  taskId: string,
+  context: TuiContext,
+  output: Writable,
+): boolean {
+  const before = context.backgroundTasks.length;
+  const task = findBackgroundTask(context, taskId);
+  if (!task) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Background task not found."
+        : "未找到后台任务。",
+    );
+    return false;
+  }
+  if (!isDismissibleBackgroundStatus(task.status)) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Running background tasks must be stopped or cancelled, not dismissed."
+        : "running 后台任务只能 stop/cancel，不能直接清理。",
+    );
+    return false;
+  }
+  context.backgroundTasks = context.backgroundTasks.filter((item) => item.id !== task.id);
+  if (before === context.backgroundTasks.length) {
+    return false;
+  }
+  if (!context.dismissedBackgroundTaskIds) {
+    context.dismissedBackgroundTaskIds = new Set();
+  }
+  context.dismissedBackgroundTaskIds.add(task.id);
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? `Dismissed ${task.title}. Transcript and logs are preserved.`
+      : `已清理 ${task.title}；transcript 和日志仍保留。`,
   );
   return true;
 }

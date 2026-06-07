@@ -34,15 +34,13 @@ const appendFileAsync = promisify(fsAppendFile);
 // Constants
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_JOB_RUNNING_AGENT_CAP = 3;
-export const JOB_AGENT_HIGH_CONFIG_CANDIDATE = 8;
 export const DEFAULT_JOB_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_JOB_BUDGET_TOKENS = 120_000;
 export const JOB_LOG_TAIL_LINES = 40;
 export const JOB_RECOVERY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
 export const DEFAULT_JOB_MAX_STEPS = 4;
 export const MAX_JOB_MAX_STEPS = 20;
-export const MAX_AGENTS = 20;
+export const JOB_AGENT_HIGH_CONFIG_CANDIDATE = 8;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,12 +103,12 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
       continue;
     }
     if (arg === "--agents") {
-      requestedAgents = clampPositiveInt(args[index + 1], 1, MAX_AGENTS);
+      requestedAgents = normalizePositiveInt(args[index + 1]) ?? requestedAgents;
       index += 1;
       continue;
     }
     if (arg === "--running-cap" || arg === "--runningCap" || arg === "--cap") {
-      runningCap = clampPositiveInt(args[index + 1], DEFAULT_JOB_RUNNING_AGENT_CAP, MAX_AGENTS);
+      runningCap = normalizePositiveInt(args[index + 1]) ?? runningCap;
       index += 1;
       continue;
     }
@@ -176,6 +174,14 @@ export function clampPositiveInt(value: string | undefined, fallback: number, ma
     return fallback;
   }
   return Math.min(parsed, max);
+}
+
+function normalizePositiveInt(value: string | undefined): number | undefined {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return undefined;
+  }
+  return parsed;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +356,7 @@ export function createDurableJobAgents(
   status: DurableJobStatus,
   runningCap: number,
 ): DurableJobAgent[] {
-  const total = Math.max(1, Math.min(options.requestedAgents, MAX_AGENTS));
+  const total = Math.max(1, options.requestedAgents);
   const tasks = createDurableJobAgentTasks(options.goal, total);
   return Array.from({ length: total }, (_, index) => {
     const active = false;
@@ -572,8 +578,8 @@ export function formatJobList(jobs: DurableJobState[], context: JobContext): str
       return `${job.id}  lifecycle ${formatJobStateSummary(job.status)}  result ${formatJobResultStatus(job)}  label ${label}  agents ${job.agents.length}/${counts.running}  queued ${counts.queued} sleeping ${counts.sleeping} blocked ${counts.blocked} stale ${counts.stale}  step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}  goal ${truncateDisplay(job.goal, 42)}  next /job status ${job.id}`;
     }),
     context.language === "en-US"
-      ? `Running cap ${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} remains benchmark-only. Full troubleshooting is only in /job status <id>, /job report <id>, or /job logs <id>.`
-      : `\u771F\u5B9E\u8FD0\u884C\u4E0A\u9650 ${DEFAULT_JOB_RUNNING_AGENT_CAP}\uFF1B${JOB_AGENT_HIGH_CONFIG_CANDIDATE} \u4ECD\u662F benchmark \u5019\u9009\u3002\u5B8C\u6574\u6392\u67E5\u5165\u53E3\u53EA\u5728 /job status <id>\u3001/job report <id> \u6216 /job logs <id>\u3002`,
+      ? `No default 3/4/20 visible running cap; requested agents are scheduled under explicit/requested cap and resource guard. Full troubleshooting is only in /job status <id>, /job report <id>, or /job logs <id>.`
+      : `\u4E0D\u518D\u4EE5\u9ED8\u8BA4 3/4/20 \u4F5C\u4E3A\u7528\u6237\u53EF\u611F\u77E5\u8FD0\u884C\u4E0A\u9650\uFF1B\u8BF7\u6C42\u7684 agents \u4F1A\u6309\u663E\u5F0F/\u8BF7\u6C42 cap \u548C resource guard \u8C03\u5EA6\u3002\u5B8C\u6574\u6392\u67E5\u5165\u53E3\u53EA\u5728 /job status <id>\u3001/job report <id> \u6216 /job logs <id>\u3002`,
   ].join("\n");
 }
 

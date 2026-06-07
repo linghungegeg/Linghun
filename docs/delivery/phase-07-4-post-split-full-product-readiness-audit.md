@@ -99,7 +99,7 @@
 - **AW-OK6**: Agent idle/completed/stale/blocked 语义正确
 - **AW-OK7**: AbortController 管道完整（创建/清理/权限桥接）
 - **AW-OK8**: 子 agent explorer/planner type 强制 plan 模式（纯只读）
-- **AW-OK9**: 并发 agent 数限制 `DEFAULT_JOB_RUNNING_AGENT_CAP = 3`
+- **AW-OK9**: 历史审计项：当时记录了 agent 并发默认常量；后续已由 Phase 17A/07-18-1 源码修复改为显式/请求 cap + resource guard，不再保留固定默认 3/4/20 agent 上限。
 - **AW-OK10**: `cancelAgent` 取消后完整刷新：`syncBackgroundWithAgentStatus`、persist、`appendBackgroundTaskEvent` 之后，末尾调用 `deps().writeStatus(output, context)`（`job-agent-command-runtime.ts:3142`）。AW2 原报告称"未调用 writeStatus"为误报，源码事实不成立。
 
 #### 权限 (15 项)

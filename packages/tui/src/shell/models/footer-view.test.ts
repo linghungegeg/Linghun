@@ -85,7 +85,7 @@ describe("footer-view: estimated cost label", () => {
 });
 
 describe("buildFooterView: 整合", () => {
-  it("setupNeeded + cache 低命中 + index unknown 共同生效", () => {
+  it("setupNeeded + cache 低命中 + index unknown 共同生效，主 footer 不显示费用", () => {
     const result = buildFooterView({
       language: "zh-CN",
       width: 120,
@@ -101,7 +101,7 @@ describe("buildFooterView: 整合", () => {
     expect(result.modelDim).toBe(true);
     expect(result.cacheTone).toBe("warning");
     expect(result.view.index).toContain("?");
-    expect(result.view.cost).toContain("0.1000");
+    expect(result.view.cost).toBeUndefined();
     expect(result.view.contextUsage).toContain("10.0%");
   });
 });

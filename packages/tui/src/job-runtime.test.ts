@@ -10,7 +10,6 @@ import {
   DEFAULT_JOB_MAX_STEPS,
   DEFAULT_JOB_TIMEOUT_MS,
   type JobContext,
-  MAX_AGENTS,
   MAX_JOB_MAX_STEPS,
   type ParsedJobRunOptions,
   appendJobLog,
@@ -147,6 +146,22 @@ describe("parseJobRunOptions", () => {
     ]);
     expect(result.requestedAgents).toBe(5);
     expect(result.runningCap).toBe(2);
+  });
+
+  it("does not clamp requested agents or running cap to a hidden fixed 20", () => {
+    const result = parseJobRunOptions([
+      "--multi-agent",
+      "--agents",
+      "24",
+      "--running-cap",
+      "23",
+      "do stuff",
+    ]);
+    expect(result.requestedAgents).toBe(24);
+    expect(result.runningCap).toBe(23);
+
+    const agents = createDurableJobAgents(result, "running", result.runningCap ?? 1);
+    expect(agents).toHaveLength(24);
   });
 
   it("parses --tokens flag", () => {

@@ -141,7 +141,6 @@ export function buildFooterView(input: FooterViewInput): {
     input.reasoningLevel,
     input.reasoningSent,
   );
-  const costLabel = formatFooterCostLabel(input.language, input.estimatedCostCny);
   return {
     view: {
       permissionMode: input.permissionModeLabel,
@@ -150,7 +149,6 @@ export function buildFooterView(input: FooterViewInput): {
       index: indexLabel,
       cyclePermHint: input.cyclePermHint,
       reasoning: reasoningLabel,
-      cost: costLabel,
       contextUsage: input.contextUsageLabel,
       hint: input.hint,
       modelDim: modelInfo.dim,

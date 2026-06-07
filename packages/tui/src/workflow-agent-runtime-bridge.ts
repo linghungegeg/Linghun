@@ -1,4 +1,3 @@
-import { DEFAULT_JOB_RUNNING_AGENT_CAP } from "./job-runtime.js";
 import type { AgentType, BackgroundTaskState, DurableJobAgentStatus } from "./tui-data-types.js";
 import type {
   NormalizedWorkflowPlan,
@@ -261,7 +260,9 @@ export function bridgeWorkflowPlanToMainChainRequests(
   const phases = plan.phases as BridgeWorkflowPhase[];
   const currentPhase = selectCurrentPhase(phases, plan.currentPhaseId, options.currentPhaseId);
   const currentPhaseId = currentPhase?.id ?? options.currentPhaseId ?? plan.currentPhaseId ?? "";
-  const runningCap = normalizeRunningCap(options.runningCap ?? plan.budget.maxRunningAgents);
+  const runningCap =
+    normalizeRunningCap(options.runningCap ?? plan.budget.maxRunningAgents) ??
+    deriveBridgeRunningCap(currentPhase);
   const confirmedStopPoints = new Set(options.confirmedPhaseStopPoints ?? []);
   const phaseStopPointConfirmed = confirmedStopPoints.has(currentPhaseId);
   const phaseStatuses = phases.map((phase) => ({
@@ -852,11 +853,16 @@ function getRequestDurationEstimate(request: WorkflowMainChainRequest | null): n
   return request?.mainChain === "job" ? request.maxDurationMs : undefined;
 }
 
-function normalizeRunningCap(value: number | undefined): number {
+function normalizeRunningCap(value: number | undefined): number | undefined {
   if (!Number.isFinite(value) || value === undefined || value < 1) {
-    return DEFAULT_JOB_RUNNING_AGENT_CAP;
+    return undefined;
   }
   return Math.max(1, Math.floor(value));
+}
+
+function deriveBridgeRunningCap(phase: BridgeWorkflowPhase | undefined): number {
+  if (!phase) return 1;
+  return Math.max(1, phase.slices.length);
 }
 
 function summarizeRequests(

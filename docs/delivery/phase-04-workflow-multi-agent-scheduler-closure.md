@@ -39,7 +39,7 @@
 - `packages/tui/src/workflow-plan-schema.ts` 已有 `WorkflowSlice.dependsOnSliceIds`、budget、targetRuntime、projection 和 validation。
 - `packages/tui/src/workflow-planner-entry.ts` 已有 conservative workflow planner 和 bridge preview。
 - `packages/tui/src/workflow-agent-runtime-bridge.ts` 已把 workflow slice 转为主链 `/fork`、`/job`、`/agents`、verification、details proposal。
-- `packages/tui/src/job-agent-command-runtime.ts` 与 `packages/tui/src/job-runtime.ts` 已有 `/job --multi-agent` durable job batch、`Promise.all` agent pool、默认真实 running cap 3、`/fork`、`/agents`、background lifecycle。
+- `packages/tui/src/job-agent-command-runtime.ts` 与 `packages/tui/src/job-runtime.ts` 已有 `/job --multi-agent` durable job batch、`Promise.all` agent pool、requested/explicit running cap + resource guard 动态裁剪、`/fork`、`/agents`、background lifecycle；后续按 CCB 行为参考移除了 hidden fixed 20 agent cap。
 - `packages/tui/src/index.ts` 已有 `checkResourceGuard` / `checkBackgroundStartGuard`、全局后台 cap、kind cap 和 heavy mutex。
 
 ### Gaps closed
@@ -140,7 +140,7 @@
 - 无新增配置项。
 - 无 provider/model/env/key 变更。
 - 无 permission mode 变更。
-- `/job --running-cap <n>` 为现有 `/job` 命令新增参数；未传时保持默认 cap 3。
+- `/job --running-cap <n>` 为现有 `/job` 命令参数；未传时按 requested agents 派生，并受 resource guard 动态限制；不再有固定 3/4/20 agent cap。
 
 ## 命令
 
@@ -377,4 +377,3 @@ known_risks:
   - "fan-out DAG after dependencies is deferred"
   - "full job-runtime.test has unrelated budget display format failures"
 ```
-

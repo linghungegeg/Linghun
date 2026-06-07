@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_WORKFLOW_RUNNING_CAP,
   type WorkflowPlan,
   normalizeWorkflowPlan,
   projectWorkflowPlan,
@@ -82,7 +81,7 @@ describe("D.14H-B workflow plan schema", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
-    expect(result.plan.budget.maxRunningAgents).toBe(DEFAULT_WORKFLOW_RUNNING_CAP);
+    expect(result.plan.budget.maxRunningAgents).toBe(1);
     expect(result.plan.phases[0]?.slices[0]?.allowedToolClasses).toEqual(["readonly", "details"]);
     expect(result.plan.phases[0]?.slices[0]?.dependsOnSliceIds).toEqual([]);
     expect(result.plan.phases[0]?.slices[0]?.independent).toBe(false);
@@ -336,7 +335,7 @@ describe("D.14H-B workflow plan schema", () => {
     expect(errors).toContain("requires discovered=true, trusted=true, and executable=true");
   });
 
-  it("keeps default running cap at 3 and queues excess running slices", () => {
+  it("derives running cap from plan slices instead of a fixed default", () => {
     const slices = Array.from({ length: 5 }, (_, index) => ({
       id: `slice-${index + 1}`,
       title: `Slice ${index + 1}`,
@@ -369,8 +368,9 @@ describe("D.14H-B workflow plan schema", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const statuses = result.plan.phases[0]?.slices.map((slice) => slice.status);
-    expect(statuses.filter((status) => status === "running")).toHaveLength(3);
-    expect(statuses.slice(3)).toEqual(["queued", "queued"]);
+    expect(result.plan.budget.maxRunningAgents).toBe(5);
+    expect(statuses.filter((status) => status === "running")).toHaveLength(5);
+    expect(statuses).not.toContain("queued");
   });
 
   it("requires explicit independent semantics for parallel slices", () => {

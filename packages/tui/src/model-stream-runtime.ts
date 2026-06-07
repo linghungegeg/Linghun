@@ -547,6 +547,7 @@ export async function sendMessage(
       }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
+      let pendingAssistantPreviewText = "";
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       let roundChunkCount = 0;
       let roundHadUsage = false;
@@ -631,17 +632,17 @@ export async function sendMessage(
           const visibleText = textSanitizer.push(event.text);
           assistantText += visibleText;
           roundAssistantText += visibleText;
-          if (visibleText) {
-            writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
-          }
+          pendingAssistantPreviewText += visibleText;
           continue;
         }
         if (event.type === "tool_use") {
           const visibleText = textSanitizer.flush();
           assistantText += visibleText;
           roundAssistantText += visibleText;
-          if (visibleText) {
-            writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
+          pendingAssistantPreviewText += visibleText;
+          if (pendingAssistantPreviewText) {
+            writeAssistantPreviewDelta(output, assistantStreamBlockId, pendingAssistantPreviewText);
+            pendingAssistantPreviewText = "";
           }
           clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
@@ -725,8 +726,10 @@ export async function sendMessage(
       const finalVisibleText = textSanitizer.flush();
       assistantText += finalVisibleText;
       roundAssistantText += finalVisibleText;
-      if (finalVisibleText) {
-        writeAssistantPreviewDelta(output, assistantStreamBlockId, finalVisibleText);
+      pendingAssistantPreviewText += finalVisibleText;
+      if (toolCalls.length > 0 && pendingAssistantPreviewText) {
+        writeAssistantPreviewDelta(output, assistantStreamBlockId, pendingAssistantPreviewText);
+        pendingAssistantPreviewText = "";
       }
 
       if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
@@ -961,6 +964,7 @@ export async function sendMessage(
   }
 
   if (assistantText) {
+    startRequestActivity(output, context, "verifying_final_answer");
     // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
     // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
     {
@@ -1017,6 +1021,7 @@ export async function sendMessage(
     }
     replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     endAssistantStream(output);
+    clearRequestActivity(context);
     writeFinalAssistantText(output, assistantText);
     output.write("\n");
     await context.store.appendEvent(sessionId, {
@@ -1519,6 +1524,7 @@ async function streamFinalModelAnswerWithoutTools(
   let finishReason: string | undefined;
   let hadThinking = false;
   let ignoredRawToolProtocolText = false;
+  let pendingAssistantPreviewText = "";
   const runtime = runtimeFromContinuation(continuation);
   const preflight = await prepareMessagesForProviderPreflight({
     messages: continuation.messages,
@@ -1559,9 +1565,7 @@ async function streamFinalModelAnswerWithoutTools(
       clearRequestActivity(context);
       const visibleText = textSanitizer.push(event.text);
       assistantText += visibleText;
-      if (visibleText) {
-        writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
-      }
+      pendingAssistantPreviewText += visibleText;
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
@@ -1590,9 +1594,7 @@ async function streamFinalModelAnswerWithoutTools(
     if (event.type === "tool_use") {
       const visibleText = textSanitizer.flush();
       assistantText += visibleText;
-      if (visibleText) {
-        writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
-      }
+      pendingAssistantPreviewText += visibleText;
       await appendSystemEvent(
         context,
         sessionId,
@@ -1659,9 +1661,7 @@ async function streamFinalModelAnswerWithoutTools(
   }
   const finalVisibleText = textSanitizer.flush();
   assistantText += finalVisibleText;
-  if (finalVisibleText) {
-    writeAssistantPreviewDelta(output, assistantStreamBlockId, finalVisibleText);
-  }
+  pendingAssistantPreviewText += finalVisibleText;
   if (textSanitizer.hadRawToolProtocol()) {
     ignoredRawToolProtocolText = true;
     assistantText = "";
@@ -1694,6 +1694,7 @@ async function streamFinalModelAnswerWithoutTools(
     }
   }
   if (assistantText) {
+    startRequestActivity(output, context, "verifying_final_answer");
     const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
     if (verdict.status === "needs_disclaimer") {
       assistantText = await downgradeUnsupportedFinalAnswer(
@@ -1721,10 +1722,14 @@ async function streamFinalModelAnswerWithoutTools(
       assistantText = visibleAssistantText;
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
+    if (pendingAssistantPreviewText || !reuseAssistantStreamBlockId) {
+      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+    }
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
     endAssistantStream(output);
+    clearRequestActivity(context);
     writeFinalAssistantText(output, assistantText);
   }
   clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
@@ -1917,6 +1922,7 @@ export async function continueModelAfterToolResults(
       }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
+      let pendingAssistantPreviewText = "";
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       const continuationRuntime = runtimeFromContinuation(continuation);
       const preflight = await prepareMessagesForProviderPreflight({
@@ -1968,17 +1974,17 @@ export async function continueModelAfterToolResults(
           const visibleText = textSanitizer.push(event.text);
           assistantText += visibleText;
           roundAssistantText += visibleText;
-          if (visibleText) {
-            writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
-          }
+          pendingAssistantPreviewText += visibleText;
           continue;
         }
         if (event.type === "tool_use") {
           const visibleText = textSanitizer.flush();
           assistantText += visibleText;
           roundAssistantText += visibleText;
-          if (visibleText) {
-            writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
+          pendingAssistantPreviewText += visibleText;
+          if (pendingAssistantPreviewText) {
+            writeAssistantPreviewDelta(output, assistantStreamBlockId, pendingAssistantPreviewText);
+            pendingAssistantPreviewText = "";
           }
           clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
@@ -2045,8 +2051,10 @@ export async function continueModelAfterToolResults(
       const finalVisibleText = textSanitizer.flush();
       assistantText += finalVisibleText;
       roundAssistantText += finalVisibleText;
-      if (finalVisibleText) {
-        writeAssistantPreviewDelta(output, assistantStreamBlockId, finalVisibleText);
+      pendingAssistantPreviewText += finalVisibleText;
+      if (toolCalls.length > 0 && pendingAssistantPreviewText) {
+        writeAssistantPreviewDelta(output, assistantStreamBlockId, pendingAssistantPreviewText);
+        pendingAssistantPreviewText = "";
       }
       if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
         await appendSystemEvent(
@@ -2223,6 +2231,7 @@ export async function continueModelAfterToolResults(
     }
     continuationLoopCompleted = true;
     if (assistantText) {
+      startRequestActivity(output, context, "verifying_final_answer");
       // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
       // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
       {
@@ -2277,6 +2286,7 @@ export async function continueModelAfterToolResults(
       }
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       endAssistantStream(output);
+      clearRequestActivity(context);
       writeFinalAssistantText(output, assistantText);
       output.write("\n");
       await context.store.appendEvent(sessionId, {

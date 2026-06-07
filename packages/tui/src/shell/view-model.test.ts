@@ -1055,6 +1055,16 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     expect(result?.text).toBe("工具完成，继续处理…");
   });
 
+  it("maps final answer verification to a clear waiting state", () => {
+    const ctx = createContext({
+      requestActivityPhase: "verifying_final_answer",
+    } as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result).toBeDefined();
+    expect(result?.phase).toBe("continuing");
+    expect(result?.text).toBe("正在验证最终回答…");
+  });
+
   it("maps permission_waiting phase correctly", () => {
     const ctx = createContext({
       requestActivityPhase: "permission_waiting",
@@ -5882,7 +5892,7 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     expect(view.commandPanel).toBeUndefined();
   });
 
-  it("CommandPanel 提示只保留 Esc 关闭，不混入 Ctrl+O 展开", async () => {
+  it("CommandPanel 只有存在 detailsText 时才显示 Ctrl+O 详情提示", async () => {
     const source = await readFile(
       join(dirname(fileURLToPath(import.meta.url)), "components", "CommandPanel.tsx"),
       "utf8",
@@ -5891,7 +5901,8 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     expect(source).toContain("Esc 关闭面板");
     expect(source).toContain("Esc close");
     expect(source).not.toContain("Ctrl+O 展开详情");
-    expect(source).not.toContain("Ctrl+O details");
+    expect(source).toContain("Ctrl+O details");
+    expect(source).toContain("hasDetailsText ? `${hint} · ${detailsHint}` : hint");
   });
 
   it("D.14D-R P1-4: CommandPanel 空 title 不渲染顶部空框（无 ❯ 标题行）", async () => {
