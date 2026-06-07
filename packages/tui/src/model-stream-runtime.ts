@@ -1167,20 +1167,10 @@ function shouldSurfacePolicyHint(id: string, decision: PolicyDecision): boolean 
     id === "user-state-trust_repair" ||
     id === "user-state-high_stakes_release" ||
     id === "provider-cooldown" ||
-    (id === "blocked-runtime" && hasRealBlockedRuntime(decision)) ||
+    id === "blocked-runtime" ||
     id === "compact-before-provider" ||
     id === "provider-fallback"
   );
-}
-
-function hasRealBlockedRuntime(decision: PolicyDecision): boolean {
-  const runtime = decision.runtimeSignal;
-  if (runtime.workflowStatus === "blocked" || runtime.workflowStatus === "stale") return true;
-  if (runtime.agentStates.blocked + runtime.jobStates.blocked > 0) return true;
-  if (runtime.agentStates.stale + runtime.jobStates.stale > 0) return true;
-  if (runtime.agentStates.cancelled + runtime.jobStates.cancelled > 0) return true;
-  if (runtime.agentStates.timeout + runtime.jobStates.timeout > 0) return true;
-  return runtime.noPassStates.some((state) => /(?:blocked|stale|cancelled|timeout)/iu.test(state));
 }
 
 function enqueueMemoryCandidateHint(context: TuiContext, count: number): void {

@@ -793,21 +793,6 @@ describe("Meta scheduler runtime", () => {
   });
 
   it("stops PASS when agent or workflow runtime is blocked", () => {
-    const backgroundTasks: BackgroundTaskState[] = [
-      {
-        id: "agent-1",
-        kind: "agent",
-        title: "agent",
-        status: "stale",
-        startedAt: new Date(0).toISOString(),
-        updatedAt: new Date(0).toISOString(),
-        heartbeatIntervalMs: 1000,
-        staleAfterMs: 1000,
-        hasOutput: false,
-        userVisibleSummary: "stale agent",
-        result: "stale",
-      },
-    ];
     const workflow: NonNullable<WorkflowState["activeRun"]> = {
       id: "wf-1",
       goal: "ship",
@@ -819,12 +804,72 @@ describe("Meta scheduler runtime", () => {
     };
     const decision = evaluateMetaScheduler({
       ...baseInput(),
-      backgroundTasks,
       workflow,
     });
 
     expect(decision.shouldStopForBlockedRuntime).toBe(true);
     expect(decision.internalEvents).toContain("meta_scheduler:blocked_runtime_stop");
+  });
+
+  it("keeps historical non-pass task states out of blocked runtime stop", () => {
+    const backgroundTasks: BackgroundTaskState[] = [
+      makeBackgroundTask("agent-stale", "agent", "stale", "stale"),
+      makeBackgroundTask("agent-cancelled", "agent", "cancelled", "cancelled"),
+      makeBackgroundTask("agent-blocked", "agent", "blocked", "fail"),
+      makeBackgroundTask("job-timeout", "job", "timeout", "timeout"),
+      makeBackgroundTask("job-done", "job", "completed", "partial"),
+    ];
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      backgroundTasks,
+    });
+
+    expect(decision.shouldStopForBlockedRuntime).toBe(false);
+    expect(decision.internalEvents).not.toContain("meta_scheduler:blocked_runtime_stop");
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).not.toContain("blocked-runtime");
+    expect(decision.policyDecision.verificationSignal.route.noPassReasons).toEqual(
+      expect.arrayContaining([
+        "agent:stale",
+        "agent:cancelled",
+        "agent:blocked",
+        "job:timeout",
+        "job:completed_not_pass",
+      ]),
+    );
+  });
+
+  it("keeps terminal blocked workflow history out of blocked runtime stop", () => {
+    const workflow: NonNullable<WorkflowState["activeRun"]> = {
+      id: "wf-history",
+      goal: "ship",
+      planId: "plan-1",
+      status: "blocked",
+      steps: [
+        {
+          id: "s1",
+          title: "audit",
+          status: "blocked",
+          runtime: "agent",
+          evidenceRefs: [],
+          summary: "old blocked step",
+          endedAt: new Date(0).toISOString(),
+        },
+      ],
+      startedAt: new Date(0).toISOString(),
+      endedAt: new Date(1).toISOString(),
+      result: "blocked",
+    };
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      workflow,
+    });
+
+    expect(decision.shouldStopForBlockedRuntime).toBe(false);
+    expect(decision.internalEvents).not.toContain("meta_scheduler:blocked_runtime_stop");
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).not.toContain("blocked-runtime");
+    expect(decision.policyDecision.verificationSignal.route.noPassReasons).toContain(
+      "workflow:blocked",
+    );
   });
 
   it("keeps runtime internals off the main screen", () => {

@@ -322,7 +322,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     typeof input.assistantText === "string" && hasHighRiskCompletionClaim(input.assistantText);
   const toolFailure = Boolean(input.lastToolFailure);
   const providerFailure = Boolean(input.providerFailure);
-  const blockedRuntime = hasBlockedAgentOrWorkflow(input.backgroundTasks, input.workflow);
+  const blockedRuntime = hasActiveBlockedWorkflow(input.workflow);
   const pressure = computeContextPressure(
     input.messages,
     input.estimatedContextChars,
@@ -1459,24 +1459,13 @@ function formatIndexStrategyDirective(
   return "Index strategy: error; use direct source reads/local search and surface a short degraded index action.";
 }
 
-function hasBlockedAgentOrWorkflow(
-  backgroundTasks: BackgroundTaskState[],
-  workflow: WorkflowState["activeRun"] | undefined,
-): boolean {
-  if (workflow?.status === "blocked") return true;
-  if (workflow?.steps.some((step) => step.status === "blocked" || step.status === "stale")) {
+function hasActiveBlockedWorkflow(workflow: WorkflowState["activeRun"] | undefined): boolean {
+  if (workflow?.status === "blocked") return !workflow.endedAt;
+  if (
+    workflow?.status === "running" &&
+    workflow.steps.some((step) => step.status === "blocked" || step.status === "stale")
+  ) {
     return true;
   }
-  return backgroundTasks.some(
-    (task) =>
-      (task.kind === "agent" || task.kind === "job") &&
-      (task.status === "blocked" ||
-        task.status === "paused" ||
-        task.status === "stale" ||
-        task.status === "cancelled" ||
-        task.status === "timeout" ||
-        task.result === "stale" ||
-        task.result === "cancelled" ||
-        task.result === "timeout"),
-  );
+  return false;
 }

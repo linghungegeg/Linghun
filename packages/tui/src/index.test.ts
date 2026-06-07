@@ -24692,6 +24692,49 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(raw).toContain("blocked_runtime_stop");
   });
 
+  it("Policy: historical background states do not emit blocked runtime hints", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-history-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks.push(
+      createBackgroundTaskFixture("agent", {
+        id: "agent-history-stale",
+        status: "stale",
+        result: "stale",
+      }),
+      createBackgroundTaskFixture("agent", {
+        id: "agent-history-cancelled",
+        status: "cancelled",
+        result: "cancelled",
+      }),
+      createBackgroundTaskFixture("agent", {
+        id: "agent-history-blocked",
+        status: "blocked",
+        result: "fail",
+      }),
+      createBackgroundTaskFixture("job", {
+        id: "job-history-timeout",
+        status: "timeout",
+        result: "timeout",
+      }),
+    );
+
+    await __testSendMessage(
+      "继续处理当前 workflow 状态",
+      context,
+      createTextGateway("先看当前状态。"),
+      new MemoryOutput(),
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).not.toContain("策略：已有任务阻塞，先检查 workflow/agent 状态。");
+    const transcript = (await store.resume(session.id)).transcript;
+    const raw = JSON.stringify(transcript);
+    expect(raw).not.toContain("blocked_runtime_stop");
+    expect(raw).toContain("no-pass-without-verification");
+  });
+
   it("Policy: latest verification and running background tasks become risk signals", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-policy-78-signals-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
