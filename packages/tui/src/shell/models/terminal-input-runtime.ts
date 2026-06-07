@@ -13,7 +13,24 @@ export type TerminalInputKey = Pick<
   "backspace" | "delete" | "ctrl" | "meta" | "return" | "shift"
 >;
 
-const DELETE_SEQUENCES = new Set(["\x1B[3~", "\x1B[3;2~", "\x1B[3;3~", "\x1B[3;5~"]);
+const DELETE_SEQUENCES = new Set([
+  "\x1B[3~",
+  "\x1B[3;2~",
+  "\x1B[3;3~",
+  "\x1B[3;4~",
+  "\x1B[3;5~",
+  "\x1B[3;6~",
+  "\x1B[3;7~",
+  "\x1B[3;8~",
+  "[3~",
+  "[3;2~",
+  "[3;3~",
+  "[3;4~",
+  "[3;5~",
+  "[3;6~",
+  "[3;7~",
+  "[3;8~",
+]);
 const BACKSPACE_SEQUENCES = new Set(["\x7F", "\b"]);
 
 export function normalizeTerminalInput(input: string, key: TerminalInputKey): TerminalInputAction {
@@ -47,8 +64,11 @@ export function isBackspaceSequence(input: string): boolean {
 }
 
 export function isMultilineEnterSequence(input: string): boolean {
-  if (!input.startsWith("\x1B[")) return false;
-  return isCsiU(input, [10, 13, 57414]) || isModifyOtherKeys(input, [10, 13, 57414]);
+  return (
+    isCsiU(input, [10, 13, 57414]) ||
+    isCsiTilde(input, [10, 13, 57414]) ||
+    isModifyOtherKeys(input, [10, 13, 57414])
+  );
 }
 
 export function sanitizeTerminalText(value: string): string {
@@ -63,20 +83,38 @@ export function sanitizeTerminalText(value: string): string {
 }
 
 function isCsiU(input: string, codes: number[]): boolean {
-  if (!input.startsWith("\x1B[") || !input.endsWith("u")) return false;
-  const parts = input.slice(2, -1).split(";");
+  const body = csiBody(input, "u");
+  if (!body) return false;
+  const parts = body.split(";");
+  const code = Number.parseInt(parts[0] ?? "", 10);
+  const modifier = Number.parseInt((parts[1] ?? "").split(":")[0] ?? "", 10);
+  return codes.includes(code) && modifier > 1;
+}
+
+function isCsiTilde(input: string, codes: number[]): boolean {
+  const body = csiBody(input, "~");
+  if (!body) return false;
+  const parts = body.split(";");
+  if (parts.length < 2 || parts[0] === "27") return false;
   const code = Number.parseInt(parts[0] ?? "", 10);
   const modifier = Number.parseInt((parts[1] ?? "").split(":")[0] ?? "", 10);
   return codes.includes(code) && modifier > 1;
 }
 
 function isModifyOtherKeys(input: string, codes: number[]): boolean {
-  if (!input.startsWith("\x1B[") || !input.endsWith("~")) return false;
-  const parts = input.slice(2, -1).split(";");
+  const body = csiBody(input, "~");
+  if (!body) return false;
+  const parts = body.split(";");
   if (parts.length < 3 || parts[0] !== "27") return false;
   const modifier = Number.parseInt(parts[1] ?? "", 10);
   const code = Number.parseInt(parts[2] ?? "", 10);
   return codes.includes(code) && modifier > 1;
+}
+
+function csiBody(input: string, suffix: string): string | undefined {
+  const start = input.startsWith("\x1B[") ? 2 : input.startsWith("[") ? 1 : -1;
+  if (start < 0 || !input.endsWith(suffix)) return undefined;
+  return input.slice(start, -suffix.length);
 }
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape sequences inherently contain control characters.

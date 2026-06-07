@@ -2852,6 +2852,24 @@ describe("Windows TTY terminal capability detection", () => {
     }
   });
 
+  it("Windows TTY with TERM still enables extended keyboard reporting on modern Windows", () => {
+    if (process.platform !== "win32") return;
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", undefined);
+    vi.stubEnv("WT_SESSION", undefined);
+    vi.stubEnv("TERM_PROGRAM", undefined);
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("ConEmuPID", undefined);
+    vi.stubEnv("CONEMUDIR", undefined);
+    vi.stubEnv("MSYSTEM", undefined);
+    vi.stubEnv("ALACRITTY_WINDOW_ID", undefined);
+    resetTerminalCapabilityCache();
+
+    const capability = detectTerminalCapability();
+    expect(capability.shiftEnter).toBe(true);
+    expect(capability.keyboardProtocols).toEqual(["csi-u", "modifyOtherKeys"]);
+  });
+
   it("LINGHUN_TERMINAL_TIER=legacy forces shouldUseInkShell=false", () => {
     vi.unstubAllEnvs();
     resetTerminalCapabilityCache();

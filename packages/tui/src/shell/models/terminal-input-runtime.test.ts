@@ -20,7 +20,12 @@ describe("terminal input normalization", () => {
   it("recognizes Delete from Ink key and raw CSI sequences", () => {
     expect(normalizeTerminalInput("", { ...key, delete: true })).toEqual({ type: "delete" });
     expect(normalizeTerminalInput("\x1B[3~", key)).toEqual({ type: "delete" });
+    expect(normalizeTerminalInput("[3~", key)).toEqual({ type: "delete" });
+    expect(normalizeTerminalInput("\x1B[3;4~", key)).toEqual({ type: "delete" });
     expect(isDeleteSequence("\x1B[3;5~")).toBe(true);
+    expect(isDeleteSequence("[3;5~")).toBe(true);
+    expect(isDeleteSequence("\x1B[51;5u")).toBe(true);
+    expect(isDeleteSequence("[51;5u")).toBe(true);
   });
 
   it("recognizes Backspace from DEL/BS and Ink key", () => {
@@ -49,8 +54,13 @@ describe("terminal input normalization", () => {
       type: "newline",
     });
     expect(isMultilineEnterSequence("\x1B[13;2u")).toBe(true);
+    expect(isMultilineEnterSequence("[13;2u")).toBe(true);
     expect(isMultilineEnterSequence("\x1B[10;3u")).toBe(true);
+    expect(isMultilineEnterSequence("\x1B[13;2~")).toBe(true);
+    expect(isMultilineEnterSequence("[13;2~")).toBe(true);
+    expect(isMultilineEnterSequence("\x1B[13;5~")).toBe(true);
     expect(isMultilineEnterSequence("\x1B[27;2;13~")).toBe(true);
+    expect(isMultilineEnterSequence("[27;2;13~")).toBe(true);
     expect(isMultilineEnterSequence("\x1B[1;2C")).toBe(false);
   });
 
