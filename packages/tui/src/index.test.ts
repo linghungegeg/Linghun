@@ -6771,10 +6771,10 @@ describe("Phase 06 TUI slash commands", () => {
     const archStep = run?.steps.find((step) => step.id === "slice-architecture-review");
     expect(archStep?.status).toBe("partial");
     expect(run?.steps.some((step) => step.id === "slice-implement")).toBe(false);
-    expect(run?.steps.find((step) => step.id === "slice-stable-point")?.status).not.toBe("queued");
-    expect(run?.steps.find((step) => step.id === "slice-stable-point")?.summary).not.toContain(
-      "slice dependency not satisfied",
-    );
+    expect(run?.steps.some((step) => step.id === "slice-stable-point")).toBe(false);
+    expect(run?.steps.find((step) => step.id === "slice-verify")?.dependsOnSliceIds).toEqual([
+      "slice-architecture-review",
+    ]);
     expect(output.text).not.toContain("slice dependency not satisfied: slice-architecture-review");
     expect(run?.steps.some((step) => step.status !== "queued" && step.id !== "slice-explore")).toBe(
       true,

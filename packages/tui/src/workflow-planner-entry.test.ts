@@ -313,7 +313,7 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     if (!result.ok) return;
     const slices = result.plan.phases[0].slices;
     expect(slices.some((s) => s.id === "slice-implement")).toBe(false);
-    expect(slices.find((s) => s.id === "slice-stable-point")?.dependsOnSliceIds).toEqual([
+    expect(slices.find((s) => s.id === "slice-verify")?.dependsOnSliceIds).toEqual([
       "slice-architecture-review",
     ]);
     expect(result.bridgeResult.requests.some((request) => request.safety.mutating)).toBe(false);
@@ -348,27 +348,24 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     expect(archEvidence?.passEvidence).toBe(false);
   });
 
-  it("generates stable-point suggestion slice as proposal-only readonly", () => {
+  it("does not inject a stable-point suggestion slice into workflow execution", () => {
     for (const mode of ["plan", "default", "auto-review", "full-access"] as const) {
       const result = generateWorkflowPlanPreview(goal({ permissionMode: mode }));
       expect(result.ok).toBe(true);
       if (!result.ok) continue;
-      const stableSlice = result.plan.phases[0].slices.find((s) => s.id === "slice-stable-point");
-      expect(stableSlice).toBeDefined();
-      expect(stableSlice?.targetRuntime?.mutating).toBe(false);
-      expect(stableSlice?.nextAction).toContain("proposal only");
+      expect(result.plan.phases[0].slices.some((s) => s.id === "slice-stable-point")).toBe(false);
+      expect(JSON.stringify(result.plan)).not.toContain("Suggest git stable point");
     }
   });
 
-  it("stable-point does not auto-commit or auto-snapshot", () => {
+  it("workflow planner does not auto-commit or auto-snapshot", () => {
     const result = generateWorkflowPlanPreview(goal());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const json = JSON.stringify(result);
     expect(json).not.toContain('"autoCommit"');
     expect(json).not.toContain('"autoSnapshot"');
-    const stableSlice = result.plan.phases[0].slices.find((s) => s.id === "slice-stable-point");
-    expect(stableSlice?.acceptanceCriteria?.[0]).toContain("proposal only");
+    expect(json).not.toContain("slice-stable-point");
   });
 
   it("controlled memory ref injects workspace_cache reference without writing memory", () => {

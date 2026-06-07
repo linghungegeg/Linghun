@@ -320,27 +320,11 @@ function buildSlicesForGoal(
       : "slice-implement";
 
   slices.push({
-    id: "slice-stable-point",
-    title: "Suggest git stable point",
-    role: "verifier",
-    status: "queued",
-    dependsOnSliceIds: [lastExecutionSlice],
-    independent: false,
-    canRunInParallel: false,
-    targetRuntime: { kind: "details", view: "evidence", mutating: false },
-    acceptanceCriteria: [
-      "suggest git stable point check (proposal only, no auto-commit or snapshot)",
-    ],
-    nextAction:
-      "Suggest creating a git stable point before/after execution. This is a proposal only — do not auto-commit or snapshot.",
-  });
-
-  slices.push({
     id: "slice-verify",
     title: "Verify result",
     role: "verifier",
     status: "queued",
-    dependsOnSliceIds: ["slice-stable-point"],
+    dependsOnSliceIds: [lastExecutionSlice],
     independent: false,
     canRunInParallel: false,
     targetRuntime: { kind: "verification", level: "typecheck", mutating: false },
