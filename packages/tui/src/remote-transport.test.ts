@@ -146,6 +146,20 @@ describe("D.14E remote transport — webhook payload builders", () => {
     expect(build).toEqual({ ok: false, reason: "missing_endpoint" });
   });
 
+  it("blocks signing-secret channels when the secret is unresolved", () => {
+    const build = buildWebhookRequest(
+      channel("feishu", {
+        transport: "webhook",
+        endpoint: "https://open.feishu.cn/open-apis/bot/v2/hook/tok",
+        signingSecretRef: "FEISHU_SIGNING_SECRET",
+      }),
+      event(),
+      undefined,
+      NOW,
+    );
+    expect(build).toEqual({ ok: false, reason: "missing_signing_secret" });
+  });
+
   it("payload body carries only the redacted summary, never raw secrets", () => {
     const build = buildWebhookRequest(
       channel("feishu", {

@@ -549,226 +549,35 @@ function formatHelpDetails(language: Language): string {
 }
 
 function formatHelp(language: Language): string {
-  if (language === "en-US") {
-    return `Available commands:
-  /help                 Show help
-  /features             Show default feature policy and disabled automation boundaries
-  /language zh-CN|en-US Switch UI language
-  /model                Show current model
-  /model setup          Configure API address, key, model, and reasoning level
-  /model doctor         Alias of /model route doctor
-  /model route          Show role-based model routes
-  /model route doctor   Diagnose role provider/model/capability/budget
-  /model route set <role> <model>  Set one role route
-  /vision <path>        Record VisionObservation evidence through vision role
-  /image generate <prompt> Generate image asset metadata through image role
-  /skills               List local skills metadata summaries
-  /skills status|doctor|validate [id] Show Connect Lite lifecycle status
-  /skills install local|git|github ... Install skill metadata with trust/source record
-  /skills enable|disable <id> Persist local skill enablement
-  /workflows            List workflow templates, risks, write/validation hints
-  /workflows plan <goal> Preview a workflow plan without executing
-  /workflows run <goal> Start a real durable workflow job
-  /workflows <name>     Show Start Gate for one workflow
-  /plugins              List local plugin manifests and contributions
-  /plugins doctor       Diagnose plugin lifecycle and load errors
-  /plugins status|doctor|validate [id] Diagnose plugin lifecycle and load errors
-  /plugins install local|git|github ... Install plugin metadata with trust/source record
-  /plugins enable|disable <id> Persist local plugin enablement
-  /doctor [readiness]   Show local terminal readiness checklist; does not run real smoke
-  /doctor project       Show Project Doctor, drift/context/rollback/cost Lite sections
-  /doctor hooks         Diagnose hook sources, events, timeout, logs, and cache impact
-  /doctor runner        Diagnose native runner resolver, protocol, and Node fallback
-  /problems             Show local Problems Lite summary from runtime evidence
-  /sessions             List sessions
-  /sessions resume <id> Resume a session using structured handoff
-  /resume [id]          Resume latest or selected session without full transcript injection
-  /branch [purpose]     Create a normal branch session from structured handoff
-  /git [status|stable|worktree|doctor]  Git status / stable-point hint / worktree (read-only)
-  /worktree             List git worktrees (read-only)
-  /checkpoint [list|stable]   Linghun snapshot checkpoints and stable-point hints
-  /memory               Show memory and handoff status
-  /memory storage       Show sessions/memory/log/cache storage paths
-  /memory review        Review candidate memories before accepting
-  /memory learn [on|off|status]  Toggle auto-learning or show learning status
-  /memory accept <id>   Accept a candidate memory
-  /memory delete <id>   Delete a candidate memory in this session
-  /memory forget <id>   Alias for /memory delete
-  /memory init          Create a basic LINGHUN.md template on explicit request
-  /memory import sessions [source] [query]  Import external AI session summary/evidence only
-  /failures             Show reusable lessons from real failures (provider/tool/verification/git/final-gate/report-guard/resource-cap)
-  /failures resolve <id>  Mark a failure lesson resolved (stops surfacing it to the model)
-  /failures ignore <id>   Mute a failure lesson without deleting it
-  /mode                 Show permission mode
-  /mode default|auto-review|plan|full-access  Switch mode
-  /tab                  Shift+Tab equivalent: cycle common modes
-  /plan                 Show structured plan options
-  /plan accept [id]     Accept a plan and return to default
-  /permissions          Show permission rules
-  /background           Show collapsed background task summaries
-  /job                  Manage local durable jobs (list/run/pause/resume/cancel/status/logs/report)
-  /agents               List agent status, transcripts, and usage
-  /agents show <id>     Show one agent detail
-  /agents cancel <id>   Interrupt one agent without stopping the main session
-  /fork <type> <task>   Start explorer/planner/verifier/worker from trimmed handoff
-  /rewind               List checkpoints
-  /rewind restore <id>  Restore a checkpoint
-  /btw <question>       Answer a temporary question without changing Todo/Plan/checkpoints
-  /interrupt            Mark current running background task as cancelled
-  /claim-check <claim>  Downgrade unsupported final claims
-  /verify [plan|last|smoke] Generate or run verification
-  /review               Review diff, risks, and verification evidence
-  /cache-log            Show recent cache usage records
-  /cache-log config size <n>  Set cache history size
-  /cache-log export [path]  Export recent cache usage records
-  /cache status         Show cache status and freshness
-  /cache warmup|refresh Attempt cache warmup or refresh
-  /compact              Compact long conversation context on request
-  /break-cache status   Show cache freshness changes
-  /mcp [status]         Show MCP server status
-  /mcp tools            Show stable MCP tool summary
-  /mcp doctor           Diagnose MCP server availability
-  /mcp validate [id]    Validate MCP source/trust/enablement metadata
-  /mcp add local <id> <command> [args...] Register local MCP command metadata
-  /mcp update <id> local <command> [args...] Update local MCP command metadata
-  /mcp enable|disable|remove <id> Manage MCP server lifecycle
-  /index status [--fresh] Show fast codebase-memory status; --fresh runs detect_changes
-  /index doctor         Diagnose bundled/managed codebase-memory runtime
-  /index check          Run explicit freshness check with detect_changes
-  /index init fast      Build a fast local index on explicit request
-  /index refresh        Refresh the current project index
-  /index search <query> Query codebase-memory and record evidence
-  /index architecture   Show short architecture summary
-  /usage                Show token/cache usage summary
-  /stats                Show local cache/cost statistics
-  /stats endpoints      Group usage by endpoint
-  /read <path>          Read file
-  /write <path> <text>  Write file
-  /edit <path> <old> => <new>  Unique replacement
-  /multiedit <path> <old> => <new>  Minimal multi-edit entry
-  /grep <pattern> [path] Search text
-  /glob <pattern> [path] Match files
-  /bash <command>       Run command with collapsed task status and full log
-  /todo                 Show tasks
-  /diff                 Show changed file summary
-  /config               Show consolidated configuration overview with next actions
-  /exit                 Exit
+  const isEn = language === "en-US";
+  const lines = [
+    isEn ? "Available commands (registry-backed):" : "可用命令（来自命令 registry）：",
+  ];
+  lines.push(...formatRegistryBackedHelpLines(language));
+  lines.push(
+    "",
+    isEn
+      ? "Slash commands, config keys, and transcript event fields stay in English."
+      : "普通输入会发送给当前 provider/model，并写入 JSONL transcript。工具命令也会写入 transcript。",
+  );
+  return lines.join("\n");
+}
 
-Slash commands, config keys, and transcript event fields stay in English.`;
+function formatRegistryBackedHelpLines(language: Language): string[] {
+  const catalog = getUserVisibleCommandCapabilities();
+  const lines: string[] = [];
+  for (const group of COMMAND_GROUP_ORDER) {
+    const commands = catalog.filter((item) => item.group === group);
+    if (commands.length === 0) continue;
+    const label = COMMAND_GROUP_LABELS[group];
+    lines.push(language === "en-US" ? `${label.en}:` : `${label.zh}：`);
+    const widest = Math.min(Math.max(...commands.map((item) => item.slash.length), 0) + 2, 18);
+    for (const command of commands) {
+      const title = language === "en-US" ? command.titleEn : command.titleZh;
+      const description = language === "en-US" ? command.descriptionEn : command.descriptionZh;
+      const risk = command.risk === "readonly" ? "" : ` [${command.risk}]`;
+      lines.push(`  ${command.slash.padEnd(widest, " ")}${title} — ${description}${risk}`);
+    }
   }
-  return `可用命令：
-  /help                 显示帮助
-  /features             查看默认功能策略与关闭的自动化边界
-  /language zh-CN|en-US 切换界面语言
-  /model                显示当前模型
-  /model setup          配置 API 地址、key、模型名称和推理等级
-  /model doctor         等价于 /model route doctor
-  /model route          查看角色模型路由
-  /model route doctor   诊断角色 provider/model/capability/budget
-  /model route set <role> <model>  设置单个角色路由
-  /vision <path>        通过 vision role 记录 VisionObservation evidence
-  /image generate <prompt>  通过 image role 生成本地资产 metadata
-  /skills               列出本地 skill metadata 摘要
-  /skills status|doctor|validate [id] 查看 Connect Lite 生命周期状态
-  /skills install local|git|github ... 安装 skill metadata 与来源/信任记录
-  /skills enable <id>   启用并信任本地 skill
-  /skills disable <id>  禁用本地 skill，重启后保留
-  /workflows            列出 workflow 模板、风险、写文件和验证提示
-  /workflows plan <目标>  预览 workflow 计划，不执行
-  /workflows run <目标>   启动真实 durable workflow job
-  /workflows <name>     展示单个 workflow 的 Start Gate
-  /plugins              列出本地 plugin manifest 与贡献项
-  /plugins doctor       诊断 plugin 生命周期和加载错误
-  /plugins status|doctor|validate [id] 诊断 plugin 生命周期和加载错误
-  /plugins install local|git|github ... 安装 plugin metadata 与来源/信任记录
-  /plugins enable|disable <id> 持久化启停 plugin
-  /doctor [readiness]   查看本地终端就绪 checklist；不运行真实 smoke
-  /doctor project       查看 Project Doctor、drift/context/rollback/cost Lite 小节
-  /doctor hooks         诊断 hook 来源、事件、timeout、日志和 cache 影响
-  /doctor runner        诊断 native runner 解析、协议与 Node fallback
-  /problems             查看来自 runtime evidence 的 Problems Lite 摘要
-  /sessions             列出当前项目会话
-  /sessions resume <id> 基于结构化 handoff 恢复历史会话
-  /resume [id]          恢复最近或指定会话，不注入完整历史
-  /branch [目的]        基于结构化 handoff 创建普通分支会话
-  /git [status|stable|worktree|doctor]  Git 状态 / 稳定点建议 / worktree（只读）
-  /worktree             查看 git worktree 列表（只读）
-  /checkpoint [list|stable]   查看 Linghun snapshot checkpoint 与稳定点建议
-  /memory               查看记忆与 handoff 状态
-  /memory storage       查看会话/记忆/日志/cache 存储路径
-  /memory review        审查候选记忆
-  /memory learn [on|off|status]  开关自动学习或查看学习状态
-  /memory accept <id>   确认写入候选记忆记录
-  /memory delete <id>   删除本会话候选/已接收记忆记录
-  /memory forget <id>   等同 /memory delete
-  /memory init          显式生成基础 LINGHUN.md 模板
-  /memory import sessions [source] [query]  只导入外部 AI 会话摘要和证据引用
-  /failures             查看从真实失败（provider/工具/验证/git/最终回答降级/报告守卫/并发上限）提取的可复用教训
-  /failures resolve <id>  标记某条失败教训已解决（不再投影给模型）
-  /failures ignore <id>   忽略某条失败教训但保留记录
-  /mode                 查看权限模式
-  /mode default|auto-review|plan|full-access  切换模式
-  /tab                  等价 Shift+Tab：循环切换常用模式
-  /plan                 输出结构化可选方案
-  /plan accept [id]     确认方案并回到 default 执行
-  /permissions          查看权限规则
-  /permissions add allow|ask|deny <tool|*> [risk]  添加规则
-  /permissions remove <id> 删除规则
-  /permissions recent   查看最近拒绝
-  /permissions recent delete <id> 删除单条最近拒绝
-  /permissions recent clear  清空最近拒绝
-  /background           查看后台任务一行摘要
-  /job                  管理本地 durable job（list/run/pause/resume/cancel/status/logs/report）
-  /details              查看 evidence/background/details 摘要
-  /agents               查看 agent 状态、transcript 和 usage
-  /agents show <id>     查看单个 agent 详情
-  /agents cancel <id>   中断单个 agent，不影响主会话
-  /fork <类型> <任务>    从裁剪 handoff 派生 explorer/planner/verifier/worker
-  /rewind               列出 checkpoint
-  /rewind restore <id>  恢复 checkpoint
-  /btw <question>       临时插问，不修改 Todo/Plan/checkpoint
-  /interrupt            标记当前长任务已取消
-  /claim-check <claim>  降级缺少证据的最终结论
-  /verify [plan|last|smoke] 生成或运行验证
-  /review               按代码审查口径输出风险与建议
-  /cache-log            查看最近 cache usage 记录
-  /cache-log config size <n>  设置 cache 历史容量
-  /cache-log export [path]  导出最近 cache usage 记录
-  /cache status         查看 cache 状态与 freshness
-  /cache warmup|refresh 尝试预热或刷新 cache
-  /compact              按需压缩长对话上下文
-  /break-cache status   查看 cache freshness 变化
-  /mcp                  查看 MCP 状态
-  /mcp status           查看 MCP server 状态
-  /mcp tools            查看稳定排序的 MCP tool 摘要
-  /mcp doctor           诊断 MCP server 可用性
-  /mcp validate [id]    校验 MCP 来源/信任/启用 metadata
-  /mcp add local <id> <command> [args...] 注册本地 MCP command metadata
-  /mcp update <id> local <command> [args...] 更新本地 MCP command metadata
-  /mcp enable|disable|remove <id> 管理 MCP server 生命周期
-  /index status [--fresh] 查看 fast 索引状态；--fresh 才运行 detect_changes
-  /index doctor         诊断 bundled/managed codebase-memory runtime
-  /index check          显式运行 detect_changes 新鲜度检查
-  /index init fast      显式建立 fast 索引
-  /index refresh        显式刷新当前项目索引
-  /index search <query> 查询索引并写入 evidence
-  /index architecture   输出短架构摘要并写入 evidence
-  /usage                查看 token/cache usage 汇总
-  /stats                查看本地 cache/cost 统计
-  /stats endpoints      按 endpoint 聚合 usage
-  /read <path>          读取文件
-  /write <path> <text>  写入文件
-  /edit <path> <old> => <new>  唯一替换
-  /multiedit <path> <old> => <new>  批量编辑的最小入口
-  /grep <pattern> [path] 搜索文本
-  /glob <pattern> [path] 匹配文件
-  /bash <command>       执行命令并保存完整日志
-  /todo                 查看任务
-  /todo add <text>      添加任务
-  /todo start|done|block <id> 更新任务状态
-  /diff                 显示本轮工具改动摘要
-  /config               一站式查看当前模型/权限/语言/索引/MCP/记忆/缓存/后台/远程/钩子/插件/技能/工作流
-  /exit                 退出
-
-普通输入会发送给当前 provider/model，并写入 JSONL transcript。工具命令也会写入 transcript。`;
+  return lines;
 }

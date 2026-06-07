@@ -1,10 +1,11 @@
 import type { LinghunConfig } from "@linghun/config";
+import type { SessionStore } from "@linghun/core";
+import type { ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import {
   CODEBASE_MEMORY_COMMAND as SHARED_CODEBASE_MEMORY_COMMAND,
   CODEBASE_MEMORY_ENV as SHARED_CODEBASE_MEMORY_ENV,
+  readPositiveIntEnv,
 } from "@linghun/shared";
-import type { SessionStore } from "@linghun/core";
-import type { ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import type { Language, PermissionMode } from "@linghun/shared";
 import type { ToolContext, ToolName } from "@linghun/tools";
 import type {
@@ -490,13 +491,6 @@ export type TuiContext = {
   /** Phase 7.18 — visible-only transcript virtualization row-height cache. */
   transcriptBlockHeightCache?: Record<string, { height: number; width: number; textHash: string }>;
 };
-
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
 
 export const VERIFICATION_COMMAND_TIMEOUT_MS = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS;
 

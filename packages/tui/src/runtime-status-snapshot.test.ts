@@ -79,4 +79,28 @@ describe("runtime status snapshot", () => {
     expect(text).toContain("当前：没有正在运行的任务。");
     expect(text).toContain("最近：verification 通过 · typecheck 通过。");
   });
+
+  it("sorts missing or invalid endedAt values behind valid terminal tasks", () => {
+    const snapshot = createRuntimeStatusSnapshot({
+      language: "zh-CN",
+      backgroundTasks: [
+        task({
+          id: "invalid",
+          status: "completed",
+          updatedAt: "",
+          currentStep: "invalid date",
+        }),
+        task({
+          id: "valid",
+          status: "completed",
+          updatedAt: "2026-06-07T10:00:00.000Z",
+          currentStep: "valid date",
+        }),
+      ],
+      lastVerification: { status: "pass", summary: "old", endedAt: "" },
+    });
+
+    expect(snapshot.recentTerminalTasks[0]?.id).toBe("valid");
+    expect(snapshot.recentTerminalTasks.map((item) => item.id ?? item.kind)).toContain("invalid");
+  });
 });

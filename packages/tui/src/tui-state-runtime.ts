@@ -28,9 +28,10 @@ import {
 } from "@linghun/config";
 import { builtInTools } from "@linghun/tools";
 import { createCacheFreshness } from "./cache-freshness.js";
-import { formatError, truncateDisplay } from "./startup-runtime.js";
 import { loadMemoryRulesFile, parseMemoryRuleFrontmatter } from "./memory-rules-runtime.js";
 import { createReplBridgeState } from "./remote-repl-bridge-runtime.js";
+import { MEMORY_LEARNING_STATE_FILE } from "./runtime-utils.js";
+import { formatError, truncateDisplay } from "./startup-runtime.js";
 import type {
   CacheState,
   ExtensionLifecycleRecord,
@@ -44,6 +45,7 @@ import type {
   MemoryCandidate,
   MemoryState,
   MemoryStatus,
+  MemoryTaxonomy,
   PluginState,
   PluginSummary,
   RemoteChannelState,
@@ -58,8 +60,6 @@ import { createWorkspaceReferenceCache } from "./workspace-reference-cache.js";
 const DEFAULT_CACHE_HISTORY_SIZE = 20;
 const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
 const PROJECT_RULES_SUMMARY_WIDTH = 600;
-const MEMORY_LEARNING_STATE_FILE = "learning-state.json";
-
 // D.13P boundary cleanup: cache freshness 默认维度不再硬编码 deepseek/deepseek-v4-flash。
 // 调用方（context bootstrap）会传入 resolved initialModel；无 model 时以 unknown 占位，
 // 由 model 名前缀推导 provider（保留 deepseek-* 推断），其他情况标 unknown，避免把
@@ -298,7 +298,9 @@ export async function createMemoryState(
     projectRulesExists: projectRules.exists,
     projectRulesSummary: projectRules.summary,
     ...(projectRules.error ? { projectRulesError: projectRules.error } : {}),
-    ...(projectRules.includedPaths ? { projectRulesIncludedPaths: projectRules.includedPaths } : {}),
+    ...(projectRules.includedPaths
+      ? { projectRulesIncludedPaths: projectRules.includedPaths }
+      : {}),
     ...(projectRules.warnings ? { projectRulesWarnings: projectRules.warnings } : {}),
     ...(projectRules.truncated ? { projectRulesTruncated: projectRules.truncated } : {}),
     projectDir: paths.memoryProject,
@@ -316,9 +318,7 @@ export async function createMemoryState(
   };
 }
 
-async function loadProjectRulesSummary(
-  path: string,
-): Promise<{
+async function loadProjectRulesSummary(path: string): Promise<{
   exists: boolean;
   summary: string;
   error?: string;
@@ -426,6 +426,13 @@ function parseMemoryCandidate(value: unknown): MemoryCandidate | null {
   if (value.scope !== "project" && value.scope !== "user" && value.scope !== "session") {
     return null;
   }
+  const taxonomy: MemoryTaxonomy | undefined =
+    value.taxonomy === "user" ||
+    value.taxonomy === "feedback" ||
+    value.taxonomy === "project" ||
+    value.taxonomy === "reference"
+      ? value.taxonomy
+      : undefined;
   const status =
     value.status === "candidate" ||
     value.status === "accepted" ||
@@ -442,6 +449,10 @@ function parseMemoryCandidate(value: unknown): MemoryCandidate | null {
     id: value.id,
     scope: value.scope,
     status,
+    ...(taxonomy ? { taxonomy } : {}),
+    ...(typeof value.topic === "string" && value.topic.trim().length > 0
+      ? { topic: truncateDisplay(value.topic.trim(), 80) }
+      : {}),
     summary: truncateDisplay(value.summary.replace(/\s+/g, " "), 240),
     source: value.source,
     sourceRefs: sourceRefs.slice(0, 6),

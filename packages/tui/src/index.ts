@@ -467,6 +467,7 @@ import {
   sendAgentMessage,
   transitionDurableJob,
 } from "./job-agent-command-runtime.js";
+import { loadProjectKeybindings } from "./keybinding-runtime.js";
 import {
   configureModelCommandRuntime,
   handleModelCommand,
@@ -519,14 +520,18 @@ import {
   LINGHUN_TASK_MAX_OUTPUT_UPPER_LIMIT,
 } from "./runtime-budget.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
-import { loadProjectKeybindings } from "./keybinding-runtime.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
+import { writeTextToClipboard } from "./shell/clipboard.js";
 import {
   createCommandBlock,
   createUserTextBlock,
 } from "./shell/models/command-transcript-presenter.js";
 import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
 import { reduceTranscriptScroll } from "./shell/models/transcript-scroll-state.js";
+import {
+  buildTranscriptTextRows,
+  reduceTranscriptSelection,
+} from "./shell/models/transcript-selection-state.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import type {
   BackgroundTaskSummary,
@@ -1460,6 +1465,22 @@ function writeLegacyStartup(output: Writable, context: TuiContext, startup: TuiS
   }
 }
 
+function pushTransientNotification(
+  context: TuiContext,
+  text: string,
+  tone: "default" | "dim" | "warning" | "error" | "success" = "default",
+): void {
+  if (!context.notifications) context.notifications = [];
+  context.notifications.push({
+    key: `transient:${Date.now()}:${context.notifications.length}`,
+    text: truncateDisplay(text, 160),
+    priority: tone === "error" || tone === "warning" ? "immediate" : "medium",
+    timeoutMs: 5000,
+    createdAt: Date.now(),
+    tone,
+  });
+}
+
 async function runPlainTui(
   input: Readable,
   output: Writable,
@@ -1840,7 +1861,33 @@ async function runInkShell(
         }
         return;
       }
-      if (event.type === "transcript-mouse") return;
+      if (event.type === "transcript-mouse") {
+        const rows = buildTranscriptTextRows(blocks);
+        const result = reduceTranscriptSelection({
+          state: context.transcriptSelectionState,
+          event: event.event,
+          rows,
+          geometry: context.transcriptViewportGeometry,
+          scroll: context.transcriptScrollState,
+        });
+        if (!result.consumed) return;
+        context.transcriptSelectionState = result.state;
+        if (result.scrollDelta) {
+          context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
+            type: "scroll",
+            delta: result.scrollDelta,
+          });
+        }
+        if (result.copyText) {
+          const copy = await writeTextToClipboard(result.copyText);
+          if (!copy.ok && copy.error) {
+            pushTransientNotification(context, `Copy failed: ${copy.error}`, "warning");
+          }
+        }
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
       if (event.type === "transcript-scroll-end") {
         context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
           type: "end",

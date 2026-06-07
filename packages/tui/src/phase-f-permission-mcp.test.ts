@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { builtInTools, createToolContext } from "@linghun/tools";
 import { defaultConfig, mcpServerSignature, saveMcpServerConfig } from "@linghun/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { validateCodebaseMemoryToolExecution } from "./deferred-tools-catalog.js";
+import {
+  listDeferredTools,
+  validateCodebaseMemoryToolExecution,
+} from "./deferred-tools-catalog.js";
+import { executeExtraTool, executeSearchExtraTools } from "./mcp-index-runtime.js";
 import { runMcpSseToolCall } from "./mcp-sse-runtime.js";
 import { DANGEROUS_DIRECTORIES, DANGEROUS_FILES, getPlatformPathDenyReason } from "./platform-security.js";
 import { hasRepeatedPermissionDenial } from "./permission-continuation-runtime.js";
@@ -84,17 +88,19 @@ describe("Phase F MCP duplicate, schema, and SSE coverage", () => {
   });
 
   it("executes an SSE MCP tools/list plus tools/call round trip", async () => {
+    const seenIds: number[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: string, init: RequestInit) => {
-        const body = JSON.parse(String(init.body)) as { method: string };
+        const body = JSON.parse(String(init.body)) as { id: number; method: string };
+        seenIds.push(body.id);
         if (body.method === "tools/list") {
-          return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [{ name: "demo" }] } }), {
+          return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [{ name: "demo" }] } }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
         }
-        return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: "ok" } }), {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: "ok" } }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -106,6 +112,150 @@ describe("Phase F MCP duplicate, schema, and SSE coverage", () => {
         x: 1,
       }),
     ).resolves.toMatchObject({ ok: true, data: { content: "ok" } });
+    expect(new Set(seenIds).size).toBe(seenIds.length);
+  });
+
+  it("rejects SSE JSON-RPC id mismatch and JSON-RPC batch responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as { id: number; method: string };
+        if (body.method === "tools/list") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id + 1, result: { tools: [{ name: "demo" }] } }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+
+    await expect(
+      runMcpSseToolCall({ command: "", transport: "sse", url: "https://example.com/mismatch" }, "demo", {}),
+    ).resolves.toMatchObject({ ok: false, errorCode: "MCP_SSE_ID_MISMATCH" });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify([{ jsonrpc: "2.0", id: 1, result: { tools: [] } }]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    await expect(
+      runMcpSseToolCall({ command: "", transport: "sse", url: "https://example.com/batch" }, "demo", {}),
+    ).resolves.toMatchObject({ ok: false, errorCode: "MCP_SSE_BATCH_UNSUPPORTED" });
+  });
+
+  it("caches SSE tools/list per endpoint while preserving tools/call ids", async () => {
+    let listCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as { id: number; method: string };
+        if (body.method === "tools/list") {
+          listCalls += 1;
+          return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [{ name: "demo" }] } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: "ok" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+
+    const server = { command: "", transport: "sse" as const, url: "https://example.com/cache" };
+    await expect(runMcpSseToolCall(server, "demo", {})).resolves.toMatchObject({ ok: true });
+    await expect(runMcpSseToolCall(server, "demo", {})).resolves.toMatchObject({ ok: true });
+    expect(listCalls).toBe(1);
+  });
+
+  it("fails closed for skill/plugin deferred entries without safe executors", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "linghun-deferred-extension-"));
+    const context = minimalContext(workspace);
+    context.skills.enabled = true;
+    context.skills.trustedIds = ["local-skill"];
+    context.skills.skills = [
+      {
+        id: "local-skill",
+        name: "Local Skill",
+        description: "test skill",
+        triggers: ["run"],
+        summary: "test",
+        source: "local",
+        scope: "project",
+        path: "skill.json",
+        version: "1.0.0",
+        enabled: true,
+        trusted: true,
+        permissions: [],
+        mayWrite: false,
+        mayExecute: false,
+        mayNetwork: false,
+        lifecycle: {
+          trustLevel: "trusted",
+          permissionSummary: "none",
+          discovered: true,
+          registered: true,
+          schemaLoaded: true,
+          runtimeVersion: "compatible",
+        },
+      },
+    ];
+    context.plugins.enabled = true;
+    context.plugins.trustedIds = ["local-plugin"];
+    context.plugins.plugins = [
+      {
+        id: "local-plugin",
+        name: "Local Plugin",
+        version: "1.0.0",
+        description: "test plugin",
+        source: "local",
+        scope: "project",
+        path: "plugin.json",
+        enabled: true,
+        trusted: true,
+        permissions: [],
+        mayWrite: false,
+        mayExecute: false,
+        mayNetwork: false,
+        lifecycle: {
+          trustLevel: "trusted",
+          permissionSummary: "none",
+          discovered: true,
+          registered: true,
+          schemaLoaded: true,
+          runtimeVersion: "compatible",
+        },
+        contributions: {
+          commands: ["hello"],
+          mcpServers: [],
+          providers: [],
+          hooks: [],
+          workflows: [],
+          skills: [],
+        },
+      },
+    ];
+
+    const tools = listDeferredTools(context);
+    expect(tools.find((tool) => tool.name === "skill:local-skill")?.executable).toBe(false);
+    expect(tools.find((tool) => tool.name === "plugin:local-plugin")?.executable).toBe(false);
+
+    executeSearchExtraTools("local", context);
+    await expect(executeExtraTool({ tool_name: "skill:local-skill", params: {} }, context)).resolves.toMatchObject({
+      ok: false,
+    });
+    await expect(executeExtraTool({ tool_name: "plugin:local-plugin", params: {} }, context)).resolves.toMatchObject({
+      ok: false,
+    });
   });
 });
 
@@ -117,5 +267,25 @@ function minimalContext(projectPath: string): TuiContext {
     config: defaultConfig,
     tools: createToolContext(projectPath),
     permissions: { rules: [], recentDenied: [] },
+    mcp: { enabled: false, servers: [], tools: [] },
+    skills: {
+      enabled: false,
+      projectDir: projectPath,
+      userDir: projectPath,
+      skills: [],
+      disabledIds: [],
+      trustedIds: [],
+      evolutionCandidates: [],
+      rejectedEvolutionCandidates: [],
+    },
+    plugins: {
+      enabled: false,
+      projectDir: projectPath,
+      userDir: projectPath,
+      plugins: [],
+      disabledIds: [],
+      trustedIds: [],
+    },
+    discoveredDeferredToolNames: new Set<string>(),
   } as unknown as TuiContext;
 }

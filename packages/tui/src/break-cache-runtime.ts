@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CacheFreshness } from "@linghun/core";
+import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import { diffFreshness } from "./cache-freshness.js";
 import type { TuiContext } from "./index.js";
 
@@ -67,7 +68,10 @@ function readRecentBreakCacheEventsSync(context: TuiContext, limit: number): Bre
           events.push({ action: parsed.action, createdAt: parsed.createdAt });
         }
       } catch (error) {
-        logBreakCacheWarning(context, `read_events_parse_failed reason=${formatDiagnosticError(error)}`);
+        logBreakCacheWarning(
+          context,
+          `read_events_parse_failed reason=${formatDiagnosticError(error)}`,
+        );
       }
     }
     return events;
@@ -90,7 +94,10 @@ export async function appendBreakCacheEvent(context: TuiContext, action: string)
     breakCacheEventLineCounts.set(path, currentCount + 1);
     await truncateBreakCacheEventsIfNeeded(path);
   } catch (error) {
-    await appendRuntimeWarning(context, `break_cache_event_write_failed reason=${formatDiagnosticError(error)}`);
+    await appendRuntimeWarning(
+      context,
+      `break_cache_event_write_failed reason=${formatDiagnosticError(error)}`,
+    );
   }
 }
 
@@ -274,14 +281,6 @@ async function appendRuntimeWarning(context: TuiContext, message: string): Promi
       `${message}; warning_write_failed=${formatDiagnosticError(error)}`,
     );
   }
-}
-
-function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && error.code === code;
-}
-
-function formatDiagnosticError(error: unknown): string {
-  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }
 
 // D.13F：把 promptCache 配置 + 当轮 nonce 折叠成 ModelRequest 片段。

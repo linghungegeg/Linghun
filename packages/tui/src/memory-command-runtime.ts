@@ -11,13 +11,18 @@ import {
   validateHandoffPacket,
 } from "./handoff-session-runtime.js";
 import type { TuiContext } from "./index.js";
+import {
+  applyMemoryExtractionDecision,
+  decideMemoryExtraction,
+  refreshAutoMemoryFiles,
+  writeAutoMemoryFiles,
+} from "./memory-extraction-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
 import type { MemoryCandidate, MemoryLearningRun } from "./tui-data-types.js";
 import {
   createEvidenceBackedMemoryCandidates,
   createLinghunMdTemplate,
   createMemoryCandidate,
-  extractLearningCandidatesFromInput,
   findMemoryRecord,
   formatMemoryLearningRun,
   formatMemoryReview,
@@ -25,6 +30,7 @@ import {
   formatMemoryStats,
   formatMemoryStatus,
   formatMemoryStorage,
+  getMemoryDirectory,
   parseMemoryCandidateArgs,
   removeMemoryFromState,
   removeMemoryRecord,
@@ -179,8 +185,8 @@ export async function handleMemoryCommand(
       writeLine(
         output,
         context.language === "en-US"
-          ? "Auto-learning enabled. New preferences/habits will be captured as candidates (not auto-accepted). Disable with /memory learn off."
-          : "自动学习已开启。新偏好/习惯将作为候选记录（不会自动接受）。关闭：/memory learn off",
+          ? "Auto-learning enabled. Stable taxonomy memory can be accepted automatically; uncertain content stays candidate-only. Disable with /memory learn off."
+          : "自动学习已开启。稳定 taxonomy 记忆可自动接受；不确定内容保留候选。关闭：/memory learn off",
       );
       return;
     }
@@ -213,8 +219,8 @@ export async function handleMemoryCommand(
       tone: "neutral",
       summary: [
         context.language === "en-US"
-          ? `Memory learn — ${result.candidatesCreated} candidate(s); ${TOGGLE_DETAILS_KEYBIND} for details.`
-          : `记忆学习 — 新候选 ${result.candidatesCreated} 条；${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
+          ? `Memory learn — ${result.candidatesCreated} candidate(s), ${result.acceptedCreated ?? 0} accepted; ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `记忆学习 — 新候选 ${result.candidatesCreated} 条，自动接受 ${result.acceptedCreated ?? 0} 条；${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       detailsText: formatMemoryLearningRun(result, context.language),
     });
@@ -255,14 +261,6 @@ export async function handleMemoryCommand(
     const candidate = context.memory.candidates.find((item) => item.id === id);
     if (!candidate) {
       writeLine(output, "未找到候选记忆。用法：/memory accept <candidate-id>");
-      return;
-    }
-    if (
-      (await deps().requestMemoryMutationApproval(context, output, {
-        action: "accept",
-        candidate,
-      })) !== "approved"
-    ) {
       return;
     }
     await executeMemoryMutation(context, output, { action: "accept", candidate });
@@ -421,6 +419,9 @@ export async function executeMemoryMutation(
   if (mutation.action === "accept") {
     const accepted = { ...mutation.candidate, status: "accepted" as const };
     await writeMemoryRecord(accepted, context);
+    if (accepted.taxonomy && accepted.scope !== "session") {
+      await writeAutoMemoryFiles(getMemoryDirectory(accepted.scope, context), accepted);
+    }
     context.memory.candidates = context.memory.candidates.filter((item) => item.id !== accepted.id);
     context.memory.accepted.unshift(accepted);
     const sessionId = await deps().ensureSession(context);
@@ -434,7 +435,7 @@ export async function executeMemoryMutation(
     deps().refreshCacheFreshness(context);
     writeLine(
       output,
-      `已写入${formatMemoryScope(accepted.scope)}级长期记忆：${accepted.id}；autoAccept=no，后续注入仍受 top-k/字符预算限制。`,
+      `已写入${formatMemoryScope(accepted.scope)}级长期记忆：${accepted.id}；后续注入仍受 accepted-only top-k/字符预算限制。`,
     );
     return;
   }
@@ -455,6 +456,13 @@ export async function executeMemoryMutation(
     await writeMemoryRecord(disabled, context);
     context.memory.accepted = context.memory.accepted.filter((item) => item.id !== disabled.id);
     context.memory.disabled.unshift(disabled);
+    if (disabled.taxonomy && disabled.scope !== "session") {
+      await refreshAutoMemoryFiles(
+        getMemoryDirectory(disabled.scope, context),
+        context.memory.accepted.filter((item) => item.scope === disabled.scope),
+        context.memory.disabled.filter((item) => item.scope === disabled.scope),
+      );
+    }
     const sessionId = await deps().ensureSession(context);
     await appendMemoryLifecycleEvent(context, sessionId, "disabled", disabled);
     await deps().recordMemoryMutationEvidence(context, sessionId, "disabled", disabled);
@@ -467,6 +475,13 @@ export async function executeMemoryMutation(
     await writeMemoryRecord(accepted, context);
     context.memory.disabled = context.memory.disabled.filter((item) => item.id !== accepted.id);
     context.memory.accepted.unshift(accepted);
+    if (accepted.taxonomy && accepted.scope !== "session") {
+      await refreshAutoMemoryFiles(
+        getMemoryDirectory(accepted.scope, context),
+        context.memory.accepted.filter((item) => item.scope === accepted.scope),
+        context.memory.disabled.filter((item) => item.scope === accepted.scope),
+      );
+    }
     const sessionId = await deps().ensureSession(context);
     await appendMemoryLifecycleEvent(context, sessionId, "rollback", accepted);
     await deps().recordMemoryMutationEvidence(context, sessionId, "rollback", accepted);
@@ -477,6 +492,13 @@ export async function executeMemoryMutation(
   if (mutation.action === "delete") {
     await removeMemoryRecord(mutation.memory, context);
     removeMemoryFromState(context.memory, mutation.memory.id);
+    if (mutation.memory.taxonomy && mutation.memory.scope !== "session") {
+      await refreshAutoMemoryFiles(
+        getMemoryDirectory(mutation.memory.scope, context),
+        context.memory.accepted.filter((item) => item.scope === mutation.memory.scope),
+        context.memory.disabled.filter((item) => item.scope === mutation.memory.scope),
+      );
+    }
     const sessionId = await deps().ensureSession(context);
     await appendMemoryLifecycleEvent(context, sessionId, "deleted", mutation.memory);
     await deps().recordMemoryMutationEvidence(context, sessionId, "deleted", mutation.memory);
@@ -484,22 +506,29 @@ export async function executeMemoryMutation(
     writeLine(output, `已删除记忆记录：${mutation.memory.id}；不会保留在候选/长期/禁用列表。`);
     return;
   }
-  const created = await initLinghunMd(context, output);
-  if (!created) {
+  if (mutation.action === "init") {
+    const created = await initLinghunMd(context, output);
+    if (!created) {
+      return;
+    }
+    const sessionId = await deps().ensureSession(context);
+    await deps().appendSystemEvent(
+      context,
+      sessionId,
+      "memory_lifecycle action=init path=LINGHUN.md",
+      "info",
+    );
+    await deps().recordMemoryMutationEvidence(
+      context,
+      sessionId,
+      "init",
+      createMemoryCandidate("project", "generated LINGHUN.md", "memory init", ["LINGHUN.md"]),
+    );
     return;
   }
-  const sessionId = await deps().ensureSession(context);
-  await deps().appendSystemEvent(
-    context,
-    sessionId,
-    "memory_lifecycle action=init path=LINGHUN.md",
-    "info",
-  );
-  await deps().recordMemoryMutationEvidence(
-    context,
-    sessionId,
-    "init",
-    createMemoryCandidate("project", "generated LINGHUN.md", "memory init", ["LINGHUN.md"]),
+  const unknown: never = mutation;
+  throw new Error(
+    `未知 memory mutation action：${String((unknown as { action?: unknown }).action)}`,
   );
 }
 
@@ -542,10 +571,9 @@ async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryL
 // Module 7 (tui-memory-runtime): createEvidenceBackedMemoryCandidates moved
 // out — see re-export+import block below.
 
-// --- D.14B Controlled Learning: secret filter + auto-learning extraction ---
-// Module 7 (tui-memory-runtime): MEMORY_SECRET_PATTERNS / containsSecret /
-// AutoLearningExtraction / PREFERENCE_TRIGGERS / extractLearningCandidatesFromInput
-// moved out — see re-export+import block below.
+// --- Pre-Smoke 2: memory extraction runtime ---
+// Auto memory no longer falls back to fixed phrase / regex candidate patches.
+// All turn-end learning decisions go through memory-extraction-runtime.
 
 export async function runAutoLearningOnTurnEnd(
   context: TuiContext,
@@ -561,54 +589,70 @@ export async function runAutoLearningOnTurnEnd(
     };
   }
 
-  const existingSummaries = new Set(
-    [...context.memory.candidates, ...context.memory.accepted, ...context.memory.disabled].map(
-      (item) => item.summary,
-    ),
-  );
+  const decision = decideMemoryExtraction({
+    recentMessages: [userInput],
+    accepted: context.memory.accepted,
+    disabled: context.memory.disabled,
+    candidates: context.memory.candidates,
+  });
 
-  const extractions = extractLearningCandidatesFromInput(userInput, existingSummaries);
-  if (extractions.length === 0) {
-    return {
-      trigger: "manual",
-      candidatesCreated: 0,
-      modelCalled: false,
-      skippedReason: "no_learnable_content",
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  const candidates: MemoryCandidate[] = extractions.map((ext) => ({
-    ...createMemoryCandidate("user", ext.summary, ext.source, ext.sourceRefs),
-    inferred: true,
-  }));
-
-  context.memory.candidates.unshift(...candidates);
-  const sessionId = await deps().ensureSession(context);
-  for (const candidate of candidates) {
-    await writeMemoryRecord(candidate, context);
+  if (decision.action === "create" || decision.action === "update") {
+    const existing = context.memory.accepted.find((item) => item.id === decision.id);
+    const applied = await applyMemoryExtractionDecision({
+      decision,
+      memoryDir: getMemoryDirectory(decision.scope, context),
+      existing,
+    });
+    if (!applied.memory) {
+      throw new Error("memory extraction returned no accepted memory");
+    }
+    await writeMemoryRecord(applied.memory, context);
+    context.memory.accepted = [
+      applied.memory,
+      ...context.memory.accepted.filter((item) => item.id !== applied.memory?.id),
+    ];
+    const sessionId = await deps().ensureSession(context);
     await context.store.appendEvent(sessionId, {
-      type: "memory_candidate",
-      candidate,
+      type: "memory_accepted",
+      memory: applied.memory,
       createdAt: new Date().toISOString(),
     });
+    await appendMemoryLifecycleEvent(context, sessionId, `auto_${decision.action}`, applied.memory);
+    await deps().recordMemoryMutationEvidence(
+      context,
+      sessionId,
+      `auto_${decision.action}`,
+      applied.memory,
+    );
+    const run: MemoryLearningRun = {
+      trigger: "evidence",
+      candidatesCreated: 0,
+      acceptedCreated: decision.action === "create" ? 1 : 0,
+      acceptedUpdated: decision.action === "update" ? 1 : 0,
+      modelCalled: false,
+      createdAt: new Date().toISOString(),
+    };
+    context.memory.lastLearningRun = run;
+    await deps().appendSystemEvent(
+      context,
+      sessionId,
+      `auto_memory_extraction action=${decision.action} taxonomy=${decision.taxonomy} topic=${decision.topic}`,
+      "info",
+    );
+    deps().refreshCacheFreshness(context);
+    return run;
   }
 
-  const run: MemoryLearningRun = {
-    trigger: "evidence",
-    candidatesCreated: candidates.length,
+  return {
+    trigger: "manual",
+    candidatesCreated: 0,
     modelCalled: false,
+    skippedReason:
+      decision.action === "no-op"
+        ? `memory_extraction:${decision.reason}${decision.blockedBy ? `:${decision.blockedBy}` : ""}`
+        : "no_learnable_content",
     createdAt: new Date().toISOString(),
   };
-  context.memory.lastLearningRun = run;
-  await deps().appendSystemEvent(
-    context,
-    sessionId,
-    `auto_learning trigger=turn_end candidates=${run.candidatesCreated} mode=active`,
-    "info",
-  );
-  deps().refreshCacheFreshness(context);
-  return run;
 }
 
 export async function initLinghunMd(context: TuiContext, output: Writable): Promise<boolean> {

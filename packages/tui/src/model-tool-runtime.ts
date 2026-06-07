@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import type { ModelGateway, ModelToolCall } from "@linghun/providers";
-import type { Language } from "@linghun/shared";
+import { type Language, isNodeErrorWithCode } from "@linghun/shared";
 import {
   type ToolName,
   type ToolOutput,
@@ -532,10 +532,6 @@ async function appendBoundaryPreflightWarning(context: TuiContext, message: stri
       `[linghun] ${message}; warning_write_failed=${formatError(error, context.language).replace(/\s+/g, " ")}\n`,
     );
   }
-}
-
-function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && error.code === code;
 }
 
 function extractBashCommand(input: unknown): string | undefined {

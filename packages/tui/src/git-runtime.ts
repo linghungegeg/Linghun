@@ -193,7 +193,7 @@ export async function readGitStatus(
     if (!rawLine) continue;
     if (rawLine.startsWith("##")) {
       // Branch header line: `## branch...origin/branch [ahead 1, behind 2]`
-      const match = rawLine.match(/##\s*([^\s.]+)(?:\.{2,3}([^\s]+))?(?:\s*\[([^\]]+)\])?/);
+      const match = rawLine.match(/^##\s+(.+?)(?:\.{2,3}([^\s]+))?(?:\s*\[([^\]]+)\])?$/u);
       if (match) {
         if (match[2]) upstream = match[2];
         const tag = match[3] ?? "";

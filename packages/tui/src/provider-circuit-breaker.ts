@@ -1,4 +1,5 @@
 import type { Language } from "@linghun/shared";
+import { readPositiveIntEnv } from "@linghun/shared";
 
 /**
  * Provider Circuit Breaker / Cooldown — D.8 Provider Resilience Lite
@@ -16,6 +17,7 @@ export type BreakerKey = string;
 export type BreakerEntry = {
   providerId: string;
   model: string;
+  state: "closed" | "open" | "half-open";
   consecutiveFailures: number;
   lastFailureAt: number;
   cooldownUntil: number;
@@ -27,13 +29,6 @@ export type ProviderCircuitBreakerState = {
 };
 
 const BREAKER_FAILURE_THRESHOLD = 2;
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
-
 const BREAKER_COOLDOWN_MS = readPositiveIntEnv("LINGHUN_PROVIDER_BREAKER_COOLDOWN_MS", 45_000);
 
 /** Recoverable error codes that trigger the breaker. */
@@ -85,9 +80,11 @@ export function recordProviderFailure(
   const consecutiveFailures = (existing?.consecutiveFailures ?? 0) + 1;
   const cooldownUntil =
     consecutiveFailures >= BREAKER_FAILURE_THRESHOLD ? now + BREAKER_COOLDOWN_MS : 0;
+  const breakerState = cooldownUntil > 0 ? "open" : "closed";
   state.entries.set(key, {
     providerId,
     model,
+    state: breakerState,
     consecutiveFailures,
     lastFailureAt: now,
     cooldownUntil,
@@ -126,8 +123,9 @@ export function checkProviderCooldown(
   }
   const now = Date.now();
   if (now >= entry.cooldownUntil) {
-    // Cooldown expired — clear the entry
-    state.entries.delete(key);
+    entry.state = "half-open";
+    entry.cooldownUntil = 0;
+    state.entries.set(key, entry);
     return { blocked: false };
   }
   return {

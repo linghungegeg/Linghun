@@ -747,8 +747,12 @@ function redactBaseUrl(baseUrl: string | undefined): string {
 }
 
 function safeUrlLabel(url: string): string {
-  const parsed = new URL(url);
-  return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}/${basename(parsed.pathname)}`;
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}/${basename(parsed.pathname)}`;
+  } catch {
+    return "invalid-url";
+  }
 }
 
 function formatUnknownError(error: unknown): string {

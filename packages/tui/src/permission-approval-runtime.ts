@@ -294,15 +294,22 @@ async function setPermissionMode(
   reason: string,
 ): Promise<void> {
   const previousMode = context.permissionMode;
-  context.permissionMode = nextMode;
-  context.planAccepted = false;
+  const previousPlanAccepted = context.planAccepted;
   const sessionId = await ensureSession(context);
-  await appendSystemEvent(
-    context,
-    sessionId,
-    `permission mode change: ${previousMode} -> ${nextMode}; reason ${reason}; boundary Start Gate and permission pipeline remain active`,
-    "info",
-  );
+  try {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `permission mode change: ${previousMode} -> ${nextMode}; reason ${reason}; boundary Start Gate and permission pipeline remain active`,
+      "info",
+    );
+    context.permissionMode = nextMode;
+    context.planAccepted = false;
+  } catch (error) {
+    context.permissionMode = previousMode;
+    context.planAccepted = previousPlanAccepted;
+    throw error;
+  }
   writeLine(output, t(context, "modeSwitched", { mode: nextMode }));
   if (nextMode === "plan") {
     writeLine(output, t(context, "modePlanBoundary"));
@@ -767,6 +774,7 @@ export async function executePermissionDeny(
       writeStatus(output, context);
       return;
     }
+    await appendDenialContinuationWarning(context, approval.sessionId, approval.toolName, deniedResult.text);
   }
   if (approval.kind === "model_tool_use") {
     const evidence = await recordToolFailureEvidence(
@@ -815,6 +823,7 @@ export async function executePermissionDeny(
       writeStatus(output, context);
       return;
     }
+    await appendDenialContinuationWarning(context, approval.sessionId, approval.toolName, deniedResult.text);
   }
   if (approval.kind === "git_worktree_remove") {
     await resolveWorktreeRemoveDeny(
@@ -874,6 +883,7 @@ export async function executePermissionDeny(
       writeStatus(output, context);
       return;
     }
+    await appendDenialContinuationWarning(context, approval.sessionId, approval.toolCall.name, deniedResult.text);
   }
   if (approval.kind === "report_write_tool") {
     const evidence = await recordToolFailureEvidence(
@@ -910,6 +920,7 @@ export async function executePermissionDeny(
       writeStatus(output, context);
       return;
     }
+    await appendDenialContinuationWarning(context, approval.sessionId, WRITE_REPORT_TOOL_NAME, deniedResult.text);
   }
   if (approval.kind === "memory_mutation") {
     await recordToolFailureEvidence(
@@ -961,6 +972,20 @@ export async function executePermissionDeny(
   }
   writeLine(output, formatPermissionDenialPrimary(context.language));
   writeStatus(output, context);
+}
+
+async function appendDenialContinuationWarning(
+  context: TuiContext,
+  sessionId: string,
+  toolName: string,
+  summary: string,
+): Promise<void> {
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `permission denial recorded for ${toolName}, but no model continuation/gateway was available; model was not resumed with denial tool_result. summary=${truncateDisplay(summary, 200)}`,
+    "warning",
+  );
 }
 
 export async function handlePermissionsCommand(

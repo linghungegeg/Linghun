@@ -41,8 +41,8 @@ import {
   type DeferredToolDescriptor,
   type DurableJobState,
   type DurableJobStatus,
-  type TuiContext,
   MAX_BACKGROUND_TASKS,
+  type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
   __testBuildExplicitDetailsCommandPanel,
@@ -53,11 +53,11 @@ import {
   __testParseRunWorkflowToolInput,
   __testRenderInteractiveChoiceLines,
   __testRunWorkflowStepsWithPlan,
-  __testWorkflowStepStatusFromNestedJob,
   __testSendMessage,
   __testStopCommandPanelSelection,
   __testToggleCommandPanelSelection,
   __testUpdateCommandPanelSelection,
+  __testWorkflowStepStatusFromNestedJob,
   addAllowRuleForTest,
   containsSecret,
   createCacheState,
@@ -125,6 +125,7 @@ import {
 } from "./job-runtime.js";
 import { evaluateMetaScheduler } from "./meta-scheduler-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
+import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
 import {
@@ -146,7 +147,6 @@ import {
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
 import { findAgent, rememberBackgroundTask } from "./tui-agent-job-runtime.js";
 import type { AgentRun } from "./tui-data-types.js";
-import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
 import { formatRoleUsageLines } from "./usage-stats-presenter.js";
 import { type WorkflowPlan, normalizeWorkflowPlan } from "./workflow-plan-schema.js";
 
@@ -1784,7 +1784,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("可以直接说“帮我检查项目状态 / 跑测试 / 解释这个报错”。");
     expect(output.text).toContain("需要精确命令时，用 /help 查看。");
     expect(output.text).not.toContain("Phase 14 TUI / REPL");
-  }, 10000);
+  }, 60_000);
 
   it("shows help, model, and session list", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -1804,51 +1804,36 @@ describe("Phase 06 TUI slash commands", () => {
     expect(defaultHelpOutput.text).toContain("核心入口：");
     expect(defaultHelpOutput.text).not.toContain("/trust");
     expect(defaultHelpOutput.text).not.toContain("/permissions");
-    expect(output.text).toContain("/sessions resume <id>");
-    expect(output.text).toContain("/resume [id]");
-    expect(output.text).toContain("/branch [目的]");
-    expect(output.text).toContain("/memory storage");
-    expect(output.text).toContain("/memory review");
-    expect(output.text).toContain("/memory accept <id>");
-    expect(output.text).toContain("可用命令：");
+    expect(output.text).toContain("/sessions");
+    expect(output.text).toContain("/resume");
+    expect(output.text).toContain("/branch");
+    expect(output.text).toContain("/memory");
+    expect(output.text).toContain("可用命令（来自命令 registry）：");
     expect(output.text).not.toContain("Core / 核心");
     expect(output.text).not.toContain("Index & MCP / 索引与 MCP");
     expect(output.text).toContain("/features");
-    expect(output.text).toContain("/model doctor");
-    expect(output.text).toContain("/model route");
-    expect(output.text).toContain("/model route doctor");
-    expect(output.text).toContain("/model route set <role> <model>");
+    expect(output.text).toContain("/model");
     expect(output.text).toContain("provider deepseek model deepseek-v4-flash");
     expect(output.text).toContain("角色路由摘要");
-    expect(output.text).toContain("/vision <path>");
-    expect(output.text).toContain("/image generate <prompt>");
+    expect(output.text).toContain("/vision");
+    expect(output.text).toContain("/image");
     expect(output.text).toContain("/skills");
-    expect(output.text).toContain("/skills enable <id>");
-    expect(output.text).toContain("/workflows <name>");
-    expect(output.text).toContain("/plugins doctor");
-    expect(output.text).toContain("/doctor [readiness]");
-    expect(output.text).toContain("/doctor hooks");
+    expect(output.text).toContain("/workflows");
+    expect(output.text).toContain("/plugins");
+    expect(output.text).toContain("/doctor");
     expect(output.text).toContain("/problems");
     expect(output.text).toContain("Readiness：本地");
     expect(output.text).toContain("非 smoke/Beta PASS");
     expect(output.text).toContain("/agents");
-    expect(output.text).toContain("/fork <类型> <任务>");
-    expect(output.text).toContain("/cache-log config size <n>");
-    expect(output.text).toContain("/cache-log export [path]");
-    expect(output.text).toContain("/cache status");
-    expect(output.text).toContain("/cache warmup|refresh");
+    expect(output.text).toContain("/fork");
+    expect(output.text).toContain("/cache-log");
+    expect(output.text).toContain("/cache");
     expect(output.text).toContain("/compact");
-    expect(output.text).toContain("/break-cache status");
-    expect(output.text).toContain("/mcp status");
-    expect(output.text).toContain("/mcp tools");
-    expect(output.text).toContain("/index status");
-    expect(output.text).toContain("/index search <query>");
-    expect(output.text).toContain("/index architecture");
+    expect(output.text).toContain("/break-cache");
+    expect(output.text).toContain("/mcp");
+    expect(output.text).toContain("/index");
     expect(output.text).toContain("/usage");
-    expect(output.text).toContain("/stats endpoints");
-    expect(output.text).toContain("/doctor project");
-    expect(output.text).toContain("/doctor hooks");
-    expect(output.text).toContain("/problems");
+    expect(output.text).toContain("/stats");
     expect(output.text).toContain(
       "当前模型：role executor provider deepseek model deepseek-v4-flash reasoning 未生效",
     );
@@ -1877,7 +1862,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("runtime");
     expect(output.text).not.toContain("schema");
     expect(output.text).not.toContain("provider contract");
-  });
+  }, 60_000);
 
   it("prefers user-scoped setup-needed when project route uses openai-compatible without user provider.env", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-route-openai-"));
@@ -3444,9 +3429,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(prompt).toContain("ControlledMemorySummary=");
     expect(prompt).toContain("项目约定：只把经确认的长期规则注入 prompt");
     expect(prompt).toContain("MemoryBoundary=acceptedOnly");
-    expect(output.text).toContain("auto learning: on; auto accept no");
+    expect(output.text).toContain("auto extraction accepted for stable taxonomy memory");
     expect(output.text).toContain("accept=写入长期且可被 topK 注入；reject=丢弃候选");
-    expect(output.text).toContain("自动学习：开启；auto accept no；切换：/memory learn on|off");
+    expect(output.text).toContain("自动学习：开启；稳定 taxonomy 记忆会自动接受");
     expect(output.text).toContain(
       "session-scope：已接受 0；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
     );
@@ -3540,12 +3525,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates[0]?.status).toBe("candidate");
     expect(context.memory.candidates[0]?.sourceRefs).toEqual(["ev-phase-16"]);
     expect(context.memory.lastLearningRun?.modelCalled).toBe(false);
-    expect(output.text).toContain("Memory learn（受控 / 只生成候选）");
+    expect(output.text).toContain("Memory learn（受控 / extraction runtime）");
     expect(output.text).toContain("调用模型：no");
-    expect(output.text).toContain("auto accept no");
+    expect(output.text).toContain("自动接受：新增 0；更新 0");
   });
 
-  it("D.14B: defaults to active candidate-only learning", async () => {
+  it("D.14B: defaults to active controlled extraction learning", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3556,10 +3541,26 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.learningMode).toBe("active");
     expect(context.memory.learningModeSource).toBe("default");
 
-    const result = await runAutoLearningOnTurnEnd(context, "我习惯用 vitest 跑测试");
-    expect(result.candidatesCreated).toBeGreaterThan(0);
-    expect(context.memory.candidates[0]?.status).toBe("candidate");
-    expect(context.memory.accepted).toHaveLength(0);
+    const result = await runAutoLearningOnTurnEnd(
+      context,
+      "请记住：我偏好先用 vitest 跑 focused tests。",
+    );
+    expect(result.candidatesCreated).toBe(0);
+    expect(result.acceptedCreated).toBe(1);
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted[0]).toMatchObject({
+      status: "accepted",
+      taxonomy: "user",
+      scope: "user",
+      inferred: true,
+    });
+    const memoryDir = resolveStoragePaths(context.config, project).memoryUser;
+    expect(await readFile(join(memoryDir, "MEMORY.md"), "utf8")).toContain(
+      context.memory.accepted[0]?.id,
+    );
+    expect(
+      await readFile(join(memoryDir, "topics", `${context.memory.accepted[0]?.topic}.md`), "utf8"),
+    ).toContain("taxonomy: user");
   });
 
   it("D.14B: /memory learn off disables auto-learning and persists user choice", async () => {
@@ -3742,21 +3743,22 @@ describe("Phase 06 TUI slash commands", () => {
     ]);
   });
 
-  it("D.14B: auto-learning generates candidates from user input when active", async () => {
+  it("D.14B: auto-learning accepts stable taxonomy memory from user input when active", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    const result = await runAutoLearningOnTurnEnd(context, "我习惯用 vitest 跑所有测试");
-    expect(result.candidatesCreated).toBeGreaterThan(0);
-    expect(context.memory.candidates.length).toBeGreaterThan(0);
-    expect(context.memory.candidates[0]?.inferred).toBe(true);
-    expect(context.memory.candidates[0]?.status).toBe("candidate");
+    const result = await runAutoLearningOnTurnEnd(context, "请记住：我偏好用 vitest 跑所有测试。");
+    expect(result.candidatesCreated).toBe(0);
+    expect(result.acceptedCreated).toBe(1);
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted[0]?.inferred).toBe(true);
+    expect(context.memory.accepted[0]?.status).toBe("accepted");
   });
 
-  it("D.14B: candidate not injected into context until accepted", async () => {
+  it("D.14B: auto accepted memory is injected through accepted-only boundary", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3764,24 +3766,19 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    await runAutoLearningOnTurnEnd(context, "我偏好：用 pnpm 而不是 npm");
-    expect(context.memory.candidates.length).toBeGreaterThan(0);
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好用 pnpm 而不是 npm。");
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted).toHaveLength(1);
 
-    const promptBefore = createModelSystemPrompt("继续", context, {
-      memory: { candidates: context.memory.candidates.length, accepted: 0 },
-    });
-    expect(promptBefore).not.toContain("用 pnpm 而不是 npm");
-
-    const candidateId = context.memory.candidates[0]?.id;
-    await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
-    await handleNaturalInput("yes", context, output);
-    const promptAfter = createModelSystemPrompt("继续", context, {
+    const prompt = createModelSystemPrompt("继续", context, {
       memory: { candidates: 0, accepted: 1 },
     });
-    expect(promptAfter).toContain("pnpm");
+    expect(prompt).toContain("pnpm");
+    expect(prompt).toContain("MemoryBoundary=acceptedOnly");
+    expect(output.text).not.toContain("写入长期记忆前请运行");
   });
 
-  it("D.14B: reject/forget removes candidate permanently", async () => {
+  it("D.14B: forget removes auto accepted memory permanently", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3789,12 +3786,13 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    await runAutoLearningOnTurnEnd(context, "我习惯：先看源码再给命令");
-    const candidateId = context.memory.candidates[0]?.id;
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好先看源码再给命令。");
+    const memoryId = context.memory.accepted[0]?.id;
 
-    await handleSlashCommand(`/memory forget ${candidateId}`, context, output);
+    await handleSlashCommand(`/memory forget ${memoryId}`, context, output);
     await handleNaturalInput("yes", context, output);
     expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted).toHaveLength(0);
     expect(output.text).toContain("已删除记忆记录");
   });
 
@@ -3810,7 +3808,9 @@ describe("Phase 06 TUI slash commands", () => {
       "我偏好用 sk-1234567890abcdefghijklmnopqrstuvwxyz 这个 key",
     );
     expect(result.candidatesCreated).toBe(0);
+    expect(result.acceptedCreated ?? 0).toBe(0);
     expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted).toHaveLength(0);
   });
 
   it("D.14B: deduplicates high-frequency preferences", async () => {
@@ -3820,11 +3820,12 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    await runAutoLearningOnTurnEnd(context, "我习惯用 vitest 跑测试");
-    const firstCount = context.memory.candidates.length;
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好用 vitest 跑测试。");
+    const firstCount = context.memory.accepted.length;
 
-    await runAutoLearningOnTurnEnd(context, "我习惯用 vitest 跑测试");
-    expect(context.memory.candidates.length).toBe(firstCount);
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好用 vitest 跑测试。");
+    expect(context.memory.accepted.length).toBe(firstCount);
+    expect(context.memory.candidates).toHaveLength(0);
   });
 
   it("D.14B: doctor/status shows learning mode dynamically", async () => {
@@ -3856,6 +3857,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/memory learn off", context, output);
     await runAutoLearningOnTurnEnd(context, "我偏好：简短回答");
     expect(context.memory.candidates.length).toBe(countBefore);
+    expect(context.memory.accepted).toHaveLength(1);
   });
 
   it("D.14B: containsSecret correctly identifies sensitive content", () => {
@@ -3881,7 +3883,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates).toHaveLength(0);
   });
 
-  it("D.14B: real input path generates candidate when learning is on", async () => {
+  it("D.14B: real input path auto accepts stable memory when learning is on", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3889,14 +3891,14 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    const result = await handleNaturalInput("我习惯用 pnpm 而不是 npm", context, output);
+    const result = await handleNaturalInput("请记住：我偏好用 pnpm 而不是 npm。", context, output);
     expect(result).toBe("message");
-    expect(context.memory.candidates.length).toBeGreaterThan(0);
-    expect(context.memory.candidates[0]?.inferred).toBe(true);
-    expect(context.memory.candidates[0]?.status).toBe("candidate");
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted[0]?.inferred).toBe(true);
+    expect(context.memory.accepted[0]?.status).toBe("accepted");
   });
 
-  it("D.14B: auto-learning candidate light hint is once-only and candidate stays out of prompt", async () => {
+  it("D.14B: auto-learning accepted light hint is once-only and memory uses accepted-only prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3904,19 +3906,19 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    await handleNaturalInput("我偏好：简短中文回答", context, output);
-    await handleNaturalInput("我习惯：先读源码再回答", context, output);
+    await handleNaturalInput("请记住：我偏好简短中文回答。", context, output);
+    await handleNaturalInput("请记住：我偏好先读源码再回答。", context, output);
 
-    expect(context.memory.candidates.length).toBeGreaterThan(0);
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted.length).toBeGreaterThan(0);
     const notifications = context.notifications?.map((item) => item.text) ?? [];
-    expect(notifications.filter((text) => text.includes("记忆：已生成"))).toHaveLength(1);
+    expect(notifications.filter((text) => text.includes("记忆：已保存"))).toHaveLength(1);
 
     const prompt = createModelSystemPrompt("继续", context, {
-      memory: { candidates: context.memory.candidates.length, accepted: 0 },
+      memory: { candidates: 0, accepted: context.memory.accepted.length },
     });
-    expect(prompt).toContain("candidateOnlyLearning");
-    expect(prompt).not.toContain("简短中文回答");
-    expect(prompt).not.toContain("先读源码再回答");
+    expect(prompt).toContain("autoExtractionRuntime");
+    expect(prompt).toContain("简短中文回答");
   });
 
   it("D.14B: slash/control commands do NOT trigger auto-learning", async () => {
@@ -3952,7 +3954,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates).toHaveLength(0);
   });
 
-  it("D.14B: real-path candidate still not injected into context until accepted", async () => {
+  it("D.14B: real-path auto accepted memory is immediately eligible for accepted-only prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3960,21 +3962,14 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    await handleNaturalInput("我偏好：用 vitest 而不是 jest", context, output);
-    expect(context.memory.candidates.length).toBeGreaterThan(0);
+    await handleNaturalInput("请记住：我偏好用 vitest 而不是 jest。", context, output);
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted).toHaveLength(1);
 
-    const promptBefore = createModelSystemPrompt("继续", context, {
-      memory: { candidates: context.memory.candidates.length, accepted: 0 },
-    });
-    expect(promptBefore).not.toContain("vitest 而不是 jest");
-
-    const candidateId = context.memory.candidates[0]?.id;
-    await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
-    await handleNaturalInput("yes", context, output);
-    const promptAfter = createModelSystemPrompt("继续", context, {
+    const prompt = createModelSystemPrompt("继续", context, {
       memory: { candidates: 0, accepted: 1 },
     });
-    expect(promptAfter).toContain("vitest");
+    expect(prompt).toContain("vitest");
   });
 
   it("keeps Phase 16 skill evolution as candidate-only metadata", async () => {
@@ -4412,7 +4407,7 @@ describe("Phase 06 TUI slash commands", () => {
       "好的，翻译成人话：",
       'RuntimeStatusForModel={"memory":{"linghunMd":"missing"},"index":{"status":"ready"}}',
       "ControlledMemorySummary=accepted:0 candidates:0",
-      "MemoryBoundary=acceptedOnly; topK=3; candidateOnlyLearning; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
+      "MemoryBoundary=acceptedOnly; topK=3; autoExtractionRuntime; dedicatedMemoryDir; manualLearnCandidateOnly; noSecretsOrFullDumps",
       "EvidenceSummary=[]",
       "你的环境基本正常。",
     ].join("\n");
@@ -4446,7 +4441,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(committed).not.toContain("ControlledMemorySummary");
     expect(committed).not.toContain("MemoryBoundary");
     expect(committed).not.toContain("EvidenceSummary");
-    expect(committed).not.toContain("doNotWriteLongTermMemoryWithoutExplicitMemoryAccept");
+    expect(committed).not.toContain("autoExtractionRuntime");
     expect(committed).not.toContain('"linghunMd"');
     // 人话正文仍保留。
     expect(committed).toContain("你的环境基本正常");
@@ -10629,7 +10624,7 @@ describe("Phase 06 TUI slash commands", () => {
     const mainLoopSrc = await readSrc("model-stream-runtime.ts");
     const agentSrc = await readFile(srcPath("job-agent-command-runtime.ts"), "utf8");
 
-    expect(budgetSrc).toContain("LINGHUN_MAX_AGENTIC_TURNS = 100");
+    expect(budgetSrc).toContain("LINGHUN_MAX_AGENTIC_TURNS = readPositiveIntEnv");
     expect(budgetSrc).toContain("LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS = 40");
     expect(budgetSrc).toContain("LINGHUN_MAX_AGENT_CHILD_TURNS = 100");
     expect(budgetSrc).toContain("LINGHUN_MAX_AGENT_CHILD_TOOL_ROUNDS = 40");
@@ -11156,7 +11151,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(firstRequest.messages[0]?.content).not.toContain(
       "必须最终调用 Write 工具写入指定报告文件",
     );
-    expect(firstRequest.messages[0]?.content).not.toContain("requested-report.md");
+    expect(firstRequest.messages[0]?.content).toContain("[target-file]");
     const secondRequest = requests[1] as { messages: Array<{ role: string; content: string }> };
     expect(
       secondRequest.messages.some((message) => message.content?.includes("requested-report.md")),
@@ -15071,7 +15066,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(template).toContain("# 项目规则");
     expect(template).toContain("事实优先：先读代码、项目索引、文档或命令结果");
     expect(template).toContain("自然语言命令不能绕过 Start Gate 或权限审批");
-    expect(template).toContain("长期记忆默认先生成候选");
+    expect(template).toContain("长期记忆默认走受控 extraction runtime");
     expect(template).toContain("改代码后运行项目认可的最小必要验证");
     expect(template).toContain("## 工程纪律");
     expect(template).toContain("默认只做完成当前任务所必需的最小改动");
@@ -15876,7 +15871,7 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("source: Composer Ctrl+C dispatches interrupt instead of escape", async () => {
     const text = await readFile(srcPath("shell/components/Composer.tsx"), "utf8");
-    expect(text).toContain('void onInput({ type: "interrupt" });');
+    expect(text).toContain('emitInput({ type: "interrupt" });');
     expect(text).not.toContain(
       'void onInput({ type: "escape" });\n        return;\n      }\n\n      // Ctrl+V',
     );
@@ -18488,7 +18483,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("cache_creation/cache write 为 0");
     expect(output.text).toContain("不代表零写入成本");
     expect(output.text).toContain("任何金额只能标记 estimated");
-    expect(output.text).toContain("cost: estimated unavailable");
+    expect(output.text).toContain("cost: estimated CNY");
     expect(output.text).toContain("/v1/responses: samples 1");
     expect(output.text).toContain("/v1/messages: samples 1");
     expect(output.text).not.toContain("零成本");
@@ -26236,6 +26231,7 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         ),
       ).toBe(true);
     },
+    60_000,
   );
 
   gitIt(

@@ -321,6 +321,41 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("routes SGR left down/drag/up to transcript mouse events", async () => {
+    const view = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      transcriptViewportGeometry: {
+        x: 0,
+        y: 2,
+        width: 80,
+        height: 8,
+        contentHeight: 40,
+        topOffset: 20,
+      },
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    await writeInput(input, shell, "\x1b[<0;10;5M");
+    await writeInput(input, shell, "\x1b[<32;12;6M");
+    await writeInput(input, shell, "\x1b[<0;12;6m");
+
+    expect(events).toContainEqual({
+      type: "transcript-mouse",
+      event: { x: 9, y: 4, button: "left", action: "down" },
+    });
+    expect(events).toContainEqual({
+      type: "transcript-mouse",
+      event: { x: 11, y: 5, button: "left", action: "drag" },
+    });
+    expect(events).toContainEqual({
+      type: "transcript-mouse",
+      event: { x: 11, y: 5, button: "left", action: "up" },
+    });
+
+    shell.unmount();
+  });
+
   it("renders selected background row details only when expanded", async () => {
     let view = {
       ...baseTaskView(),

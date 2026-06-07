@@ -3958,6 +3958,21 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(en).toContain("Hidden commands still work");
   });
 
+  it("Pre-Smoke 5 /help all is generated from the user-visible command registry", async () => {
+    const { formatCatalogHelp } = await import("../slash-dispatch.js");
+    const { getUserVisibleCommandCapabilities } = await import("../natural-command-bridge.js");
+
+    const zh = formatCatalogHelp("zh-CN", "default", false, "all");
+    const en = formatCatalogHelp("en-US", "default", false, "all");
+
+    for (const command of getUserVisibleCommandCapabilities()) {
+      expect(zh).toContain(command.slash);
+      expect(en).toContain(command.slash);
+    }
+    expect(zh).toContain("可用命令（来自命令 registry）");
+    expect(en).toContain("Available commands (registry-backed)");
+  });
+
   it("D.13P-S latestOutputNext promotes Ctrl+O over /details in zh-CN and en-US", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
@@ -4058,12 +4073,13 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     expect(source).toContain("parseSgrMouseEvent(input)");
-    expect(source).toContain("isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)");
-    expect(source).toContain('mouse.action !== "wheel"');
+    expect(source).toContain("isTranscriptMouseTarget(mouse, view.transcriptViewportGeometry)");
     expect(source).toContain('mouse?.button === "wheel-up"');
     expect(source).toContain('type: "transcript-scroll", action: "wheelUp"');
     expect(source).toContain('mouse?.button === "wheel-down"');
     expect(source).toContain('type: "transcript-scroll", action: "wheelDown"');
+    expect(source).toContain('mouse?.button === "left"');
+    expect(source).toContain('type: "transcript-mouse", event: mouse');
     expect(source).not.toContain("if (isSgrMouseInput(input)) return;");
   });
 
@@ -5932,13 +5948,13 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
       source.indexOf("const text = bufferToString"),
     );
     expect(activeConfig).not.toContain("view.commandPanel");
-    expect(source).toContain("{ isActive: !configPanelActive }");
-    expect(source).toContain('void onInput({ type: "transcript-scroll", action: "halfPageUp" })');
-    expect(source).toContain('void onInput({ type: "transcript-scroll", action: "halfPageDown" })');
-    expect(source).toContain('void onInput({ type: "transcript-scroll", action: "wheelUp" })');
-    expect(source).toContain('void onInput({ type: "transcript-scroll", action: "wheelDown" })');
+    expect(source).toContain("{ isActive: true }");
+    expect(source).toContain('emitInput({ type: "transcript-scroll", action: "halfPageUp" })');
+    expect(source).toContain('emitInput({ type: "transcript-scroll", action: "halfPageDown" })');
+    expect(source).toContain('emitInput({ type: "transcript-scroll", action: "wheelUp" })');
+    expect(source).toContain('emitInput({ type: "transcript-scroll", action: "wheelDown" })');
     expect(source).toContain("const commandPanelConsumesInput = hasSelectableCommandPanelRows");
-    expect(source).toContain('void onInput({ type: "command-panel-stop" })');
+    expect(source).toContain('emitInput({ type: "command-panel-stop" })');
   });
 });
 

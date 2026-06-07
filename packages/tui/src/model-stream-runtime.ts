@@ -274,6 +274,10 @@ export async function handleNaturalInput(
     if (run.candidatesCreated > 0) {
       enqueueMemoryCandidateHint(context, run.candidatesCreated);
     }
+    const acceptedChanged = (run.acceptedCreated ?? 0) + (run.acceptedUpdated ?? 0);
+    if (acceptedChanged > 0) {
+      enqueueAutoMemoryHint(context, run.acceptedCreated ?? 0, run.acceptedUpdated ?? 0);
+    }
   }
   return "message";
 }
@@ -1184,6 +1188,23 @@ function enqueueMemoryCandidateHint(context: TuiContext, count: number): void {
       context.language === "en-US"
         ? `Memory: ${count} candidate(s) created; review with /memory review.`
         : `记忆：已生成 ${count} 条候选；用 /memory review 查看。`,
+    priority: "low",
+    timeoutMs: 5000,
+    createdAt: Date.now(),
+    tone: "dim",
+  });
+}
+
+function enqueueAutoMemoryHint(context: TuiContext, created: number, updated: number): void {
+  const key = "memory:auto-extraction-accepted";
+  context.notifications ??= [];
+  if (context.notifications.some((item) => item.key === key)) return;
+  context.notifications.push({
+    key,
+    text:
+      context.language === "en-US"
+        ? `Memory: saved ${created} and updated ${updated}; review with /memory review.`
+        : `记忆：已保存 ${created} 条、更新 ${updated} 条；用 /memory review 查看。`,
     priority: "low",
     timeoutMs: 5000,
     createdAt: Date.now(),

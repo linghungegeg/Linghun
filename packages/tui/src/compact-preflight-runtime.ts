@@ -1,7 +1,7 @@
 import type { ModelRole } from "@linghun/config";
 import type { ModelMessage } from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
-import { redactCommonSecrets } from "@linghun/shared";
+import { readPositiveIntEnv, redactCommonSecrets } from "@linghun/shared";
 import { type CompactBoundary, compactMessagesToFit } from "./compact-context.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import {
@@ -57,17 +57,7 @@ export type ProviderPreflightCompactResult =
   | { blocked: true; messages: ModelMessage[]; message: string };
 
 const MAX_CONTEXT_MESSAGES = 12;
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
-
-const DEFAULT_CONTEXT_WINDOW_TOKENS = readPositiveIntEnv(
-  "LINGHUN_CONTEXT_WINDOW_TOKENS",
-  128_000,
-);
+const DEFAULT_CONTEXT_WINDOW_TOKENS = readPositiveIntEnv("LINGHUN_CONTEXT_WINDOW_TOKENS", 128_000);
 const CONTEXT_INPUT_HEADROOM_TOKENS = 8_192;
 const CONTEXT_CHARS_PER_TOKEN_ESTIMATE = 4;
 const AUTOCOMPACT_BUFFER_TOKENS = 13_000;

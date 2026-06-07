@@ -96,6 +96,7 @@ describe("provider-circuit-breaker", () => {
       recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
       const entry = state.entries.get("openai::gpt-4o");
       expect(entry).toBeDefined();
+      expect(entry?.state).toBe("closed");
       expect(entry?.consecutiveFailures).toBe(1);
       expect(entry?.cooldownUntil).toBe(0);
       expect(entry?.reasonCode).toBe("PROVIDER_RATE_LIMITED");
@@ -108,6 +109,7 @@ describe("provider-circuit-breaker", () => {
       recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
       const entry = state.entries.get("openai::gpt-4o");
       expect(entry).toBeDefined();
+      expect(entry?.state).toBe("open");
       expect(entry?.consecutiveFailures).toBe(2);
       expect(entry?.cooldownUntil).toBe(2000 + BREAKER_CONSTANTS.COOLDOWN_MS);
       expect(entry?.reasonCode).toBe("PROVIDER_SERVER_ERROR");
@@ -177,7 +179,7 @@ describe("provider-circuit-breaker", () => {
       }
     });
 
-    it("returns blocked=false and clears entry after cooldown expires", () => {
+    it("returns blocked=false and moves to half-open after cooldown expires", () => {
       vi.setSystemTime(10_000);
       recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
       recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
@@ -185,8 +187,8 @@ describe("provider-circuit-breaker", () => {
       vi.setSystemTime(10_000 + BREAKER_CONSTANTS.COOLDOWN_MS + 1);
       const result = checkProviderCooldown(state, "openai", "gpt-4o");
       expect(result.blocked).toBe(false);
-      // Entry should be cleaned up
-      expect(state.entries.has("openai::gpt-4o")).toBe(false);
+      expect(state.entries.get("openai::gpt-4o")?.state).toBe("half-open");
+      expect(state.entries.get("openai::gpt-4o")?.cooldownUntil).toBe(0);
     });
 
     it("returns correct remaining time mid-cooldown", () => {
@@ -309,6 +311,7 @@ describe("provider-circuit-breaker", () => {
       vi.setSystemTime(1000 + BREAKER_CONSTANTS.COOLDOWN_MS + 1);
       const check3 = checkProviderCooldown(state, "openai", "gpt-4o");
       expect(check3.blocked).toBe(false);
+      expect(state.entries.get("openai::gpt-4o")?.state).toBe("half-open");
     });
 
     it("successful request clears breaker mid-accumulation", () => {

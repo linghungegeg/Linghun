@@ -801,11 +801,14 @@ export type RemoteState = {
 
 export type MemoryScope = "project" | "user" | "session";
 export type MemoryStatus = "candidate" | "accepted" | "rejected" | "disabled" | "retired";
+export type MemoryTaxonomy = "user" | "feedback" | "project" | "reference";
 
 export type MemoryCandidate = {
   id: string;
   scope: MemoryScope;
   status: MemoryStatus;
+  taxonomy?: MemoryTaxonomy;
+  topic?: string;
   summary: string;
   source: string;
   sourceRefs: string[];
@@ -817,6 +820,8 @@ export type MemoryCandidate = {
 export type MemoryLearningRun = {
   trigger: "manual" | "verification" | "handoff" | "evidence";
   candidatesCreated: number;
+  acceptedCreated?: number;
+  acceptedUpdated?: number;
   modelCalled: boolean;
   skippedReason?: string;
   createdAt: string;

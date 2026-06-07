@@ -469,6 +469,7 @@ async function startApprovedRunnerSpec(
     String(taskDurationMs),
   ]);
   let child!: ReturnType<typeof spawn>;
+  let spawnError: string | undefined;
   try {
     child = spawn(startCommand.command, startCommand.args, {
       cwd: spec.cwd,
@@ -476,8 +477,8 @@ async function startApprovedRunnerSpec(
       stdio: "ignore",
       windowsHide: true,
     });
-    child.once("error", () => {
-      // The adapter observes missing state below and falls back to Node/TUI.
+    child.once("error", (error) => {
+      spawnError = sanitizeDiagnosticText(error instanceof Error ? error.message : String(error));
     });
     child.unref();
     if (child.pid) _runnerPids.set(spec.id, child.pid);
@@ -507,7 +508,9 @@ async function startApprovedRunnerSpec(
       adapter: "node",
       protocol: resolution.protocol,
       version: resolution.version,
-      lastError: failed
+      lastError: spawnError
+        ? `runner spawn error: ${spawnError}`
+        : failed
         ? "runner start failed before writing observable state"
         : "runner did not write observable state before startup timeout",
       fallbackReason: "start_failed",

@@ -20,7 +20,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     const text = [
       "解释如下：",
       "ControlledMemorySummary=accepted:0 candidates:0",
-      "MemoryBoundary=acceptedOnly; topK=3; candidateOnlyLearning; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
+      "MemoryBoundary=acceptedOnly; topK=3; autoExtractionRuntime; dedicatedMemoryDir; manualLearnCandidateOnly; noSecretsOrFullDumps",
       "EvidenceSummary=[]",
       "CommandCapabilitySummary=",
       "/help Help: risk=readonly",
@@ -30,12 +30,15 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).not.toContain("MemoryBoundary");
     expect(result).not.toContain("EvidenceSummary");
     expect(result).not.toContain("CommandCapabilitySummary");
-    expect(result).not.toContain("doNotWriteLongTermMemoryWithoutExplicitMemoryAccept");
+    expect(result).not.toContain("autoExtractionRuntime");
+    expect(result).not.toContain("dedicatedMemoryDir");
   });
 
-  it("strips bare doNotWriteLongTermMemoryWithoutExplicitMemoryAccept token even without '='", () => {
-    const text = "记忆策略：doNotWriteLongTermMemoryWithoutExplicitMemoryAccept 生效中。";
+  it("strips bare memory boundary tokens even without '='", () => {
+    const text =
+      "记忆策略：autoExtractionRuntime 生效中；历史 token doNotWriteLongTermMemoryWithoutExplicitMemoryAccept 也可能被复述。";
     const result = sanitizeMainScreenLeakage(text, "zh-CN");
+    expect(result).not.toContain("autoExtractionRuntime");
     expect(result).not.toContain("doNotWriteLongTermMemoryWithoutExplicitMemoryAccept");
   });
 

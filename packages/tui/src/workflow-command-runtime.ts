@@ -5,7 +5,12 @@ import { dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
 import type { CacheFreshness } from "@linghun/core";
-import { TOGGLE_DETAILS_KEYBIND, type Language } from "@linghun/shared";
+import {
+  type Language,
+  TOGGLE_DETAILS_KEYBIND,
+  formatDiagnosticError,
+  isNodeErrorWithCode,
+} from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
 import type {
   RegistryAgentDefinition,
@@ -521,14 +526,6 @@ async function appendWorkflowHydrateWarning(context: TuiContext, message: string
       `[linghun] ${message}; warning_write_failed=${formatDiagnosticError(error)}\n`,
     );
   }
-}
-
-function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && error.code === code;
-}
-
-function formatDiagnosticError(error: unknown): string {
-  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }
 
 function recoverWorkflowRunState(

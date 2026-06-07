@@ -128,6 +128,9 @@ export function buildWebhookRequest(
   }
   const content = event.redactedSummary;
   const type = channel.config.type;
+  if (channel.config.signingSecretRef && !signingSecret) {
+    return { ok: false, reason: "missing_signing_secret" };
+  }
   if (type === "feishu" || type === "lark") {
     return { ok: true, request: buildFeishuWebhook(endpoint, content, signingSecret, nowMs) };
   }

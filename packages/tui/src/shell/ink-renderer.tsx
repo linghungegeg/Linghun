@@ -41,10 +41,9 @@ export function renderInkShell(
   const enableModifyOtherKeys = capability.keyboardProtocols.includes("modifyOtherKeys");
   const enableKittyKeyboard =
     capability.kittyKeyboard || capability.keyboardProtocols.includes("csi-u");
-  // Phase 7.18 repair: transcript virtualization uses an app-owned clipped
-  // viewport, so real wheel events must enter the transcript scroll reducer.
-  // Alternate screen stays disabled; selection/copy is still not reintroduced.
-  const enableMouseTracking = true;
+  const enableMouseTracking =
+    process.env.LINGHUN_TUI_MOUSE === "1" ||
+    (process.env.LINGHUN_TUI_MOUSE !== "0" && capability.tier !== "legacy");
   const useAlternateScreen = false;
   let instance: ReturnType<typeof render>;
 

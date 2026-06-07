@@ -9,6 +9,11 @@ import {
 import { resolveKeybinding } from "../../keybinding-runtime.js";
 import { selectInputOwner } from "../models/input-owner-controller.js";
 import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
+import {
+  isMultilineEnterSequence as isNormalizedMultilineEnterSequence,
+  normalizeTerminalInput,
+  sanitizeTerminalText,
+} from "../models/terminal-input-runtime.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
@@ -42,6 +47,17 @@ function isTranscriptWheelTarget(
     mouse.y >= geometry.y &&
     mouse.y < geometry.y + geometry.height
   );
+}
+
+function isTranscriptMouseTarget(
+  mouse: TranscriptMouseEventView | undefined,
+  geometry: TranscriptViewportGeometryView | undefined,
+): boolean {
+  if (!mouse) return false;
+  if (mouse.action === "wheel") return isTranscriptWheelTarget(mouse, geometry);
+  if (mouse.button !== "left") return false;
+  if (!geometry) return false;
+  return mouse.x >= geometry.x && mouse.x < geometry.x + geometry.width;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,22 +319,8 @@ function isWordBoundary(ch: string): boolean {
   return /[\s\p{P}]/u.test(ch);
 }
 
-// 极简 ANSI 去除：识别 CSI / OSC / 单字节 ESC 序列。
-// 不引入新依赖（CCB 用 strip-ansi 包，这里就地实现以保持 LingHun 已有依赖收敛）。
-// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape sequences inherently contain control characters.
-const ANSI_STRIP_PATTERN = /\u001B\[[\d;?]*[a-zA-Z]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B./g;
-const CONTROL_SEQUENCE_PATTERN =
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal control sequences are control characters.
-  /(?:\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B[P_X^][\s\S]*?(?:\u001B\\)|\u001B[@-_]|\u009B[0-?]*[ -/]*[@-~]|\u0000|\u0007|\u0008|\u000B|\u000C|\u000E|\u000F|\u007F)/g;
 export function sanitizeComposerInput(value: string): string {
-  return (
-    value
-      .replace(CONTROL_SEQUENCE_PATTERN, "")
-      .replace(ANSI_STRIP_PATTERN, "")
-      .replace(/\r\n?/g, "\n")
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: composer sanitation intentionally drops raw terminal control bytes while preserving real newline.
-      .replace(/[\u0001-\u0009\u000B-\u001F]/g, "")
-  );
+  return sanitizeTerminalText(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -427,27 +429,7 @@ export function shouldUnstickSlashHidden(
 }
 
 export function isMultilineEnterSequence(input: string): boolean {
-  if (!input.startsWith("\x1B[")) return false;
-  const body = input.slice(2);
-  const csiU = body.endsWith("u") ? body.slice(0, -1).split(";") : undefined;
-  if (csiU?.length === 2) {
-    const [code, modifier] = csiU;
-    const normalizedModifier = modifier.split(":")[0];
-    return (
-      (code === "10" || code === "13" || code === "57414") &&
-      (normalizedModifier === "2" || normalizedModifier === "3")
-    );
-  }
-  const modified = body.endsWith("~") ? body.slice(0, -1).split(";") : undefined;
-  if (modified?.length === 3) {
-    const [prefix, modifier, code] = modified;
-    return (
-      prefix === "27" &&
-      (modifier === "2" || modifier === "3") &&
-      (code === "10" || code === "13" || code === "57414")
-    );
-  }
-  return false;
+  return isNormalizedMultilineEnterSequence(input);
 }
 
 const COMPOSER_MAX_VISIBLE_LINES = 5;
@@ -504,6 +486,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const noColor = view.themeMode === "no-color";
   const theme = useMemo(() => createShellTheme(noColor), [noColor]);
   const anchorRef = useRef<DOMElement | null>(null);
+  const emitInput = useCallback(
+    (event: ShellInputEvent) => {
+      Promise.resolve(onInput(event)).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setHintNotice(message);
+      });
+    },
+    [onInput],
+  );
 
   // Permission active = a permission card is on screen and the composer is in
   // selector mode (key bindings change; ordinary chars do NOT enter the buffer).
@@ -584,12 +575,12 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       // 通过 submit 文本路径回灌（避免被 handleNaturalInput 当用户正常发言）。
       // cancel 仍上抛 escape 关闭面板（与既有交互链兼容）。
       if (id === "cancel") {
-        void onInput({ type: "escape" });
+        emitInput({ type: "escape" });
         return;
       }
-      void onInput({ type: "permission-action", actionId: id });
+      emitInput({ type: "permission-action", actionId: id });
     },
-    [onInput],
+    [emitInput],
   );
 
   // 提示通知（Esc again to clear / Ctrl+C again to clear）
@@ -660,11 +651,13 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     (input, key) => {
       if (isSgrMouseInput(input)) {
         const mouse = parseSgrMouseEvent(input);
-        if (!isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)) return;
+        if (!isTranscriptMouseTarget(mouse, view.transcriptViewportGeometry)) return;
         if (mouse?.button === "wheel-up") {
-          void onInput({ type: "transcript-scroll", action: "wheelUp" });
+          emitInput({ type: "transcript-scroll", action: "wheelUp" });
         } else if (mouse?.button === "wheel-down") {
-          void onInput({ type: "transcript-scroll", action: "wheelDown" });
+          emitInput({ type: "transcript-scroll", action: "wheelDown" });
+        } else if (mouse?.button === "left") {
+          emitInput({ type: "transcript-mouse", event: mouse });
         }
         return;
       }
@@ -675,7 +668,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       const owner = selectInputOwner(input, key, {
         permissionActive,
         panelActive: configPanelActive || commandPanelActive,
-        panelInteractive: commandPanelConsumesInput,
+        panelInteractive: Boolean(
+          view.configPanel || view.helpPanel || view.sessionsPanel || commandPanelConsumesInput,
+        ),
         pastePending: pastePendingRef.current,
         slashVisible: slashCandidates.length > 0 && !slashHidden,
       });
@@ -698,11 +693,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         if (binding.pending) return;
         if (binding.action === "toggle-details") {
           clearHintNotice();
-          void onInput({ type: "toggle-details" });
+          emitInput({ type: "toggle-details" });
           return;
         }
         if (binding.action === "cycle-permission-mode") {
-          void onInput({ type: "cycle-permission-mode" });
+          emitInput({ type: "cycle-permission-mode" });
           return;
         }
         if (binding.action === "clear-line") {
@@ -774,29 +769,56 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       // ─── 2. Panel layer keys ───────────────────────────────────────────
       if (owner === "panel") {
         if (key.escape) {
-          if (view.helpPanel) void onInput({ type: "help-close" });
-          else if (view.btwPanel) void onInput({ type: "btw-close" });
-          else if (view.sessionsPanel) void onInput({ type: "sessions-close" });
-          else if (view.configPanel) void onInput({ type: "config-back" });
-          else if (view.commandPanel) void onInput({ type: "command-panel-close" });
-          else void onInput({ type: "escape" });
+          if (view.helpPanel) emitInput({ type: "help-close" });
+          else if (view.btwPanel) emitInput({ type: "btw-close" });
+          else if (view.sessionsPanel) emitInput({ type: "sessions-close" });
+          else if (view.configPanel) emitInput({ type: "config-back" });
+          else if (view.commandPanel) emitInput({ type: "command-panel-close" });
+          else emitInput({ type: "escape" });
+          return;
+        }
+        if (view.helpPanel) {
+          if (!key.ctrl && !key.meta && /^[1-9]$/.test(input)) {
+            const idx = Number(input) - 1;
+            if (idx < view.helpPanel.entries.length) {
+              const delta = idx - view.helpPanel.cursor;
+              if (delta !== 0) emitInput({ type: "help-move", delta: delta as -1 | 1 });
+              emitInput({ type: "help-enter" });
+            }
+          } else if (key.return) emitInput({ type: "help-enter" });
+          else if (key.upArrow) emitInput({ type: "help-move", delta: -1 });
+          else if (key.downArrow) emitInput({ type: "help-move", delta: 1 });
+          else if (key.tab || key.rightArrow) emitInput({ type: "help-switch-group", delta: 1 });
+          else if (key.leftArrow) emitInput({ type: "help-switch-group", delta: -1 });
+          return;
+        }
+        if (view.configPanel) {
+          if (key.return) emitInput({ type: "config-enter" });
+          else if (key.upArrow) emitInput({ type: "config-move", delta: -1 });
+          else if (key.downArrow) emitInput({ type: "config-move", delta: 1 });
+          return;
+        }
+        if (view.sessionsPanel) {
+          if (key.return) emitInput({ type: "sessions-resume" });
+          else if (key.upArrow) emitInput({ type: "sessions-move", delta: -1 });
+          else if (key.downArrow) emitInput({ type: "sessions-move", delta: 1 });
           return;
         }
         if (commandPanelConsumesInput) {
           if (key.upArrow) {
-            void onInput({ type: "command-panel-move", delta: -1 });
+            emitInput({ type: "command-panel-move", delta: -1 });
             return;
           }
           if (key.downArrow) {
-            void onInput({ type: "command-panel-move", delta: 1 });
+            emitInput({ type: "command-panel-move", delta: 1 });
             return;
           }
           if (key.return) {
-            void onInput({ type: "command-panel-toggle" });
+            emitInput({ type: "command-panel-toggle" });
             return;
           }
           if (input.toLowerCase() === "x" && !key.ctrl && !key.meta) {
-            void onInput({ type: "command-panel-stop" });
+            emitInput({ type: "command-panel-stop" });
             return;
           }
           return;
@@ -871,7 +893,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
               resetBuffer();
               setSlashHidden(false);
               clearHintNotice();
-              void onInput({ type: "submit", text: submitText });
+              emitInput({ type: "submit", text: submitText });
               return;
             }
           }
@@ -880,9 +902,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           resetBuffer();
           setSlashHidden(false);
           clearHintNotice();
-          void onInput(
-            submitText ? { type: "submit", text: submitText } : { type: "empty-submit" },
-          );
+          emitInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
           return;
         }
         // 兜底 — slash owner 内未命中明确分支：吞掉，避免 fall-through 到 composer。
@@ -895,7 +915,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         const index = Number(input) - 1;
         const suggestion = view.taskSuggestions?.[index];
         if (suggestion) {
-          void onInput({ type: "task-suggestion-action", suggestionId: suggestion.id });
+          emitInput({ type: "task-suggestion-action", suggestionId: suggestion.id });
         }
         return;
       }
@@ -906,32 +926,24 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       const inTaskMode = view.viewMode === "task" || view.viewMode === "pending";
       const k = key as { pageUp?: boolean; pageDown?: boolean; end?: boolean; home?: boolean };
       if (inTaskMode && k.pageUp) {
-        void onInput({ type: "transcript-scroll", action: "halfPageUp" });
+        emitInput({ type: "transcript-scroll", action: "halfPageUp" });
         return;
       }
       if (inTaskMode && k.pageDown) {
-        void onInput({ type: "transcript-scroll", action: "halfPageDown" });
+        emitInput({ type: "transcript-scroll", action: "halfPageDown" });
         return;
       }
       if (inTaskMode && k.home && text.length === 0) {
-        void onInput({ type: "transcript-scroll", action: "top" });
+        emitInput({ type: "transcript-scroll", action: "top" });
         return;
       }
       if (inTaskMode && k.end && text.length === 0) {
-        void onInput({ type: "transcript-scroll", action: "bottom" });
+        emitInput({ type: "transcript-scroll", action: "bottom" });
         return;
       }
 
-      // Multiline: Shift+Enter plus terminal-safe fallbacks.
-      if (isMultilineEnterSequence(input)) {
-        updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
-        return;
-      }
-      if (key.return && (key.shift || key.meta)) {
-        updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
-        return;
-      }
-      if ((key.ctrl && input === "j") || input === "\n") {
+      const terminalAction = normalizeTerminalInput(input, key);
+      if (terminalAction.type === "newline") {
         updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
         return;
       }
@@ -953,7 +965,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           );
           const suggestion = view.taskSuggestions[index];
           if (suggestion) {
-            void onInput({ type: "task-suggestion-action", suggestionId: suggestion.id });
+            emitInput({ type: "task-suggestion-action", suggestionId: suggestion.id });
             return;
           }
         }
@@ -982,7 +994,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             resetBuffer();
             setSlashHidden(false);
             clearHintNotice();
-            void onInput({ type: "submit", text: submitText });
+            emitInput({ type: "submit", text: submitText });
             return;
           }
         }
@@ -991,7 +1003,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         resetBuffer();
         setSlashHidden(false);
         clearHintNotice();
-        void onInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
+        emitInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
         return;
       }
 
@@ -1013,7 +1025,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // Shift+Tab — 切换 permission mode。
       if (key.tab && key.shift) {
-        void onInput({ type: "cycle-permission-mode" });
+        emitInput({ type: "cycle-permission-mode" });
         return;
       }
 
@@ -1048,7 +1060,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
         // 空 buffer → 走上层 escape 链路（既有交互行为）。
         clearHintNotice();
-        void onInput({ type: "escape" });
+        emitInput({ type: "escape" });
         return;
       }
 
@@ -1085,11 +1097,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
-          void onInput({ type: "task-suggestion-move", delta: -1 });
+          emitInput({ type: "task-suggestion-move", delta: -1 });
           return;
         }
         if (inTaskModeWheel && text.length === 0) {
-          void onInput({ type: "transcript-scroll", action: "wheelUp" });
+          emitInput({ type: "transcript-scroll", action: "wheelUp" });
           return;
         }
         const moved = bufferMoveVisualUp(buffer, maxWidth);
@@ -1114,11 +1126,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
-          void onInput({ type: "task-suggestion-move", delta: 1 });
+          emitInput({ type: "task-suggestion-move", delta: 1 });
           return;
         }
         if (inTaskModeWheel && text.length === 0) {
-          void onInput({ type: "transcript-scroll", action: "wheelDown" });
+          emitInput({ type: "transcript-scroll", action: "wheelDown" });
           return;
         }
         const moved = bufferMoveVisualDown(buffer, maxWidth);
@@ -1150,18 +1162,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
       if (key.ctrl && input === "e") {
         setBufferAndResetSelection(bufferEnd(buffer));
-        return;
-      }
-
-      // Delete operations
-      if (key.backspace || key.delete) {
-        if (key.ctrl || key.meta) {
-          setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
-        } else if (key.backspace) {
-          setBufferAndResetSelection(bufferBackspace(buffer));
-        } else {
-          setBufferAndResetSelection(bufferDelete(buffer));
-        }
         return;
       }
 
@@ -1198,7 +1198,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
         clearHintNotice();
-        void onInput({ type: "interrupt" });
+        emitInput({ type: "interrupt" });
         return;
       }
 
@@ -1214,22 +1214,27 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       // 但用户按 Ctrl+O 时不应当作 slash 提交，也不应打开 CommandPanel。
       if (key.ctrl && input === "o") {
         clearHintNotice();
-        void onInput({ type: "toggle-details" });
+        emitInput({ type: "toggle-details" });
         return;
       }
 
-      // 其他 ctrl/meta 不处理
-      if (key.ctrl || key.meta) return;
-
-      // 普通字符输入：去掉 ANSI、\r → \n（处理终端粘贴 SSH coalesce）。
-      if (input && input !== "\r" && input !== "\n") {
-        const sanitized = sanitizeComposerInput(input);
-        if (sanitized) {
-          updateBufferAndResetSelection((current) => bufferInsert(current, sanitized));
-        }
+      if (terminalAction.type === "backspace") {
+        setBufferAndResetSelection(bufferBackspace(buffer));
+        return;
+      }
+      if (terminalAction.type === "delete") {
+        setBufferAndResetSelection(bufferDelete(buffer));
+        return;
+      }
+      if (terminalAction.type === "delete-word-left") {
+        setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
+        return;
+      }
+      if (terminalAction.type === "text" && terminalAction.text) {
+        updateBufferAndResetSelection((current) => bufferInsert(current, terminalAction.text));
       }
     },
-    { isActive: !configPanelActive },
+    { isActive: true },
   );
 
   // ─── Render ─────────────────────────────────────────────────────────────

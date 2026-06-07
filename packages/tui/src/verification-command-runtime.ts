@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
@@ -39,12 +39,20 @@ export async function createVerificationPlan(
 
   const packageJson = await safeReadJson(join(projectPath, "package.json"));
   const scripts = isRecord(packageJson?.scripts) ? packageJson.scripts : {};
+  const packageManager = await detectPackageManager(projectPath);
   const steps: VerificationStep[] = [];
-  addPackageStep(steps, scripts, "typecheck", "typecheck", "TypeScript 类型检查。 ");
-  addPackageStep(steps, scripts, "test", "test", "项目测试套件。 ");
-  addPackageStep(steps, scripts, "lint", "lint", "lint 静态检查。 ");
-  addPackageStep(steps, scripts, "build", "build", "构建验证。 ");
-  addPackageStep(steps, scripts, "smoke", "smoke", "项目自定义 smoke 验证。 ");
+  addPackageStep(
+    steps,
+    scripts,
+    "typecheck",
+    "typecheck",
+    "TypeScript 类型检查。 ",
+    packageManager,
+  );
+  addPackageStep(steps, scripts, "test", "test", "项目测试套件。 ", packageManager);
+  addPackageStep(steps, scripts, "lint", "lint", "lint 静态检查。 ", packageManager);
+  addPackageStep(steps, scripts, "build", "build", "构建验证。 ", packageManager);
+  addPackageStep(steps, scripts, "smoke", "smoke", "项目自定义 smoke 验证。 ", packageManager);
 
   if (steps.length > 0) {
     return steps;
@@ -65,11 +73,43 @@ export function addPackageStep(
   scriptName: string,
   kind: VerificationStepKind,
   reason: string,
+  packageManager: PackageManager = "pnpm",
 ): void {
   if (typeof scripts[scriptName] !== "string") {
     return;
   }
-  steps.push({ kind, command: `corepack pnpm ${scriptName}`, reason });
+  steps.push({ kind, command: formatPackageManagerCommand(packageManager, scriptName), reason });
+}
+
+type PackageManager = "pnpm" | "npm" | "yarn" | "bun";
+
+async function detectPackageManager(projectPath: string): Promise<PackageManager> {
+  if (await fileExists(join(projectPath, "pnpm-lock.yaml"))) return "pnpm";
+  if (await fileExists(join(projectPath, "package-lock.json"))) return "npm";
+  if (await fileExists(join(projectPath, "yarn.lock"))) return "yarn";
+  if (
+    (await fileExists(join(projectPath, "bun.lockb"))) ||
+    (await fileExists(join(projectPath, "bun.lock")))
+  ) {
+    return "bun";
+  }
+  return "pnpm";
+}
+
+function formatPackageManagerCommand(packageManager: PackageManager, scriptName: string): string {
+  if (packageManager === "npm") return `npm run ${scriptName}`;
+  if (packageManager === "yarn") return `corepack yarn ${scriptName}`;
+  if (packageManager === "bun") return `bun run ${scriptName}`;
+  return `corepack pnpm ${scriptName}`;
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function runVerificationPlan(

@@ -1632,7 +1632,7 @@ export function verifyRemoteSignature(
   message: RemoteApprovalMessage,
 ): boolean {
   if (!channel.config.signingSecretRef) {
-    return message.signature === `mock:${event.messageId}:${event.nonce}`;
+    return isRemoteMockSignatureAllowed() && message.signature === `mock:${event.messageId}:${event.nonce}`;
   }
   return typeof message.signature === "string" && message.signature.startsWith("ref:");
 }
@@ -1646,11 +1646,16 @@ export function verifyRemoteInboundSignature(
 ): boolean {
   if (!channel.config.signingSecretRef) {
     return (
+      isRemoteMockSignatureAllowed() &&
       message.origin === "fixture" &&
       message.signature === `mock:inbound:${message.messageId}:${message.nonce}`
     );
   }
   return typeof message.signature === "string" && message.signature.startsWith("ref:");
+}
+
+function isRemoteMockSignatureAllowed(): boolean {
+  return process.env.NODE_ENV !== "production";
 }
 
 // D.14E — 远程入站统一入口。三类入站（approval_response / natural_language_message /

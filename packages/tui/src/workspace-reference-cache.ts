@@ -641,10 +641,42 @@ function parseIgnorePatterns(content: string): string[] {
 function ignorePatternMatches(pattern: string, relativePath: string, name: string): boolean {
   const normalized = normalizeRelativePath(pattern).replace(/^\//, "");
   const directoryPattern = pattern.endsWith("/") ? normalized.replace(/\/$/, "") : normalized;
-  if (!directoryPattern || directoryPattern.includes("*")) {
+  if (!directoryPattern) {
     return false;
   }
-  return relativePath === directoryPattern || name === directoryPattern;
+  const path = normalizeRelativePath(relativePath);
+  if (!directoryPattern.includes("*")) {
+    return (
+      path === directoryPattern ||
+      name === directoryPattern ||
+      path.startsWith(`${directoryPattern}/`)
+    );
+  }
+  const regex = globPatternToRegExp(directoryPattern);
+  return regex.test(path) || regex.test(name);
+}
+
+function globPatternToRegExp(pattern: string): RegExp {
+  let source = "";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "*") {
+      const next = pattern[index + 1];
+      if (next === "*") {
+        source += ".*";
+        index += 1;
+      } else {
+        source += "[^/]*";
+      }
+      continue;
+    }
+    source += escapeRegExp(char ?? "");
+  }
+  return new RegExp(`^(?:${source})(?:/.*)?$`, "u");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$+?.()|[\]{}]/gu, "\\$&");
 }
 
 function incrementWorkspaceSnapshotCount(

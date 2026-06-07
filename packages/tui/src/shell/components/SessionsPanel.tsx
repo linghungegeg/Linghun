@@ -39,7 +39,7 @@ const HINT_TEXT = {
 
 export function SessionsPanel({
   panel,
-  controller,
+  controller: _controller,
   width,
   noColor,
   language,
@@ -62,24 +62,7 @@ export function SessionsPanel({
   const theme = createShellTheme(noColor);
   const hint = HINT_TEXT[language] ?? HINT_TEXT["zh-CN"];
 
-  useInput((_input, key) => {
-    if (key.escape) {
-      void controller.onInput({ type: "sessions-close" });
-      return;
-    }
-    if (key.return) {
-      void controller.onInput({ type: "sessions-resume" });
-      return;
-    }
-    if (key.upArrow) {
-      void controller.onInput({ type: "sessions-move", delta: -1 });
-      return;
-    }
-    if (key.downArrow) {
-      void controller.onInput({ type: "sessions-move", delta: 1 });
-      return;
-    }
-  });
+  useInput(() => undefined, { isActive: false });
 
   const cardWidth = Math.min(width, 84);
   const innerWidth = Math.max(20, cardWidth - 4);

@@ -29,7 +29,6 @@
 //   - countMemoryScopes (pure)
 //   - createEvidenceBackedMemoryCandidates (type-only TuiContext)
 //   - containsSecret (pure)
-//   - extractLearningCandidatesFromInput (pure)
 //   - formatMemoryLearningRun (pure)
 //   - createControlledMemoryInjection (type-only TuiContext)
 //   - estimateMemoryTokens (pure)
@@ -47,6 +46,7 @@ import { join } from "node:path";
 import { resolveStoragePaths } from "@linghun/config";
 import type { Language } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
+import { MEMORY_LEARNING_STATE_FILE } from "./runtime-utils.js";
 import { formatDisplayPath, formatError, truncateDisplay } from "./startup-runtime.js";
 import type {
   MemoryCandidate,
@@ -63,8 +63,6 @@ const MEMORY_PROMPT_TOP_K = 3;
 const MEMORY_PROMPT_ITEM_WIDTH = 180;
 const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 const PROJECT_RULES_STATUS_WIDTH = 160;
-const MEMORY_LEARNING_STATE_FILE = "learning-state.json";
-
 export function createMemoryCandidate(
   scope: MemoryScope,
   summary: string,
@@ -197,7 +195,7 @@ export function formatMemoryStatus(context: TuiContext): string {
     "Memory status",
     `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}; summary ${formatProjectRulesContext(context)}`,
     `- review queue: candidates ${context.memory.candidates.length}; accepted ${context.memory.accepted.length}; disabled ${context.memory.disabled.length}; rejected ${context.memory.rejected.length}`,
-    `- auto learning: ${learningLabel}; auto accept no; source ${learningSource}; long-term memory requires /memory accept <id>`,
+    `- auto learning: ${learningLabel}; auto extraction accepted for stable taxonomy memory; source ${learningSource}; uncertain content stays candidate-only`,
     `- prompt injection: accepted-only topK ${MEMORY_PROMPT_TOP_K}; injected ${injected.items.length}; estimated tokens ${estimateMemoryTokens(injected.text)}; details /memory stats`,
     "- next: /memory review to accept/reject; /memory disable <id> to pause accepted memory; /memory rollback <id> to re-enable",
     `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,
@@ -245,9 +243,9 @@ export function formatMemoryReview(context: TuiContext): string {
     );
   if (context.memory.candidates.length === 0) {
     return [
-      "Memory review：暂无候选记忆；长期记忆不会自动写入。",
-      "来源边界：/memory learn 只看 bounded evidence/Todo/verification/handoff，不读取完整聊天、完整日志或完整索引。",
-      "下一步：需要时用 /memory candidate <短小稳定摘要> [--scope project|user|session] 创建候选，再 /memory accept。",
+      "Memory review：暂无候选记忆；稳定 taxonomy 长期记忆可由 extraction runtime 自动写入专用 memory dir。",
+      "来源边界：自动抽取只保存长期稳定事实；/memory learn 只看 bounded evidence/Todo/verification/handoff，不读取完整聊天、完整日志或完整索引。",
+      "下一步：需要手动复核时用 /memory candidate <短小稳定摘要> [--scope project|user|session] 创建候选，再 /memory accept。",
       ...accepted,
       ...disabled,
       "动作区别：accept=写入长期且可被 topK 注入；reject=丢弃候选；disable=暂停已接受注入；rollback=重新启用；delete=删除记录。",
@@ -273,7 +271,7 @@ export function formatMemoryStats(context: TuiContext): string {
   const candidateScopeCounts = countMemoryScopes(context.memory.candidates);
   const learningLabel = context.memory.learningMode === "active" ? "on" : "off";
   const lastRun = context.memory.lastLearningRun
-    ? `${context.memory.lastLearningRun.trigger}; candidates ${context.memory.lastLearningRun.candidatesCreated}; model called ${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}`
+    ? `${context.memory.lastLearningRun.trigger}; candidates ${context.memory.lastLearningRun.candidatesCreated}; accepted created ${context.memory.lastLearningRun.acceptedCreated ?? 0}; accepted updated ${context.memory.lastLearningRun.acceptedUpdated ?? 0}; model called ${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}`
     : "none";
   if (context.language === "en-US") {
     return [
@@ -284,8 +282,8 @@ export function formatMemoryStats(context: TuiContext): string {
       `- candidate scope: project ${candidateScopeCounts.project}; user ${candidateScopeCounts.user}; session ${candidateScopeCounts.session}; candidates are not auto-accepted or injected`,
       `- prompt injection: accepted-only topK ${MEMORY_PROMPT_TOP_K}; injected ${injection.items.length}; chars ${injection.text.length}; estimated tokens ${estimateMemoryTokens(injection.text)}`,
       `- last learning run: ${lastRun}`,
-      `- auto learning: ${learningLabel}; auto accept no; toggle with /memory learn on|off`,
-      "- long-term write: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
+      `- auto learning: ${learningLabel}; stable taxonomy memory auto accepted; uncertain content stays candidate-only; toggle with /memory learn on|off`,
+      "- long-term write: auto extraction is limited to the dedicated memory dir; manual candidates still use /memory accept <id>; memory never bypasses ordinary Write/Edit permissions",
       "- full candidates, transcripts, logs, and index dumps are not injected into the prompt",
     ].join("\n");
   }
@@ -297,8 +295,8 @@ export function formatMemoryStats(context: TuiContext): string {
     `- candidate：project ${candidateScopeCounts.project}；user ${candidateScopeCounts.user}；session ${candidateScopeCounts.session}；候选不会自动接受或注入`,
     `- prompt 注入：accepted-only topK ${MEMORY_PROMPT_TOP_K}；injected ${injection.items.length}；chars ${injection.text.length}；estimated tokens ${estimateMemoryTokens(injection.text)}`,
     `- 上次学习：${lastRun}`,
-    `- 自动学习：${learningLabel === "on" ? "开启" : "关闭"}；auto accept no；切换：/memory learn on|off`,
-    "- 长期写入：必须显式 /memory accept <id>；memory 不绕过 Start Gate 或权限模式",
+    `- 自动学习：${learningLabel === "on" ? "开启" : "关闭"}；稳定 taxonomy 记忆会自动接受，不确定内容保留候选；切换：/memory learn on|off`,
+    "- 长期写入：自动 extraction 只写专用 memory dir；手动候选仍用 /memory accept <id>；memory 不绕过普通 Write/Edit 权限",
     "- 完整候选、聊天、日志和索引 dump 不注入 prompt",
   ].join("\n");
 }
@@ -347,7 +345,7 @@ export function createEvidenceBackedMemoryCandidates(context: TuiContext): Memor
   return summaries;
 }
 
-// --- D.14B Controlled Learning: secret filter + auto-learning extraction ---
+// --- Pre-Smoke 2: deterministic no-save filter shared by memory extraction ---
 
 const MEMORY_SECRET_PATTERNS = [
   /\b[A-Za-z0-9_-]{20,}(?:key|token|secret|password|credential)/i,
@@ -363,74 +361,26 @@ export function containsSecret(text: string): boolean {
   return MEMORY_SECRET_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-export type AutoLearningExtraction = {
-  category: MemoryLearningCategory;
-  summary: string;
-  source: string;
-  sourceRefs: string[];
-};
-
-const PREFERENCE_TRIGGERS = [
-  { pattern: /(?:用|使用|prefer|always use|默认用)\s*(.{3,60})/i, category: "preference" as const },
-  {
-    pattern: /(?:不要|don'?t|never|禁止|avoid)\s+(.{3,60})/i,
-    category: "collaboration_rule" as const,
-  },
-  {
-    pattern: /(?:先|before|每次|always|每轮)\s+(.{3,60})/i,
-    category: "collaboration_rule" as const,
-  },
-  {
-    pattern: /(?:习惯|偏好|喜欢|style|preference)\s*[:：]?\s*(.{3,60})/i,
-    category: "preference" as const,
-  },
-];
-
-export function extractLearningCandidatesFromInput(
-  userInput: string,
-  existingSummaries: Set<string>,
-): AutoLearningExtraction[] {
-  if (!userInput || userInput.length < 8 || userInput.length > 2000) return [];
-  if (containsSecret(userInput)) return [];
-
-  const results: AutoLearningExtraction[] = [];
-  for (const { pattern, category } of PREFERENCE_TRIGGERS) {
-    const match = userInput.match(pattern);
-    if (match?.[1]) {
-      const summary = match[1].trim().replace(/\s+/g, " ").slice(0, 120);
-      if (summary.length < 5) continue;
-      if (containsSecret(summary)) continue;
-      if (existingSummaries.has(summary)) continue;
-      results.push({
-        category,
-        summary,
-        source: "auto-learning:user-input",
-        sourceRefs: ["turn:current"],
-      });
-      existingSummaries.add(summary);
-    }
-  }
-  return results.slice(0, 2);
-}
-
 export function formatMemoryLearningRun(run: MemoryLearningRun, language: Language): string {
   if (language === "en-US") {
     return [
-      "Memory learn (controlled / candidate-only)",
+      "Memory learn (controlled / extraction runtime)",
       `- source: bounded evidence/Todo/verification/handoff only; trigger ${run.trigger}`,
       `- candidates created: ${run.candidatesCreated}`,
+      `- accepted created: ${run.acceptedCreated ?? 0}; accepted updated: ${run.acceptedUpdated ?? 0}`,
       `- model called: ${run.modelCalled ? "yes" : "no"}`,
       `- skipped reason: ${run.skippedReason ?? "none"}`,
-      "- next: review candidates with /memory review, then accept or reject. auto accept no.",
+      "- next: stable taxonomy memory is accepted automatically into the dedicated memory dir; review uncertain candidates with /memory review.",
     ].join("\n");
   }
   return [
-    "Memory learn（受控 / 只生成候选）",
+    "Memory learn（受控 / extraction runtime）",
     `- 来源：仅 bounded evidence/Todo/verification/handoff；trigger ${run.trigger}`,
     `- 新候选：${run.candidatesCreated}`,
+    `- 自动接受：新增 ${run.acceptedCreated ?? 0}；更新 ${run.acceptedUpdated ?? 0}`,
     `- 调用模型：${run.modelCalled ? "yes" : "no"}`,
     `- 跳过原因：${run.skippedReason ?? "none"}`,
-    "- 下一步：用 /memory review 查看候选，再 accept 或 reject；auto accept no。",
+    "- 下一步：稳定 taxonomy 记忆会自动写入专用 memory dir；不确定候选用 /memory review 复核。",
   ].join("\n");
 }
 
@@ -493,7 +443,7 @@ export function createLinghunMdTemplate(language: Language): string {
 - Prefer facts over guesses: read code, project index, documentation, or command results before making claims.
 - Natural-language commands do not bypass Start Gate or permission approval.
 - Writing files, Bash, network access, dependency installation, and permission/config changes require explicit user confirmation.
-- Long-term memory is candidate-first by default; do not auto-write it without user review and acceptance.
+- Long-term memory uses the controlled extraction runtime by default: stable taxonomy facts may be auto-written to the dedicated memory directory; uncertain content remains candidate-only.
 - After code changes, run the smallest project-approved validation that covers the touched area.
 - Do not paste full transcripts, huge logs, large index results, or full memory stores back into model context.
 - Keep clean rewrite boundaries: reference public behavior and project docs, but do not copy suspicious or proprietary source.
@@ -519,7 +469,7 @@ export function createLinghunMdTemplate(language: Language): string {
 - 事实优先：先读代码、项目索引、文档或命令结果，再判断和下结论。
 - 自然语言命令不能绕过 Start Gate 或权限审批。
 - 写文件、Bash、联网、安装依赖、权限或配置变更，都必须先得到用户明确确认。
-- 长期记忆默认先生成候选，用户 review/accept 后再写入，不自动长期保存。
+- 长期记忆默认走受控 extraction runtime：稳定 taxonomy 事实可自动写入专用 memory dir；不确定内容仍保留候选。
 - 改代码后运行项目认可的最小必要验证，覆盖本次改动范围。
 - 不要把完整 transcript、大日志、大索引结果或完整 memory 塞回模型上下文。
 - 遵守 clean rewrite：可参考公开行为和项目文档，不复制可疑或专有源码。

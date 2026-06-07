@@ -3,10 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
-  createTool,
   type ToolDefinition,
   type ToolFactoryDefinition,
   type ToolLifecycleMetadata,
+  createTool,
 } from "./tool-runtime.js";
 import { toolPrompts } from "./tools/prompts.js";
 import { toolUserFacingNames } from "./tools/ui.js";
@@ -126,11 +126,7 @@ const BASH_PREVIEW_LIMIT = 4_000;
 const BASH_TIMEOUT_MS = 120_000;
 const MAX_TODO_ITEMS = 100;
 const SEARCH_EXCLUDED_DIR_NAMES = ["node_modules", "dist", ".git", ".codebase-memory"];
-const SEARCH_EXCLUDED_PATH_PREFIXES = [
-  ".linghun/logs",
-  ".linghun/agent-runs",
-  ".linghun/failures",
-];
+const SEARCH_EXCLUDED_PATH_PREFIXES = [".linghun/logs", ".linghun/agent-runs", ".linghun/failures"];
 const SEARCH_EXCLUDED_FILE_SUFFIXES = [".tsbuildinfo"];
 const RG_TIMEOUT_MS = 30_000;
 
@@ -980,9 +976,10 @@ function convertUnixReadOnlyCommandForPowerShell(command: string): ShellCommandA
 
   if (!script) return undefined;
   return {
-    command: ["powershell.exe -NoProfile -NonInteractive -Command", quoteCmdArg(`$ErrorActionPreference='Stop'; ${script}`)].join(
-      " ",
-    ),
+    command: [
+      "powershell.exe -NoProfile -NonInteractive -Command",
+      quoteCmdArg(`$ErrorActionPreference='Stop'; ${script}`),
+    ].join(" "),
     adapter: "powershell-adapted",
   };
 }
@@ -1041,7 +1038,12 @@ function looksLikeUnsupportedUnixMultiline(command: string): boolean {
 
 function blockUnsupportedUnixReadOnlyCommand(command: string): ShellCommandAdapter | undefined {
   const tokens = tokenizeSimpleShellCommand(command);
-  const program = tokens?.[0]?.toLowerCase() ?? command.trim().match(/^(\w+)/u)?.[1]?.toLowerCase();
+  const program =
+    tokens?.[0]?.toLowerCase() ??
+    command
+      .trim()
+      .match(/^(\w+)/u)?.[1]
+      ?.toLowerCase();
   if (!program || !["cat", "ls", "grep", "pwd", "which"].includes(program)) return undefined;
   return createBlockedPowerShellAdapter(
     `Unsupported ${program} form on Windows PowerShell; use a simple read-only form or a PowerShell-safe command.`,
@@ -1195,7 +1197,11 @@ function resolveWorkspacePath(workspaceRoot: string, inputPath: string): string 
   }
   const target = resolve(workspaceRoot, inputPath);
   const rel = relative(workspaceRoot, target);
-  if (rel.startsWith("..") || isAbsolute(rel) || (rel === "" && target !== resolve(workspaceRoot))) {
+  if (
+    rel.startsWith("..") ||
+    isAbsolute(rel) ||
+    (rel === "" && target !== resolve(workspaceRoot))
+  ) {
     throw new Error(`路径越界：${inputPath}。建议：只操作当前工作区内文件。`);
   }
   return target;
@@ -1439,7 +1445,10 @@ function isDefaultSearchExcludedPath(
   if (entry.isDirectory() && SEARCH_EXCLUDED_DIR_NAMES.includes(entry.name)) {
     return true;
   }
-  if (entry.isFile() && SEARCH_EXCLUDED_FILE_SUFFIXES.some((suffix) => entry.name.endsWith(suffix))) {
+  if (
+    entry.isFile() &&
+    SEARCH_EXCLUDED_FILE_SUFFIXES.some((suffix) => entry.name.endsWith(suffix))
+  ) {
     return true;
   }
   const rel = stripCurrentDirectoryPrefix(relative(searchRoot, entryPath).replaceAll("\\", "/"));
@@ -1529,12 +1538,12 @@ function createRgExcludeArgs(root: string, workspaceRoot: string): string[] {
     relative(workspaceRoot, root).replaceAll("\\", "/"),
   );
   return [
-    ...SEARCH_EXCLUDED_DIR_NAMES.filter((dir) => !isExplicitExcludedDirRoot(searchRootRel, dir)).map(
-      (dir) => `!**/${dir}/**`,
+    ...SEARCH_EXCLUDED_DIR_NAMES.filter(
+      (dir) => !isExplicitExcludedDirRoot(searchRootRel, dir),
+    ).map((dir) => `!**/${dir}/**`),
+    ...SEARCH_EXCLUDED_PATH_PREFIXES.filter((path) => !isSameOrInside(searchRootRel, path)).map(
+      (path) => `!**/${path}/**`,
     ),
-    ...SEARCH_EXCLUDED_PATH_PREFIXES.filter(
-      (path) => !isSameOrInside(searchRootRel, path),
-    ).map((path) => `!**/${path}/**`),
     ...SEARCH_EXCLUDED_FILE_SUFFIXES.filter((suffix) => !searchRootRel.endsWith(suffix)).map(
       (suffix) => `!**/*${suffix}`,
     ),

@@ -1,10 +1,10 @@
 import { basename } from "node:path";
-import { TOGGLE_DETAILS_KEYBIND, type Language } from "@linghun/shared";
+import { type Language, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
 import { calculateContextPercentages } from "../context-window-runtime.js";
 import type { TuiContext } from "../index.js";
-import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
+import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
 import {
   findConfigPanel,
@@ -389,7 +389,7 @@ export function createShellViewModel(
             reasoningLevel: options.reasoningLevel,
             reasoningSent: options.reasoningSent,
             estimatedCostCny: sumFiniteNumbers(
-              context.roleUsage.map((usage) => usage.estimatedCny),
+              (context.roleUsage ?? []).map((usage) => usage.estimatedCny),
             ),
             contextUsageLabel: context.cache.compactPressure
               ? calculateContextPercentages(
@@ -561,8 +561,9 @@ export function createShellViewModel(
         if (typeof n.createdAt !== "number") return true;
         return n.createdAt + n.timeoutMs > now;
       });
-      // 同步把 ctxNotifs 收敛为活动队列，避免无限积累。
-      (context as { notifications?: NotificationView[] }).notifications = live;
+      if (live.length !== ctxNotifs.length) {
+        (context as { notifications?: NotificationView[] }).notifications = live;
+      }
       return live.length > 0 ? [...live] : undefined;
     })(),
   };

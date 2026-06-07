@@ -1,6 +1,6 @@
 import type { Writable } from "node:stream";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
-import { charWidth, composerMaxWidth, taskComposerMaxWidth, wrapText } from "./text-utils.js";
+import { composerMaxWidth, displayWidth, taskComposerMaxWidth, wrapText } from "./text-utils.js";
 import { getStatusMarker } from "./theme.js";
 import type { ProductBlockStatus, ShellViewModel } from "./types.js";
 
@@ -458,17 +458,8 @@ const ANSI_REGEX = /\x1B\[[0-9;]*m/g;
 
 function centerText(text: string, width: number): string {
   const visible = text.replace(ANSI_REGEX, "");
-  const visibleWidth = displayWidthPlain(visible);
+  const visibleWidth = displayWidth(visible);
   if (visibleWidth >= width) return text;
   const pad = Math.max(0, Math.floor((width - visibleWidth) / 2));
   return " ".repeat(pad) + text;
-}
-
-/** Compute display width accounting for CJK wide characters. */
-function displayWidthPlain(value: string): number {
-  let width = 0;
-  for (const char of value) {
-    width += charWidth(char);
-  }
-  return width;
 }

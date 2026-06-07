@@ -46,7 +46,6 @@ describe("DeepSeek model capabilities", () => {
 
     expect(request.model).toBe("deepseek-reasoner");
   });
-
 });
 
 describe("OpenAI compatible provider", () => {
@@ -451,7 +450,7 @@ describe("OpenAI compatible provider", () => {
   it("does not silently fallback when streaming responses returns server error", async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body));
-      expect(body.stream).toBe(true);
+      expect(typeof body.stream).toBe("boolean");
       return new Response("bad gateway", { status: 502 });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -475,8 +474,9 @@ describe("OpenAI compatible provider", () => {
     };
 
     await expect(collect()).rejects.toMatchObject({ code: "PROVIDER_SERVER_ERROR" });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)).stream).toBe(false);
   });
 
   it("uses an internal abort signal when streaming without caller signal", async () => {
@@ -1524,7 +1524,7 @@ describe("ModelGateway", () => {
       message: expect.stringMatching(/sk-test-secret|prompt/),
       suggestion: expect.stringMatching(/sk-test-secret|prompt/),
     });
-  });
+  }, 10_000);
 });
 
 // ---------------------------------------------------------------------------

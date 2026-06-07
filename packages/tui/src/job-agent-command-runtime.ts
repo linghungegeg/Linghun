@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
-import { Writable } from "node:stream";
+import type { Writable } from "node:stream";
 import { type ModelRole, type RoleModelRoute, resolveStoragePaths } from "@linghun/config";
 import type {
   EndpointProfile,
@@ -9,6 +9,7 @@ import type {
   ModelMessage,
   ModelToolCall,
 } from "@linghun/providers";
+import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import type { ToolName, ToolOutput } from "@linghun/tools";
 import { builtInTools, createToolContext, runTool } from "@linghun/tools";
 import { showCommandPanel } from "./command-panel-runtime.js";
@@ -16,6 +17,7 @@ import type {
   CompactPreflightRuntime,
   ProviderPreflightCompactResult,
 } from "./compact-preflight-runtime.js";
+import { createSilentOutput } from "./details-status-runtime.js";
 import { appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { createManagedWorktree } from "./git-operation-runtime.js";
@@ -23,7 +25,6 @@ import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
 import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
 import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
-import { createSilentOutput } from "./details-status-runtime.js";
 import {
   formatBackgroundTask,
   formatBackgroundTaskPanelDetails,
@@ -3030,10 +3031,9 @@ export async function denyAgentToolUse(
   parentSessionId: string,
   outcomeText: string,
 ): Promise<{ ok: false; tool: string; text: string; evidenceId?: string }> {
-  const text =
-    AGENT_PERMISSION_BRIDGE_TOOLS.has(toolName)
-      ? `${outcomeText}; ${toolName} was NOT executed / NOT written.`
-      : outcomeText;
+  const text = AGENT_PERMISSION_BRIDGE_TOOLS.has(toolName)
+    ? `${outcomeText}; ${toolName} was NOT executed / NOT written.`
+    : outcomeText;
   const evidenceId = await deps().recordAgentToolFailureEvidence(
     context,
     parentSessionId,
@@ -3545,14 +3545,6 @@ async function appendAgentHydrateWarning(context: TuiContext, message: string): 
   }
 }
 
-function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && error.code === code;
-}
-
-function formatDiagnosticError(error: unknown): string {
-  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
-}
-
 function isDefaultBackgroundListTask(task: BackgroundTaskState): boolean {
   if (task.kind === "agent") {
     return task.status === "running";
@@ -3672,19 +3664,23 @@ export async function sendAgentMessage(
     await persistAgentRun(context, target.agent);
     await deps().appendBackgroundTaskEvent(context, parentSessionId, target.background);
     setTimeout(() => {
-      void completeAgent(target.agent, target.background, context, createSilentOutput(), "mailbox").catch(
-        (error: unknown) => {
-          const message = `mailbox wake agent complete failed: ${error instanceof Error ? error.message : String(error)}`;
-          target.background.status = "failed";
-          target.background.result = "fail";
-          target.background.currentStep = message;
-          target.background.updatedAt = new Date().toISOString();
-          target.background.userVisibleSummary = message;
-          void deps()
-            .appendBackgroundTaskEvent(context, parentSessionId, target.background)
-            .catch(() => undefined);
-        },
-      );
+      void completeAgent(
+        target.agent,
+        target.background,
+        context,
+        createSilentOutput(),
+        "mailbox",
+      ).catch((error: unknown) => {
+        const message = `mailbox wake agent complete failed: ${error instanceof Error ? error.message : String(error)}`;
+        target.background.status = "failed";
+        target.background.result = "fail";
+        target.background.currentStep = message;
+        target.background.updatedAt = new Date().toISOString();
+        target.background.userVisibleSummary = message;
+        void deps()
+          .appendBackgroundTaskEvent(context, parentSessionId, target.background)
+          .catch(() => undefined);
+      });
     }, 0);
   }
   const delivered = targets.map((agent) => agent.id);

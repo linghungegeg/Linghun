@@ -1,6 +1,5 @@
 import type { McpServerConfig } from "@linghun/config";
 import type { Language } from "@linghun/shared";
-import { isFeatureEnabled } from "./feature-flag-runtime.js";
 import type { TuiContext } from "./index.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import type { McpToolState, PluginSummary, SkillSummary } from "./tui-data-types.js";
@@ -198,11 +197,9 @@ function listSkillDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
         160,
       ),
       requiredArgs: [],
-      executable: isFeatureEnabled("experimentalDeferredSkillExecution", context),
+      executable: false,
       reason: skillManifestHasContribution(skill)
-        ? isFeatureEnabled("experimentalDeferredSkillExecution", context)
-          ? "Experimental skill deferred execution feature flag is enabled; execution still needs discovery/trust/schema and permission gates."
-          : "Skill manifest contributes commands/tools (enabled+trusted), but experimental skill execution is disabled by feature flag; review manifest manually or run /skills status."
+        ? "Skill manifest contributes commands/tools (enabled+trusted), but Linghun has no safe Skill executor adapter yet; review manifest manually or run /skills status."
         : "Skill manifest is metadata-only (no command/tool contribution); not executable. Run /skills status for details.",
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -236,11 +233,9 @@ function listPluginDeferredTools(context: TuiContext): DeferredToolDescriptor[] 
         160,
       ),
       requiredArgs: [],
-      executable: isFeatureEnabled("experimentalDeferredPluginExecution", context),
+      executable: false,
       reason: pluginManifestHasContribution(plugin)
-        ? isFeatureEnabled("experimentalDeferredPluginExecution", context)
-          ? "Experimental plugin deferred execution feature flag is enabled; execution still needs discovery/trust/schema and permission gates."
-          : "Plugin manifest contributes commands/tools (enabled+trusted), but experimental plugin execution is disabled by feature flag; review contributions manually or run /plugins doctor."
+        ? "Plugin manifest contributes commands/tools (enabled+trusted), but Linghun has no safe Plugin executor adapter yet; review contributions manually or run /plugins doctor."
         : "Plugin manifest is metadata-only (no command/tool contribution); not executable. Run /plugins doctor for details.",
     }))
     .sort((a, b) => a.name.localeCompare(b.name));

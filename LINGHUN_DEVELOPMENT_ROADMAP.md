@@ -5,11 +5,210 @@
 **CCB vs Linghun 空 catch 硬数据**：CCB 3 个 vs Linghun 16+ 个——错误处理严谨度差距
 **原则**：
 - 不降级——每项任务必须提升 Linghun，不允许退化
-- 大文件拆分暂不处理——保持现状，只做功能/质量改进
+- 不再以“不拆大文件”为前提——不能为了避免结构调整而继续往单文件堆补丁；源码级闭环需要新增模块、局部拆分、抽出 runtime 时必须做，但不得复制 CCB 可疑源码
 - 每个 Phase 独立交付、独立验证、不可跳阶段
 - 每个任务含：具体位置 → 做什么 → 验收标准
+- 实测前不留技术债——高危、中危、低危、文档假阳性、实测交互缺陷全部必须裁决并闭环；不能以“局部成熟”声明全局成熟
 
 ---
+
+## 2026-06-07 实测前全量闭环总令（新对话执行入口）
+
+本节覆盖并修正旧 A-G 路线图口径。2026-06-07 本轮已经按本节从 Pre-Smoke 0 推进到 Pre-Smoke 7，并以 `docs/audit/pre-smoke-full-closure-registry-2026-06-07.md` 与 `docs/delivery/phase-pre-smoke-00-audit-registry.md` 到 `docs/delivery/phase-pre-smoke-07-full-closure.md` 作为闭合事实来源。
+
+### 2026-06-07 Pre-Smoke 0-7 闭合状态
+
+| 阶段 | 状态 | 事实来源 |
+|---|---|---|
+| Pre-Smoke 0 | 已闭合 | `docs/delivery/phase-pre-smoke-00-audit-registry.md` |
+| Pre-Smoke 1 | 已闭合 | `docs/delivery/phase-pre-smoke-01-tui-input-panel.md` |
+| Pre-Smoke 2 | 已闭合 | `docs/delivery/phase-pre-smoke-02-memory-runtime.md` |
+| Pre-Smoke 3 | 已闭合 | `docs/delivery/phase-pre-smoke-03-executor-closure.md` |
+| Pre-Smoke 4 | 已闭合 | `docs/delivery/phase-pre-smoke-04-state-error-concurrency.md` |
+| Pre-Smoke 5 | 已闭合 | `docs/delivery/phase-pre-smoke-05-functional-ecosystem.md` |
+| Pre-Smoke 6 | 已闭合 | `docs/delivery/phase-pre-smoke-06-low-risk-debt.md` |
+| Pre-Smoke 7 | 已闭合 | `docs/delivery/phase-pre-smoke-07-full-closure.md` |
+
+闭合口径：本轮完成本地源码级实现、focused/full-unit 验证、registry 裁决和交付文档闭环，并建立稳定点 commit。该结论不等于真实项目 smoke 已通过，不等于 Beta PASS，也不等于 open-source-ready；真实项目实测仍需用户从稳定点另行确认启动。
+
+### 总体约束
+
+- **全部修，不挑重点**：审计报告、旁路复核、用户实测问题、文档错误和历史路线图里已列项目都必须处理；仅允许将“源码证伪”的条目标记为 `NOT-ISSUE`，不允许把真实问题延期到实测后。
+- **源码级闭环**：每个问题必须有 source-level 定位、实现、测试/验证、交付文档。不能只改表象、不能只靠注释或文档说明。
+- **对齐 CCB，但不复制源码**：允许参考 CCB 的产品行为、分层方式、权限边界、提示词原则和测试思路；禁止复制专有实现、内部 API、遥测或可疑源码。
+- **该自研就自研**：Linghun 已有边界不足时可以新增模块，例如 terminal input runtime、auto memory runtime、panel layer runtime、sanitizer/shared helpers；不能继续把复杂逻辑塞进 `Composer.tsx` 或单个神文件。
+- **实测前无技术债**：每阶段的 `已知问题` 只能是已证伪、外部不可控或用户明确排除项；不能把本阶段必做能力写成后续补丁。
+- **旁路审计先裁决**：审计报告里的每一项必须进入 `DONE / FIXED / NOT-ISSUE / MERGED-INTO / BLOCKED-BY-USER` 状态表。没有状态表，不算闭环。
+- **文档同步**：每阶段必须更新 `docs/delivery/phase-pre-smoke-XX-*.md`，最终更新本路线图和 `docs/audit/FULL_LINE_AUDIT_2026-06-07.md` 的状态摘要。
+
+### 已确认的文档/审计修正
+
+| 报告原说法 | 旁路复核结论 | 后续处理 |
+|---|---|---|
+| `provider-client-runtime.ts` 不存在 | 错。实际存在于 `packages/providers/src/provider-client-runtime.ts` | 报告修正为 `NOT-ISSUE`，不再安排修复 |
+| deferred tools “全不可执行” | 表述过重。codebase-memory 与 local/SSE MCP 已有执行路径；Skill/Plugin 执行适配器仍缺，MCP 缺失 executor 路径仍需逐 server/source 复核 | 拆成“Skill executor、Plugin executor、MCP executor 三条闭环线”：有真实 executor 才能提示可执行；否则从提示和 catalog 中撤掉可执行暗示 |
+| CommandPanel 缺 `useInput` deps | 错。CommandPanel 不自带 `useInput`；Config/Help/Btw/SessionsPanel 有 | 修正文档并只修真实组件 |
+| unknown terminal assume 全能力 | 表述过重。unknown 返回 `basicCapability()`，但 basic 对 unicode/color/cursorPositioning 仍偏乐观 | 改为 capability 分层保守化 |
+| mock inbound 任意前缀通过 | 表述过重。当前要求 `origin === "fixture"` 且精确 nonce/messageId；但生产无 secret 时 mock 路径仍需门控 | 修为“生产/非测试模式必须禁用 mock signature” |
+
+### 用户实测 P0：终端输入、鼠标、面板必须先闭环
+
+| # | 问题 | 源码事实 | 成熟修复方向 | 验收 |
+|---|---|---|---|---|
+| T0.1 | Delete 键不能用 | `Composer.tsx` 只依赖 `key.delete/key.backspace`，缺 raw sequence 归一化 | 新增或抽出 `terminal-input-runtime`，统一识别 `\x1b[3~`、`\x7f`、modifyOtherKeys/CSI-u 等，再把动作派发给 edit buffer | Windows Terminal、PowerShell、cmd/legacy、tmux/ssh 场景下 Delete/Backspace 均可用 |
+| T0.2 | Shift+Enter 不能换行 | `Composer.tsx` 有逻辑，但 `ink-renderer.tsx` 混用 kitty/CSI-u，真实事件不稳 | 区分 kitty、CSI-u、modifyOtherKeys；输入 runtime 做 fallback；保留 Ctrl+J/backslash-enter | Shift+Enter、Alt/Meta+Enter、Ctrl+J 三条路径均可换行，不误提交 |
+| T0.3 | 鼠标左键拖选/复制/下拉不可用 | SGR mouse 无条件开启；Composer 只处理 wheel，left down/drag/up 没接 selection reducer | 复用/补齐 `transcript-selection-state`，接入 left down/drag/up、copy、edge autoscroll；mouse tracking 按 capability/selection 开关启用 | 左键拖选、向下拖动自动滚动、松开复制；不支持 app-owned selection 的终端保留原生选择 |
+| T0.4 | 高级面板渲染异常 | `PanelLayer` 在 transcript flow 内，宽度/高度/输入 owner 不统一 | 建立稳定 panel layer：固定容器、宽高约束、滚动、单一 input owner；Config/Help/Btw/Sessions/Command 对齐 | `/config`、`/memory`、`/mcp`、`/help` 在窄/宽终端均不挤压、不错位、不抢输入 |
+| T0.5 | Composer monolithic input 继续膨胀 | 570 行 `useInput` 已成为根因 | 抽出 input owner、edit reducer、mouse reducer；Composer 只负责渲染和调用 runtime | 新输入逻辑有纯函数测试，不再靠源字符串断言 |
+
+### 自动记忆必须对齐 CCB：自动、窄边界、可回滚
+
+| # | 问题 | 当前 Linghun | CCB 成熟行为参考 | 调整要求 | 验收 |
+|---|---|---|---|---|---|
+| M0.1 | 自动记忆停在候选层 | `runAutoLearningOnTurnEnd` 只写 candidate，`/memory accept` 还走 Write 权限确认；旧 auto-learning 依赖固定短语/正则触发，属于文字补丁，必须删除 | CCB auto memory 默认开启，由最近对话的背景提取器分析并写专用 memory dir；普通写文件仍受权限管道 | 自研 Linghun memory extraction runtime：按最近消息、已有 memory manifest、taxonomy 和不可保存清单做语义判断、去重、更新或新增；不再要求用户逐条确认写入；禁止把固定短语匹配当成熟方案 | 最近对话中出现可复用长期事实时，提取器能保存或更新对应 topic；无长期价值内容不写；下一轮可注入/回忆 |
+| M0.2 | 存储形态不利于模型维护 | JSON candidate 文件为主 | CCB 用 `MEMORY.md` 短索引 + topic markdown 文件，按主题更新/去重 | 增加 Linghun auto memory markdown 层或兼容迁移层；JSON 可作为状态索引，但长期内容应可读、可维护 | `/memory storage/review` 能看到 topic、索引、状态；重复偏好更新同一主题而非创建一堆 UUID |
+| M0.3 | 内容边界不够成熟 | 旧抽取逻辑只生成短 summary，taxonomy 仅 preference 等内部类别，无法表达长期记忆边界 | CCB 四类：user / feedback / project / reference；明确不保存代码结构、git、临时任务、debug recipe、已有规则、secrets | 引入 Linghun memory taxonomy、secret filter、不可保存清单、stale/verify 提示 | 自动记忆不保存代码文件结构、临时阶段进度、完整日志/索引/secrets |
+| M0.4 | 权限边界过重又不够专用 | `/memory accept` 调用通用 Write 权限 | CCB 只对白名单 auto memory path 放行，不放宽普通 Write | 新增 memory-runtime 内部写入通道或专用 permission carve-out，仅允许 Linghun memory dir | 普通 Write 仍需权限；memory runtime 写自己的目录不弹重复确认 |
+| M0.5 | 忘记/删除/回滚要成熟 | 现有 reject/disable/rollback/delete 有但围绕 JSON | 保留可忘记、可更新、可禁用 | 自动 accepted 也必须可 `/memory forget|disable|rollback`，并刷新 cache/memory injection | 记忆可见、可删、可回滚；删除后不再注入 |
+
+### 实测前全量闭环阶段
+
+> 阶段名使用 `Pre-Smoke`，表示真实项目实测前必须全部完成。每阶段可多开 agent，但交付必须合并为源码事实和验证结果。
+
+#### Pre-Smoke 0 — 审计事实注册表与文档纠偏
+
+目标：把所有审计项、用户实测项、旁路复核项统一成可执行 registry，修正文档假阳性，避免新对话重复踩坑。
+
+必须完成：
+- 建立 `docs/audit/pre-smoke-full-closure-registry-2026-06-07.md`，逐项列出高危/中危/低危/实测问题/文档错误。
+- 每项必须有 `status`、`source file`、`source-level evidence`、`fix phase`、`verification`。
+- 修正 `docs/audit/FULL_LINE_AUDIT_2026-06-07.md` 中已证伪或过重的说法。
+- 本路线图同步最终阶段入口。
+
+验收：
+- 任何审计条目都不能处于“未分类/未裁决”。
+- `NOT-ISSUE` 必须有源码证据。
+
+#### Pre-Smoke 1 — TUI 输入/鼠标/面板源码级修复
+
+目标：闭合用户实测 4 个 P0 交互问题，并从结构上避免继续打补丁。
+
+必须完成：
+- 新增或抽出 terminal input normalization/edit runtime。
+- 正确处理 Delete/Backspace/raw DEL/CSI-u/modifyOtherKeys/Shift+Enter。
+- 接通 SGR left down/drag/up selection、copy、edge autoscroll；mouse tracking capability gate。
+- 建立稳定 panel layer 和统一 input owner。
+- 修复 `ConfigPanel/HelpPanel/BtwPanel/SessionsPanel` 的 `useInput` owner/deps 问题。
+
+验收：
+- 单元测试覆盖 input normalization、edit reducer、selection reducer、panel owner。
+- Ink/TUI smoke 覆盖 Delete、Shift+Enter、鼠标拖选复制、下拉自动滚动、`/config` 渲染。
+- Windows Terminal/PowerShell 至少一条真实交互记录进入阶段文档。
+
+#### Pre-Smoke 2 — 自动记忆 CCB 对齐闭环
+
+目标：把长期记忆从“候选+确认”调整为“自动、受控、窄边界、可回滚”。
+
+必须完成：
+- 引入 Linghun memory taxonomy：`user / feedback / project / reference`。
+- 引入不可保存清单：代码结构、git 历史、临时任务、debug recipe、已有规则、secrets、完整日志/索引/transcript。
+- 删除现有固定短语/正则触发式 auto-learning 文字补丁；改为 CCB 风格的 memory extraction runtime：读取最近对话摘要、已有 memory manifest、taxonomy 和不可保存清单，由抽取器决定 update / create / no-op。
+- 可复用长期事实自动 accepted 并持久化；不确定、临时或证据不足内容必须 no-op 或 candidate，不能乱写。
+- `/memory accept` 作为显式用户意图，不再二次弹通用 Write 确认。
+- memory runtime 写入仅限 Linghun memory dir；普通 Write 权限不得放宽。
+- 支持更新/去重/忘记/禁用/回滚；刷新 prompt injection 和 cache freshness。
+
+验收：
+- 最近对话出现长期可复用信息时，memory extraction runtime 能按 taxonomy 保存到 topic markdown 并更新 `MEMORY.md` 索引；不是靠匹配固定短语。
+- 同主题再次出现新信息时更新已有 topic，不生成重复噪声。
+- 临时任务、当前阶段进度、代码结构、git 信息、debug recipe、已有规则、secrets、完整日志/索引/transcript 不写入长期记忆。
+- `/memory review/storage/stats/forget/disable/rollback` 全部可用。
+
+#### Pre-Smoke 3 — 高危/安全/远程/MCP 全修复
+
+目标：审计高危和安全中危全部源码级闭环。
+
+必须完成：
+- `mcp-sse-runtime`：JSON-RPC frame `!Array.isArray`，id 递增，tools/list 缓存，响应/并发安全。
+- Skill executor：参考 CCB 的成熟边界，只参考“核心工具直接调用、deferred 先 discovery 再 Execute、远程/不可信 skill 不内联执行、schema/trust/permission gate、错误可回传”的行为；Linghun 自研 adapter 必须只执行 enabled+trusted+schema-valid 的本地 skill contribution，失败要返回结构化 tool_result/evidence，不能只把 feature flag 打开。
+- Plugin executor：独立于 Skill executor 闭环。只允许 enabled+trusted+schema-valid plugin contribution 进入可执行列表；执行前必须经过 source/commit/permission record、capability/schema gate 和权限策略；失败隔离，不能让 plugin hook/command 绕过 Start Gate、permission、evidence、resource guard。
+- MCP executor：不把 MCP 简化成 “tools/list 已发现”。必须逐 transport 补齐执行路径：local stdio、SSE/HTTP 已支持的 server 走 tools/list + tools/call + schema/trust/runtime gate；缺失 transport 或 schema 未加载时必须不可执行并给 doctor 诊断；codebase-memory/local/SSE 路径要补并发/id/cache/error 回传测试。
+- Deferred catalog/prompt truthfulness：SearchExtraTools 只能发现真实可执行或明确不可执行原因；ExecuteExtraTool 只能调用已 discovery 且 executor 存在的工具；若某类 executor 未闭合，必须从 `executable=true`、system reminder 和模型提示中移除可执行暗示。
+- `model-setup-runtime` partial validation 移除假值绕过，只校验已输入字段并保留完整提交校验。
+- remote mock signature：生产/非测试模式禁用 mock；空 signing secret 明确 blocked/diagnostic。
+- permission denial：gateway/continuation 缺失时仍写 warning/tool result/state，不静默不一致。
+- runner spawn error：不吞错，记录可诊断 fallback reason。
+- command panel/details、remote transport、connector URL、Feishu close、HMAC 空密钥全部闭合。
+
+验收：
+- 对应单元测试覆盖成功/失败/并发/空密钥/生产模式。
+- Skill/Plugin/MCP executor 各自有 focused tests：discovery-before-execute、schema mismatch、untrusted/disabled、permission require/deny、readonly auto allow、mutating gate、executor missing fail-closed、tool_result/evidence 回传、cache/hash 稳定。
+- `/skills status`、`/plugins doctor`、`/mcp doctor` 和 deferred tool doctor 能解释为什么某个工具可执行或不可执行，不泄露 raw secret/schema 大对象。
+- 所有高危项状态为 `FIXED` 或源码证伪 `NOT-ISSUE`。
+
+#### Pre-Smoke 4 — 状态一致性、错误处理、并发底座全修复
+
+目标：消除中危状态不一致、空 catch、NaN 排序、存储竞态和 circuit breaker 振荡。
+
+必须完成：
+- permission mode / git evidence / view-model 副作用等先写内存后 await 的路径要么回滚，要么改为提交成功后更新。
+- `Date.parse("")` 排序改稳定比较。
+- `executeMemoryMutation` 显式 exhaustive，未知 action fail closed。
+- SessionStore 并发追加引入文件级锁/退避或等价线性化方案。
+- Provider circuit breaker 加 half-open。
+- 所有审计列出的空 catch/void Promise 必须处理：记录 warning、返回结构化错误或源码证伪。
+
+验收：
+- 相关测试覆盖异常路径、并发路径、状态回滚路径。
+- 全仓 `rg "catch \\{\\s*\\}"` 剩余项必须逐条登记为必要防御并有注释/测试。
+
+#### Pre-Smoke 5 — 功能正确性与生态能力全修复
+
+目标：把报告中所有功能相关中危和旧路线图 A-G 功能缺口全部闭合。
+
+必须完成：
+- `auxModel` setup step 死定义裁决：实现或删除。
+- `/help` 与命令描述去重，命令 registry 保持一致。
+- git branch regex 支持点号等合法分支。
+- workspace ignore glob 正确处理。
+- verification runner 自动识别 pnpm/npm/yarn/bun，不硬编码 `corepack pnpm`。
+- clipboard 非空 stderr 判定修正。
+- user-state / feedback signal runtime 成熟化：`matchesFrustrated` 不得以“正则收紧”闭环；必须结合运行时失败事件、重复失败次数、用户明确反馈、active prompt/loading/panel 状态、dismiss/cooldown 和 policy gate，输出 typed signal、verification plan、notification plan。
+- provider/tool/MCP/workflow 旧路线图中未完成正确性项全部进入 registry 并闭合。
+
+验收：
+- 对应命令/函数都有最小测试。
+- user-state 相关测试覆盖事件驱动命中、文本误报、重复失败、dismiss/cooldown、policy disabled、其他面板打开时不打扰。
+- 功能项不得只靠文档“已知限制”跳过。
+
+#### Pre-Smoke 6 — 低危/代码债/重复/死代码全清零
+
+目标：实测前不留低危技术债。
+
+必须完成：
+- 报告低危列表中的重复设计、死代码、模型/逻辑缺陷、Shell 层债务全部处理。
+- `readPositiveIntEnv`、`isNodeErrorWithCode`、`formatDiagnosticError`、密钥脱敏、displayWidth、learning-state 常量等重复统一。
+- dead code 删除或启用；保留项必须有测试证明是 defense-only。
+- `MessageMarkdown`、`plain-renderer`、`ProductBlock`、`ScrollViewport`、`useAnchoredCursor` 等 Shell 债务闭合。
+- 若文件继续超长且阻碍修复，做最小模块化拆分。
+
+验收：
+- registry 中低危项无 `OPEN`。
+- lint/typecheck/test 不因清理产生回归。
+
+#### Pre-Smoke 7 — 全量验证、真实交互预检、交付文档
+
+目标：进入真实项目实测前给出“可测稳定点”。
+
+必须完成：
+- 运行最小必要到全量验证：typecheck、lint、unit tests、相关 TUI smoke、必要 build。
+- 对 Delete、Shift+Enter、mouse select/copy/down-drag、advanced panel、auto memory 做真实交互记录。
+- 更新所有阶段交付文档和最终 handoff packet。
+- 建立稳定点 commit。
+
+验收：
+- `docs/delivery/phase-pre-smoke-07-full-closure.md` 给出 PASS/FAIL、验证命令、剩余风险。
+- 若存在任何真实技术债，阶段不得 PASS，不得进入实测。
 
 ## Phase A：正确性修复（立即，不依赖其他阶段）
 

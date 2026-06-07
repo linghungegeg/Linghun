@@ -1,9 +1,4 @@
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
+import { readPositiveIntEnv } from "@linghun/shared";
 
 export const LINGHUN_MAX_AGENTIC_TURNS = readPositiveIntEnv("LINGHUN_MAX_AGENTIC_TURNS", 100);
 export const LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS = 40;

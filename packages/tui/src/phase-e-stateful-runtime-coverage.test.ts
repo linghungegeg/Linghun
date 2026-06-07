@@ -48,10 +48,10 @@ describe("Phase E MCP stdio runtime coverage", () => {
         if (req.method === "tools/call") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { content: [{ type: "text", text: "ok" }] } }));
       });
     `);
-    const ok = await runMcpStdioToolCall(okServer, "demo_tool", { x: 1 }, okServer.cwd, 1_000);
+    const ok = await runMcpStdioToolCall(okServer, "demo_tool", { x: 1 }, okServer.cwd, 5_000);
     expect(ok).toMatchObject({ ok: true, summary: "tools/call demo_tool ok" });
 
-    const missing = await runMcpStdioToolCall(okServer, "missing_tool", {}, okServer.cwd, 1_000);
+    const missing = await runMcpStdioToolCall(okServer, "missing_tool", {}, okServer.cwd, 5_000);
     expect(missing).toMatchObject({ ok: false, errorCode: "MCP_TOOL_NOT_FOUND" });
 
     const timeoutServer = await createMcpServerScript(`

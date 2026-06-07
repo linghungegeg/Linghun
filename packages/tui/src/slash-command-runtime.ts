@@ -58,7 +58,12 @@ import {
   type ModelUsage,
   findKnownModel,
 } from "@linghun/providers";
-import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
+import {
+  LINGHUN_NAME,
+  type Language,
+  type PermissionMode,
+  isNodeErrorWithCode,
+} from "@linghun/shared";
 import {
   type DiffSummary,
   type TodoItem,
@@ -894,7 +899,6 @@ import {
   createLinghunMdTemplate,
   createMemoryCandidate,
   estimateMemoryTokens,
-  extractLearningCandidatesFromInput,
   findMemoryRecord,
   formatControlledMemoryForModel,
   formatMemoryLearningRun,
@@ -2795,10 +2799,6 @@ function normalizePath(path: string): string {
 
 function hashFileContent(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
-}
-
-function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && error.code === code;
 }
 
 async function chooseIndexIgnoreFile(

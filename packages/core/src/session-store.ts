@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import { type JsonlDiagnostic, appendJsonl, readJsonl } from "./jsonl.js";
 import { identifyProject } from "./project.js";
 import {
@@ -66,6 +67,7 @@ export class SessionStore {
   readonly sessionRootDir: string;
   readonly projectPath: string;
   private readonly now: () => Date;
+  private readonly sessionWriteQueues = new Map<string, Promise<void>>();
 
   constructor(options: SessionStoreOptions) {
     this.sessionRootDir = options.sessionRootDir;
@@ -147,19 +149,17 @@ export class SessionStore {
   async appendEvent(sessionId: string, event: TranscriptEvent): Promise<void> {
     assertValidSessionId(sessionId);
     const project = identifyProject(this.projectPath);
-    let session = await this.readMetadata(project.projectId, sessionId);
-    if (!session) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      session = await this.readMetadata(project.projectId, sessionId);
-    }
-    if (!session) {
-      throw new Error(`未找到会话：${sessionId}`);
-    }
+    await this.enqueueSessionWrite(project.projectId, sessionId, async () => {
+      const session = await this.readMetadata(project.projectId, sessionId);
+      if (!session) {
+        throw new Error(`未找到会话：${sessionId}`);
+      }
 
-    await appendJsonl(session.transcriptPath, event);
-    await this.writeMetadata(project.projectId, {
-      ...session,
-      updatedAt: this.now().toISOString(),
+      await appendJsonl(session.transcriptPath, event);
+      await this.writeMetadata(project.projectId, {
+        ...session,
+        updatedAt: this.now().toISOString(),
+      });
     });
   }
 
@@ -213,7 +213,7 @@ export class SessionStore {
     error: unknown,
   ): Promise<void> {
     const transcriptPath = join(this.getSessionDir(projectId, sessionId), "transcript.jsonl");
-    const message = `session_metadata_read_failed path=${metadataPath} reason=${formatError(error)}`;
+    const message = `session_metadata_read_failed path=${metadataPath} reason=${formatDiagnosticError(error)}`;
     try {
       await appendJsonl(transcriptPath, {
         type: "system_event",
@@ -224,7 +224,7 @@ export class SessionStore {
       } satisfies TranscriptEvent);
     } catch (writeError) {
       process.stderr.write(
-        `[linghun] ${message}; warning_write_failed=${formatError(writeError)}\n`,
+        `[linghun] ${message}; warning_write_failed=${formatDiagnosticError(writeError)}\n`,
       );
     }
   }
@@ -233,6 +233,25 @@ export class SessionStore {
     const metadataPath = this.getMetadataPath(projectId, session.id);
     await mkdir(this.getSessionDir(projectId, session.id), { recursive: true });
     await writeFile(metadataPath, `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  }
+
+  private enqueueSessionWrite(
+    projectId: string,
+    sessionId: string,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const key = `${projectId}/${sessionId}`;
+    const previous = this.sessionWriteQueues.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(operation);
+    const queued = next
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.sessionWriteQueues.get(key) === queued) {
+          this.sessionWriteQueues.delete(key);
+        }
+      });
+    this.sessionWriteQueues.set(key, queued);
+    return next;
   }
 }
 
@@ -244,16 +263,8 @@ async function safeReadDir(dir: string, label: string): Promise<string[]> {
       return [];
     }
     process.stderr.write(
-      `[linghun] readdir_failed label=${label} path=${dir} reason=${formatError(error)}\n`,
+      `[linghun] readdir_failed label=${label} path=${dir} reason=${formatDiagnosticError(error)}\n`,
     );
     return [];
   }
-}
-
-function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && error.code === code;
-}
-
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }

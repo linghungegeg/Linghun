@@ -4,7 +4,9 @@ import {
   LINGHUN_CLI_NAME,
   LINGHUN_NAME,
   LINGHUN_VERSION,
+  formatDiagnosticError,
   normalizeDeepSeekModelName,
+  readPositiveIntEnv,
 } from "@linghun/shared";
 import {
   getRegisteredClientFactories,
@@ -375,21 +377,12 @@ export type ProviderBaseUrlDiagnostic = {
 const PROVIDER_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const PROVIDER_MAX_ATTEMPTS = 3;
 const PROVIDER_BASE_RETRY_MS = 500;
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
 
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = readPositiveIntEnv(
   "LINGHUN_PROVIDER_STREAM_IDLE_TIMEOUT_MS",
   30_000,
 );
-const PROVIDER_REQUEST_TIMEOUT_MS = readPositiveIntEnv(
-  "LINGHUN_PROVIDER_TIMEOUT_MS",
-  30_000,
-);
+const PROVIDER_REQUEST_TIMEOUT_MS = readPositiveIntEnv("LINGHUN_PROVIDER_TIMEOUT_MS", 30_000);
 const LINGHUN_REQUEST_PACKAGE_NAME = `@linghun/${LINGHUN_CLI_NAME}`;
 const LINGHUN_REQUEST_IDENTITY_HEADERS = {
   "User-Agent": `${LINGHUN_NAME}/${LINGHUN_VERSION} (${LINGHUN_REQUEST_PACKAGE_NAME})`,
@@ -726,7 +719,9 @@ export class OpenAiCompatibleProvider implements Provider {
     if (signal?.aborted) {
       requestController.abort(signal.reason);
     } else {
-      signal?.addEventListener("abort", () => requestController.abort(signal.reason), { once: true });
+      signal?.addEventListener("abort", () => requestController.abort(signal.reason), {
+        once: true,
+      });
     }
     const requestSignal = requestController.signal;
     const contract = resolveProviderRuntimeContract(this.config, request);
@@ -1282,10 +1277,6 @@ async function safeReadResponseText(response: Response): Promise<string | undefi
   }
 }
 
-function formatDiagnosticError(error: unknown): string {
-  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
-}
-
 const NON_SSE_BODY_PREVIEW_LIMIT = 480;
 
 function summarizeNonSseBodyForError(body: string | undefined): string {
@@ -1434,7 +1425,7 @@ function extractNonStreamingText(parsed: unknown, endpointProfile: EndpointProfi
       return output
         .flatMap((item) =>
           item && typeof item === "object" && Array.isArray((item as { content?: unknown }).content)
-            ? ((item as { content: unknown[] }).content)
+            ? (item as { content: unknown[] }).content
             : [],
         )
         .map((item) =>
@@ -1487,8 +1478,7 @@ function withStreamIdleTimeout(
           const error = new LinghunError({
             code: "PROVIDER_STREAM_TIMEOUT",
             message: `模型请求失败：流式响应超过 ${timeoutMs}ms 没有新数据。`,
-            suggestion:
-              "请稍后重试，或运行 /model doctor 检查 provider/model、网络和网关稳定性。",
+            suggestion: "请稍后重试，或运行 /model doctor 检查 provider/model、网络和网关稳定性。",
             recoverable: true,
           });
           void reader.cancel(error).catch(() => undefined);
@@ -2770,7 +2760,8 @@ export class DeepSeekProvider extends OpenAiCompatibleProvider {
 registerClientFactories({
   chat: ({ request, config }) => createChatProfileRequest(request, config),
   responses: ({ request, config }) => createResponsesProfileRequest(request, config),
-  anthropicMessages: ({ request, config }) => createAnthropicMessagesProfileRequest(request, config),
+  anthropicMessages: ({ request, config }) =>
+    createAnthropicMessagesProfileRequest(request, config),
 });
 
 export function normalizeProviderError(error: unknown): LinghunError {

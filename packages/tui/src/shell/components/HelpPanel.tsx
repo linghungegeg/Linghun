@@ -37,7 +37,7 @@ const HINT_TEXT = {
 
 export function HelpPanel({
   panel,
-  controller,
+  controller: _controller,
   width,
   noColor,
   language,
@@ -55,43 +55,7 @@ export function HelpPanel({
   const theme = createShellTheme(noColor);
   const hint = HINT_TEXT[language] ?? HINT_TEXT["zh-CN"];
 
-  useInput((input, key) => {
-    if (key.escape) {
-      void controller.onInput({ type: "help-close" });
-      return;
-    }
-    if (key.return) {
-      void controller.onInput({ type: "help-enter" });
-      return;
-    }
-    if (key.upArrow) {
-      void controller.onInput({ type: "help-move", delta: -1 });
-      return;
-    }
-    if (key.downArrow) {
-      void controller.onInput({ type: "help-move", delta: 1 });
-      return;
-    }
-    if (key.tab || key.rightArrow) {
-      void controller.onInput({ type: "help-switch-group", delta: 1 });
-      return;
-    }
-    if (key.leftArrow) {
-      void controller.onInput({ type: "help-switch-group", delta: -1 });
-      return;
-    }
-    // 数字快捷键 1-9：直接定位 cursor 并立即 dispatch（CCB Select 范式）。
-    if (input && /^[1-9]$/.test(input)) {
-      const idx = Number(input) - 1;
-      if (idx < panel.entries.length) {
-        const delta = idx - panel.cursor;
-        if (delta !== 0) {
-          void controller.onInput({ type: "help-move", delta: delta as -1 | 1 });
-        }
-        void controller.onInput({ type: "help-enter" });
-      }
-    }
-  });
+  useInput(() => undefined, { isActive: false });
 
   const cardWidth = Math.min(width, 84);
   const innerWidth = Math.max(20, cardWidth - 4);

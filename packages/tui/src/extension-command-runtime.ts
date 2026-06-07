@@ -113,7 +113,7 @@ export function formatFeaturePolicy(context: TuiContext): string {
     `- codebase-memory MCP: discoverable/diagnosable via /mcp doctor; enabled servers ${context.config.mcp.enabledServers.join(",") || "none"}`,
     `- permissions: project allowlist visible via /permissions; default mode ${context.permissionMode}`,
     "Advanced/high-cost/automation（discoverable, not auto-run）",
-    "- memory: auto long-term extraction no; auto accept no; review via /memory review",
+    "- memory: controlled extraction runtime on when learning is active; stable taxonomy memory writes only to dedicated memory dir; review via /memory review",
     `- skills: discover manifests ${context.skills.enabled ? "yes" : "no"}; auto execute no; trusted ids ${context.skills.trustedIds.join(",") || "none"}`,
     `- workflows: discover templates ${context.workflows.enabled ? "yes" : "no"}; auto run no; /workflows <name> only shows Start Gate`,
     `- plugins: discover manifests ${context.plugins.enabled ? "yes" : "no"}; auto execute no; trusted ids ${context.plugins.trustedIds.join(",") || "none"}`,

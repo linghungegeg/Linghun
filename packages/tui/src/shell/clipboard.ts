@@ -1,19 +1,32 @@
 import { spawn } from "node:child_process";
 
 export type ClipboardWriteResult = { ok: true; method: string } | { ok: false; error: string };
+type ClipboardCandidate = { command: string; args: string[]; label: string };
+type ClipboardPipe = (
+  command: string,
+  args: string[],
+  text: string,
+) => Promise<{ ok: boolean; error?: string }>;
 
 export async function writeTextToClipboard(text: string): Promise<ClipboardWriteResult> {
+  return writeTextToClipboardWithDeps(text, clipboardCandidates(), pipeToCommand);
+}
+
+export async function writeTextToClipboardWithDeps(
+  text: string,
+  candidates: ClipboardCandidate[],
+  pipe: ClipboardPipe,
+): Promise<ClipboardWriteResult> {
   const normalized = text.replace(/\r\n/g, "\n");
   if (!normalized) return { ok: false, error: "empty selection" };
-  const candidates = clipboardCandidates();
   for (const candidate of candidates) {
-    const result = await pipeToCommand(candidate.command, candidate.args, normalized);
+    const result = await pipe(candidate.command, candidate.args, normalized);
     if (result.ok) return { ok: true, method: candidate.label };
   }
   return { ok: false, error: "no supported clipboard command found" };
 }
 
-function clipboardCandidates(): { command: string; args: string[]; label: string }[] {
+function clipboardCandidates(): ClipboardCandidate[] {
   if (process.platform === "win32") return [{ command: "clip", args: [], label: "clip" }];
   if (process.platform === "darwin") return [{ command: "pbcopy", args: [], label: "pbcopy" }];
   return [
@@ -52,7 +65,11 @@ function pipeToCommand(
       stderr += chunk.toString();
     });
     child.once("close", (code) => {
-      finish({ ok: code === 0, error: stderr.trim() || `exit ${code ?? "unknown"}` });
+      if (code === 0) {
+        finish({ ok: true });
+        return;
+      }
+      finish({ ok: false, error: stderr.trim() || `exit ${code ?? "unknown"}` });
     });
     child.stdin?.end(process.platform === "win32" ? text.replace(/\n/g, "\r\n") : text);
   });

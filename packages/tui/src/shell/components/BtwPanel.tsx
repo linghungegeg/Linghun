@@ -34,7 +34,7 @@ const HINT_TEXT = {
 
 export function BtwPanel({
   panel,
-  controller,
+  controller: _controller,
   width,
   noColor,
   language,
@@ -53,11 +53,7 @@ export function BtwPanel({
   const theme = createShellTheme(noColor);
   const hint = HINT_TEXT[language] ?? HINT_TEXT["zh-CN"];
 
-  useInput((input, key) => {
-    if (key.escape || key.return || input === " ") {
-      void controller.onInput({ type: "btw-close" });
-    }
-  });
+  useInput(() => undefined, { isActive: false });
 
   const cardWidth = Math.min(width, 84);
   const innerWidth = Math.max(20, cardWidth - 2);

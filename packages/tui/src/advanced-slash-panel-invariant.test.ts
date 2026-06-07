@@ -41,12 +41,6 @@ const MIGRATIONS: Record<string, string[]> = {
     "formatAgentDetails(agent, context)",
     "formatAgentsList(context)",
   ],
-  "extension-slash-runtime.ts": [
-    'validateExtensionItems("skills", context)',
-    'validateExtensionItems("skills", context, args[1])',
-    "formatPluginsDoctor(context)",
-    'validateExtensionItems("plugins", context, args[1])',
-  ],
   "remote-command-runtime.ts": ["formatRemoteTestResult(channel, result)"],
 };
 
@@ -74,6 +68,16 @@ describe("D.14D-E advanced slash CommandPanel invariant", () => {
     const src = readSrc("remote-command-runtime.ts");
     expect(src).toContain("detailsText: report");
     expect(src).not.toContain("writeLine(output, report)");
+  });
+
+  it("routes /skills and /plugins doctor/validate bodies through definition-backed panel details", () => {
+    const src = readSrc("extension-slash-runtime.ts");
+    expect(src).toContain('doctorDetails: (context) => validateExtensionItems("skills", context)');
+    expect(src).toContain("doctorDetails: formatPluginsDoctor");
+    expect(src).toContain("? definition.doctorDetails(context)");
+    expect(src).toContain(": validateExtensionItems(definition.kind, context, args[1])");
+    expect(src).not.toContain("writeLine(output, validateExtensionItems");
+    expect(src).not.toContain("writeLine(output, formatPluginsDoctor");
   });
 
   it("keeps /remote setup in CommandPanel with legacy details compatibility", () => {

@@ -159,8 +159,13 @@ describe("model-setup-runtime", () => {
         validateModelSetupPartial({ baseUrl: "https://api.example.com/v1" }),
       ).not.toThrow();
     });
-    it("does not throw for empty values (uses placeholders)", () => {
+    it("does not throw for empty values", () => {
       expect(() => validateModelSetupPartial({})).not.toThrow();
+    });
+    it("validates only supplied partial fields", () => {
+      expect(() => validateModelSetupPartial({ baseUrl: "not-a-url" })).toThrow();
+      expect(() => validateModelSetupPartial({ apiKey: "" })).toThrow();
+      expect(() => validateModelSetupPartial({ model: "" })).toThrow();
     });
   });
 

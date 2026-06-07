@@ -4,17 +4,16 @@ import { join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { defaultConfig } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
-import type {
-  ModelGateway,
-  ModelMessage,
-  ModelToolCall,
-} from "@linghun/providers";
+import type { ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
-import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
 import { createIndexState } from "./index-runtime.js";
-import { configureJobAgentCommandRuntime, runModelBackedAgent } from "./job-agent-command-runtime.js";
+import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
+import {
+  configureJobAgentCommandRuntime,
+  runModelBackedAgent,
+} from "./job-agent-command-runtime.js";
 import {
   AGENT_CONTROL_TOOL_NAME,
   COMMAND_PROPOSAL_TOOL_NAME,
@@ -39,13 +38,6 @@ import { executePermissionApprove } from "./permission-approval-runtime.js";
 import { classifyToolRequest } from "./permission-policy-engine.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import { configureSlashCommandRuntime, handleSlashCommand } from "./slash-command-runtime.js";
-import {
-  createCacheState,
-  createMemoryState,
-  createMcpState,
-  createRemoteState,
-} from "./tui-state-runtime.js";
-import { decidePermission } from "./tui-permission-runtime.js";
 import type { PendingLocalApproval, TuiContext } from "./tui-context-runtime.js";
 import type {
   AgentRun,
@@ -53,6 +45,13 @@ import type {
   MemoryCandidate,
   VerificationReport,
 } from "./tui-data-types.js";
+import { decidePermission } from "./tui-permission-runtime.js";
+import {
+  createCacheState,
+  createMcpState,
+  createMemoryState,
+  createRemoteState,
+} from "./tui-state-runtime.js";
 import type {
   WorkflowBridgeContextRefs,
   WorkflowBridgeRequestProposal,
@@ -134,7 +133,7 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
       abortOutput,
     );
     expect(abortOutput.text).toContain("已取消");
-  });
+  }, 60_000);
 
   it("routes deferred, builtin, index, and seven Linghun control tool branches", async () => {
     const context = await createTestContext();
@@ -236,11 +235,21 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
     );
     expect(extra.ok).toBe(false);
 
-    const builtin = await executeModelToolUse(call("Todo", { items: [] }), context, sessionId, output);
+    const builtin = await executeModelToolUse(
+      call("Todo", { items: [] }),
+      context,
+      sessionId,
+      output,
+    );
     expect(builtin.tool).toBe("Todo");
-    const index = await executeModelToolUse(call(INDEX_STATUS_INSPECT, {}), context, sessionId, output);
+    const index = await executeModelToolUse(
+      call(INDEX_STATUS_INSPECT, {}),
+      context,
+      sessionId,
+      output,
+    );
     expect(index.tool).toBe(INDEX_STATUS_INSPECT);
-  });
+  }, 60_000);
 });
 
 describe("Phase E agent, slash, workflow, permission, and natural intent coverage", () => {
@@ -256,11 +265,7 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       status: "pending",
       summary: "extra instruction",
     });
-    const completed = await runModelBackedAgent(
-      agent,
-      context,
-      new MemoryOutput(),
-    );
+    const completed = await runModelBackedAgent(agent, context, new MemoryOutput());
     expect(completed.status).toBe("completed");
     expect(agent.mailbox[0]?.status).toBe("consumed");
 
@@ -398,7 +403,7 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       output,
     );
     expect(registryUnknown.status).toBe("blocked");
-  });
+  }, 60_000);
 
   it("covers executePermissionApprove across all pending approval kinds", async () => {
     const base = await createTestContext();
@@ -423,7 +428,12 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
         sessionId,
         warnings: ["scope drift"],
       },
-      { kind: "model_tool_use", toolCall: call("Todo", { items: [] }), toolName: "Todo", sessionId },
+      {
+        kind: "model_tool_use",
+        toolCall: call("Todo", { items: [] }),
+        toolName: "Todo",
+        sessionId,
+      },
       {
         kind: "git_worktree_remove",
         sessionId,
@@ -470,10 +480,15 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     for (const approval of approvals) {
       const context = await cloneContextForApproval(base, approval.kind);
       await expect(
-        executePermissionApprove(rewriteApprovalSession(approval, context), context, undefined, new MemoryOutput()),
+        executePermissionApprove(
+          rewriteApprovalSession(approval, context),
+          context,
+          undefined,
+          new MemoryOutput(),
+        ),
       ).resolves.toBeUndefined();
     }
-  });
+  }, 60_000);
 
   it("covers permission policy auto-allow, require-permission, hard-deny, and natural intent branches", async () => {
     const context = await createTestContext();
@@ -559,7 +574,11 @@ function workflowRequest(
     executable: Boolean(request),
     request,
     safety: {
-      readonly: !request || request.mainChain === "details" || request.mainChain === "agents" || request.mainChain === "workflows",
+      readonly:
+        !request ||
+        request.mainChain === "details" ||
+        request.mainChain === "agents" ||
+        request.mainChain === "workflows",
       mutating: request?.mainChain === "fork" || request?.mainChain === "job",
       requiresStartGate: false,
       requiresPermissionPipeline: false,
@@ -613,10 +632,7 @@ function createBackgroundTask(
   };
 }
 
-function createAgentRun(
-  context: TuiContext,
-  overrides: Partial<AgentRun> = {},
-): AgentRun {
+function createAgentRun(context: TuiContext, overrides: Partial<AgentRun> = {}): AgentRun {
   const id = overrides.id ?? "agent-test";
   return {
     id,

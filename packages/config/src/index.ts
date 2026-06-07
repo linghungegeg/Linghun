@@ -10,6 +10,7 @@ import {
   type Language,
   type PermissionMode,
   canonicalPathForCompare,
+  formatDiagnosticError,
   isDeepSeekApiModel,
   isRawPermissionMode,
   normalizeDeepSeekModelName,
@@ -951,10 +952,6 @@ function isAtomicReplaceConflict(error: unknown): boolean {
   return code === "EEXIST" || code === "EPERM";
 }
 
-function formatDiagnosticError(error: unknown): string {
-  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
-}
-
 export async function readProviderEnvValues(home = homedir()): Promise<Record<string, string>> {
   const path = getProviderEnvPath(home);
   const raw = await readFile(path, "utf8");
@@ -1267,9 +1264,7 @@ function mergeProviderEnvConfig(
 }
 
 function omitModelRouteOverrides(config: Partial<LinghunConfig>): Partial<LinghunConfig> {
-  const next = { ...config };
-  delete next.defaultModel;
-  delete next.modelRoutes;
+  const { defaultModel: _defaultModel, modelRoutes: _modelRoutes, ...next } = config;
   return next;
 }
 
@@ -1423,8 +1418,7 @@ export async function saveMcpServerConfig(
   const current = await loadConfig(projectPath);
   const signature = mcpServerSignature(server);
   const duplicate = Object.entries(current.mcp.servers).find(
-    ([existingId, existing]) =>
-      existingId !== id && mcpServerSignature(existing) === signature,
+    ([existingId, existing]) => existingId !== id && mcpServerSignature(existing) === signature,
   );
   if (duplicate) {
     throw new Error(

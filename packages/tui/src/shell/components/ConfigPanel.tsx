@@ -36,7 +36,7 @@ const HINT_TEXT = {
 
 export function ConfigPanel({
   panel,
-  controller,
+  controller: _controller,
   width,
   noColor,
   language,
@@ -50,24 +50,7 @@ export function ConfigPanel({
   const theme = createShellTheme(noColor);
   const hint = HINT_TEXT[language] ?? HINT_TEXT["zh-CN"];
 
-  useInput((_input, key) => {
-    if (key.escape) {
-      void controller.onInput({ type: "config-back" });
-      return;
-    }
-    if (key.return) {
-      void controller.onInput({ type: "config-enter" });
-      return;
-    }
-    if (key.upArrow) {
-      void controller.onInput({ type: "config-move", delta: -1 });
-      return;
-    }
-    if (key.downArrow) {
-      void controller.onInput({ type: "config-move", delta: 1 });
-      return;
-    }
-  });
+  useInput(() => undefined, { isActive: false });
 
   const innerWidth = Math.max(20, Math.min(width, 76) - 4);
 

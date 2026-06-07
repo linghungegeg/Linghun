@@ -242,8 +242,12 @@ function autoScrollDeltaForMouse(
 ): number {
   const maxOffset = Math.max(0, geometry.contentHeight - geometry.height);
   const current = scroll?.scrollOffset ?? 0;
-  if (y < geometry.y && current < maxOffset) return EDGE_AUTOSCROLL_LINES;
-  if (y >= geometry.y + geometry.height && current > 0) return -EDGE_AUTOSCROLL_LINES;
+  if (y < geometry.y && current < maxOffset) {
+    return Math.min(EDGE_AUTOSCROLL_LINES, maxOffset - current);
+  }
+  if (y >= geometry.y + geometry.height && current > 0) {
+    return -Math.min(EDGE_AUTOSCROLL_LINES, current);
+  }
   return 0;
 }
 

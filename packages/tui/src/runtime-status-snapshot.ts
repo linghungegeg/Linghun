@@ -62,7 +62,7 @@ export function createRuntimeStatusSnapshot(
   const staleTasks = input.backgroundTasks.filter((task) => task.status === "stale");
   const terminalTasks = input.backgroundTasks
     .filter((task) => isTerminalBackgroundStatus(task.status))
-    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .sort((a, b) => compareIsoDesc(a.updatedAt, b.updatedAt))
     .slice(0, 3)
     .map((task) => mapBackgroundTask(task, input.language, false));
 
@@ -85,7 +85,7 @@ export function createRuntimeStatusSnapshot(
       endedAt: input.lastModelRequest.endedAt,
     });
   }
-  recentTerminalTasks.sort((a, b) => Date.parse(b.endedAt ?? "") - Date.parse(a.endedAt ?? ""));
+  recentTerminalTasks.sort((a, b) => compareIsoDesc(a.endedAt, b.endedAt));
 
   return {
     requestActivity,
@@ -225,9 +225,9 @@ function formatTaskLine(
         ? language === "en-US"
           ? "Needs attention"
           : "需处理"
-      : language === "en-US"
-        ? "Resumable"
-        : "可恢复";
+        : language === "en-US"
+          ? "Resumable"
+          : "可恢复";
   const progress = task.progress?.total
     ? ` · ${task.progress.completed}/${task.progress.total}`
     : "";
@@ -247,10 +247,7 @@ function isActiveWorkflowStatus(
 
 function isTerminalBackgroundStatus(status: BackgroundTaskState["status"]): boolean {
   return (
-    status === "completed" ||
-    status === "failed" ||
-    status === "cancelled" ||
-    status === "timeout"
+    status === "completed" || status === "failed" || status === "cancelled" || status === "timeout"
   );
 }
 
@@ -292,4 +289,14 @@ function truncate(value: string, max: number): string {
     .trim();
   if (normalized.length <= max) return normalized;
   return `${normalized.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function compareIsoDesc(left: string | undefined, right: string | undefined): number {
+  return safeTimeMs(right) - safeTimeMs(left);
+}
+
+function safeTimeMs(value: string | undefined): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }

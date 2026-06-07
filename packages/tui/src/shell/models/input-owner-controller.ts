@@ -136,7 +136,7 @@ export function isNavigationKey(key: OwnerKeyShape): boolean {
 function isPanelKey(input: string, key: OwnerKeyShape, interactive: boolean): boolean {
   if (key.escape) return true;
   if (!interactive) return false;
-  if (key.return || isNavigationKey(key)) return true;
+  if (key.return || key.tab || isNavigationKey(key)) return true;
   return input.toLowerCase() === "x" && !key.ctrl && !key.meta;
 }
 

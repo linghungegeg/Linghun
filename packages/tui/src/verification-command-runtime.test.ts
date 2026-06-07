@@ -1,4 +1,4 @@
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -36,6 +36,25 @@ describe("verification-command-runtime", () => {
       const typecheckSteps = defaultPlan.filter((step) => step.kind === "typecheck");
       expect(typecheckSteps.length).toBeGreaterThan(0);
       expect(typecheckSteps[0].command).toContain("typecheck");
+    });
+
+    it.each([
+      ["package-lock.json", "npm run test"],
+      ["yarn.lock", "corepack yarn test"],
+      ["bun.lockb", "bun run test"],
+      ["pnpm-lock.yaml", "corepack pnpm test"],
+    ])("uses %s to choose verification command", async (lockFile, expectedCommand) => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-pm-"));
+      await writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { test: "vitest run" } }),
+        "utf8",
+      );
+      await writeFile(join(projectPath, lockFile), "", "utf8");
+
+      const plan = await createVerificationPlan(projectPath, "default");
+
+      expect(plan.find((step) => step.kind === "test")?.command).toBe(expectedCommand);
     });
   });
 

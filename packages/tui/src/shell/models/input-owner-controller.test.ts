@@ -128,6 +128,17 @@ describe("selectInputOwner — panel second", () => {
     expect(selectInputOwner("x", noKey, ctx)).toBe("panel");
     expect(selectInputOwner("x", { ...noKey, ctrl: true }, ctx)).toBe("composer");
   });
+
+  it("interactive panel owns Help/Config/Sessions navigation keys before composer", () => {
+    const ctx: OwnerContext = { ...idleCtx, panelActive: true, panelInteractive: true };
+    expect(selectInputOwner("", { ...noKey, leftArrow: true } as OwnerKeyShape, ctx)).toBe(
+      "panel",
+    );
+    expect(selectInputOwner("", { ...noKey, rightArrow: true } as OwnerKeyShape, ctx)).toBe(
+      "panel",
+    );
+    expect(selectInputOwner("", { ...noKey, tab: true }, ctx)).toBe("panel");
+  });
 });
 
 describe("selectInputOwner — slash third", () => {

@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
+import { isNodeErrorWithCode } from "@linghun/shared";
 
 export type JsonlReadResult<T> = {
   records: T[];
@@ -54,8 +55,4 @@ async function fileExists(filePath: string): Promise<boolean> {
     }
     throw error;
   }
-}
-
-function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && error.code === code;
 }

@@ -10,6 +10,7 @@ import type {
   FailureLearningState,
   WorkflowState,
 } from "./tui-data-types.js";
+import { evaluateUserStateSignal } from "./user-state-signal-runtime.js";
 
 type ActiveWorkflowRun = NonNullable<WorkflowState["activeRun"]>;
 
@@ -138,6 +139,12 @@ export type MetaSchedulerInput = {
   roleBudgetStop?: boolean;
   toolResultBudgetPersistedCount?: number;
   userStateDecision?: UserStateDecision;
+  userStateDismissedUntilMs?: number;
+  userStateCooldownUntilMs?: number;
+  userStatePolicyEnabled?: boolean;
+  loading?: boolean;
+  activePrompt?: boolean;
+  otherPanelOpen?: boolean;
   nowMs?: number;
 };
 
@@ -265,7 +272,52 @@ export type MetaSchedulerDecision = {
 export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerDecision {
   const internalEvents: string[] = [];
   const directives: string[] = [];
-  const userStateDecision = input.userStateDecision ?? classifyUserStateDecision(input.userText);
+  const userStateSignal =
+    input.userStateDecision ??
+    evaluateUserStateSignal({
+      userText: input.userText,
+      repeatedFailureCount:
+        (input.lastToolFailure ||
+        input.providerFailure ||
+        isRiskyVerificationStatus(input.lastVerificationStatus)
+          ? 1
+          : 0) + countRecentFailureLearning(input.failureLearning),
+      events: [
+        ...(input.lastToolFailure
+          ? [
+              {
+                kind: "tool_failure" as const,
+                summary: `${input.lastToolFailure.toolName}: ${input.lastToolFailure.summary}`,
+              },
+            ]
+          : []),
+        ...(input.providerFailure
+          ? [
+              {
+                kind: "provider_failure" as const,
+                summary: `${input.providerFailure.provider}/${input.providerFailure.model}: ${input.providerFailure.message}`,
+              },
+            ]
+          : []),
+        ...(isRiskyVerificationStatus(input.lastVerificationStatus)
+          ? [
+              {
+                kind: "verification_failure" as const,
+                summary: `last verification ${input.lastVerificationStatus}`,
+              },
+            ]
+          : []),
+      ],
+      loading: input.loading,
+      activePrompt: input.activePrompt,
+      otherPanelOpen: input.otherPanelOpen,
+      dismissedUntilMs: input.userStateDismissedUntilMs,
+      cooldownUntilMs: input.userStateCooldownUntilMs,
+      policyEnabled: input.userStatePolicyEnabled,
+      backgroundTasks: input.backgroundTasks,
+      nowMs: input.nowMs,
+    }).decision;
+  const userStateDecision = input.userStateDecision ?? userStateSignal;
   const highRiskClaim =
     typeof input.assistantText === "string" && hasHighRiskCompletionClaim(input.assistantText);
   const toolFailure = Boolean(input.lastToolFailure);
@@ -576,146 +628,10 @@ function hasHighRiskCompletionClaim(text: string): boolean {
   );
 }
 
-function classifyUserStateDecision(userText: string): UserStateDecision {
-  const text = userText.trim();
-  if (!text) return createUserStateDecision("neutral", 0.35);
-  const commandFirst = matchesDecisiveCommand(text);
-  if (matchesHighStakesRelease(text)) {
-    return createUserStateDecision("high_stakes_release", 0.88, {
-      commandFirst,
-      memorySummary:
-        "User treats release/deploy/open-source readiness as high stakes; require dirty tree/build/focused verification/stability boundary.",
-    });
-  }
-  if (matchesTrustRepair(text)) {
-    return createUserStateDecision("trust_repair", 0.86, {
-      commandFirst,
-      memorySummary:
-        "User is repairing trust after prior mismatch; require source facts before delivery summaries.",
-    });
-  }
-  if (matchesFrustrated(text)) {
-    return createUserStateDecision("frustrated", 0.78, {
-      commandFirst,
-      memorySummary:
-        "User is frustrated by repeated shallow work; reduce generic hints and strengthen source-first verification.",
-    });
-  }
-  if (matchesConfused(text)) {
-    return createUserStateDecision("confused", 0.74);
-  }
-  if (matchesStrategicExploration(text)) {
-    return createUserStateDecision("strategic_exploration", 0.72);
-  }
-  if (commandFirst) {
-    return createUserStateDecision("decisive_command", 0.7);
-  }
-  return createUserStateDecision("neutral", 0.5);
-}
-
-function createUserStateDecision(
-  kind: UserStateKind,
-  confidence: number,
-  options: { memorySummary?: string; commandFirst?: boolean } = {},
-): UserStateDecision {
-  const sourceFactFirst = kind === "frustrated" || kind === "trust_repair";
-  const highStakes = kind === "high_stakes_release";
-  const confused = kind === "confused";
-  const strategic = kind === "strategic_exploration";
-  const decisive = kind === "decisive_command" || options.commandFirst === true;
-  const strengthened = sourceFactFirst || highStakes;
-  const route =
-    kind === "trust_repair" || kind === "frustrated"
-      ? "source_fact_first"
-      : highStakes
-        ? "release_gate"
-        : confused
-          ? "explain_first"
-          : strategic
-            ? "discussion_only"
-            : decisive
-              ? "command_first"
-              : "normal";
-  return {
-    kind,
-    confidence,
-    interactionPlan: {
-      route,
-      sourceFactsFirst: sourceFactFirst,
-      commandFirst: decisive,
-      explainFirst: confused,
-      discussionOnly: strategic,
-      allowImplementationPush: !(confused || strategic),
-    },
-    verificationPlan: {
-      strength: highStakes ? "release" : strengthened ? "strengthened" : "normal",
-      requireSourceFacts: sourceFactFirst || highStakes,
-      forbidEarlyPass: sourceFactFirst || highStakes,
-      requireDirtyTreeCheck: highStakes,
-      requireBuild: highStakes,
-      requireFocusedTests: strengthened || highStakes,
-      requireStabilityBoundary: highStakes,
-    },
-    detailPlan: {
-      style: decisive
-        ? "command_first"
-        : confused
-          ? "explain_first"
-          : strategic
-            ? "discussion"
-            : kind === "neutral"
-              ? "normal"
-              : "concise",
-      background: decisive ? "minimal" : confused || strategic ? "expanded" : "normal",
-    },
-    notificationPlan: {
-      quiet: kind === "frustrated" || kind === "trust_repair" || decisive,
-      suppressGenericHints: kind !== "neutral",
-      maxHints: kind === "neutral" ? 3 : 2,
-    },
-    memoryCandidate: {
-      shouldCreate: Boolean(options.memorySummary),
-      scope: "session",
-      ...(options.memorySummary ? { summary: options.memorySummary } : {}),
-      autoAccept: false,
-    },
-  };
-}
-
-function matchesHighStakesRelease(text: string): boolean {
-  return /(?:发布|上线|发版|开源发布|稳定点|提交稳定点|建立稳定点|release|deploy|deployment|production|prod|open-?source|上线前|发布前|release readiness|smoke-ready|beta pass|stable point|checkpoint|commit point)/iu.test(
-    text,
-  );
-}
-
-function matchesTrustRepair(text: string): boolean {
-  return /(?:别再|不要再|上次|之前.*(?:错|漏|幻觉|没看|没读|误判)|信任|可信|别复述|不要只复述|不要.*(?:复述|摘要)|trust repair|regain trust|don't just summarize|do not just summarize|you missed|you were wrong)/iu.test(
-    text,
-  );
-}
-
-function matchesFrustrated(text: string): boolean {
-  return /(?:烦|崩溃|离谱|又错|还错|怎么又|别糊弄|少废话|少说多做|别废话|别绕|不要绕|别空泛|别瞎猜|frustrated|annoyed|again\?|stop guessing|stop hand-?waving|less talk|no fluff|too noisy)/iu.test(
-    text,
-  );
-}
-
-function matchesConfused(text: string): boolean {
-  return /(?:不懂|没懂|看不懂|为什么|啥意思|什么意思|解释一下|先解释|讲清楚|怎么理解|我困惑|confused|don't understand|do not understand|explain|what does .* mean|why\b|how should i understand)/iu.test(
-    text,
-  );
-}
-
-function matchesStrategicExploration(text: string): boolean {
-  return /(?:讨论|分析方案|架构判断|战略|路线|取舍|探索|先别写|不要写代码|不要实现|先聊|评估一下|brainstorm|strategy|strategic|explore|discuss|architecture decision|trade-?off|do not implement|don't implement|no code changes)/iu.test(
-    text,
-  );
-}
-
-function matchesDecisiveCommand(text: string): boolean {
-  return /(?:直接给(?:我)?命令|只给命令|给(?:我)?命令|命令即可|不用解释|不要解释|只要命令|command only|just commands|give me the command|no explanation|直接执行|立刻执行|马上执行|do it now|run it now)/iu.test(
-    text,
-  );
+function countRecentFailureLearning(state: FailureLearningState): number {
+  return state.records.filter(
+    (record) => record.status === "active" && record.projectScope === state.projectScope,
+  ).length;
 }
 
 function adjustTaskKindForUserState(

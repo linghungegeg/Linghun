@@ -56,6 +56,57 @@ describe("SessionStore", () => {
     expect(resumed.diagnostics).toEqual([]);
   });
 
+  it("serializes concurrent appendEvent calls for one session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+
+    await Promise.all(
+      Array.from({ length: 20 }, async (_, index) =>
+        store.appendEvent(session.id, {
+          type: "user_message",
+          id: `message-${index}`,
+          text: `message ${index}`,
+          createdAt: new Date(index).toISOString(),
+        }),
+      ),
+    );
+
+    const resumed = await store.resume(session.id);
+    const messages = resumed.transcript.filter((event) => event.type === "user_message");
+    expect(messages).toHaveLength(20);
+    expect(new Set(messages.map((event) => event.id)).size).toBe(20);
+    expect(resumed.diagnostics).toEqual([]);
+  });
+
+  it("continues appendEvent queue after a failed append", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+
+    await expect(
+      store.appendEvent("missing-session", {
+        type: "user_message",
+        id: "bad",
+        text: "bad",
+        createdAt: new Date(0).toISOString(),
+      }),
+    ).rejects.toThrow(/未找到会话/);
+    await store.appendEvent(session.id, {
+      type: "user_message",
+      id: "good",
+      text: "good",
+      createdAt: new Date(1).toISOString(),
+    });
+
+    const resumed = await store.resume(session.id);
+    expect(
+      resumed.transcript.some((event) => event.type === "user_message" && event.id === "good"),
+    ).toBe(true);
+  });
+
   it("updates summary without changing the session id", async () => {
     const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-project-"));

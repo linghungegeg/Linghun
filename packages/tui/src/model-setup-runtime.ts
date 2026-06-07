@@ -102,15 +102,33 @@ export function applyModelSetupValues(setup: PendingModelSetup, values: ModelSet
 }
 
 export function validateModelSetupPartial(values: Partial<ProviderEnvSetup>): void {
-  validateProviderEnvSetup({
-    baseUrl: values.baseUrl ?? "https://example.com/v1",
-    apiKey: values.apiKey ?? "temporary-validation-key",
-    model: values.model ?? "temporary-model",
-    reasoningLevel: values.reasoningLevel ?? "Medium",
-    endpointProfile: values.endpointProfile,
-    includeUsage: values.includeUsage,
-    auxModel: values.auxModel,
-  });
+  if (values.baseUrl !== undefined) {
+    validateProviderEnvSetup({
+      baseUrl: values.baseUrl,
+      apiKey: "temporary-validation-key",
+      model: "temporary-model",
+      reasoningLevel: "Medium",
+    });
+  }
+  if (values.apiKey !== undefined) {
+    validateProviderEnvSetup({
+      baseUrl: "https://example.com/v1",
+      apiKey: values.apiKey,
+      model: "temporary-model",
+      reasoningLevel: "Medium",
+    });
+  }
+  if (values.model !== undefined || values.reasoningLevel !== undefined) {
+    validateProviderEnvSetup({
+      baseUrl: "https://example.com/v1",
+      apiKey: "temporary-validation-key",
+      model: values.model ?? "temporary-model",
+      reasoningLevel: values.reasoningLevel ?? "Medium",
+      endpointProfile: values.endpointProfile,
+      includeUsage: values.includeUsage,
+      auxModel: values.auxModel,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

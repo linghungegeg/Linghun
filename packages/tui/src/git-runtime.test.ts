@@ -277,6 +277,30 @@ describe("D.13R Git — readGitStatus fail-closed 路径", () => {
       expect(result.untracked).toContain("new.ts");
     }
   });
+
+  it("parses branch names containing dots and slashes", async () => {
+    const porcelain = "## feature/v1.2...origin/feature/v1.2 [behind 3]\n";
+    const runner = makeRunner([
+      {
+        args: ["rev-parse", "--is-inside-work-tree"],
+        result: okStdout("true"),
+      },
+      {
+        args: ["status", "--porcelain=v1", "-b"],
+        result: okStdout(porcelain),
+      },
+      { args: ["log"], result: okStdout("deadbee\tfix: y") },
+      { args: ["branch", "--show-current"], result: okStdout("feature/v1.2") },
+    ]);
+    const result = await readGitStatus("/repo", runner);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.branch).toBe("feature/v1.2");
+      expect(result.upstream).toBe("origin/feature/v1.2");
+      expect(result.behind).toBe(3);
+    }
+  });
 });
 
 describe("D.13R Git — readWorktreeList fail-closed 路径", () => {

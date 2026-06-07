@@ -298,7 +298,7 @@ describe("Meta scheduler runtime", () => {
   it("UserState hotfix: frustrated command request keeps strengthened verification and becomes command-first", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
-      userText: "少说多做，给我命令。",
+      userText: "又错了，给我命令。",
     });
 
     expect(decision.policyDecision.userState.kind).toBe("frustrated");
@@ -320,7 +320,7 @@ describe("Meta scheduler runtime", () => {
       userText: "别废话，直接给我命令。",
     });
 
-    expect(decision.policyDecision.userState.kind).toBe("frustrated");
+    expect(decision.policyDecision.userState.kind).toBe("decisive_command");
     expect(decision.policyDecision.userState.interactionPlan.commandFirst).toBe(true);
     expect(decision.policyDecision.userState.detailPlan.style).toBe("command_first");
     expect(decision.policyDecision.userState.detailPlan.background).toBe("minimal");
@@ -331,6 +331,7 @@ describe("Meta scheduler runtime", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
       userText: "不要再复述摘要，给我命令。",
+      lastVerificationStatus: "fail",
     });
 
     expect(decision.policyDecision.userState.kind).toBe("trust_repair");
@@ -347,6 +348,7 @@ describe("Meta scheduler runtime", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
       userText: "准备稳定点，给我命令。",
+      lastVerificationStatus: "fail",
     });
 
     expect(decision.policyDecision.userState.kind).toBe("high_stakes_release");

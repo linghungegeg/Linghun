@@ -161,6 +161,7 @@ describe("workspace reference cache", () => {
     await mkdir(join(project, "node_modules"));
     await mkdir(join(project, "tmp"));
     await mkdir(join(project, "cache"));
+    await writeFile(join(project, "debug.tmp"), "ignored tmp", "utf8");
     await writeFile(
       join(project, "src", "index.ts"),
       "export const secret = 'not stored';",
@@ -171,7 +172,7 @@ describe("workspace reference cache", () => {
       JSON.stringify({ scripts: { test: "vitest" } }),
       "utf8",
     );
-    await writeFile(join(project, ".gitignore"), "tmp/\n", "utf8");
+    await writeFile(join(project, ".gitignore"), "tmp/\n*.tmp\n", "utf8");
     await writeFile(join(project, ".cbmignore"), "cache/\n", "utf8");
     const cache = createWorkspaceReferenceCache();
 
@@ -197,6 +198,11 @@ describe("workspace reference cache", () => {
     expect(
       snapshot.workspaceSnapshot?.entries.some(
         (entry) => entry.ignoredReason === ".gitignore:tmp/",
+      ),
+    ).toBe(true);
+    expect(
+      snapshot.workspaceSnapshot?.entries.some(
+        (entry) => entry.path === "debug.tmp" && entry.ignoredReason === ".gitignore:*.tmp",
       ),
     ).toBe(true);
     expect(

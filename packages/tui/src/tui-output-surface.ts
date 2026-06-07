@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { Writable } from "node:stream";
-import { TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
+import { TOGGLE_DETAILS_KEYBIND, formatDiagnosticError } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import { createOutputBlock } from "./shell/view-model.js";
@@ -16,10 +16,6 @@ const LAST_FULL_OUTPUT_PREVIEW_CHARS = 2_000;
 const OUTPUT_MEMORY_ARTIFACT_DIR = "tui-output";
 // Phase 6.5: summary 首行超长时截断，避免单行渲染撑爆 TUI。
 const MAX_STREAMING_SUMMARY_CHARS = 500;
-
-function formatDiagnosticError(error: unknown): string {
-  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
-}
 
 function isRuntimeStatusDump(line: string): boolean {
   if (line.startsWith("[Linghun] 会话 ")) return true;
