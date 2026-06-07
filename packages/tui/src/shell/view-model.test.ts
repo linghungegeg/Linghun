@@ -384,8 +384,11 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
+    expect(output.text).toContain("\x1B[>1u");
+    expect(output.text).toContain("\x1B[<u");
     expect(output.text).toContain("\x1B[>4;2m");
     expect(output.text).toContain("\x1B[>4m");
+    expect(output.text.indexOf("\x1B[>1u")).toBeLessThan(output.text.lastIndexOf("\x1B[<u"));
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
@@ -2866,6 +2869,20 @@ describe("Windows TTY terminal capability detection", () => {
     resetTerminalCapabilityCache();
 
     const capability = detectTerminalCapability();
+    expect(capability.shiftEnter).toBe(true);
+    expect(capability.keyboardProtocols).toEqual(["csi-u", "modifyOtherKeys"]);
+  });
+
+  it("WT_SESSION enables extended keyboard reporting regardless of platform branch", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", undefined);
+    vi.stubEnv("WT_SESSION", "test-windows-terminal");
+    vi.stubEnv("TERM_PROGRAM", undefined);
+    vi.stubEnv("TERM", undefined);
+    resetTerminalCapabilityCache();
+
+    const capability = detectTerminalCapability();
+    expect(capability.tier).toBe("modern");
     expect(capability.shiftEnter).toBe(true);
     expect(capability.keyboardProtocols).toEqual(["csi-u", "modifyOtherKeys"]);
   });

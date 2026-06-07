@@ -24,6 +24,8 @@ export type KeyEventLike = {
   tab?: boolean;
   escape?: boolean;
   return?: boolean;
+  backspace?: boolean;
+  delete?: boolean;
   name?: string;
 };
 
@@ -43,6 +45,7 @@ export function resolveKeybinding(
   chordBuffer: string[] = [],
 ): { action?: KeybindingAction; chordBuffer: string[]; pending: boolean } {
   const key = normalizeKeyEvent(event);
+  if (!key) return { chordBuffer: [], pending: false };
   const nextChord = [...chordBuffer, key].filter(Boolean);
   const candidates = bindings.filter(
     (binding) => binding.context === context || binding.context === "global",
@@ -78,6 +81,8 @@ export function mergeKeybindings(defaults: Keybinding[], custom: Keybinding[]): 
 export function normalizeKeyEvent(event: KeyEventLike): string {
   if (event.tab && event.shift) return "shift+tab";
   if (event.tab) return "tab";
+  if (event.backspace) return "backspace";
+  if (event.delete) return "delete";
   if (event.return || event.name === "return") return "enter";
   if (event.escape || event.name === "escape") return "escape";
   const parts: string[] = [];

@@ -65,6 +65,14 @@ function detectTerminalCapabilityUncached(): TerminalCapability {
   if (env.TERM === "dumb") return legacyCapability();
 
   // Windows-specific detection
+  if (env.WT_SESSION) {
+    return {
+      ...modernCapability(),
+      shiftEnter: true,
+      keyboardProtocols: ["csi-u", "modifyOtherKeys"],
+    };
+  }
+
   if (process.platform === "win32") {
     return detectWindowsTerminal(env);
   }
@@ -74,15 +82,6 @@ function detectTerminalCapabilityUncached(): TerminalCapability {
 }
 
 function detectWindowsTerminal(env: NodeJS.ProcessEnv): TerminalCapability {
-  // Windows Terminal (modern conpty-based)
-  if (env.WT_SESSION) {
-    return {
-      ...modernCapability(),
-      shiftEnter: true,
-      keyboardProtocols: ["csi-u", "modifyOtherKeys"],
-    };
-  }
-
   // VS Code integrated terminal
   if (env.TERM_PROGRAM === "vscode") {
     return { ...modernCapability(), shiftEnter: true, keyboardProtocols: ["csi-u"] };

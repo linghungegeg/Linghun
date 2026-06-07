@@ -309,4 +309,11 @@ describe("Phase G keybinding engine", () => {
       action: "toggle-details",
     });
   });
+
+  it("does not treat empty special-key input as a pending chord", () => {
+    expect(resolveKeybinding(DEFAULT_KEYBINDINGS, "chat", { input: "", delete: true })).toEqual({
+      chordBuffer: [],
+      pending: false,
+    });
+  });
 });

@@ -60,7 +60,7 @@ export function renderInkShell(
       stderr: options.stderr as NodeJS.WriteStream | undefined,
       exitOnCtrlC: false,
       alternateScreen: useAlternateScreen,
-      kittyKeyboard: enableKittyKeyboard ? { mode: "auto" } : undefined,
+      kittyKeyboard: enableKittyKeyboard ? { mode: "enabled" } : undefined,
     });
   } catch (error) {
     if (enableMouseTracking) {

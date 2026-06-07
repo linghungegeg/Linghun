@@ -686,6 +686,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             tab: key.tab,
             escape: key.escape,
             return: key.return,
+            backspace: key.backspace,
+            delete: key.delete,
           },
           chordBufferRef.current,
         );

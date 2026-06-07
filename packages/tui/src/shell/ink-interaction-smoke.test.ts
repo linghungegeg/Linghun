@@ -474,4 +474,22 @@ describe("Ink TTY interaction smoke", () => {
     await expectSubmit([..."baz", "\x0a", ..."qux", "\r"], "baz\nqux");
     await expectSubmit([..."csi", "\x1b[13;2u", ..."enter", "\r"], "csi\nenter");
   });
+
+  it("keeps Delete flowing to the editor instead of keybinding chord pending", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      activity: undefined,
+      blocks: [],
+      taskSuggestions: undefined,
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    for (const value of [..."abc", "\x1b[D", "\x1b[3~", "\r"]) {
+      await writeInput(input, shell, value);
+    }
+
+    expect(events).toContainEqual({ type: "submit", text: "ab" });
+    shell.unmount();
+  });
 });
