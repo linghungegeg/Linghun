@@ -1,5 +1,6 @@
 import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
+import type { TerminalCapability } from "./terminal-capability.js";
 import {
   DISABLE_KITTY_KEYBOARD,
   DISABLE_MODIFY_OTHER_KEYS,
@@ -11,7 +12,6 @@ import {
   enableTerminalInteractionModes,
   resolveTerminalInteractionModes,
 } from "./terminal-interaction-runtime.js";
-import type { TerminalCapability } from "./terminal-capability.js";
 
 function capability(overrides: Partial<TerminalCapability> = {}): TerminalCapability {
   return {
@@ -38,7 +38,7 @@ describe("terminal interaction modes", () => {
     });
   });
 
-  it("requires explicit app-owned screen mode before enabling mouse tracking", () => {
+  it("requires app-owned screen mode before enabling mouse tracking", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
@@ -56,6 +56,16 @@ describe("terminal interaction modes", () => {
       resolveTerminalInteractionModes({
         capability: capability({ alternateScreen: false }),
         env: { LINGHUN_TUI_MOUSE: "1" },
+        appOwnedScreen: true,
+      }).mouseTracking,
+    ).toBe(false);
+  });
+
+  it("allows explicit env opt-out for app-owned mouse tracking", () => {
+    expect(
+      resolveTerminalInteractionModes({
+        capability: capability(),
+        env: { LINGHUN_TUI_MOUSE: "0" },
         appOwnedScreen: true,
       }).mouseTracking,
     ).toBe(false);

@@ -310,7 +310,7 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
-  it("ignores SGR mouse sequences on the main screen so terminal-native selection keeps ownership", async () => {
+  it("routes SGR wheel and left selection events inside the transcript viewport", async () => {
     const view = {
       ...baseTaskView(),
       commandPanel: undefined,
@@ -332,9 +332,9 @@ describe("Ink TTY interaction smoke", () => {
     await writeInput(input, shell, "\x1b[<32;12;6M");
     await writeInput(input, shell, "\x1b[<0;12;6m");
 
-    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
-    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
-    expect(events.some((event) => event.type === "transcript-mouse")).toBe(false);
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
+    expect(events.some((event) => event.type === "transcript-mouse")).toBe(true);
 
     shell.unmount();
   });

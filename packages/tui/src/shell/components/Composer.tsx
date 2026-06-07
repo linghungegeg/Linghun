@@ -1,19 +1,19 @@
 import { Box, type DOMElement, Text, useInput } from "ink";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { resolveKeybinding } from "../../keybinding-runtime.js";
 import {
   formatUnknownSlashCommand,
   getCoreSlashCandidates,
   getSlashPrefixCandidates,
 } from "../../slash-dispatch.js";
-import { resolveKeybinding } from "../../keybinding-runtime.js";
 import { selectInputOwner } from "../models/input-owner-controller.js";
-import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
 import {
   isMultilineEnterSequence as isNormalizedMultilineEnterSequence,
   normalizeTerminalInput,
   sanitizeTerminalText,
 } from "../models/terminal-input-runtime.js";
+import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
 import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
@@ -515,7 +515,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel,
   );
   const terminalInteractionModes = useMemo(
-    () => resolveTerminalInteractionModes({ capability, appOwnedScreen: false }),
+    () => resolveTerminalInteractionModes({ capability, appOwnedScreen: true }),
     [capability],
   );
 
@@ -1336,7 +1336,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         <Text color={theme.muted} dimColor={!text}>
           {PROMPT_MARKER}
         </Text>
-        <Box ref={anchorRef} flexDirection="column" width={Math.max(4, maxWidth - displayWidthOf(PROMPT_MARKER))}>
+        <Box
+          ref={anchorRef}
+          flexDirection="column"
+          width={Math.max(4, maxWidth - displayWidthOf(PROMPT_MARKER))}
+        >
           {lines.map((line, index) => {
             return (
               <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>

@@ -1,7 +1,7 @@
 import type { Language } from "@linghun/shared";
 import { Box, Text, useInput } from "ink";
 import type React from "react";
-import { fitText } from "../text-utils.js";
+import { fitText, wrapText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type { ConfigPanelView, ShellController } from "../types.js";
 
@@ -25,12 +25,12 @@ import type { ConfigPanelView, ShellController } from "../types.js";
  */
 const HINT_TEXT = {
   "zh-CN": {
-    list: "↑↓ 选择 · Enter 进入 · Esc 关闭",
-    detail: "↑↓ 选择 · Enter 执行 · Esc 返回",
+    list: "Enter · Esc",
+    detail: "Enter · Esc",
   },
   "en-US": {
-    list: "↑↓ select · Enter open · Esc close",
-    detail: "↑↓ select · Enter run · Esc back",
+    list: "Enter · Esc",
+    detail: "Enter · Esc",
   },
 } as const;
 
@@ -52,7 +52,8 @@ export function ConfigPanel({
 
   useInput(() => undefined, { isActive: false });
 
-  const innerWidth = Math.max(20, Math.min(width, 76) - 4);
+  const panelWidth = Math.max(20, Math.min(width, 96));
+  const innerWidth = Math.max(20, panelWidth - 4);
 
   if (panel.phase === "panel_list") {
     return (
@@ -62,7 +63,7 @@ export function ConfigPanel({
         borderColor={theme.border}
         paddingX={1}
         marginTop={1}
-        width={Math.min(width, 76)}
+        width={panelWidth}
       >
         <Text color={theme.accent} bold>
           {fitText("/config", innerWidth)}
@@ -70,10 +71,15 @@ export function ConfigPanel({
         <Text color={theme.muted}>{fitText(hint.list, innerWidth)}</Text>
         {panel.panels.map((p, idx) => {
           const active = idx === panel.cursor;
+          const line = `${active ? "▸ " : "  "}${p.title}  ${p.summary}`;
           return (
-            <Text key={p.id} color={active ? theme.accent : undefined}>
-              {fitText(`${active ? "▸ " : "  "}${p.title}  ${p.summary}`, innerWidth)}
-            </Text>
+            <Box key={p.id} flexDirection="column">
+              {wrapText(line, innerWidth).map((part, lineIdx) => (
+                <Text key={`${p.id}-${lineIdx}`} color={active ? theme.accent : undefined}>
+                  {lineIdx === 0 ? part : `  ${fitText(part, Math.max(8, innerWidth - 2))}`}
+                </Text>
+              ))}
+            </Box>
           );
         })}
       </Box>
@@ -88,19 +94,30 @@ export function ConfigPanel({
       borderColor={theme.border}
       paddingX={1}
       marginTop={1}
-      width={Math.min(width, 76)}
+      width={panelWidth}
     >
       <Text color={theme.accent} bold>
         {fitText(`/config · ${panel.panel.title}`, innerWidth)}
       </Text>
-      <Text color={theme.muted}>{fitText(panel.panel.summary, innerWidth)}</Text>
+      <Box flexDirection="column">
+        {wrapText(panel.panel.summary, innerWidth).map((line, idx) => (
+          <Text key={`summary-${idx}-${line}`} color={theme.muted}>
+            {line}
+          </Text>
+        ))}
+      </Box>
       <Text color={theme.muted}>{fitText(hint.detail, innerWidth)}</Text>
       {panel.actions.map((a, idx) => {
         const active = idx === panel.actionCursor;
+        const line = `${active ? "▸ " : "  "}${a.label}`;
         return (
-          <Text key={a.id} color={active ? theme.accent : undefined}>
-            {fitText(`${active ? "▸ " : "  "}${a.label}`, innerWidth)}
-          </Text>
+          <Box key={a.id} flexDirection="column">
+            {wrapText(line, innerWidth).map((part, lineIdx) => (
+              <Text key={`${a.id}-${lineIdx}`} color={active ? theme.accent : undefined}>
+                {lineIdx === 0 ? part : `  ${fitText(part, Math.max(8, innerWidth - 2))}`}
+              </Text>
+            ))}
+          </Box>
         );
       })}
     </Box>

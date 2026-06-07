@@ -114,6 +114,19 @@ describe("reduceConfigState", () => {
     expect(step.dispatch).toEqual({ kind: "slash", command: "/model" });
   });
 
+  it("language panel dispatches explicit switch commands instead of bare /language", () => {
+    const panel = findConfigPanel("language");
+    expect(panel?.actions.map((action) => action.slash)).toEqual([
+      "/language zh-CN",
+      "/language en-US",
+    ]);
+    const step = reduceConfigState(
+      { phase: "panel_detail", panelId: "language", actionCursor: 1 },
+      { type: "enter" },
+    );
+    expect(step.dispatch).toEqual({ kind: "slash", command: "/language en-US" });
+  });
+
   it("move clamps within panel_detail action bounds", () => {
     const step = reduceConfigState(
       { phase: "panel_detail", panelId: "model", actionCursor: 0 },

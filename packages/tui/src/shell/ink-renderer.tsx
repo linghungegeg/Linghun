@@ -41,7 +41,7 @@ export function renderInkShell(
   const capability = detectTerminalCapability();
   const terminalInteractionModes = resolveTerminalInteractionModes({
     capability,
-    appOwnedScreen: false,
+    appOwnedScreen: true,
   });
   const useAlternateScreen = false;
   let instance: ReturnType<typeof render>;

@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import type React from "react";
-import { fitText } from "../text-utils.js";
+import { fitText, wrapText } from "../text-utils.js";
 import { type ShellTheme, getStatusMarker } from "../theme.js";
 import type { MessageBlockKind, ProductBlockViewModel } from "../types.js";
 import { CtrlOToExpand } from "./CtrlOToExpand.js";
@@ -87,16 +87,20 @@ export function ProductBlock({
     // 与 slash command transcript 的 marker / 配色区分：
     //   slash    → ❯ + accent 文本（命令意图）
     //   user_text → › + 默认色文本（对话语义）
-    // marker 用 dim，文本用默认色，避免被当成 highlight 命令；多行用户消息
-    // title 已截到首行（createUserTextBlock）。
+    // 对齐 CCB：普通用户输入不走 Markdown，不把 `inline code` 或标点染成诊断色；
+    // slash command 仍走独立 command transcript 样式。
     const isUserText = block.messageKind === "user_text";
     if (isUserText) {
       const body = (block.fullText ?? block.title ?? "").trim();
       if (!body) return null;
       return (
         <Box marginTop={1} marginBottom={0} flexDirection="row">
-          <Text color={theme.accent ?? theme.muted}>│ </Text>
-          <MessageMarkdown text={body} theme={theme} wrapWidth={Math.max(8, width - 2)} />
+          <Text color={theme.muted}>│ </Text>
+          <Box flexDirection="column">
+            {wrapText(body, Math.max(8, width - 2)).map((line, idx) => (
+              <Text key={`${idx}-${line}`}>{line}</Text>
+            ))}
+          </Box>
         </Box>
       );
     }

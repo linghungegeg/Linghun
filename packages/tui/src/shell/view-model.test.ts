@@ -392,7 +392,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("keeps SGR mouse tracking off on the main screen so native selection owns copy", async () => {
+  it("enables SGR mouse tracking for app-owned transcript wheel and restores it on exit", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -412,8 +412,8 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).not.toContain("\x1B[?1000h\x1B[?1002h\x1B[?1006h");
-    expect(output.text).not.toContain("\x1B[?1006l\x1B[?1002l\x1B[?1000l");
+    expect(output.text).toContain("\x1B[?1000h\x1B[?1002h\x1B[?1006h");
+    expect(output.text).toContain("\x1B[?1006l\x1B[?1002l\x1B[?1000l");
   });
 
   it("does not add beforeExit listener when waiting after unmount", async () => {
@@ -2446,7 +2446,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     // anchorRef attaches to the outer Box synchronously in the same render —
     // not via a deferred effect — so the parent-chain origin resolves on the
     // very first commit.
-    expect(source).toMatch(/<Box ref=\{anchorRef\}/);
+    expect(source).toContain("ref={anchorRef}");
   });
 
   it("error output has Ctrl+O hint for full error", () => {
@@ -4790,7 +4790,8 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
 
     expect(userBranch).toContain("marginBottom={0}");
     expect(userBranch).toContain("│ ");
-    expect(userBranch).toContain("MessageMarkdown");
+    expect(userBranch).toContain("wrapText");
+    expect(userBranch).not.toContain("MessageMarkdown");
     expect(assistantBranch).toContain("marginTop={isAssistantText ? 1 : 0}");
     expect(assistantBranch).toContain("marginBottom={0}");
   });
@@ -5892,17 +5893,17 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     expect(view.commandPanel).toBeUndefined();
   });
 
-  it("CommandPanel 只有存在 detailsText 时才显示 Ctrl+O 详情提示", async () => {
+  it("CommandPanel keeps ordinary panels quiet and only shows details/selectable short hints", async () => {
     const source = await readFile(
       join(dirname(fileURLToPath(import.meta.url)), "components", "CommandPanel.tsx"),
       "utf8",
     );
 
-    expect(source).toContain("Esc 关闭面板");
-    expect(source).toContain("Esc close");
+    expect(source).toContain('"zh-CN": ""');
+    expect(source).toContain("Enter · x · Esc");
     expect(source).not.toContain("Ctrl+O 展开详情");
     expect(source).toContain("Ctrl+O details");
-    expect(source).toContain("hasDetailsText ? `${hint} · ${detailsHint}` : hint");
+    expect(source).toContain('[hint, hasDetailsText ? detailsHint : ""].filter(Boolean).join');
   });
 
   it("D.14D-R P1-4: CommandPanel 空 title 不渲染顶部空框（无 ❯ 标题行）", async () => {

@@ -109,7 +109,8 @@ function buildConfigPanelsRaw(): ConfigPanel[] {
       summaryEn: "Switch zh-CN / en-US UI.",
       rootSlash: "/language",
       actions: [
-        { id: "view", labelZh: "切换语言", labelEn: "Switch language", slash: "/language" },
+        { id: "zh", labelZh: "切换到中文", labelEn: "Switch to Chinese", slash: "/language zh-CN" },
+        { id: "en", labelZh: "切换到英文", labelEn: "Switch to English", slash: "/language en-US" },
       ],
     },
     {

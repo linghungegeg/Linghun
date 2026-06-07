@@ -1,7 +1,7 @@
 import type { Language } from "@linghun/shared";
 import { Box, Text } from "ink";
 import type React from "react";
-import { fitText } from "../text-utils.js";
+import { fitText, wrapText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type { CommandPanelRow, CommandPanelView, ShellController } from "../types.js";
 
@@ -23,13 +23,13 @@ import type { CommandPanelRow, CommandPanelView, ShellController } from "../type
  * 键盘：由 Composer 的 input-owner panel 分支统一派发，CommandPanel 只负责渲染。
  */
 const HINT_TEXT = {
-  "zh-CN": "Esc 关闭面板",
-  "en-US": "Esc close",
+  "zh-CN": "",
+  "en-US": "",
 } as const;
 
 const SELECTABLE_HINT_TEXT = {
-  "zh-CN": "↑/↓ 选择 · x 停止/清理 · Esc 关闭",
-  "en-US": "↑/↓ select · x stop/clear · Esc close",
+  "zh-CN": "Enter · x · Esc",
+  "en-US": "Enter · x · Esc",
 } as const;
 
 const DETAILS_HINT_TEXT = {
@@ -66,12 +66,12 @@ export function CommandPanel({
   const selectedDetailsText = selectableRows[cursor]?.detailsText;
   const hasDetailsText = Boolean((selectedDetailsText ?? panel.detailsText ?? "").trim());
   const detailsHint = DETAILS_HINT_TEXT[language] ?? DETAILS_HINT_TEXT["zh-CN"];
-  const renderedHint = hasDetailsText ? `${hint} · ${detailsHint}` : hint;
+  const renderedHint = [hint, hasDetailsText ? detailsHint : ""].filter(Boolean).join(" · ");
   const expandedDetailsText = panel.expanded
     ? (selectedDetailsText ?? panel.detailsText)
     : undefined;
 
-  const cardWidth = Math.min(width, 90);
+  const cardWidth = Math.max(20, Math.min(width, 110));
   const innerWidth = Math.max(20, cardWidth - 4);
   const tone = panel.tone ?? "neutral";
   const borderColor =
@@ -98,7 +98,11 @@ export function CommandPanel({
       {panel.summary && panel.summary.length > 0 ? (
         <Box flexDirection="column">
           {panel.summary.map((line, idx) => (
-            <Text key={`${idx}-${line}`}>{fitText(line, innerWidth)}</Text>
+            <Box key={`${idx}-${line}`} flexDirection="column">
+              {wrapText(line, innerWidth).map((part, lineIdx) => (
+                <Text key={`${idx}-${lineIdx}-${part}`}>{part}</Text>
+              ))}
+            </Box>
           ))}
         </Box>
       ) : null}
@@ -141,24 +145,34 @@ export function CommandPanel({
             {fitText(language === "en-US" ? "— details —" : "— 详情 —", innerWidth)}
           </Text>
           {expandedDetailsText.split("\n").map((line, idx) => (
-            <Text key={`detail-${idx}-${line}`} color={theme.dim ?? theme.muted}>
-              {fitText(line, innerWidth)}
-            </Text>
+            <Box key={`detail-${idx}-${line}`} flexDirection="column">
+              {wrapText(line, innerWidth).map((part, lineIdx) => (
+                <Text key={`detail-${idx}-${lineIdx}-${part}`} color={theme.dim ?? theme.muted}>
+                  {part}
+                </Text>
+              ))}
+            </Box>
           ))}
         </Box>
       ) : null}
       {panel.actions && panel.actions.length > 0 ? (
         <Box flexDirection="column" marginTop={1}>
           {panel.actions.map((action, idx) => (
-            <Text key={`action-${idx}-${action}`} color={theme.dim ?? theme.muted}>
-              {fitText(`→ ${action}`, innerWidth)}
-            </Text>
+            <Box key={`action-${idx}-${action}`} flexDirection="column">
+              {wrapText(`→ ${action}`, innerWidth).map((part, lineIdx) => (
+                <Text key={`action-${idx}-${lineIdx}-${part}`} color={theme.dim ?? theme.muted}>
+                  {part}
+                </Text>
+              ))}
+            </Box>
           ))}
         </Box>
       ) : null}
-      <Text color={theme.dim ?? theme.muted} dimColor>
-        {fitText(renderedHint, innerWidth)}
-      </Text>
+      {renderedHint ? (
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {fitText(renderedHint, innerWidth)}
+        </Text>
+      ) : null}
     </Box>
   );
 }
@@ -207,8 +221,15 @@ function renderCommandPanelRow({
   const selected = isSelectable && selectableIndex === cursor;
   const prefix = isSelectable ? (selected ? "> " : "  ") : "";
   return (
-    <Text key={`row-${selectableIndex}-${text}`} color={selected ? theme.accent : undefined}>
-      {fitText(`${prefix}${text}`, innerWidth)}
-    </Text>
+    <Box key={`row-${selectableIndex}-${text}`} flexDirection="column">
+      {wrapText(`${prefix}${text}`, innerWidth).map((part, lineIdx) => (
+        <Text
+          key={`row-${selectableIndex}-${lineIdx}-${part}`}
+          color={selected ? theme.accent : undefined}
+        >
+          {lineIdx === 0 ? part : `  ${fitText(part, Math.max(8, innerWidth - 2))}`}
+        </Text>
+      ))}
+    </Box>
   );
 }
