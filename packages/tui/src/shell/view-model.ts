@@ -1418,11 +1418,14 @@ export function mapPendingApprovalToPermission(
       risk,
       scope: [],
       hint: "",
-      actionSummary: buildPermissionActionSummary(
-        context.language,
-        toolName,
-        approval.toolCall?.input,
-      ),
+      actionSummary:
+        approval.kind === "architecture_drift"
+          ? buildArchitectureDriftActionSummary(
+              context.language,
+              toolName,
+              approval.toolCall?.input,
+            )
+          : buildPermissionActionSummary(context.language, toolName, approval.toolCall?.input),
       actions:
         approval.kind === "model_tool_use" ? [] : buildOneShotPermissionActions(context.language),
       explanationLines:
@@ -1545,6 +1548,15 @@ function buildPermissionActionSummary(
     if (target) return zh ? `搜索：${target}` : `Search: ${target}`;
   }
   return zh ? `使用工具：${toolName}` : `Use tool: ${toolName}`;
+}
+
+function buildArchitectureDriftActionSummary(
+  language: Language,
+  toolName: string,
+  input: unknown,
+): string {
+  const action = buildPermissionActionSummary(language, toolName, input);
+  return language === "en-US" ? `Confirm scope change: ${action}` : `确认范围变化：${action}`;
 }
 
 function createProjectRouteBlock(language: Language, problem: string): ProductBlockViewModel {

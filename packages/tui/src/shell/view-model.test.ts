@@ -1135,10 +1135,11 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     const result = mapPendingApprovalToPermission(ctx);
     expect(result).toBeDefined();
     expect(result?.toolName).toBe("Edit");
-    // D.13L Block 0-B — architecture_drift 也只用 actionSummary 展示"做什么"，
-    // warnings 仍走 /details 路径，不在主屏暴露。
+    // architecture_drift 是范围变化确认，不应伪装成普通工具授权。
+    expect(result?.actionSummary).toContain("确认范围变化");
     expect(result?.actionSummary).toContain("core/api.ts");
     expect(result?.actionSummary).toContain("修改文件");
+    expect(result?.actionSummary).not.toBe("修改文件：core/api.ts");
   });
 
   it("D.14D-R P0-1: maps index_ignore_write approval to a Write PermissionPanel view", () => {

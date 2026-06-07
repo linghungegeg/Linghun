@@ -278,7 +278,11 @@ export async function executeModelToolUse(
   if (!toolName) {
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
   }
-  if (!architectureDriftConfirmed && context.currentArchitectureCard) {
+  if (
+    !architectureDriftConfirmed &&
+    context.currentArchitectureCard &&
+    shouldConfirmArchitectureDriftForTool(toolName)
+  ) {
     clearRequestActivity(context);
     const drift = detectArchitectureDrift(context.currentArchitectureCard, {
       toolName,
@@ -444,6 +448,15 @@ export async function executeModelToolUse(
     output,
     permission.preflight,
     continuation?.reportWriteGuard,
+  );
+}
+
+function shouldConfirmArchitectureDriftForTool(toolName: ToolName): boolean {
+  return (
+    toolName === "Write" ||
+    toolName === "Edit" ||
+    toolName === "MultiEdit" ||
+    toolName === "Bash"
   );
 }
 
