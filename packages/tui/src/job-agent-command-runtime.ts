@@ -3250,6 +3250,9 @@ export async function cancelAgent(
   if (background) {
     syncBackgroundWithAgentStatus(background, agent);
     background.updatedAt = now;
+    background.cancelState = "confirmed_exited";
+    background.cancelRequestedAt ??= now;
+    background.confirmedExitedAt = now;
   }
   context.backgroundAbortControllers?.get(agent.id)?.abort();
   context.backgroundAbortControllers?.delete(agent.id);

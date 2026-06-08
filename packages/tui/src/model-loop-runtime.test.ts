@@ -130,6 +130,7 @@ describe("model-loop-runtime", () => {
       const names = createModelToolDefinitions().map((d) => d.name);
       expect(names).toContain("GitStablePointCreate");
       expect(names).toContain("GitStatusInspect");
+      expect(names).toContain("GitRollbackExplain");
       expect(names).toContain("ManagedWorktreeCreate");
       expect(names).toContain("ManagedWorktreeRemove");
     });

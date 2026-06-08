@@ -17,17 +17,19 @@ import {
 } from "./git-tool-runtime.js";
 
 describe("D.14G git tool schema", () => {
-  it("createGitToolDefinitions exposes the 4 structured Git tools", () => {
+  it("createGitToolDefinitions exposes structured Git tools", () => {
     const names = createGitToolDefinitions().map((d) => d.name);
     expect(names).toContain("GitStablePointCreate");
     expect(names).toContain("GitStatusInspect");
+    expect(names).toContain("GitRollbackExplain");
     expect(names).toContain("ManagedWorktreeCreate");
     expect(names).toContain("ManagedWorktreeRemove");
-    expect(names).toHaveLength(4);
+    expect(names).toHaveLength(5);
   });
 
   it("isGitToolName recognizes git tools and rejects others", () => {
     expect(isGitToolName("GitStablePointCreate")).toBe(true);
+    expect(isGitToolName("GitRollbackExplain")).toBe(true);
     expect(isGitToolName("ManagedWorktreeRemove")).toBe(true);
     expect(isGitToolName("Read")).toBe(false);
     expect(isGitToolName("SearchExtraTools")).toBe(false);

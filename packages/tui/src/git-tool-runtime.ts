@@ -4,6 +4,7 @@
  * 这些是 Linghun 自研的结构化 Git 工具（不是 Anthropic defer_loading / tool_reference）：
  *   - GitStablePointCreate
  *   - GitStatusInspect
+ *   - GitRollbackExplain
  *   - ManagedWorktreeCreate
  *   - ManagedWorktreeRemove
  *
@@ -29,12 +30,14 @@ import {
 
 export const GIT_STABLE_POINT_CREATE = "GitStablePointCreate" as const;
 export const GIT_STATUS_INSPECT = "GitStatusInspect" as const;
+export const GIT_ROLLBACK_EXPLAIN = "GitRollbackExplain" as const;
 export const MANAGED_WORKTREE_CREATE = "ManagedWorktreeCreate" as const;
 export const MANAGED_WORKTREE_REMOVE = "ManagedWorktreeRemove" as const;
 
 export const GIT_TOOL_NAMES: readonly string[] = [
   GIT_STABLE_POINT_CREATE,
   GIT_STATUS_INSPECT,
+  GIT_ROLLBACK_EXPLAIN,
   MANAGED_WORKTREE_CREATE,
   MANAGED_WORKTREE_REMOVE,
 ];
@@ -72,6 +75,23 @@ export function createGitToolDefinitions(): ModelToolDefinition[] {
         additionalProperties: false,
         properties: {
           includeDetails: { type: "boolean" },
+        },
+      },
+    },
+    {
+      name: GIT_ROLLBACK_EXPLAIN,
+      description:
+        "Read-only boundary tool for rollback requests. Use when the user asks for git revert/reset/rollback or asks how Linghun snapshot restore differs from git revert/reset. This tool does not run git revert/reset/checkout and does not move HEAD; it returns explicit next-step guidance and boundary evidence.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          requestedOperation: {
+            type: "string",
+            enum: ["revert", "reset", "rollback", "snapshot_restore", "unknown"],
+          },
+          targetRef: { type: "string" },
+          reason: { type: "string" },
         },
       },
     },

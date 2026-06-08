@@ -18122,6 +18122,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(firstController.signal.aborted).toBe(true);
     expect(secondController.signal.aborted).toBe(true);
     expect(context.agents.map((agent) => agent.status)).toEqual(["cancelled", "cancelled"]);
+    expect(context.backgroundTasks.map((task) => task.cancelState)).toEqual([
+      "confirmed_exited",
+      "confirmed_exited",
+    ]);
     expect(output.text).toContain("已停止后台智能体 2 个。");
     expect(output.text).not.toContain("AgentControl cancel_all");
     const transcript = (await store.resume(session.id)).transcript;
@@ -24847,7 +24851,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(context.cache.workspaceReference._pendingProbe).not.toBe(neverSettlingProbe);
   });
 
-  it("ordinary answer light path omits full tools, git status, and meta scheduler prompt payload", async () => {
+  it("ordinary answer keeps full tool and scheduler path", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-light-path-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -24864,15 +24868,16 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
 
     await __testSendMessage("解释一下递归的直觉", context, gateway, output);
 
-    const request = requests[0] as { tools?: unknown; messages?: { content?: string }[] };
-    expect(request.tools).toBeUndefined();
+    const request = requests[0] as { tools?: unknown[]; messages?: { content?: string }[] };
+    expect(request.tools?.some((tool) => JSON.stringify(tool).includes("AgentControl"))).toBe(
+      true,
+    );
     const prompt = String(request.messages?.[0]?.content ?? "");
-    expect(prompt).not.toContain("MetaSchedulerForModel:");
-    expect(prompt).not.toContain("GitStatus=");
-    expect(prompt).not.toContain("DeferredToolsReminder=");
-    expect(prompt).toContain("ordinary_light_path_no_tools");
+    expect(prompt).toContain("MetaSchedulerForModel:");
+    expect(prompt).toContain("CommandCapabilitySummary=");
+    expect(prompt).not.toContain("ordinary_light_path_no_tools");
     const transcript = (await store.resume(session.id)).transcript;
-    expect(JSON.stringify(transcript)).toContain("ordinary_light_path");
+    expect(JSON.stringify(transcript)).not.toContain("ordinary_light_path");
   });
 
   it("Policy: code fact request keeps source-first in system_event, not main notifications", async () => {
@@ -26412,6 +26417,35 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     );
     return requests;
   }
+
+  it("model GitRollbackExplain records rollback boundary without moving HEAD", async () => {
+    await isolateModelEnv();
+    const project = await mkdtemp(join(tmpdir(), "linghun-git-rollback-boundary-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const context = await createTestContext(project, store, session, config);
+    const gateway = createModelGateway(config);
+    context.modelGateway = gateway;
+    const output = new MemoryOutput();
+    mockSseToolSequence(
+      [{ toolName: "GitRollbackExplain", input: { requestedOperation: "reset" } }],
+      "我不会执行 git reset。",
+    );
+
+    await __testSendMessage("我要回滚 git reset 到上个提交", context, gateway, output);
+
+    expect(output.text).toContain("Git 回滚边界");
+    const transcript = (await store.resume(session.id)).transcript;
+    const result = transcript.find(
+      (event) => event.type === "tool_result" && event.toolName === "GitRollbackExplain",
+    );
+    expect(JSON.stringify(result)).toContain('"movesHead":false');
+    expect(JSON.stringify(result)).toContain('"executesGitRollback":false');
+    expect(context.evidence.some((item) => item.summary.includes("GitRollbackExplain"))).toBe(
+      true,
+    );
+  });
 
   async function makeRepoContext(): Promise<{
     project: string;

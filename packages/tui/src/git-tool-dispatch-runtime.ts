@@ -30,6 +30,7 @@ import {
 } from "./git-operation-runtime.js";
 import { readGitStatus, readWorktreeList } from "./git-runtime.js";
 import {
+  GIT_ROLLBACK_EXPLAIN,
   GIT_STABLE_POINT_CREATE,
   GIT_STATUS_INSPECT,
   MANAGED_WORKTREE_CREATE,
@@ -251,6 +252,9 @@ export async function executeGitToolUse(
     if (toolCall.name === GIT_STATUS_INSPECT) {
       return await runGitStatusInspectTool(toolCall, context, sessionId, output, deps);
     }
+    if (toolCall.name === GIT_ROLLBACK_EXPLAIN) {
+      return await runGitRollbackExplainTool(toolCall, context, sessionId, output, deps);
+    }
     if (toolCall.name === GIT_STABLE_POINT_CREATE) {
       return await runStablePointTool(
         toolCall,
@@ -287,6 +291,44 @@ export async function executeGitToolUse(
     );
     return { ok: false, tool: toolCall.name, text, evidenceId: evidence.id };
   }
+}
+
+async function runGitRollbackExplainTool(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  deps: GitToolDispatchDeps,
+): Promise<GitToolResult> {
+  const isEn = context.language === "en-US";
+  const text = isEn
+    ? "Git rollback boundary: Linghun can restore in-memory snapshot checkpoints with /rewind restore, but this tool does not execute git revert/reset/checkout and does not move HEAD. For a real git rollback, inspect /git status first, then run an explicit shell/git command after choosing revert vs reset."
+    : "Git 回滚边界：Linghun 可用 /rewind restore 恢复内存 snapshot checkpoint，但此工具不会执行 git revert/reset/checkout，也不会移动 HEAD。真实 git 回滚请先查看 /git status，再由用户明确选择 revert 或 reset 后手动执行对应 git 命令。";
+  const data = {
+    mutating: false,
+    movesHead: false,
+    executesGitRollback: false,
+    snapshotRestoreCommand: "/rewind restore <checkpointId>",
+    gitStatusCommand: "/git status",
+  };
+  const evidence = await deps.recordToolEvidence(context, sessionId, "Read", {
+    text: `GitRollbackExplain: ${text}`,
+    data,
+  } as ToolOutput, {
+    query: "GitRollbackExplain",
+  });
+  await deps.appendDeferredToolResultEvent(
+    context,
+    sessionId,
+    toolCall.id,
+    toolCall.name,
+    { text, data },
+    false,
+    evidence?.id,
+  );
+  deps.clearRequestActivity(context);
+  deps.writeLine(output, text);
+  return { ok: true, tool: toolCall.name, text, data, evidenceId: evidence?.id };
 }
 
 async function runGitStatusInspectTool(
