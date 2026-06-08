@@ -185,12 +185,22 @@ function isSessionAppendRace(error: unknown): boolean {
   );
 }
 
+export const SILENT_OUTPUT_MARKER = Symbol.for("linghun.silentOutput");
+
+export type SilentWritable = Writable & { [SILENT_OUTPUT_MARKER]?: true };
+
 export function createSilentOutput(): Writable {
-  return new Writable({
+  const output = new Writable({
     write(_chunk, _encoding, callback) {
       callback();
     },
-  });
+  }) as SilentWritable;
+  output[SILENT_OUTPUT_MARKER] = true;
+  return output;
+}
+
+export function isSilentOutput(output: Writable): boolean {
+  return (output as SilentWritable)[SILENT_OUTPUT_MARKER] === true;
 }
 
 export function formatShellBackgroundSummaries(context: TuiContext): BackgroundTaskSummary[] {

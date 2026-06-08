@@ -392,7 +392,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("enables SGR wheel tracking by default without drag reporting", async () => {
+  it("keeps SGR mouse off on the main terminal screen", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -412,8 +412,10 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("\x1B[?1000h\x1B[?1006h");
-    expect(output.text).toContain("\x1B[?1006l\x1B[?1000l");
+    expect(output.text).not.toContain("\x1B[?1000h");
+    expect(output.text).not.toContain("\x1B[?1006h");
+    expect(output.text).not.toContain("\x1B[?1006l");
+    expect(output.text).not.toContain("\x1B[?1000l");
     expect(output.text).not.toContain("\x1B[?1002h");
     expect(output.text).not.toContain("\x1B[?1002l");
   });

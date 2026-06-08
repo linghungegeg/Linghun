@@ -1171,7 +1171,10 @@ export async function executeLinghunControlToolUse(
           );
         }
       } else {
-        await runWorkflowSteps(input.goal ?? "", context, createSilentOutput(), input);
+        await runWorkflowSteps(input.goal ?? "", context, createSilentOutput(), {
+          ...input,
+          ignoreForegroundModelGuard: true,
+        });
       }
       const run = context.workflows.activeRun;
       const ok =

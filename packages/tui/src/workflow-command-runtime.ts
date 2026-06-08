@@ -791,6 +791,7 @@ type RunWorkflowExecutionOptions = {
    *  marks mutating requests as executable (per-tool permission still applies).
    *  When false/undefined, mutating requests stay blocked at the bridge layer. */
   phaseGateConfirmed?: boolean;
+  ignoreForegroundModelGuard?: boolean;
 };
 
 type WorkflowBatchItem = {
@@ -965,6 +966,7 @@ async function runWorkflowPlanSteps(
           output,
           runId,
           getWorkflowRunningCap(plan, options, phase.id),
+          options,
         ),
       })),
     );
@@ -1540,6 +1542,7 @@ async function executeWorkflowStep(
   output: Writable,
   workflowRunId?: string,
   workflowRunningCap?: number,
+  options: RunWorkflowExecutionOptions = {},
 ): Promise<{
   status: WorkflowStepTerminalStatus;
   summary: string;
@@ -1723,12 +1726,14 @@ async function executeWorkflowStep(
           ],
           context,
           output,
+          { ignoreForegroundModelGuard: options.ignoreForegroundModelGuard === true },
         );
       } else {
         await runNestedWorkflowJobCommand(
           [req.action, req.jobRef ?? ""].filter(Boolean),
           context,
           output,
+          { ignoreForegroundModelGuard: options.ignoreForegroundModelGuard === true },
         );
       }
       const readonlyJobActions = new Set(["list", "logs"]);
@@ -2247,18 +2252,33 @@ async function runNestedWorkflowJobCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
+  options: { ignoreForegroundModelGuard?: boolean } = {},
 ): Promise<void> {
   const workflowTaskIndex = context.backgroundTasks.findIndex(
     (task) => task.kind === "job" && task.id.startsWith("workflow-") && task.status === "running",
   );
+  const activeAbortController =
+    options.ignoreForegroundModelGuard === true ? context.activeAbortController : undefined;
+  if (activeAbortController) {
+    context.activeAbortController = undefined;
+  }
   if (workflowTaskIndex < 0) {
-    await handleJobCommand(args, context, output);
-    return;
+    try {
+      await handleJobCommand(args, context, output);
+      return;
+    } finally {
+      if (activeAbortController) {
+        context.activeAbortController = activeAbortController;
+      }
+    }
   }
   const [workflowTask] = context.backgroundTasks.splice(workflowTaskIndex, 1);
   try {
     await handleJobCommand(args, context, output);
   } finally {
+    if (activeAbortController) {
+      context.activeAbortController = activeAbortController;
+    }
     if (workflowTask && !context.backgroundTasks.some((task) => task.id === workflowTask.id)) {
       rememberBackgroundTask(context, workflowTask);
     }

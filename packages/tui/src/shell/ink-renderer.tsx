@@ -39,11 +39,11 @@ export function renderInkShell(
 ): InkShellInstance {
   const stdout = options.stdout as NodeJS.WriteStream | undefined;
   const capability = detectTerminalCapability();
+  const useAlternateScreen = false;
   const terminalInteractionModes = resolveTerminalInteractionModes({
     capability,
-    appOwnedScreen: true,
+    appOwnedScreen: useAlternateScreen,
   });
-  const useAlternateScreen = false;
   let instance: ReturnType<typeof render>;
 
   try {

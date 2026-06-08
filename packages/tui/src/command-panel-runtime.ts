@@ -1,4 +1,5 @@
 import type { Writable } from "node:stream";
+import { isSilentOutput } from "./details-status-runtime.js";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelRow, CommandPanelView } from "./shell/types.js";
 import { sanitizeDiagnosticText, sanitizeDisplayPaths, writeLine } from "./startup-runtime.js";
@@ -263,6 +264,7 @@ export function showCommandPanel(
   output: Writable,
   panel: CommandPanelView,
 ): void {
+  if (isSilentOutput(output)) return;
   if (context.isInkSession) {
     context.commandPanelState = panel;
     return;

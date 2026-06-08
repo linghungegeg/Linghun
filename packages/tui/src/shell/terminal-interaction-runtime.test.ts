@@ -71,6 +71,16 @@ describe("terminal interaction modes", () => {
     ).toBe(true);
   });
 
+  it("keeps mouse tracking off when the Ink shell is not using an app-owned screen", () => {
+    expect(
+      resolveTerminalInteractionModes({
+        capability: capability(),
+        env: { LINGHUN_TUI_MOUSE: "1" },
+        appOwnedScreen: false,
+      }).mouseTracking,
+    ).toBe(false);
+  });
+
   it("allows disabling app-owned wheel tracking explicitly", () => {
     expect(
       resolveTerminalInteractionModes({

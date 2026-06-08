@@ -28006,6 +28006,38 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     expect(context.workflows.activeRun?.phaseGateConfirmed).toBe(true);
     // The nested job step still runs through per-tool permission, not auto-executed.
   });
+
+  it("model-facing workflow nested job does not self-block on the current model turn", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-self-guard-"));
+    const config = createTestModelConfig();
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    const currentTurnController = new AbortController();
+    context.activeAbortController = currentTurnController;
+    const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("full-access"));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid plan");
+
+    await __testRunWorkflowStepsWithPlan("nested job model tool", plan.plan, context, output, {
+      phaseGateConfirmed: true,
+      ignoreForegroundModelGuard: true,
+    });
+
+    const jobs = await listDurableJobsFromRuntime({
+      config,
+      projectPath: project,
+      language: "zh-CN",
+    });
+    expect(context.activeAbortController).toBe(currentTurnController);
+    expect(jobs[0]?.pauseReason ?? "").not.toContain("已有前台模型请求正在运行");
+    expect(jobs[0]?.status).not.toBe("sleeping");
+  });
 });
 
 describe("Phase A correctness focused guards", () => {
