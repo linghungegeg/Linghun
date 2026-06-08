@@ -688,13 +688,13 @@ export function formatWorkflowStatus(context: TuiContext): string {
     lines.push(`- goal: ${truncateDisplay(run.goal, 120)}`);
 
     if (problemStep) {
-      lines.push(`- stopped at: ${truncateDisplay(problemStep.summary, 80)} [${problemStep.status}]`);
+      lines.push(`- stopped at: ${truncateDisplay(problemStep.summary ?? "", 80)} [${problemStep.status}]`);
     }
 
     if (run.status === "running") {
       const current = run.steps.find((s) => s.status === "running");
       if (current) {
-        lines.push(`- running: ${truncateDisplay(current.summary, 80)}`);
+        lines.push(`- running: ${truncateDisplay(current.summary ?? "", 80)}`);
       }
     }
   }
