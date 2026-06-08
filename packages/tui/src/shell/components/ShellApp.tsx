@@ -179,16 +179,6 @@ function TaskLayout({
           {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
             ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
             blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
-          {view.taskRuntimeSummary ? (
-            <Box marginBottom={view.blocks.length > 0 ? 1 : 0}>
-              <ProductBlock
-                block={view.taskRuntimeSummary}
-                theme={theme}
-                width={view.width - 4}
-              />
-            </Box>
-          ) : null}
-
           {view.blocks.length > 0 ? (
             <Box flexDirection="column">
               {view.blocks.map((block) => (

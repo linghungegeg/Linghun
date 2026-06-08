@@ -699,9 +699,9 @@ describe("home → task view mode transition", () => {
     expect(rendered).not.toContain("v0.1.0");
     // No vision text in task mode
     expect(rendered).not.toContain("技术普惠会越来越成熟");
-    // Status tray preserved
-    expect(rendered).toContain("项目：");
-    expect(rendered).toContain("模型：");
+    // Task mode keeps the full StatusTray out of the top bar.
+    expect(rendered).not.toContain("项目：");
+    expect(rendered).not.toContain("模型：");
     // No fake composer input line
     expect(rendered).not.toContain("> 我能帮您做点什么？");
     // Output block summary preserved (title is empty for non-fail per D13E-P3)
@@ -1821,7 +1821,7 @@ describe("D.12B — #9: home flicker guard (submitted pending state)", () => {
     const rendered = renderPlainShell(view);
     expect(rendered).not.toContain("技术普惠");
     expect(rendered).toContain("LingHun");
-    expect(rendered).toContain("项目：");
+    expect(rendered).not.toContain("项目：");
   });
 
   it("explicit viewMode override takes precedence over submitted", () => {
@@ -1877,7 +1877,7 @@ describe("D.12B — P2-5: no-color does not force white", () => {
       backgroundSummaries: [{ id: "nc1", title: "task", status: "stale" }],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("后台：1");
+    expect(rendered).not.toContain("后台：1");
     expect(rendered).not.toContain("可能卡住 1");
     expect(rendered).not.toContain("/background");
     expect(rendered).not.toContain("task");
@@ -3836,9 +3836,11 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     const rendered = renderPlainShell(view);
     expect(rendered).not.toContain("工作树：");
-    expect(rendered).toContain("后台 1");
-    expect(rendered).toContain("阻塞 1");
-    expect(rendered).toContain("/background");
+    expect(rendered).not.toContain("后台 1");
+    expect(rendered).not.toContain("后台：1");
+    expect(rendered).not.toContain("后台:1");
+    expect(rendered).not.toContain("阻塞 1");
+    expect(rendered).not.toContain("/background");
   });
 
   it("D13E-P3: index 'unknown' renders as '索引?' / 'Index?' (no 'unknown' leak)", () => {
@@ -4208,10 +4210,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       body.indexOf("<Composer view={view}"),
     );
     expect(body).not.toContain("width={cw} paddingX={1}");
-    expect(body).toContain("view.taskRuntimeSummary");
-    expect(body.indexOf("view.taskRuntimeSummary")).toBeLessThan(
-      body.indexOf("view.blocks.length > 0"),
-    );
+    expect(body).not.toContain("view.taskRuntimeSummary");
     expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("{composerRule}"));
     expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
     expect(body).not.toContain(

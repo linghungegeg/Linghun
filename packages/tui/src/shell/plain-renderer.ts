@@ -245,10 +245,10 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
 
   const lines: string[] = [];
 
-  // Compact top bar: bold brand + dim status
+  // Compact top bar: keep Task mode free of the full StatusTray; runtime
+  // metadata belongs in the bottom task footer or explicit status/details views.
   const brandPart = bold(colorBrightWhite("LingHun", noColor), noColor);
-  const statusPart = dim(formatStatusTray(view), noColor);
-  lines.push(`${brandPart}  ${statusPart}`);
+  lines.push(brandPart);
   lines.push(separator);
 
   // Activity indicator
@@ -289,14 +289,6 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
   }
 
   // Output blocks
-  const runtimeSummaryLines = view.taskRuntimeSummary
-    ? formatBlockLines({ ...view, blocks: [view.taskRuntimeSummary] }, noColor)
-    : [];
-  if (runtimeSummaryLines.length > 0) {
-    lines.push("");
-    lines.push(...runtimeSummaryLines);
-  }
-
   const blockLines = formatBlockLines(view, noColor);
   if (blockLines.length > 0) {
     lines.push("");
