@@ -176,8 +176,7 @@ function mapWorkflow(
     title: "workflow",
     status: workflow.status,
     currentStep,
-    progress: { completed, total: workflow.steps.length, label: "workflow" },
-    elapsed: formatElapsed(workflow.startedAt, language),
+    progress: { completed, total: workflow.steps.length },
   };
 }
 

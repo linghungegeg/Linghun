@@ -392,7 +392,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("enables SGR wheel tracking without enabling drag tracking on the main terminal screen", async () => {
+  it("keeps terminal-native selection on the main screen by not enabling SGR mouse tracking", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -412,10 +412,10 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("\x1B[?1000h");
-    expect(output.text).toContain("\x1B[?1006h");
-    expect(output.text).toContain("\x1B[?1006l");
-    expect(output.text).toContain("\x1B[?1000l");
+    expect(output.text).not.toContain("\x1B[?1000h");
+    expect(output.text).not.toContain("\x1B[?1006h");
+    expect(output.text).not.toContain("\x1B[?1006l");
+    expect(output.text).not.toContain("\x1B[?1000l");
     expect(output.text).not.toContain("\x1B[?1002h");
     expect(output.text).not.toContain("\x1B[?1002l");
   });
@@ -1251,9 +1251,9 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary?.title).not.toContain("已结束");
     expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).toContain("后台任务正在运行");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("lint check");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("checking files");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("1/3 steps");
+    expect(view.taskRuntimeSummary?.summary).toContain("lint check");
+    expect(view.taskRuntimeSummary?.summary).toContain("checking files");
+    expect(view.taskRuntimeSummary?.summary).toContain("1/3 steps");
     expect(view.taskRuntimeSummary?.nextAction).toContain("/background");
     expect(view.taskRuntimeSummary?.nextAction).not.toContain("/interrupt");
   });
@@ -1356,8 +1356,8 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.blocks.find((b) => b.id === "bg-summary")).toBeUndefined();
     expect(view.taskRuntimeSummary?.title).toContain("Background 1");
     expect(view.taskRuntimeSummary?.title).toContain("running 1");
-    expect(view.taskRuntimeSummary?.summary).toContain("Background task is running");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("build");
+    expect(view.taskRuntimeSummary?.summary).toContain("Background task running");
+    expect(view.taskRuntimeSummary?.summary).toContain("build");
   });
 
   it("completed-only background tasks stay low-noise and do not become PASS", () => {
@@ -4167,9 +4167,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(outerWrapper).not.toContain('alignItems="center"');
   });
 
-  it("Composer routes SGR wheel events to transcript scroll without treating them as text", async () => {
+  it("Composer routes SGR wheel only behind mouse tracking and never takes over left selection", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
+    expect(source).toContain("if (!terminalInteractionModes.mouseTracking) return;");
     expect(source).toContain("parseSgrMouseEvent(input)");
     expect(source).toContain("isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)");
     expect(source).toContain('mouse?.button === "wheel-up"');
@@ -4213,7 +4214,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       body.indexOf("<Composer view={view}"),
     );
     expect(body).not.toContain("width={cw} paddingX={1}");
-    expect(body).not.toContain("view.taskRuntimeSummary");
+    expect(body).toContain("view.taskRuntimeSummary");
+    expect(body).toContain("<ProductBlock block={view.taskRuntimeSummary}");
     expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("{composerRule}"));
     expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
     expect(body).not.toContain(

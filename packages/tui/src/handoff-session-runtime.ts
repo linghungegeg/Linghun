@@ -102,6 +102,7 @@ function restoreCheckpoints(context: TuiContext, transcript: TranscriptEvent[]):
       })
       .map((event) => event.checkpointId),
   );
+  context.checkpoints = context.checkpoints ?? [];
   const known = new Set(context.checkpoints.map((checkpoint) => checkpoint.id));
   const restored = transcript
     .filter((event): event is Extract<TranscriptEvent, { type: "checkpoint_created" }> => {

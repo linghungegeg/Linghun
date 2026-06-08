@@ -86,7 +86,7 @@ describe("verification-command-runtime", () => {
     await expect(readdir(join(projectPath, ".linghun", "logs", "verification"))).rejects.toThrow();
   });
 
-  it("records scoped verification evidence without upgrading synthetic smoke to tests passed", async () => {
+  it("records scoped verification evidence without upgrading synthetic smoke to verification pass", async () => {
     const context = createEvidenceContext();
     await recordVerificationEvidence(
       context,
@@ -94,8 +94,10 @@ describe("verification-command-runtime", () => {
       makeReport("pass", [{ kind: "smoke", synthetic: true }]),
     );
 
-    expect(context.evidence[0]?.supportsClaims).toContain("verification_passed");
+    expect(context.evidence[0]?.supportsClaims).toContain("verification_self_check_passed");
+    expect(context.evidence[0]?.supportsClaims).toContain("verification_not_run");
     expect(context.evidence[0]?.supportsClaims).toContain("smoke_ran");
+    expect(context.evidence[0]?.supportsClaims).not.toContain("verification_passed");
     expect(context.evidence[0]?.supportsClaims).not.toContain("test_passed");
     expect(context.evidence[0]?.supportsClaims).not.toContain("smoke_passed");
   });

@@ -297,8 +297,6 @@ function buildSlicesForGoal(
         ? { kind: "slash", slash: "/job", action: "run", mutating: true }
         : { kind: "slash", slash: "/fork", role: "worker", mutating: true },
       budget: {
-        maxTokens: 5000,
-        maxDurationMs: 120_000,
         ...(useDurableJobBatch
           ? {
               ...(options.requestedAgents ? { requestedAgents: options.requestedAgents } : {}),

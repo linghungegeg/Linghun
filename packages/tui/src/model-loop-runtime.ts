@@ -957,9 +957,7 @@ function evidenceSupportsCommandClaim(
   if (claim === "diff_check") {
     return record.supportsClaims.includes("diff_check_passed");
   }
-  return (
-    record.supportsClaims.includes("smoke_passed") || record.supportsClaims.includes("smoke_ran")
-  );
+  return record.supportsClaims.includes("smoke_passed");
 }
 
 function evidenceSupportsCompletionClaim(

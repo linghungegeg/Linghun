@@ -207,12 +207,13 @@ export function formatModelRoutes(config: LinghunConfig): string {
         `- ${route.role}: provider ${route.provider || "未配置"}`,
         `model ${route.primaryModel || "未配置"}`,
         `capabilities ${route.requiredCapabilities.join("+") || "none"}`,
-        `tools ${route.allowTools ? "yes" : "no"}`,
-        `write ${route.allowWrite ? "yes" : "no"}`,
-        `bash ${route.allowBash ? "yes" : "no"}`,
+        `tool route hint ${route.allowTools ? "yes" : "no"}`,
+        `write route hint ${route.allowWrite ? "yes" : "no"}`,
+        `bash route hint ${route.allowBash ? "yes" : "no"}`,
         `budget ${route.maxCostCny === undefined ? "unconfigured" : `estimated <= ${route.maxCostCny} CNY`}`,
       ].join("  "),
     ),
+    "提示：route hint 只是候选能力提示，最终工具执行仍由权限模式和 permission gate 决定。",
     "提示：/model route doctor 诊断缺 provider、能力不足和预算配置。",
   ].join("\n");
 }

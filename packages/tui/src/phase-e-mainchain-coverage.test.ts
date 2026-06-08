@@ -99,6 +99,41 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
     expect(textOutput.text).toContain("answer");
     expect(textContext.roleUsage[0]?.inputTokens).toBe(10);
 
+    const anthropicContext = await createTestContext();
+    anthropicContext.model = "claude-3-5-sonnet-latest";
+    const tokenCountRequests: Array<{ endpointProfile?: string; model?: string }> = [];
+    await __testSendMessage(
+      "count profile",
+      anthropicContext,
+      {
+        async *stream() {
+          yield {
+            type: "usage",
+            usage: { inputTokens: 7, outputTokens: 1 },
+          } satisfies TestStreamEvent;
+          yield { type: "assistant_text_delta", text: "counted" } satisfies TestStreamEvent;
+          yield {
+            type: "message_stop",
+            chunkCount: 2,
+            hadUsage: true,
+            finishReason: "stop",
+          } satisfies TestStreamEvent;
+        },
+        async countMessagesTokensWithAPI(
+          _provider: string,
+          request: { endpointProfile?: string; model?: string },
+        ) {
+          tokenCountRequests.push({ endpointProfile: request.endpointProfile, model: request.model });
+          return { source: "api", inputTokens: 8 };
+        },
+      } as unknown as ModelGateway,
+      new MemoryOutput(),
+    );
+    expect(tokenCountRequests).toContainEqual({
+      endpointProfile: "anthropic_messages",
+      model: "claude-3-5-sonnet-latest",
+    });
+
     const toolContext = await createTestContext();
     const toolOutput = new MemoryOutput();
     await __testSendMessage(

@@ -30,11 +30,11 @@ function capability(overrides: Partial<TerminalCapability> = {}): TerminalCapabi
 }
 
 describe("terminal interaction modes", () => {
-  it("enables modifyOtherKeys and wheel tracking on the main screen", () => {
+  it("keeps mouse tracking off on the main screen by default", () => {
     expect(resolveTerminalInteractionModes({ capability: capability(), env: {} })).toEqual({
       kittyKeyboard: true,
       modifyOtherKeys: true,
-      mouseTracking: true,
+      mouseTracking: false,
     });
   });
 
@@ -70,14 +70,14 @@ describe("terminal interaction modes", () => {
     ).toBe(true);
   });
 
-  it("enables wheel tracking even when the Ink shell is not using an app-owned screen", () => {
+  it("does not enable wheel tracking when the Ink shell is not using an app-owned screen", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
         env: { LINGHUN_TUI_MOUSE: "1" },
         appOwnedScreen: false,
       }).mouseTracking,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("allows disabling app-owned wheel tracking explicitly", () => {
@@ -98,7 +98,7 @@ describe("terminal interaction modes", () => {
     ).toEqual({
       kittyKeyboard: false,
       modifyOtherKeys: false,
-      mouseTracking: true,
+      mouseTracking: false,
     });
   });
 

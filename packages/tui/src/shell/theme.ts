@@ -30,6 +30,7 @@ export type ShellTheme = {
   notification: string | undefined;
   success: string | undefined;
   error: string | undefined;
+  inlineCode: string | undefined;
 };
 
 export function createShellTheme(noColor: boolean): ShellTheme {
@@ -58,6 +59,7 @@ export function createShellTheme(noColor: boolean): ShellTheme {
       notification: undefined,
       success: undefined,
       error: undefined,
+      inlineCode: undefined,
     };
   }
   return {
@@ -79,7 +81,7 @@ export function createShellTheme(noColor: boolean): ShellTheme {
     // 让 status dot 与正文同色一片青；panel/permission/help 用不同 border 色，
     // 让 PermissionPanel 一眼能与 ConfigPanel 区分；diagnostic 仍可用 cyan 强调
     // /model doctor 等诊断输出，但只服务诊断，不再当通用正文色。
-    assistantText: "white",
+    assistantText: undefined,
     dim: "gray",
     panel: "gray",
     permission: "magenta",
@@ -88,6 +90,7 @@ export function createShellTheme(noColor: boolean): ShellTheme {
     notification: "gray",
     success: "green",
     error: "red",
+    inlineCode: "gray",
   };
 }
 

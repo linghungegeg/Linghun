@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
-import type { ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
+import type { EndpointProfile, ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import {
@@ -113,10 +113,7 @@ import {
   formatReportEvidenceRequired,
   formatRequestActivity,
 } from "./request-lifecycle-presenter.js";
-import {
-  LINGHUN_MAX_AGENTIC_TURNS,
-  LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
-} from "./runtime-budget.js";
+import { LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES } from "./runtime-budget.js";
 import { detectTerminalCapability } from "./shell/terminal-capability.js";
 import { addRoleUsage } from "./slash-command-runtime.js";
 import { handleSlashCommand } from "./slash-command-runtime.js";
@@ -130,7 +127,6 @@ import {
 } from "./tui-context-runtime.js";
 import {
   MAX_CONTEXT_MESSAGES,
-  MAX_MODEL_TOTAL_TOOL_ROUNDS,
   MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
   MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
   REQUEST_SLOW_HINT_MS,
@@ -545,10 +541,10 @@ export async function sendMessage(
   try {
     let evidenceRounds = 0;
     let consecutiveTodoOnlyRounds = 0;
-    let totalPlanningOnlyRounds = 0;
+    let noProgressRounds = 0;
     let todoOnlyHintSent = false;
     let rawToolProtocolTextRetries = 0;
-    modelRoundLoop: for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
+    modelRoundLoop: for (let round = 0; ; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId);
@@ -788,6 +784,21 @@ export async function sendMessage(
         });
       }
       if (toolCalls.length === 0) {
+        if (consecutiveTodoOnlyRounds >= MAX_TODO_ONLY_CONSECUTIVE_ROUNDS && todoOnlyHintSent) {
+          const limitMsg =
+            evidenceRounds === 0
+              ? context.language === "en-US"
+                ? "Execution paused at an internal runaway guard. Only planning/Todo was executed; no repository verification was performed. Send the request again or run the matching verification command to continue."
+                : "执行已在内部防 runaway 保护处暂停。只完成计划整理，尚未执行仓库验证。请重新发起请求或运行对应验证命令继续。"
+              : context.language === "en-US"
+                ? "Execution paused at an internal runaway guard before a final answer. The task is not complete; send the request again to continue from the latest visible state."
+                : "执行已在内部防 runaway 保护处暂停，尚未生成最终回答。本任务未完成；请基于当前可见状态重新发起请求继续。";
+          discardAssistantBlock(output, assistantStreamBlockId);
+          assistantText = "";
+          roundAssistantText = "";
+          writeLine(output, limitMsg);
+          break;
+        }
         if (reportWriteGuard && shouldSendReportEvidenceReminder(reportWriteGuard)) {
           messagesForProvider.push({
             role: "user",
@@ -872,6 +883,7 @@ export async function sendMessage(
         consecutiveTodoOnlyRounds = 0;
         evidenceRounds += 1;
       }
+      let roundHadProgress = false;
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(toolCall, context, sessionId, output, {
           messages: messagesForProvider,
@@ -886,6 +898,9 @@ export async function sendMessage(
         if (result.pendingApproval) {
           return;
         }
+        if (result.ok || result.evidenceId) {
+          roundHadProgress = true;
+        }
         if (doesWriteSatisfyReportGuard(reportWriteGuard, toolCall, result)) {
           reportWriteGuard.completed = true;
         }
@@ -895,46 +910,26 @@ export async function sendMessage(
           content: JSON.stringify(result),
         });
       }
-      if (todoOnly) {
-        totalPlanningOnlyRounds += 1;
-        if (consecutiveTodoOnlyRounds > MAX_TODO_ONLY_CONSECUTIVE_ROUNDS && !todoOnlyHintSent) {
-          const todoHint =
-            context.language === "en-US"
-              ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect) or provide an unverified conclusion."
-              : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）或给出尚未验证结论。";
-          messagesForProvider.push({ role: "user", content: todoHint });
-          todoOnlyHintSent = true;
-          continue;
-        }
+      if (todoOnly && consecutiveTodoOnlyRounds >= MAX_TODO_ONLY_CONSECUTIVE_ROUNDS && !todoOnlyHintSent) {
+        const todoHint =
+          context.language === "en-US"
+            ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect) or provide an unverified conclusion."
+            : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）或给出尚未验证结论。";
+        messagesForProvider.push({ role: "user", content: todoHint });
+        todoOnlyHintSent = true;
+        continue;
       }
-      const reachedTotalLimit = round + 1 >= MAX_MODEL_TOTAL_TOOL_ROUNDS;
-      if (reachedTotalLimit) {
+      noProgressRounds = todoOnly || !roundHadProgress ? noProgressRounds + 1 : 0;
+      if (noProgressRounds > MAX_TODO_ONLY_CONSECUTIVE_ROUNDS) {
         const onlyPlanning = evidenceRounds === 0;
         const limitMsg = onlyPlanning
           ? context.language === "en-US"
-            ? `Execution turn budget exhausted after ${MAX_MODEL_TOTAL_TOOL_ROUNDS} turns. Only planning/Todo was executed; no repository verification was performed. If verification is needed, run the matching command or send the request again.`
-            : `执行轮次预算已耗尽（${MAX_MODEL_TOTAL_TOOL_ROUNDS} 轮）。仅完成计划整理，尚未执行仓库验证。如需验证请运行对应命令或重新发起请求。`
+            ? "Execution paused at an internal runaway guard. Only planning/Todo was executed; no repository verification was performed. Send the request again or run the matching verification command to continue."
+            : "执行已在内部防 runaway 保护处暂停。只完成计划整理，尚未执行仓库验证。请重新发起请求或运行对应验证命令继续。"
           : context.language === "en-US"
-            ? `Execution turn budget exhausted after ${MAX_MODEL_TOTAL_TOOL_ROUNDS} turns. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again.`
-            : `执行轮次预算已耗尽（${MAX_MODEL_TOTAL_TOOL_ROUNDS} 轮）。将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。`;
+            ? "Execution paused at an internal runaway guard before a final answer. The task is not complete; send the request again to continue from the latest visible state."
+            : "执行已在内部防 runaway 保护处暂停，尚未生成最终回答。本任务未完成；请基于当前可见状态重新发起请求继续。";
         writeLine(output, limitMsg);
-        const finalText = await streamFinalModelAnswerWithoutTools(
-          {
-            messages: messagesForProvider,
-            provider: selectedRuntime.provider,
-            model: selectedRuntime.model,
-            endpointProfile: selectedRuntime.endpointProfile,
-            reasoningLevel: selectedRuntime.reasoningLevel,
-            reasoningSent: selectedRuntime.reasoningSent,
-          },
-          context,
-          gateway,
-          sessionId,
-          output,
-          controller.signal,
-          assistantStreamBlockId,
-        );
-        assistantText += finalText;
         break;
       }
     }
@@ -1909,11 +1904,11 @@ export async function continueModelAfterToolResults(
   try {
     let evidenceRounds = 0;
     let consecutiveTodoOnlyRounds = 0;
-    let totalPlanningOnlyRounds = 0;
+    let noProgressRounds = 0;
     let todoOnlyHintSent = false;
     let rawToolProtocolTextRetries = 0;
     let runtimeFallbackAttempted = false;
-    continuationRoundLoop: for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
+    continuationRoundLoop: for (let round = 0; ; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId);
@@ -2168,6 +2163,7 @@ export async function continueModelAfterToolResults(
         consecutiveTodoOnlyRounds = 0;
         evidenceRounds += 1;
       }
+      let roundHadProgress = false;
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(
           toolCall,
@@ -2180,6 +2176,9 @@ export async function continueModelAfterToolResults(
         if (result.pendingApproval) {
           return;
         }
+        if (result.ok || result.evidenceId) {
+          roundHadProgress = true;
+        }
         if (doesWriteSatisfyReportGuard(continuation.reportWriteGuard, toolCall, result)) {
           continuation.reportWriteGuard.completed = true;
         }
@@ -2189,10 +2188,7 @@ export async function continueModelAfterToolResults(
           content: JSON.stringify(result),
         });
       }
-      if (todoOnly) {
-        totalPlanningOnlyRounds += 1;
-      }
-      if (todoOnly && consecutiveTodoOnlyRounds > MAX_TODO_ONLY_CONSECUTIVE_ROUNDS) {
+      if (todoOnly && consecutiveTodoOnlyRounds >= MAX_TODO_ONLY_CONSECUTIVE_ROUNDS) {
         if (!todoOnlyHintSent) {
           const todoHint =
             context.language === "en-US"
@@ -2203,27 +2199,17 @@ export async function continueModelAfterToolResults(
           continue;
         }
       }
-      const reachedTotalLimit = round + 1 >= MAX_MODEL_TOTAL_TOOL_ROUNDS;
-      if (reachedTotalLimit) {
+      noProgressRounds = todoOnly || !roundHadProgress ? noProgressRounds + 1 : 0;
+      if (noProgressRounds > MAX_TODO_ONLY_CONSECUTIVE_ROUNDS) {
         const onlyPlanning = evidenceRounds === 0;
         const limitMsg = onlyPlanning
           ? context.language === "en-US"
-            ? `Continuation execution turn budget exhausted after ${MAX_MODEL_TOTAL_TOOL_ROUNDS} turns. Only planning/Todo was executed; no repository verification was performed.`
-            : `续轮执行轮次预算已耗尽（${MAX_MODEL_TOTAL_TOOL_ROUNDS} 轮）。仅完成计划整理，尚未执行仓库验证。如需验证请运行对应命令或重新发起请求。`
+            ? "Continuation paused at an internal runaway guard. Only planning/Todo was executed; no repository verification was performed."
+            : "续轮执行已在内部防 runaway 保护处暂停。只完成计划整理，尚未执行仓库验证。请重新发起请求或运行对应验证命令继续。"
           : context.language === "en-US"
-            ? `Continuation execution turn budget exhausted after ${MAX_MODEL_TOTAL_TOOL_ROUNDS} turns. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again.`
-            : `续轮执行轮次预算已耗尽（${MAX_MODEL_TOTAL_TOOL_ROUNDS} 轮）。将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。`;
+            ? "Continuation paused at an internal runaway guard before a final answer. The task is not complete; send the request again to continue from the latest visible state."
+            : "续轮执行已在内部防 runaway 保护处暂停，尚未生成最终回答。本任务未完成；请基于当前可见状态重新发起请求继续。";
         writeLine(output, limitMsg);
-        const finalText = await streamFinalModelAnswerWithoutTools(
-          continuation,
-          context,
-          gateway,
-          sessionId,
-          output,
-          controller.signal,
-          assistantStreamBlockId,
-        );
-        assistantText += finalText;
         break;
       }
     }
@@ -2412,7 +2398,7 @@ async function buildGitStatusSummary(cwd: string): Promise<string | undefined> {
 async function recordApiTokenCountIfAvailable(
   context: TuiContext,
   gateway: ModelGateway,
-  runtime: { provider: string; model: string; endpointProfile?: string },
+  runtime: { provider: string; model: string; endpointProfile?: EndpointProfile },
   messages: ModelMessage[],
   signal: AbortSignal,
 ): Promise<void> {
@@ -2422,10 +2408,7 @@ async function recordApiTokenCountIfAvailable(
       {
         messages,
         model: runtime.model,
-        endpointProfile:
-          runtime.endpointProfile === "responses" || runtime.endpointProfile === "chat_completions"
-            ? runtime.endpointProfile
-            : undefined,
+        endpointProfile: runtime.endpointProfile,
       },
       signal,
     )

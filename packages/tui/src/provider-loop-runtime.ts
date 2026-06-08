@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
+import { resolveEffectiveEndpointProfile } from "@linghun/providers";
 import { getRoleRoute, inferProviderForRouteModel } from "./model-doctor-runtime.js";
 import { checkProviderCooldown, formatCooldownMessage } from "./provider-circuit-breaker.js";
 import {
@@ -37,7 +38,13 @@ function createRuntimeForFallbackModel(
   const providerConfig = context.config.providers[provider];
   if (!providerConfig) return undefined;
   const rawEndpointProfile = providerConfig.endpointProfile ?? "chat_completions";
-  const endpointProfile = rawEndpointProfile === "responses" ? "responses" : "chat_completions";
+  const endpointProfile = resolveEffectiveEndpointProfile({
+    requestEndpointProfile: undefined,
+    configEndpointProfile: rawEndpointProfile,
+    configBaseUrl: providerConfig.baseUrl,
+    configModel: providerConfig.model,
+    requestModel: fallbackModel,
+  }).endpointProfile;
   const compatibilityProfile =
     providerConfig.compatibilityProfile ??
     (providerConfig.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
@@ -46,7 +53,7 @@ function createRuntimeForFallbackModel(
     reasoningLevel &&
       (endpointProfile === "responses" ||
         compatibilityProfile === "permissive_openai_compatible" ||
-        rawEndpointProfile === "anthropic_messages"),
+        endpointProfile === "anthropic_messages"),
   );
   return {
     role: baseRuntime.role,

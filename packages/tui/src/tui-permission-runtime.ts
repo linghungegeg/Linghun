@@ -245,7 +245,7 @@ export async function decidePermission(
       return {
         request,
         decision: "allow",
-        reason: "auto-review 自动允许工作区内低风险文件编辑。",
+        reason: "auto-review 自动允许工作区内普通文件编辑。",
         preflight: formatDiffBeforeWrite(name, files, tool.permission.risk),
         verdict,
       };
@@ -263,9 +263,6 @@ export async function decidePermission(
       request,
       decision: "allow",
       reason: "full-access 已由本地用户显式开启，但硬拒绝和安全路径仍生效。",
-      preflight: tool.isReadOnly
-        ? undefined
-        : formatDiffBeforeWrite(name, files, tool.permission.risk),
       verdict,
     };
   }

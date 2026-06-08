@@ -39,6 +39,7 @@ import {
 } from "@linghun/config";
 import {
   DeepSeekProvider,
+  type EndpointProfile,
   ModelGateway,
   OpenAiCompatibleProvider,
   resolveEffectiveEndpointProfile,
@@ -63,7 +64,7 @@ export type SelectedModelRuntime = {
   role: ModelRole;
   provider: string;
   model: string;
-  endpointProfile: "chat_completions" | "responses";
+  endpointProfile: EndpointProfile;
   reasoningLevel?: string;
   reasoningStatus: string;
   reasoningSent: boolean;
@@ -173,12 +174,14 @@ export function getSelectedModelRuntime(
     ? resolveProviderForModel(context.config, model)
     : route.provider || resolveProviderForModel(context.config, model);
   const providerConfig = context.config.providers[provider];
-  // SelectedModelRuntime 仅描述 OpenAI-style runtime（chat_completions / responses）；
-  // 若 provider 已切到 anthropic_messages，仍以 chat_completions 暴露给上层（reasoning/decision
-  // 路径不依赖该字段做协议分流），避免 SelectedModelRuntime 类型扩散到 Anthropic profile。
   const rawEndpointProfile = providerConfig?.endpointProfile ?? "chat_completions";
-  const endpointProfile: "chat_completions" | "responses" =
-    rawEndpointProfile === "responses" ? "responses" : "chat_completions";
+  const endpointProfile = resolveEffectiveEndpointProfile({
+    requestEndpointProfile: undefined,
+    configEndpointProfile: rawEndpointProfile,
+    configBaseUrl: providerConfig?.baseUrl,
+    configModel: providerConfig?.model,
+    requestModel: model,
+  }).endpointProfile;
   const compatibilityProfile =
     providerConfig?.compatibilityProfile ??
     (providerConfig?.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
@@ -187,13 +190,11 @@ export function getSelectedModelRuntime(
   //   1. responses profile（OpenAI Responses API 原生 reasoning.effort）；
   //   2. permissive_openai_compatible chat（中转网关接受非标 reasoning 字段）；
   //   3. anthropic_messages profile（Anthropic extended thinking，由 provider builder 注入 thinking 字段）。
-  // 注意：SelectedModelRuntime.endpointProfile 被收窄为 chat_completions | responses，
-  // anthropic_messages 走的是 provider 决策器自动切换路径——这里直接看 raw provider profile。
   const reasoningSent = Boolean(
     reasoningLevel &&
       (endpointProfile === "responses" ||
         compatibilityProfile === "permissive_openai_compatible" ||
-        rawEndpointProfile === "anthropic_messages"),
+        endpointProfile === "anthropic_messages"),
   );
   return {
     role,

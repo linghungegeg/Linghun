@@ -292,7 +292,7 @@ function formatTaskProgress(task: BackgroundTaskState): string {
   if (!task.progress) return "-";
   const total = typeof task.progress.total === "number" ? task.progress.total : undefined;
   const ratio = total ? `${task.progress.completed}/${total}` : `${task.progress.completed}`;
-  return task.progress.label ? `${task.progress.label} ${ratio}` : ratio;
+  return task.progress.label ? `${ratio} ${task.progress.label}` : ratio;
 }
 
 function normalizePanelStatus(status: BackgroundTaskState["status"], language: Language): string {

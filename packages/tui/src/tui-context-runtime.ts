@@ -1,6 +1,6 @@
 import type { LinghunConfig } from "@linghun/config";
 import type { SessionStore } from "@linghun/core";
-import type { ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
+import type { EndpointProfile, ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import {
   CODEBASE_MEMORY_COMMAND as SHARED_CODEBASE_MEMORY_COMMAND,
   CODEBASE_MEMORY_ENV as SHARED_CODEBASE_MEMORY_ENV,
@@ -240,7 +240,7 @@ export type PendingModelContinuation = {
   messages: ModelMessage[];
   provider: string;
   model: string;
-  endpointProfile: "chat_completions" | "responses";
+  endpointProfile: EndpointProfile;
   reasoningLevel?: string;
   reasoningSent: boolean;
   reportWriteGuard?: ReportWriteGuard;

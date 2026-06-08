@@ -11,14 +11,14 @@
 // session store 记录由 index.ts 的 handleBtwCommand 协调（保持 index.ts 只做
 // glue，本模块承载逻辑）。
 
-import type { ModelGateway } from "@linghun/providers";
+import type { EndpointProfile, ModelGateway } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import type { NaturalIntent } from "./natural-command-bridge.js";
 
 export type BtwSideQuestionRuntime = {
   provider: string;
   model: string;
-  endpointProfile: "chat_completions" | "responses";
+  endpointProfile: EndpointProfile;
   reasoningLevel?: string;
   reasoningSent: boolean;
 };

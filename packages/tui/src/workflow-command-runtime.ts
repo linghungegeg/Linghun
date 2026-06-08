@@ -555,8 +555,10 @@ function recoverWorkflowRunState(
     startedAt: state.startedAt,
     endedAt: state.endedAt,
     result: status === "completed" ? "partial" : status === "stale" ? "stale" : state.result,
-    // Preserve persisted gate state; default false for old state files that lack the field.
     phaseGateConfirmed: state.phaseGateConfirmed === true,
+    confirmedPhaseStopPoints: Array.isArray(state.confirmedPhaseStopPoints)
+      ? state.confirmedPhaseStopPoints.filter((item): item is string => typeof item === "string")
+      : [],
   };
 }
 
@@ -763,22 +765,7 @@ export async function runWorkflowSteps(
     writeLine(output, "工作流运行失败：计划没有可执行 phase。");
     return;
   }
-  const confirmed = generateWorkflowPlanPreview({
-    goal,
-    permissionMode: context.permissionMode,
-    agents: options.agents,
-    multiAgent: options.multiAgent,
-    runningCap: options.runningCap,
-    teamName: options.teamName,
-    ...buildWorkflowPlannerContextInput(context),
-    confirmedPhaseStopPoints: [phase.id],
-  });
-  if (!confirmed.ok) {
-    writeLine(output, `工作流运行失败：${confirmed.reason}`);
-    return;
-  }
-
-  await runWorkflowPlanSteps(goal, confirmed.plan, context, output, options);
+  await runWorkflowPlanSteps(goal, preview.plan, context, output, options);
 }
 
 type RunWorkflowExecutionOptions = {
@@ -787,10 +774,7 @@ type RunWorkflowExecutionOptions = {
   runningCap?: number;
   teamName?: string;
   __testRunId?: string;
-  /** Propagated from activeRun.phaseGateConfirmed. When true, the bridge
-   *  marks mutating requests as executable (per-tool permission still applies).
-   *  When false/undefined, mutating requests stay blocked at the bridge layer. */
-  phaseGateConfirmed?: boolean;
+  confirmedPhaseStopPoints?: string[];
   ignoreForegroundModelGuard?: boolean;
 };
 
@@ -832,6 +816,9 @@ async function runWorkflowPlanSteps(
     return;
   }
 
+  const confirmedPhaseStopPoints = Array.from(
+    new Set([...(options.confirmedPhaseStopPoints ?? []), phase.id]),
+  );
   const sessionId = await ensureSession(context);
   const runId = options.__testRunId ?? `workflow-${randomUUID().slice(0, 8)}`;
   const startedAt = new Date().toISOString();
@@ -876,6 +863,7 @@ async function runWorkflowPlanSteps(
     startedAt,
     result: "partial",
     phaseGateConfirmed: true,
+    confirmedPhaseStopPoints,
   };
   rememberBackgroundTask(context, workflowTask);
   await persistWorkflowRunState(context, context.workflows.activeRun, workflowTask);
@@ -908,7 +896,7 @@ async function runWorkflowPlanSteps(
   let batchIndex = 0;
   const gateOptions: RunWorkflowExecutionOptions = {
     ...options,
-    phaseGateConfirmed: context.workflows.activeRun?.phaseGateConfirmed === true,
+    confirmedPhaseStopPoints: context.workflows.activeRun?.confirmedPhaseStopPoints ?? [],
   };
   while (stepStates.some((step) => step.status === "queued")) {
     if (isWorkflowRunTerminal(context, runId, workflowTask)) return;
@@ -1170,6 +1158,7 @@ export async function runRegistryWorkflow(
     startedAt,
     result: "partial",
     phaseGateConfirmed: true,
+    confirmedPhaseStopPoints: [workflow.id],
   };
   rememberBackgroundTask(context, task);
   await persistWorkflowRunState(context, context.workflows.activeRun, task);
@@ -1330,15 +1319,15 @@ async function executeRegistryWorkflowStep(
           evidenceRefs: [],
         };
       }
-      if (context.workflows.activeRun?.phaseGateConfirmed !== true) {
+      if (!context.workflows.activeRun?.confirmedPhaseStopPoints?.includes(workflow.id)) {
         return {
           status: "blocked",
           summary: formatWorkflowStepSummary(
             step.id,
             "blocked",
             context.language === "en-US"
-              ? "workflow start gate not confirmed; mutating registry steps require an explicit /workflows run invocation"
-              : "workflow start gate 未确认；mutating registry step 需要明确的 /workflows run 调用",
+              ? "phase stopPoint not confirmed; mutating registry steps are waiting for confirmation"
+              : "phase stopPoint 未确认；mutating registry step 正在等待确认",
             context.language,
           ),
           evidenceRefs: [],
@@ -1548,10 +1537,11 @@ async function executeWorkflowStep(
   summary: string;
   evidenceRefs: string[];
 }> {
-  const phaseGateConfirmed = context.workflows.activeRun?.phaseGateConfirmed === true;
+  const currentPhaseId = request.phaseId;
+  const confirmedStopPoints = new Set(context.workflows.activeRun?.confirmedPhaseStopPoints ?? []);
   const capability = decideWorkflowStepCapability({
     permissionMode: context.permissionMode,
-    phaseStopPointConfirmed: phaseGateConfirmed,
+    phaseStopPointConfirmed: currentPhaseId ? confirmedStopPoints.has(currentPhaseId) : false,
     target:
       request.safety.mutating || request.request
         ? ({ kind: "details", view: "evidence", mutating: request.safety.mutating } as never)
@@ -2086,7 +2076,7 @@ function getCurrentWorkflowStepRequest(
   };
   const bridge = bridgeWorkflowPlanToMainChainRequests(runningPlan, {
     currentPhaseId: phaseId,
-    confirmedPhaseStopPoints: options.phaseGateConfirmed === true ? [phaseId] : [],
+    confirmedPhaseStopPoints: options.confirmedPhaseStopPoints ?? [],
     runningCap: getWorkflowRunningCap(plan, options, phaseId),
   });
   return (
@@ -2328,7 +2318,8 @@ export async function finishWorkflowRun(
   task.currentStep = summary;
   task.updatedAt = now;
   task.lastOutputAt = now;
-  task.userVisibleSummary = task.userVisibleSummary || summary;
+  task.userVisibleSummary =
+    status === "completed" || status === "partial" ? (task.userVisibleSummary ?? summary) : summary;
   task.nextAction =
     status === "completed" || status === "partial"
       ? "Review verification evidence; workflow completion is lifecycle only."

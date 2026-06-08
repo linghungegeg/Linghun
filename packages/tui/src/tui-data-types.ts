@@ -997,10 +997,9 @@ export type WorkflowState = {
     startedAt: string;
     endedAt?: string;
     result: "partial" | "failed" | "blocked" | "cancelled" | "stale";
-    /** Set to true when the user explicitly invoked /workflows run. Mutating steps
-     *  are still gated by per-tool decidePermission; this only satisfies the
-     *  workflow-level Start Gate so the bridge does not permanently block them. */
+    /** Set to true when the user explicitly invoked /workflows run. */
     phaseGateConfirmed?: boolean;
+    confirmedPhaseStopPoints?: string[];
   };
 };
 

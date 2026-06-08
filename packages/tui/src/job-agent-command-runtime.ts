@@ -3,11 +3,12 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { type ModelRole, type RoleModelRoute, resolveStoragePaths } from "@linghun/config";
-import type {
-  EndpointProfile,
-  ModelGateway,
-  ModelMessage,
-  ModelToolCall,
+import {
+  type EndpointProfile,
+  type ModelGateway,
+  type ModelMessage,
+  type ModelToolCall,
+  resolveEffectiveEndpointProfile,
 } from "@linghun/providers";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import type { ToolName, ToolOutput, ToolRunResult } from "@linghun/tools";
@@ -1728,7 +1729,7 @@ export async function runDurableJobLiteTick(
         status: "partial",
         summary:
           item.assignment.type === "verifier"
-            ? "Verifier agent used real verification, but durable job lifecycle is not verification evidence."
+            ? "Verifier agent produced verification/self-check evidence, but durable job lifecycle is not verification evidence."
             : "Agent output is partial until explicit verification/final gate evidence proves the work passed.",
       };
       await persistDurableJobProgress(
@@ -1759,13 +1760,15 @@ export async function runDurableJobLiteTick(
       return;
     }
 
-    const afterStop = await applyDurableJobBudgetStop(
-      context,
-      job,
-      `after_step_${job.budget.usedSteps ?? stepIndex + 1}`,
-    );
-    if (afterStop) {
-      return;
+    if (hasRunnableJobAgents(job)) {
+      const afterStop = await applyDurableJobBudgetStop(
+        context,
+        job,
+        `after_step_${job.budget.usedSteps ?? stepIndex + 1}`,
+      );
+      if (afterStop) {
+        return;
+      }
     }
   }
 
@@ -1945,8 +1948,8 @@ export async function handleAgentsCommand(
       tone: "neutral",
       summary: [
         isEn
-          ? `Agents · ${total} total · ${running} busy · ${idle} idle · ${cancellable.length} cancellable — Ctrl+O for details.`
-          : `Agents · 共 ${total} · 忙碌 ${running} · 空闲 ${idle} · 可取消 ${cancellable.length} — Ctrl+O 查看详情。`,
+          ? `Agents · ${running} running now · ${idle} current-session idle/completed · ${total} historical loaded · ${cancellable.length} cancellable — Ctrl+O for details.`
+          : `Agents：当前运行 ${running} · 当前会话空闲/完成 ${idle} · 历史已加载 ${total} · 可取消 ${cancellable.length} — Ctrl+O 查看详情。`,
       ],
       actions:
         cancellable.length > 0
@@ -2341,10 +2344,17 @@ export async function runAgentWork(
       agent.parentSessionId ?? (await deps().ensureSession(context)),
       report,
     );
+    const hasRealVerificationPass = report.commands.some(
+      (command) => command.status === "pass" && command.synthetic !== true,
+    );
+    const summary =
+      report.status === "pass" && !hasRealVerificationPass
+        ? `verifier 已完成 synthetic self-check；真实验证未运行；任务「${agent.task}」。`
+        : `verifier 已运行验证，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`;
     return {
       status:
         report.status === "pass" ? "completed" : report.status === "fail" ? "failed" : "blocked",
-      summary: `verifier 已运行真实验证，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`,
+      summary,
       evidenceRefs: [],
     };
   }
@@ -2367,6 +2377,39 @@ function shouldAttemptAgentRuntimeFallback(kind: ProviderFailureKind): boolean {
   );
 }
 
+function resolveAgentRuntimeForModel(
+  context: TuiContext,
+  baseRuntime: AgentProviderRuntime,
+  model: string,
+): AgentProviderRuntime {
+  const providerConfig = context.config.providers[baseRuntime.provider];
+  const rawEndpointProfile = providerConfig?.endpointProfile ?? baseRuntime.endpointProfile;
+  const endpointProfile = resolveEffectiveEndpointProfile({
+    requestEndpointProfile: undefined,
+    configEndpointProfile: rawEndpointProfile,
+    configBaseUrl: providerConfig?.baseUrl,
+    configModel: providerConfig?.model,
+    requestModel: model,
+  }).endpointProfile;
+  const compatibilityProfile =
+    providerConfig?.compatibilityProfile ??
+    (providerConfig?.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
+  const reasoningLevel = providerConfig?.reasoningLevel ?? baseRuntime.reasoningLevel;
+  const reasoningSent = Boolean(
+    reasoningLevel &&
+      (endpointProfile === "responses" ||
+        compatibilityProfile === "permissive_openai_compatible" ||
+        endpointProfile === "anthropic_messages"),
+  );
+  return {
+    provider: baseRuntime.provider,
+    model,
+    endpointProfile,
+    reasoningLevel,
+    reasoningSent,
+  };
+}
+
 function createAgentRuntimeForFallbackModel(
   context: TuiContext,
   baseRuntime: AgentProviderRuntime,
@@ -2377,7 +2420,13 @@ function createAgentRuntimeForFallbackModel(
   const providerConfig = context.config.providers[provider];
   if (!providerConfig) return undefined;
   const rawEndpointProfile = providerConfig.endpointProfile ?? "chat_completions";
-  const endpointProfile = rawEndpointProfile === "responses" ? "responses" : "chat_completions";
+  const endpointProfile = resolveEffectiveEndpointProfile({
+    requestEndpointProfile: undefined,
+    configEndpointProfile: rawEndpointProfile,
+    configBaseUrl: providerConfig.baseUrl,
+    configModel: providerConfig.model,
+    requestModel: fallbackModel,
+  }).endpointProfile;
   const compatibilityProfile =
     providerConfig.compatibilityProfile ??
     (providerConfig.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
@@ -2386,7 +2435,7 @@ function createAgentRuntimeForFallbackModel(
     reasoningLevel &&
       (endpointProfile === "responses" ||
         compatibilityProfile === "permissive_openai_compatible" ||
-        rawEndpointProfile === "anthropic_messages"),
+        endpointProfile === "anthropic_messages"),
   );
   return {
     provider,
@@ -2533,13 +2582,7 @@ export async function runModelBackedAgent(
   }
   let finalText = "";
   const maxTurns = getAgentMaxTurns(agent);
-  let currentRuntime: AgentProviderRuntime = {
-    provider: continuation.provider,
-    model: agent.model || continuation.model,
-    endpointProfile: continuation.endpointProfile,
-    reasoningLevel: continuation.reasoningLevel,
-    reasoningSent: continuation.reasoningSent,
-  };
+  let currentRuntime = resolveAgentRuntimeForModel(context, continuation, agent.model || continuation.model);
   const attemptedFallbackModels = new Set<string>();
   let activeFallback:
     | {
@@ -2777,6 +2820,13 @@ export async function runModelBackedAgent(
         tool_call_id: toolCall.id,
         content: JSON.stringify(result),
       });
+      if (agent.status === "blocked") {
+        return {
+          status: "blocked",
+          summary: agent.summary || result.text,
+          evidenceRefs: result.evidenceId ? [result.evidenceId] : [],
+        };
+      }
       if (result.pendingApproval) {
         return {
           status: "blocked",
@@ -2789,7 +2839,7 @@ export async function runModelBackedAgent(
   if (!finalText) {
     return {
       status: "blocked",
-      summary: `${agent.type} blocked：agent child execution turn budget exhausted (${maxTurns}) without a final answer.`,
+      summary: `${agent.type} blocked：agent child stopped at an internal safety cap without a final answer.`,
       evidenceRefs: [],
     };
   }
@@ -2823,6 +2873,13 @@ async function executeAgentToolCall(
   const allowedTools = new Set(getAgentAllowedTools(agent).map((tool) => tool.name));
   if (!allowedTools.has(toolName)) {
     const text = `Tool ${toolName} is not allowed for agent ${agent.id}.`;
+    agent.status = "blocked";
+    agent.summary = text;
+    setAgentActivity(agent, "blocked", text);
+    const background = ensureAgentBackgroundTask(agent, context);
+    syncBackgroundWithAgentStatus(background, agent);
+    await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+    await persistAgentRun(context, agent);
     await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
     return { ok: false, tool: toolName, text };
   }
@@ -2855,6 +2912,7 @@ async function executeAgentToolCall(
         });
         if (pendingApproval) {
           agent.status = "blocked";
+          agent.summary = `${toolName} 需要用户确认，agent loop 已停止并回灌 tool_result。`;
           setAgentActivity(agent, "blocked", `${toolName} waiting for parent approval`);
           const background = ensureAgentBackgroundTask(agent, context);
           syncBackgroundWithAgentStatus(background, agent);
@@ -3145,10 +3203,8 @@ async function consumeAgentMailbox(
 }
 
 function getAgentAllowedTools(agent: AgentRun): (typeof builtInTools)[ToolName][] {
-  if (agent.allowedTools) {
-    return (
-      normalizeRegistryAllowedTools(agent.allowedTools)?.map((name) => builtInTools[name]) ?? []
-    );
+  if (agent.allowedTools !== undefined) {
+    return normalizeRegistryAllowedTools(agent.allowedTools)?.map((name) => builtInTools[name]) ?? [];
   }
   const readOnly = [builtInTools.Read, builtInTools.Grep, builtInTools.Glob, builtInTools.Todo];
   if (agent.type === "explorer" || agent.type === "planner") return readOnly;
@@ -3898,7 +3954,12 @@ function formatAgentsList(context: TuiContext): string {
       : "当前没有 agent。用法：/fork explorer|planner|verifier|worker <task>。";
   }
   const cancellable = listCancellableAgents(context);
-  const lines = [context.language === "en-US" ? "Agents:" : "Agents："];
+  const running = context.agents.filter((agent) => agent.status === "running").length;
+  const lines = [
+    context.language === "en-US"
+      ? `Agent history / loaded agents (running now: ${running}, historical loaded: ${context.agents.length}):`
+      : `Agents：历史/已加载记录（当前运行：${running}，历史已加载：${context.agents.length}）：`,
+  ];
   for (const agent of context.agents) {
     const label = truncateDisplay(
       agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task),

@@ -390,7 +390,7 @@ export function createDurableJobAgentTasks(goal: string, total: number): string[
   const templates = [
     `planner subtask: turn the job goal into a concise execution plan. Goal: ${goal}`,
     `worker subtask: execute the next bounded work item with real tools when available. Goal: ${goal}`,
-    `verifier subtask: run real verification only; do not treat job lifecycle completion as verified. Goal: ${goal}`,
+    `verifier subtask: run verification or synthetic self-check only; do not treat job lifecycle completion as verified. Goal: ${goal}`,
   ];
   for (let index = templates.length; index < total; index += 1) {
     templates.push(

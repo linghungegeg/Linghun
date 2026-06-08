@@ -4,6 +4,7 @@ import type { ToolName } from "@linghun/tools";
 import { calculateContextPercentages } from "../context-window-runtime.js";
 import type { TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
+import { sanitizeMainScreenLeakage } from "../model-prompt-runtime.js";
 import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
 import {
@@ -1055,7 +1056,10 @@ export function createOutputBlock(
   language: Language,
   id = `output-${Date.now()}`,
 ): ProductBlockViewModel {
-  const rawNormalized = redactSensitiveText(text.replace(/\r/g, "").trim());
+  const rawNormalized = sanitizeMainScreenLeakage(
+    redactSensitiveText(text.replace(/\r/g, "").trim()),
+    language,
+  );
   // P1-1 — Ctrl+O hint 单一来源：tool-output-presenter 在正文里自带一行折叠
   // 提示（"输出已折叠，按 Ctrl+O 展开。" / "Output folded. Press Ctrl+O to
   // expand."）。ink 主屏的 Ctrl+O 提示统一由 block.nextAction（detailsHint）
@@ -1695,6 +1699,23 @@ function formatFooterWorkspaceStatus(
 
 function summarizeBackgroundStep(task: BackgroundTaskSummary, language: Language): string {
   const zh = language === "zh-CN";
+  const pieces: string[] = [];
+  const safeTitle = sanitizeBackgroundSummaryPart(task.title);
+  const safeStep = sanitizeBackgroundSummaryPart(task.currentStep);
+  const progress = formatBackgroundProgress(task.progress);
+  if (safeTitle) pieces.push(safeTitle);
+  if (safeStep) pieces.push(safeStep);
+  if (progress) pieces.push(progress);
+  if (pieces.length > 0) {
+    if (task.status === "blocked" || task.status === "paused") {
+      return zh
+        ? `后台任务需要处理：${pieces.join(" · ")}`
+        : `Background task needs attention: ${pieces.join(" · ")}`;
+    }
+    return zh
+      ? `后台任务正在运行：${pieces.join(" · ")}`
+      : `Background task running: ${pieces.join(" · ")}`;
+  }
   switch (task.status) {
     case "running":
       return zh
@@ -1730,6 +1751,36 @@ function summarizeBackgroundStep(task: BackgroundTaskSummary, language: Language
         ? "后台任务摘要已折叠；完整内容在详情、日志或报告。"
         : "Background task summary is folded; full content is in details, logs, or report.";
   }
+}
+
+function formatBackgroundProgress(
+  progress: BackgroundTaskSummary["progress"] | undefined,
+): string | undefined {
+  if (!progress || !Number.isFinite(progress.completed)) return undefined;
+  const completed = Math.max(0, Math.floor(progress.completed));
+  const label = sanitizeBackgroundSummaryPart(progress.label);
+  if (Number.isFinite(progress.total) && progress.total !== undefined && progress.total > 0) {
+    const total = Math.max(1, Math.floor(progress.total));
+    return `${completed}/${total}${label ? ` ${label}` : ""}`;
+  }
+  return label ? `${completed} ${label}` : `${completed}`;
+}
+
+function sanitizeBackgroundSummaryPart(value: string | undefined): string | undefined {
+  const trimmed = value?.replace(/\s+/gu, " ").trim();
+  if (!trimmed) return undefined;
+  if (
+    /\b(gateId|requestId|schemaLoaded|fullOutputPath|logPath|tool_result|endpoint)\b/iu.test(
+      trimmed,
+    ) ||
+    /\brunner=/iu.test(trimmed) ||
+    /raw evidence/iu.test(trimmed) ||
+    /[A-Za-z]:\\/u.test(trimmed) ||
+    /\/tmp\//u.test(trimmed)
+  ) {
+    return undefined;
+  }
+  return truncateMiddle(trimmed, 48);
 }
 
 function isMainScreenBackgroundSummary(summary: BackgroundTaskSummary): boolean {

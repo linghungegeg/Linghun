@@ -28,7 +28,8 @@ export function resolveTerminalInteractionModes({
   const mouseTracking =
     env.LINGHUN_TUI_MOUSE !== "0" &&
     capability.cursorPositioning &&
-    (appOwnedScreen || capability.alternateScreen);
+    appOwnedScreen &&
+    capability.alternateScreen;
   return {
     kittyKeyboard:
       capability.kittyKeyboard ||

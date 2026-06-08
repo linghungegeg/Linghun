@@ -385,7 +385,14 @@ function deriveVerificationSupportsClaims(report: VerificationReport): string[] 
   if (report.status !== "pass") {
     return ["verification attempted", `verification:${report.status}`, "未通过验证", "需要复核"];
   }
-  const claims = new Set<string>(["verification_passed"]);
+  const hasRealPassedCommand = report.commands.some(
+    (command) => command.status === "pass" && command.synthetic !== true,
+  );
+  const claims = new Set<string>(
+    hasRealPassedCommand
+      ? ["verification_passed"]
+      : ["verification_self_check_passed", "verification_not_run"],
+  );
   for (const command of report.commands) {
     if (command.status !== "pass") continue;
     if (command.kind === "test") {
@@ -404,6 +411,13 @@ function deriveVerificationSupportsClaims(report: VerificationReport): string[] 
 }
 
 function formatVerificationEvidenceStatusSummary(report: VerificationReport): string {
+  const syntheticOnlyPass =
+    report.status === "pass" &&
+    report.commands.length > 0 &&
+    report.commands.every((command) => command.synthetic === true || command.status !== "pass");
+  if (syntheticOnlyPass) {
+    return "SELF-CHECK：synthetic self-check 已通过；真实验证未运行，不能作为真实 PASS 证据。";
+  }
   const statusLabel = report.status.toUpperCase();
   return new RegExp(`^${statusLabel}(?:\\s|:|：)`, "u").test(report.summary)
     ? report.summary

@@ -498,7 +498,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel,
   );
   const terminalInteractionModes = useMemo(
-    () => resolveTerminalInteractionModes({ capability, appOwnedScreen: true }),
+    () => resolveTerminalInteractionModes({ capability, appOwnedScreen: false }),
     [capability],
   );
 
@@ -1087,11 +1087,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
 
       // Up / Down — slash 列表优先；多行先在内部走，到达边界再走历史。
-      // 鼠标滚轮归属：在 task/pending 模式下 buffer 为空时，
-      // ↑↓ 派发 transcript-scroll（Win10 conhost 等终端把 wheel 报告为 ↑↓），让滚轮
-      // 滚动 transcript 而不是切 history。buffer 非空时仍走 history（用户已经
-      // 在打字，明确在用键盘 ↑↓ 翻 history 草稿）。
-      const inTaskModeWheel = view.viewMode === "task" || view.viewMode === "pending";
       if (key.upArrow) {
         if (slashVisible && slashSelection >= 0) {
           setSlashSelection((current) => {
@@ -1102,10 +1097,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
           emitInput({ type: "task-suggestion-move", delta: -1 });
-          return;
-        }
-        if (inTaskModeWheel && text.length === 0) {
-          emitInput({ type: "transcript-scroll", action: "wheelUp" });
           return;
         }
         const moved = bufferMoveVisualUp(buffer, maxWidth);
@@ -1131,10 +1122,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
           emitInput({ type: "task-suggestion-move", delta: 1 });
-          return;
-        }
-        if (inTaskModeWheel && text.length === 0) {
-          emitInput({ type: "transcript-scroll", action: "wheelDown" });
           return;
         }
         const moved = bufferMoveVisualDown(buffer, maxWidth);

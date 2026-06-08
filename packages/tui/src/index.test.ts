@@ -269,6 +269,20 @@ function mockOpenAiTextFetch(finalText = "done"): unknown[] {
   return requests;
 }
 
+function mockOpenAiDelayedTextFetch(finalText = "done", delayMs = 10): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      await waitForTestMs(delayMs);
+      const body = `data: ${JSON.stringify({ id: "chatcmpl-delayed-test", choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
 function mockOpenAiBarrierFetch(finalText = "done"): {
   requests: unknown[];
   releaseOne: () => void;
@@ -3706,6 +3720,19 @@ describe("Phase 06 TUI slash commands", () => {
 
     hydrateResumeContext(context, [
       {
+        type: "checkpoint_created",
+        checkpoint: {
+          id: "checkpoint-undefined-context",
+          sessionId: "session-1",
+          createdAt: "2026-06-01T00:00:00.000Z",
+          reason: "test",
+          changedFiles: ["a.txt"],
+          restoreKind: "snapshot",
+          restorable: false,
+        },
+        createdAt: "2026-06-01T00:00:00.000Z",
+      },
+      {
         type: "memory_candidate",
         candidate: makeCandidate("pending-candidate"),
         createdAt: "2026-06-01T00:00:00.000Z",
@@ -3799,6 +3826,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.accepted.map((item) => item.id)).toEqual([
       "session-accepted",
       "accepted-candidate",
+    ]);
+    expect(context.checkpoints.map((checkpoint) => checkpoint.id)).toEqual([
+      "checkpoint-undefined-context",
     ]);
   });
 
@@ -4899,7 +4929,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(output.text).toContain("explorer blocked：模型网关未就绪");
     expect(output.text).toContain("planner blocked：模型网关未就绪");
-    expect(output.text).toContain("verifier 已运行真实验证");
+    expect(output.text).toContain("verifier 已完成 synthetic self-check；真实验证未运行");
     expect(output.text).toContain("Agents：");
     expect(output.text).toContain("inspect-cache-explorer");
     expect(output.text).toContain("display name: inspect-cache-explorer");
@@ -6038,6 +6068,81 @@ describe("Phase 06 TUI slash commands", () => {
     ).not.toContainEqual(expect.objectContaining({ result: "pass" }));
   });
 
+  it("does not let after-step timeout override a fully completed agent batch", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-job-completed-timeout-"));
+    const config: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiDelayedTextFetch("job child done", 650);
+
+    await handleSlashCommand(
+      "/job run completed batch should not timeout --multi-agent --agents 1 --tokens 50000 --timeout 500",
+      context,
+      output,
+    );
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      pauseReason?: string;
+      result?: { status?: string };
+      agents?: Array<{ status?: string }>;
+    };
+    expect(persisted.status).toBe("completed");
+    expect(persisted.pauseReason).toBeUndefined();
+    expect(persisted.result?.status).toBe("partial");
+    expect(persisted.agents?.every((agent) => agent.status === "completed")).toBe(true);
+  });
+
+  it("keeps after-step timeout active when queued agents remain", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-job-after-step-timeout-"));
+    const config: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiDelayedTextFetch("job child done", 650);
+
+    await handleSlashCommand(
+      "/job run queued batch should still timeout --multi-agent --agents 2 --running-cap 1 --tokens 50000 --timeout 500",
+      context,
+      output,
+    );
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      pauseReason?: string;
+      result?: { status?: string; summary?: string };
+      agents?: Array<{ status?: string }>;
+    };
+    expect(persisted.status).toBe("timeout");
+    expect(persisted.pauseReason).toContain("timeout:after_step_1");
+    expect(persisted.result?.status).toBe("timeout");
+    expect(persisted.result?.summary).toContain("no evidence that verification passed");
+    expect(persisted.agents?.map((agent) => agent.status)).toEqual(["completed", "timeout"]);
+  });
+
   it("runs /job --multi-agent --agents 6 with a real cap-based concurrent AgentRun pool", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-real-job-cap-"));
     const config: LinghunConfig = {
@@ -6414,10 +6519,11 @@ describe("Phase 06 TUI slash commands", () => {
     const workflowTask = context.backgroundTasks.find((task) =>
       task.title.includes("Workflow: close product maturity gaps"),
     );
-    expect(workflowTask).toMatchObject({ kind: "job", status: "failed", result: "partial" });
+    expect(workflowTask).toMatchObject({ kind: "job", status: "blocked", result: "partial" });
     expect(context.workflows.activeRun).toMatchObject({
       status: "blocked",
       result: "blocked",
+      confirmedPhaseStopPoints: ["phase-1"],
     });
     expect(context.workflows.activeRun?.steps.some((step) => step.status === "blocked")).toBe(true);
     const transcript = (await store.resume(session.id)).transcript;
@@ -7646,7 +7752,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests).toHaveLength(2);
     expect(context.agents[0]?.status).toBe("blocked");
     expect(context.agents[0]?.summary).toContain(
-      "agent child execution turn budget exhausted (2) without a final answer",
+      "agent child stopped at an internal safety cap without a final answer",
     );
   });
 
@@ -10573,7 +10679,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests.length).toBeGreaterThanOrEqual(42);
   });
 
-  it("normal tool_use stops at the 100-turn execution budget with an accurate reason", async () => {
+  it("normal progressing tool_use is not stopped by a hidden 100-round cap", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
@@ -10593,69 +10699,72 @@ describe("Phase 06 TUI slash commands", () => {
       "utf8",
     );
     const requests = mockOpenAiToolSequenceWithFinalCalls(
-      Array.from({ length: 100 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
-      "预算耗尽后的无工具总结。",
+      Array.from({ length: 101 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
+      "已完成 101 轮有进展读取。",
     );
     const output = new MemoryOutput();
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["请持续读取直到预算停止\n/exit\n"]),
+      stdin: Readable.from(["请持续读取超过一百轮再回答\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/读取摘要/g)).toHaveLength(100);
-    expect(output.text).toContain("执行轮次预算已耗尽（100 轮）");
-    expect(output.text).toContain("预算耗尽后的无工具总结。");
+    expect(output.text.match(/读取摘要/g)).toHaveLength(101);
+    expect(output.text).toContain("已完成 101 轮有进展读取。");
+    expect(output.text).not.toContain("执行已在内部防 runaway 保护处暂停");
     expect(output.text).not.toContain("工具调用上限");
-    expect(requests.length).toBeGreaterThanOrEqual(101);
+    expect(requests.length).toBeGreaterThanOrEqual(102);
   }, 10000);
 
-  it("gates no-tool final summary after total tool-round budget exhaustion", async () => {
+  it("gates no-tool final summary after the no-progress runaway guard", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
     await writeFile(
       join(project, ".linghun", "settings.json"),
       JSON.stringify({
-        defaultModel: "hundred-turn-no-tool-gate-model",
+        defaultModel: "todo-runaway-no-tool-gate-model",
         providers: {
           deepseek: { model: "different-model" },
           "openai-compatible": {
             baseUrl: "https://example.test/v1",
             apiKey: "sk-test",
-            model: "hundred-turn-no-tool-gate-model",
+            model: "todo-runaway-no-tool-gate-model",
           },
         },
       }),
       "utf8",
     );
     const requests = mockOpenAiToolSequenceWithFinalCalls(
-      Array.from({ length: 100 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
+      Array.from({ length: 8 }, (_, index) => ({
+        toolName: "Todo",
+        input: { action: "add", content: `计划 ${index + 1}` },
+      })),
       '已完成，测试通过，PASS。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
     );
     const output = new MemoryOutput();
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["请持续读取直到预算停止\n/exit\n"]),
+      stdin: Readable.from(["只整理计划直到防失控暂停\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("执行轮次预算已耗尽（100 轮）");
-    expect(output.text).toContain("当前证据不足");
-    expect(output.text).toContain("缺少证据");
+    expect(output.text).toContain("执行已在内部防 runaway 保护处暂停");
+    expect(output.text).toContain("尚未执行仓库验证");
+    expect(output.text).not.toContain("当前证据不足");
+    expect(output.text).not.toContain("缺少证据");
     expect(output.text).not.toContain("[未验证]");
     expect(output.text).not.toContain("已完成，测试通过，PASS。");
-    expect(requests.length).toBeGreaterThanOrEqual(101);
+    expect(requests.length).toBeLessThan(100);
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = (await store.list()).at(0);
     expect(session).toBeTruthy();
     const transcript = (await store.resume(session?.id ?? "")).transcript;
-    expect(JSON.stringify(transcript)).toContain("final_answer_claim_gate downgrade");
-    expect(JSON.stringify(transcript)).toContain("当前证据不足");
+    expect(JSON.stringify(transcript)).not.toContain("final_answer_claim_gate downgrade");
+    expect(JSON.stringify(transcript)).not.toContain("当前证据不足");
     expect(JSON.stringify(transcript)).not.toContain("[未验证]");
     expect(JSON.stringify(transcript)).not.toContain("已完成，测试通过，PASS。");
   }, 10000);
@@ -10704,7 +10813,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests.length).toBeGreaterThanOrEqual(6);
   });
 
-  it("repeated Todo-only rounds stop at the total hard cap with unverified wording", async () => {
+  it("repeated Todo-only rounds stop at the no-progress guard with unverified wording", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -10800,7 +10909,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(contextSrc).toContain(
       "export const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS",
     );
-    expect(mainLoopSrc).toContain("MAX_MODEL_TOTAL_TOOL_ROUNDS");
+    expect(mainLoopSrc).not.toContain("MAX_MODEL_TOTAL_TOOL_ROUNDS");
+    expect(mainLoopSrc).toContain("let noProgressRounds = 0");
+    expect(mainLoopSrc).toContain("noProgressRounds = todoOnly || !roundHadProgress");
+    expect(mainLoopSrc).toContain("modelRoundLoop: for (let round = 0; ; round += 1)");
+    expect(mainLoopSrc).toContain("continuationRoundLoop: for (let round = 0; ; round += 1)");
     expect(`${contextSrc}\n${mainLoopSrc}`).not.toContain(
       "const MAX_MODEL_TOOL_ROUNDS = LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS",
     );
@@ -10810,7 +10923,7 @@ describe("Phase 06 TUI slash commands", () => {
       "const AGENT_MAX_TOOL_ROUNDS = LINGHUN_MAX_AGENT_CHILD_TOOL_ROUNDS",
     );
     expect(agentSrc).not.toContain("agent child tool/evidence budget exhausted");
-    expect(agentSrc).toContain("agent child execution turn budget exhausted");
+    expect(agentSrc).toContain("agent child stopped at an internal safety cap");
   });
 
   it("continues after denied model tool permission as a tool_result", async () => {
@@ -12594,7 +12707,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persistedAgent.lastResultSummary).toContain("子 agent 已完成 41 轮读取并总结。");
   });
 
-  it("StartAgent child loop blocks at the 100-turn execution budget", async () => {
+  it("StartAgent child loop blocks at the internal safety cap", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-budget-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
@@ -12625,7 +12738,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(requests.length).toBeGreaterThanOrEqual(102);
     expect(output.text).toContain(
-      "agent child execution turn budget exhausted (100) without a final answer",
+      "agent child stopped at an internal safety cap without a final answer",
     );
     expect(output.text).not.toContain("agent child tool/evidence budget exhausted");
     expect(output.text).not.toContain("工具调用上限");
@@ -18649,7 +18762,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Priority");
     expect(output.text).toContain("Suggestion");
     expect(output.text).toContain("Claim Checker：缺少证据：已验证");
-    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).toContain("Claim Checker：缺少证据：smoke 验证通过");
   });
 
   it("keeps verification background summaries out of the input area", async () => {
@@ -25223,10 +25336,8 @@ describe("Phase 7.7 Policy Kernel gate invariants", () => {
     const workflowSrc = readFileSync(join(__dirname, "workflow-command-runtime.ts"), "utf8");
     const streamSrc = readFileSync(join(__dirname, "model-stream-runtime.ts"), "utf8");
 
-    expect(workflowSrc).toContain("phaseGateConfirmed");
-    expect(workflowSrc).toContain(
-      "Per-tool decidePermission still gates every Write/Bash/Agent fork",
-    );
+    expect(workflowSrc).toContain("confirmedPhaseStopPoints");
+    expect(workflowSrc).toContain("phaseStopPointConfirmed");
     expect(streamSrc).toContain("evaluateFinalAnswerClaims");
     expect(streamSrc).toContain("runArchitectureAndCompletenessFinalGate");
     expect(streamSrc).not.toContain("policyDecision.executionPlan.requireFinalGate = false");
@@ -25427,7 +25538,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
       /assistantStreamBlockId\s*=\s*\n?\s*reuseAssistantStreamBlockId\s*\?\?/,
     );
     expect(runtimeSrc).toMatch(
-      /streamFinalModelAnswerWithoutTools\([^)]*assistantStreamBlockId,?\s*\)/s,
+      /streamFinalModelAnswerWithoutTools\([\s\S]*?assistantStreamBlockId,\s*true,\s*\)/,
     );
   });
 
@@ -27421,7 +27532,9 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(
       context.evidence.some(
         (event) =>
-          event.kind === "test_result" && event.supportsClaims.includes("verification_passed"),
+          event.kind === "test_result" &&
+          event.supportsClaims.includes("verification_self_check_passed") &&
+          !event.supportsClaims.includes("verification_passed"),
       ),
     ).toBe(true);
     const parentTranscript = (await store.resume(session.id)).transcript;
@@ -27430,7 +27543,8 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
         (event) =>
           event.type === "evidence_record" &&
           event.kind === "test_result" &&
-          event.supportsClaims.includes("verification_passed"),
+          event.supportsClaims.includes("verification_self_check_passed") &&
+          !event.supportsClaims.includes("verification_passed"),
       ),
     ).toBe(true);
   });
@@ -27870,7 +27984,7 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     expect(["completed", "running"]).toContain(step?.status);
   });
 
-  it("registry workflow sets phaseGateConfirmed on explicit /workflows run invocation", async () => {
+  it("registry workflow separates start gate from phase stopPoint confirmation", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-pm1-confirm-"));
     await mkdir(join(project, ".linghun", "workflows"), { recursive: true });
     await writeFile(
@@ -27878,7 +27992,7 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
       JSON.stringify({
         id: "confirm-test",
         name: "Confirm Test",
-        description: "Verify phaseGateConfirmed is set.",
+        description: "Verify start gate state is separate from stopPoint confirmations.",
         steps: [{ id: "s1", action: "details" }],
       }),
       "utf8",
@@ -27899,8 +28013,8 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
 
     await handleSlashCommand("/workflows run confirm-test", context, output);
 
-    // Explicit /workflows run invocation must set phaseGateConfirmed.
     expect(context.workflows.activeRun?.phaseGateConfirmed).toBe(true);
+    expect(context.workflows.activeRun?.confirmedPhaseStopPoints).toEqual(["confirm-test"]);
   });
 
   it("Phase A: nested job created status does not map to completed", () => {
@@ -27946,15 +28060,14 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     const phaseId = normalized.phases[0]?.id ?? "";
     const stepId = normalized.phases[0]?.slices[0]?.id ?? "";
 
-    // Without phaseGateConfirmed, mutating request must be non-executable at bridge.
     const unconfirmed = __testGetCurrentWorkflowStepRequest(normalized, phaseId, [], stepId, {
-      phaseGateConfirmed: false,
+      confirmedPhaseStopPoints: [],
     });
     expect(unconfirmed.executable).toBe(false);
     expect(unconfirmed.status).toBe("start_gate_needed");
   });
 
-  it("bridge request layer: confirmed gate allows mutating request through bridge", () => {
+  it("bridge request layer: confirmed stopPoint allows mutating request through bridge", () => {
     const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("full-access"));
     expect(plan.ok).toBe(true);
     if (!plan.ok) throw new Error("invalid plan");
@@ -27962,15 +28075,14 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     const phaseId = normalized.phases[0]?.id ?? "";
     const stepId = normalized.phases[0]?.slices[0]?.id ?? "";
 
-    // With phaseGateConfirmed, mutating must be executable.
     const confirmed = __testGetCurrentWorkflowStepRequest(normalized, phaseId, [], stepId, {
-      phaseGateConfirmed: true,
+      confirmedPhaseStopPoints: [phaseId],
     });
     expect(confirmed.executable).toBe(true);
     expect(confirmed.request).not.toBeNull();
   });
 
-  it("bridge request layer: defaults to unconfirmed when phaseGateConfirmed is absent", () => {
+  it("bridge request layer: defaults to unconfirmed when stopPoint confirmation is absent", () => {
     const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("full-access"));
     expect(plan.ok).toBe(true);
     if (!plan.ok) throw new Error("invalid plan");
@@ -27978,15 +28090,14 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     const phaseId = normalized.phases[0]?.id ?? "";
     const stepId = normalized.phases[0]?.slices[0]?.id ?? "";
 
-    // Omitting phaseGateConfirmed blocks mutating at bridge.
     const defaults = __testGetCurrentWorkflowStepRequest(normalized, phaseId, [], stepId, {});
     expect(defaults.executable).toBe(false);
   });
 
-  it("bridge request layer: confirmed gate does not bypass per-tool permission", async () => {
-    // Confirmed gate only makes the bridge request executable — the step
+  it("bridge request layer: confirmed stopPoint does not bypass per-tool permission", async () => {
+    // Confirmed stopPoint only makes the bridge request executable — the step
     // must still go through per-tool decidePermission at executeWorkflowStep.
-    // This test verifies the full path: confirmed gate produces executable
+    // This test verifies the full path: confirmed stopPoint produces executable
     // request, but in default mode the mutating job step hits the
     // per-tool resource/cap guard (not a silent auto-execution).
     const project = await mkdtemp(join(tmpdir(), "linghun-pm1-perm-"));
@@ -27995,15 +28106,17 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    // Use the test helper which sets phaseGateConfirmed on activeRun.
     const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("default"));
     expect(plan.ok).toBe(true);
     if (!plan.ok) throw new Error("invalid plan");
 
-    await __testRunWorkflowStepsWithPlan("pm1 perm test", plan.plan, context, output);
+    const phaseId = plan.plan.phases[0]?.id ?? "";
+    await __testRunWorkflowStepsWithPlan("pm1 perm test", plan.plan, context, output, {
+      confirmedPhaseStopPoints: [phaseId],
+    });
 
-    // Verify the gate was confirmed by the run.
     expect(context.workflows.activeRun?.phaseGateConfirmed).toBe(true);
+    expect(context.workflows.activeRun?.confirmedPhaseStopPoints).toEqual([phaseId]);
     // The nested job step still runs through per-tool permission, not auto-executed.
   });
 
@@ -28024,8 +28137,9 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     expect(plan.ok).toBe(true);
     if (!plan.ok) throw new Error("invalid plan");
 
+    const phaseId = plan.plan.phases[0]?.id ?? "";
     await __testRunWorkflowStepsWithPlan("nested job model tool", plan.plan, context, output, {
-      phaseGateConfirmed: true,
+      confirmedPhaseStopPoints: [phaseId],
       ignoreForegroundModelGuard: true,
     });
 

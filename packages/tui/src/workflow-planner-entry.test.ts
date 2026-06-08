@@ -306,6 +306,8 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     });
     expect(implement?.budget?.maxRunningAgents).toBe(2);
     expect(implement?.budget?.requestedAgents).toBe(4);
+    expect(implement?.budget?.maxTokens).toBeUndefined();
+    expect(implement?.budget?.maxDurationMs).toBeUndefined();
     expect(result.bridgeResult.runningCap).toBe(2);
     expect(result.bridgeResult.requests.some((request) => request.sliceId === "slice-implement")).toBe(
       true,

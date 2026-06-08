@@ -444,8 +444,8 @@ export async function handleInterruptCommand(
   writeLine(
     output,
     context.language === "en-US"
-      ? `Interrupt requested for ${result.cancelled} active item(s); abort signal sent ${result.abortSignalsSent}; marked stale ${result.markedOnly}; confirmed exited ${result.confirmedExited}. Inspect /background/logs before assuming processes exited.`
-      : `已请求中断 ${result.cancelled} 个活动任务；已发送取消信号 ${result.abortSignalsSent}；已标记 stale ${result.markedOnly}；已确认退出 ${result.confirmedExited}。确认进程退出前请查看 /background 和日志。`,
+      ? `Interrupt requested for ${result.cancelled} active item(s); abort signal sent ${result.abortSignalsSent}; marked stale ${result.markedOnly}; confirmed exited 0. Inspect /background/logs before assuming processes exited.`
+      : `已请求中断 ${result.cancelled} 个活动任务；已发送取消信号 ${result.abortSignalsSent}；已标记 stale ${result.markedOnly}；已确认退出 0。确认进程退出前请查看 /background 和日志。`,
   );
 }
 
@@ -453,7 +453,6 @@ type InterruptAllActiveWorkResult = {
   cancelled: number;
   abortSignalsSent: number;
   markedOnly: number;
-  confirmedExited: number;
 };
 
 export async function interruptAllActiveWork(
@@ -602,5 +601,5 @@ export async function interruptAllActiveWork(
       ? t(context, "interruptIdle")
       : `${t(context, "interruptCancelled")} abort_signal_sent=${abortSignalsSent}; marked_stale=${markedOnly}; confirmed_exited=${confirmedExited}`,
   );
-  return { cancelled, abortSignalsSent, markedOnly, confirmedExited };
+  return { cancelled, abortSignalsSent, markedOnly };
 }

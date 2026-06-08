@@ -127,7 +127,7 @@ function InlineRow({
       : tone === "diagnostic"
         ? theme.diagnostic
         : theme.assistantText;
-  const codeColor = theme.diagnostic ?? theme.accent;
+  const codeColor = theme.inlineCode ?? theme.dim ?? theme.muted;
   return (
     <Box flexDirection="column">
       {rows.map((row, rowIndex) => {
@@ -193,7 +193,7 @@ function InlineText({
       : tone === "diagnostic"
         ? theme.diagnostic
         : theme.assistantText;
-  const codeColor = theme.diagnostic ?? theme.accent;
+  const codeColor = theme.inlineCode ?? theme.dim ?? theme.muted;
   const tokens = tokenizeInline(value);
   return (
     <Text
@@ -321,6 +321,7 @@ function CodeLine({
   dim,
   selected,
   ranges,
+  wrapWidth,
 }: {
   line: string;
   lang?: string;
@@ -328,6 +329,7 @@ function CodeLine({
   dim: boolean;
   selected?: boolean;
   ranges?: ProductBlockSelectionRange[];
+  wrapWidth: number;
 }): React.ReactNode {
   const isDiff = lang === "diff" || lang === "patch";
   const color =
@@ -340,7 +342,7 @@ function CodeLine({
   if (ranges && ranges.length > 0) {
     const segments = splitLineBySelectionRanges(line.length === 0 ? " " : line, ranges);
     return (
-      <Text>
+      <Text wrap="wrap">
         {segments.map((segment, index) => (
           <Text
             key={`${index}-${segment.selected ? "selected" : "plain"}-${segment.text}`}
@@ -355,13 +357,18 @@ function CodeLine({
     );
   }
   return (
-    <Text
-      color={selected ? "white" : color}
-      backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
-      dimColor={selected ? false : dimLine}
-    >
-      {line.length === 0 ? " " : line}
-    </Text>
+    <Box flexDirection="column">
+      {wrapText(line.length === 0 ? " " : line, wrapWidth).map((wrapped, index) => (
+        <Text
+          key={`${index}-${wrapped}`}
+          color={selected ? "white" : color}
+          backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
+          dimColor={selected ? false : dimLine}
+        >
+          {wrapped}
+        </Text>
+      ))}
+    </Box>
   );
 }
 
@@ -384,6 +391,7 @@ export function MessageMarkdown({
     selectedRangesByLine.set(range.lineIndex, existing);
   }
   const rendered: React.ReactNode[] = [];
+  const effectiveWrapWidth = wrapWidth ?? 80;
   let inCode = false;
   let codeLang: string | undefined;
   let codeBuffer: { line: string; lineIndex: number }[] = [];
@@ -406,6 +414,7 @@ export function MessageMarkdown({
               dim={dim}
               selected={selectedLines.has(lineIndex)}
               ranges={selectedRangesByLine.get(lineIndex)}
+              wrapWidth={Math.max(8, effectiveWrapWidth - 5)}
             />
           </Box>
         ))}

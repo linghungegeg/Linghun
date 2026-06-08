@@ -1181,12 +1181,13 @@ export async function executeLinghunControlToolUse(
         run?.status === "completed" || (input.runInBackground && run?.status === "running");
       const currentStep = selectWorkflowCurrentStepForToolResult(run);
       const text = run
-        ? formatWorkflowStartPrimary({
-            language: context.language,
-            steps: run.steps.length,
-            currentPhase: currentStep?.summary ?? currentStep?.title ?? "workflow",
-            background: input.runInBackground && run.status === "running",
-          })
+        ? formatWorkflowToolResultSummary(
+            context.language,
+            run.status,
+            run.steps.length,
+            currentStep?.summary ?? currentStep?.title ?? "workflow",
+            input.runInBackground && run.status === "running",
+          )
         : "Workflow runtime did not start.";
       return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
         workflowId: run?.id,
@@ -1256,6 +1257,22 @@ export async function executeLinghunControlToolUse(
     context.commandPanelState = previousCommandPanelState;
     clearRequestActivity(context);
   }
+}
+
+function formatWorkflowToolResultSummary(
+  language: Language,
+  status: NonNullable<TuiContext["workflows"]["activeRun"]>["status"],
+  steps: number,
+  currentStep: string,
+  background: boolean,
+): string {
+  if (status === "running") {
+    return formatWorkflowStartPrimary({ language, steps, currentPhase: currentStep, background });
+  }
+  if (language === "en-US") {
+    return `Workflow started, then stopped at step: ${currentStep}. Status: ${status}. Use /workflows status for details.`;
+  }
+  return `workflow 已启动，随后停在步骤：${currentStep}。状态：${status}。可用 /workflows status 查看详情。`;
 }
 
 function selectWorkflowCurrentStepForToolResult(
@@ -2365,10 +2382,21 @@ export async function handleToolCommand(
       return;
     }
 
+    const boundaryPreflight = await runBoundaryEditPreflight(
+      { id: "slash-command-preflight", name, input },
+      name,
+      context,
+    );
+    if (boundaryPreflight.decision === "confirm") {
+      writeLine(output, formatBoundaryEditPreflightPrompt(boundaryPreflight, context.language));
+      context.pendingLocalApproval = undefined;
+      writeStatus(output, context);
+      return;
+    }
+
     const shouldKeepAutoReviewWorkspaceEditQuiet =
       context.permissionMode === "auto-review" &&
       permission.request.files.length > 0 &&
-      permission.request.risk === "low" &&
       (name === "Write" || name === "Edit" || name === "MultiEdit");
 
     if (permission.preflight && !shouldKeepAutoReviewWorkspaceEditQuiet) {

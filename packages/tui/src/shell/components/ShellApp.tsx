@@ -248,6 +248,11 @@ function TaskLayout({
       <Box flexShrink={0} flexDirection="column">
         {/* D.13Q-UX：轻提示固定在 composer 上方，不和 footer/runtime summary 抢最底部。 */}
         <NotificationStack notifications={view.notifications} theme={theme} />
+        {view.taskRuntimeSummary ? (
+          <Box width={cw} marginTop={1}>
+            <ProductBlock block={view.taskRuntimeSummary} theme={theme} width={cw} />
+          </Box>
+        ) : null}
 
         <Box width={cw} paddingTop={1}>
           <Text color={theme.border ?? theme.muted} dimColor>

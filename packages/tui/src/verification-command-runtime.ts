@@ -304,12 +304,16 @@ export async function runVerificationPlan(
               : partial.length > 0 || unverified.length > 0
                 ? "partial"
                 : "pass";
+    const syntheticOnlyPass =
+      status === "pass" && results.every((item) => item.synthetic === true || item.status !== "pass");
     const report: VerificationReport = {
       id: runId,
       status,
       summary:
         status === "pass"
-          ? `PASS：${results.length} 个验证步骤通过。`
+          ? syntheticOnlyPass
+            ? "SELF-CHECK：synthetic self-check 已通过；真实验证未运行，不能作为真实 PASS 证据。"
+            : `PASS：${results.length} 个验证步骤通过。`
           : status === "fail"
             ? `FAIL：${failed.length}/${results.length} 个验证步骤失败。`
             : status === "cancelled"
@@ -546,10 +550,21 @@ function formatVerificationReportLines(
   const statusLabel = report.status.toUpperCase();
   const statusAlreadyShown = new RegExp(`^${statusLabel}(?:\\s|:|：)`, "u").test(report.summary);
   const summary = statusAlreadyShown ? report.summary : `${statusLabel} ${report.summary}`;
+  const syntheticOnlyPass =
+    report.status === "pass" &&
+    report.commands.length > 0 &&
+    report.commands.every((command) => command.synthetic === true || command.status !== "pass");
   const lines = [
     summary,
     language === "en-US" ? `Duration: ${report.durationMs}ms` : `耗时：${report.durationMs}ms`,
   ];
+  if (syntheticOnlyPass) {
+    lines.push(
+      language === "en-US"
+        ? "Real verification did not run; this is not enough evidence for a real PASS."
+        : "真实验证未运行；这不足以证明真实 PASS。",
+    );
+  }
   if (includeCommandDetails) {
     for (const command of report.commands) {
       lines.push(
@@ -558,6 +573,12 @@ function formatVerificationReportLines(
       if (command.status !== "pass") {
         lines.push(`  摘要：${command.summary}`);
       }
+    }
+  }
+  if (!includeCommandDetails && report.status !== "pass") {
+    const logPath = report.commands.find((command) => command.logPath)?.logPath ?? report.logPath;
+    if (logPath) {
+      lines.push(`log: ${logPath}`);
     }
   }
   if (includeCommandDetails && report.unverified.length > 0) {
