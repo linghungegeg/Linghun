@@ -80,6 +80,26 @@ describe("runtime status snapshot", () => {
     expect(text).toContain("最近：verification 通过 · typecheck 通过。");
   });
 
+  it("labels workflow progress instead of showing a bare ratio", () => {
+    const snapshot = createRuntimeStatusSnapshot({
+      language: "zh-CN",
+      backgroundTasks: [
+        task({
+          id: "workflow-1",
+          title: "workflow run",
+          kind: "job",
+          status: "running",
+          currentStep: "Architecture review",
+          progress: { completed: 3, total: 5, label: "workflow" },
+        }),
+      ],
+    });
+
+    const text = formatRuntimeStatusSnapshotForBtw(snapshot, "zh-CN");
+    expect(text).toContain("workflow 3/5");
+    expect(text).not.toContain(" · 3/5");
+  });
+
   it("sorts missing or invalid endedAt values behind valid terminal tasks", () => {
     const snapshot = createRuntimeStatusSnapshot({
       language: "zh-CN",

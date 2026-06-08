@@ -26,7 +26,9 @@ export function resolveTerminalInteractionModes({
   appOwnedScreen = false,
 }: TerminalInteractionOptions): TerminalInteractionModes {
   const mouseTracking =
-    env.LINGHUN_TUI_MOUSE !== "0" && appOwnedScreen && capability.alternateScreen;
+    env.LINGHUN_TUI_MOUSE !== "0" &&
+    capability.cursorPositioning &&
+    (appOwnedScreen || capability.alternateScreen);
   return {
     kittyKeyboard:
       capability.kittyKeyboard ||

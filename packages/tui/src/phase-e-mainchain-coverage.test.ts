@@ -29,6 +29,7 @@ import {
 } from "./model-loop-runtime.js";
 import { __testSendMessage } from "./model-stream-runtime.js";
 import {
+  __testSelectWorkflowCurrentStepForToolResult,
   executeDeferredDispatchToolUse,
   executeLinghunControlToolUse,
   executeModelToolUse,
@@ -213,6 +214,34 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
     );
     expect(controlResults.some((result) => result.pendingApproval || result.ok)).toBe(true);
 
+    const currentStep = __testSelectWorkflowCurrentStepForToolResult({
+      id: "workflow-blocked",
+      goal: "blocked nested job",
+      planId: "plan-blocked",
+      status: "blocked",
+      result: "blocked",
+      startedAt: new Date().toISOString(),
+      steps: [
+        {
+          id: "slice-implement",
+          title: "Run durable multi-agent job batch",
+          status: "blocked",
+          summary: "slice-implement blocked: nested job failed",
+          runtime: "job",
+          evidenceRefs: [],
+        },
+        {
+          id: "slice-verify",
+          title: "Verify result",
+          status: "queued",
+          runtime: "verification",
+          evidenceRefs: [],
+        },
+      ],
+    });
+    expect(currentStep?.id).toBe("slice-implement");
+    expect(currentStep?.summary).toContain("slice-implement blocked");
+
     const search = await executeDeferredDispatchToolUse(
       call(SEARCH_EXTRA_TOOLS_NAME, { query: "codebase memory", limit: 2 }),
       context,
@@ -253,7 +282,7 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
 });
 
 describe("Phase E agent, slash, workflow, permission, and natural intent coverage", () => {
-  it("runModelBackedAgent completes final answer, consumes mailbox, and blocks on failing tool_use", async () => {
+  it("runModelBackedAgent completes final answer, consumes mailbox, and lets tool errors self-recover", async () => {
     const context = await createTestContext();
     const agent = createAgentRun(context, { id: "agent-loop", maxTurns: 2 });
     agent.mailbox.push({
@@ -265,20 +294,35 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       status: "pending",
       summary: "extra instruction",
     });
+    context.agents.push(agent);
     const completed = await runModelBackedAgent(agent, context, new MemoryOutput());
     expect(completed.status).toBe("completed");
     expect(agent.mailbox[0]?.status).toBe("consumed");
 
-    const blockedContext = await createTestContext([
-      { type: "tool_use", id: "tc-unknown", name: "UnknownTool", input: {} },
+    const recoveredContext = await createTestContext([
+      [{ type: "tool_use", id: "tc-unknown", name: "UnknownTool", input: {} }],
+      [{ type: "assistant_text_delta", text: "tool error observed; recovered with final answer" }],
     ]);
-    const blocked = await runModelBackedAgent(
-      createAgentRun(blockedContext, { id: "agent-blocked", maxTurns: 1 }),
-      blockedContext,
+    const recoveredAgent = createAgentRun(recoveredContext, { id: "agent-recovered", maxTurns: 2 });
+    recoveredContext.agents.push(recoveredAgent);
+    const recovered = await runModelBackedAgent(
+      recoveredAgent,
+      recoveredContext,
       new MemoryOutput(),
     );
-    expect(blocked.status).toBe("blocked");
-    expect(blocked.summary).toContain("UnknownTool");
+    expect(recovered.status).toBe("completed");
+    expect(recovered.summary).toContain("recovered with final answer");
+    const childTranscript = (
+      await recoveredContext.store.resume(recoveredContext.agents[0]?.transcriptSessionId ?? "")
+    ).transcript;
+    expect(
+      childTranscript.some(
+        (event) =>
+          event.type === "tool_result" &&
+          event.toolName === "UnknownTool" &&
+          event.isError === true,
+      ),
+    ).toBe(true);
   });
 
   it("covers slash command runtime routing for ten common commands", async () => {
@@ -543,6 +587,20 @@ function gateway(events: TestStreamEvent[]): ModelGateway {
   } as unknown as ModelGateway;
 }
 
+function gatewayByTurn(turns: TestStreamEvent[][]): ModelGateway {
+  let index = 0;
+  return {
+    async *stream() {
+      const events = turns[index] ?? [];
+      index += 1;
+      for (const event of events) yield event;
+    },
+    async countMessagesTokensWithAPI() {
+      return { source: "unavailable", reason: "test" };
+    },
+  } as unknown as ModelGateway;
+}
+
 function abortingGateway(context: TuiContext, events: TestStreamEvent[]): ModelGateway {
   return {
     async *stream() {
@@ -722,7 +780,9 @@ function rewriteApprovalSession(
   return approval;
 }
 
-async function createTestContext(agentEvents?: TestStreamEvent[]): Promise<TuiContext> {
+async function createTestContext(
+  agentEvents?: TestStreamEvent[] | TestStreamEvent[][],
+): Promise<TuiContext> {
   const projectPath = await mkdtemp(join(tmpdir(), "linghun-phase-e-main-"));
   await mkdir(resolve(projectPath, ".linghun"), { recursive: true });
   const store = new SessionStore({ projectPath, sessionRootDir: join(projectPath, ".sessions") });
@@ -795,7 +855,11 @@ async function createTestContext(agentEvents?: TestStreamEvent[]): Promise<TuiCo
     recordAgentToolFailureEvidence: async () => "evidence-agent-failure",
     recordToolResultBudgetEvidence: async () => undefined,
     createAgentGatewayContinuation: () => ({
-      gateway: gateway(agentEvents ?? [{ type: "assistant_text_delta", text: "agent final" }]),
+      gateway: Array.isArray(agentEvents?.[0])
+        ? gatewayByTurn(agentEvents as TestStreamEvent[][])
+        : gateway((agentEvents as TestStreamEvent[] | undefined) ?? [
+            { type: "assistant_text_delta", text: "agent final" },
+          ]),
       provider: "deepseek",
       model: "deepseek-chat",
       endpointProfile: "chat_completions",

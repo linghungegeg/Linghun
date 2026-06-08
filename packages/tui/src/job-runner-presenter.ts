@@ -155,9 +155,7 @@ export function formatBackgroundDetails(
   language: Language,
   projectPath?: string,
 ): string {
-  const progress = task.progress
-    ? `${task.progress.completed}/${task.progress.total ?? "?"} ${task.progress.label ?? ""}`.trim()
-    : "none";
+  const progress = task.progress ? formatTaskProgress(task) : "none";
   return [
     language === "en-US" ? `Background ${task.id}` : `Background ${task.id}`,
     `- kind: ${task.kind}`,
@@ -198,13 +196,13 @@ export function formatBackgroundOutputDetails(
 }
 
 export function formatBackgroundTask(task: BackgroundTaskState, language: Language): string {
-  const progress = task.progress ? ` ${task.progress.completed}/${task.progress.total ?? "?"}` : "";
+  const progress = task.progress ? ` ${formatTaskProgress(task)}` : "";
   const elapsed = formatElapsedSince(task.startedAt);
   const title = truncateLine(
     cleanPanelText(task.title, language === "en-US" ? "Background task" : "后台任务"),
-    32,
+    28,
   );
-  const step = truncateLine(cleanPanelText(task.currentStep ?? "-", "-"), 34);
+  const step = truncateLine(cleanPanelText(task.currentStep ?? "-", "-"), 30);
   return language === "en-US"
     ? `[background] ${title} · ${task.status} · ${step}${progress} · elapsed ${elapsed}`
     : `[后台] ${title} · ${task.status} · ${step}${progress} · 耗时 ${elapsed}`;
@@ -287,9 +285,14 @@ function truncateLine(value: string, max: number): string {
 
 function formatPanelProgress(task: BackgroundTaskState): string {
   if (!task.progress) return "-";
+  return formatTaskProgress(task);
+}
+
+function formatTaskProgress(task: BackgroundTaskState): string {
+  if (!task.progress) return "-";
   const total = typeof task.progress.total === "number" ? task.progress.total : undefined;
   const ratio = total ? `${task.progress.completed}/${total}` : `${task.progress.completed}`;
-  return task.progress.label ? `${ratio} ${task.progress.label}` : ratio;
+  return task.progress.label ? `${task.progress.label} ${ratio}` : ratio;
 }
 
 function normalizePanelStatus(status: BackgroundTaskState["status"], language: Language): string {

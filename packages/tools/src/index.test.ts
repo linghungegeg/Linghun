@@ -87,12 +87,29 @@ describe("Phase 05 core tools", () => {
     expect(glob.output.text).toContain("sample.txt");
     expect(edit.output.changedFiles).toEqual(["sample.txt"]);
     expect(await readFile(filePath, "utf8")).toContain("gamma");
+    expect(todoAdd.output.text).toContain("Todo created: id=1");
     expect(todoAdd.output.text).toContain("[pending] 验证工具闭环");
+    expect(todoAdd.output.data).toMatchObject({ createdId: "1" });
     expect(context.todos[0]?.status).toBe("completed");
     expect(context.todos[0]?.evidence).toBe("测试通过");
     expect(bash.output.text).toContain("exit code 0");
     expect(bash.output.fullOutputPath).toBeTruthy();
     expect(diff.output.text).toContain("sample.txt");
+  });
+
+  it("ignores model-supplied Todo add id and returns the runtime id", async () => {
+    const context = createToolContext();
+
+    const todoAdd = await runTool(
+      "Todo",
+      { action: "add", id: "survey", content: "调查源码" },
+      context,
+    );
+
+    expect(context.todos[0]?.id).toBe("1");
+    expect(todoAdd.output.text).toContain("Todo created: id=1");
+    expect(todoAdd.output.text).not.toContain("id=survey");
+    expect(todoAdd.output.data).toMatchObject({ createdId: "1" });
   });
 
   it("streams Bash progress before returning final output", async () => {

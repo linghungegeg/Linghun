@@ -1179,15 +1179,12 @@ export async function executeLinghunControlToolUse(
       const run = context.workflows.activeRun;
       const ok =
         run?.status === "completed" || (input.runInBackground && run?.status === "running");
+      const currentStep = selectWorkflowCurrentStepForToolResult(run);
       const text = run
         ? formatWorkflowStartPrimary({
             language: context.language,
             steps: run.steps.length,
-            currentPhase:
-              run.steps.find((step) => step.status === "running")?.title ??
-              run.steps.find((step) => step.status === "queued")?.title ??
-              run.steps.at(-1)?.title ??
-              "workflow",
+            currentPhase: currentStep?.summary ?? currentStep?.title ?? "workflow",
             background: input.runInBackground && run.status === "running",
           })
         : "Workflow runtime did not start.";
@@ -1260,6 +1257,25 @@ export async function executeLinghunControlToolUse(
     clearRequestActivity(context);
   }
 }
+
+function selectWorkflowCurrentStepForToolResult(
+  run: TuiContext["workflows"]["activeRun"] | undefined,
+): NonNullable<TuiContext["workflows"]["activeRun"]>["steps"][number] | undefined {
+  return (
+    run?.steps.find(
+      (step) =>
+        step.status === "blocked" ||
+        step.status === "failed" ||
+        step.status === "stale" ||
+        step.status === "cancelled",
+    ) ??
+    run?.steps.find((step) => step.status === "running") ??
+    run?.steps.find((step) => step.status === "queued") ??
+    run?.steps.at(-1)
+  );
+}
+
+export const __testSelectWorkflowCurrentStepForToolResult = selectWorkflowCurrentStepForToolResult;
 
 function executableCommandProposalTool(command: string): string | undefined {
   const normalized = command.trim().toLowerCase();

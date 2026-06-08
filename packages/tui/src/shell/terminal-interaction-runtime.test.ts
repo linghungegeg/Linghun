@@ -30,18 +30,18 @@ function capability(overrides: Partial<TerminalCapability> = {}): TerminalCapabi
 }
 
 describe("terminal interaction modes", () => {
-  it("enables modifyOtherKeys but keeps mouse tracking off on the main screen", () => {
+  it("enables modifyOtherKeys and wheel tracking on the main screen", () => {
     expect(resolveTerminalInteractionModes({ capability: capability(), env: {} })).toEqual({
       kittyKeyboard: true,
       modifyOtherKeys: true,
-      mouseTracking: false,
+      mouseTracking: true,
     });
   });
 
-  it("requires app-owned screen mode before enabling mouse tracking", () => {
+  it("requires cursor-positioning terminal capability before enabling mouse tracking", () => {
     expect(
       resolveTerminalInteractionModes({
-        capability: capability(),
+        capability: capability({ cursorPositioning: false }),
         env: { LINGHUN_TUI_MOUSE: "1" },
       }).mouseTracking,
     ).toBe(false);
@@ -56,7 +56,6 @@ describe("terminal interaction modes", () => {
       resolveTerminalInteractionModes({
         capability: capability({ alternateScreen: false }),
         env: { LINGHUN_TUI_MOUSE: "1" },
-        appOwnedScreen: true,
       }).mouseTracking,
     ).toBe(false);
   });
@@ -71,14 +70,14 @@ describe("terminal interaction modes", () => {
     ).toBe(true);
   });
 
-  it("keeps mouse tracking off when the Ink shell is not using an app-owned screen", () => {
+  it("enables wheel tracking even when the Ink shell is not using an app-owned screen", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
         env: { LINGHUN_TUI_MOUSE: "1" },
         appOwnedScreen: false,
       }).mouseTracking,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("allows disabling app-owned wheel tracking explicitly", () => {
@@ -86,7 +85,6 @@ describe("terminal interaction modes", () => {
       resolveTerminalInteractionModes({
         capability: capability(),
         env: { LINGHUN_TUI_MOUSE: "0" },
-        appOwnedScreen: true,
       }).mouseTracking,
     ).toBe(false);
   });
@@ -100,7 +98,7 @@ describe("terminal interaction modes", () => {
     ).toEqual({
       kittyKeyboard: false,
       modifyOtherKeys: false,
-      mouseTracking: false,
+      mouseTracking: true,
     });
   });
 

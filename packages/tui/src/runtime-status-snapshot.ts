@@ -229,7 +229,7 @@ function formatTaskLine(
           ? "Resumable"
           : "可恢复";
   const progress = task.progress?.total
-    ? ` · ${task.progress.completed}/${task.progress.total}`
+    ? ` · ${task.progress.label ? `${task.progress.label} ` : ""}${task.progress.completed}/${task.progress.total}`
     : "";
   const step = task.currentStep ? ` · ${truncate(task.currentStep, 80)}` : "";
   const elapsed = task.elapsed ? ` · ${task.elapsed}` : "";

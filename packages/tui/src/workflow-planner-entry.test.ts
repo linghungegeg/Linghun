@@ -60,6 +60,33 @@ describe("D.14H-E workflow planner entry", () => {
     expect(hasWorkerSlice).toBe(false);
   });
 
+  it("treats audit, investigation, and inspection goals as readonly unless edits are explicit", () => {
+    for (const readonlyGoal of [
+      "请做源码审计并给结论",
+      "只读源码事实调查，不修改文件",
+      "定位 workflow blocked 的原因",
+      "复核最新实测问题",
+      "read-only source fact investigation without editing",
+      "inspect the runtime failure and report findings",
+    ]) {
+      const result = generateWorkflowPlanPreview(goal({ goal: readonlyGoal }));
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      const slices = result.plan.phases[0].slices;
+      expect(slices.some((slice) => slice.id === "slice-implement")).toBe(false);
+      expect(slices.find((slice) => slice.id === "slice-verify")?.dependsOnSliceIds).toEqual([
+        "slice-architecture-review",
+      ]);
+    }
+
+    const fixResult = generateWorkflowPlanPreview(goal({ goal: "请修复 workflow blocked 问题" }));
+    expect(fixResult.ok).toBe(true);
+    if (!fixResult.ok) return;
+    expect(fixResult.plan.phases[0].slices.some((slice) => slice.id === "slice-implement")).toBe(
+      true,
+    );
+  });
+
   it("default mode marks mutating proposals with requiresStartGate/requiresPermissionPipeline, not directly executable", () => {
     const result = generateWorkflowPlanPreview(goal({ permissionMode: "default" }));
     expect(result.ok).toBe(true);

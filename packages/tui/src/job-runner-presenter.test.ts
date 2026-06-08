@@ -199,7 +199,7 @@ describe("job runner presenters", () => {
     expect(formatJobNextAction({ ...baseJob, status: "completed" }, "en-US")).not.toContain("PASS");
 
     const rendered = formatBackgroundTask(baseBackground, "en-US");
-    expect(rendered).toContain("[background] Job: safe · timeout · timeout 1/4");
+    expect(rendered).toContain("[background] Job: safe · timeout · timeout worker steps 1/4");
     expect(rendered).toContain("elapsed ");
     expect(rendered).not.toContain("log:");
     expect(rendered).not.toContain("next:");
@@ -237,7 +237,7 @@ describe("job runner presenters", () => {
 
     expect(row).toContain("Verification gate");
     expect(row).toContain("stale");
-    expect(row).toContain("2/5 checks");
+    expect(row).toContain("checks 2/5");
     expect(row).toContain("/details background job-test");
     expect(row).not.toContain("sourceRef");
     expect(row).not.toContain("schema");

@@ -106,7 +106,7 @@ export type GlobInput = { pattern: string; path?: string; limit?: number };
 export type BashInput = { command: string; timeoutMs?: number };
 export type TodoInput =
   | { action: "list" }
-  | { action: "add"; content: string }
+  | { action: "add"; content: string; id?: string }
   | { action: "start" | "done" | "block"; id: string; evidence?: string };
 export type DiffInput = { files?: string[] };
 
@@ -1116,11 +1116,16 @@ async function todoTool(input: TodoInput, context: ToolContext): Promise<ToolOut
     if (context.todos.length >= MAX_TODO_ITEMS) {
       throw new Error(`Todo 已达到上限 ${MAX_TODO_ITEMS} 条。建议：先完成或清理旧 Todo。`);
     }
+    const id = String(context.todos.length + 1);
     context.todos.push({
-      id: String(context.todos.length + 1),
+      id,
       content: input.content,
       status: "pending",
     });
+    return {
+      text: `Todo created: id=${id}\n${formatTodos(context.todos)}`,
+      data: { items: context.todos, createdId: id },
+    };
   }
   if (input.action === "start") {
     const item = findTodo(context.todos, input.id);

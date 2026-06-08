@@ -392,7 +392,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("keeps SGR mouse off on the main terminal screen", async () => {
+  it("enables SGR wheel tracking without enabling drag tracking on the main terminal screen", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -412,10 +412,10 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).not.toContain("\x1B[?1000h");
-    expect(output.text).not.toContain("\x1B[?1006h");
-    expect(output.text).not.toContain("\x1B[?1006l");
-    expect(output.text).not.toContain("\x1B[?1000l");
+    expect(output.text).toContain("\x1B[?1000h");
+    expect(output.text).toContain("\x1B[?1006h");
+    expect(output.text).toContain("\x1B[?1006l");
+    expect(output.text).toContain("\x1B[?1000l");
     expect(output.text).not.toContain("\x1B[?1002h");
     expect(output.text).not.toContain("\x1B[?1002l");
   });
@@ -585,11 +585,10 @@ describe("Ink shell selection", () => {
     expect(plainRendered).not.toContain("/model setup");
   });
 
-  it("does not pretend Shift+Enter is distinguishable when the terminal only sends Enter", () => {
+  it("inserts newline for explicit Shift+Enter while plain Enter still submits", () => {
     expect(handleComposerInput("hello", "\r", { return: true, shift: true })).toEqual({
-      kind: "emit",
-      event: { type: "submit", text: "hello" },
-      nextText: "",
+      kind: "append",
+      text: "\n",
     });
     expect(handleComposerInput("hello", "\x1B[13;2u", { return: false })).toEqual({
       kind: "append",

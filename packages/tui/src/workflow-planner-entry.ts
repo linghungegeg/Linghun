@@ -354,9 +354,21 @@ function normalizePositiveInt(value: number | undefined): number | undefined {
 
 function isReadonlyAuditGoal(goal: string): boolean {
   const normalized = goal.toLowerCase();
+  const implementationIntentText = normalized
+    .replace(/不要(?:修改|编辑|写入)|不(?:修改|编辑|写入)|只读|不写/giu, " ")
+    .replace(
+      /no\s+(?:code\s+)?changes|read[-\s]?only|do\s+not\s+(?:edit|modify|write)|without\s+(?:editing|modifying|writing)/giu,
+      " ",
+    );
+  if (
+    /(修复|修改|实现|提交|改代码|写入|编辑|fix|modify|implement|submit|commit|edit|write|apply\s+changes)/iu.test(
+      implementationIntentText,
+    )
+  ) {
+    return false;
+  }
   return (
-    /(审计|检查|评估|分析|review|audit|inspect|analy[sz]e)/iu.test(goal) &&
-    /(不要修改|不修改|只读|不写|no\s+(?:code\s+)?changes|read[-\s]?only|do\s+not\s+(?:edit|modify|write))/iu.test(
+    /(审计|调查|定位|排查|检查|复核|评估|分析|查看|review|audit|inspect|locate|triage|investigate|investigation|fact[-\s]?finding|check|verify|analy[sz]e)/iu.test(
       normalized,
     )
   );

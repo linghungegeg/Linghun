@@ -10,7 +10,7 @@ import type {
   ModelToolCall,
 } from "@linghun/providers";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
-import type { ToolName, ToolOutput } from "@linghun/tools";
+import type { ToolName, ToolOutput, ToolRunResult } from "@linghun/tools";
 import { builtInTools, createToolContext, runTool } from "@linghun/tools";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import type {
@@ -2784,13 +2784,6 @@ export async function runModelBackedAgent(
           evidenceRefs: result.evidenceId ? [result.evidenceId] : [],
         };
       }
-      if (!result.ok) {
-        return {
-          status: "blocked",
-          summary: `${agent.type} blocked：${result.tool} 未成功执行：${truncateDisplay(result.text, 180)}`,
-          evidenceRefs: result.evidenceId ? [result.evidenceId] : [],
-        };
-      }
     }
   }
   if (!finalText) {
@@ -2896,7 +2889,18 @@ async function executeAgentToolCall(
   if (permission.preflight) {
     writeLine(output, permission.preflight);
   }
-  const result = await runAgentToolInCwd(toolName, toolCall.input, agent, context);
+  let result: ToolRunResult;
+  try {
+    result = await runAgentToolInCwd(toolName, toolCall.input, agent, context);
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    return {
+      ok: false,
+      tool: toolName,
+      text,
+    };
+  }
   await appendAgentToolEvents(agent, context, toolName, toolCall.input, result.output, toolCall.id);
   const failed = isAgentToolOutputFailure(toolName, result.output);
   return {
