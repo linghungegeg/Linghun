@@ -1,0 +1,28 @@
+{
+  "$schema": "../../APP_BRIDGE_MANIFEST.schema.json",
+  "appId": "demo.drawing",
+  "name": "Demo Drawing",
+  "version": "0.1.0",
+  "transport": "http",
+  "baseUrl": "http://127.0.0.1:47831",
+  "auth": { "type": "none" },
+  "capabilities": [
+    {
+      "id": "demo.drawing.describe",
+      "appId": "demo.drawing",
+      "title": "Describe Drawing",
+      "description": "Describes a local drawing.",
+      "category": "drawing",
+      "intents": ["describe drawing"],
+      "keywords": ["drawing", "describe"],
+      "transport": "http",
+      "auth": "none",
+      "permission": "read",
+      "riskLevel": "low",
+      "inputSchema": { "type": "object", "required": ["subject"] },
+      "outputSchema": { "type": "object", "required": ["summary"] },
+      "supportsRollback": false,
+      "supportsPreview": false
+    }
+  ]
+}

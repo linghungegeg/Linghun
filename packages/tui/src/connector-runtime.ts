@@ -11,6 +11,7 @@ import {
   type CapabilityPermission,
   type CapabilityProvider,
   type CapabilityTransport,
+  executeCapability,
   registerCapability,
   registerCapabilityProvider,
   setCapabilityConnectionResolver,
@@ -73,6 +74,21 @@ export type AppConnectorDoctorResult = {
   apps: AppConnectorState[];
 };
 
+export type AppConnectorValidationResult =
+  | {
+      ok: true;
+      manifestPath: string;
+      appId: string;
+      name: string;
+      version: string;
+      transport: CapabilityTransport;
+      baseUrl?: string;
+      capabilityCount: number;
+      capabilityIds: string[];
+      warnings: string[];
+    }
+  | { ok: false; error: string };
+
 type ConnectorRuntimeState = {
   apps: Map<string, AppConnectorState>;
   authConfigs: Map<string, AppConnectorAuthConfig>;
@@ -94,6 +110,48 @@ function getRuntimeState(context: TuiContext): ConnectorRuntimeState {
 
 export function listAppConnectors(context: TuiContext): AppConnectorState[] {
   return [...getRuntimeState(context).apps.values()].sort((a, b) => a.appId.localeCompare(b.appId));
+}
+
+export async function validateAppConnectorManifest(
+  manifestPath: string,
+  context: TuiContext,
+): Promise<AppConnectorValidationResult> {
+  const localManifestPath = resolveProjectLocalManifestPath(manifestPath, context);
+  if (!localManifestPath.ok) return localManifestPath;
+  const manifest = await readConnectorManifest(localManifestPath.value);
+  if (!manifest.ok) return manifest;
+  const warnings: string[] = [];
+  if (manifest.value.transport !== "http") {
+    return {
+      ok: false,
+      error: `transport ${manifest.value.transport} is reserved; current App Bridge validate only supports Local HTTP.`,
+    };
+  }
+  if (!manifest.value.baseUrl) {
+    return { ok: false, error: "HTTP connector requires baseUrl." };
+  }
+  const url = buildConnectorUrl(manifest.value.baseUrl, "");
+  if (!url.ok) return { ok: false, error: url.error };
+  const duplicateIds = findDuplicateCapabilityIds(manifest.value.capabilities);
+  if (duplicateIds.length > 0) {
+    return { ok: false, error: `duplicate capability id: ${duplicateIds.join(", ")}` };
+  }
+  const auth = resolveConnectorAuth(manifest.value.auth, context);
+  if (auth.type !== "none" && !auth.value) {
+    warnings.push(`auth ${auth.type} is not resolved yet; source=${auth.source}`);
+  }
+  return {
+    ok: true,
+    manifestPath: localManifestPath.value,
+    appId: manifest.value.appId,
+    name: manifest.value.name,
+    version: manifest.value.version,
+    transport: manifest.value.transport,
+    baseUrl: manifest.value.baseUrl,
+    capabilityCount: manifest.value.capabilities.length,
+    capabilityIds: manifest.value.capabilities.map((item) => item.id),
+    warnings,
+  };
 }
 
 export async function connectAppConnector(
@@ -207,7 +265,13 @@ export async function handleAppsCommand(
       title: "/apps",
       tone: "neutral",
       summary: formatAppConnectorList(context).split("\n"),
-      actions: ["/apps connect <manifestPath>", "/apps doctor", "/apps disconnect <appId>"],
+      actions: [
+        "/apps validate <manifestPath>",
+        "/apps connect <manifestPath>",
+        "/apps test-run <manifestPath> <capabilityId> <json>",
+        "/apps doctor",
+        "/apps disconnect <appId>",
+      ],
       detailsText: formatAppConnectorList(context),
     });
     return;
@@ -220,8 +284,33 @@ export async function handleAppsCommand(
       summary: body
         .split("\n")
         .filter((line) => line && line !== "Details" && !line.startsWith("- appId=")),
-      actions: ["/apps list", "/apps disconnect <appId>"],
+      actions: [
+        "/apps list",
+        "/apps validate <manifestPath>",
+        "/apps test-run <manifestPath> <capabilityId> <json>",
+        "/apps disconnect <appId>",
+      ],
       detailsText: body,
+    });
+    return;
+  }
+  if (action === "validate") {
+    const manifestPath = args.slice(1).join(" ");
+    if (!manifestPath) {
+      writeLine(output, usageText("validate", context.language));
+      return;
+    }
+    const result = await validateAppConnectorManifest(manifestPath, context);
+    const formatted = formatAppConnectorValidation(result, context.language);
+    showCommandPanel(context, output, {
+      title: "/apps validate",
+      tone: result.ok ? "neutral" : "warning",
+      summary: formatted.summary,
+      actions: [
+        "/apps connect <manifestPath>",
+        "/apps test-run <manifestPath> <capabilityId> <json>",
+      ],
+      detailsText: formatted.detailsText,
     });
     return;
   }
@@ -242,6 +331,93 @@ export async function handleAppsCommand(
     );
     return;
   }
+  if (action === "test-run") {
+    const manifestPath = args[1];
+    const capabilityId = args[2];
+    const json = args.slice(3).join(" ");
+    if (!manifestPath || !capabilityId || !json) {
+      writeLine(output, usageText("test-run", context.language));
+      return;
+    }
+    const parsed = parseJsonInput(json);
+    if (!parsed.ok) {
+      writeLine(
+        output,
+        localizedLine(
+          context.language,
+          "App test-run input JSON invalid",
+          "App test-run input JSON 无效",
+          parsed.error,
+        ),
+      );
+      return;
+    }
+    const connection = await connectAppConnector(manifestPath, context);
+    if (!connection.ok) {
+      writeLine(
+        output,
+        localizedLine(
+          context.language,
+          "App test-run connect failed",
+          "App test-run 连接失败",
+          sanitizeConnectorText(connection.error),
+        ),
+      );
+      return;
+    }
+    const definition = connection.state.capabilityIds.includes(capabilityId);
+    if (!definition) {
+      writeLine(
+        output,
+        localizedLine(
+          context.language,
+          "App test-run capability not found",
+          "App test-run 未找到 capability",
+          sanitizeConnectorText(capabilityId),
+        ),
+      );
+      return;
+    }
+    const result = await executeCapability(
+      { capabilityId, input: parsed.value, source: "slash" },
+      context,
+    );
+    const lines =
+      context.language === "en-US"
+        ? [
+            `Connected ${sanitizeConnectorText(connection.state.name)} and executed ${sanitizeConnectorText(capabilityId)}.`,
+            `Result: ${result.ok ? "ok" : "failed"}.`,
+            `Summary: ${sanitizeConnectorText(result.summary)}`,
+            "The app remains connected for follow-up /capabilities run or /apps disconnect.",
+          ]
+        : [
+            `已连接 ${sanitizeConnectorText(connection.state.name)} 并执行 ${sanitizeConnectorText(capabilityId)}。`,
+            `结果：${result.ok ? "ok" : "failed"}。`,
+            `摘要：${sanitizeConnectorText(result.summary)}`,
+            "app 保持 connected，可继续 /capabilities run 或 /apps disconnect。",
+          ];
+    showCommandPanel(context, output, {
+      title: "/apps test-run",
+      tone: result.ok ? "neutral" : "warning",
+      summary: lines,
+      actions: ["/capabilities run <capabilityId> <json>", "/apps disconnect <appId>"],
+      detailsText: [
+        ...lines,
+        "",
+        `details: ${sanitizeConnectorText(result.details ?? "none")}`,
+        result.artifactRef
+          ? `artifactRef: ${sanitizeConnectorText(result.artifactRef)}`
+          : undefined,
+        result.previewRef ? `previewRef: ${sanitizeConnectorText(result.previewRef)}` : undefined,
+        result.rollbackRef
+          ? `rollbackRef: ${sanitizeConnectorText(result.rollbackRef)}`
+          : undefined,
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join("\n"),
+    });
+    return;
+  }
   if (action === "disconnect") {
     const appId = args[1];
     if (!appId) {
@@ -254,8 +430,83 @@ export async function handleAppsCommand(
   }
   writeLine(
     output,
-    "用法：/apps list | /apps connect <manifestPath> | /apps doctor | /apps disconnect <appId>",
+    context.language === "en-US"
+      ? "Usage: /apps list | /apps validate <manifestPath> | /apps connect <manifestPath> | /apps test-run <manifestPath> <capabilityId> <json> | /apps doctor | /apps disconnect <appId>"
+      : "用法：/apps list | /apps validate <manifestPath> | /apps connect <manifestPath> | /apps test-run <manifestPath> <capabilityId> <json> | /apps doctor | /apps disconnect <appId>",
   );
+}
+
+function formatAppConnectorValidation(
+  result: AppConnectorValidationResult,
+  language: Language,
+): { summary: string[]; detailsText: string } {
+  if (!result.ok) {
+    const line =
+      language === "en-US"
+        ? `Manifest validation failed: ${sanitizeConnectorText(result.error)}`
+        : `Manifest 校验失败：${sanitizeConnectorText(result.error)}`;
+    return { summary: [line], detailsText: line };
+  }
+  const warningLines = result.warnings.map((warning) =>
+    language === "en-US"
+      ? `warning: ${sanitizeConnectorText(warning)}`
+      : `警告：${sanitizeConnectorText(warning)}`,
+  );
+  const summary =
+    language === "en-US"
+      ? [
+          `Manifest valid: ${sanitizeConnectorText(result.name)} (${sanitizeConnectorText(result.appId)}).`,
+          `transport=${result.transport}; capabilities=${result.capabilityCount}`,
+          ...warningLines,
+        ]
+      : [
+          `Manifest 有效：${sanitizeConnectorText(result.name)}（${sanitizeConnectorText(result.appId)}）。`,
+          `transport=${result.transport}；capabilities=${result.capabilityCount}`,
+          ...warningLines,
+        ];
+  const details = [
+    ...summary,
+    "",
+    `manifestPath=${sanitizeConnectorText(result.manifestPath)}`,
+    `version=${sanitizeConnectorText(result.version)}`,
+    `baseUrl=${redactBaseUrl(result.baseUrl)}`,
+    `capabilityIds=${sanitizeConnectorText(result.capabilityIds.join(", "))}`,
+  ];
+  return { summary, detailsText: details.join("\n") };
+}
+
+function usageText(action: "validate" | "test-run", language: Language): string {
+  if (action === "validate") {
+    return language === "en-US"
+      ? "Usage: /apps validate <manifestPath>"
+      : "用法：/apps validate <manifestPath>";
+  }
+  return language === "en-US"
+    ? "Usage: /apps test-run <manifestPath> <capabilityId> <json>"
+    : "用法：/apps test-run <manifestPath> <capabilityId> <json>";
+}
+
+function parseJsonInput(
+  json: string,
+): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!isRecord(parsed)) return { ok: false, error: "input must be a JSON object." };
+    return { ok: true, value: parsed };
+  } catch (error) {
+    return { ok: false, error: formatUnknownError(error) };
+  }
+}
+
+function localizedLine(
+  language: Language,
+  enPrefix: string,
+  zhPrefix: string,
+  detail: string,
+): string {
+  return language === "en-US"
+    ? `${enPrefix}: ${sanitizeConnectorText(detail)}`
+    : `${zhPrefix}：${sanitizeConnectorText(detail)}`;
 }
 
 function resolveProjectLocalManifestPath(
@@ -534,6 +785,19 @@ function mergeCapabilities(
     byId.set(capability.id, { ...byId.get(capability.id), ...capability });
   }
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function findDuplicateCapabilityIds(capabilities: CapabilityDefinition[]): string[] {
+  const seen = new Set<string>();
+  const duplicate = new Set<string>();
+  for (const capability of capabilities) {
+    if (seen.has(capability.id)) {
+      duplicate.add(capability.id);
+      continue;
+    }
+    seen.add(capability.id);
+  }
+  return [...duplicate].sort((a, b) => a.localeCompare(b));
 }
 
 async function executeHttpCapability(

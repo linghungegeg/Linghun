@@ -20,6 +20,7 @@ import {
   formatAppConnectorList,
   handleAppsCommand,
   listAppConnectors,
+  validateAppConnectorManifest,
 } from "./connector-runtime.js";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
@@ -74,6 +75,51 @@ describe("Connector Runtime Local HTTP", () => {
       expect(server.requests.some((item) => item.path === "/linghun/capabilities")).toBe(true);
       expect(output.text).not.toContain('"capabilities"');
       expect(output.text).not.toContain("Authorization");
+    } finally {
+      await server.close();
+      disconnectAppConnector("demo.drawing", context);
+    }
+  });
+
+  it("/apps validate checks a manifest without contacting the connector", async () => {
+    const context = await createConnectorTestContext("default");
+    const output = new MemoryOutput();
+    const manifestPath = await writeManifest(context.projectPath, "http://127.0.0.1:47831");
+
+    const result = await validateAppConnectorManifest(manifestPath, context);
+    await handleAppsCommand(["validate", manifestPath], context, output);
+
+    expect(result).toMatchObject({
+      ok: true,
+      appId: "demo.drawing",
+      capabilityCount: 2,
+    });
+    expect(output.text).toContain("Manifest 有效");
+    expect(output.text).toContain("capabilities=2");
+    expect(listAppConnectors(context)).toHaveLength(0);
+  });
+
+  it("/apps test-run connects, executes through Capability Runtime, and records evidence", async () => {
+    const context = await createConnectorTestContext("default");
+    const output = new MemoryOutput();
+    const server = await startMockConnector();
+    try {
+      const manifestPath = await writeManifest(context.projectPath, server.baseUrl);
+
+      await handleAppsCommand(
+        ["test-run", manifestPath, "demo.drawing.describe", '{"subject":"circle"}'],
+        context,
+        output,
+      );
+
+      expect(output.text).toContain("已连接 Demo Drawing 并执行 demo.drawing.describe");
+      expect(output.text).toContain("摘要：Described circle");
+      expect(server.requests.some((item) => item.path === "/linghun/capabilities")).toBe(true);
+      expect(server.requests.some((item) => item.path === "/linghun/execute")).toBe(true);
+      expect(context.evidence.some((item) => item.summary.includes("capability succeeded"))).toBe(
+        true,
+      );
+      expect(findCapability("demo.drawing.describe", context)).toBeTruthy();
     } finally {
       await server.close();
       disconnectAppConnector("demo.drawing", context);

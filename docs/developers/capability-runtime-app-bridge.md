@@ -6,6 +6,8 @@
 
 ```text
 /apps connect <manifestPath>
+/apps validate <manifestPath>
+/apps test-run <manifestPath> <capabilityId> <json>
 /apps list
 /apps doctor
 /apps disconnect <appId>
@@ -15,6 +17,13 @@
 `/apps connect` 只读取用户显式传入的本地 manifest，不做后台扫描，不读取无关目录。连接成功后，manifest 与远端发现到的 capabilities 会注册进 Capability Runtime，后续统一通过 `/capabilities run` 执行。
 
 HTTP connector capabilities 按当前项目隔离：一个项目通过 `/apps connect` 注册的 capability，不会出现在另一个项目的 `/capabilities list`、`/capabilities doctor` 或 `/capabilities run` 中。内置 mock capabilities 仍是全局可见。
+
+开发者自检入口：
+
+- `/apps validate <manifestPath>`：只校验当前项目内 manifest，不连接外部 app。
+- `/apps test-run <manifestPath> <capabilityId> <json>`：连接 manifest 指向的 Local HTTP app，执行一次 capability，并保留 connected 状态，便于继续 `/capabilities run` 或 `/apps disconnect`。
+
+根目录提供机器可读 schema：`APP_BRIDGE_MANIFEST.schema.json`。示例 connector 位于 `app-bridge-examples/node-demo` 和 `app-bridge-examples/python-demo`。
 
 ## Manifest
 

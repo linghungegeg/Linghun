@@ -1202,13 +1202,15 @@ POST /linghun/execute
 
 ```text
 /apps connect .\demo-connector.json
+/apps validate .\demo-connector.json
+/apps test-run .\demo-connector.json demo.drawing.describe {"subject":"circle"}
 /apps list
 /apps doctor
 /capabilities run demo.drawing.describe {"subject":"circle"}
 /apps disconnect demo.drawing
 ```
 
-当前 HTTP 执行端点是统一的 `/linghun/execute`，不是每个 capability 一个 URL。Auth 可以使用 `env`、`projectConfigRef`、`userConfigRef` 或 `valueRef`，不能在 manifest 中写 raw secret。详细开发者指南在 `docs/developers/capability-runtime-app-bridge.md`。
+当前 HTTP 执行端点是统一的 `/linghun/execute`，不是每个 capability 一个 URL。Auth 可以使用 `env`、`projectConfigRef`、`userConfigRef` 或 `valueRef`，不能在 manifest 中写 raw secret。开发者可以用 `/apps validate` 做只读 manifest 校验，用 `/apps test-run` 做一次连接与执行自测。根目录提供机器可读 `APP_BRIDGE_MANIFEST.schema.json`，示例 connector 在 `app-bridge-examples/`。详细开发者指南在 `docs/developers/capability-runtime-app-bridge.md`。
 
 开发者接入时，不需要理解 Linghun 的全部内部系统。一个应用只需要提供：
 

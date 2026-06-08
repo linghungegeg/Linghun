@@ -1202,13 +1202,15 @@ The user-facing connection commands are:
 
 ```text
 /apps connect .\demo-connector.json
+/apps validate .\demo-connector.json
+/apps test-run .\demo-connector.json demo.drawing.describe {"subject":"circle"}
 /apps list
 /apps doctor
 /capabilities run demo.drawing.describe {"subject":"circle"}
 /apps disconnect demo.drawing
 ```
 
-The current HTTP execution endpoint is the shared `/linghun/execute`, not a per-capability URL. Auth may use `env`, `projectConfigRef`, `userConfigRef`, or `valueRef`; raw secrets must not be written into the manifest. The full developer guide lives at `docs/developers/capability-runtime-app-bridge.md`.
+The current HTTP execution endpoint is the shared `/linghun/execute`, not a per-capability URL. Auth may use `env`, `projectConfigRef`, `userConfigRef`, or `valueRef`; raw secrets must not be written into the manifest. Developers can use `/apps validate` for read-only manifest checks and `/apps test-run` for one connect-and-execute self-test. The repository root includes the machine-readable `APP_BRIDGE_MANIFEST.schema.json`, and connector examples live under `app-bridge-examples/`. The full developer guide lives at `docs/developers/capability-runtime-app-bridge.md`.
 
 For application developers, integration does not require understanding every Linghun subsystem. An application provides:
 

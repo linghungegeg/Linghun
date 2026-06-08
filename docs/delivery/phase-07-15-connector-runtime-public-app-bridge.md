@@ -16,6 +16,8 @@
   - `AppConnectorDoctorResult`
 - `/apps` 命令：
   - `/apps connect <manifestPath>`
+  - `/apps validate <manifestPath>`
+  - `/apps test-run <manifestPath> <capabilityId> <json>`
   - `/apps list`
   - `/apps doctor`
   - `/apps disconnect <appId>`
@@ -47,6 +49,11 @@
   - 主屏 sanitizer 覆盖 `AppConnectorManifest`、`AppConnectorState`、raw connector response/payload/request
 - 开发者文档：
   - `docs/developers/capability-runtime-app-bridge.md`
+  - `docs/developers/capability-runtime-app-bridge.en.md`
+- 开源接入物料：
+  - `APP_BRIDGE_MANIFEST.schema.json`
+  - `app-bridge-examples/node-demo`
+  - `app-bridge-examples/python-demo`
 
 ## 使用方式
 
@@ -86,6 +93,8 @@ Manifest 示例：
 
 ```text
 /apps connect .\demo-connector.json
+/apps validate .\demo-connector.json
+/apps test-run .\demo-connector.json demo.drawing.describe {"subject":"circle"}
 /apps list
 /apps doctor
 /capabilities run demo.drawing.describe {"subject":"circle"}
@@ -112,6 +121,10 @@ Manifest 示例：
 - `packages/tui/src/model-prompt-runtime.ts`
 - `packages/tui/src/model-prompt-runtime.test.ts`
 - `docs/developers/capability-runtime-app-bridge.md`
+- `docs/developers/capability-runtime-app-bridge.en.md`
+- `APP_BRIDGE_MANIFEST.schema.json`
+- `app-bridge-examples/node-demo/*`
+- `app-bridge-examples/python-demo/*`
 - `docs/delivery/README.md`
 
 ## 关键设计
@@ -164,7 +177,9 @@ $env:LINGHUN_DEMO_DRAWING_KEY = "dev-local-token"
 ## 命令
 
 - `/apps list`
+- `/apps validate <manifestPath>`
 - `/apps connect <manifestPath>`
+- `/apps test-run <manifestPath> <capabilityId> <json>`
 - `/apps doctor`
 - `/apps disconnect <appId>`
 - `/capabilities run <capabilityId> <json>`
