@@ -38,7 +38,7 @@ describe("terminal interaction modes", () => {
     });
   });
 
-  it("requires explicit opt-in and app-owned screen mode before enabling mouse tracking", () => {
+  it("requires app-owned screen mode before enabling mouse tracking", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
@@ -61,11 +61,21 @@ describe("terminal interaction modes", () => {
     ).toBe(false);
   });
 
-  it("keeps app-owned mouse tracking off by default", () => {
+  it("enables app-owned wheel tracking by default", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
         env: {},
+        appOwnedScreen: true,
+      }).mouseTracking,
+    ).toBe(true);
+  });
+
+  it("allows disabling app-owned wheel tracking explicitly", () => {
+    expect(
+      resolveTerminalInteractionModes({
+        capability: capability(),
+        env: { LINGHUN_TUI_MOUSE: "0" },
         appOwnedScreen: true,
       }).mouseTracking,
     ).toBe(false);

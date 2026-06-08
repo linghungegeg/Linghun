@@ -392,7 +392,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("does not enable SGR mouse tracking by default so terminal selection remains native", async () => {
+  it("enables SGR wheel tracking by default without drag reporting", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -412,8 +412,10 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).not.toContain("\x1B[?1000h\x1B[?1002h\x1B[?1006h");
-    expect(output.text).not.toContain("\x1B[?1006l\x1B[?1002l\x1B[?1000l");
+    expect(output.text).toContain("\x1B[?1000h\x1B[?1006h");
+    expect(output.text).toContain("\x1B[?1006l\x1B[?1000l");
+    expect(output.text).not.toContain("\x1B[?1002h");
+    expect(output.text).not.toContain("\x1B[?1002l");
   });
 
   it("does not add beforeExit listener when waiting after unmount", async () => {

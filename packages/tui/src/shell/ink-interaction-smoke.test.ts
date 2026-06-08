@@ -310,7 +310,7 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
-  it("leaves mouse events to the terminal by default", async () => {
+  it("handles wheel by default but does not take over left selection", async () => {
     const view = {
       ...baseTaskView(),
       commandPanel: undefined,
@@ -332,8 +332,8 @@ describe("Ink TTY interaction smoke", () => {
     await writeInput(input, shell, "\x1b[<32;12;6M");
     await writeInput(input, shell, "\x1b[<0;12;6m");
 
-    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
-    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
     expect(events.some((event) => event.type === "transcript-mouse")).toBe(false);
 
     shell.unmount();

@@ -5,8 +5,8 @@ export const ENABLE_MODIFY_OTHER_KEYS = "\x1B[>4;2m";
 export const DISABLE_MODIFY_OTHER_KEYS = "\x1B[>4m";
 export const ENABLE_KITTY_KEYBOARD = "\x1B[>1u";
 export const DISABLE_KITTY_KEYBOARD = "\x1B[<u";
-export const ENABLE_SGR_MOUSE = "\x1B[?1000h\x1B[?1002h\x1B[?1006h";
-export const DISABLE_SGR_MOUSE = "\x1B[?1006l\x1B[?1002l\x1B[?1000l";
+export const ENABLE_SGR_MOUSE = "\x1B[?1000h\x1B[?1006h";
+export const DISABLE_SGR_MOUSE = "\x1B[?1006l\x1B[?1000l";
 
 export type TerminalInteractionOptions = {
   capability: TerminalCapability;
@@ -26,7 +26,7 @@ export function resolveTerminalInteractionModes({
   appOwnedScreen = false,
 }: TerminalInteractionOptions): TerminalInteractionModes {
   const mouseTracking =
-    env.LINGHUN_TUI_MOUSE === "1" && appOwnedScreen && capability.alternateScreen;
+    env.LINGHUN_TUI_MOUSE !== "0" && appOwnedScreen && capability.alternateScreen;
   return {
     kittyKeyboard:
       capability.kittyKeyboard ||
