@@ -186,7 +186,8 @@ export async function decidePermission(
   // without bypassing user-configured deny rules. Engine itself never auto-
   // denies; conservative path is `require_permission`, which falls through
   // here unchanged so the existing decision tree owns the `ask` / `allow` /
-  // `deny` outcome.
+  // `deny` outcome. auto-review intentionally handles the same readonly verdict
+  // in its own branch after explicit rules, so user rules still win there too.
   if (context.permissionMode !== "plan" && context.permissionMode !== "auto-review") {
     if (verdict.decision === "auto_allow_readonly") {
       // Honor explicit deny/ask rules even for readonly tools — never override
@@ -254,7 +255,7 @@ export async function decidePermission(
       return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。", verdict };
     }
     const reason =
-      "auto-review 仅自动放行低风险工作区编辑；当前动作需要确认，硬拒绝和路径安全仍由权限底座处理。";
+      "auto-review 仅自动放行安全只读动作和低风险工作区编辑；写入、非只读 Bash、安装、联网或权限变更仍需确认，硬拒绝和路径安全仍由权限底座处理。";
     return { request, decision: "ask", reason, verdict };
   }
 

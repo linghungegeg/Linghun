@@ -297,11 +297,30 @@ export function formatCapabilityDoctor(language: Language = "zh-CN", context?: T
     const connection = resolveCapabilityConnection(item, context);
     lines.push(
       sanitizeCapabilityDisplayText(
-        `- ${item.id}: ${connection.status}; transport=${item.transport}; auth=${item.auth}; permission=${item.permission}; ${connection.summary}`,
+        `- ${item.id}: availability=${formatCapabilityAvailability(item, connection)}; ${connection.status}; transport=${item.transport}; auth=${item.auth}; permission=${item.permission}; ${connection.summary}`,
       ),
     );
   }
   return lines.join("\n");
+}
+
+function formatCapabilityAvailability(
+  definition: CapabilityDefinition,
+  connection: CapabilityConnection,
+): string {
+  if (connection.status === "unsupported") {
+    return "not_implemented/unsupported (not a usable capability)";
+  }
+  if (definition.transport === "mock") {
+    return "mock/demo (diagnostic only; not a real external capability)";
+  }
+  if (connection.status === "connected") {
+    return "real/connected";
+  }
+  if (connection.status === "needs_configuration") {
+    return "reserved/needs_configuration (not usable until configured)";
+  }
+  return "reserved/not_connected (not usable until connected)";
 }
 
 export function registerCapabilityProvider(provider: CapabilityProvider): void {

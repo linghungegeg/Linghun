@@ -56,6 +56,56 @@ describe("verification-command-runtime", () => {
 
       expect(plan.find((step) => step.kind === "test")?.command).toBe(expectedCommand);
     });
+
+    it("uses project-specific TUI/provider smoke scripts as real-smoke candidates", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-real-smoke-"));
+      await writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({
+          scripts: {
+            "smoke:tui-stdin": "linghun < prompt.txt",
+            "smoke:live-provider": "node live-provider.mjs",
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8");
+
+      const plan = await createVerificationPlan(projectPath, "real-smoke");
+
+      expect(plan).toHaveLength(2);
+      expect(plan.map((step) => step.command)).toEqual([
+        "corepack pnpm smoke:tui-stdin",
+        "corepack pnpm smoke:live-provider",
+      ]);
+      expect(plan.every((step) => step.kind === "smoke" && step.synthetic === false)).toBe(true);
+      expect(plan[0].reason).toContain("TUI stdin real-smoke");
+      expect(plan[1].reason).toContain("live-provider real-smoke");
+    });
+
+    it("prefers the standard smoke script for real-smoke when present", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-standard-smoke-"));
+      await writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({
+          scripts: {
+            smoke: "node smoke.mjs",
+            "smoke:tui-stdin": "linghun < prompt.txt",
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8");
+
+      const plan = await createVerificationPlan(projectPath, "real-smoke");
+
+      expect(plan).toHaveLength(1);
+      expect(plan[0]).toMatchObject({
+        kind: "smoke",
+        command: "corepack pnpm smoke",
+        synthetic: false,
+      });
+    });
   });
 
   it("writes verification logs under LINGHUN_DATA_DIR when isolated", async () => {

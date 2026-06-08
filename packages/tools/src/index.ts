@@ -446,6 +446,11 @@ function readOptionalString(
   return value;
 }
 
+function normalizeOptionalWorkspacePath(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined;
+  return path.trim().length === 0 ? undefined : path;
+}
+
 function readOptionalPositiveInteger(
   record: Record<string, unknown>,
   key: string,
@@ -512,7 +517,7 @@ function validateGrepInput(input: unknown): GrepInput {
   const record = validateRecord(input, "Grep");
   return {
     pattern: readString(record, "pattern", "Grep"),
-    path: readOptionalString(record, "path", "Grep"),
+    path: normalizeOptionalWorkspacePath(readOptionalString(record, "path", "Grep")),
     limit: readOptionalPositiveInteger(record, "limit", "Grep"),
   };
 }
@@ -521,7 +526,7 @@ function validateGlobInput(input: unknown): GlobInput {
   const record = validateRecord(input, "Glob");
   return {
     pattern: readString(record, "pattern", "Glob"),
-    path: readOptionalString(record, "path", "Glob"),
+    path: normalizeOptionalWorkspacePath(readOptionalString(record, "path", "Glob")),
     limit: readOptionalPositiveInteger(record, "limit", "Glob"),
   };
 }

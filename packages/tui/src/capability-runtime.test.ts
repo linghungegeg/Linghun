@@ -178,8 +178,12 @@ describe("Capability Runtime MVP", () => {
     expect(definition).toBeTruthy();
     if (!definition) throw new Error("test.http.pending missing");
     expect(resolveCapabilityConnection(definition).status).toBe("needs_configuration");
-    expect(formatCapabilityDoctor("zh-CN")).toContain("test.http.pending");
-    expect(formatCapabilityDoctor("zh-CN")).toContain("needs_configuration");
+    const doctor = formatCapabilityDoctor("zh-CN");
+    expect(doctor).toContain("test.http.pending");
+    expect(doctor).toContain("needs_configuration");
+    expect(doctor).toContain("availability=reserved/needs_configuration");
+    expect(doctor).toContain("availability=mock/demo");
+    expect(doctor).toContain("not a real external capability");
   });
 
   it("sanitizes capability metadata in list, doctor, and result details", () => {

@@ -51,7 +51,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     modeCurrent: "当前权限模式：{mode}",
     modeOptions: "可选：default / auto-review / plan / full-access",
     modeBoundary:
-      "边界：切换模式不等于绕过硬拒绝；危险动作仍受权限底座约束。Plan 仍只读，auto-review 会自动放行低风险工作区编辑。",
+      "边界：切换模式不等于绕过硬拒绝；危险动作仍受权限底座约束。Plan 仍只读，auto-review 会自动放行安全只读动作和低风险工作区编辑；写入、非只读 Bash、安装、联网或权限变更仍会确认。",
     modeUnknown: "未知模式。可选：default / auto-review / plan / full-access",
     modeSwitched: "已切换权限模式：{mode}",
     modePlanBoundary:
@@ -96,7 +96,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     modeCurrent: "Current permission mode: {mode}",
     modeOptions: "Options: default / auto-review / plan / full-access",
     modeBoundary:
-      "Boundary: switching modes does not bypass hard denies; dangerous actions still go through the permission pipeline. Plan remains readonly; auto-review automatically allows low-risk workspace edits.",
+      "Boundary: switching modes does not bypass hard denies; dangerous actions still go through the permission pipeline. Plan remains readonly; auto-review automatically allows safe readonly actions and low-risk workspace edits; writes, non-readonly Bash, installs, network, and permission changes still ask.",
     modeUnknown: "Unknown mode. Options: default / auto-review / plan / full-access",
     modeSwitched: "Permission mode switched: {mode}",
     modePlanBoundary:

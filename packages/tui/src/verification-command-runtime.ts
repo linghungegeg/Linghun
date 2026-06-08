@@ -41,17 +41,7 @@ export async function createVerificationPlan(
   const scripts = isRecord(packageJson?.scripts) ? packageJson.scripts : {};
   const packageManager = await detectPackageManager(projectPath);
   if (mode === "real-smoke") {
-    return typeof scripts.smoke === "string"
-      ? [
-          {
-            kind: "smoke",
-            command: formatPackageManagerCommand(packageManager, "smoke"),
-            reason:
-              "项目自定义 real-smoke：使用 package.json smoke 脚本；非 synthetic，可作为真实 smoke 候选证据。",
-            synthetic: false,
-          },
-        ]
-      : [];
+    return createRealSmokePlan(scripts, packageManager);
   }
   const steps: VerificationStep[] = [];
   addPackageStep(
@@ -131,6 +121,45 @@ export function addPackageStep(
     return;
   }
   steps.push({ kind, command: formatPackageManagerCommand(packageManager, scriptName), reason });
+}
+
+function createRealSmokePlan(
+  scripts: Record<string, unknown>,
+  packageManager: PackageManager,
+): VerificationStep[] {
+  if (typeof scripts.smoke === "string") {
+    return [
+      {
+        kind: "smoke",
+        command: formatPackageManagerCommand(packageManager, "smoke"),
+        reason:
+          "项目自定义 real-smoke：使用 package.json smoke 脚本；非 synthetic，可作为真实 smoke 候选证据。",
+        synthetic: false,
+      },
+    ];
+  }
+
+  const candidates: Array<{ scriptName: string; reason: string }> = [
+    {
+      scriptName: "smoke:tui-stdin",
+      reason:
+        "项目 TUI stdin real-smoke：覆盖真实 CLI/TUI 输入主链；非 synthetic，可作为真实 smoke 候选证据。",
+    },
+    {
+      scriptName: "smoke:live-provider",
+      reason:
+        "项目 live-provider real-smoke：覆盖真实 provider 请求主链；非 synthetic，可作为真实 provider smoke 候选证据。",
+    },
+  ];
+
+  return candidates
+    .filter((candidate) => typeof scripts[candidate.scriptName] === "string")
+    .map((candidate) => ({
+      kind: "smoke" as const,
+      command: formatPackageManagerCommand(packageManager, candidate.scriptName),
+      reason: candidate.reason,
+      synthetic: false,
+    }));
 }
 
 type PackageManager = "pnpm" | "npm" | "yarn" | "bun";

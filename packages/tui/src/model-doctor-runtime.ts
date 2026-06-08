@@ -207,6 +207,7 @@ export function formatModelRoutes(config: LinghunConfig): string {
         `- ${route.role}: provider ${route.provider || "未配置"}`,
         `model ${route.primaryModel || "未配置"}`,
         `capabilities ${route.requiredCapabilities.join("+") || "none"}`,
+        `availability ${formatRouteAvailability(route)}`,
         `tool route hint ${route.allowTools ? "yes" : "no"}`,
         `write route hint ${route.allowWrite ? "yes" : "no"}`,
         `bash route hint ${route.allowBash ? "yes" : "no"}`,
@@ -216,6 +217,28 @@ export function formatModelRoutes(config: LinghunConfig): string {
     "提示：route hint 只是候选能力提示，最终工具执行仍由权限模式和 permission gate 决定。",
     "提示：/model route doctor 诊断缺 provider、能力不足和预算配置。",
   ].join("\n");
+}
+
+function formatRouteAvailability(route: RoleModelRoute): string {
+  const capabilityText = route.requiredCapabilities.join("+") || "none";
+  if (!route.provider && !route.primaryModel) {
+    return route.requiredCapabilities.includes("vision") || route.requiredCapabilities.includes("image")
+      ? `reserved/disabled (${capabilityText} provider/model 未配置；不是可用能力)`
+      : "unconfigured (provider/model 未配置)";
+  }
+  if (!route.provider || !route.primaryModel) {
+    return "unconfigured (provider 或 model 缺失)";
+  }
+  return "configured";
+}
+
+function collectReservedMultimodalRoutes(config: LinghunConfig): RoleModelRoute[] {
+  return config.modelRoutes.routes.filter(
+    (route) =>
+      (route.requiredCapabilities.includes("vision") || route.requiredCapabilities.includes("image")) &&
+      !route.provider &&
+      !route.primaryModel,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +334,15 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       .join(",");
     lines.push(
       `- WARN placeholder model: providers=[${providerHits || "none"}] routes=[${routeHits || "none"}] (这些是占位/未成熟模型名；smoke 前请用 LINGHUN_DEEPSEEK_MODEL/LINGHUN_DEFAULT_MODEL 替换为现役模型名，例如 deepseek-chat/deepseek-reasoner)`,
+    );
+  }
+  const reservedMultimodalRoutes = collectReservedMultimodalRoutes(context.config);
+  if (reservedMultimodalRoutes.length > 0) {
+    const roles = reservedMultimodalRoutes
+      .map((route) => `${route.role}(${route.requiredCapabilities.join("+")})`)
+      .join(",");
+    lines.push(
+      `- reserved multimodal routes: ${roles} provider/model 未配置；status/doctor 将其标记为 reserved/disabled，不是可用能力。`,
     );
   }
   // D.13F：顶层 promptCache 摘要（仅展示 enabled / systemTtl，与具体 provider 无关）。

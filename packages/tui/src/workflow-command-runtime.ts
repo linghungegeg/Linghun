@@ -676,40 +676,32 @@ export function formatWorkflowStatus(context: TuiContext): string {
       ? "No active workflow run."
       : "当前没有 active workflow run。";
   }
-  const lines = [
-    context.language === "en-US"
-      ? `Workflow runs: ${runs.length}; selected ${context.workflows.activeRun?.id ?? "-"}`
-      : `Workflow runs：${runs.length}；当前选中 ${context.workflows.activeRun?.id ?? "-"}`,
-  ];
+  const lines: string[] = [];
   for (const run of runs) {
-    const counts = run.steps.reduce(
-      (acc, step) => {
-        acc[step.status] += 1;
-        return acc;
-      },
-      {
-        queued: 0,
-        running: 0,
-        completed: 0,
-        partial: 0,
-        failed: 0,
-        blocked: 0,
-        cancelled: 0,
-        stale: 0,
-      } satisfies Record<WorkflowStepState["status"], number>,
+    const total = run.steps.length;
+    const completed = run.steps.filter((s) => s.status === "completed").length;
+    const problemStep = run.steps.find(
+      (s) => s.status === "failed" || s.status === "blocked" || s.status === "stale",
     );
-    lines.push(
-      `Workflow ${run.id}`,
-      `- status: ${run.status}; result ${run.result}`,
-      `- goal: ${truncateDisplay(run.goal, 120)}`,
-      `- planId: ${run.planId}`,
-      `- steps: queued ${counts.queued}; running ${counts.running}; completed ${counts.completed}; partial ${counts.partial}; blocked ${counts.blocked}; failed ${counts.failed}; cancelled ${counts.cancelled}; stale ${counts.stale}`,
-      `- evidenceRefs: ${run.steps.flatMap((step) => step.evidenceRefs).join(", ") || "none"}`,
-    );
+
+    lines.push(`Workflow ${run.id}: ${run.status} (${completed}/${total} completed)`);
+    lines.push(`- goal: ${truncateDisplay(run.goal, 120)}`);
+
+    if (problemStep) {
+      lines.push(`- stopped at: ${truncateDisplay(problemStep.summary, 80)} [${problemStep.status}]`);
+    }
+
+    if (run.status === "running") {
+      const current = run.steps.find((s) => s.status === "running");
+      if (current) {
+        lines.push(`- running: ${truncateDisplay(current.summary, 80)}`);
+      }
+    }
   }
   lines.push(
-    "- completion is PARTIAL only; blocked/stale/cancelled/failed steps are not verification evidence.",
-    "- background: /background; details: /details background <id>",
+    context.language === "en-US"
+      ? "Details: /background or /details background <id>"
+      : "详情：/background 或 /details background <id>",
   );
   return lines.join("\n");
 }

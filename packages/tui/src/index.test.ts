@@ -16177,6 +16177,8 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/mode auto", context, output);
 
     expect(output.text).toContain("可选：default / auto-review / plan / full-access");
+    expect(output.text).toContain("安全只读动作和低风险工作区编辑");
+    expect(output.text).toContain("非只读 Bash");
     expect(output.text).not.toContain(
       "可选：default / plan / acceptEdits / dontAsk / auto / bypass",
     );
@@ -26555,7 +26557,7 @@ describe("D.13V-B/C source invariants", () => {
     expect(text).toMatch(/"full-access":\s*"full access \(safety on\)"/);
   });
 
-  it("auto-review 允许低风险 Edit，但 medium Write 和危险动作仍走 ask/deny", async () => {
+  it("auto-review 允许安全只读和低风险 Edit，但 medium Write 和危险动作仍走 ask/deny", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -26570,6 +26572,16 @@ describe("D.13V-B/C source invariants", () => {
       session.id,
     );
     expect(edit.decision).toBe("allow");
+
+    const readonlyBash = await decidePermission(
+      "Bash",
+      { command: "node --version" },
+      context,
+      session.id,
+    );
+    expect(readonlyBash.decision).toBe("allow");
+    expect(readonlyBash.autoAllowReadonly?.decision).toBe("auto_allow_readonly");
+    expect(readonlyBash.reason).toContain("安全只读动作");
 
     const write = await decidePermission(
       "Write",

@@ -446,6 +446,18 @@ describe("Phase 05 core tools", () => {
     expect(grep.output.data).toMatchObject({ count: 1 });
   });
 
+  it("treats empty Grep and Glob paths as the workspace root", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(join(project, "sample.txt"), "needle\n", "utf8");
+
+    const grep = await runTool("Grep", { pattern: "needle", path: "" }, context);
+    const glob = await runTool("Glob", { pattern: "*.txt", path: "" }, context);
+
+    expect(grep.output.text).toContain("sample.txt:1");
+    expect(glob.output.text).toContain("sample.txt");
+  });
+
   it("uses rg for Grep and Glob when available, including Chinese paths and ignored dirs", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const calls: string[][] = [];

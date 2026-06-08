@@ -274,8 +274,17 @@ describe("model-doctor-runtime", () => {
       const output = formatModelRoutes(baseConfig);
       expect(output).toContain("executor");
       expect(output).toContain("provider deepseek");
-      expect(output).toContain("tools yes");
+      expect(output).toContain("tool route hint yes");
+      expect(output).toContain("availability configured");
       expect(output).toContain("/model route doctor");
+    });
+
+    it("marks reserved multimodal routes as disabled rather than usable", () => {
+      const output = formatModelRoutes(defaultConfig);
+      expect(output).toContain("vision: provider 未配置");
+      expect(output).toContain("image: provider 未配置");
+      expect(output).toContain("availability reserved/disabled (vision provider/model 未配置；不是可用能力)");
+      expect(output).toContain("availability reserved/disabled (image provider/model 未配置；不是可用能力)");
     });
   });
 
@@ -631,6 +640,13 @@ describe("model-doctor-runtime", () => {
       const output = await formatModelRouteDoctor(makeContext(baseConfig));
       expect(output).toContain("- prompt cache: enabled yes; system ttl 5m");
       expect(output).toContain("5m 默认 cache_control 无 ttl 字面量");
+    });
+
+    it("marks default vision/image routes as reserved and disabled in doctor", async () => {
+      const output = await formatModelRouteDoctor(makeContext(defaultConfig));
+      expect(output).toContain("reserved multimodal routes: vision(vision),image(image)");
+      expect(output).toContain("reserved/disabled");
+      expect(output).toContain("不是可用能力");
     });
 
     it("shows prompt cache enabled no when disabled", async () => {
