@@ -11,7 +11,12 @@ import { formatModeBehavior } from "./slash-dispatch.js";
 import { formatError, writeLine } from "./startup-runtime.js";
 import type { TerminalReadinessView } from "./terminal-readiness-presenter.js";
 import { createVerificationLevelForReadiness } from "./terminal-readiness-runtime.js";
-import { findBackgroundTask, isRuntimeActiveBackgroundTask } from "./tui-agent-job-runtime.js";
+import {
+  createJobBackgroundTask,
+  findBackgroundTask,
+  findDurableJob,
+  isRuntimeActiveBackgroundTask,
+} from "./tui-agent-job-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import {
   createLogArtifactRegistry,
@@ -22,6 +27,7 @@ import {
 import type { MessageKey } from "./tui-messages.js";
 import { messages } from "./tui-messages.js";
 import { getRuntimeStatusProvider, getSelectedModelRuntime } from "./tui-model-runtime.js";
+import { hydrateWorkflowRuns } from "./workflow-command-runtime.js";
 import { createShellBlockOutputForTest, writeErrorLine } from "./tui-output-surface.js";
 
 // Module 4 — upsertJobBackgroundTask / createJobBackgroundTask /
@@ -62,7 +68,7 @@ async function runDetailsCommandBody(
     return;
   }
   if (action === "background") {
-    const task = findBackgroundTask(context, id);
+    const task = await findDurableBackgroundTask(context, id);
     writeLine(
       output,
       task
@@ -72,7 +78,7 @@ async function runDetailsCommandBody(
     return;
   }
   if (action === "output") {
-    const task = findBackgroundTask(context, id);
+    const task = await findDurableBackgroundTask(context, id);
     const evidence = task ? undefined : findEvidence(context, id);
     const logRequest = parseLogArtifactRequest(args.slice(2));
     if (logRequest) {
@@ -124,6 +130,19 @@ async function runDetailsCommandBody(
     return;
   }
   showCommandPanel(context, output, panel);
+}
+
+async function findDurableBackgroundTask(
+  context: TuiContext,
+  id: string | undefined,
+): Promise<ReturnType<typeof findBackgroundTask>> {
+  let task = findBackgroundTask(context, id);
+  if (task || !id) return task;
+  await hydrateWorkflowRuns(context);
+  task = findBackgroundTask(context, id);
+  if (task) return task;
+  const job = await findDurableJob(context, id);
+  return job ? createJobBackgroundTask(job, context) : undefined;
 }
 
 export function formatHomeScreen(context: TuiContext): string {

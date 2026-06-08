@@ -214,7 +214,7 @@ function formatJobBudgetLine(job: DurableJobState): string {
   parts.push(explicit?.runtime === true ? `timeout ${job.timeoutMs}ms` : "timeout not set");
   const anyExplicit = Boolean(explicit?.tokens || explicit?.steps || explicit?.runtime);
   const prefix = anyExplicit ? "budget" : "budget not set";
-  return `- ${prefix}: ${parts.join("; ")}`;
+  return `- ${prefix}: ${parts.join("; ")}\n- cap scope: durable job agents only; unrelated /fork agents do not silently consume this effective cap.`;
 }
 
 export function countDurableJobAgents(job: DurableJobState): Record<DurableJobAgentStatus, number> {

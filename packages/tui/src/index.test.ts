@@ -6000,6 +6000,59 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Beta readiness PASS");
   });
 
+  it("finds durable background details after the 50 item memory projection drops an old job", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-durable-background-fallback-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    const output = new MemoryOutput();
+    const oldJob = await persistDurableJobFixture(project, config, "running", undefined, "old-visible");
+    context.backgroundTasks = Array.from({ length: MAX_BACKGROUND_TASKS }, (_, index) =>
+      createBackgroundTaskFixture("job", { id: `recent-job-${index}` }),
+    );
+
+    await handleSlashCommand(`/details background ${oldJob.id}`, context, output);
+
+    expect(output.text).toContain(oldJob.id);
+    expect(output.text).toContain("Background");
+  });
+
+  it("does not let unrelated /fork agents consume durable job effective cap", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-job-cap-scope-"));
+    const config: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", { id: "fork-agent-a" }),
+      createBackgroundTaskFixture("agent", { id: "fork-agent-b" }),
+    ];
+    mockOpenAiTextFetch("job child done");
+
+    await handleSlashCommand("/job run cap scope --multi-agent --agents 2 --tokens 50000", context, output);
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(resolveStoragePaths(config, project).jobs, jobId ?? "missing", "state.json");
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      effectiveAgentCap?: number;
+      capReason?: string;
+    };
+    expect(persisted.effectiveAgentCap).toBe(2);
+    expect(persisted.capReason).toContain("runtime_job_owned_dynamic_cap");
+    await handleSlashCommand(`/job status ${jobId}`, context, output);
+    expect(output.text).toContain("durable job agents only");
+    expect(output.text).not.toContain("default 3/4/20");
+  });
+
   it("runs /job --multi-agent through real AgentRun children with unknown index and keeps verifier PASS separate", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-real-job-agents-"));
     const config: LinghunConfig = {
@@ -6038,7 +6091,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.verification?.status).toBe("partial");
     expect(persisted.verification?.summary).toContain("not verification evidence");
     expect(persisted.effectiveAgentCap).toBe(4);
-    expect(persisted.capReason).toContain("runtime_dynamic_cap");
+    expect(persisted.capReason).toContain("runtime_job_owned_dynamic_cap");
     expect(persisted.capReason).not.toBe("not_running");
     expect(persisted.capReason).not.toContain("effectiveCap=0");
     expect(persisted.handoffPacket?.indexStatus?.status).toBe("unknown");
@@ -6351,7 +6404,7 @@ describe("Phase 06 TUI slash commands", () => {
       join(resolveStoragePaths(config, project).jobs, jobId ?? "missing", "state.json"),
     );
     expect(job?.effectiveAgentCap).toBe(5);
-    expect(job?.capReason).toContain("runtime_dynamic_cap");
+    expect(job?.capReason).toContain("runtime_job_owned_dynamic_cap");
     expect(context.backgroundTasks.find((task) => task.id === "job-stale-cap")?.status).toBe(
       "stale",
     );
@@ -6536,6 +6589,67 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript.some((event) => event.type === "background_task_update")).toBe(true);
     expect(output.text).toContain("模型网关未就绪");
     expect(output.text).not.toContain("PASS：");
+  });
+
+  it("keeps multiple workflow runs visible in status instead of overwriting activeRun", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-multi-active-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    const output = new MemoryOutput();
+    const plan = normalizeWorkflowPlan({
+      id: "wf-multi-active",
+      title: "multi active",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: context.permissionMode,
+      currentPhaseId: "phase-a",
+      phases: [
+        {
+          id: "phase-a",
+          title: "Phase A",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "test" },
+          slices: [
+            {
+              id: "details-a",
+              title: "details A",
+              role: "worker",
+              status: "queued",
+              references: [],
+              targetRuntime: {
+                kind: "details",
+                view: "evidence",
+                mutating: false,
+              },
+            },
+          ],
+        },
+      ],
+      stopConditions: [],
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid workflow plan");
+
+    await __testRunWorkflowStepsWithPlan("first active workflow", plan.plan, context, output, {
+      __testRunId: "workflow-multi-first",
+    });
+    await __testRunWorkflowStepsWithPlan("second active workflow", plan.plan, context, output, {
+      __testRunId: "workflow-multi-second",
+    });
+    await handleSlashCommand("/workflows status", context, output);
+
+    expect(context.workflows.activeRuns?.map((run) => run.id)).toEqual([
+      "workflow-multi-second",
+      "workflow-multi-first",
+    ]);
+    expect(context.workflows.activeRun?.id).toBe("workflow-multi-second");
+    expect(output.text).toContain("workflow-multi-first");
+    expect(output.text).toContain("workflow-multi-second");
   });
 
   it("parses RunWorkflow multi-agent fields for auditable workflow input", () => {
@@ -18501,6 +18615,51 @@ describe("Phase 06 TUI slash commands", () => {
       ),
     ).toBe(true);
     expect(JSON.stringify(transcript)).not.toContain("failure_learning");
+  });
+
+  it("/interrupt cancels all running workflow runs without dropping sibling active runs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-interrupt-multi-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const startedAt = new Date().toISOString();
+    context.workflows.activeRuns = ["workflow-interrupt-a", "workflow-interrupt-b"].map((id) => ({
+      id,
+      goal: id,
+      planId: "wf-interrupt-multi",
+      status: "running" as const,
+      startedAt,
+      result: "partial" as const,
+      steps: [
+        {
+          id: `${id}-step`,
+          title: "running step",
+          status: "running" as const,
+          runtime: "agent" as const,
+          evidenceRefs: [],
+          startedAt,
+        },
+      ],
+    }));
+    context.workflows.activeRun = context.workflows.activeRuns[0];
+    context.backgroundTasks = context.workflows.activeRuns.map((run) =>
+      createBackgroundTaskFixture("job", { id: run.id, title: `Workflow: ${run.goal}` }),
+    );
+
+    await handleSlashCommand("/interrupt", context, output);
+
+    expect(context.workflows.activeRuns.map((run) => [run.id, run.status, run.result])).toEqual([
+      ["workflow-interrupt-a", "cancelled", "cancelled"],
+      ["workflow-interrupt-b", "cancelled", "cancelled"],
+    ]);
+    await handleSlashCommand("/workflows status", context, output);
+    expect(output.text).toContain("workflow-interrupt-a");
+    expect(output.text).toContain("workflow-interrupt-b");
   });
 
   it("/interrupt persists active workflow cancellation when background state is missing", async () => {

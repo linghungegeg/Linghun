@@ -40,6 +40,7 @@ import type { BackgroundTaskState, DurableJobState } from "./tui-data-types.js";
 import {
   createWorkflowInterruptBackgroundTask,
   finishWorkflowRun,
+  getWorkflowRuns,
   upsertWorkflowBackgroundTask,
 } from "./workflow-command-runtime.js";
 
@@ -520,13 +521,12 @@ export async function interruptAllActiveWork(
     abortSignalsSent += 1;
   }
 
-  const workflowRun = context.workflows.activeRun;
-  const workflowTask =
-    workflowRun?.status === "running"
-      ? (context.backgroundTasks.find((task) => task.id === workflowRun.id) ??
-        createWorkflowInterruptBackgroundTask(workflowRun, context.language))
-      : undefined;
-  if (workflowRun?.status === "running" && workflowTask) {
+  const workflowRuns = getWorkflowRuns(context).filter((run) => run.status === "running");
+  const workflowRunIds = new Set(workflowRuns.map((run) => run.id));
+  for (const workflowRun of workflowRuns) {
+    const workflowTask =
+      context.backgroundTasks.find((task) => task.id === workflowRun.id) ??
+      createWorkflowInterruptBackgroundTask(workflowRun, context.language);
     upsertWorkflowBackgroundTask(context, workflowTask);
     cancelled += 1;
     markedOnly += 1;
@@ -546,7 +546,7 @@ export async function interruptAllActiveWork(
     context.agents.filter((agent) => agent.status === "running").map((agent) => agent.id),
   );
   const activeTasks = context.backgroundTasks
-    .filter((task) => isRuntimeActiveBackgroundTask(task) && task.id !== workflowRun?.id)
+    .filter((task) => isRuntimeActiveBackgroundTask(task) && !workflowRunIds.has(task.id))
     .filter((task) => !runningAgentIds.has(task.id));
   for (const task of activeTasks) {
     const aborted = abortBackgroundTask(context, task.id);
@@ -588,12 +588,6 @@ export async function interruptAllActiveWork(
     await cancelAgentByRef(agent.id, context, createSilentOutput());
     cancelled += 1;
     if (hadController) abortSignalsSent += 1;
-  }
-
-  if (context.workflows.activeRun?.status === "running") {
-    context.workflows.activeRun.status = "cancelled";
-    context.workflows.activeRun.endedAt = now;
-    context.workflows.activeRun.result = "cancelled";
   }
 
   await appendInterruptEvent(

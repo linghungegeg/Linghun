@@ -53,6 +53,7 @@ import {
 import { getRoleRoute } from "./model-doctor-runtime.js";
 import { inferProviderForRouteModel } from "./model-doctor-runtime.js";
 import { createModelToolDefinitionsForTools } from "./model-loop-runtime.js";
+import { getWorkflowRuns } from "./workflow-command-runtime.js";
 import {
   checkProviderCooldown,
   clearProviderBreaker,
@@ -947,7 +948,7 @@ export async function createDurableJob(
         ? `resource_guard:${resourceGuard}`
         : undefined;
   const agents = createDurableJobAgents(options, status, runningCap);
-  const effectiveCap = status === "running" ? resolveEffectiveJobAgentCap(context, runningCap) : 0;
+  const effectiveCap = status === "running" ? runningCap : 0;
   const capReason = formatInitialJobCapReason(status, {
     pauseReason,
     requestedAgents: options.requestedAgents,
@@ -1115,16 +1116,9 @@ function formatInitialJobCapReason(
   return `preflight_blocked:${input.preflight.missing.join(",") || "unknown"}`;
 }
 
-function resolveEffectiveJobAgentCap(
-  context: TuiContext,
-  requestedCap: number,
-  ignoreTaskId?: string,
-): number {
-  const runningAgents = context.backgroundTasks.filter(
-    (task) =>
-      task.id !== ignoreTaskId && task.kind === "agent" && isRuntimeActiveBackgroundTask(task),
-  ).length;
-  return Math.max(0, requestedCap - runningAgents);
+function resolveEffectiveJobAgentCap(job: DurableJobState): number {
+  const runningJobAgents = job.agents.filter((agent) => agent.status === "running").length;
+  return Math.max(0, job.budget.maxRunningAgents - runningJobAgents);
 }
 
 function hasRunnableJobAgents(job: DurableJobState): boolean {
@@ -1349,8 +1343,8 @@ export async function resumeDurableJob(job: DurableJobState, context: TuiContext
   }
   updateDurableJobEffectiveAgentCap(
     job,
-    resolveEffectiveJobAgentCap(context, job.budget.maxRunningAgents, job.id),
-    "resume_dynamic_cap",
+    resolveEffectiveJobAgentCap(job),
+    "resume_job_owned_dynamic_cap",
   );
   await transitionDurableJob(job, context, "running");
   if (job.status === "running") {
@@ -1528,8 +1522,8 @@ export async function runDurableJobLiteTick(
   }
   updateDurableJobEffectiveAgentCap(
     job,
-    resolveEffectiveJobAgentCap(context, job.budget.maxRunningAgents, job.id),
-    "runtime_dynamic_cap",
+    resolveEffectiveJobAgentCap(job),
+    "runtime_job_owned_dynamic_cap",
   );
   const budgetStop = await applyDurableJobBudgetStop(context, job, "before_worker_loop");
   if (budgetStop) {
@@ -2061,10 +2055,7 @@ export async function handleForkCommand(
     return;
   }
   const workflowTaskId =
-    runtimeOptions.workflowRunId ??
-    (context.workflows.activeRun?.status === "running"
-      ? context.workflows.activeRun.id
-      : undefined);
+    runtimeOptions.workflowRunId ?? getWorkflowRuns(context).find((run) => run.status === "running")?.id;
   const guard = deps().checkBackgroundStartGuard(context, "agent", false, workflowTaskId);
   if (guard) {
     writeLine(output, guard);

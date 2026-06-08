@@ -983,24 +983,27 @@ export type WorkflowTemplate = {
   steps: string[];
 };
 
+export type WorkflowRunState = {
+  id: string;
+  goal: string;
+  planId: string;
+  status: "running" | "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale";
+  steps: WorkflowStepState[];
+  startedAt: string;
+  endedAt?: string;
+  result: "partial" | "failed" | "blocked" | "cancelled" | "stale";
+  /** Set to true when the user explicitly invoked /workflows run. */
+  phaseGateConfirmed?: boolean;
+  confirmedPhaseStopPoints?: string[];
+};
+
 export type WorkflowState = {
   enabled: boolean;
   templates: WorkflowTemplate[];
   disabledIds: string[];
   lastStarted?: string;
-  activeRun?: {
-    id: string;
-    goal: string;
-    planId: string;
-    status: "running" | "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale";
-    steps: WorkflowStepState[];
-    startedAt: string;
-    endedAt?: string;
-    result: "partial" | "failed" | "blocked" | "cancelled" | "stale";
-    /** Set to true when the user explicitly invoked /workflows run. */
-    phaseGateConfirmed?: boolean;
-    confirmedPhaseStopPoints?: string[];
-  };
+  activeRuns?: WorkflowRunState[];
+  activeRun?: WorkflowRunState;
 };
 
 export type HookSummary = {
