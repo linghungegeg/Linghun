@@ -966,6 +966,7 @@ import {
 import { CHAT_COMPLETIONS_ENDPOINT, formatStats, formatUsage } from "./usage-stats-presenter.js";
 import {
   createReviewReport,
+  createVerificationUnavailableReport,
   createVerificationPlan,
   formatVerificationLast,
   formatVerificationPlan,
@@ -1697,8 +1698,8 @@ export async function handleRewindCommand(
     writeLine(
       output,
       context.language === "en-US"
-        ? "Linghun snapshot checkpoints (in-memory file snapshots; not a git reset):"
-        : "Linghun snapshot checkpoint（内存文件快照，不是 git reset）：",
+        ? "Linghun snapshot checkpoints (in-memory file snapshots; not git revert/reset and does not move HEAD):"
+        : "Linghun snapshot checkpoint（内存文件快照，不是 git revert/reset，不移动 HEAD）：",
     );
     writeLine(
       output,
@@ -1818,8 +1819,8 @@ export async function handleRewindCommand(
   writeLine(
     output,
     context.language === "en-US"
-      ? `Linghun snapshot checkpoint restored (not a git operation): ${checkpoint.id}`
-      : `已恢复 Linghun snapshot checkpoint（不是 git reset）：${checkpoint.id}`,
+      ? `Linghun snapshot checkpoint restored (file snapshot only; not git revert/reset and HEAD was not moved): ${checkpoint.id}`
+      : `已恢复 Linghun snapshot checkpoint（仅文件快照；不是 git revert/reset，HEAD 未移动）：${checkpoint.id}`,
   );
   writeStatus(output, context);
 }
@@ -2172,6 +2173,10 @@ export async function handleVerifyCommand(
     if (plan.length === 0) {
       plan = await createVerificationPlan(context.projectPath, "smoke");
     }
+  } else if (action === "focused") {
+    plan = await createVerificationPlan(context.projectPath, "focused");
+  } else if (action === "real-smoke") {
+    plan = await createVerificationPlan(context.projectPath, "real-smoke");
   } else {
     plan = await createVerificationPlan(
       context.projectPath,
@@ -2179,15 +2184,39 @@ export async function handleVerifyCommand(
     );
   }
 
-  if (action === "plan") {
+  if (action === "plan" || action === "plan-only") {
     writeLine(output, formatVerificationPlan(plan, context.language));
-    return;
-  }
-  if (action && action !== "smoke" && action !== "typecheck") {
     writeLine(
       output,
-      "用法：/verify | /verify plan | /verify last | /verify smoke | /verify typecheck",
+      context.language === "en-US"
+        ? "Mode: plan-only. No command was run and no verification evidence was recorded."
+        : "模式：plan-only。未执行命令，也不会记录验证 evidence。",
     );
+    return;
+  }
+  if (
+    action &&
+    action !== "smoke" &&
+    action !== "typecheck" &&
+    action !== "focused" &&
+    action !== "real-smoke"
+  ) {
+    writeLine(
+      output,
+      "用法：/verify | /verify plan-only | /verify plan | /verify last | /verify focused | /verify real-smoke | /verify smoke | /verify typecheck",
+    );
+    return;
+  }
+  if (action === "real-smoke" && plan.length === 0) {
+    const sessionId = await ensureSession(context);
+    const report = createVerificationUnavailableReport(
+      "real-smoke",
+      "package.json 未提供 smoke 脚本；synthetic smoke 不会升级为 real-smoke。",
+    );
+    context.lastVerification = report;
+    await recordVerificationEvidence(context, sessionId, report);
+    writeLine(output, formatVerificationTaskSummary(report, context.language));
+    writeStatus(output, context);
     return;
   }
 

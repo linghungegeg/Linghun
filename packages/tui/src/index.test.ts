@@ -10859,6 +10859,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("SHOULD_NOT_RUN");
     expect(output.text).not.toContain("tool_result");
     expect(transcript).toContain('"type":"tool_result"');
+    expect(transcript).toContain("permission_user_decision");
+    expect(transcript).toContain("decision=denied");
     await expect(readFailureRecordFiles(project)).resolves.toEqual([]);
   });
 
@@ -10908,6 +10910,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("我已收到取消结果，不会继续写文件。");
     expect(output.text).not.toContain("tool_result");
     expect(transcript).toContain('"type":"tool_result"');
+    expect(transcript).toContain("permission_user_decision");
+    expect(transcript).toContain("decision=cancelled");
     await expect(readFile(join(project, "cancelled.txt"), "utf8")).rejects.toThrow();
   });
 
@@ -14299,14 +14303,14 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
 
-    // 刷新成功后状态升级为成熟的 stale（新鲜度待确认），不再是 missing/unknown。
-    expect(context.index.status).toBe("stale");
+    // 刷新成功后状态升级为精确的“已刷新但未验证读回”，不再是 missing/unknown。
+    expect(context.index.status).toBe("refresh_completed_but_unverified");
     expect(context.index.indexedAt).toBeTruthy();
-    expect(context.index.staleHint).toContain("待确认");
+    expect(context.index.staleHint).toContain("尚未验证");
     // footer 不再显示 `索引?`。
     const footer = formatFooterIndexLabel(context.language, context.index.status);
     expect(footer).not.toBe("索引?");
-    expect(footer).toContain("stale");
+    expect(footer).toContain("refresh");
   });
 
   it("D.14D-R P1-2: index refresh success with confirmed status shows ready in footer", async () => {
@@ -24841,6 +24845,34 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(modelStreamStarted).toBe(true);
     expect(output.text).toContain("普通回答");
     expect(context.cache.workspaceReference._pendingProbe).not.toBe(neverSettlingProbe);
+  });
+
+  it("ordinary answer light path omits full tools, git status, and meta scheduler prompt payload", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-light-path-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    const requests: unknown[] = [];
+    const gateway = {
+      stream: vi.fn(async function* (_provider: string, request: unknown) {
+        requests.push(request);
+        yield { type: "assistant_text_delta", text: "这是一个轻量解释。" } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+      }),
+    } as unknown as Parameters<typeof __testSendMessage>[2];
+
+    await __testSendMessage("解释一下递归的直觉", context, gateway, output);
+
+    const request = requests[0] as { tools?: unknown; messages?: { content?: string }[] };
+    expect(request.tools).toBeUndefined();
+    const prompt = String(request.messages?.[0]?.content ?? "");
+    expect(prompt).not.toContain("MetaSchedulerForModel:");
+    expect(prompt).not.toContain("GitStatus=");
+    expect(prompt).not.toContain("DeferredToolsReminder=");
+    expect(prompt).toContain("ordinary_light_path_no_tools");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(JSON.stringify(transcript)).toContain("ordinary_light_path");
   });
 
   it("Policy: code fact request keeps source-first in system_event, not main notifications", async () => {

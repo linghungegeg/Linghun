@@ -84,6 +84,17 @@ describe("/verify command", () => {
     });
   });
 
+  it("creates focused plan from project verification scripts without defaulting to synthetic smoke", async () => {
+    const focused = await createVerificationPlan(process.cwd(), "focused");
+    expect(focused.length).toBeGreaterThan(0);
+    expect(focused.every((step) => step.kind !== "smoke" || step.synthetic !== true)).toBe(true);
+  });
+
+  it("real-smoke requires a project smoke script and never returns synthetic fallback", async () => {
+    const realSmoke = await createVerificationPlan("/tmp/no-real-smoke", "real-smoke");
+    expect(realSmoke).toEqual([]);
+  });
+
   it("formats zh/en pass reports without duplicating PASS", () => {
     const report: VerificationReport = {
       id: "verify-pass",

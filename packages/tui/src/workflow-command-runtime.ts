@@ -45,7 +45,11 @@ import type {
   WorkflowState,
   WorkflowStepState,
 } from "./tui-data-types.js";
-import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
+import {
+  createVerificationPlan,
+  createVerificationUnavailableReport,
+  runVerificationPlan,
+} from "./verification-command-runtime.js";
 import type {
   WorkflowBridgeRequestProposal,
   WorkflowMainChainRequest,
@@ -2190,19 +2194,43 @@ function deriveWorkflowRunningCap(plan: NormalizedWorkflowPlan, phaseId?: string
 }
 
 export async function runWorkflowVerificationStep(
-  level: "smoke" | "focused" | "typecheck" | "test" | "build" | "lint",
+  level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint",
   context: TuiContext,
   output: Writable,
 ): Promise<VerificationReport> {
   const sessionId = await ensureSession(context);
+  if (level === "plan-only") {
+    const report = createVerificationUnavailableReport(
+      "focused",
+      "plan-only requested; commands were not executed.",
+    );
+    context.lastVerification = report;
+    await recordVerificationEvidence(context, sessionId, report);
+    return report;
+  }
   const plan =
-    level === "smoke" || level === "focused"
+    level === "smoke" || level === "focused" || level === "real-smoke"
       ? await createVerificationPlan(context.projectPath, "smoke")
       : (await createVerificationPlan(context.projectPath, "default")).filter(
           (step) => step.kind === level,
         );
   const effectivePlan =
-    plan.length > 0 ? plan : await createVerificationPlan(context.projectPath, "smoke");
+    level === "focused"
+      ? await createVerificationPlan(context.projectPath, "focused")
+      : level === "real-smoke"
+        ? await createVerificationPlan(context.projectPath, "real-smoke")
+        : plan.length > 0
+          ? plan
+          : await createVerificationPlan(context.projectPath, "smoke");
+  if (level === "real-smoke" && effectivePlan.length === 0) {
+    const report = createVerificationUnavailableReport(
+      "real-smoke",
+      "package.json smoke script is missing; synthetic smoke is not real-smoke.",
+    );
+    context.lastVerification = report;
+    await recordVerificationEvidence(context, sessionId, report);
+    return report;
+  }
   const report = await runVerificationPlan(
     effectivePlan,
     context,

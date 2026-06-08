@@ -55,6 +55,9 @@ export type BackgroundTaskState = {
   workflowRunId?: string;
   hasOutput: boolean;
   result?: "pass" | "fail" | "partial" | "cancelled" | "timeout" | "stale";
+  cancelState?: "abort_signal_sent" | "marked_stale" | "confirmed_exited";
+  cancelRequestedAt?: string;
+  confirmedExitedAt?: string;
   userVisibleSummary: string;
   nextAction?: string;
 };

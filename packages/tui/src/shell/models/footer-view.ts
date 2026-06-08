@@ -94,6 +94,9 @@ export function formatFooterIndexLabel(language: Language, status: string): stri
   if (!trimmed || trimmed.toLowerCase() === "unknown") {
     return language === "en-US" ? "Index?" : "索引?";
   }
+  if (trimmed === "refresh_completed_but_unverified") {
+    return `${label} refresh`;
+  }
   return `${label} ${truncateMiddle(trimmed, 10)}`;
 }
 

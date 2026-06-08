@@ -119,6 +119,13 @@ export function buildIndexStatusPanel(context: TuiContext): CommandPanelView {
       isEn ? "Stale — /index refresh recommended." : "已过期 — 建议运行 /index refresh。",
     );
     actions.push("/index refresh");
+  } else if (status === "refresh_completed_but_unverified") {
+    summary.push(
+      isEn
+        ? "Refresh completed; status read-back is unverified — run /index status --fresh."
+        : "刷新已完成；状态读回尚未验证 — 运行 /index status --fresh。",
+    );
+    actions.push("/index status --fresh");
   } else if (status === "error") {
     summary.push(isEn ? "Error — run /index doctor." : "出错 — 运行 /index doctor。");
     actions.push("/index doctor");
@@ -144,6 +151,8 @@ export function formatIndexStatus(context: TuiContext): string {
           : "建议：运行 /index init fast 建立索引；仓库很大时会自动跳过高风险大文件/生成物。"
         : context.index.status === "stale"
           ? "建议：按需刷新索引；大文件/生成物会在默认刷新中临时跳过。"
+          : context.index.status === "refresh_completed_but_unverified"
+            ? "建议：索引刷新命令已完成，但读回/新鲜度尚未验证；运行 /index status --fresh 确认。"
           : context.index.status === "error"
             ? "建议：修复 codebase-memory runtime/artifact 后重试 /index doctor 或 /index status。"
             : "建议：可用 /index search <query> 或 /index architecture 获取短结果；新鲜度检查用 /index status --fresh 或 /index check。";

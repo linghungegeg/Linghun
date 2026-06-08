@@ -293,11 +293,17 @@ export async function recordToolEvidence(
   if (!kind) {
     return null;
   }
+  const readOnlyEvidence = name === "Read" || name === "Grep" || name === "Glob";
   const evidence = createEvidenceRecord(
     kind,
-    `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
+    readOnlyEvidence
+      ? formatReadOnlyToolEvidenceSummary(name, output, input)
+      : `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
     output.fullOutputPath ?? name,
-    deriveToolSupportsClaims(name, input, output),
+    [
+      ...deriveToolSupportsClaims(name, input, output),
+      ...(readOnlyEvidence ? ["readonly_low_noise_evidence"] : []),
+    ],
   );
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
@@ -305,6 +311,36 @@ export async function recordToolEvidence(
     ...evidence,
   });
   return evidence;
+}
+
+function formatReadOnlyToolEvidenceSummary(
+  name: ToolName,
+  output: ToolOutput,
+  input: unknown,
+): string {
+  const target = readToolEvidenceTarget(input);
+  const artifact = output.fullOutputPath ? "artifact=yes" : "artifact=no";
+  const bytes = output.text.length;
+  return `${name}: ${target}; output_chars=${bytes}; ${artifact}`;
+}
+
+function readToolEvidenceTarget(input: unknown): string {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return "target=unspecified";
+  const record = input as Record<string, unknown>;
+  for (const key of ["path", "file_path", "pattern", "query"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return `${key}=${truncateDisplay(value.replace(/\s+/g, " "), 90)}`;
+    }
+  }
+  const paths = record.paths;
+  if (Array.isArray(paths)) {
+    const values = paths.filter((item): item is string => typeof item === "string");
+    if (values.length > 0) {
+      return `paths=${truncateDisplay(values.slice(0, 3).join(","), 90)}`;
+    }
+  }
+  return "target=unspecified";
 }
 
 export async function recordVerificationEvidence(

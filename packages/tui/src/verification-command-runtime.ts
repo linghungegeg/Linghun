@@ -23,7 +23,7 @@ import { isRecord } from "./tui-state-runtime.js";
 
 export async function createVerificationPlan(
   projectPath: string,
-  mode: "default" | "smoke",
+  mode: "default" | "smoke" | "focused" | "real-smoke",
 ): Promise<VerificationStep[]> {
   if (mode === "smoke") {
     return [
@@ -40,6 +40,19 @@ export async function createVerificationPlan(
   const packageJson = await safeReadJson(join(projectPath, "package.json"));
   const scripts = isRecord(packageJson?.scripts) ? packageJson.scripts : {};
   const packageManager = await detectPackageManager(projectPath);
+  if (mode === "real-smoke") {
+    return typeof scripts.smoke === "string"
+      ? [
+          {
+            kind: "smoke",
+            command: formatPackageManagerCommand(packageManager, "smoke"),
+            reason:
+              "项目自定义 real-smoke：使用 package.json smoke 脚本；非 synthetic，可作为真实 smoke 候选证据。",
+            synthetic: false,
+          },
+        ]
+      : [];
+  }
   const steps: VerificationStep[] = [];
   addPackageStep(
     steps,
@@ -55,7 +68,24 @@ export async function createVerificationPlan(
   addPackageStep(steps, scripts, "smoke", "smoke", "项目自定义 smoke 验证。 ", packageManager);
 
   if (steps.length > 0) {
+    if (mode === "focused") {
+      const focused = steps.filter(
+        (step) => step.kind === "typecheck" || step.kind === "test" || step.kind === "lint",
+      );
+      return focused.length > 0 ? focused : steps.slice(0, 1);
+    }
     return steps;
+  }
+  if (mode === "focused") {
+    return [
+      {
+        kind: "smoke",
+        command: "node --version",
+        reason:
+          "未发现项目 focused 验证脚本，降级为 Node 运行环境 self-check；这是 synthetic，不能当作 real-smoke。",
+        synthetic: true,
+      },
+    ];
   }
   return [
     {
@@ -65,6 +95,28 @@ export async function createVerificationPlan(
       synthetic: true,
     },
   ];
+}
+
+export function createVerificationUnavailableReport(
+  kind: "real-smoke" | "focused",
+  reason: string,
+): VerificationReport {
+  const now = new Date().toISOString();
+  return {
+    id: randomUUID(),
+    status: "partial",
+    summary: `PARTIAL：${kind} 未运行，未生成 PASS 证据。`,
+    commands: [],
+    unverified: [`${kind}: ${reason}`],
+    risk: [`${kind} 缺少可执行入口；不得声称验证通过。`],
+    startedAt: now,
+    endedAt: now,
+    durationMs: 0,
+    nextAction:
+      kind === "real-smoke"
+        ? "在 package.json 增加真实 smoke 脚本后运行 /verify real-smoke，或明确降级为 synthetic self-check。"
+        : "补充项目验证脚本，或运行 /verify smoke 只做 runner self-check。",
+  };
 }
 
 export function addPackageStep(

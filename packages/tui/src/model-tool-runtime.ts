@@ -1555,7 +1555,10 @@ function parseIndexOperationToolInput(
 function parseVerificationToolInput(
   input: unknown,
 ):
-  | { ok: true; level: "smoke" | "focused" | "typecheck" | "test" | "build" | "lint" }
+  | {
+      ok: true;
+      level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint";
+    }
   | { ok: false; text: string } {
   const obj =
     input && typeof input === "object" && !Array.isArray(input)
@@ -1563,8 +1566,10 @@ function parseVerificationToolInput(
       : {};
   const level = obj.level;
   if (
+    level !== "plan-only" &&
     level !== "smoke" &&
     level !== "focused" &&
+    level !== "real-smoke" &&
     level !== "typecheck" &&
     level !== "test" &&
     level !== "build" &&

@@ -25,6 +25,7 @@ export type IndexRuntimeStatus =
   | "ready"
   | "missing"
   | "stale"
+  | "refresh_completed_but_unverified"
   | "error"
   | "indexing";
 

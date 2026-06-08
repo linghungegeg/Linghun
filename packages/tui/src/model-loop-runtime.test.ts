@@ -217,6 +217,9 @@ describe("model-loop-runtime", () => {
     it("returns all tools when guard is undefined", () => {
       const defs = createModelToolDefinitionsForReportGuard(undefined);
       expect(defs.some((d) => d.name === "Bash")).toBe(true);
+      const verify = defs.find((d) => d.name === "RunVerification");
+      expect(JSON.stringify(verify?.inputSchema)).toContain("plan-only");
+      expect(JSON.stringify(verify?.inputSchema)).toContain("real-smoke");
     });
 
     it("returns all tools when guard is completed", () => {

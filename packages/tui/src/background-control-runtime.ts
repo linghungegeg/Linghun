@@ -180,6 +180,8 @@ export function finishBackgroundTaskFromToolOutput(
   if (outcome === "cancelled") {
     task.status = "cancelled";
     task.result = "cancelled";
+    task.cancelState = "confirmed_exited";
+    task.confirmedExitedAt = now;
     task.currentStep = context.language === "en-US" ? "cancelled" : "已取消";
   } else if (outcome === "timeout") {
     task.status = "timeout";
@@ -209,7 +211,11 @@ export function finishBackgroundTaskFromToolOutput(
         ? `Command ended with ${task.status}; do not claim it passed.`
         : `命令以 ${task.status} 结束；不得声称已通过。`;
   task.nextAction =
-    task.status === "completed"
+    task.cancelState === "confirmed_exited"
+      ? context.language === "en-US"
+        ? "Process exit was observed after cancellation; inspect the log before rerunning."
+        : "已观察到取消后的进程退出；重跑前请先查看日志。"
+      : task.status === "completed"
       ? context.language === "en-US"
         ? "Review the summarized output or open the log."
         : "可查看摘要输出或打开完整日志。"
@@ -334,10 +340,12 @@ async function stopSingleBackgroundTask(
   task.status = aborted ? "cancelled" : "stale";
   task.result = aborted ? "cancelled" : "partial";
   task.updatedAt = now;
+  task.cancelState = aborted ? "abort_signal_sent" : "marked_stale";
+  task.cancelRequestedAt = now;
   task.nextAction = aborted
     ? context.language === "en-US"
-      ? "Abort signal sent. Review /background and the log before continuing."
-      : "已发送取消信号。继续前可先查看 /background 和日志。"
+      ? "Abort signal sent; process exit is not confirmed yet. Review /background and the log before continuing."
+      : "已发送取消信号；尚未确认进程退出。继续前可先查看 /background 和日志。"
     : context.language === "en-US"
       ? "No live abort controller was available; state marked stale/resumable."
       : "未找到可用取消 controller；已标记为 stale/resumable。";
@@ -436,8 +444,8 @@ export async function handleInterruptCommand(
   writeLine(
     output,
     context.language === "en-US"
-      ? `Interrupt requested for ${result.cancelled} active item(s); abort signal sent ${result.abortSignalsSent}; marked stale ${result.markedOnly}; confirmed exited 0. Inspect /background/logs before assuming processes exited.`
-      : `已请求中断 ${result.cancelled} 个活动任务；已发送取消信号 ${result.abortSignalsSent}；已标记 stale ${result.markedOnly}；已确认退出 0。确认进程退出前请查看 /background 和日志。`,
+      ? `Interrupt requested for ${result.cancelled} active item(s); abort signal sent ${result.abortSignalsSent}; marked stale ${result.markedOnly}; confirmed exited ${result.confirmedExited}. Inspect /background/logs before assuming processes exited.`
+      : `已请求中断 ${result.cancelled} 个活动任务；已发送取消信号 ${result.abortSignalsSent}；已标记 stale ${result.markedOnly}；已确认退出 ${result.confirmedExited}。确认进程退出前请查看 /background 和日志。`,
   );
 }
 
@@ -445,6 +453,7 @@ type InterruptAllActiveWorkResult = {
   cancelled: number;
   abortSignalsSent: number;
   markedOnly: number;
+  confirmedExited: number;
 };
 
 export async function interruptAllActiveWork(
@@ -455,6 +464,7 @@ export async function interruptAllActiveWork(
   let cancelled = 0;
   let abortSignalsSent = 0;
   let markedOnly = 0;
+  let confirmedExited = 0;
   const appendInterruptEvent = async (message: string) => {
     await context.store.appendEvent(sessionId, {
       type: "interrupt",
@@ -478,10 +488,12 @@ export async function interruptAllActiveWork(
       verificationTask.status = "cancelled";
       verificationTask.result = "cancelled";
       verificationTask.updatedAt = now;
+      verificationTask.cancelState = "abort_signal_sent";
+      verificationTask.cancelRequestedAt = now;
       verificationTask.nextAction =
         context.language === "en-US"
-          ? "Review the verification log, then rerun /verify if needed."
-          : "先查看验证日志，必要时复跑 /verify。";
+          ? "Abort signal sent; process exit is not confirmed yet. Review the verification log, then rerun /verify if needed."
+          : "已发送取消信号；尚未确认进程退出。先查看验证日志，必要时复跑 /verify。";
       await appendBackgroundTaskEvent(context, sessionId, verificationTask);
     }
   }
@@ -560,10 +572,12 @@ export async function interruptAllActiveWork(
     task.status = aborted ? "cancelled" : "stale";
     task.result = aborted ? "cancelled" : "partial";
     task.updatedAt = now;
+    task.cancelState = aborted ? "abort_signal_sent" : "marked_stale";
+    task.cancelRequestedAt = now;
     task.nextAction = aborted
       ? context.language === "en-US"
-        ? "Abort signal sent. Review /background and the log before continuing."
-        : "已发送取消信号。继续前可先查看 /background 和日志。"
+        ? "Abort signal sent; process exit is not confirmed yet. Review /background and the log before continuing."
+        : "已发送取消信号；尚未确认进程退出。继续前可先查看 /background 和日志。"
       : context.language === "en-US"
         ? "No live abort controller was available; state marked stale/resumable."
         : "未找到可用取消 controller；已标记为 stale/resumable。";
@@ -586,7 +600,7 @@ export async function interruptAllActiveWork(
   await appendInterruptEvent(
     cancelled === 0
       ? t(context, "interruptIdle")
-      : `${t(context, "interruptCancelled")} abort_signal_sent=${abortSignalsSent}; marked_stale=${markedOnly}; confirmed_exited=0`,
+      : `${t(context, "interruptCancelled")} abort_signal_sent=${abortSignalsSent}; marked_stale=${markedOnly}; confirmed_exited=${confirmedExited}`,
   );
-  return { cancelled, abortSignalsSent, markedOnly };
+  return { cancelled, abortSignalsSent, markedOnly, confirmedExited };
 }

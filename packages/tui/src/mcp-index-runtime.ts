@@ -1104,24 +1104,23 @@ export async function runIndexRepository(
     return;
   }
   await refreshIndexStatus(context);
-  // P1-2 — index_repository 已成功（result.ok）。若紧随的 refreshIndexStatus 因
-  // list_projects/index_status 读回延迟未能确认 ready/stale（回落到 missing/
-  // unknown/error），footer 不能显示 `索引?` 这种"从没建过"的假信号。这里把它
-  // 升级成一个可解释的成熟状态：索引刚刷新过、新鲜度待确认（stale + staleHint）。
+  // P1 — index_repository 已成功（result.ok），但紧随的 refreshIndexStatus
+  // 可能因 list_projects/index_status 读回延迟未能确认 ready/stale。这里不用
+  // stale 冒充真实过期，而记录更精确的终态：刷新完成但读回/新鲜度待确认。
   const statusAfterRefresh: string = context.index.status;
   if (
     statusAfterRefresh === "missing" ||
     statusAfterRefresh === "unknown" ||
     statusAfterRefresh === "error"
   ) {
-    context.index.status = "stale";
+    context.index.status = "refresh_completed_but_unverified";
     context.index.artifactStatus = "stale";
     context.index.indexedAt = new Date().toISOString();
     context.index.error = undefined;
     context.index.staleHint =
       context.language === "en-US"
-        ? "Index just refreshed; status read-back is pending. Run /index status to confirm."
-        : "索引已刷新，状态待确认。运行 /index status 可确认。";
+        ? "Index refresh command completed, but status read-back/freshness was not verified. Run /index status --fresh to confirm."
+        : "索引刷新命令已完成，但状态读回/新鲜度尚未验证。运行 /index status --fresh 可确认。";
   } else {
     context.index.indexedAt = new Date().toISOString();
   }

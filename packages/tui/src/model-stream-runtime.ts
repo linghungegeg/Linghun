@@ -431,6 +431,7 @@ export async function sendMessage(
     ...context,
     provider: getRuntimeStatusProvider(context),
   });
+  const lightPath = shouldUseOrdinaryAnswerLightPath(text, context);
   const architectureCard = shouldTriggerArchitectureRuntime(text, context)
     ? createArchitectureCard(text, context)
     : undefined;
@@ -441,17 +442,19 @@ export async function sendMessage(
   const architectureDirective = architectureCard
     ? createArchitectureRuntimeDirective(architectureCard)
     : undefined;
-  void refreshWorkspaceReferenceCache(context, runtimeStatus).catch(async (error) => {
-    const reason = error instanceof Error ? error.message : String(error);
-    await appendSystemEvent(
-      context,
-      sessionId,
-      `workspace_reference_lazy_refresh_failed reason=${reason.replace(/\s+/g, " ").slice(0, 220)}`,
-      "warning",
-    );
-  });
+  if (!lightPath) {
+    void refreshWorkspaceReferenceCache(context, runtimeStatus).catch(async (error) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `workspace_reference_lazy_refresh_failed reason=${reason.replace(/\s+/g, " ").slice(0, 220)}`,
+        "warning",
+      );
+    });
+  }
   // D.14G — 最小 WorktreeContext（redacted，无 provider/baseUrl）；仅隔离 worktree 内注入。
-  const worktreeContext = await computeWorktreeContext(context.projectPath);
+  const worktreeContext = lightPath ? null : await computeWorktreeContext(context.projectPath);
 
   // Verify previous turn's failure-learning contract before starting new evaluation.
   if (
@@ -486,30 +489,41 @@ export async function sendMessage(
     }
   }
 
-  const metaSchedulerDecision = evaluateMetaScheduler({
-    ...createMetaSchedulerInput(context, selectedRuntime, text, false),
-    userText: text,
-    messages: createPolicyContextPressureMessages(runtimeStatus, text),
-    ...(context.lastToolFailure ? { lastToolFailure: context.lastToolFailure } : {}),
-    ...(context.lastProviderFailure
-      ? {
-          providerFailure: {
-            provider: context.lastProviderFailure.provider,
-            model: context.lastProviderFailure.model,
-            message: context.lastProviderFailure.summary,
-          },
-        }
-      : {}),
-  });
+  const metaSchedulerDecision = lightPath
+    ? undefined
+    : evaluateMetaScheduler({
+        ...createMetaSchedulerInput(context, selectedRuntime, text, false),
+        userText: text,
+        messages: createPolicyContextPressureMessages(runtimeStatus, text),
+        ...(context.lastToolFailure ? { lastToolFailure: context.lastToolFailure } : {}),
+        ...(context.lastProviderFailure
+          ? {
+              providerFailure: {
+                provider: context.lastProviderFailure.provider,
+                model: context.lastProviderFailure.model,
+                message: context.lastProviderFailure.summary,
+              },
+            }
+          : {}),
+      });
   context.lastMetaSchedulerFailureLearningRequired =
-    metaSchedulerDecision.shouldCaptureFailureLearning;
+    metaSchedulerDecision?.shouldCaptureFailureLearning ?? false;
   context.lastMetaSchedulerFailureLearningFulfilled = false;
-  for (const event of metaSchedulerDecision.internalEvents) {
-    await appendSystemEvent(context, sessionId, event, "info");
+  if (metaSchedulerDecision) {
+    for (const event of metaSchedulerDecision.internalEvents) {
+      await appendSystemEvent(context, sessionId, event, "info");
+    }
+    enqueuePolicyHints(context, metaSchedulerDecision.policyDecision);
+    await appendPolicyDecisionEvent(context, sessionId, metaSchedulerDecision.policyDecision);
+  } else {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      "ordinary_light_path: skipped meta_scheduler_prompt_directive and synchronous git_status_summary; tools omitted unless later intent requires them",
+      "info",
+    );
   }
-  enqueuePolicyHints(context, metaSchedulerDecision.policyDecision);
-  await appendPolicyDecisionEvent(context, sessionId, metaSchedulerDecision.policyDecision);
-  const gitStatusSummary = await buildGitStatusSummary(context.projectPath);
+  const gitStatusSummary = lightPath ? undefined : await buildGitStatusSummary(context.projectPath);
   const systemPrompt = createModelSystemPrompt(
     text,
     context,
@@ -517,8 +531,9 @@ export async function sendMessage(
     architectureDirective,
     summarizeWorktreeContextForPrompt(worktreeContext),
     buildFailureLearningSummaryForPrompt(context.failureLearning),
-    formatMetaSchedulerDirective(metaSchedulerDecision),
+    metaSchedulerDecision ? formatMetaSchedulerDirective(metaSchedulerDecision) : undefined,
     gitStatusSummary,
+    { lightPath },
   );
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
@@ -561,8 +576,8 @@ export async function sendMessage(
       let roundHadUsage = false;
       let roundFinishReason: string | undefined;
       let roundHadThinking = false;
-      const modelSupportsTools = selectedTools;
-      if (!modelSupportsTools && round === 0) {
+      const modelSupportsTools = selectedTools && !lightPath;
+      if (!selectedTools && round === 0) {
         writeLine(
           output,
           context.language === "en-US"
@@ -570,26 +585,30 @@ export async function sendMessage(
             : "当前 provider/model 不支持 tool calling；本轮降级为纯文本，不发送 tools/toolChoice。可运行 /model doctor 查看详情。",
         );
       }
-      const preflight = await prepareMessagesForProviderPreflight({
-        messages: messagesForProvider,
-        context,
-        sessionId,
-        runtime: selectedRuntime,
-        trigger: "request",
-        deps: compactPreflightDeps,
-      });
-      if (preflight.blocked) {
-        clearRequestActivity(context);
-        context.activeAbortController = undefined;
-        context.tools.abortSignal = undefined;
-        context.interrupt = { type: "idle" };
-        writeLine(output, preflight.message);
-        writeStatus(output, context);
-        return;
-      }
-      messagesForProvider = preflight.messages;
-      const requestMessages = preflight.messages;
       const contextMaxChars = getProviderContextMaxChars(context, selectedRuntime);
+      const shouldRunPreflight =
+        !lightPath || estimateModelMessageChars(messagesForProvider) > contextMaxChars;
+      if (shouldRunPreflight) {
+        const preflight = await prepareMessagesForProviderPreflight({
+          messages: messagesForProvider,
+          context,
+          sessionId,
+          runtime: selectedRuntime,
+          trigger: "request",
+          deps: compactPreflightDeps,
+        });
+        if (preflight.blocked) {
+          clearRequestActivity(context);
+          context.activeAbortController = undefined;
+          context.tools.abortSignal = undefined;
+          context.interrupt = { type: "idle" };
+          writeLine(output, preflight.message);
+          writeStatus(output, context);
+          return;
+        }
+        messagesForProvider = preflight.messages;
+      }
+      const requestMessages = messagesForProvider;
       if (estimateModelMessageChars(requestMessages) > contextMaxChars) {
         const warning =
           context.language === "en-US"
@@ -1064,6 +1083,28 @@ function createPolicyContextPressureMessages(
     },
     { role: "user", content: userText },
   ];
+}
+
+function shouldUseOrdinaryAnswerLightPath(text: string, context: TuiContext): boolean {
+  if (context.pendingLocalApproval || context.pendingNaturalCommand || context.pendingAutopilot) {
+    return false;
+  }
+  if (context.workflows.activeRun?.status === "running") return false;
+  if (context.backgroundTasks.some((task) => task.status === "running")) return false;
+  if (context.lastToolFailure || context.lastProviderFailure) return false;
+  if (context.cache.compactPressure?.ratio && context.cache.compactPressure.ratio >= 0.9) {
+    return false;
+  }
+  const normalized = text.trim();
+  if (!normalized) return false;
+  if (normalized.startsWith("/")) return false;
+  return !looksLikeToolOrActionIntent(normalized);
+}
+
+function looksLikeToolOrActionIntent(text: string): boolean {
+  return /(?:修改|写入|创建|删除|移动|重命名|保存|提交|回滚|恢复|刷新|索引|验证|测试|构建|运行|执行|命令|终端|读取|查看文件|搜索源码|grep|glob|bash|git|commit|revert|reset|checkout|diff|agent|workflow|fork|job|verify|index|read|write|edit|run|execute|create|delete|remove|rename|restore|refresh|test|build|lint|file|source|codebase|report|报告|审计|源码|代码库|多智能体|工作流)/iu.test(
+    text,
+  );
 }
 
 function createMetaSchedulerInput(

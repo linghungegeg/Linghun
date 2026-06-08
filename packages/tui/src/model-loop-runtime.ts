@@ -225,7 +225,7 @@ export const INDEX_OPERATION_DESCRIPTION =
   "Run a real Linghun index operation for requests such as inspect index status, refresh index, initialize fast index, or repair index ignore rules. Mutating operations use the existing permission pipeline.";
 
 export const RUN_VERIFICATION_DESCRIPTION =
-  "Run Linghun Verification Runner for requests such as run verification, typecheck, tests, build, lint, or smoke checks. Uses the existing verification runtime and records evidence.";
+  "Run Linghun Verification Runner for requests such as plan-only, focused, real-smoke, typecheck, tests, build, lint, or runner self-check smoke checks. Uses the existing verification runtime and records evidence only when commands run.";
 
 export const WRITE_REPORT_DESCRIPTION =
   "Write a report or controlled file using Linghun's real Write/Edit permission pipeline. Use for requests that explicitly ask to write a report file; do not answer as if a report was written without this tool result.";
@@ -363,7 +363,7 @@ export function createRunVerificationInputSchema(): unknown {
     properties: {
       level: {
         type: "string",
-        enum: ["smoke", "focused", "typecheck", "test", "build", "lint"],
+        enum: ["plan-only", "smoke", "focused", "real-smoke", "typecheck", "test", "build", "lint"],
       },
     },
     required: ["level"],

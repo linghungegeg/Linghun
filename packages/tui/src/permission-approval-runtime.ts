@@ -109,13 +109,12 @@ export async function cancelPendingInteraction(
     const approval = context.pendingLocalApproval;
     context.pendingLocalApproval = undefined;
     if (approval.kind === "index_ignore_write") {
-      writeLine(output, "已取消待确认权限；未写入文件，也未刷新索引。可修改请求后重试。");
+      await executePermissionDeny(approval, context, context.modelGateway, output, true, source);
     } else if (approval.kind === "git_worktree_remove") {
-      writeLine(output, `已取消删除 worktree；「${approval.name}」未被删除。可调整请求后重试。`);
+      await executePermissionDeny(approval, context, context.modelGateway, output, true, source);
     } else {
-      writeLine(output, "已取消待确认权限；工具尚未执行。可调整请求或继续说明目标。");
+      await executePermissionDeny(approval, context, context.modelGateway, output, true, source);
     }
-    writeStatus(output, context);
     return;
   }
   if (context.pendingNaturalCommand) {
@@ -456,6 +455,7 @@ export async function executePermissionApprove(
   gateway: ModelGateway | undefined,
   output: Writable,
 ): Promise<void> {
+  await recordPermissionUserDecision(context, approval, "approved", "approve");
   if (approval.kind === "agent_tool_use") {
     const agent = context.agents.find((item) => item.id === approval.agentId);
     if (!agent) {
@@ -535,6 +535,13 @@ export async function executePermissionApprove(
         content: JSON.stringify(result),
       });
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+    } else if (approval.continuation && !result.pendingApproval) {
+      await appendApprovalContinuationWarning(
+        context,
+        approval.sessionId,
+        approval.toolName,
+        result.text,
+      );
     }
     writeLightHints(output, context);
     writeStatus(output, context);
@@ -563,6 +570,13 @@ export async function executePermissionApprove(
         content: JSON.stringify(result),
       });
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+    } else if (approval.continuation) {
+      await appendApprovalContinuationWarning(
+        context,
+        approval.sessionId,
+        approval.toolName,
+        result.text,
+      );
     }
     writeLightHints(output, context);
     writeStatus(output, context);
@@ -604,6 +618,13 @@ export async function executePermissionApprove(
         content: JSON.stringify(result),
       });
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+    } else if (approval.continuation) {
+      await appendApprovalContinuationWarning(
+        context,
+        approval.sessionId,
+        approval.toolCall.name,
+        result.text,
+      );
     }
     if (!context.isInkSession) {
       writeLightHints(output, context);
@@ -628,6 +649,13 @@ export async function executePermissionApprove(
         content: JSON.stringify(result),
       });
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+    } else if (approval.continuation) {
+      await appendApprovalContinuationWarning(
+        context,
+        approval.sessionId,
+        WRITE_REPORT_TOOL_NAME,
+        result.text,
+      );
     }
     if (!context.isInkSession) {
       writeLightHints(output, context);
@@ -663,9 +691,16 @@ export async function executePermissionDeny(
   gateway: ModelGateway | undefined,
   output: Writable,
   cancelled: boolean,
+  decisionSource = cancelled ? "cancel" : "deny",
 ): Promise<void> {
   const sessionId = await ensureSession(context);
   const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
+  await recordPermissionUserDecision(
+    context,
+    approval,
+    cancelled ? "cancelled" : "denied",
+    decisionSource,
+  );
   if (approval.kind === "agent_tool_use") {
     const agent = context.agents.find((item) => item.id === approval.agentId);
     if (!agent) {
@@ -983,9 +1018,51 @@ async function appendDenialContinuationWarning(
   await appendSystemEvent(
     context,
     sessionId,
-    `permission denial recorded for ${toolName}, but no model continuation/gateway was available; model was not resumed with denial tool_result. summary=${truncateDisplay(summary, 200)}`,
+    `permission_continuation_terminal: outcome=denied_or_cancelled; tool=${toolName}; continuation=unavailable; model_resumed=no; summary=${truncateDisplay(summary, 200)}`,
     "warning",
   );
+}
+
+async function appendApprovalContinuationWarning(
+  context: TuiContext,
+  sessionId: string,
+  toolName: string,
+  summary: string,
+): Promise<void> {
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `permission_continuation_terminal: outcome=approved; tool=${toolName}; continuation=unavailable; model_resumed=no; summary=${truncateDisplay(summary, 200)}`,
+    "warning",
+  );
+}
+
+async function recordPermissionUserDecision(
+  context: TuiContext,
+  approval: PendingLocalApproval,
+  decision: "approved" | "denied" | "cancelled",
+  source: string,
+): Promise<void> {
+  const sessionId = await ensureSession(context);
+  const toolName = permissionApprovalToolName(approval);
+  const continuation =
+    "continuation" in approval && approval.continuation ? "available" : "none";
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `permission_user_decision: decision=${decision}; source=${source}; kind=${approval.kind}; tool=${toolName}; continuation=${continuation}`,
+    decision === "approved" ? "info" : "warning",
+  );
+}
+
+function permissionApprovalToolName(approval: PendingLocalApproval): string {
+  if ("toolName" in approval) return approval.toolName;
+  if ("toolCall" in approval && approval.toolCall) return approval.toolCall.name;
+  if (approval.kind === "index_ignore_write") return "Write";
+  if (approval.kind === "memory_mutation") return "Write";
+  if (approval.kind === "break_cache_mutation") return "Write";
+  if (approval.kind === "image_generation") return "Write";
+  return approval.kind;
 }
 
 export async function handlePermissionsCommand(

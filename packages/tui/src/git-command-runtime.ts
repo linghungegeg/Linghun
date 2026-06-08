@@ -295,8 +295,8 @@ export async function renderCheckpointPanel(context: TuiContext, output: Writabl
       tone: "neutral",
       summary: [
         isEn
-          ? "No Linghun snapshot checkpoints yet. Linghun snapshots are in-memory file snapshots, not git commits."
-          : "暂无 Linghun snapshot checkpoint。Linghun snapshot 是内存文件快照，不是 git commit。",
+          ? "No Linghun snapshot checkpoints yet. Linghun snapshots are in-memory file snapshots, not git commits/reverts/resets and do not move HEAD."
+          : "暂无 Linghun snapshot checkpoint。Linghun snapshot 是内存文件快照，不是 git commit/revert/reset，也不会移动 HEAD。",
       ],
       actions: ['/checkpoint create "<message>"', "/git stable"],
     });
@@ -304,8 +304,8 @@ export async function renderCheckpointPanel(context: TuiContext, output: Writabl
   }
   const summary: string[] = [
     isEn
-      ? `${checkpoints.length} snapshot checkpoint${checkpoints.length === 1 ? "" : "s"} (Linghun in-memory snapshots, not git commits).`
-      : `共 ${checkpoints.length} 个 snapshot checkpoint（Linghun 内存快照，不是 git commit）。`,
+      ? `${checkpoints.length} snapshot checkpoint${checkpoints.length === 1 ? "" : "s"} (Linghun in-memory snapshots, not git commit/revert/reset; HEAD is not moved).`
+      : `共 ${checkpoints.length} 个 snapshot checkpoint（Linghun 内存快照，不是 git commit/revert/reset；不会移动 HEAD）。`,
     isEn
       ? 'For a real git stable point use /checkpoint create "<message>" or /git stable create.'
       : '需要真实 git 稳定点请用 /checkpoint create "<message>" 或 /git stable create。',
