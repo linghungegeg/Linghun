@@ -110,7 +110,7 @@ export function isLowRiskWorkspaceEdit(
 ): boolean {
   return (
     (name === "Write" || name === "Edit" || name === "MultiEdit") &&
-    (risk === "low" || risk === "medium") &&
+    risk === "low" &&
     files.length > 0
   );
 }

@@ -913,8 +913,8 @@ export async function sendMessage(
       if (todoOnly && consecutiveTodoOnlyRounds >= MAX_TODO_ONLY_CONSECUTIVE_ROUNDS && !todoOnlyHintSent) {
         const todoHint =
           context.language === "en-US"
-            ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect) or provide an unverified conclusion."
-            : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）或给出尚未验证结论。";
+            ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect); otherwise execution will pause at the runaway guard."
+            : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）；否则执行将停在 runaway 保护处。";
         messagesForProvider.push({ role: "user", content: todoHint });
         todoOnlyHintSent = true;
         continue;
@@ -2192,8 +2192,8 @@ export async function continueModelAfterToolResults(
         if (!todoOnlyHintSent) {
           const todoHint =
             context.language === "en-US"
-              ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect) or provide an unverified conclusion."
-              : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）或给出尚未验证结论。";
+              ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect); otherwise execution will pause at the runaway guard."
+              : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）；否则执行将停在 runaway 保护处。";
           continuation.messages.push({ role: "user", content: todoHint });
           todoOnlyHintSent = true;
           continue;

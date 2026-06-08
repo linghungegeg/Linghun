@@ -9060,7 +9060,7 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(false);
   });
 
-  it("auto-review allows /image generate metadata while cancel does not write it", async () => {
+  it("auto-review asks for /image generate metadata while cancel does not write it", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -9071,9 +9071,14 @@ describe("Phase 06 TUI slash commands", () => {
     context.permissionMode = "auto-review";
     await handleSlashCommand("/image generate logo concept", context, output);
 
-    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(context.pendingLocalApproval?.kind).toBe("image_generation");
+    const autoReviewPending =
+      context.pendingLocalApproval?.kind === "image_generation"
+        ? context.pendingLocalApproval
+        : undefined;
+    await handleNaturalInput("yes", context, output);
     expect(context.imageResults).toHaveLength(1);
-    expect(await readFile(context.imageResults[0]?.images[0]?.path ?? "", "utf8")).toContain(
+    expect(await readFile(autoReviewPending?.assetPath ?? "", "utf8")).toContain(
       "image_generation_metadata",
     );
 
@@ -10847,6 +10852,11 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
+    const providerText = JSON.stringify(requests);
+    expect(providerText).toContain("请继续执行验证工具");
+    expect(providerText).toContain("否则执行将停在 runaway 保护处");
+    expect(providerText).not.toContain("或给出尚未验证结论");
+    expect(providerText).not.toContain("provide an unverified conclusion");
     expect(output.text).toContain("只完成计划整理");
     expect(output.text).toContain("尚未执行仓库验证");
     expect(output.text).not.toContain("将基于目前已收集的信息");
@@ -10914,6 +10924,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(mainLoopSrc).toContain("noProgressRounds = todoOnly || !roundHadProgress");
     expect(mainLoopSrc).toContain("modelRoundLoop: for (let round = 0; ; round += 1)");
     expect(mainLoopSrc).toContain("continuationRoundLoop: for (let round = 0; ; round += 1)");
+    expect(mainLoopSrc).toContain("otherwise execution will pause at the runaway guard");
+    expect(mainLoopSrc).toContain("否则执行将停在 runaway 保护处");
+    expect(mainLoopSrc).not.toContain("provide an unverified conclusion");
+    expect(mainLoopSrc).not.toContain("或给出尚未验证结论");
     expect(`${contextSrc}\n${mainLoopSrc}`).not.toContain(
       "const MAX_MODEL_TOOL_ROUNDS = LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS",
     );
@@ -11194,7 +11208,7 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
   });
 
-  it("preflights model Write to existing large files before auto-review can run it", async () => {
+  it("asks before model Write to existing large files in auto-review", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -11224,13 +11238,13 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["请修改大文件\n/exit\n"]),
+      stdin: Readable.from(["请修改大文件\n", "/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("架构边界检查已暂停 big.ts");
-    expect(output.text).toContain("继续这次最小局部改动");
+    expect(output.text).toContain("Linghun 想执行 Write big.ts");
+    expect(output.text).toContain("允许本次执行？yes / no");
     await expect(readFile(join(project, "big.ts"), "utf8")).resolves.toBe(original);
   });
 
@@ -11595,7 +11609,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain('"evidenceId"');
   });
 
-  it("auto-review report Write is allowed through the normal workspace edit path", async () => {
+  it("auto-review report Write asks through the normal workspace edit path", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -11608,12 +11622,12 @@ describe("Phase 06 TUI slash commands", () => {
       session.id,
     );
 
-    expect(permission.decision).toBe("allow");
+    expect(permission.decision).toBe("ask");
     expect(context.permissions.recentDenied).toHaveLength(0);
     await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
   });
 
-  it("auto-review report Write completes without an extra foreground approval prompt", async () => {
+  it("auto-review report Write completes after foreground approval", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -11638,7 +11652,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["请生成 report.md\n", "/exit\n"]),
+      stdin: Readable.from(["请生成 report.md\n", "yes\n", "/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -11677,7 +11691,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["请生成 report.md\n", "/exit\n"]),
+      stdin: Readable.from(["请生成 report.md\n", "yes\n", "/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -13387,7 +13401,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["更新 note.txt\n", "/exit\n"]),
+      stdin: Readable.from(["更新 note.txt\n", "yes\n", "/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -16179,7 +16193,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("full-access");
   });
 
-  it("allows auto-review workspace edits while keeping dangerous actions behind hard denies", async () => {
+  it("auto-review allows low-risk edits while asking for medium writes", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "sample.txt"), "alpha", "utf8");
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -16194,11 +16208,12 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/bash node --version", context, output);
 
     expect(output.text).toContain("已切换权限模式：auto-review");
-    expect(output.text).not.toContain("写入前摘要");
+    expect(output.text).toContain("权限已拒绝");
+    expect(output.text).toContain("本次请求：工具 Write");
     expect(output.text).not.toContain("已创建 checkpoint");
     expect(output.text).toContain("Edit 摘要");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
-    await expect(readFile(join(project, "medium.txt"), "utf8")).resolves.toBe("should-not-write");
+    await expect(readFile(join(project, "medium.txt"), "utf8")).rejects.toThrow();
   });
 
   it("keeps full-access behind hard denies", async () => {
@@ -26381,12 +26396,21 @@ describe("D.13V-B/C source invariants", () => {
     expect(text).toMatch(/"full-access":\s*"full access \(safety on\)"/);
   });
 
-  it("auto-review 允许普通 report.md 写入，但危险动作仍走 ask/deny", async () => {
+  it("auto-review 允许低风险 Edit，但 medium Write 和危险动作仍走 ask/deny", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
     context.permissionMode = "auto-review";
+
+    await writeFile(join(project, "report.md"), "draft", "utf8");
+    const edit = await decidePermission(
+      "Edit",
+      { file_path: "report.md", old_string: "draft", new_string: "ok" },
+      context,
+      session.id,
+    );
+    expect(edit.decision).toBe("allow");
 
     const write = await decidePermission(
       "Write",
@@ -26394,7 +26418,7 @@ describe("D.13V-B/C source invariants", () => {
       context,
       session.id,
     );
-    expect(write.decision).toBe("allow");
+    expect(write.decision).toBe("ask");
 
     const secretWrite = await decidePermission(
       "Write",
