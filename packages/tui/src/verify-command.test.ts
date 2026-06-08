@@ -5,6 +5,7 @@ import {
   createVerificationPlan,
   formatVerificationPlan,
   formatVerificationReport,
+  formatVerificationTaskSummary,
 } from "./verification-command-runtime.js";
 
 describe("/verify command", () => {
@@ -122,5 +123,46 @@ describe("/verify command", () => {
     expect(formatVerificationReport(englishReport, "en-US").split("\n")[0]).toBe(
       "PASS: 1 verification step passed.",
     );
+  });
+
+  it("formats task summary without command/log evidence while preserving full report details", () => {
+    const report: VerificationReport = {
+      id: "verify-fail",
+      status: "fail",
+      summary: "FAIL：1/1 个验证步骤失败。",
+      commands: [
+        {
+          kind: "test",
+          command: "corepack pnpm test",
+          reason: "fixture",
+          status: "fail",
+          summary: "exit code 1; assertion failed",
+          exitCode: 1,
+          durationMs: 12,
+          logPath: "F:\\Linghun\\.linghun\\logs\\verification\\verify-fail-1-test.log",
+        },
+      ],
+      unverified: ["test fail：exit code 1"],
+      risk: ["test 失败：exit code 1"],
+      logPath: "F:\\Linghun\\.linghun\\logs\\verification",
+      startedAt: "2026-06-03T00:00:00.000Z",
+      endedAt: "2026-06-03T00:00:00.012Z",
+      durationMs: 12,
+      nextAction: "先查看失败命令与日志，修复后复跑 /verify。",
+    };
+
+    const taskSummary = formatVerificationTaskSummary(report, "zh-CN");
+    const fullReport = formatVerificationReport(report, "zh-CN");
+
+    expect(taskSummary).toContain("FAIL：1/1 个验证步骤失败。");
+    expect(taskSummary).toContain("下一步：先查看失败命令与日志，修复后复跑 /verify。");
+    expect(taskSummary).toContain("详情：/verify last");
+    expect(taskSummary).not.toContain("corepack pnpm test");
+    expect(taskSummary).not.toContain("verify-fail-1-test.log");
+    expect(taskSummary).not.toContain("未验证：");
+
+    expect(fullReport).toContain("corepack pnpm test");
+    expect(fullReport).toContain("verify-fail-1-test.log");
+    expect(fullReport).toContain("未验证：test fail");
   });
 });

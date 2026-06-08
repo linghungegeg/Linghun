@@ -91,6 +91,36 @@ describe("tui permission runtime — CCB-aligned modes", () => {
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 
+  it("auto-review asks for medium risk Write and MultiEdit instead of treating them as low risk", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.permissionMode = "auto-review";
+
+    const edit = await decidePermission(
+      "Edit",
+      { path: "note.md", oldText: "x", newText: "y" },
+      context,
+      sessionId,
+    );
+    const write = await decidePermission(
+      "Write",
+      { path: "note.md", content: "x" },
+      context,
+      sessionId,
+    );
+    const multiEdit = await decidePermission(
+      "MultiEdit",
+      { path: "note.md", edits: [{ oldText: "x", newText: "y" }] },
+      context,
+      sessionId,
+    );
+
+    expect(edit.decision).toBe("allow");
+    expect(write.decision).toBe("ask");
+    expect(multiEdit.decision).toBe("ask");
+    expect(write.request.risk).toBe("medium");
+    expect(multiEdit.request.risk).toBe("medium");
+  });
+
   it("architecture drift does not intercept readonly/session/discovery tools", async () => {
     const { context, sessionId } = await createTestContext();
     context.currentArchitectureCard = architectureCard();

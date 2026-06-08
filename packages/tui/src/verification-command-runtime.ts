@@ -476,6 +476,21 @@ export function formatVerificationPlan(plan: VerificationStep[], language: Langu
 }
 
 export function formatVerificationReport(report: VerificationReport, language: Language): string {
+  return formatVerificationReportLines(report, language, true).join("\n");
+}
+
+export function formatVerificationTaskSummary(
+  report: VerificationReport,
+  language: Language,
+): string {
+  return formatVerificationReportLines(report, language, false).join("\n");
+}
+
+function formatVerificationReportLines(
+  report: VerificationReport,
+  language: Language,
+  includeCommandDetails: boolean,
+): string[] {
   const statusLabel = report.status.toUpperCase();
   const statusAlreadyShown = new RegExp(`^${statusLabel}(?:\\s|:|：)`, "u").test(report.summary);
   const summary = statusAlreadyShown ? report.summary : `${statusLabel} ${report.summary}`;
@@ -483,19 +498,24 @@ export function formatVerificationReport(report: VerificationReport, language: L
     summary,
     language === "en-US" ? `Duration: ${report.durationMs}ms` : `耗时：${report.durationMs}ms`,
   ];
-  for (const command of report.commands) {
-    lines.push(
-      `- [${command.status.toUpperCase()}] ${command.command} (${command.durationMs}ms) log: ${command.logPath ?? "无日志"}`,
-    );
-    if (command.status !== "pass") {
-      lines.push(`  摘要：${command.summary}`);
+  if (includeCommandDetails) {
+    for (const command of report.commands) {
+      lines.push(
+        `- [${command.status.toUpperCase()}] ${command.command} (${command.durationMs}ms) log: ${command.logPath ?? "无日志"}`,
+      );
+      if (command.status !== "pass") {
+        lines.push(`  摘要：${command.summary}`);
+      }
     }
   }
-  if (report.unverified.length > 0) {
+  if (includeCommandDetails && report.unverified.length > 0) {
     lines.push(`未验证：${report.unverified.join("; ")}`);
   }
   lines.push(`下一步：${report.nextAction}`);
-  return lines.join("\n");
+  if (!includeCommandDetails) {
+    lines.push(language === "en-US" ? "Details: /verify last" : "详情：/verify last");
+  }
+  return lines;
 }
 
 export function formatVerificationLast(

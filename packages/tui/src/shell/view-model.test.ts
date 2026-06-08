@@ -1380,6 +1380,78 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary?.summary).not.toContain("job");
   });
 
+  it("renders task runtime summary on Ink and plain task main surfaces", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const context = createContext({
+      backgroundTasks: [
+        {
+          id: "verify-stale",
+          kind: "verification",
+          title: "Verification Runner",
+          status: "stale",
+          startedAt: "2026-06-03T00:00:00.000Z",
+          updatedAt: "2026-06-03T00:00:01.000Z",
+          heartbeatIntervalMs: 30_000,
+          staleAfterMs: 120_000,
+          logPath: "F:\\Linghun\\.linghun\\logs\\verification",
+          hasOutput: true,
+          userVisibleSummary: "verification stale",
+        },
+        {
+          id: "job-cancelled",
+          kind: "job",
+          title: "Job cancelled",
+          status: "cancelled",
+          startedAt: "2026-06-03T00:00:00.000Z",
+          updatedAt: "2026-06-03T00:00:02.000Z",
+          heartbeatIntervalMs: 30_000,
+          staleAfterMs: 120_000,
+          logPath: "F:\\Linghun\\.linghun\\logs\\jobs",
+          hasOutput: true,
+          userVisibleSummary: "job cancelled",
+        },
+      ],
+    });
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(context, {
+          width: output.columns,
+          height: output.rows,
+          viewMode: "task",
+          backgroundSummaries: [],
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("后台 2");
+    expect(output.text).toContain("可能卡住 1");
+    expect(output.text).toContain("已取消 1");
+    expect(output.text).toContain("/background");
+    expect(output.text).not.toContain("Verification Runner");
+    expect(output.text).not.toContain("Job cancelled");
+
+    const plain = renderPlainShell(controller.getViewModel());
+    expect(plain).toContain("后台 2");
+    expect(plain).toContain("可能卡住 1");
+    expect(plain).toContain("已取消 1");
+    expect(plain).toContain("/background");
+    expect(plain).not.toContain("Verification Runner");
+    expect(plain).not.toContain("Job cancelled");
+  });
+
   it("startup hydrate-style terminal and stale agent history stay out while running remains visible", () => {
     const terminalOnly = createShellViewModel(createContext(), {
       width: 100,
@@ -1819,7 +1891,7 @@ describe("D.12B — P3-2: plain status tray total length control", () => {
 });
 
 describe("D.12B — P2-5: no-color does not force white", () => {
-  it("no-color plain render keeps stale background history out of the ordinary summary", () => {
+  it("no-color plain render surfaces stale background as a low-noise task summary", () => {
     const view = createShellViewModel(createContext(), {
       noColor: true,
       width: 80,
@@ -1827,10 +1899,12 @@ describe("D.12B — P2-5: no-color does not force white", () => {
       backgroundSummaries: [{ id: "nc1", title: "task", status: "stale" }],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).not.toContain("后台 1");
+    expect(rendered).toContain("后台 1");
+    expect(rendered).toContain("可能卡住 1");
+    expect(rendered).toContain("/background");
+    expect(rendered).not.toContain("task");
     expect(rendered).not.toContain("需要确认 1");
     expect(rendered).not.toContain("可恢复");
-    expect(rendered).not.toContain("详情 /background");
     expect(rendered).not.toContain("上次会话恢复的后台任务");
     expect(rendered).toContain("LingHun");
   });
@@ -3788,7 +3862,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     const rendered = renderPlainShell(view);
     expect(rendered).not.toContain("工作树：");
-    expect(rendered).not.toContain("后台 1");
+    expect(rendered).toContain("后台 1");
+    expect(rendered).toContain("阻塞 1");
+    expect(rendered).toContain("/background");
   });
 
   it("D13E-P3: index 'unknown' renders as '索引?' / 'Index?' (no 'unknown' leak)", () => {
@@ -4158,7 +4234,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       body.indexOf("<Composer view={view}"),
     );
     expect(body).not.toContain("width={cw} paddingX={1}");
-    expect(body).not.toContain("view.taskRuntimeSummary");
+    expect(body).toContain("view.taskRuntimeSummary");
+    expect(body.indexOf("view.taskRuntimeSummary")).toBeLessThan(
+      body.indexOf("view.blocks.length > 0"),
+    );
     expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("{composerRule}"));
     expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
     expect(body).not.toContain(

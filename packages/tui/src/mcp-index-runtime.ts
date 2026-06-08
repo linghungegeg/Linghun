@@ -243,7 +243,9 @@ export async function handleIndexCommand(
       writeLine(output, guard);
       return;
     }
-    await runIndexRepository(context, "fast", "init fast", args.includes("--force"), output);
+    await runIndexRepository(context, "fast", "init fast", args.includes("--force"), output, {
+      guardAlreadyChecked: true,
+    });
     if (context.index.status === "ready") {
       if (!context.index.safetyWarning) {
         writeLine(output, formatIndexRefreshSummary(context, "init fast"));
@@ -264,6 +266,7 @@ export async function handleIndexCommand(
       "refresh",
       args.includes("--force"),
       output,
+      { guardAlreadyChecked: true },
     );
     if (context.index.status === "ready") {
       if (!context.index.safetyWarning) {
@@ -1020,7 +1023,17 @@ export async function runIndexRepository(
   actionLabel: "init fast" | "refresh",
   force: boolean,
   output: Writable,
+  options: { guardAlreadyChecked?: boolean } = {},
 ): Promise<void> {
+  if (!options.guardAlreadyChecked) {
+    const guard = deps().checkBackgroundStartGuard(context, "index", true);
+    if (guard) {
+      context.index.status = "error";
+      context.index.error = guard;
+      writeLine(output, guard);
+      return;
+    }
+  }
   const safety = await scanIndexSafety(context.projectPath);
   const transientExcludes =
     !force && safety.riskyFiles.length > 0 ? createIndexTransientExcludes(safety) : [];

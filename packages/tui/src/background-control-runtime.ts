@@ -436,8 +436,8 @@ export async function handleInterruptCommand(
   writeLine(
     output,
     context.language === "en-US"
-      ? `Interrupt requested for ${result.cancelled} active item(s); abort signals ${result.abortSignalsSent}, marked ${result.markedOnly}.`
-      : `已请求中断 ${result.cancelled} 个活动任务；abort signals ${result.abortSignalsSent}，marked ${result.markedOnly}。`,
+      ? `Interrupt requested for ${result.cancelled} active item(s); abort signal sent ${result.abortSignalsSent}; marked stale ${result.markedOnly}; confirmed exited 0. Inspect /background/logs before assuming processes exited.`
+      : `已请求中断 ${result.cancelled} 个活动任务；已发送取消信号 ${result.abortSignalsSent}；已标记 stale ${result.markedOnly}；已确认退出 0。确认进程退出前请查看 /background 和日志。`,
   );
 }
 
@@ -586,7 +586,7 @@ export async function interruptAllActiveWork(
   await appendInterruptEvent(
     cancelled === 0
       ? t(context, "interruptIdle")
-      : `${t(context, "interruptCancelled")} abort signals ${abortSignalsSent}; marked only ${markedOnly}`,
+      : `${t(context, "interruptCancelled")} abort_signal_sent=${abortSignalsSent}; marked_stale=${markedOnly}; confirmed_exited=0`,
   );
   return { cancelled, abortSignalsSent, markedOnly };
 }

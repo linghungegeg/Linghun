@@ -147,6 +147,9 @@ export type TranscriptEvent =
         reason: string;
         changedFiles: string[];
         restoreKind: "git" | "snapshot";
+        restorable?: boolean;
+        restoreUnavailableReason?: string;
+        files?: { path: string; existed: boolean; content?: string }[];
       };
       createdAt: string;
     }

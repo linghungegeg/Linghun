@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
 import { createIndexState } from "./index-runtime.js";
 import { summarizeIndexResult } from "./index-result-presenter.js";
-import { refreshIndexStatus, isSupportiveIndexEvidence } from "./mcp-index-runtime.js";
+import {
+  configureMcpIndexRuntime,
+  refreshIndexStatus,
+  isSupportiveIndexEvidence,
+  runIndexRepository,
+} from "./mcp-index-runtime.js";
 
 async function writeMockCodebaseMemory(
   projectPath: string,
@@ -112,6 +117,45 @@ describe("mcp-index-runtime", () => {
     expect(context.index.status).toBe("ready");
     expect(context.index.projectName).toBe("CustomProject");
     expect(context.index.projectName).not.toBe("F-Linghun");
+  });
+
+  test("runIndexRepository enforces resource guard even when called directly", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-index-direct-guard-"));
+    const output = { text: "", write(chunk: string) { this.text += chunk; return true; } };
+    const context = {
+      ...createIndexContext(projectPath),
+      language: "zh-CN",
+      backgroundTasks: [
+        {
+          id: "index-existing",
+          kind: "index",
+          title: "Index refresh",
+          status: "running",
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          heartbeatIntervalMs: 30_000,
+          staleAfterMs: 120_000,
+          hasOutput: false,
+          userVisibleSummary: "running",
+        },
+      ],
+    };
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () =>
+        "并发上限：index 后台任务已达到上限 1；请等待完成、查看 /background，或用 /interrupt 取消后重试。这是 resource/concurrency cap，不是权限拒绝。",
+      ensureSession: async () => "session-test",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+    });
+
+    await runIndexRepository(context as never, "fast", "refresh", false, output as never);
+
+    expect(context.index.status).toBe("error");
+    expect(context.index.error).toContain("resource/concurrency cap");
+    expect(output.text).toContain("index 后台任务已达到上限");
   });
 
   test("refreshIndexStatus keeps artifact-backed unknown-project distinct from missing", async () => {

@@ -969,7 +969,7 @@ import {
   createVerificationPlan,
   formatVerificationLast,
   formatVerificationPlan,
-  formatVerificationReport,
+  formatVerificationTaskSummary,
   runVerificationCommand,
   runVerificationPlan,
 } from "./verification-command-runtime.js";
@@ -1704,8 +1704,17 @@ export async function handleRewindCommand(
       output,
       context.checkpoints
         .map(
-          (checkpoint) =>
-            `${checkpoint.id}  ${checkpoint.createdAt}  ${checkpoint.changedFiles.join(", ")}`,
+          (checkpoint) => {
+            const restoreState =
+              checkpoint.restorable === false || checkpoint.files.length === 0
+                ? context.language === "en-US"
+                  ? "not restorable after resume"
+                  : "恢复后不可还原"
+                : context.language === "en-US"
+                  ? "restorable"
+                  : "可还原";
+            return `${checkpoint.id}  ${checkpoint.createdAt}  ${restoreState}  ${checkpoint.changedFiles.join(", ")}`;
+          },
         )
         .join("\n"),
     );
@@ -1725,10 +1734,32 @@ export async function handleRewindCommand(
     writeLine(output, `${t(context, "checkpointMissing")}：${checkpointId}`);
     return;
   }
+  if (checkpoint.restorable === false || checkpoint.files.length === 0) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Checkpoint cannot be restored after resume: ${
+            checkpoint.restoreUnavailableReason ?? "snapshot file contents are unavailable"
+          }.`
+        : `checkpoint 在恢复会话后不可还原：${
+            checkpoint.restoreUnavailableReason ?? "缺少 snapshot 文件内容"
+          }。`,
+    );
+    return;
+  }
   const sessionId = await ensureSession(context);
+  if (checkpoint.sessionId !== sessionId) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Checkpoint belongs to another session and will not be restored: ${checkpoint.id}.`
+        : `checkpoint 属于其他会话，已拒绝恢复：${checkpoint.id}。`,
+    );
+    return;
+  }
   const permission = await decidePermission(
     "Write",
-    { path: checkpoint.changedFiles[0] ?? ".linghun/checkpoint-restore" },
+    { paths: checkpoint.changedFiles.length > 0 ? checkpoint.changedFiles : [".linghun/checkpoint-restore"] },
     context,
     sessionId,
   );
@@ -2176,7 +2207,7 @@ export async function handleVerifyCommand(
   );
   context.lastVerification = report;
   await recordVerificationEvidence(context, sessionId, report);
-  writeLine(output, formatVerificationReport(report, context.language));
+  writeLine(output, formatVerificationTaskSummary(report, context.language));
   writeStatus(output, context);
 }
 
@@ -2594,7 +2625,9 @@ export async function runIndexSafetyRepair(context: TuiContext, output: Writable
     );
   }
 
-  await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
+  await runIndexRepository(context, context.config.index.mode, "refresh", false, output, {
+    guardAlreadyChecked: true,
+  });
   if (!context.index.safetyWarning) {
     writeLine(output, formatIndexRefreshSummary(context));
   }

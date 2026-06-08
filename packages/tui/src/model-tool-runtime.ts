@@ -2049,9 +2049,13 @@ export async function executeApprovedIndexToolUse(
     // 复用 /index repair 续跑：追加 ignore 条目后刷新（内部已有 writeLine 摘要）。
     await runIndexSafetyRepair(context, output);
   } else if (action === "init fast") {
-    await runIndexRepository(context, "fast", "init fast", Boolean(force), output);
+    await runIndexRepository(context, "fast", "init fast", Boolean(force), output, {
+      guardAlreadyChecked: true,
+    });
   } else {
-    await runIndexRepository(context, context.config.index.mode, "refresh", Boolean(force), output);
+    await runIndexRepository(context, context.config.index.mode, "refresh", Boolean(force), output, {
+      guardAlreadyChecked: true,
+    });
   }
   clearRequestActivity(context);
   const ok = context.index.status === "ready" || context.index.status === "stale";
@@ -2340,7 +2344,7 @@ export async function handleToolCommand(
     const shouldKeepAutoReviewWorkspaceEditQuiet =
       context.permissionMode === "auto-review" &&
       permission.request.files.length > 0 &&
-      permission.request.risk !== "high" &&
+      permission.request.risk === "low" &&
       (name === "Write" || name === "Edit" || name === "MultiEdit");
 
     if (permission.preflight && !shouldKeepAutoReviewWorkspaceEditQuiet) {
@@ -2546,16 +2550,18 @@ export async function maybeCreateCheckpoint(
   context.checkpoints = context.checkpoints.slice(0, MAX_CHECKPOINTS);
   await context.store.appendEvent(sessionId, {
     type: "checkpoint_created",
-    checkpoint: {
-      id: checkpoint.id,
-      sessionId: checkpoint.sessionId,
+      checkpoint: {
+        id: checkpoint.id,
+        sessionId: checkpoint.sessionId,
+        createdAt: checkpoint.createdAt,
+        reason: checkpoint.reason,
+        changedFiles: checkpoint.changedFiles,
+        restoreKind: checkpoint.restoreKind,
+        restorable: true,
+        files: checkpoint.files,
+      },
       createdAt: checkpoint.createdAt,
-      reason: checkpoint.reason,
-      changedFiles: checkpoint.changedFiles,
-      restoreKind: checkpoint.restoreKind,
-    },
-    createdAt: checkpoint.createdAt,
-  });
+    });
   return checkpoint;
 }
 

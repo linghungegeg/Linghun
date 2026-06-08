@@ -51,6 +51,7 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
       createdAt: event.createdAt,
     }));
   context.evidence = [...evidence.reverse(), ...context.evidence].slice(0, 20);
+  restoreCheckpoints(context, transcript);
   const handoff = [...transcript].reverse().find((event) => event.type === "handoff_packet");
   if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
     context.memory.lastHandoff = sanitizeHandoffPacket(handoff.packet);
@@ -91,6 +92,58 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
       }
     }
   }
+}
+
+function restoreCheckpoints(context: TuiContext, transcript: TranscriptEvent[]): void {
+  const restoredIds = new Set(
+    transcript
+      .filter((event): event is Extract<TranscriptEvent, { type: "checkpoint_restored" }> => {
+        return event.type === "checkpoint_restored";
+      })
+      .map((event) => event.checkpointId),
+  );
+  const known = new Set(context.checkpoints.map((checkpoint) => checkpoint.id));
+  const restored = transcript
+    .filter((event): event is Extract<TranscriptEvent, { type: "checkpoint_created" }> => {
+      return event.type === "checkpoint_created";
+    })
+    .filter((event) => !restoredIds.has(event.checkpoint.id) && !known.has(event.checkpoint.id))
+    .map((event) => {
+      const files = Array.isArray(event.checkpoint.files)
+        ? event.checkpoint.files.filter(isCheckpointFile)
+        : [];
+      const restorable =
+        event.checkpoint.restorable === true &&
+        event.checkpoint.restoreKind === "snapshot" &&
+        files.length > 0;
+      return {
+        id: event.checkpoint.id,
+        sessionId: event.checkpoint.sessionId,
+        createdAt: event.checkpoint.createdAt,
+        reason: event.checkpoint.reason,
+        changedFiles: event.checkpoint.changedFiles,
+        restoreKind: event.checkpoint.restoreKind,
+        restorable,
+        restoreUnavailableReason: restorable
+          ? undefined
+          : "checkpoint metadata was restored, but snapshot file contents are unavailable",
+        files,
+      };
+    })
+    .reverse();
+  if (restored.length > 0) {
+    context.checkpoints = [...restored, ...context.checkpoints].slice(0, 20);
+  }
+}
+
+function isCheckpointFile(value: unknown): value is {
+  path: string;
+  existed: boolean;
+  content?: string;
+} {
+  if (!isRecord(value)) return false;
+  if (typeof value.path !== "string" || typeof value.existed !== "boolean") return false;
+  return value.content === undefined || typeof value.content === "string";
 }
 
 function restoreSessionAcceptedMemory(context: TuiContext, transcript: TranscriptEvent[]): void {

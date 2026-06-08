@@ -2266,6 +2266,8 @@ export async function finishWorkflowRun(
           ? "stale"
           : status === "cancelled"
             ? "cancelled"
+            : status === "blocked"
+              ? "blocked"
             : "failed";
   task.result =
     status === "completed" || status === "partial" || status === "blocked"
@@ -2282,6 +2284,8 @@ export async function finishWorkflowRun(
   task.nextAction =
     status === "completed" || status === "partial"
       ? "Review verification evidence; workflow completion is lifecycle only."
+      : status === "blocked"
+        ? "Inspect the blocked workflow step, unblock the prerequisite, then rerun."
       : "Inspect /failures and rerun after fixing the failed step.";
   if (context.workflows.activeRun?.id === runId) {
     await persistWorkflowRunState(context, context.workflows.activeRun, task);

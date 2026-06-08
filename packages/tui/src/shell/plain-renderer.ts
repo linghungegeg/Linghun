@@ -289,6 +289,14 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
   }
 
   // Output blocks
+  const runtimeSummaryLines = view.taskRuntimeSummary
+    ? formatBlockLines({ ...view, blocks: [view.taskRuntimeSummary] }, noColor)
+    : [];
+  if (runtimeSummaryLines.length > 0) {
+    lines.push("");
+    lines.push(...runtimeSummaryLines);
+  }
+
   const blockLines = formatBlockLines(view, noColor);
   if (blockLines.length > 0) {
     lines.push("");

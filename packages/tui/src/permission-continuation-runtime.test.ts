@@ -92,6 +92,11 @@ describe("permission-continuation-runtime", () => {
       expect(isLowRiskWorkspaceEdit("Write", "high", ["a.ts"])).toBe(false);
     });
 
+    it("returns false for medium risk writes", () => {
+      expect(isLowRiskWorkspaceEdit("Write", "medium", ["a.ts"])).toBe(false);
+      expect(isLowRiskWorkspaceEdit("MultiEdit", "medium", ["a.ts"])).toBe(false);
+    });
+
     it("returns false for empty files", () => {
       expect(isLowRiskWorkspaceEdit("Write", "low", [])).toBe(false);
     });
@@ -104,6 +109,13 @@ describe("permission-continuation-runtime", () => {
 
     it("normalizes backslashes", () => {
       expect(collectInputFiles({ path: "src\\a.ts" })).toEqual(["src/a.ts"]);
+    });
+
+    it("extracts all paths from multi-file permission input", () => {
+      expect(collectInputFiles({ paths: ["src\\a.ts", "src/b.ts", 123] })).toEqual([
+        "src/a.ts",
+        "src/b.ts",
+      ]);
     });
 
     it("returns empty for null input", () => {

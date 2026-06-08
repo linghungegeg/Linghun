@@ -215,16 +215,19 @@ async function createSnapshotStablePoint(
   context.checkpoints = context.checkpoints.slice(0, deps.maxCheckpoints);
   await context.store.appendEvent(sessionId, {
     type: "checkpoint_created",
-    checkpoint: {
-      id: checkpoint.id,
-      sessionId: checkpoint.sessionId,
+      checkpoint: {
+        id: checkpoint.id,
+        sessionId: checkpoint.sessionId,
+        createdAt: checkpoint.createdAt,
+        reason: checkpoint.reason,
+        changedFiles: checkpoint.changedFiles,
+        restoreKind: checkpoint.restoreKind,
+        restorable: false,
+        restoreUnavailableReason:
+          "git stable checkpoint payload is kept in-memory only to avoid persisting broad dirty-file contents",
+      },
       createdAt: checkpoint.createdAt,
-      reason: checkpoint.reason,
-      changedFiles: checkpoint.changedFiles,
-      restoreKind: checkpoint.restoreKind,
-    },
-    createdAt: checkpoint.createdAt,
-  });
+    });
   return checkpoint;
 }
 

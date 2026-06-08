@@ -123,6 +123,11 @@ import {
   persistDurableJob,
   readDurableJobState,
 } from "./job-runtime.js";
+import {
+  recoverDurableJobForContext,
+  resumeDurableJob,
+  runDurableJobLiteTick,
+} from "./job-agent-command-runtime.js";
 import { evaluateMetaScheduler } from "./meta-scheduler-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
@@ -1592,6 +1597,60 @@ function createVerificationReportFixture(status: VerificationReport["status"]): 
     endedAt: now,
     durationMs: 1,
     nextAction: status === "pass" ? "review" : "rerun /verify",
+  };
+}
+
+function createDurableJobFixture(
+  context: TuiContext,
+  overrides: Partial<DurableJobState> = {},
+): DurableJobState {
+  const now = new Date().toISOString();
+  const paths = getDurableJobPaths(context, overrides.id ?? "job-phase3-direct");
+  return {
+    id: overrides.id ?? "job-phase3-direct",
+    goal: "phase 3 direct durable job fixture",
+    projectPath: context.projectPath,
+    phase: "Closure Phase 3",
+    target: "direct-test",
+    plan: ["step one"],
+    budget: {
+      maxTokens: 50_000,
+      maxRunningAgents: 1,
+      maxSteps: 1,
+      note: "phase 3 direct fixture",
+      usedTokens: 0,
+      remainingTokens: 50_000,
+      usedSteps: 0,
+      explicit: {},
+    },
+    effectiveAgentCap: 1,
+    capReason: "fixture",
+    timeoutMs: 60_000,
+    permissionPolicy: "default",
+    allowEdit: false,
+    allowBash: false,
+    allowMultiAgent: false,
+    status: "running",
+    agents: [],
+    createdAt: now,
+    updatedAt: now,
+    startedAt: now,
+    logPath: paths.logPath,
+    reportPath: paths.reportPath,
+    fullOutputPath: paths.fullOutputPath,
+    evidenceRefs: [
+      {
+        id: "ev-phase3-direct",
+        kind: "user_provided",
+        source: "test",
+        summary: "phase 3 direct evidence fixture",
+      },
+    ],
+    verification: { status: "partial", summary: "fixture verification is partial" },
+    worker: { status: "not_started", summary: "not started" },
+    adoptedConclusions: [],
+    rejectedConclusions: [],
+    ...overrides,
   };
 }
 
@@ -6193,6 +6252,112 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
+  it("Closure Phase 3: background resource guard excludes agent/job lifecycle tasks from global cap", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-phase3-cap-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", { id: "agent-running-cap-a" }),
+      createBackgroundTaskFixture("agent", { id: "agent-running-cap-b" }),
+      createBackgroundTaskFixture("job", { id: "job-running-cap-a" }),
+      createBackgroundTaskFixture("job", { id: "job-running-cap-b" }),
+    ];
+
+    const { checkBackgroundStartGuard } = await import("./background-control-runtime.js");
+
+    expect(checkBackgroundStartGuard(context, "verification", true)).toBeNull();
+    expect(checkBackgroundStartGuard(context, "index", true)).toBeNull();
+  });
+
+  it("Closure Phase 3: durable job core functions stay conservative without PASS evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-phase3-job-core-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-phase3-core",
+      kind: "test_result",
+      source: "fixture",
+      summary: "phase 3 focused evidence",
+      supportsClaims: ["phase-3-focused"],
+      createdAt: new Date().toISOString(),
+    });
+
+    const sleeping = createDurableJobFixture(context, {
+      id: "job-phase3-sleeping",
+      status: "sleeping",
+      startedAt: undefined,
+      worker: { status: "not_started", summary: "not started" },
+    });
+    await runDurableJobLiteTick(context, sleeping);
+    expect(sleeping.status).toBe("sleeping");
+    expect(sleeping.worker?.status).toBe("not_started");
+    expect(sleeping.result).toBeUndefined();
+
+    const terminal = createDurableJobFixture(context, {
+      id: "job-phase3-terminal",
+      status: "completed",
+      endedAt: new Date().toISOString(),
+    });
+    await resumeDurableJob(terminal, context);
+    expect(terminal.status).toBe("completed");
+    expect(terminal.result?.status).toBe("blocked");
+    expect(terminal.result?.summary).toContain("terminal completed");
+    expect(terminal.rejectedConclusions.join("\n")).toContain("not verification evidence");
+    const persistedTerminal = await readDurableJobState(getDurableJobStatePath(terminal));
+    expect(persistedTerminal?.result?.status).toBe("blocked");
+
+    const staleHeartbeat = createDurableJobFixture(context, {
+      id: "job-phase3-stale-heartbeat",
+      status: "running",
+      ownerSessionId: session.id,
+      ownerPid: 12345,
+      heartbeatAt: "2000-01-01T00:00:00.000Z",
+      handoffPacket: createHandoffPacket(context, [], undefined, session.id),
+    });
+    await recoverDurableJobForContext(context, staleHeartbeat);
+    expect(staleHeartbeat.status).toBe("stale");
+    expect(staleHeartbeat.pauseReason).toBe("recovered_stale_heartbeat");
+    expect(staleHeartbeat.result?.status).toBe("stale");
+    expect(staleHeartbeat.rejectedConclusions.join("\n")).toContain("not verification evidence");
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+  });
+
+  it("Closure Phase 3: interruptAllActiveWork returns direct counters for mixed active work", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-phase3-interrupt-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const modelController = new AbortController();
+    const btwController = new AbortController();
+    context.activeAbortController = modelController;
+    context.activeBtwAbortController = btwController;
+    context.btwPanelState = { question: "side question", phase: "loading" };
+    context.backgroundTasks = [createBackgroundTaskFixture("bash", { id: "bash-no-controller" })];
+
+    const { interruptAllActiveWork } = await import("./background-control-runtime.js");
+    const result = await interruptAllActiveWork(context);
+
+    expect(result).toEqual({ cancelled: 3, abortSignalsSent: 2, markedOnly: 1 });
+    expect(modelController.signal.aborted).toBe(true);
+    expect(btwController.signal.aborted).toBe(true);
+    expect(context.activeAbortController).toBeUndefined();
+    expect(context.activeBtwAbortController).toBeUndefined();
+    expect(context.btwPanelState).toMatchObject({ phase: "error" });
+    expect(context.backgroundTasks[0]).toMatchObject({
+      id: "bash-no-controller",
+      status: "stale",
+      result: "partial",
+    });
+  });
+
   it("runs /workflows run through real workflow steps while /workflows plan stays preview-only", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, "packages", "tui", "src"), { recursive: true });
@@ -6623,8 +6788,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       context.backgroundTasks.find((task) => task.id === context.workflows.activeRun?.id),
     ).toMatchObject({
-      status: "failed",
+      status: "blocked",
       result: "partial",
+      nextAction: expect.stringContaining("blocked workflow step"),
     });
     const transcript = (await store.resume(session.id)).transcript;
     expect(
@@ -16031,6 +16197,67 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
+  it("hydrates restorable checkpoint snapshots from transcript after resume", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "sample.txt"), "alpha", "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    await handleSlashCommand("/write sample.txt beta", context, output);
+    const transcript = (await store.resume(session.id)).transcript;
+    const hydratedContext = await createTestContext(project, store, session);
+    hydratedContext.permissionMode = "full-access";
+    hydrateResumeContext(hydratedContext, transcript);
+    await handleSlashCommand(
+      `/rewind restore ${hydratedContext.checkpoints[0]?.id}`,
+      hydratedContext,
+      output,
+    );
+
+    expect(hydratedContext.checkpoints[0]?.restorable).toBe(true);
+    expect(hydratedContext.checkpoints[0]?.files[0]?.content).toBe("alpha");
+    expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("alpha");
+  });
+
+  it("checks all changed files before restoring a multi-file checkpoint", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "safe.txt"), "new safe", "utf8");
+    await writeFile(join(project, ".env"), "TOKEN=new", "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+    context.checkpoints.unshift({
+      id: "cp-multi",
+      sessionId: session.id,
+      createdAt: new Date().toISOString(),
+      reason: "test checkpoint",
+      restoreKind: "snapshot",
+      changedFiles: ["safe.txt", ".env"],
+      restorable: true,
+      files: [
+        { path: "safe.txt", existed: true, content: "old safe" },
+        { path: ".env", existed: true, content: "TOKEN=old" },
+      ],
+    });
+
+    await handleSlashCommand("/rewind restore cp-multi", context, output);
+
+    expect(output.text).toContain("权限已拒绝");
+    expect(await readFile(join(project, "safe.txt"), "utf8")).toBe("new safe");
+    expect(await readFile(join(project, ".env"), "utf8")).toBe("TOKEN=new");
+    const transcript = (await store.resume(session.id)).transcript;
+    const request = transcript.find((event) => event.type === "permission_request");
+    expect(request).toMatchObject({
+      type: "permission_request",
+      request: { files: ["safe.txt", ".env"] },
+    });
+  });
+
   it("blocks rewind restore in default mode before mutating files", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "sample.txt"), "alpha", "utf8");
@@ -17051,7 +17278,9 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/interrupt", context, output);
     await running;
 
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 1，marked 0。");
+    expect(output.text).toContain(
+      "已请求中断 1 个活动任务；已发送取消信号 1；已标记 stale 0；已确认退出 0。",
+    );
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
     expect(context.backgroundAbortControllers?.size ?? 0).toBe(0);
@@ -17067,7 +17296,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/interrupt", context, output);
 
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 0，marked 1。");
+    expect(output.text).toContain(
+      "已请求中断 1 个活动任务；已发送取消信号 0；已标记 stale 1；已确认退出 0。",
+    );
     expect(context.backgroundTasks[0]?.status).toBe("stale");
     expect(context.backgroundTasks[0]?.result).toBe("partial");
   });
@@ -17118,7 +17349,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/interrupt", context, output);
 
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 0，marked 1。");
+    expect(output.text).toContain(
+      "已请求中断 1 个活动任务；已发送取消信号 0；已标记 stale 1；已确认退出 0。",
+    );
     expect(context.backgroundTasks[0]?.status).toBe("stale");
     expect(context.backgroundTasks[0]?.result).toBe("stale");
     const persisted = await readDurableJobState(getDurableJobStatePath(job));
@@ -17171,7 +17404,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/interrupt", context, output);
 
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 1，marked 0。");
+    expect(output.text).toContain(
+      "已请求中断 1 个活动任务；已发送取消信号 1；已标记 stale 0；已确认退出 0。",
+    );
     expect(controller.signal.aborted).toBe(true);
     expect(context.backgroundAbortControllers?.has(agent.id)).toBe(false);
     expect(context.agents[0]?.status).toBe("cancelled");
@@ -18088,7 +18323,9 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/interrupt", context, output);
 
     const task = context.backgroundTasks.find((item) => item.id === runId);
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 0，marked 1。");
+    expect(output.text).toContain(
+      "已请求中断 1 个活动任务；已发送取消信号 0；已标记 stale 1；已确认退出 0。",
+    );
     expect(context.workflows.activeRun.status).toBe("cancelled");
     expect(context.workflows.activeRun.result).toBe("cancelled");
     expect(task?.status).toBe("cancelled");
@@ -18157,7 +18394,9 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/interrupt", context, output);
 
     const task = context.backgroundTasks.find((item) => item.id === runId);
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 0，marked 1。");
+    expect(output.text).toContain(
+      "已请求中断 1 个活动任务；已发送取消信号 0；已标记 stale 1；已确认退出 0。",
+    );
     expect(task?.status).toBe("cancelled");
     expect(task?.result).toBe("cancelled");
     const statePath = join(
