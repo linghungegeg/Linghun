@@ -50,23 +50,6 @@ function isTranscriptWheelTarget(
   );
 }
 
-function isTranscriptMouseTarget(
-  mouse: TranscriptMouseEventView | undefined,
-  geometry: TranscriptViewportGeometryView | undefined,
-): boolean {
-  if (!mouse) return false;
-  if (mouse.action === "wheel") return isTranscriptWheelTarget(mouse, geometry);
-  if (mouse.button !== "left") return false;
-  if (!geometry) return false;
-  if (mouse.action === "drag" || mouse.action === "up") return true;
-  return (
-    mouse.x >= geometry.x &&
-    mouse.x < geometry.x + geometry.width &&
-    mouse.y >= geometry.y &&
-    mouse.y < geometry.y + geometry.height
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Edit buffer — the core editing model
 // ---------------------------------------------------------------------------
@@ -663,13 +646,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       if (isSgrMouseInput(input)) {
         if (!terminalInteractionModes.mouseTracking) return;
         const mouse = parseSgrMouseEvent(input);
-        if (!isTranscriptMouseTarget(mouse, view.transcriptViewportGeometry)) return;
+        if (!isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)) return;
         if (mouse?.button === "wheel-up") {
           emitInput({ type: "transcript-scroll", action: "wheelUp" });
         } else if (mouse?.button === "wheel-down") {
           emitInput({ type: "transcript-scroll", action: "wheelDown" });
-        } else if (mouse?.button === "left") {
-          emitInput({ type: "transcript-mouse", event: mouse });
         }
         return;
       }

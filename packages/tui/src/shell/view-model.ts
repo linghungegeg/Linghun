@@ -268,10 +268,14 @@ export function createShellViewModel(
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
-  const backgroundSummaryInput = selectBackgroundSummaryInput(options.backgroundSummaries, context);
   const taskRuntimeSummary =
-    effectiveViewMode !== "home" && !setupActiveFlow && backgroundSummaryInput.length > 0
-      ? mapBackgroundSummariesToBlocks(backgroundSummaryInput, language)[0]
+    effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length
+      ? mapBackgroundSummariesToBlocks(
+          options.backgroundSummaries.filter(
+            (s) => s.status === "running" || s.status === "paused" || s.status === "blocked",
+          ),
+          language,
+        )[0]
       : undefined;
   if (!options.permission && !setupActiveFlow) {
     const allOutputBlocks = options.outputBlocks ?? [];
@@ -1572,32 +1576,6 @@ function createProjectRouteBlock(language: Language, problem: string): ProductBl
     summary: text.routeSummary(problem),
     nextAction: text.routeNextAction,
   };
-}
-
-function selectBackgroundSummaryInput(
-  summaries: BackgroundTaskSummary[] | undefined,
-  context: TuiContext,
-): BackgroundTaskSummary[] {
-  if (summaries === undefined) return [];
-  const selected: BackgroundTaskSummary[] = [];
-  const seen = new Set<string>();
-  const add = (candidate: Partial<BackgroundTaskSummary>): void => {
-    if (
-      typeof candidate.id !== "string" ||
-      typeof candidate.title !== "string" ||
-      typeof candidate.status !== "string" ||
-      seen.has(candidate.id)
-    ) {
-      return;
-    }
-    seen.add(candidate.id);
-    selected.push(candidate as BackgroundTaskSummary);
-  };
-  for (const summary of summaries) add(summary);
-  for (const summary of context.backgroundTasks ?? []) {
-    if (isMainScreenBackgroundSummary(summary)) add(summary);
-  }
-  return selected;
 }
 
 function mapBackgroundSummariesToBlocks(

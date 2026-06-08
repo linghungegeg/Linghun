@@ -392,7 +392,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("enables SGR mouse tracking for app-owned transcript wheel and restores it on exit", async () => {
+  it("does not enable SGR mouse tracking by default so terminal selection remains native", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -412,8 +412,8 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("\x1B[?1000h\x1B[?1002h\x1B[?1006h");
-    expect(output.text).toContain("\x1B[?1006l\x1B[?1002l\x1B[?1000l");
+    expect(output.text).not.toContain("\x1B[?1000h\x1B[?1002h\x1B[?1006h");
+    expect(output.text).not.toContain("\x1B[?1006l\x1B[?1002l\x1B[?1000l");
   });
 
   it("does not add beforeExit listener when waiting after unmount", async () => {
@@ -1243,9 +1243,9 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary?.id).toBe("bg-summary");
     expect(view.taskRuntimeSummary?.kind).toBe("run");
     expect(view.taskRuntimeSummary?.status).toBe("running");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 2");
+    expect(view.taskRuntimeSummary?.title).toContain("后台 1");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("已结束 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("已结束");
     expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).toContain("后台任务正在运行");
     expect(view.taskRuntimeSummary?.summary).not.toContain("lint check");
@@ -1271,11 +1271,7 @@ describe("backgroundSummaries → blocks mapping", () => {
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
-    expect(view.taskRuntimeSummary?.status).toBe("fail");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 2");
-    expect(view.taskRuntimeSummary?.title).toContain("超时 1");
-    expect(view.taskRuntimeSummary?.title).toContain("异常 1");
-    expect(view.taskRuntimeSummary?.summary).toContain("后台任务已超时");
+    expect(view.taskRuntimeSummary).toBeUndefined();
     const joined = `${view.taskRuntimeSummary?.title ?? ""} ${view.taskRuntimeSummary?.summary ?? ""} ${view.taskRuntimeSummary?.nextAction ?? ""}`;
     expect(joined).not.toContain("deploy");
     expect(joined).not.toContain("health check");
@@ -1345,13 +1341,7 @@ describe("backgroundSummaries → blocks mapping", () => {
         },
       ],
     });
-    expect(view.taskRuntimeSummary?.status).toBe("blocked");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 1");
-    expect(view.taskRuntimeSummary?.title).toContain("智能体 1");
-    expect(view.taskRuntimeSummary?.title).toContain("可能卡住 1");
-    expect(view.taskRuntimeSummary?.summary).toContain("可能卡住");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("cli-tui-worker");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("stale/resumable");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
   it("uses en-US prefix for background blocks", () => {
@@ -1374,10 +1364,7 @@ describe("backgroundSummaries → blocks mapping", () => {
       backgroundSummaries: [{ id: "t6", title: "job", status: "completed" }],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
-    expect(view.taskRuntimeSummary?.status).toBe("info");
-    expect(view.taskRuntimeSummary?.title).toContain("completed 1");
-    expect(view.taskRuntimeSummary?.summary).toContain("Background task completed");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("job");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
   it("renders task runtime summary on Ink and plain task main surfaces", async () => {
@@ -1436,18 +1423,16 @@ describe("backgroundSummaries → blocks mapping", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("后台 2");
-    expect(output.text).toContain("可能卡住 1");
-    expect(output.text).toContain("已取消 1");
-    expect(output.text).toContain("/background");
+    expect(output.text).not.toContain("后台 2");
+    expect(output.text).not.toContain("可能卡住 1");
+    expect(output.text).not.toContain("已取消 1");
     expect(output.text).not.toContain("Verification Runner");
     expect(output.text).not.toContain("Job cancelled");
 
     const plain = renderPlainShell(controller.getViewModel());
-    expect(plain).toContain("后台 2");
-    expect(plain).toContain("可能卡住 1");
-    expect(plain).toContain("已取消 1");
-    expect(plain).toContain("/background");
+    expect(plain).not.toContain("后台 2");
+    expect(plain).not.toContain("可能卡住 1");
+    expect(plain).not.toContain("已取消 1");
     expect(plain).not.toContain("Verification Runner");
     expect(plain).not.toContain("Job cancelled");
   });
@@ -1462,14 +1447,7 @@ describe("backgroundSummaries → blocks mapping", () => {
         { id: "agent-cancelled-old", kind: "agent", title: "Agent cancelled", status: "cancelled" },
       ],
     });
-    expect(terminalOnly.taskRuntimeSummary?.status).toBe("fail");
-    expect(terminalOnly.taskRuntimeSummary?.title).toContain("后台 3");
-    expect(terminalOnly.taskRuntimeSummary?.title).toContain("异常 1");
-    expect(terminalOnly.taskRuntimeSummary?.title).toContain("已取消 1");
-    expect(terminalOnly.taskRuntimeSummary?.title).toContain("已结束 1");
-    expect(terminalOnly.taskRuntimeSummary?.summary).not.toContain("cli-tui-worker");
-    expect(terminalOnly.taskRuntimeSummary?.summary).not.toContain("Job old");
-    expect(terminalOnly.taskRuntimeSummary?.summary).not.toContain("Agent cancelled");
+    expect(terminalOnly.taskRuntimeSummary).toBeUndefined();
 
     const recoverable = createShellViewModel(createContext(), {
       width: 100,
@@ -1486,12 +1464,12 @@ describe("backgroundSummaries → blocks mapping", () => {
         },
       ],
     });
-    expect(recoverable.taskRuntimeSummary?.title).toContain("后台 3");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("智能体 3");
+    expect(recoverable.taskRuntimeSummary?.title).toContain("后台 1");
+    expect(recoverable.taskRuntimeSummary?.title).toContain("智能体 1");
     expect(recoverable.taskRuntimeSummary?.title).not.toContain("需要确认");
     expect(recoverable.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("可能卡住 1");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("异常 1");
+    expect(recoverable.taskRuntimeSummary?.title).not.toContain("可能卡住");
+    expect(recoverable.taskRuntimeSummary?.title).not.toContain("异常");
     expect(recoverable.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(recoverable.taskRuntimeSummary?.summary).not.toContain("cli-tui-worker");
   });
@@ -1807,7 +1785,7 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     expect(bgBlock).toBeUndefined();
   });
 
-  it("running/blocked jobs fold terminal history into one low-noise task summary", () => {
+  it("running/blocked jobs fold into one low-noise task summary without terminal history", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1820,11 +1798,11 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 4");
+    expect(view.taskRuntimeSummary?.title).toContain("后台 2");
     expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("可能卡住 1");
-    expect(view.taskRuntimeSummary?.title).toContain("异常 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("可能卡住");
+    expect(view.taskRuntimeSummary?.title).not.toContain("异常");
     expect(view.taskRuntimeSummary?.title).not.toContain("需要确认");
     expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
@@ -1891,7 +1869,7 @@ describe("D.12B — P3-2: plain status tray total length control", () => {
 });
 
 describe("D.12B — P2-5: no-color does not force white", () => {
-  it("no-color plain render surfaces stale background as a low-noise task summary", () => {
+  it("no-color plain render keeps stale background out of the task summary", () => {
     const view = createShellViewModel(createContext(), {
       noColor: true,
       width: 80,
@@ -1899,9 +1877,9 @@ describe("D.12B — P2-5: no-color does not force white", () => {
       backgroundSummaries: [{ id: "nc1", title: "task", status: "stale" }],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("后台 1");
-    expect(rendered).toContain("可能卡住 1");
-    expect(rendered).toContain("/background");
+    expect(rendered).toContain("后台：1");
+    expect(rendered).not.toContain("可能卡住 1");
+    expect(rendered).not.toContain("/background");
     expect(rendered).not.toContain("task");
     expect(rendered).not.toContain("需要确认 1");
     expect(rendered).not.toContain("可恢复");
@@ -2231,7 +2209,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(bgBlocks).toHaveLength(0);
   });
 
-  it("Task folds running/blocked background and terminal history into one low-noise summary", () => {
+  it("Task folds running/blocked background into one low-noise summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -2245,12 +2223,12 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 5");
+    expect(view.taskRuntimeSummary?.title).toContain("后台 2");
     expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("可能卡住 1");
-    expect(view.taskRuntimeSummary?.title).toContain("超时 1");
-    expect(view.taskRuntimeSummary?.title).toContain("异常 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("可能卡住");
+    expect(view.taskRuntimeSummary?.title).not.toContain("超时");
+    expect(view.taskRuntimeSummary?.title).not.toContain("异常");
     expect(view.taskRuntimeSummary?.title).not.toContain("需要确认");
     expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
@@ -3829,11 +3807,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     expect(view.taskFooter?.workspaceStatus).toBeUndefined();
     expect(view.taskFooter?.runtimeStatus).toBeUndefined();
-    expect(view.taskRuntimeSummary?.title).toContain("后台 1");
-    expect(view.taskRuntimeSummary?.title).toContain("可能卡住 1");
-    expect(view.taskRuntimeSummary?.summary).toContain("可能卡住");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("job-724a5c-worker");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("stale/resumable");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
   it("Phase 6.6: task footer stays minimal even with background summaries (workspace/runtime details are opt-in)", () => {
@@ -4192,13 +4166,13 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     expect(source).toContain("parseSgrMouseEvent(input)");
-    expect(source).toContain("isTranscriptMouseTarget(mouse, view.transcriptViewportGeometry)");
+    expect(source).toContain("isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)");
     expect(source).toContain('mouse?.button === "wheel-up"');
     expect(source).toContain('type: "transcript-scroll", action: "wheelUp"');
     expect(source).toContain('mouse?.button === "wheel-down"');
     expect(source).toContain('type: "transcript-scroll", action: "wheelDown"');
-    expect(source).toContain('mouse?.button === "left"');
-    expect(source).toContain('type: "transcript-mouse", event: mouse');
+    expect(source).not.toContain('mouse?.button === "left"');
+    expect(source).not.toContain('type: "transcript-mouse", event: mouse');
     expect(source).not.toContain("if (isSgrMouseInput(input)) return;");
   });
 

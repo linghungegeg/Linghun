@@ -38,7 +38,7 @@ describe("terminal interaction modes", () => {
     });
   });
 
-  it("requires app-owned screen mode before enabling mouse tracking", () => {
+  it("requires explicit opt-in and app-owned screen mode before enabling mouse tracking", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
@@ -61,11 +61,11 @@ describe("terminal interaction modes", () => {
     ).toBe(false);
   });
 
-  it("allows explicit env opt-out for app-owned mouse tracking", () => {
+  it("keeps app-owned mouse tracking off by default", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
-        env: { LINGHUN_TUI_MOUSE: "0" },
+        env: {},
         appOwnedScreen: true,
       }).mouseTracking,
     ).toBe(false);
