@@ -8,6 +8,7 @@ import type { Language } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
 import { createProcessGuard } from "./process-guard.js";
+import { LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS } from "./runtime-budget.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
 import { rememberBackgroundTask } from "./tui-agent-job-runtime.js";
 import type {
@@ -19,7 +20,6 @@ import type {
   VerificationStepKind,
 } from "./tui-data-types.js";
 import { isRecord } from "./tui-state-runtime.js";
-const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 
 export async function createVerificationPlan(
   projectPath: string,
@@ -314,7 +314,7 @@ export async function runVerificationCommand(
   command: string,
   cwd: string,
   signal?: AbortSignal,
-  timeoutMs = VERIFICATION_COMMAND_TIMEOUT_MS,
+  timeoutMs = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS,
 ): Promise<{
   exitCode: number;
   output: string;

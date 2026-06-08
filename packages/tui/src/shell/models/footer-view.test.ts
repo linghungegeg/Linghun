@@ -29,7 +29,7 @@ describe("footer-view: model label setup-needed dim", () => {
   it("placeholder 'openai-compatible-model' 视为占位，dim '--'", () => {
     const result = formatFooterModelLabel("en-US", "openai-compatible-model", false, 120);
     expect(result.dim).toBe(true);
-    expect(result.text).toContain("--");
+    expect(result.text).toBe("Model --");
   });
 });
 
@@ -40,6 +40,7 @@ describe("footer-view: cache hit rate tone", () => {
 
   it("hitRate=0.9 → tone=default", () => {
     expect(formatFooterCacheLabel("zh-CN", 0.9).tone).toBe("default");
+    expect(formatFooterCacheLabel("en-US", 0.9).text).toBe("Cache 90%");
   });
 
   it("hitRate=0.4 → tone=warning（命中率偏低）", () => {
@@ -55,6 +56,8 @@ describe("footer-view: index status placeholder", () => {
 
   it("正常 status 显示完整标签", () => {
     expect(formatFooterIndexLabel("zh-CN", "ready")).toContain("ready");
+    expect(formatFooterIndexLabel("en-US", "ready")).toBe("Index ready");
+    expect(formatFooterIndexLabel("en-US", "unknown")).toBe("Index?");
   });
 });
 

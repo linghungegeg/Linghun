@@ -256,24 +256,25 @@ const READONLY_HEADS = new Set<string>([
   "get-process",
   "get-service",
   "get-date",
-  "node",
   "npm",
   "pnpm",
   "yarn",
   "bun",
+  "git",
+  "cargo",
+  "go",
+  "rustc",
+  "docker",
+]);
+
+const EXECUTABLE_RUNTIME_HEADS = new Set<string>([
   "deno",
   "python",
   "python3",
   "tsc",
-  "git",
-  "gh",
-  "cargo",
-  "go",
-  "rustc",
   "javac",
   "java",
   "ruby",
-  "docker",
 ]);
 
 // Heads that print process / shell environment by design. Always
@@ -598,7 +599,8 @@ function classifyBashHead(head: string, args: string[]): SemanticClass {
   if (head === "gh") {
     return "network";
   }
-  // docker: ps / images / version / inspect / logs are readonly queries.
+  // docker: keep only harmless inventory/version queries on the light path.
+  // logs/inspect/stats can expose container secrets or long output, so they ask.
   if (head === "docker") {
     return classifyDockerSubcommand(args);
   }
@@ -606,6 +608,9 @@ function classifyBashHead(head: string, args: string[]): SemanticClass {
   if (isVersionQuery(args)) return "readonly";
   if (head === "node") {
     return classifyNodeSubcommand(args);
+  }
+  if (EXECUTABLE_RUNTIME_HEADS.has(head)) {
+    return "unknown";
   }
   for (const [pkgHead, verbs] of INSTALL_PAIRS) {
     if (head === pkgHead) {
@@ -680,21 +685,12 @@ function classifyGitSubcommand(args: string[]): SemanticClass {
 function classifyDockerSubcommand(args: string[]): SemanticClass {
   const sub = args.find((a) => !a.startsWith("-"))?.toLowerCase();
   if (!sub) return "readonly";
-  if (
-    [
-      "ps",
-      "images",
-      "image",
-      "inspect",
-      "logs",
-      "version",
-      "info",
-      "stats",
-      "top",
-      "history",
-    ].includes(sub)
-  ) {
+  if (["ps", "images", "version", "info"].includes(sub)) {
     return "readonly";
+  }
+  if (sub === "image") {
+    const verb = args.filter((a) => !a.startsWith("-"))[1]?.toLowerCase();
+    return !verb || verb === "ls" || verb === "list" ? "readonly" : "unknown";
   }
   return "unknown";
 }

@@ -64,7 +64,7 @@ export function formatFooterModelLabel(
   setupNeeded: boolean,
   width: number,
 ): { text: string; dim: boolean } {
-  const label = language === "en-US" ? "model" : "模型";
+  const label = language === "en-US" ? "Model" : "模型";
   const trimmed = (effectiveModel ?? "").trim();
   const isPlaceholder =
     setupNeeded || SETUP_PLACEHOLDER_VALUES.has(trimmed.toLowerCase()) || trimmed.length === 0;
@@ -79,7 +79,7 @@ export function formatFooterCacheLabel(
   language: Language,
   hitRate: number | null,
 ): { text: string; tone: "default" | "warning" | "dim" } {
-  const label = language === "en-US" ? "cache" : "缓存";
+  const label = language === "en-US" ? "Cache" : "缓存";
   if (hitRate === null || hitRate === undefined) {
     return { text: `${label}?`, tone: "dim" };
   }

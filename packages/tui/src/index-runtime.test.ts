@@ -2,9 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   createCurrentIndexProjectNameCandidates,
   findCurrentIndexProject,
+  getCodebaseMemoryArtifactDir,
+  getCodebaseMemoryGraphPath,
 } from "./index-runtime.js";
 
 describe("index runtime project selection", () => {
+  it("keeps codebase-memory artifact path separate from Linghun storage.index metadata", () => {
+    expect(getCodebaseMemoryArtifactDir("F:\\Linghun")).toBe("F:\\Linghun\\.codebase-memory");
+    expect(getCodebaseMemoryGraphPath("F:\\Linghun")).toBe(
+      "F:\\Linghun\\.codebase-memory\\graph.db.zst",
+    );
+  });
+
   it("prefers root_path over name candidates", () => {
     const project = findCurrentIndexProject(
       {

@@ -18231,6 +18231,14 @@ describe("Phase 06 TUI slash commands", () => {
     );
   }, 10_000);
 
+  it("Closure Phase 5: verification command runtime uses runtime-budget timeout source", async () => {
+    const source = await readSrc("verification-command-runtime.ts");
+
+    expect(source).toContain('import { LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS } from "./runtime-budget.js";');
+    expect(source).toContain("timeoutMs = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS");
+    expect(source).not.toContain("const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000");
+  });
+
   it("generic command timeout uses process guard without changing result", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     consumeProcessGuardStopResultsForTest();
@@ -24810,6 +24818,30 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       }),
     } as unknown as Parameters<typeof __testSendMessage>[2];
   }
+
+  it("Closure Phase 4: ordinary request does not wait for workspace-reference lazy refresh", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-closure-p4-wsref-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    let modelStreamStarted = false;
+    const neverSettlingProbe = new Promise<never>(() => undefined);
+    context.cache.workspaceReference._pendingProbe = neverSettlingProbe;
+    const gateway = {
+      stream: vi.fn(async function* () {
+        modelStreamStarted = true;
+        yield { type: "assistant_text_delta", text: "普通回答" } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+      }),
+    } as unknown as Parameters<typeof __testSendMessage>[2];
+
+    await __testSendMessage("普通问答：解释一下当前设计", context, gateway, output);
+
+    expect(modelStreamStarted).toBe(true);
+    expect(output.text).toContain("普通回答");
+    expect(context.cache.workspaceReference._pendingProbe).not.toBe(neverSettlingProbe);
+  });
 
   it("Policy: code fact request keeps source-first in system_event, not main notifications", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-policy-source-"));

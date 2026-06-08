@@ -28,6 +28,8 @@ describe("permission-policy-engine — Bash readonly auto allow", () => {
     "node --version",
     "npm --version",
     "pnpm --version",
+    "python --version",
+    "tsc --version",
     "echo hello",
     "docker ps",
   ]) {
@@ -116,6 +118,16 @@ describe("permission-policy-engine — Bash require_permission", () => {
     "node --require ./preload.cjs scripts/check.mjs",
     "node scripts/check.mjs | cat",
     "node scripts/check.mjs > out.txt",
+    "python script.py",
+    "python3 -m pytest",
+    "deno run x.ts",
+    "tsc",
+    "javac Main.java",
+    "java Main",
+    "ruby script.rb",
+    "docker logs app",
+    "docker inspect app",
+    "docker stats",
   ]) {
     it(`require_permission: ${cmd}`, () => {
       const v = classifyToolRequest(bash(cmd));

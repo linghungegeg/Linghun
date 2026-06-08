@@ -153,6 +153,21 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(success.ok).toBe(true);
     if (success.ok) expect(context.cache.deepCompact?.id).toBe(success.packet.id);
 
+    const cancelledController = new AbortController();
+    cancelledController.abort();
+    const cancelled = await runDeepCompact({
+      context: await createTestContext(),
+      sessionId,
+      transcript: [],
+      runtime: runtime(),
+      trigger: "manual",
+      gateway: gateway([{ type: "assistant_text_delta", text: "late summary", id: "a2" }]),
+      signal: cancelledController.signal,
+      deps: deepDeps(),
+    });
+    expect(cancelled).toMatchObject({ ok: false });
+    if (!cancelled.ok) expect(cancelled.message).toContain("取消");
+
     const toolUseFailure = await runDeepCompact({
       context: await createTestContext(),
       sessionId,

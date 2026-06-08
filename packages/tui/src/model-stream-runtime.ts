@@ -441,7 +441,15 @@ export async function sendMessage(
   const architectureDirective = architectureCard
     ? createArchitectureRuntimeDirective(architectureCard)
     : undefined;
-  await refreshWorkspaceReferenceCache(context, runtimeStatus);
+  void refreshWorkspaceReferenceCache(context, runtimeStatus).catch(async (error) => {
+    const reason = error instanceof Error ? error.message : String(error);
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `workspace_reference_lazy_refresh_failed reason=${reason.replace(/\s+/g, " ").slice(0, 220)}`,
+      "warning",
+    );
+  });
   // D.14G — 最小 WorktreeContext（redacted，无 provider/baseUrl）；仅隔离 worktree 内注入。
   const worktreeContext = await computeWorktreeContext(context.projectPath);
 

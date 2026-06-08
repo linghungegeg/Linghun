@@ -49,6 +49,7 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
   runtime: CompactPreflightRuntime;
   trigger: DeepCompactTrigger;
   gateway?: ModelGateway;
+  signal?: AbortSignal;
   deps: DeepCompactRuntimeDeps;
 }): Promise<DeepCompactRunResult> {
   if (!input.gateway) {
@@ -64,6 +65,7 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
     ...input,
     transcript: resumed.transcript,
     gateway: input.gateway,
+    signal: input.signal,
   });
 }
 
@@ -74,6 +76,7 @@ export async function runDeepCompact(input: {
   runtime: CompactPreflightRuntime;
   trigger: DeepCompactTrigger;
   gateway: ModelGateway;
+  signal?: AbortSignal;
   deps: DeepCompactRuntimeDeps;
 }): Promise<DeepCompactRunResult> {
   const now = Date.now();
@@ -89,6 +92,7 @@ export async function runDeepCompact(input: {
     input.transcript,
     input.trigger,
   );
+  const signal = input.signal ?? new AbortController().signal;
   let summary = "";
   try {
     for await (const event of input.gateway.stream(
@@ -98,8 +102,11 @@ export async function runDeepCompact(input: {
         model: input.runtime.model,
         toolChoice: "none",
       },
-      new AbortController().signal,
+      signal,
     )) {
+      if (signal.aborted) {
+        return failMessage(input.context, "Deep compact cancelled by user interrupt.");
+      }
       if (event.type === "assistant_text_delta") {
         summary += event.text;
         continue;
@@ -127,6 +134,9 @@ export async function runDeepCompact(input: {
       }
     }
   } catch (error) {
+    if (signal.aborted) {
+      return failMessage(input.context, "Deep compact cancelled by user interrupt.");
+    }
     const reason = error instanceof Error ? error.message : String(error);
     await recordDeepCompactFailure(input.context, input.sessionId, reason, input.deps);
     return failMessage(input.context, "Deep compact failed before provider request.");
@@ -737,6 +747,10 @@ function failMessage(context: TuiContext, english: string): DeepCompactRunResult
               "Deep compact 失败：compact agent 在禁用工具时尝试了 tool_use。",
             )
             .replace("Deep compact provider request failed.", "Deep compact provider 请求失败。")
+            .replace(
+              "Deep compact cancelled by user interrupt.",
+              "Deep compact 已被用户中断取消。",
+            )
             .replace(
               "Deep compact failed before provider request.",
               "Deep compact 在 provider 请求前失败。",

@@ -86,11 +86,21 @@ export type LocalIndexArtifactState =
   | { status: "missing"; artifactPath?: string }
   | { status: "corrupt"; artifactPath?: string; error: string };
 
+// codebase-memory owns this artifact directory; Linghun storage.index is only
+// Linghun metadata/config storage and must not be treated as the graph path.
+export function getCodebaseMemoryArtifactDir(projectPath: string): string {
+  return join(projectPath, ".codebase-memory");
+}
+
+export function getCodebaseMemoryGraphPath(projectPath: string): string {
+  return join(getCodebaseMemoryArtifactDir(projectPath), "graph.db.zst");
+}
+
 export async function readLocalIndexArtifactState(
   projectPath: string,
 ): Promise<LocalIndexArtifactState> {
-  const artifactDir = join(projectPath, ".codebase-memory");
-  const graphPath = join(artifactDir, "graph.db.zst");
+  const artifactDir = getCodebaseMemoryArtifactDir(projectPath);
+  const graphPath = getCodebaseMemoryGraphPath(projectPath);
   try {
     const graphStat = await stat(graphPath);
     if (!graphStat.isFile() || graphStat.size <= 0) {

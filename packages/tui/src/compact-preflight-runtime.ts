@@ -143,6 +143,7 @@ export async function prepareMessagesForProviderPreflight(input: {
         runtime: input.runtime,
         trigger: input.trigger,
         gateway: input.context.modelGateway,
+        signal: input.context.activeAbortController?.signal,
         deps: input.deps.runDeepCompact,
       });
       if (!deep.ok) {
