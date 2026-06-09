@@ -116,7 +116,6 @@ describe("permission-policy-engine — Bash require_permission", () => {
     "node scripts/check.mjs %LINGHUN_OPENAI_API_KEY%",
     "node scripts/check.mjs --token",
     "node --require ./preload.cjs scripts/check.mjs",
-    "node scripts/check.mjs | cat",
     "node scripts/check.mjs > out.txt",
     "python script.py",
     "python3 -m pytest",
@@ -138,11 +137,9 @@ describe("permission-policy-engine — Bash require_permission", () => {
   for (const cmd of [
     "ls; rm -rf /",
     "cat foo && rm foo",
-    "git status || true",
     "pwd | grep x",
     "echo hi > out.txt",
     "echo hi >> out.txt",
-    "cat < input.txt",
     "echo `pwd`",
     "echo $(pwd)",
     "Get-Content src/shared/large-generated.ts | Measure-Object -Line",
@@ -152,6 +149,17 @@ describe("permission-policy-engine — Bash require_permission", () => {
     it(`组合符强制 require_permission: ${cmd}`, () => {
       const v = classifyToolRequest(bash(cmd));
       expect(v.decision).toBe("require_permission");
+    });
+  }
+
+  for (const cmd of [
+    "git status || true",
+    "cat < input.txt",
+    "node scripts/check.mjs | cat",
+  ]) {
+    it(`全段 readonly 管道/链 auto_allow_readonly: ${cmd}`, () => {
+      const v = classifyToolRequest(bash(cmd));
+      expect(v.decision).toBe("auto_allow_readonly");
     });
   }
 });

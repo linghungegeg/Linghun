@@ -2794,6 +2794,14 @@ export async function handleSlashCommand(
     await handleAutopilotCommand(rest, context, output);
     return "handled";
   }
+  if (command === "/brief") {
+    context.briefMode = !context.briefMode;
+    const msg = context.briefMode
+      ? messages[context.language].r7BriefEnabled
+      : messages[context.language].r7BriefDisabled;
+    writeLine(output, msg);
+    return "handled";
+  }
   if (command === "/sessions") {
     if (rest[0] === "resume") {
       const sessionId = rest[1];

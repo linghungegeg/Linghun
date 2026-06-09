@@ -31,6 +31,8 @@
 
 import { isAbsolute, relative, resolve } from "node:path";
 
+import { classifyCompoundCommand } from "./bash-subcommand-parser.js";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -127,6 +129,20 @@ const COMPOSITION_OPERATORS_REGEX =
 // PowerShell / cmd.exe encoded-command and arbitrary-shell patterns.
 const ENCODED_OR_NESTED_SHELL_REGEX =
   /(?:^|\s)(?:powershell|pwsh)(?:\.exe)?\s+.*?(?:-enc(?:odedcommand)?|-e\b)|(?:^|\s)cmd(?:\.exe)?\s+\/c\b|(?:^|\s)(?:bash|sh)\s+-c\b/iu;
+
+// Detect unquoted subshell execution: $() or backtick outside single quotes.
+function hasUnquotedSubshell(command: string): boolean {
+  let inSingle = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (ch === "'" && !inSingle) { inSingle = true; continue; }
+    if (ch === "'" && inSingle) { inSingle = false; continue; }
+    if (inSingle) continue;
+    if (ch === "`") return true;
+    if (ch === "$" && command[i + 1] === "(") return true;
+  }
+  return false;
+}
 
 // Network downloaders / fetchers that effectively act as code-exec entry
 // points. Treated as `network` regardless of verb argument.
@@ -410,11 +426,45 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
   }
 
   if (COMPOSITION_OPERATORS_REGEX.test(command) || ENCODED_OR_NESTED_SHELL_REGEX.test(command)) {
+    // Encoded/nested shell commands always require permission — no decomposition.
+    if (ENCODED_OR_NESTED_SHELL_REGEX.test(command)) {
+      return {
+        decision: "require_permission",
+        semantic: "unknown",
+        pathSafety: "unknown_path",
+        reason: "命令含嵌套 shell / 编码命令；不自动放行。",
+        redactedSummary,
+      };
+    }
+    // Subshell execution ($() or backtick) embeds arbitrary commands that can't
+    // be classified by head token alone — always require permission.
+    if (hasUnquotedSubshell(command)) {
+      return {
+        decision: "require_permission",
+        semantic: "unknown",
+        pathSafety: "unknown_path",
+        reason: "命令含子 shell 执行（$() / 反引号）；不自动放行。",
+        redactedSummary,
+      };
+    }
+    // Attempt subcommand-level decomposition for pipe/chain operators.
+    const compound = classifyCompoundCommand(command, req.workspaceRoot);
+    if (compound.aggregateDecision === "auto_allow_readonly") {
+      return {
+        decision: "auto_allow_readonly",
+        semantic: "readonly",
+        pathSafety: "workspace_safe",
+        reason: "管道/链式命令各段均为只读；自动放行。",
+        redactedSummary,
+      };
+    }
     return {
       decision: "require_permission",
       semantic: "unknown",
       pathSafety: "unknown_path",
-      reason: "命令含组合符 / 重定向 / 嵌套 shell / 编码命令；不自动放行。",
+      reason: compound.riskySummary
+        ? `命令含非只读段：${compound.riskySummary}；不自动放行。`
+        : "命令含组合符 / 重定向；不自动放行。",
       redactedSummary,
     };
   }
@@ -568,7 +618,7 @@ function bashReasonFor(semantic: SemanticClass, head: string): string {
   }
 }
 
-function classifyBashHead(head: string, args: string[]): SemanticClass {
+export function classifyBashHead(head: string, args: string[]): SemanticClass {
   if (DESTRUCTIVE_HEADS.has(head)) return "destructive";
   if (MUTATING_HEADS.has(head)) return "mutating";
   if (NETWORK_HEADS.has(head)) return "network";

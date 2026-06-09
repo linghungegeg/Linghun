@@ -82,7 +82,9 @@ export type MessageKey =
   | "r4ClipboardCopied"
   | "r4ClipboardFailed"
   | "r5FullscreenEnabled"
-  | "r5FullscreenDisabled";
+  | "r5FullscreenDisabled"
+  | "r7BriefEnabled"
+  | "r7BriefDisabled";
 
 export const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
@@ -173,6 +175,8 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     r4ClipboardFailed: "复制失败",
     r5FullscreenEnabled: "全屏模式已启用",
     r5FullscreenDisabled: "全屏模式未启用（终端原生滚动）",
+    r7BriefEnabled: "简洁模式已启用，减少 TUI 噪音。",
+    r7BriefDisabled: "简洁模式已关闭，恢复完整输出。",
   },
   "en-US": {
     appTitle: "{name} TUI / REPL",
@@ -265,5 +269,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     r4ClipboardFailed: "Copy failed",
     r5FullscreenEnabled: "Fullscreen mode enabled",
     r5FullscreenDisabled: "Fullscreen mode disabled (native scrolling)",
+    r7BriefEnabled: "Brief mode enabled; TUI noise reduced.",
+    r7BriefDisabled: "Brief mode disabled; full output restored.",
   },
 };

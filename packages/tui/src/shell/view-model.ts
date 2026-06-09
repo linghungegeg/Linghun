@@ -600,6 +600,7 @@ function selectStreamingAssistantText(
   context: TuiContext,
   blocks: ProductBlockViewModel[],
 ): string | undefined {
+  if (context.briefMode) return undefined;
   const streaming = (context as { streamingAssistant?: { id: string; text: string } })
     .streamingAssistant;
   if (!streaming) return undefined;
@@ -1208,6 +1209,10 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
   };
   const mapped = phaseMap[phase];
   if (!mapped) return undefined;
+
+  if (context.briefMode && (mapped === "thinking" || mapped === "continuing")) {
+    return undefined;
+  }
 
   const toolName = (context as { requestActivityToolName?: string }).requestActivityToolName;
   const retryInfo = (context as { retryInfo?: { attempt: number; max: number; delaySec: number } }).retryInfo;

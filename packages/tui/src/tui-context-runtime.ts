@@ -115,6 +115,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/enter",
   "/trust",
   "/autopilot",
+  "/brief",
   "/sessions",
   "/read",
   "/write",
@@ -495,6 +496,8 @@ export type TuiContext = {
   backgroundOverlayState?: { open: boolean; cursor: number; expanded?: boolean };
   /** R6 — notification callback, initialized by index.ts to push transient notifications. */
   pushNotification?: (text: string, tone?: "default" | "dim" | "warning" | "error" | "success") => void;
+  /** R7 — brief mode reduces TUI noise (env LINGHUN_TUI_BRIEF=1 or /brief toggle). */
+  briefMode?: boolean;
 };
 
 export const VERIFICATION_COMMAND_TIMEOUT_MS = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS;
