@@ -115,6 +115,7 @@ import type {
   VerificationReport,
 } from "./tui-data-types.js";
 import { formatAgentDetails } from "./tui-details-runtime.js";
+import { messages } from "./tui-messages.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
 import { decidePermission } from "./tui-permission-runtime.js";
 import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
@@ -139,6 +140,19 @@ const AGENT_ASSIGNABLE_STATUSES = new Set<AgentRun["status"]>(["running", "idle"
 
 function getAgentRunsDir(context: TuiContext): string {
   return resolveStoragePaths(context.config, context.projectPath).agentRuns;
+}
+
+function formatAgentCompletionSummary(agent: AgentRun, context: TuiContext): string {
+  const text = messages[context.language];
+  const elapsed = Date.now() - Date.parse(agent.startedAt);
+  const sec = (elapsed / 1000).toFixed(1);
+  const tokens = agent.cost.inputTokens + agent.cost.outputTokens;
+  const tools = agent.mailbox.filter((m) => m.status === "consumed").length;
+  const conclusion = truncateDisplay((agent.summary ?? "").replace(/\s+/g, " "), 120);
+  return [
+    `  ${text.r3CompletionDuration}: ${sec}s · ${text.r3TokensLabel} ${tokens} · ${text.r3CompletionTools} ${tools}`,
+    `  ${text.r3CompletionConclusion}: ${conclusion}`,
+  ].join("\n");
 }
 
 export type JobAgentCommandRuntimeDeps = {
@@ -2264,6 +2278,7 @@ export async function completeAgent(
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
   clearAgentAbortController(context, agent.id);
   writeLine(output, formatAgentSummary(agent, context));
+  writeLine(output, formatAgentCompletionSummary(agent, context));
   deps().writeStatus(output, context);
 }
 

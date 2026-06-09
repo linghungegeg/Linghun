@@ -290,6 +290,21 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("opens the background overlay with Shift+Down", async () => {
+    const view = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      backgroundTaskOverlay: undefined,
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    await writeInput(input, shell, "\x1b[1;2B");
+
+    expect(events).toContainEqual({ type: "background-overlay-open" });
+    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "lineDown" });
+    shell.unmount();
+  });
+
   it("absorbs panel navigation keys for non-selectable CommandPanel rows", async () => {
     const view = {
       ...baseTaskView(),

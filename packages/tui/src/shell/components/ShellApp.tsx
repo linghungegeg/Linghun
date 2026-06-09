@@ -11,6 +11,8 @@ import {
 import { createShellTheme, getStatusMarker } from "../theme.js";
 import type { ShellController, ShellViewModel, TaskActivityView } from "../types.js";
 import type { ProductBlockViewModel } from "../types.js";
+import { AgentProgressTree } from "./AgentProgressTree.js";
+import { BackgroundTaskOverlay } from "./BackgroundTaskOverlay.js";
 import { BtwPanel } from "./BtwPanel.js";
 import { CommandPanel } from "./CommandPanel.js";
 import { Composer } from "./Composer.js";
@@ -23,7 +25,9 @@ import { TranscriptViewport } from "./ScrollViewport.js";
 import { SessionsPanel } from "./SessionsPanel.js";
 import { StatusFooter } from "./StatusFooter.js";
 import { StatusTray } from "./StatusTray.js";
+import { TaskListView } from "./TaskListView.js";
 import { TaskSuggestionBar } from "./TaskSuggestionBar.js";
+import { WorkflowProgressView } from "./WorkflowProgressView.js";
 
 export function ShellApp({
   controller,
@@ -218,6 +222,33 @@ function TaskLayout({
           ) : null}
 
           {/* TaskSuggestionBar — 空输入时可用 ↑/↓/Enter 或数字选择。 */}
+          {view.agentProgressTree ? (
+            <AgentProgressTree
+              tree={view.agentProgressTree}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          ) : null}
+
+          {view.taskListView ? (
+            <TaskListView
+              list={view.taskListView}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          ) : null}
+
+          {view.workflowProgressView ? (
+            <WorkflowProgressView
+              workflow={view.workflowProgressView}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          ) : null}
+
           {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
             <TaskSuggestionBar
               suggestions={view.taskSuggestions}
@@ -333,6 +364,15 @@ function PanelLayer({
   noColor: boolean;
 }): React.ReactNode {
   if (view.permission) return null;
+  if (view.backgroundTaskOverlay) {
+    return (
+      <BackgroundTaskOverlay
+        overlay={view.backgroundTaskOverlay}
+        width={width}
+        noColor={noColor}
+      />
+    );
+  }
   if (view.helpPanel) {
     return (
       <HelpPanel

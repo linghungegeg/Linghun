@@ -7,6 +7,12 @@ import { formatElapsedSince } from "../job-runner-presenter.js";
 import { sanitizeMainScreenLeakage } from "../model-prompt-runtime.js";
 import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
 import { SLASH_COMMAND_REGISTRY } from "../natural-command-bridge.js";
+import {
+  buildAgentProgressTreeView,
+  buildBackgroundTaskOverlayView,
+  buildTaskListView,
+  buildWorkflowProgressView,
+} from "./progress-views.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
 import { buildHelpPanelData } from "./models/help-panel.js";
 import { buildElevationOptions } from "./models/permission-elevation.js";
@@ -443,6 +449,13 @@ export function createShellViewModel(
   // 只负责渲染 title/sections/actions/detailsText。空状态时 commandPanel 为 undefined。
   const commandPanel: CommandPanelView | undefined =
     (context as { commandPanelState?: CommandPanelView }).commandPanelState ?? undefined;
+  const agentProgressTree = buildAgentProgressTreeView(context);
+  const taskListView = buildTaskListView(context);
+  const workflowProgressView = buildWorkflowProgressView(context);
+  const backgroundTaskOverlay = buildBackgroundTaskOverlayView(
+    context,
+    options.backgroundSummaries ?? [],
+  );
 
   // Main transcript scroll：home 模式不暴露；task/pending 模式默认吸底。
   const transcriptScroll: TranscriptScrollView | undefined =
@@ -532,6 +545,10 @@ export function createShellViewModel(
     limitations: options.limitations ?? [],
     taskFooter,
     taskRuntimeSummary: taskRuntimeSummary ? fitBlockToWidth(taskRuntimeSummary, width) : undefined,
+    agentProgressTree,
+    taskListView,
+    workflowProgressView,
+    backgroundTaskOverlay,
     taskSuggestions: taskSuggestions && taskSuggestions.length > 0 ? taskSuggestions : undefined,
     taskSuggestionCursor,
     configPanel,

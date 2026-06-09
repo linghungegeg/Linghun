@@ -563,7 +563,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   );
 
   const configPanelActive = Boolean(
-    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel,
+    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel || view.backgroundTaskOverlay,
   );
   const terminalInteractionModes = useMemo(
     () => resolveTerminalInteractionModes({ capability, appOwnedScreen: false }),
@@ -724,6 +724,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             view.helpPanel ||
             view.btwPanel ||
             view.sessionsPanel ||
+            view.backgroundTaskOverlay ||
             view.commandPanel ||
             commandPanelConsumesInput,
         ),
@@ -768,6 +769,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
           return;
         }
+      }
+
+      if (!permissionActive && key.downArrow && key.shift && (view.viewMode === "task" || view.viewMode === "pending")) {
+        emitInput({ type: "background-overlay-open" });
+        return;
       }
 
       // ─── 1. Permission selector mode（最高优先级）────────────────────────
@@ -832,6 +838,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           if (view.helpPanel) emitInput({ type: "help-close" });
           else if (view.btwPanel) emitInput({ type: "btw-close" });
           else if (view.sessionsPanel) emitInput({ type: "sessions-close" });
+          else if (view.backgroundTaskOverlay) emitInput({ type: "background-overlay-close" });
           else if (view.configPanel) emitInput({ type: "config-back" });
           else if (view.commandPanel) emitInput({ type: "command-panel-close" });
           else emitInput({ type: "escape" });
@@ -870,6 +877,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           if (key.return) emitInput({ type: "sessions-resume" });
           else if (key.upArrow) emitInput({ type: "sessions-move", delta: -1 });
           else if (key.downArrow) emitInput({ type: "sessions-move", delta: 1 });
+          return;
+        }
+        if (view.backgroundTaskOverlay) {
+          if (key.upArrow) emitInput({ type: "background-overlay-move", delta: -1 });
+          else if (key.downArrow) emitInput({ type: "background-overlay-move", delta: 1 });
+          else if (key.return) emitInput({ type: "background-overlay-toggle" });
+          else if (input.toLowerCase() === "x" && !key.ctrl && !key.meta) {
+            emitInput({ type: "background-overlay-stop" });
+          }
           return;
         }
         if (commandPanelConsumesInput) {

@@ -529,6 +529,10 @@ import {
   reduceTranscriptSelection,
 } from "./shell/models/transcript-selection-state.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
+import {
+  getBackgroundOverlaySelectedTask,
+  updateBackgroundOverlayCursor,
+} from "./shell/progress-views.js";
 import type {
   BackgroundTaskSummary,
   ProductBlockViewModel,
@@ -1677,7 +1681,8 @@ async function runInkShell(
           context.helpPanelState ||
           context.configPanelState ||
           context.btwPanelState ||
-          context.sessionsPanelState
+          context.sessionsPanelState ||
+          context.backgroundOverlayState?.open
         ) {
           if (context.btwPanelState?.phase === "loading" && context.activeBtwAbortController) {
             context.activeBtwAbortController.abort();
@@ -1688,6 +1693,7 @@ async function runInkShell(
           context.configPanelState = undefined;
           context.btwPanelState = undefined;
           context.sessionsPanelState = undefined;
+          context.backgroundOverlayState = undefined;
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
           return;
@@ -1804,6 +1810,66 @@ async function runInkShell(
       }
       if (event.type === "command-panel-stop") {
         await stopCommandPanelSelection(context, output);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "background-overlay-open") {
+        context.backgroundOverlayState = { open: true, cursor: context.backgroundOverlayState?.cursor ?? 0 };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "background-overlay-close") {
+        context.backgroundOverlayState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "background-overlay-move") {
+        updateBackgroundOverlayCursor(context, event.delta);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "background-overlay-toggle") {
+        const selected = getBackgroundOverlaySelectedTask(context);
+        context.commandPanelState = selected
+          ? {
+              title: "/background",
+              summary: [selected.userVisibleSummary],
+              detailsText: selected.nextAction ?? selected.userVisibleSummary,
+            }
+          : undefined;
+        context.backgroundOverlayState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "background-overlay-stop") {
+        const selected = getBackgroundOverlaySelectedTask(context);
+        if (selected) {
+          context.commandPanelState = {
+            title: "/background",
+            sections: [
+              {
+                rows: [
+                  {
+                    text: selected.title,
+                    taskRef: {
+                      id: selected.id,
+                      kind: selected.kind === "agent" ? "agent" : selected.kind === "job" ? "job" : "background",
+                    },
+                    detailsText: selected.nextAction ?? selected.userVisibleSummary,
+                  },
+                ],
+              },
+            ],
+            cursor: 0,
+          };
+          await stopCommandPanelSelection(context, output);
+          context.commandPanelState = undefined;
+        }
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

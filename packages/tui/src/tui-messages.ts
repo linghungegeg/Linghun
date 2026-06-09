@@ -38,7 +38,29 @@ export type MessageKey =
   | "evidenceBlocked"
   | "claimNeedsDisclaimer"
   | "projectRulesMissingHint"
-  | "toolInterrupted";
+  | "toolInterrupted"
+  | "r3AgentsTitle"
+  | "r3TasksTitle"
+  | "r3WorkflowsTitle"
+  | "r3ToolsLabel"
+  | "r3TokensLabel"
+  | "r3BlockedByLabel"
+  | "r3PendingHiddenSuffix"
+  | "r3BackgroundTitle"
+  | "r3BackgroundHint"
+  | "r3BackgroundRunning"
+  | "r3BackgroundBlocked"
+  | "r3BackgroundCompleted"
+  | "r3BackgroundVisible"
+  | "r3OverlayStatus"
+  | "r3OverlayStep"
+  | "r3OverlayProgress"
+  | "r3OverlayResult"
+  | "r3OverlayNext"
+  | "r3OverlayLog"
+  | "r3CompletionDuration"
+  | "r3CompletionTools"
+  | "r3CompletionConclusion";
 
 export const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
@@ -85,6 +107,28 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     projectRulesMissingHint:
       "[hint:info] 缺少 LINGHUN.md 项目规则；如需基础模板，可运行 /memory init。不会自动生成或打断输入。",
     toolInterrupted: "当前模型响应或工具调用已取消；可以继续输入。",
+    r3AgentsTitle: "智能体",
+    r3TasksTitle: "任务",
+    r3WorkflowsTitle: "工作流",
+    r3ToolsLabel: "工具",
+    r3TokensLabel: "tokens",
+    r3BlockedByLabel: "阻塞于",
+    r3PendingHiddenSuffix: "待显示",
+    r3BackgroundTitle: "后台任务",
+    r3BackgroundHint: "Shift+Down · Enter 详情 · x 停止 · Esc",
+    r3BackgroundRunning: "运行中",
+    r3BackgroundBlocked: "阻塞",
+    r3BackgroundCompleted: "已完成",
+    r3BackgroundVisible: "可见",
+    r3OverlayStatus: "状态",
+    r3OverlayStep: "步骤",
+    r3OverlayProgress: "进度",
+    r3OverlayResult: "结果",
+    r3OverlayNext: "下一步",
+    r3OverlayLog: "日志",
+    r3CompletionDuration: "耗时",
+    r3CompletionTools: "工具调用",
+    r3CompletionConclusion: "结论",
   },
   "en-US": {
     appTitle: "{name} TUI / REPL",
@@ -133,5 +177,27 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     projectRulesMissingHint:
       "[hint:info] LINGHUN.md project rules are missing. To create a basic template, run /memory init. I will not generate it automatically or interrupt input.",
     toolInterrupted: "The current model response or tool call was cancelled; input is ready again.",
+    r3AgentsTitle: "Agents",
+    r3TasksTitle: "Tasks",
+    r3WorkflowsTitle: "Workflows",
+    r3ToolsLabel: "tools",
+    r3TokensLabel: "tok",
+    r3BlockedByLabel: "blocked-by",
+    r3PendingHiddenSuffix: "pending",
+    r3BackgroundTitle: "Background tasks",
+    r3BackgroundHint: "Shift+Down · Enter details · x stop · Esc",
+    r3BackgroundRunning: "running",
+    r3BackgroundBlocked: "blocked",
+    r3BackgroundCompleted: "completed",
+    r3BackgroundVisible: "visible",
+    r3OverlayStatus: "status",
+    r3OverlayStep: "step",
+    r3OverlayProgress: "progress",
+    r3OverlayResult: "result",
+    r3OverlayNext: "next",
+    r3OverlayLog: "log",
+    r3CompletionDuration: "duration",
+    r3CompletionTools: "tool uses",
+    r3CompletionConclusion: "conclusion",
   },
 };

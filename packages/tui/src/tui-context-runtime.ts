@@ -491,6 +491,8 @@ export type TuiContext = {
   transcriptBlockHeightCache?: Record<string, { height: number; width: number; textHash: string }>;
   /** Visible-only dismissed background ids; transcript/logs/durable state stay intact. */
   dismissedBackgroundTaskIds?: Set<string>;
+  /** Visible-only Shift+Down background overlay state. */
+  backgroundOverlayState?: { open: boolean; cursor: number; expanded?: boolean };
 };
 
 export const VERIFICATION_COMMAND_TIMEOUT_MS = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS;

@@ -30,6 +30,7 @@ import {
 } from "./job-agent-command-runtime.js";
 import { getDurableJobStatePath } from "./job-runtime.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
+import { messages } from "./tui-messages.js";
 import {
   isRuntimeActiveBackgroundTask,
   listDurableJobs,
@@ -2384,6 +2385,22 @@ export async function finishWorkflowRun(
     summary,
     createdAt: now,
   });
+  if (run) {
+    const text = messages[context.language];
+    const elapsed = run.startedAt
+      ? ((Date.parse(now) - Date.parse(run.startedAt)) / 1000).toFixed(1)
+      : "?";
+    const steps = run.steps.length;
+    const completedSteps = run.steps.filter(
+      (s) => s.status === "completed" || s.status === "partial",
+    ).length;
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `workflow_completion: ${text.r3CompletionDuration} ${elapsed}s · steps ${completedSteps}/${steps} · ${text.r3CompletionConclusion}: ${truncateDisplay(summary, 120)}`,
+      "info",
+    );
+  }
   if (status !== "completed" && status !== "cancelled") {
     await captureFailureLearning(context, sessionId, {
       category: "tool_failure",

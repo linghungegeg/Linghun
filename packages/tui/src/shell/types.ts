@@ -340,6 +340,57 @@ export type TranscriptVirtualRangeView = {
   totalBlockCount: number;
 };
 
+export type AgentProgressTreeView = {
+  rows: {
+    id: string;
+    branch: "middle" | "last";
+    name: string;
+    status: string;
+    activity?: string;
+    toolUses: number;
+    tokens: number;
+  }[];
+  hiddenPending: number;
+};
+
+export type TaskListView = {
+  rows: {
+    id: string;
+    subject: string;
+    status: string;
+    owner?: string;
+    blockedBy?: string[];
+  }[];
+  hiddenPending: number;
+};
+
+export type WorkflowProgressView = {
+  runs: {
+    id: string;
+    goal: string;
+    status: string;
+    currentStepId?: string;
+    steps: { id: string; title: string; status: string; active: boolean }[];
+  }[];
+  hiddenPending: number;
+};
+
+export type BackgroundTaskOverlayView = {
+  title: string;
+  summary: string;
+  hint: string;
+  cursor: number;
+  rows: {
+    id: string;
+    kind: string;
+    title: string;
+    status: string;
+    currentStep?: string;
+    progress?: { completed: number; total?: number; label?: string };
+    detailsText?: string;
+  }[];
+};
+
 export type TranscriptViewportGeometryView = {
   x: number;
   y: number;
@@ -406,6 +457,10 @@ export type ShellViewModel = {
   taskFooter?: TaskFooterView;
   /** Footer-adjacent background/workflow summary; kept out of transcript blocks. */
   taskRuntimeSummary?: ProductBlockViewModel;
+  agentProgressTree?: AgentProgressTreeView;
+  taskListView?: TaskListView;
+  workflowProgressView?: WorkflowProgressView;
+  backgroundTaskOverlay?: BackgroundTaskOverlayView;
   /**
    * D.13Q-UX — 轻提示队列。NotificationStack 右对齐渲染，单条主显，
    * 不进 transcript（与 blocks 隔离）。空数组时 ShellApp 不渲染。
@@ -539,7 +594,12 @@ export type ShellInputEvent =
   | { type: "command-panel-close" }
   | { type: "command-panel-move"; delta: -1 | 1 }
   | { type: "command-panel-toggle" }
-  | { type: "command-panel-stop" };
+  | { type: "command-panel-stop" }
+  | { type: "background-overlay-open" }
+  | { type: "background-overlay-close" }
+  | { type: "background-overlay-move"; delta: -1 | 1 }
+  | { type: "background-overlay-toggle" }
+  | { type: "background-overlay-stop" };
 
 export type ShellController = {
   onInput: (event: ShellInputEvent) => Promise<void> | void;
