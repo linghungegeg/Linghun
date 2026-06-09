@@ -326,6 +326,7 @@ describe("Ink TTY interaction smoke", () => {
   });
 
   it("keeps default main-screen SGR wheel and left selection native", async () => {
+    vi.stubEnv("LINGHUN_FULLSCREEN", "0");
     const view = {
       ...baseTaskView(),
       commandPanel: undefined,

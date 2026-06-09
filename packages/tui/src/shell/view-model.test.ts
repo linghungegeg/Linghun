@@ -306,6 +306,7 @@ describe("Ink shell selection", () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    vi.stubEnv("LINGHUN_FULLSCREEN", "0");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const widths: number[] = [];
@@ -389,6 +390,7 @@ describe("Ink shell selection", () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    vi.stubEnv("LINGHUN_FULLSCREEN", "0");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {

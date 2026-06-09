@@ -80,7 +80,9 @@ export type MessageKey =
   | "r4UnseenMessages"
   | "r4GitBranch"
   | "r4ClipboardCopied"
-  | "r4ClipboardFailed";
+  | "r4ClipboardFailed"
+  | "r5FullscreenEnabled"
+  | "r5FullscreenDisabled";
 
 export const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
@@ -169,6 +171,8 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     r4GitBranch: "分支",
     r4ClipboardCopied: "已复制",
     r4ClipboardFailed: "复制失败",
+    r5FullscreenEnabled: "全屏模式已启用",
+    r5FullscreenDisabled: "全屏模式未启用（终端原生滚动）",
   },
   "en-US": {
     appTitle: "{name} TUI / REPL",
@@ -259,5 +263,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     r4GitBranch: "branch",
     r4ClipboardCopied: "Copied",
     r4ClipboardFailed: "Copy failed",
+    r5FullscreenEnabled: "Fullscreen mode enabled",
+    r5FullscreenDisabled: "Fullscreen mode disabled (native scrolling)",
   },
 };

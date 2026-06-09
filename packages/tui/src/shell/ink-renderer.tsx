@@ -39,7 +39,7 @@ export function renderInkShell(
 ): InkShellInstance {
   const stdout = options.stdout as NodeJS.WriteStream | undefined;
   const capability = detectTerminalCapability();
-  const useAlternateScreen = false;
+  const useAlternateScreen = resolveAlternateScreen(capability);
   const terminalInteractionModes = resolveTerminalInteractionModes({
     capability,
     appOwnedScreen: useAlternateScreen,
@@ -134,6 +134,14 @@ export function renderInkShell(
       await instance.waitUntilRenderFlush();
     },
   };
+}
+
+export function resolveAlternateScreen(capability: TerminalCapability): boolean {
+  if (process.env.LINGHUN_FULLSCREEN === "0") return false;
+  if (!capability.alternateScreen) return false;
+  // tmux command mode (tmux -CC) does not support alt-screen apps
+  if (process.env.TMUX_PANE || process.env.TERM_PROGRAM === "tmux") return false;
+  return true;
 }
 
 function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {

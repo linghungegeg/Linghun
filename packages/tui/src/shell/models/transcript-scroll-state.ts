@@ -36,14 +36,15 @@ export function reduceTranscriptScroll(
 ): TranscriptScrollView {
   const current = state ?? createInitialTranscriptScroll();
   if (action.type === "measure") {
-    return clampTranscriptScroll(
-      {
-        ...current,
-        viewportHeight: action.viewportHeight,
-        contentHeight: action.contentHeight,
-      },
-      action.contentHeight - action.viewportHeight,
-    );
+    const measured = {
+      ...current,
+      viewportHeight: action.viewportHeight,
+      contentHeight: action.contentHeight,
+    };
+    if (current.stickToBottom) {
+      measured.scrollOffset = 0;
+    }
+    return clampTranscriptScroll(measured, action.contentHeight - action.viewportHeight);
   }
   if (action.type === "end") {
     return { ...current, scrollOffset: 0, stickToBottom: true };

@@ -1,7 +1,9 @@
 import { Box, type DOMElement, Text } from "ink";
 import type React from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { TerminalCapability } from "../terminal-capability.js";
+import { resolveAlternateScreen } from "../ink-renderer.js";
+import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
 import {
   brandWordmark,
   composerMaxWidth,
@@ -19,6 +21,7 @@ import { Composer } from "./Composer.js";
 import { ConfigPanel } from "./ConfigPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
 import { StreamingMarkdown } from "./MessageMarkdown.js";
+import { MouseInputRouter } from "./MouseInputRouter.js";
 import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
 import { TranscriptViewport } from "./ScrollViewport.js";
@@ -159,6 +162,10 @@ function TaskLayout({
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
+  const mouseActive = useMemo(
+    () => resolveTerminalInteractionModes({ capability, appOwnedScreen: resolveAlternateScreen(capability) }).mouseTracking,
+    [capability],
+  );
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>
@@ -270,6 +277,12 @@ function TaskLayout({
         </TranscriptViewport>
         <PanelLayer view={view} controller={controller} width={view.width - 4} noColor={noColor} />
       </Box>
+
+      <MouseInputRouter
+        active={mouseActive}
+        scroll={view.transcriptScroll}
+        onInput={(event) => { void controller.onInput(event); }}
+      />
 
       {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents
           Yoga from collapsing the band when output is tall. Left alignment
