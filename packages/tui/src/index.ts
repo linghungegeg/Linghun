@@ -527,6 +527,7 @@ import {
 import { reduceTranscriptScroll } from "./shell/models/transcript-scroll-state.js";
 import {
   buildTranscriptScreenBuffer,
+  isSelectionStale,
   reduceTranscriptSelection,
 } from "./shell/models/transcript-selection-state.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
@@ -1890,6 +1891,24 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      if (event.type === "copy-selection") {
+        const sel = context.transcriptSelectionState;
+        const text = sel?.selectedText ?? sel?.copiedText;
+        if (text) {
+          const copy = await writeTextToClipboard(text, { stdout: output as NodeJS.WriteStream });
+          if (!copy.ok && copy.error) {
+            pushTransientNotification(context, `Copy failed: ${copy.error}`, "warning");
+          } else if (copy.ok) {
+            const lineCount = Math.max(1, text.split("\n").length);
+            const message = context.language === "en-US"
+              ? `Copied ${lineCount} line${lineCount === 1 ? "" : "s"}`
+              : `已复制 ${lineCount} 行`;
+            pushTransientNotification(context, message, "success");
+          }
+        }
+        shell?.rerender();
+        return;
+      }
       // ─── Main transcript scroll ─────────────────────────────────────────────
       if (event.type === "transcript-scroll") {
         const previous = context.transcriptScrollState;
@@ -1953,6 +1972,9 @@ async function runInkShell(
         return;
       }
       if (event.type === "transcript-mouse") {
+        if (isSelectionStale(context.transcriptSelectionState, Date.now())) {
+          context.transcriptSelectionState = undefined;
+        }
         const currentView = controller.getViewModel();
         const rows = buildTranscriptScreenBuffer(
           currentView.blocks,

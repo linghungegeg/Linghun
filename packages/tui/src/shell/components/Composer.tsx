@@ -14,6 +14,7 @@ import {
   isMultilineEnterSequence as isNormalizedMultilineEnterSequence,
   normalizeTerminalInput,
   sanitizeTerminalText,
+  classifyTerminalInput,
 } from "../models/terminal-input-runtime.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
@@ -718,6 +719,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   useInput(
     (input, key) => {
+      // Block mouse sequences and terminal responses from reaching the edit buffer.
+      // MouseInputRouter handles mouse; terminal responses are discarded.
+      if (classifyTerminalInput(input) !== "keyboard") return;
+
       const buffer = bufferRef.current;
       const text = bufferToString(buffer);
       const terminalAction = normalizeTerminalInput(input, key);
@@ -815,6 +820,12 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       if (!permissionActive && key.downArrow && key.shift && (view.viewMode === "task" || view.viewMode === "pending")) {
         emitInput({ type: "background-overlay-open" });
+        return;
+      }
+
+      // Ctrl+Shift+C — copy current transcript selection to clipboard.
+      if (key.ctrl && key.shift && input.toLowerCase() === "c") {
+        emitInput({ type: "copy-selection" });
         return;
       }
 

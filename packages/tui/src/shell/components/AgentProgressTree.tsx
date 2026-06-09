@@ -19,26 +19,24 @@ export function AgentProgressTree({
   if (tree.rows.length === 0) return null;
   const theme = createShellTheme(noColor);
   const innerWidth = Math.max(20, width - 2);
+  const narrow = innerWidth < 60;
   const text = messages[language];
   return (
     <Box flexDirection="column" marginTop={1}>
-      <Text color={theme.muted} bold>
-        {text.r3AgentsTitle}
-      </Text>
       {tree.rows.map((row) => {
         const branch = row.branch === "last" ? "└─" : "├─";
-        const tokens = row.tokens > 0 ? ` · ${row.tokens} ${text.r3TokensLabel}` : "";
-        const tools = row.toolUses > 0 ? ` · ${text.r3ToolsLabel} ${row.toolUses}` : "";
-        const activity = row.activity ? ` · ${row.activity}` : "";
+        const name = narrow ? "" : ` ${row.name}`;
+        const activity = row.activity ? ` ${row.activity}` : "";
+        const line = `${branch}${name}${activity}`;
         return (
-          <Text key={row.id} color={row.status === "blocked" ? theme.status.blocked : undefined}>
-            {fitText(`${branch} ${row.name} · ${row.status}${tools}${tokens}${activity}`, innerWidth)}
+          <Text key={row.id} color={row.status === "blocked" ? theme.status.blocked : theme.muted}>
+            {fitText(line, innerWidth)}
           </Text>
         );
       })}
       {tree.hiddenPending > 0 ? (
         <Text color={theme.muted} dimColor>
-          {`…+${tree.hiddenPending} ${text.r3PendingHiddenSuffix}`}
+          {`  +${tree.hiddenPending} ${text.r3PendingHiddenSuffix} · Shift+↓`}
         </Text>
       ) : null}
     </Box>

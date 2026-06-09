@@ -5,6 +5,8 @@ import {
   isMultilineEnterSequence,
   normalizeTerminalInput,
   sanitizeTerminalText,
+  classifyTerminalInput,
+  recoverOrphanMouseTail,
 } from "./terminal-input-runtime.js";
 
 const key = {
@@ -93,5 +95,36 @@ describe("terminal input normalization", () => {
   it("sanitizes terminal control sequences while preserving text newlines", () => {
     expect(sanitizeTerminalText("a\x1B[31mb\x1B[0m\r\nc\x7Fd")).toBe("ab\ncd");
     expect(normalizeTerminalInput("hello", key)).toEqual({ type: "text", text: "hello" });
+  });
+});
+
+describe("classifyTerminalInput", () => {
+  it("classifies orphan SGR mouse tail as mouse", () => {
+    expect(classifyTerminalInput("[<64;44;14M")).toBe("mouse");
+    expect(classifyTerminalInput("[<0;10;5M")).toBe("mouse");
+    expect(classifyTerminalInput("[<35;80;24m")).toBe("mouse");
+  });
+
+  it("classifies regular keyboard input as keyboard", () => {
+    expect(classifyTerminalInput("a")).toBe("keyboard");
+    expect(classifyTerminalInput("hello")).toBe("keyboard");
+    expect(classifyTerminalInput("\x1B[A")).toBe("keyboard");
+  });
+
+  it("classifies full SGR mouse sequence as mouse", () => {
+    expect(classifyTerminalInput("[<64;44;14M")).toBe("mouse");
+  });
+});
+
+describe("recoverOrphanMouseTail", () => {
+  it("prepends ESC to orphan SGR tail", () => {
+    expect(recoverOrphanMouseTail("[<64;44;14M")).toBe("\x1B[<64;44;14M");
+    expect(recoverOrphanMouseTail("[<0;10;5m")).toBe("\x1B[<0;10;5m");
+  });
+
+  it("returns undefined for non-mouse input", () => {
+    expect(recoverOrphanMouseTail("hello")).toBeUndefined();
+    expect(recoverOrphanMouseTail("[A")).toBeUndefined();
+    expect(recoverOrphanMouseTail("\x1B[<64;44;14M")).toBeUndefined();
   });
 });

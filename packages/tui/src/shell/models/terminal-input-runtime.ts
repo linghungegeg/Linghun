@@ -8,6 +8,49 @@ export type TerminalInputAction =
   | { type: "text"; text: string }
   | { type: "ignore" };
 
+export type InputClassification = "keyboard" | "mouse" | "terminal-response";
+
+/**
+ * Classify raw terminal input BEFORE it reaches any handler.
+ * Returns "mouse" for SGR mouse sequences (full or orphan tail),
+ * "terminal-response" for DA1/DA2/DECRPM/cursor-position reports,
+ * "keyboard" for everything else.
+ */
+export function classifyTerminalInput(input: string): InputClassification {
+  if (looksLikeSgrMouse(input)) return "mouse";
+  if (looksLikeTerminalResponse(input)) return "terminal-response";
+  return "keyboard";
+}
+
+function looksLikeSgrMouse(input: string): boolean {
+  const start = input.startsWith("\x1B[<") ? 3 : input.startsWith("[<") ? 2 : -1;
+  if (start < 0) return false;
+  const tail = input.slice(start);
+  return /^\d+;\d+;\d+[mM]$/.test(tail);
+}
+
+function looksLikeTerminalResponse(input: string): boolean {
+  if (!input.startsWith("\x1B[")) return false;
+  const body = input.slice(2);
+  if (body.startsWith("?") && /^[\d;]*[cn$y]$/.test(body.slice(1))) return true;
+  if (/^[\d;]*R$/.test(body)) return true;
+  if (body.startsWith(">") && /^\d+;\d+;\d+c$/.test(body.slice(1))) return true;
+  return false;
+}
+
+/**
+ * Recover an orphan SGR mouse tail by prepending ESC.
+ * When the event loop stalls, ESC arrives as a separate frame and the
+ * remaining `[<btn;col;rowM` reaches handlers as "text". This re-synthesizes
+ * the full sequence so the mouse router can parse it.
+ */
+export function recoverOrphanMouseTail(input: string): string | undefined {
+  if (!input.startsWith("[<")) return undefined;
+  const tail = input.slice(2);
+  if (/^\d+;\d+;\d+[mM]$/.test(tail)) return `\x1B${input}`;
+  return undefined;
+}
+
 export type TerminalInputKey = Pick<
   Key,
   "backspace" | "delete" | "ctrl" | "meta" | "return" | "shift"

@@ -351,6 +351,7 @@ export type AgentProgressTreeView = {
     tokens: number;
   }[];
   hiddenPending: number;
+  activitySummary?: string;
 };
 
 export type TaskListView = {
@@ -620,6 +621,7 @@ export type ShellInputEvent =
   | { type: "background-overlay-move"; delta: -1 | 1 }
   | { type: "background-overlay-toggle" }
   | { type: "background-overlay-stop" }
+  | { type: "copy-selection" }
   | { type: "history-search-open" }
   | { type: "history-search-close" }
   | { type: "history-search-input"; query: string }

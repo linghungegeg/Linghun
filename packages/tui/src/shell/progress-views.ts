@@ -12,21 +12,47 @@ import type {
 
 const MAX_LIST_ITEMS = 8;
 const MAX_DETAIL_LINES = 12;
+const MAX_MAINSCREEN_AGENTS = 4;
+
+/**
+ * Summarize repetitive activities (e.g. "Read × 5, Glob × 3") instead of
+ * showing each one individually. CCB-style activity condensation.
+ */
+function summarizeActivity(agents: AgentRun[]): string | undefined {
+  const running = agents.filter((a) => a.status === "running");
+  if (running.length === 0) return undefined;
+  const activities = running.map((a) => a.activitySummary ?? a.activeTask?.summary).filter(Boolean) as string[];
+  if (activities.length === 0) return undefined;
+  const counts = new Map<string, number>();
+  for (const act of activities) {
+    const base = act.replace(/\s+\d+.*$/, "").replace(/…$/, "").trim();
+    counts.set(base, (counts.get(base) ?? 0) + 1);
+  }
+  const parts: string[] = [];
+  for (const [base, count] of counts) {
+    parts.push(count > 1 ? `${base} ×${count}` : base);
+  }
+  return parts.slice(0, 3).join(", ");
+}
 
 export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTreeView | undefined {
-  const agents = smartSlice(context.agents ?? [], MAX_LIST_ITEMS, isActiveAgent);
-  if (agents.visible.length === 0) return undefined;
+  const allAgents = context.agents ?? [];
+  const running = allAgents.filter((a) => a.status === "running");
+  if (running.length === 0) return undefined;
+  const visible = running.slice(0, MAX_MAINSCREEN_AGENTS);
+  const hiddenCount = Math.max(0, allAgents.filter(isActiveAgent).length - visible.length);
   return {
-    rows: agents.visible.map((agent, index) => ({
+    rows: visible.map((agent, index) => ({
       id: agent.id,
-      branch: index === agents.visible.length - 1 ? "last" : "middle",
+      branch: index === visible.length - 1 ? "last" : "middle",
       name: agent.displayName ?? agent.addressableName ?? agent.id,
       status: agent.status,
       activity: agent.activitySummary ?? agent.activeTask?.summary ?? agent.lastResultSummary,
       toolUses: agent.mailbox.length,
-      tokens: agent.cost.inputTokens + agent.cost.outputTokens,
+      tokens: 0,
     })),
-    hiddenPending: agents.hiddenPending,
+    hiddenPending: hiddenCount,
+    activitySummary: summarizeActivity(allAgents),
   };
 }
 

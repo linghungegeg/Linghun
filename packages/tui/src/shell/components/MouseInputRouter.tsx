@@ -6,6 +6,7 @@ import {
   isSgrMouseInput,
   parseSgrMouseEvent,
 } from "../models/transcript-selection-state.js";
+import { recoverOrphanMouseTail } from "../models/terminal-input-runtime.js";
 import type { ShellInputEvent, TranscriptScrollView } from "../types.js";
 
 /**
@@ -43,8 +44,13 @@ export function MouseInputRouter({
 
   const handleInput = useCallback(
     (input: string) => {
-      if (!isSgrMouseInput(input)) return;
-      const mouse = parseSgrMouseEvent(input);
+      let seq = input;
+      if (!isSgrMouseInput(seq)) {
+        const recovered = recoverOrphanMouseTail(seq);
+        if (!recovered) return;
+        seq = recovered;
+      }
+      const mouse = parseSgrMouseEvent(seq);
       if (!mouse) return;
 
       if (mouse.button === "wheel-up" || mouse.button === "wheel-down") {

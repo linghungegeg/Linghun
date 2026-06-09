@@ -111,8 +111,19 @@ function writeOsc52(stdout: Writable | undefined, text: string): boolean {
   if (!stdout || typeof stdout.write !== "function") return false;
   try {
     const payload = Buffer.from(text, "utf8").toString("base64");
-    return stdout.write(`\x1B]52;c;${payload}\x07`) !== false;
+    const osc = `\x1B]52;c;${payload}\x07`;
+    const sequence = isTmux() ? wrapTmuxDcs(osc) : osc;
+    return stdout.write(sequence) !== false;
   } catch {
     return false;
   }
+}
+
+function isTmux(): boolean {
+  return Boolean(process.env.TMUX);
+}
+
+function wrapTmuxDcs(osc: string): string {
+  const escaped = osc.replace(/\x1B/g, "\x1B\x1B");
+  return `\x1BPtmux;${escaped}\x1B\\`;
 }

@@ -36,7 +36,7 @@ describe("Phase R3 progress view projectors", () => {
 
     const view = buildAgentProgressTreeView(ctx);
 
-    expect(view?.rows[0]).toMatchObject({ name: "Explore", status: "running", toolUses: 2, tokens: 15 });
+    expect(view?.rows[0]).toMatchObject({ name: "Explore", status: "running", toolUses: 2, tokens: 0 });
   });
 
   it("projects todos with owner and blocked-by fields when present", () => {
@@ -104,5 +104,56 @@ describe("Phase R3 progress view projectors", () => {
     expect(overlay?.rows).toHaveLength(2);
     expect(overlay?.cursor).toBe(1);
     expect(overlay?.summary).toContain("运行中 1");
+  });
+
+  it("agent tree only shows running agents, hides blocked/stale/completed from main screen", () => {
+    const ctx = createContext();
+    ctx.agents = [
+      {
+        id: "agent-1",
+        displayName: "Runner",
+        status: "running",
+        activitySummary: "reading",
+        mailbox: [],
+        cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      },
+      {
+        id: "agent-2",
+        displayName: "Blocker",
+        status: "blocked",
+        activitySummary: "stuck",
+        mailbox: [],
+        cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      },
+      {
+        id: "agent-3",
+        displayName: "Done",
+        status: "completed",
+        activitySummary: undefined,
+        mailbox: [],
+        cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      },
+    ] as unknown as TuiContext["agents"];
+
+    const view = buildAgentProgressTreeView(ctx);
+
+    expect(view?.rows).toHaveLength(1);
+    expect(view?.rows[0]?.name).toBe("Runner");
+    expect(view?.hiddenPending).toBe(1);
+  });
+
+  it("returns undefined when no agents are running", () => {
+    const ctx = createContext();
+    ctx.agents = [
+      {
+        id: "agent-1",
+        displayName: "Done",
+        status: "completed",
+        mailbox: [],
+        cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      },
+    ] as unknown as TuiContext["agents"];
+
+    expect(buildAgentProgressTreeView(ctx)).toBeUndefined();
   });
 });

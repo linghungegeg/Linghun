@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTranscriptScreenBuffer,
+  isSelectionStale,
   parseSgrMouseEvent,
   reduceTranscriptSelection,
   selectionLineRangesForBlock,
@@ -296,5 +297,89 @@ describe("transcript selection reducer", () => {
         "assistant",
       ),
     ).toEqual([{ lineIndex: 0, startColumn: 0, endColumn: 2 }]);
+  });
+
+  it("double-click selects word at click point", () => {
+    const wordRows = [
+      {
+        index: 0,
+        text: "hello world",
+        cells: Array.from("hello world").map((char) => ({
+          char,
+          selectableText: char,
+          width: 1,
+        })),
+      },
+    ];
+    const geo = { x: 0, y: 0, width: 20, height: 1, contentHeight: 1, topOffset: 0 };
+
+    const firstDown = reduceTranscriptSelection({
+      state: undefined,
+      event: { x: 2, y: 0, button: "left", action: "down" },
+      rows: wordRows,
+      geometry: geo,
+    });
+    const firstUp = reduceTranscriptSelection({
+      state: firstDown.state,
+      event: { x: 2, y: 0, button: "left", action: "up" },
+      rows: wordRows,
+      geometry: geo,
+    });
+    const secondDown = reduceTranscriptSelection({
+      state: firstUp.state,
+      event: { x: 2, y: 0, button: "left", action: "down" },
+      rows: wordRows,
+      geometry: geo,
+    });
+
+    expect(secondDown.state?.anchorMode).toBe("word");
+    expect(secondDown.state?.selectedText).toBe("hello");
+  });
+
+  it("triple-click selects entire line", () => {
+    const lineRows = [
+      {
+        index: 0,
+        text: "hello world",
+        cells: Array.from("hello world").map((char) => ({
+          char,
+          selectableText: char,
+          width: 1,
+        })),
+      },
+    ];
+    const geo = { x: 0, y: 0, width: 20, height: 1, contentHeight: 1, topOffset: 0 };
+
+    let state: any = undefined;
+    for (let i = 0; i < 3; i++) {
+      const down = reduceTranscriptSelection({
+        state,
+        event: { x: 2, y: 0, button: "left", action: "down" },
+        rows: lineRows,
+        geometry: geo,
+      });
+      const up = reduceTranscriptSelection({
+        state: down.state,
+        event: { x: 2, y: 0, button: "left", action: "up" },
+        rows: lineRows,
+        geometry: geo,
+      });
+      state = i < 2 ? up.state : down.state;
+    }
+
+    expect(state?.anchorMode).toBe("line");
+    expect(state?.selectedText).toBe("hello world");
+  });
+
+  it("isSelectionStale detects lost mouse release", () => {
+    const state = {
+      dragging: true,
+      anchor: { row: 0, column: 0 },
+      focus: { row: 1, column: 5 },
+      lastClickTime: 1000,
+    };
+    expect(isSelectionStale(state, 2000)).toBe(false);
+    expect(isSelectionStale(state, 7000)).toBe(true);
+    expect(isSelectionStale(undefined, 7000)).toBe(false);
   });
 });

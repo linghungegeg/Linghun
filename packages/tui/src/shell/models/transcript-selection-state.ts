@@ -60,6 +60,10 @@ export type TranscriptSelectionState = {
   selectedText?: string;
   copiedText?: string;
   lastCopyError?: string;
+  anchorMode?: "char" | "word" | "line";
+  lastClickTime?: number;
+  lastClickRow?: number;
+  clickCount?: number;
 };
 
 export type TranscriptSelectionInput = {
@@ -78,6 +82,8 @@ export type TranscriptSelectionResult = {
 };
 
 const EDGE_AUTOSCROLL_LINES = 2;
+const MULTI_CLICK_TIMEOUT_MS = 500;
+const LOST_RELEASE_TIMEOUT_MS = 5000;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: SGR mouse input may start with ESC.
 const SGR_MOUSE_RE = /^\u001B?\[<(\d+);(\d+);(\d+)([mM])$/u;
 
@@ -221,6 +227,40 @@ export function isSgrMouseInput(input: string): boolean {
   return SGR_MOUSE_RE.test(input);
 }
 
+/**
+ * Check if a dragging selection has lost its mouse release (e.g., mouse left window).
+ * If more than LOST_RELEASE_TIMEOUT_MS since last event, force-finish.
+ */
+export function isSelectionStale(state: TranscriptSelectionState | undefined, now: number): boolean {
+  if (!state?.dragging || !state.lastClickTime) return false;
+  return now - state.lastClickTime > LOST_RELEASE_TIMEOUT_MS;
+}
+
+function detectClickCount(state: TranscriptSelectionState | undefined, point: TranscriptSelectionPoint, now: number): number {
+  if (!state?.lastClickTime || !state.lastClickRow === undefined) return 1;
+  if (now - state.lastClickTime > MULTI_CLICK_TIMEOUT_MS) return 1;
+  if (state.lastClickRow !== point.row) return 1;
+  return ((state.clickCount ?? 1) % 3) + 1;
+}
+
+function wordBoundsAt(row: TranscriptTextRow, column: number): { start: number; end: number } {
+  const cells = row.cells.length > 0 ? row.cells : cellsFromText(row.text, row.noSelect === true);
+  const col = Math.max(0, Math.min(column, cells.length - 1));
+  const charAtCol = cells[col]?.selectableText ?? " ";
+  const cls = charClass(charAtCol);
+  let start = col;
+  while (start > 0 && charClass(cells[start - 1]?.selectableText ?? " ") === cls) start--;
+  let end = col;
+  while (end < cells.length - 1 && charClass(cells[end + 1]?.selectableText ?? " ") === cls) end++;
+  return { start, end: end + 1 };
+}
+
+function charClass(ch: string): "ws" | "word" | "punct" {
+  if (/\s/.test(ch)) return "ws";
+  if (/[\w一-鿿㐀-䶿豈-﫿]/.test(ch)) return "word";
+  return "punct";
+}
+
 export function reduceTranscriptSelection(
   input: TranscriptSelectionInput,
 ): TranscriptSelectionResult {
@@ -244,17 +284,66 @@ export function reduceTranscriptSelection(
       : 0;
 
   if (event.action === "down") {
-    const next: TranscriptSelectionState = { dragging: true, anchor: point, focus: point };
-    return { state: withSelectedText(next, rows), consumed: true };
+    const now = Date.now();
+    const clickCount = detectClickCount(input.state, point, now);
+    const targetRow = rows[point.row];
+
+    // Lost-release recovery: if a new press arrives while still dragging,
+    // the previous release was lost (mouse left the terminal window).
+    // Finish the prior selection so copy-on-select fires before we start anew.
+    let lostReleaseCopy: string | undefined;
+    if (input.state?.dragging && input.state.anchor) {
+      const finished = withSelectedText({ ...input.state, dragging: false }, rows);
+      lostReleaseCopy = finished.selectedText?.trimEnd() || undefined;
+    }
+
+    if (clickCount === 2 && targetRow && !targetRow.noSelect) {
+      const bounds = wordBoundsAt(targetRow, point.column);
+      const anchor: TranscriptSelectionPoint = { row: point.row, column: bounds.start };
+      const focus: TranscriptSelectionPoint = { row: point.row, column: bounds.end };
+      const next: TranscriptSelectionState = {
+        dragging: true, anchor, focus, anchorMode: "word",
+        lastClickTime: now, lastClickRow: point.row, clickCount,
+      };
+      return { state: withSelectedText(next, rows), copyText: lostReleaseCopy, consumed: true };
+    }
+    if (clickCount === 3 && targetRow && !targetRow.noSelect) {
+      const anchor: TranscriptSelectionPoint = { row: point.row, column: 0 };
+      const focus: TranscriptSelectionPoint = { row: point.row, column: targetRow.cells.length };
+      const next: TranscriptSelectionState = {
+        dragging: true, anchor, focus, anchorMode: "line",
+        lastClickTime: now, lastClickRow: point.row, clickCount,
+      };
+      return { state: withSelectedText(next, rows), copyText: lostReleaseCopy, consumed: true };
+    }
+
+    const next: TranscriptSelectionState = {
+      dragging: true, anchor: point, focus: point, anchorMode: "char",
+      lastClickTime: now, lastClickRow: point.row, clickCount,
+    };
+    return { state: withSelectedText(next, rows), copyText: lostReleaseCopy, consumed: true };
   }
 
   if (event.action === "drag") {
     if (!input.state?.dragging || !input.state.anchor)
       return { state: input.state, consumed: true };
+    let adjustedFocus = point;
+    if (input.state.anchorMode === "word") {
+      const targetRow = rows[point.row];
+      if (targetRow && !targetRow.noSelect) {
+        const bounds = wordBoundsAt(targetRow, point.column);
+        adjustedFocus = { row: point.row, column: point.row >= (input.state.anchor.row) ? bounds.end : bounds.start };
+      }
+    } else if (input.state.anchorMode === "line") {
+      const targetRow = rows[point.row];
+      if (targetRow) {
+        adjustedFocus = { row: point.row, column: point.row >= (input.state.anchor.row) ? targetRow.cells.length : 0 };
+      }
+    }
     const next: TranscriptSelectionState = {
       ...input.state,
       dragging: true,
-      focus: point,
+      focus: adjustedFocus,
       lastCopyError: undefined,
     };
     return {
@@ -268,7 +357,17 @@ export function reduceTranscriptSelection(
     if (!input.state?.dragging || !input.state.anchor) return { state: undefined, consumed: true };
     const next = withSelectedText({ ...input.state, dragging: false, focus: point }, rows);
     const copyText = next.selectedText?.trimEnd();
-    if (!copyText) return { state: undefined, consumed: true };
+    if (!copyText) {
+      return {
+        state: {
+          dragging: false,
+          lastClickTime: input.state.lastClickTime,
+          lastClickRow: input.state.lastClickRow,
+          clickCount: input.state.clickCount,
+        },
+        consumed: true,
+      };
+    }
     return {
       state: { ...next, copiedText: copyText },
       copyText,
