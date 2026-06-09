@@ -520,6 +520,26 @@ export type ShellViewModel = {
       isCurrent: boolean;
     }[];
   };
+  /**
+   * R4 — HistorySearchPanel UI 状态。Ctrl+R 打开交互式历史搜索。
+   */
+  historySearchPanel?: {
+    query: string;
+    cursor: number;
+    results: { text: string; timestamp: number }[];
+  };
+  /**
+   * R4 — ShortcutPanel UI 状态。"?" / /shortcuts 打开快捷键发现面板。
+   */
+  shortcutPanel?: boolean;
+  /**
+   * R4 — Unseen message count (when scrolled above bottom).
+   */
+  unseenMessageCount?: number;
+  /**
+   * R4 — Git branch name for footer display.
+   */
+  gitBranch?: string;
 };
 
 /**
@@ -599,7 +619,19 @@ export type ShellInputEvent =
   | { type: "background-overlay-close" }
   | { type: "background-overlay-move"; delta: -1 | 1 }
   | { type: "background-overlay-toggle" }
-  | { type: "background-overlay-stop" };
+  | { type: "background-overlay-stop" }
+  | { type: "history-search-open" }
+  | { type: "history-search-close" }
+  | { type: "history-search-input"; query: string }
+  | { type: "history-search-move"; delta: -1 | 1 }
+  | { type: "history-search-accept" }
+  | { type: "shortcuts-panel-open" }
+  | { type: "shortcuts-panel-close" }
+  | { type: "undo" }
+  | { type: "stash" }
+  | { type: "external-editor" }
+  | { type: "clipboard-copied"; text: string }
+  | { type: "clipboard-failed"; error: string };
 
 export type ShellController = {
   onInput: (event: ShellInputEvent) => Promise<void> | void;

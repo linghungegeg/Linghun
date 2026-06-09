@@ -8,7 +8,12 @@ export type KeybindingAction =
   | "interrupt"
   | "submit"
   | "clear-line"
-  | "delete-word-left";
+  | "delete-word-left"
+  | "history-search"
+  | "undo"
+  | "stash"
+  | "external-editor"
+  | "shortcuts-panel";
 
 export type Keybinding = {
   context: KeybindingContext;
@@ -36,6 +41,11 @@ export const DEFAULT_KEYBINDINGS: Keybinding[] = [
   { context: "chat", keys: ["enter"], action: "submit" },
   { context: "chat", keys: ["ctrl+u"], action: "clear-line" },
   { context: "chat", keys: ["ctrl+w"], action: "delete-word-left" },
+  { context: "chat", keys: ["ctrl+r"], action: "history-search" },
+  { context: "chat", keys: ["ctrl+_"], action: "undo" },
+  { context: "chat", keys: ["ctrl+s"], action: "stash" },
+  { context: "chat", keys: ["ctrl+g"], action: "external-editor" },
+  { context: "chat", keys: ["?"], action: "shortcuts-panel" },
 ];
 
 export function resolveKeybinding(
@@ -87,6 +97,8 @@ export function normalizeKeyEvent(event: KeyEventLike): string {
   if ((event.return || event.name === "return") && event.meta) return "meta+enter";
   if (event.return || event.name === "return") return "enter";
   if (event.escape || event.name === "escape") return "escape";
+  // Ctrl+_ sends \x1f in most terminals
+  if (event.ctrl && (event.input === "\x1f" || event.name === "_")) return "ctrl+_";
   const parts: string[] = [];
   if (event.ctrl) parts.push("ctrl");
   if (event.meta) parts.push("meta");

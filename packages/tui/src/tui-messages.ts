@@ -60,7 +60,27 @@ export type MessageKey =
   | "r3OverlayLog"
   | "r3CompletionDuration"
   | "r3CompletionTools"
-  | "r3CompletionConclusion";
+  | "r3CompletionConclusion"
+  | "r4HistorySearchTitle"
+  | "r4HistorySearchHint"
+  | "r4HistorySearchNoMatch"
+  | "r4ShortcutsTitle"
+  | "r4ShortcutsClose"
+  | "r4ShortcutsCatEditing"
+  | "r4ShortcutsCatNavigation"
+  | "r4ShortcutsCatPanels"
+  | "r4ShortcutsCatSystem"
+  | "r4UndoHint"
+  | "r4StashSaved"
+  | "r4StashRestored"
+  | "r4StashEmpty"
+  | "r4EditorOpening"
+  | "r4EditorError"
+  | "r4TerminalSetupTitle"
+  | "r4UnseenMessages"
+  | "r4GitBranch"
+  | "r4ClipboardCopied"
+  | "r4ClipboardFailed";
 
 export const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
@@ -129,6 +149,26 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     r3CompletionDuration: "耗时",
     r3CompletionTools: "工具调用",
     r3CompletionConclusion: "结论",
+    r4HistorySearchTitle: "搜索历史",
+    r4HistorySearchHint: "Enter 选择 · Esc 关闭",
+    r4HistorySearchNoMatch: "无匹配",
+    r4ShortcutsTitle: "快捷键",
+    r4ShortcutsClose: "按任意键关闭",
+    r4ShortcutsCatEditing: "编辑",
+    r4ShortcutsCatNavigation: "导航",
+    r4ShortcutsCatPanels: "面板",
+    r4ShortcutsCatSystem: "系统",
+    r4UndoHint: "已撤销",
+    r4StashSaved: "输入已暂存",
+    r4StashRestored: "已恢复暂存",
+    r4StashEmpty: "暂存为空",
+    r4EditorOpening: "正在打开编辑器…",
+    r4EditorError: "编辑器打开失败：{error}",
+    r4TerminalSetupTitle: "终端配置指引",
+    r4UnseenMessages: "↓ {count} 条新消息",
+    r4GitBranch: "分支",
+    r4ClipboardCopied: "已复制",
+    r4ClipboardFailed: "复制失败",
   },
   "en-US": {
     appTitle: "{name} TUI / REPL",
@@ -199,5 +239,25 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     r3CompletionDuration: "duration",
     r3CompletionTools: "tool uses",
     r3CompletionConclusion: "conclusion",
+    r4HistorySearchTitle: "Search history",
+    r4HistorySearchHint: "Enter select · Esc close",
+    r4HistorySearchNoMatch: "no matches",
+    r4ShortcutsTitle: "Shortcuts",
+    r4ShortcutsClose: "Press any key to close",
+    r4ShortcutsCatEditing: "Editing",
+    r4ShortcutsCatNavigation: "Navigation",
+    r4ShortcutsCatPanels: "Panels",
+    r4ShortcutsCatSystem: "System",
+    r4UndoHint: "Undone",
+    r4StashSaved: "Input stashed",
+    r4StashRestored: "Stash restored",
+    r4StashEmpty: "Stash is empty",
+    r4EditorOpening: "Opening editor…",
+    r4EditorError: "Editor failed: {error}",
+    r4TerminalSetupTitle: "Terminal setup",
+    r4UnseenMessages: "↓ {count} new messages",
+    r4GitBranch: "branch",
+    r4ClipboardCopied: "Copied",
+    r4ClipboardFailed: "Copy failed",
   },
 };

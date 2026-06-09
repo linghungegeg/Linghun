@@ -1,7 +1,10 @@
 import { Box, type DOMElement, Text, useInput } from "ink";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { computeGhostText } from "../../ghost-text.js";
 import { resolveKeybinding } from "../../keybinding-runtime.js";
+import { createPromptStash, toggleStash } from "../../prompt-stash.js";
+import { type UndoRing, createUndoRing, undoRingPop, undoRingPush } from "../../undo-ring.js";
 import {
   formatUnknownSlashCommand,
   getCoreSlashCandidates,
@@ -533,6 +536,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const lastCtrlCAtRef = useRef(0);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chordBufferRef = useRef<string[]>([]);
+  const undoRingRef = useRef<UndoRing>(createUndoRing());
+  const stashRef = useRef(createPromptStash());
   // D.13Q-UX Real Smoke Fix v2 — B. task/pending 模式必须用 taskComposerMaxWidth，
   // 与 ShellApp.TaskLayout 的 cw 对齐；否则 useAnchoredCursor 的父链 Yoga 计算
   // 出来的 cursor 锚是 80-col 居中容器，而真正的 Composer 容器是 view.width-4，
@@ -563,7 +568,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   );
 
   const configPanelActive = Boolean(
-    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel || view.backgroundTaskOverlay,
+    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel || view.backgroundTaskOverlay || view.historySearchPanel || view.shortcutPanel,
   );
   const terminalInteractionModes = useMemo(
     () => resolveTerminalInteractionModes({ capability, appOwnedScreen: false }),
@@ -616,12 +621,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   }, []);
 
   const setBufferAndResetSelection = useCallback((next: EditBuffer) => {
+    undoRingRef.current = undoRingPush(undoRingRef.current, bufferRef.current);
     bufferRef.current = next;
     setBuffer(next);
     setSlashSelection(0);
   }, []);
   const updateBufferAndResetSelection = useCallback(
     (update: (current: EditBuffer) => EditBuffer) => {
+      undoRingRef.current = undoRingPush(undoRingRef.current, bufferRef.current);
       const next = update(bufferRef.current);
       bufferRef.current = next;
       setBuffer(next);
@@ -725,6 +732,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             view.btwPanel ||
             view.sessionsPanel ||
             view.backgroundTaskOverlay ||
+            view.historySearchPanel ||
+            view.shortcutPanel ||
             view.commandPanel ||
             commandPanelConsumesInput,
         ),
@@ -768,6 +777,39 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         if (binding.action === "delete-word-left") {
           setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
           return;
+        }
+        if (binding.action === "history-search") {
+          emitInput({ type: "history-search-open" });
+          return;
+        }
+        if (binding.action === "undo") {
+          const result = undoRingPop(undoRingRef.current);
+          undoRingRef.current = result.ring;
+          if (result.buffer) {
+            bufferRef.current = result.buffer;
+            setBuffer(result.buffer);
+            setSlashSelection(0);
+          }
+          return;
+        }
+        if (binding.action === "stash") {
+          const currentText = bufferToString(bufferRef.current);
+          const result = toggleStash(stashRef.current, currentText);
+          stashRef.current = result.stash;
+          if (result.bufferText !== undefined) {
+            resetBuffer(result.bufferText);
+          }
+          return;
+        }
+        if (binding.action === "external-editor") {
+          emitInput({ type: "external-editor" });
+          return;
+        }
+        if (binding.action === "shortcuts-panel") {
+          if (bufferToString(bufferRef.current).length === 0) {
+            emitInput({ type: "shortcuts-panel-open" });
+            return;
+          }
         }
       }
 
@@ -839,9 +881,28 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           else if (view.btwPanel) emitInput({ type: "btw-close" });
           else if (view.sessionsPanel) emitInput({ type: "sessions-close" });
           else if (view.backgroundTaskOverlay) emitInput({ type: "background-overlay-close" });
+          else if (view.historySearchPanel) emitInput({ type: "history-search-close" });
+          else if (view.shortcutPanel) emitInput({ type: "shortcuts-panel-close" });
           else if (view.configPanel) emitInput({ type: "config-back" });
           else if (view.commandPanel) emitInput({ type: "command-panel-close" });
           else emitInput({ type: "escape" });
+          return;
+        }
+        if (view.historySearchPanel) {
+          if (key.return) emitInput({ type: "history-search-accept" });
+          else if (key.upArrow) emitInput({ type: "history-search-move", delta: -1 });
+          else if (key.downArrow) emitInput({ type: "history-search-move", delta: 1 });
+          else if (!key.ctrl && !key.meta && input.length > 0 && !key.return && !key.tab) {
+            const newQuery = (view.historySearchPanel.query ?? "") + input;
+            emitInput({ type: "history-search-input", query: newQuery });
+          } else if (key.backspace) {
+            const currentQuery = view.historySearchPanel.query ?? "";
+            emitInput({ type: "history-search-input", query: currentQuery.slice(0, -1) });
+          }
+          return;
+        }
+        if (view.shortcutPanel) {
+          emitInput({ type: "shortcuts-panel-close" });
           return;
         }
         if (view.helpPanel) {
@@ -1099,6 +1160,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             return;
           }
         }
+        const ghost = computeGhostText(
+          text,
+          slashCandidates.map((c) => ({ slash: c.slash, description: c.descriptionZh })),
+        );
+        if (ghost) {
+          resetBuffer(text + ghost + " ");
+          return;
+        }
         return;
       }
 
@@ -1350,6 +1419,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const showSuggestions =
     !permissionActive && slashCandidates.length > 0 && slashSelection >= 0 && !slashHidden;
 
+  const ghostSuffix = useMemo(() => {
+    if (permissionActive || slashHidden) return undefined;
+    return computeGhostText(
+      text,
+      slashCandidates.map((c) => ({ slash: c.slash, description: c.descriptionZh })),
+    );
+  }, [text, slashCandidates, permissionActive, slashHidden]);
+
   // Unknown slash hint: only after the user pressed Enter with an unknown
   // command. The composer no longer pesters the user mid-typing.
   const showUnknownHint = false;
@@ -1399,6 +1476,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             return (
               <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
                 {sliceWidth(line, Math.max(4, composerInnerWidth - displayWidthOf(PROMPT_MARKER)))}
+                {index === lines.length - 1 && ghostSuffix ? (
+                  <Text color="gray" dimColor>
+                    {ghostSuffix}
+                  </Text>
+                ) : null}
               </Text>
             );
           })}

@@ -27,6 +27,8 @@ export type StatusFooterProps = {
   modelDim?: boolean;
   /** cache 段语义色调（命中率低时染 warning）。 */
   cacheTone?: "default" | "warning" | "dim";
+  /** R4 — git branch name to display. */
+  gitBranch?: string;
 };
 
 export function StatusFooter({
@@ -36,6 +38,7 @@ export function StatusFooter({
   language,
   modelDim = false,
   cacheTone = "default",
+  gitBranch,
 }: StatusFooterProps): React.ReactNode {
   void language;
   // R1-8: 默认保留 权限模式 + 模型 + 缓存 + 索引 + 推理；费用估算避免误导，移入详情入口。
@@ -48,6 +51,7 @@ export function StatusFooter({
     },
     { key: "index", text: footer.index, tone: "default" },
   ];
+  if (gitBranch) rightSegments.push({ key: "branch", text: `⎇ ${gitBranch}`, tone: "dim" });
   if (footer.contextUsage) rightSegments.push({ key: "context", text: footer.contextUsage, tone: "dim" });
   if (footer.reasoning) rightSegments.push({ key: "reasoning", text: footer.reasoning });
 
