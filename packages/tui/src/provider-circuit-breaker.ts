@@ -64,18 +64,20 @@ export function isRecoverableProviderFailure(errorCode: string): boolean {
 /**
  * Record a provider failure. If the failure is recoverable and the threshold
  * is reached, the breaker enters cooldown.
+ * Returns true if this call caused the breaker to open (state transition to "open").
  */
 export function recordProviderFailure(
   state: ProviderCircuitBreakerState,
   providerId: string,
   model: string,
   errorCode: string,
-): void {
+): boolean {
   if (!isRecoverableProviderFailure(errorCode)) {
-    return;
+    return false;
   }
   const key = makeBreakerKey(providerId, model);
   const existing = state.entries.get(key);
+  const previousState = existing?.state ?? "closed";
   const now = Date.now();
   const consecutiveFailures = (existing?.consecutiveFailures ?? 0) + 1;
   const cooldownUntil =
@@ -90,6 +92,7 @@ export function recordProviderFailure(
     cooldownUntil,
     reasonCode: errorCode,
   });
+  return breakerState === "open" && previousState !== "open";
 }
 
 /**

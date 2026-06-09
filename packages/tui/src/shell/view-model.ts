@@ -1195,6 +1195,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     request_started: "thinking",
     request_started_report: "thinking",
     waiting_first_delta: "thinking",
+    provider_retrying: "thinking",
     tool_running: "tool_running",
     continuing_after_tool: "continuing",
     verifying_final_answer: "continuing",
@@ -1209,9 +1210,13 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
   if (!mapped) return undefined;
 
   const toolName = (context as { requestActivityToolName?: string }).requestActivityToolName;
+  const retryInfo = (context as { retryInfo?: { attempt: number; max: number; delaySec: number } }).retryInfo;
   const textMap: Record<string, Record<string, string>> = {
     "zh-CN": {
       thinking: "正在思考…",
+      provider_retrying: retryInfo
+        ? `重试中 (${retryInfo.attempt}/${retryInfo.max})…${retryInfo.delaySec}s 后重试`
+        : "重试中…",
       tool_running: toolName ? `正在运行 ${toolName}…` : "正在运行工具…",
       continuing: "工具完成，继续处理…",
       verifying_final_answer: "正在验证最终回答…",
@@ -1221,6 +1226,9 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     },
     "en-US": {
       thinking: "Thinking…",
+      provider_retrying: retryInfo
+        ? `Retrying (${retryInfo.attempt}/${retryInfo.max})… retry in ${retryInfo.delaySec}s`
+        : "Retrying…",
       tool_running: toolName ? `Running ${toolName}…` : "Running tool…",
       continuing: "Continuing after tool…",
       verifying_final_answer: "Verifying final answer…",

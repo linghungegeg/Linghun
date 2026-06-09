@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { Writable } from "node:stream";
 import type { TranscriptEvent } from "@linghun/core";
+import { computePromptCacheHitRate } from "@linghun/core";
 import { buildExplicitDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
 import { calculateContextPercentages } from "./context-window-runtime.js";
 import { formatBackgroundDetails, formatBackgroundOutputDetails } from "./job-runner-presenter.js";
 import { formatLogArtifactSlice, readLogArtifactSlice } from "./log-artifact.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
-import type { BackgroundTaskSummary, ProductBlockViewModel } from "./shell/types.js";
+import type { BackgroundTaskSummary, CommandPanelSection, CommandPanelView, ProductBlockViewModel } from "./shell/types.js";
 import { formatModeBehavior } from "./slash-dispatch.js";
 import { formatError, writeLine } from "./startup-runtime.js";
 import type { TerminalReadinessView } from "./terminal-readiness-presenter.js";
@@ -28,6 +29,7 @@ import {
 import type { MessageKey } from "./tui-messages.js";
 import { messages } from "./tui-messages.js";
 import { getRuntimeStatusProvider, getSelectedModelRuntime } from "./tui-model-runtime.js";
+import { formatEstimatedCny, sumCacheHistory, sumRoleUsageEstimatedCny } from "./usage-stats-presenter.js";
 import { hydrateWorkflowRuns } from "./workflow-command-runtime.js";
 import { createShellBlockOutputForTest, writeErrorLine } from "./tui-output-surface.js";
 
@@ -243,6 +245,159 @@ export function formatShellBackgroundSummaries(context: TuiContext): BackgroundT
 
 function isSessionEnded(transcript: TranscriptEvent[]): boolean {
   return transcript.at(-1)?.type === "session_end";
+}
+
+export function buildStatusPanel(context: TuiContext): CommandPanelView {
+  const isEn = context.language === "en-US";
+  const runtime = getSelectedModelRuntime(context);
+  const provider = getRuntimeStatusProvider(context);
+  const mode = formatPermissionModeLabel(context.permissionMode, context.language);
+
+  // ── Summary (always visible) ──────────────────────────────────────────────
+  const contextUsage = context.cache.compactPressure
+    ? calculateContextPercentages(
+        Math.ceil(context.cache.compactPressure.estimatedChars / 4),
+        Math.ceil(context.cache.compactPressure.maxChars / 4),
+      )
+    : undefined;
+  const ctxLabel = contextUsage
+    ? `${(contextUsage.ratio * 100).toFixed(0)}%`
+    : "?";
+  const summary = isEn
+    ? [`Model ${runtime.model} · Ctx ${ctxLabel} · Mode ${mode}`]
+    : [`模型 ${runtime.model} · 上下文 ${ctxLabel} · 模式 ${mode}`];
+
+  // ── Sections (visible when expanded) ──────────────────────────────────────
+  const sections: CommandPanelSection[] = [];
+
+  // 1. Model
+  sections.push({
+    title: isEn ? "Model" : "模型/Model",
+    rows: [
+      isEn
+        ? `Name: ${runtime.model}  Provider: ${provider}`
+        : `名称: ${runtime.model}  Provider: ${provider}`,
+      isEn
+        ? `Endpoint: ${runtime.endpointProfile}  Reasoning: ${runtime.reasoningStatus}`
+        : `Endpoint: ${runtime.endpointProfile}  推理: ${runtime.reasoningStatus}`,
+    ],
+  });
+
+  // 2. Context
+  if (contextUsage) {
+    const usedK = contextUsage.usedTokens >= 1000
+      ? `${Math.round(contextUsage.usedTokens / 1000)}k`
+      : String(contextUsage.usedTokens);
+    const maxK = contextUsage.maxTokens >= 1000
+      ? `${Math.round(contextUsage.maxTokens / 1000)}k`
+      : String(contextUsage.maxTokens);
+    const pressure = context.cache.compactPressure;
+    const pressureLabel = pressure
+      ? ` compact-pressure ${(pressure.ratio * 100).toFixed(0)}%`
+      : "";
+    sections.push({
+      title: isEn ? "Context" : "上下文/Context",
+      rows: [
+        `${contextUsage.bar} ${usedK}/${maxK} (${(contextUsage.ratio * 100).toFixed(1)}%)${pressureLabel}`,
+      ],
+    });
+  } else {
+    sections.push({
+      title: isEn ? "Context" : "上下文/Context",
+      rows: [isEn ? "No context usage data yet." : "暂无上下文数据。"],
+    });
+  }
+
+  // 3. Cost
+  const totals = sumCacheHistory(context.cache.history);
+  const totalEstimatedCny = sumRoleUsageEstimatedCny(context);
+  sections.push({
+    title: isEn ? "Cost" : "费用/Cost",
+    rows: [
+      isEn
+        ? `Estimated: ${formatEstimatedCny(totalEstimatedCny)}  Input: ${totals.inputTokens}  Output: ${totals.outputTokens}`
+        : `估算: ${formatEstimatedCny(totalEstimatedCny)}  Input: ${totals.inputTokens}  Output: ${totals.outputTokens}`,
+    ],
+  });
+
+  // 4. Provider health (breaker)
+  const breakerEntries = [...context.providerBreaker.entries.values()];
+  if (breakerEntries.length > 0) {
+    const rows = breakerEntries.map((entry) => {
+      const stateIcon =
+        entry.state === "closed" ? "✓" : entry.state === "open" ? "✗" : "?";
+      const cooldownInfo =
+        entry.state === "open" && entry.cooldownUntil > Date.now()
+          ? ` cooldown ${Math.ceil((entry.cooldownUntil - Date.now()) / 1000)}s`
+          : "";
+      return `${stateIcon} ${entry.providerId}/${entry.model} (${entry.state}${cooldownInfo})`;
+    });
+    sections.push({
+      title: isEn ? "Provider Health" : "Provider 健康/Health",
+      rows,
+    });
+  }
+
+  // 5. Cache
+  const latestHitRate = context.cache.history.at(-1)?.hitRate ?? null;
+  const hitRateLabel = latestHitRate !== null
+    ? `${Math.round(latestHitRate * 100)}%`
+    : "n/a";
+  const sessionHitRate = context.cache.history.length > 0
+    ? computePromptCacheHitRate({
+        inputTokens: totals.inputTokens,
+        outputTokens: totals.outputTokens,
+        cacheReadTokens: totals.cacheReadTokens,
+        cacheWriteTokens: totals.cacheWriteTokens,
+        provider,
+        model: runtime.model,
+      })
+    : null;
+  const sessionHitLabel = sessionHitRate !== null
+    ? `${Math.round(sessionHitRate * 100)}%`
+    : "n/a";
+  sections.push({
+    title: isEn ? "Cache" : "缓存/Cache",
+    rows: [
+      isEn
+        ? `Last hit rate: ${hitRateLabel}  Session avg: ${sessionHitLabel}  Read: ${totals.cacheReadTokens}  Write: ${totals.cacheWriteTokens}`
+        : `最近命中率: ${hitRateLabel}  会话均值: ${sessionHitLabel}  Read: ${totals.cacheReadTokens}  Write: ${totals.cacheWriteTokens}`,
+    ],
+  });
+
+  // 6. Index
+  const indexStatus = context.index.status;
+  sections.push({
+    title: isEn ? "Index" : "索引/Index",
+    rows: [
+      isEn
+        ? `Status: ${indexStatus}${context.index.nodes ? `  Nodes: ${context.index.nodes}` : ""}${context.index.edges ? `  Edges: ${context.index.edges}` : ""}`
+        : `状态: ${indexStatus}${context.index.nodes ? `  节点: ${context.index.nodes}` : ""}${context.index.edges ? `  边: ${context.index.edges}` : ""}`,
+    ],
+  });
+
+  // 7. Rate limit (only if last provider failure indicates rate limiting)
+  if (
+    context.lastProviderFailure &&
+    context.lastProviderFailure.code === "PROVIDER_RATE_LIMITED"
+  ) {
+    sections.push({
+      title: isEn ? "Rate Limit" : "限流/Rate Limit",
+      rows: [
+        isEn
+          ? `Provider ${context.lastProviderFailure.provider} rate limited (${context.lastProviderFailure.summary})`
+          : `Provider ${context.lastProviderFailure.provider} 被限流 (${context.lastProviderFailure.summary})`,
+      ],
+    });
+  }
+
+  return {
+    title: "/status",
+    tone: "neutral",
+    summary,
+    sections,
+    expanded: false,
+  };
 }
 
 export function writeStatus(output: Writable, context: TuiContext): void {

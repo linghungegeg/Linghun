@@ -7,12 +7,13 @@ export type RequestActivityPhase =
   | "tool_running"
   | "continuing_after_tool"
   | "permission_waiting"
-  | "verifying_final_answer";
+  | "verifying_final_answer"
+  | "provider_retrying";
 
 export function formatRequestActivity(
   phase: RequestActivityPhase,
   language: Language,
-  values: { reportPath?: string; toolName?: string } = {},
+  values: { reportPath?: string; toolName?: string; retryAttempt?: number; retryMax?: number; retryDelaySec?: number } = {},
 ): string {
   const reportPath = values.reportPath ?? "report.md";
   const toolName = values.toolName ?? "tool";
@@ -35,6 +36,12 @@ export function formatRequestActivity(
     if (phase === "verifying_final_answer") {
       return "Verifying the final answer before showing it.";
     }
+    if (phase === "provider_retrying") {
+      const attempt = values.retryAttempt ?? 1;
+      const max = values.retryMax ?? 3;
+      const delay = values.retryDelaySec ?? 1;
+      return `Retrying (${attempt}/${max})… retry in ${delay}s`;
+    }
     return "Thinking…";
   }
   if (phase === "request_started_report") {
@@ -54,6 +61,12 @@ export function formatRequestActivity(
   }
   if (phase === "verifying_final_answer") {
     return "正在验证最终回答，验证后再显示。";
+  }
+  if (phase === "provider_retrying") {
+    const attempt = values.retryAttempt ?? 1;
+    const max = values.retryMax ?? 3;
+    const delay = values.retryDelaySec ?? 1;
+    return `重试中 (${attempt}/${max})…${delay}s 后重试`;
   }
   return "正在思考…";
 }

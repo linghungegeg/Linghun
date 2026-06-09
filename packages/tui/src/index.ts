@@ -56,6 +56,7 @@ import {
   type ModelToolCall,
   type ModelUsage,
   findKnownModel,
+  registerHooks as registerProviderHooks,
 } from "@linghun/providers";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
 import {
@@ -864,6 +865,7 @@ import {
   __testBuildExplicitDetailsCommandPanel,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
+  buildStatusPanel,
   createSessionEndEvent,
   ensureSession,
   formatHomeScreen,
@@ -1384,6 +1386,20 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const gateway = createModelGateway(context.config);
   // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
   context.modelGateway = gateway;
+  // R6 — Register provider retry hook so the TUI can show retry activity.
+  registerProviderHooks({
+    onRetry: (info) => {
+      context.requestActivityPhase = "provider_retrying";
+      context.requestActivityToolName = undefined;
+      (context as { retryInfo?: { attempt: number; max: number; delaySec: number } }).retryInfo = {
+        attempt: info.attempt,
+        max: info.maxAttempts,
+        delaySec: Math.ceil(info.delayMs / 1000),
+      };
+    },
+  });
+  // R6 — Initialize notification callback on context for circuit breaker and other runtimes.
+  context.pushNotification = (text, tone) => pushTransientNotification(context, text, tone);
   const sigintHandler = () => {
     requestTrackedProcessStop(false);
     void handleInterruptCommand([], context, output).catch((error: unknown) => {
@@ -2749,9 +2765,13 @@ export async function handleSlashCommand(
     return "handled";
   }
   if (command === "/status") {
-    writeStatus(output, context);
     refreshBackgroundLifecycle(context);
-    writeLine(output, formatTerminalReadinessStatus(createTerminalReadinessView(context)));
+    if (context.isInkSession) {
+      showCommandPanel(context, output, buildStatusPanel(context));
+    } else {
+      writeStatus(output, context);
+      writeLine(output, formatTerminalReadinessStatus(createTerminalReadinessView(context)));
+    }
     return "handled";
   }
   if (command === "/tab") {

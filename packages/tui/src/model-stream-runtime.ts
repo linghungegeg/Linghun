@@ -92,7 +92,7 @@ import {
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
-import { clearProviderBreaker, recordProviderFailure } from "./provider-circuit-breaker.js";
+import { BREAKER_CONSTANTS, clearProviderBreaker, formatCooldownMessage, recordProviderFailure } from "./provider-circuit-breaker.js";
 import {
   checkAndWriteProviderCooldown,
   recordProviderFallbackAttempt,
@@ -332,6 +332,11 @@ export function startRequestActivity(
   const slowTimer = setTimeout(() => {
     const activity = context.requestActivity;
     if (!activity || activity.slowHintShown) {
+      return;
+    }
+    // Suppress slow-hint when a tool is actively running — the user already
+    // sees a "Running <tool>…" indicator, so a "still waiting" message is misleading.
+    if (context.requestActivityPhase === "tool_running") {
       return;
     }
     context.requestActivity = { slowHintShown: true };
@@ -678,12 +683,18 @@ export async function sendMessage(
         if (event.type === "error") {
           clearRequestActivity(context);
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
-          recordProviderFailure(
+          const breakerOpened = recordProviderFailure(
             context.providerBreaker,
             selectedRuntime.provider,
             selectedRuntime.model,
             event.error.code ?? "UNKNOWN",
           );
+          if (breakerOpened) {
+            context.pushNotification?.(
+              formatCooldownMessage(selectedRuntime.provider, selectedRuntime.model, BREAKER_CONSTANTS.COOLDOWN_MS, context.language),
+              "warning",
+            );
+          }
           const fallback = resolveRuntimeFallback(context, selectedRuntime, event.error);
           if (fallback) {
             await recordProviderFallbackAttempt(context, sessionId, {
@@ -1600,12 +1611,18 @@ async function streamFinalModelAnswerWithoutTools(
       clearRequestActivity(context);
       const currentRuntime = runtimeFromContinuation(continuation);
       await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
-      recordProviderFailure(
+      const breakerOpened2 = recordProviderFailure(
         context.providerBreaker,
         continuation.provider,
         continuation.model,
         event.error.code ?? "UNKNOWN",
       );
+      if (breakerOpened2) {
+        context.pushNotification?.(
+          formatCooldownMessage(continuation.provider, continuation.model, BREAKER_CONSTANTS.COOLDOWN_MS, context.language),
+          "warning",
+        );
+      }
       const fallback = fallbackAttempted
         ? undefined
         : resolveRuntimeFallback(context, currentRuntime, event.error);
@@ -1999,12 +2016,18 @@ export async function continueModelAfterToolResults(
           clearRequestActivity(context);
           const currentRuntime = runtimeFromContinuation(continuation);
           await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
-          recordProviderFailure(
+          const breakerOpened3 = recordProviderFailure(
             context.providerBreaker,
             continuation.provider,
             continuation.model,
             event.error.code ?? "UNKNOWN",
           );
+          if (breakerOpened3) {
+            context.pushNotification?.(
+              formatCooldownMessage(continuation.provider, continuation.model, BREAKER_CONSTANTS.COOLDOWN_MS, context.language),
+              "warning",
+            );
+          }
           const fallback = runtimeFallbackAttempted
             ? undefined
             : resolveRuntimeFallback(context, currentRuntime, event.error);

@@ -493,6 +493,8 @@ export type TuiContext = {
   dismissedBackgroundTaskIds?: Set<string>;
   /** Visible-only Shift+Down background overlay state. */
   backgroundOverlayState?: { open: boolean; cursor: number; expanded?: boolean };
+  /** R6 — notification callback, initialized by index.ts to push transient notifications. */
+  pushNotification?: (text: string, tone?: "default" | "dim" | "warning" | "error" | "success") => void;
 };
 
 export const VERIFICATION_COMMAND_TIMEOUT_MS = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS;

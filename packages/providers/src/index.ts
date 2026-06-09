@@ -1187,13 +1187,17 @@ async function fetchWithProviderRetry(url: string, init: RequestInit): Promise<R
       if (!PROVIDER_RETRY_STATUSES.has(response.status) || attempt === PROVIDER_MAX_ATTEMPTS) {
         return response;
       }
-      await sleep(readRetryAfterMs(response) ?? PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1));
+      const delayMs = readRetryAfterMs(response) ?? PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1);
+      getRegisteredHooks().onRetry?.({ attempt, maxAttempts: PROVIDER_MAX_ATTEMPTS, delayMs, statusCode: response.status });
+      await sleep(delayMs);
     } catch (error) {
       lastError = error;
       if (!(error instanceof TypeError) || attempt === PROVIDER_MAX_ATTEMPTS) {
         throw error;
       }
-      await sleep(PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1));
+      const delayMs = PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1);
+      getRegisteredHooks().onRetry?.({ attempt, maxAttempts: PROVIDER_MAX_ATTEMPTS, delayMs, statusCode: 0 });
+      await sleep(delayMs);
     }
   }
   throw new Error("Provider retry loop exhausted without returning a response.");
