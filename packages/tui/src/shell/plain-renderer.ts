@@ -187,9 +187,10 @@ function renderPlainHome(view: ShellViewModel, capability: TerminalCapability): 
   content.push(centerText(dim(accentLine, noColor), composerWidth));
   content.push("");
 
-  // Vision — dim/muted, centered
-  content.push(centerText(dim(view.homeVision, noColor), composerWidth));
-  content.push("");
+  if (view.homeVision) {
+    content.push(centerText(dim(view.homeVision, noColor), composerWidth));
+    content.push("");
+  }
 
   // Composer box: top cyan line, placeholder hint, bottom cyan line
   // The placeholder is shown as a dim hint (no "> " prefix) because the real

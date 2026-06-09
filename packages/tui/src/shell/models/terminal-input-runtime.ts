@@ -44,7 +44,7 @@ export function normalizeTerminalInput(input: string, key: TerminalInputKey): Te
     return { type: "backspace" };
   }
 
-  if (key.shift && key.return) return { type: "newline" };
+  if ((key.shift || key.meta) && key.return) return { type: "newline" };
   if (isMultilineEnterSequence(input)) return { type: "newline" };
   if ((key.ctrl && input === "j") || input === "\n") return { type: "newline" };
 

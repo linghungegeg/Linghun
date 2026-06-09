@@ -268,7 +268,7 @@ export type ConfigPanelView =
   | {
       phase: "panel_list";
       cursor: number;
-      panels: { id: string; title: string; summary: string }[];
+      panels: { id: string; title: string; summary: string; slash: string }[];
     }
   | {
       phase: "panel_detail";
@@ -370,6 +370,14 @@ export type TranscriptScrollActionName =
   | "top"
   | "bottom";
 
+export type TaskSuggestion = {
+  id: string;
+  source: "slash" | "setup" | "permission" | "config" | "tool_error";
+  label: string;
+  hint?: string;
+  action: { kind: "slash"; command: string } | { kind: "inline"; id: string };
+};
+
 export type ShellViewModel = {
   language: Language;
   projectName: string;
@@ -406,7 +414,7 @@ export type ShellViewModel = {
    * D.13E Step 2 — 由 view-model.taskSuggestions 计算后挂到 view 上，
    * ShellApp 渲染 TaskSuggestionBar；空数组时 ShellApp 不渲染任何东西。
    */
-  taskSuggestions?: import("./models/task-suggestion.js").TaskSuggestion[];
+  taskSuggestions?: TaskSuggestion[];
   taskSuggestionCursor?: number;
   /**
    * D.13E Step 2 — ConfigPanel UI 状态。idle 时 undefined；
@@ -474,6 +482,7 @@ export type ShellInputEvent =
   | { type: "cycle-permission-mode" }
   | { type: "config-move"; delta: -1 | 1 }
   | { type: "config-enter" }
+  | { type: "config-submit"; command: string }
   | { type: "config-back" }
   | { type: "permission-action"; actionId: PermissionActionId }
   | { type: "task-suggestion-move"; delta: -1 | 1 }

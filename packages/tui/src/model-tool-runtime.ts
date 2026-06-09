@@ -150,7 +150,7 @@ import {
   uniqueStrings,
   writeLine,
 } from "./startup-runtime.js";
-import { formatToolOutput, formatToolStart } from "./tool-output-presenter.js";
+import { formatToolOutput } from "./tool-output-presenter.js";
 import {
   findDurableJob,
   isAgentType,
@@ -627,13 +627,8 @@ export async function executeApprovedModelToolUse(
     context.tools.abortSignal = backgroundController.signal;
   }
   const progress = installToolProgressHandler(context, sessionId, toolCall.id, output, task);
-  // D.13L Section 4 — model tool use 也在 runTool 前 emit 启动行，确保
-  // `Bash(git status)` / `Read(src/foo.ts)` 这种人类可读句首与 CCB 一致；
-  // permission 已批准、preflight 已写入后再打印，避免被拒绝时多一行噪音。
-  const startBanner = formatToolStart(toolName, toolCall.input);
-  if (startBanner) {
-    writeLine(output, startBanner);
-  }
+  // R1: tool start banner suppressed by default (noise reduction).
+  // Verbose/brief mode (R7) will re-enable when needed.
   try {
     const result = await runTool(toolName, toolCall.input, context.tools);
     progress.restore();
@@ -2439,13 +2434,7 @@ export async function handleToolCommand(
       context.tools.abortSignal = backgroundController.signal;
     }
     const progress = installToolProgressHandler(context, sessionId, callId, output, task);
-    // D.13L Section 4 — 在 runTool 前 emit `<Tool>(<arg>)` 启动行，与 CCB
-    // AssistantToolUseMessage 渲染对齐；只有可派生单参数（command / path /
-    // pattern）时才打印，避免 fallback 到无意义的 "Tool() ".
-    const startBanner = formatToolStart(name, input);
-    if (startBanner) {
-      writeLine(output, startBanner);
-    }
+    // R1: tool start banner suppressed by default (noise reduction).
     let result: Awaited<ReturnType<typeof runTool>>;
     try {
       result = await runTool(name, input, context.tools);

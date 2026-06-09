@@ -894,7 +894,7 @@ describe("Meta scheduler runtime", () => {
     expect(sanitized).not.toContain("policy_decision");
     expect(sanitized).not.toContain("Typed policy route");
     expect(sanitized).not.toContain("Verification route");
-    expect(sanitized).toContain("Internal runtime context was omitted");
+    expect(sanitized).not.toContain("Internal runtime context was omitted");
   });
 
   describe("verifyFailureLearningContract", () => {

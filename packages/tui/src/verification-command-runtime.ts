@@ -604,12 +604,8 @@ function formatVerificationReportLines(
       }
     }
   }
-  if (!includeCommandDetails && report.status !== "pass") {
-    const logPath = report.commands.find((command) => command.logPath)?.logPath ?? report.logPath;
-    if (logPath) {
-      lines.push(`log: ${logPath}`);
-    }
-  }
+  // R1: task summary no longer exposes raw log paths on main screen.
+  // Full paths remain visible in /verify last (includeCommandDetails=true).
   if (includeCommandDetails && report.unverified.length > 0) {
     lines.push(`未验证：${report.unverified.join("; ")}`);
   }

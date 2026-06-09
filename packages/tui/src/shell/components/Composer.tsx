@@ -7,13 +7,11 @@ import {
   getCoreSlashCandidates,
   getSlashPrefixCandidates,
 } from "../../slash-dispatch.js";
-import { selectInputOwner } from "../models/input-owner-controller.js";
 import {
   isMultilineEnterSequence as isNormalizedMultilineEnterSequence,
   normalizeTerminalInput,
   sanitizeTerminalText,
 } from "../models/terminal-input-runtime.js";
-import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
 import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
@@ -24,8 +22,6 @@ import type {
   ShellInputEvent,
   ShellViewModel,
   TaskPermissionView,
-  TranscriptMouseEventView,
-  TranscriptViewportGeometryView,
 } from "../types.js";
 import { SlashSuggestions } from "./SlashSuggestions.js";
 import { useAnchoredCursor } from "./useAnchoredCursor.js";
@@ -36,19 +32,6 @@ type ComposerProps = {
   capability: TerminalCapability;
 };
 
-function isTranscriptWheelTarget(
-  mouse: TranscriptMouseEventView | undefined,
-  geometry: TranscriptViewportGeometryView | undefined,
-): boolean {
-  if (!mouse || mouse.action !== "wheel") return false;
-  if (!geometry) return true;
-  return (
-    mouse.x >= geometry.x &&
-    mouse.x < geometry.x + geometry.width &&
-    mouse.y >= geometry.y &&
-    mouse.y < geometry.y + geometry.height
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Edit buffer — the core editing model
@@ -393,6 +376,90 @@ export function shouldEnterPastePath(
   return false;
 }
 
+export type InputOwner = "permission" | "panel" | "paste" | "slash" | "composer";
+
+export type OwnerKeyShape = {
+  ctrl?: boolean;
+  meta?: boolean;
+  escape?: boolean;
+  tab?: boolean;
+  return?: boolean;
+  shift?: boolean;
+  upArrow?: boolean;
+  downArrow?: boolean;
+  leftArrow?: boolean;
+  rightArrow?: boolean;
+};
+
+export type OwnerContext = {
+  permissionActive: boolean;
+  panelActive?: boolean;
+  panelInteractive?: boolean;
+  panelNumericShortcuts?: boolean;
+  panelSpaceAction?: boolean;
+  pastePending: boolean;
+  slashVisible: boolean;
+};
+
+export function selectInputOwner(input: string, key: OwnerKeyShape, ctx: OwnerContext): InputOwner {
+  if (ctx.permissionActive) return "permission";
+  if (ctx.panelActive === true && isPanelOwnerKey(input, key, ctx)) return "panel";
+  if (ctx.pastePending && (key.return || key.escape)) return "paste";
+  if (shouldEnterPastePath(input, key, ctx.pastePending)) return "paste";
+  if (ctx.slashVisible && isSlashOwnerKey(input, key)) return "slash";
+  return "composer";
+}
+
+function isPanelOwnerKey(input: string, key: OwnerKeyShape, ctx: OwnerContext): boolean {
+  if (key.escape) return true;
+  if (ctx.panelInteractive !== true) return false;
+  if (isModifiedEnter(input, key)) return false;
+  if (key.return || key.tab || key.upArrow || key.downArrow || key.leftArrow || key.rightArrow) {
+    return true;
+  }
+  if (ctx.panelNumericShortcuts && /^[1-9]$/.test(input) && !key.ctrl && !key.meta) return true;
+  if (ctx.panelSpaceAction && input === " " && !key.ctrl && !key.meta) return true;
+  return input.toLowerCase() === "x" && !key.ctrl && !key.meta;
+}
+
+function isSlashOwnerKey(input: string, key: OwnerKeyShape): boolean {
+  return Boolean(
+    (key.return && !isModifiedEnter(input, key)) ||
+      key.escape ||
+      key.tab ||
+      key.upArrow ||
+      key.downArrow,
+  );
+}
+
+function isModifiedEnter(input: string, key: OwnerKeyShape): boolean {
+  return Boolean(
+    key.return &&
+      (key.shift || key.meta) &&
+      input.length > 0 &&
+      input !== "\r" &&
+      input !== "\n",
+  );
+}
+
+export function isNavigationKey(key: OwnerKeyShape): boolean {
+  return Boolean(key.upArrow || key.downArrow || key.leftArrow || key.rightArrow);
+}
+
+export function isVerticalNavigationKey(key: OwnerKeyShape): boolean {
+  return Boolean(key.upArrow || key.downArrow);
+}
+
+export const OWNER_PRIORITY: ReadonlyArray<InputOwner> = [
+  "permission",
+  "panel",
+  "paste",
+  "slash",
+  "composer",
+];
+
+export const shouldOwnerBePaste = shouldEnterPastePath;
+
 /**
  * 判断双击窗口（Esc / Ctrl+C 二次清空）是否命中。
  * 命中时视作"清空"动作；未命中视作"提示"动作。
@@ -445,6 +512,7 @@ const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
 // 标准 ink@7 不暴露 event.keypress.isPasted（CCB 用的是 @anthropic 私有 fork），
 // 所以只能通过 chunk 大小 + 100ms 聚合窗口降级识别 bracketed paste。
 const PASTE_THRESHOLD = 16;
+export const OWNER_PASTE_THRESHOLD = PASTE_THRESHOLD;
 const PASTE_COMPLETION_TIMEOUT_MS = 100;
 // DOUBLE_PRESS_WINDOW_MS: 双击 Esc / Ctrl+C 的有效窗口（CCB ~1s）。
 const DOUBLE_PRESS_WINDOW_MS = 1000;
@@ -643,17 +711,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   useInput(
     (input, key) => {
-      if (isSgrMouseInput(input)) {
-        if (!terminalInteractionModes.mouseTracking) return;
-        const mouse = parseSgrMouseEvent(input);
-        if (!isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)) return;
-        if (mouse?.button === "wheel-up") {
-          emitInput({ type: "transcript-scroll", action: "wheelUp" });
-        } else if (mouse?.button === "wheel-down") {
-          emitInput({ type: "transcript-scroll", action: "wheelDown" });
-        }
-        return;
-      }
       const buffer = bufferRef.current;
       const text = bufferToString(buffer);
       const terminalAction = normalizeTerminalInput(input, key);
@@ -798,8 +855,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
         if (view.configPanel) {
-          if (key.return) emitInput({ type: "config-enter" });
-          else if (key.upArrow) emitInput({ type: "config-move", delta: -1 });
+          if (key.return) {
+            if (view.configPanel.phase === "panel_list") {
+              const selected = view.configPanel.panels[view.configPanel.cursor];
+              if (selected) emitInput({ type: "config-submit", command: selected.slash });
+            } else {
+              emitInput({ type: "config-enter" });
+            }
+          } else if (key.upArrow) emitInput({ type: "config-move", delta: -1 });
           else if (key.downArrow) emitInput({ type: "config-move", delta: 1 });
           return;
         }

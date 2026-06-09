@@ -30,7 +30,6 @@ import {
   LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
   LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS,
 } from "./runtime-budget.js";
-import type { ConfigPanelId } from "./shell/models/config-control-plane.js";
 import type { TranscriptSelectionState } from "./shell/models/transcript-selection-state.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import type { ToolResultBudgetState } from "./tool-result-budget.js";
@@ -344,7 +343,7 @@ export type TuiContext = {
   // reduceConfigState 推进；view-model 用 mapConfigPanelState 映射给 UI。
   configPanelState?:
     | { phase: "panel_list"; cursor: number }
-    | { phase: "panel_detail"; panelId: ConfigPanelId; actionCursor: number };
+    | { phase: "panel_detail"; panelId: string; actionCursor: number };
   workspaceTrustEnforced?: boolean;
   activeAbortController?: AbortController;
   backgroundAbortControllers?: Map<string, AbortController>;

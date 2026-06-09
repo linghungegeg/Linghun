@@ -523,7 +523,6 @@ import {
   createCommandBlock,
   createUserTextBlock,
 } from "./shell/models/command-transcript-presenter.js";
-import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
 import { reduceTranscriptScroll } from "./shell/models/transcript-scroll-state.js";
 import {
   buildTranscriptScreenBuffer,
@@ -2111,44 +2110,30 @@ async function runInkShell(
       // ─── D.13E Step 2 — config-* 三类事件：ConfigPanel 自带 useInput 上抛 ─────
       if (event.type === "config-move") {
         if (!context.configPanelState) return;
-        const step = reduceConfigState(context.configPanelState, {
-          type: "move",
-          delta: event.delta,
-        });
-        context.configPanelState =
-          step.next.phase === "idle" ? undefined : (step.next as typeof context.configPanelState);
+        const current = context.configPanelState.phase === "panel_list" ? context.configPanelState.cursor : 0;
+        context.configPanelState = { phase: "panel_list", cursor: Math.max(0, Math.min(13, current + event.delta)) };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "config-submit") {
+        context.configPanelState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        blocks.push(createCommandBlock(commandSequence++, event.command));
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        await processTuiLine(event.command, context, gateway, shellOutput, store);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
       }
       if (event.type === "config-enter") {
-        if (!context.configPanelState) return;
-        const step = reduceConfigState(context.configPanelState, { type: "enter" });
-        context.configPanelState =
-          step.next.phase === "idle" ? undefined : (step.next as typeof context.configPanelState);
-        if (step.dispatch.kind === "slash") {
-          // 关闭面板再派 slash，避免 panel UI 与 slash 输出叠加。
-          context.configPanelState = undefined;
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
-          // 推 transcript 命令行，与用户手敲 slash 保持一致的视觉反馈。
-          blocks.push(createCommandBlock(commandSequence++, step.dispatch.command));
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
-          await processTuiLine(step.dispatch.command, context, gateway, shellOutput, store);
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
-          return;
-        }
-        shell?.rerender();
-        await shell?.waitUntilRenderFlush();
         return;
       }
       if (event.type === "config-back") {
         if (!context.configPanelState) return;
-        const step = reduceConfigState(context.configPanelState, { type: "back" });
-        context.configPanelState =
-          step.next.phase === "idle" ? undefined : (step.next as typeof context.configPanelState);
+        context.configPanelState = undefined;
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

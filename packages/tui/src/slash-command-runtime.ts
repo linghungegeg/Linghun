@@ -670,7 +670,6 @@ import {
   createCommandBlock,
   createUserTextBlock,
 } from "./shell/models/command-transcript-presenter.js";
-import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import type {
   BackgroundTaskSummary,

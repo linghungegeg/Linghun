@@ -77,10 +77,11 @@ function HomeLayout({
         ))}
       </Box>
 
-      {/* Vision */}
-      <Box marginTop={1} justifyContent="center">
-        <Text color={theme.muted}>{fitText(view.homeVision, cw - 2)}</Text>
-      </Box>
+      {view.homeVision ? (
+        <Box marginTop={1} justifyContent="center">
+          <Text color={theme.muted}>{fitText(view.homeVision, cw - 2)}</Text>
+        </Box>
+      ) : null}
 
       {/* Setup hint (if needed) */}
       {view.setupHint ? (

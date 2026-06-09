@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import type React from "react";
-import type { TaskSuggestion } from "../models/task-suggestion.js";
+import type { TaskSuggestion } from "../types.js";
 import { fitText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 

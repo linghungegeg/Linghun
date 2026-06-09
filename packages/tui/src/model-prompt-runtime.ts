@@ -242,9 +242,5 @@ export function sanitizeMainScreenLeakage(
   }
   result = result.replace(/\n{3,}/gu, "\n\n").trim();
   if (!redacted) return text;
-  const note =
-    language === "en-US"
-      ? "(Internal runtime context was omitted from the main screen; use /model doctor or /details to inspect it.)"
-      : "（内部运行时上下文已从主屏省略；需要时用 /model doctor 或 /details 查看。）";
-  return result.length > 0 ? `${result}\n${note}` : note;
+  return result;
 }

@@ -267,11 +267,6 @@ export function createShellLimitations(input: ShellLimitationsInput): string[] {
         : "provider.env 读取失败；可用 /model setup 或 /model doctor 处理。",
     );
   }
-  if (process.env.NO_COLOR === "1" || process.env.FORCE_COLOR === "0") {
-    limitations.push(
-      input.language === "en-US" ? "No-color mode is active." : "当前为无颜色模式。",
-    );
-  }
   return limitations;
 }
 

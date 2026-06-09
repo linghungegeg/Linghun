@@ -368,12 +368,12 @@ describe("startup-runtime", () => {
       expect(result.some((l) => l.includes("provider.env"))).toBe(true);
     });
 
-    it("includes no-color limitation when NO_COLOR is set", () => {
+    it("does not add a no-color limitation when NO_COLOR is set", () => {
       const original = process.env.NO_COLOR;
       process.env.NO_COLOR = "1";
       try {
         const result = createShellLimitations({ language: "en-US" });
-        expect(result.some((l) => l.includes("No-color"))).toBe(true);
+        expect(result.some((l) => l.includes("No-color"))).toBe(false);
       } finally {
         if (original === undefined) {
           process.env.NO_COLOR = undefined;

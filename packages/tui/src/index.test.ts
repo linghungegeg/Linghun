@@ -142,7 +142,6 @@ import {
 } from "./provider-circuit-breaker.js";
 import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
-import { formatFooterIndexLabel } from "./shell/models/footer-view.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import { createOutputBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
 import {
@@ -158,6 +157,13 @@ import { type WorkflowPlan, normalizeWorkflowPlan } from "./workflow-plan-schema
 const __testDir = dirname(fileURLToPath(import.meta.url));
 function srcPath(relativePath: string): string {
   return join(__testDir, relativePath);
+}
+
+function formatFooterIndexLabel(language: "zh-CN" | "en-US", status: string): string {
+  const trimmed = (status ?? "").trim();
+  if (!trimmed || trimmed.toLowerCase() === "unknown") return language === "en-US" ? "Index?" : "索引?";
+  if (trimmed === "refresh_completed_but_unverified") return `${language === "en-US" ? "Index" : "索引"} refresh`;
+  return `${language === "en-US" ? "Index" : "索引"} ${trimmed.length > 10 ? `${trimmed.slice(0, 4)}…${trimmed.slice(-5)}` : trimmed}`;
 }
 
 function readSrc(relativePath: string): Promise<string> {
@@ -4578,7 +4584,7 @@ describe("Phase 06 TUI slash commands", () => {
     const committed = finalAnswer?.text ?? "";
     expect(committed).not.toContain("RuntimeStatusForModel");
     expect(committed).not.toContain("ControlledMemorySummary");
-    expect(committed).toContain("内部运行时上下文已从主屏省略");
+    expect(committed).not.toContain("内部运行时上下文已从主屏省略");
     expect(committed).toContain("你的模型是 leak-model");
   });
 
@@ -4669,7 +4675,7 @@ describe("Phase 06 TUI slash commands", () => {
       "zh-CN",
     );
     expect(cleaned).not.toContain("ShellEnvironment");
-    expect(cleaned).toContain("内部运行时上下文已从主屏省略");
+    expect(cleaned).not.toContain("内部运行时上下文已从主屏省略");
   });
 
   it("injects structured final answer claim schema and sanitizes its internal marker", async () => {
@@ -4687,7 +4693,7 @@ describe("Phase 06 TUI slash commands", () => {
       "zh-CN",
     );
     expect(cleaned).not.toContain("LinghunFinalAnswerClaims");
-    expect(cleaned).toContain("内部运行时上下文已从主屏省略");
+    expect(cleaned).not.toContain("内部运行时上下文已从主屏省略");
   });
 
   it("injects bounded GitStatus into system prompt and sanitizes its label", async () => {
@@ -4711,7 +4717,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(prompt).toContain("recent=abc123 test");
     const cleaned = sanitizeMainScreenLeakage("GitStatus=branch=main; user=dev", "zh-CN");
     expect(cleaned).not.toContain("GitStatus");
-    expect(cleaned).toContain("内部运行时上下文已从主屏省略");
+    expect(cleaned).not.toContain("内部运行时上下文已从主屏省略");
   });
 
   it("Phase D PromptCommand slash handlers route into the model loop instead of local execution", async () => {
@@ -14951,9 +14957,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    // 工具错误（ENOENT）按产品策略不刷主屏原文；主屏只显示 Read 工具调用与模型说明。
+    // 工具启动横幅默认隐藏；主屏只保留模型说明。
     // 核心不变式：缺失 LINGHUN.md 不会被自动生成（无"已生成基础 LINGHUN.md"，文件不存在）。
-    expect(output.text).toContain("Read(LINGHUN.md)");
+    expect(output.text).not.toContain("Read(LINGHUN.md)");
     expect(output.text).toContain("LINGHUN.md");
     expect(output.text).toContain("/memory init");
     expect(output.text).not.toContain("已生成基础 LINGHUN.md");
@@ -16280,7 +16286,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(context.permissionMode).toBe("full-access");
     expect(context.pendingLocalApproval).toBeUndefined();
-    expect(output.text).toContain("Bash(node --version)");
+    expect(output.text).not.toContain("Bash(node --version)");
     expect(output.text).toContain("continued after shift-tab");
     expect(requests).toHaveLength(1);
   });
@@ -18850,7 +18856,6 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.lastVerification?.status).toBe("fail");
     expect(output.text).toContain("FAIL");
     expect(output.text).toContain("复跑 /verify");
-    expect(output.text).toContain("log:");
     expect(context.lastVerification?.commands[0]?.logPath).toBeTruthy();
   }, 10_000);
 
@@ -24660,7 +24665,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
 
     expect(result).toBe("handled");
     expect(context.pendingLocalApproval).toBeUndefined();
-    expect(output.text).toContain("Bash(node --version)");
+    expect(output.text).not.toContain("Bash(node --version)");
     expect(output.text).toContain("continued after approval");
     expect(requests).toHaveLength(1);
     const toolEvents = (await store.resume(session.id)).transcript.filter(
@@ -24689,7 +24694,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     );
 
     expect(result).toBe("handled");
-    expect(output.text).toContain("Bash(node -e");
+    expect(output.text).not.toContain("Bash(node -e");
     expect(output.text).toContain("主屏已隐藏后续流式输出");
     expect(output.text.length).toBeLessThan(20_000);
     expect(output.text).not.toContain("TUI_LONG_499");

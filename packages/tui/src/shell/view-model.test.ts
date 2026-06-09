@@ -103,17 +103,15 @@ function createContext(overrides: Partial<TuiContext> = {}): TuiContext {
 }
 
 describe("shell view model", () => {
-  it("zh-CN only shows Chinese vision, en-US only shows English vision", () => {
+  it("keeps the home brand and localized composer placeholder without vision copy", () => {
     const zhView = createShellViewModel(createContext({ language: "zh-CN" }), { width: 80 });
     const enView = createShellViewModel(createContext({ language: "en-US" }), { width: 80 });
 
     expect(zhView.brand).toBe("LingHun");
-    expect(zhView.homeVision).toBe("技术普惠会越来越成熟 而你就是最伟大的梦想家");
+    expect(zhView.homeVision).toBe("");
     expect((zhView as Record<string, unknown>).homeVisionEn).toBeUndefined();
     expect(enView.brand).toBe("LingHun");
-    expect(enView.homeVision).toBe(
-      "Technology will become more accessible, and you are the greatest dreamer.",
-    );
+    expect(enView.homeVision).toBe("");
     expect(getComposerPlaceholder("zh-CN")).toBe("我能帮您做点什么？");
     expect(getComposerPlaceholder("en-US")).toBe("What can I help you with?");
     expect(zhView.composer.placeholder).toBe("我能帮您做点什么？");
@@ -223,12 +221,7 @@ describe("shell view model", () => {
       expect(view.status.permission).toContain("权限：");
       expect(view.blocks.map((block) => block.id)).toEqual([]);
       expect(rendered).toContain("LingHun");
-      // width <= 40 uses short vision; wider uses full vision
-      if (width <= 40) {
-        expect(rendered).toContain("技术普惠，你是最伟大的梦想家");
-      } else {
-        expect(rendered).toContain("技术普惠会越来越成熟 而你就是最伟大的梦想家");
-      }
+      expect(rendered).not.toContain("技术普惠");
       expect(rendered).not.toContain("信任：");
       expect(rendered).not.toContain("首页");
       expect(rendered).not.toContain("项目状态");
@@ -841,8 +834,7 @@ describe("home → task view mode transition", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    // Home mode shows vision
-    expect(output.text).toContain("技术普惠会越来越成熟");
+    expect(output.text).not.toContain("技术普惠会越来越成熟");
     // No activity or permission
     expect(output.text).not.toContain("正在思考");
     expect(output.text).not.toContain("yes / no");
@@ -928,10 +920,7 @@ describe("home → task view mode transition", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    // Brand should appear but NOT be duplicated by ShellApp-level clears.
-    const brandMatches = output.text.split("技术普惠会越来越成熟");
-    // The text may appear multiple times in raw output due to initial + re-render,
-    // but the key assertion is no stdout.write("\x1b[2J\x1b[H") from ShellApp
+    expect(output.text).not.toContain("技术普惠会越来越成熟");
     expect(output.text).not.toContain("\x1b[2J\x1b[H");
   });
 
@@ -1226,7 +1215,7 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
 });
 
 describe("backgroundSummaries → blocks mapping", () => {
-  it("folds active background tasks into one footer-adjacent summary", () => {
+  it("keeps running background tasks out of the default task runtime summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1243,19 +1232,7 @@ describe("backgroundSummaries → blocks mapping", () => {
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
-    expect(view.taskRuntimeSummary?.id).toBe("bg-summary");
-    expect(view.taskRuntimeSummary?.kind).toBe("run");
-    expect(view.taskRuntimeSummary?.status).toBe("running");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 1");
-    expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).not.toContain("已结束");
-    expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
-    expect(view.taskRuntimeSummary?.summary).toContain("后台任务正在运行");
-    expect(view.taskRuntimeSummary?.summary).toContain("lint check");
-    expect(view.taskRuntimeSummary?.summary).toContain("checking files");
-    expect(view.taskRuntimeSummary?.summary).toContain("1/3 steps");
-    expect(view.taskRuntimeSummary?.nextAction).toContain("/background");
-    expect(view.taskRuntimeSummary?.nextAction).not.toContain("/interrupt");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
   it("folds terminal background statuses into a low-noise task runtime summary", () => {
@@ -1274,9 +1251,9 @@ describe("backgroundSummaries → blocks mapping", () => {
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
-    expect(view.taskRuntimeSummary).toBeUndefined();
+    expect(view.taskRuntimeSummary?.id).toBe("bg-summary");
     const joined = `${view.taskRuntimeSummary?.title ?? ""} ${view.taskRuntimeSummary?.summary ?? ""} ${view.taskRuntimeSummary?.nextAction ?? ""}`;
-    expect(joined).not.toContain("deploy");
+    expect(joined).toContain("deploy");
     expect(joined).not.toContain("health check");
     expect(joined).not.toContain("sourceRef");
     expect(joined).not.toContain("schema");
@@ -1347,17 +1324,14 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
-  it("uses en-US prefix for background blocks", () => {
+  it("keeps en-US running background summaries out of the default main surface", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       width: 80,
       viewMode: "task",
       backgroundSummaries: [{ id: "t5", title: "build", status: "running" }],
     });
     expect(view.blocks.find((b) => b.id === "bg-summary")).toBeUndefined();
-    expect(view.taskRuntimeSummary?.title).toContain("Background 1");
-    expect(view.taskRuntimeSummary?.title).toContain("running 1");
-    expect(view.taskRuntimeSummary?.summary).toContain("Background task running");
-    expect(view.taskRuntimeSummary?.summary).toContain("build");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
   it("completed-only background tasks stay low-noise and do not become PASS", () => {
@@ -1450,7 +1424,7 @@ describe("backgroundSummaries → blocks mapping", () => {
         { id: "agent-cancelled-old", kind: "agent", title: "Agent cancelled", status: "cancelled" },
       ],
     });
-    expect(terminalOnly.taskRuntimeSummary).toBeUndefined();
+    expect(terminalOnly.taskRuntimeSummary?.status).toBe("fail");
 
     const recoverable = createShellViewModel(createContext(), {
       width: 100,
@@ -1470,11 +1444,12 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(recoverable.taskRuntimeSummary?.title).toContain("后台 1");
     expect(recoverable.taskRuntimeSummary?.title).toContain("智能体 1");
     expect(recoverable.taskRuntimeSummary?.title).not.toContain("需要确认");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(recoverable.taskRuntimeSummary?.title).not.toContain("运行中 1");
     expect(recoverable.taskRuntimeSummary?.title).not.toContain("可能卡住");
-    expect(recoverable.taskRuntimeSummary?.title).not.toContain("异常");
+    expect(recoverable.taskRuntimeSummary?.title).toContain("异常 1");
     expect(recoverable.taskRuntimeSummary?.title).not.toContain("可恢复");
-    expect(recoverable.taskRuntimeSummary?.summary).not.toContain("cli-tui-worker");
+    expect(recoverable.taskRuntimeSummary?.summary).toContain("Agent cli-tui-worker");
+    expect(recoverable.taskRuntimeSummary?.summary).not.toContain("Agent resumed");
   });
 
   it("home mode does not show background blocks", () => {
@@ -1803,9 +1778,9 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
     expect(view.taskRuntimeSummary?.title).toContain("后台 2");
     expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
-    expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("运行中 1");
     expect(view.taskRuntimeSummary?.title).not.toContain("可能卡住");
-    expect(view.taskRuntimeSummary?.title).not.toContain("异常");
+    expect(view.taskRuntimeSummary?.title).toContain("异常 1");
     expect(view.taskRuntimeSummary?.title).not.toContain("需要确认");
     expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
@@ -1837,20 +1812,11 @@ describe("D.12B — #9: home flicker guard (submitted pending state)", () => {
   });
 });
 
-describe("D.12B — P3-1: narrow vision short text", () => {
-  it("width=40 uses short vision text in zh-CN", () => {
-    const view = createShellViewModel(createContext(), { width: 40 });
-    expect(view.homeVision).toBe("技术普惠，你是最伟大的梦想家");
-  });
-
-  it("width=80 uses full vision text", () => {
-    const view = createShellViewModel(createContext(), { width: 80 });
-    expect(view.homeVision).toBe("技术普惠会越来越成熟 而你就是最伟大的梦想家");
-  });
-
-  it("en-US width=40 uses short vision", () => {
-    const view = createShellViewModel(createContext({ language: "en-US" }), { width: 40 });
-    expect(view.homeVision).toBe("You are the greatest dreamer.");
+describe("D.12B — P3-1: home vision copy", () => {
+  it("omits vision text in zh-CN and en-US", () => {
+    expect(createShellViewModel(createContext(), { width: 40 }).homeVision).toBe("");
+    expect(createShellViewModel(createContext(), { width: 80 }).homeVision).toBe("");
+    expect(createShellViewModel(createContext({ language: "en-US" }), { width: 40 }).homeVision).toBe("");
   });
 });
 
@@ -1973,22 +1939,18 @@ describe("D.12C — Composer cursor alignment closure", () => {
     expect(rendered).not.toContain("\u258C");
   });
 
-  it("brand wordmark to vision has spacing in plain home render", () => {
+  it("brand wordmark to composer has spacing in plain home render", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
     const lines = rendered.split("\n");
-    // Compact header "LingHun" (no version) followed by accent line, empty line, then vision
     const brandIdx = lines.findIndex((l) => l.trim() === "LingHun");
     expect(brandIdx).toBeGreaterThanOrEqual(0);
-    // Accent underline on next line (ASCII dash for legacy)
     const accentLine = lines[brandIdx + 1];
     expect(accentLine).toBeDefined();
     expect((accentLine as string).trim()).toMatch(/^-+$/);
-    // Then empty line
-    expect(lines[brandIdx + 2]).toBe("");
-    // Then vision
-    expect(lines[brandIdx + 3]).toContain("技术普惠");
+    expect(rendered).not.toContain("技术普惠");
+    expect(lines.findIndex((l) => l.includes("我能帮您做点什么？"))).toBeGreaterThan(brandIdx);
   });
 
   it("ink-renderer does not add extra hide cursor — Ink manages cursor via useCursor", async () => {
@@ -2104,7 +2066,7 @@ describe("D.12C — Composer cursor alignment closure", () => {
     await shell.waitUntilExit();
 
     expect(output.text).toContain("LingHun");
-    expect(output.text).toContain("技术普惠会越来越成熟");
+    expect(output.text).not.toContain("技术普惠会越来越成熟");
     expect(output.text).toContain("我能帮您做点什么？");
   });
 
@@ -2228,10 +2190,10 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
     expect(view.taskRuntimeSummary?.title).toContain("后台 2");
     expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
-    expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("运行中 1");
     expect(view.taskRuntimeSummary?.title).not.toContain("可能卡住");
     expect(view.taskRuntimeSummary?.title).not.toContain("超时");
-    expect(view.taskRuntimeSummary?.title).not.toContain("异常");
+    expect(view.taskRuntimeSummary?.title).toContain("异常 1");
     expect(view.taskRuntimeSummary?.title).not.toContain("需要确认");
     expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
@@ -2672,7 +2634,7 @@ describe("TTY legacy fallback product shell", () => {
     // Product shell structure: brand + vision + composer box + status
     expect(rendered).toContain("LingHun");
     expect(rendered).not.toContain("v0.1.0");
-    expect(rendered).toContain("技术普惠会越来越成熟");
+    expect(rendered).not.toContain("技术普惠会越来越成熟");
     // Composer box includes placeholder hint (no "> " prefix — readline provides the real prompt)
     expect(rendered).toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
@@ -2795,7 +2757,7 @@ describe("TTY legacy fallback product shell", () => {
     );
     expect(underlineIdx).toBeGreaterThan(0);
     // Vision
-    expect(rendered).toContain("技术普惠会越来越成熟");
+    expect(rendered).not.toContain("技术普惠会越来越成熟");
     // Composer top/bottom cyan lines (─ repeated composerWidth)
     const composerLineCount = lines.filter((l) => {
       const stripped = l.replace(ANSI_STRIP, "");
@@ -3116,7 +3078,7 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     // Brand centered
     expect(rendered).toContain("LingHun");
     // Vision
-    expect(rendered).toContain("技术普惠会越来越成熟");
+    expect(rendered).not.toContain("技术普惠会越来越成熟");
     // Composer box lines (─)
     expect(rendered).toContain("─");
     // Status tray
@@ -3421,7 +3383,7 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
   // Home/Task structure non-regression
   // =========================================================================
 
-  it("Home structure: brand → underline → vision → composer → status (no regression)", () => {
+  it("Home structure: brand → composer → status without vision copy (no regression)", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     resetTerminalCapabilityCache();
     const view = createShellViewModel(createContext(), { width: 80, height: 24 });
@@ -3431,13 +3393,12 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     const lines = rendered.split("\n").map((l) => l.replace(ANSI_STRIP, ""));
 
     const brandIdx = lines.findIndex((l) => l.trim() === "LingHun");
-    const visionIdx = lines.findIndex((l) => l.includes("技术普惠"));
     const composerIdx = lines.findIndex((l) => l.includes("我能帮您做点什么？"));
     const statusIdx = lines.findIndex((l) => l.includes("项目："));
 
     expect(brandIdx).toBeGreaterThanOrEqual(0);
-    expect(visionIdx).toBeGreaterThan(brandIdx);
-    expect(composerIdx).toBeGreaterThan(visionIdx);
+    expect(rendered).not.toContain("技术普惠");
+    expect(composerIdx).toBeGreaterThan(brandIdx);
     expect(statusIdx).toBeGreaterThan(composerIdx);
   });
 
@@ -3698,10 +3659,8 @@ describe("D.13D Final Closure — interaction shell", () => {
     shell.unmount();
     await shell.waitUntilExit();
     expect(output.text).not.toContain("LingHun");
-    // Task footer (D.13D rework): minimal mode + index line, NOT the full
-    // StatusTray. The "[Linghun] 会话…" noise is gone from Task mode.
     expect(output.text).toContain("默认模式");
-    expect(output.text).toContain("索引");
+    expect(output.text).not.toContain("索引");
     expect(output.text).not.toContain("项目：");
     // task placeholder used
     expect(output.text).toContain("继续输入…");
@@ -4086,23 +4045,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
   });
 
   it("D.13P-S toolErrorRetryHint promotes Ctrl+O over /details in zh-CN and en-US", async () => {
-    const { buildTaskSuggestions } = await import("./models/task-suggestion.js");
-    const failBlocks = [
-      {
-        id: "fail-1",
-        kind: "error",
-        title: "Bash",
-        summary: "failed",
-        body: "failed",
-        status: "fail",
-      },
-    ] as const;
-    const zh = buildTaskSuggestions({ language: "zh-CN", failBlocks: [...failBlocks] });
-    expect(zh[0]?.hint).toBe("按 Ctrl+O 查看最近一次失败输出（或 /details）");
-    expect(zh[0]?.hint?.indexOf("Ctrl+O")).toBeLessThan(zh[0]?.hint?.indexOf("/details") ?? 0);
-    const en = buildTaskSuggestions({ language: "en-US", failBlocks: [...failBlocks] });
-    expect(en[0]?.hint).toBe("Press Ctrl+O for the latest failure output (or /details)");
-    expect(en[0]?.hint?.indexOf("Ctrl+O")).toBeLessThan(en[0]?.hint?.indexOf("/details") ?? 0);
+    const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
+    expect(source).toContain("按 ${TOGGLE_DETAILS_KEYBIND} 查看最近一次失败输出（或 /details）");
+    expect(source).toContain("Press ${TOGGLE_DETAILS_KEYBIND} for the latest failure output (or /details)");
   });
 
   it("ShellInputEvent type union includes cycle-permission-mode for Shift+Tab", async () => {
@@ -4167,19 +4112,14 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(outerWrapper).not.toContain('alignItems="center"');
   });
 
-  it("Composer routes SGR wheel only behind mouse tracking and never takes over left selection", async () => {
+  it("Composer no longer carries SGR wheel handling in the input path", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
-    expect(source).toContain("if (!terminalInteractionModes.mouseTracking) return;");
-    expect(source).toContain("parseSgrMouseEvent(input)");
-    expect(source).toContain("isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)");
-    expect(source).toContain('mouse?.button === "wheel-up"');
-    expect(source).toContain('type: "transcript-scroll", action: "wheelUp"');
-    expect(source).toContain('mouse?.button === "wheel-down"');
-    expect(source).toContain('type: "transcript-scroll", action: "wheelDown"');
-    expect(source).not.toContain('mouse?.button === "left"');
-    expect(source).not.toContain('type: "transcript-mouse", event: mouse');
-    expect(source).not.toContain("if (isSgrMouseInput(input)) return;");
+    expect(source).not.toContain("parseSgrMouseEvent(input)");
+    expect(source).not.toContain("isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)");
+    expect(source).not.toContain('mouse?.button === "wheel-up"');
+    expect(source).not.toContain('mouse?.button === "wheel-down"');
+    expect(source).not.toContain("if (isSgrMouseInput(input))");
   });
 
   it("transcript measurement and geometry events only rerender on actual state changes", async () => {
@@ -6053,8 +5993,6 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     expect(source).toContain("{ isActive: true }");
     expect(source).toContain('emitInput({ type: "transcript-scroll", action: "halfPageUp" })');
     expect(source).toContain('emitInput({ type: "transcript-scroll", action: "halfPageDown" })');
-    expect(source).toContain('emitInput({ type: "transcript-scroll", action: "wheelUp" })');
-    expect(source).toContain('emitInput({ type: "transcript-scroll", action: "wheelDown" })');
     expect(source).toContain("const commandPanelConsumesInput = hasSelectableCommandPanelRows");
     expect(source).toContain('emitInput({ type: "command-panel-stop" })');
   });

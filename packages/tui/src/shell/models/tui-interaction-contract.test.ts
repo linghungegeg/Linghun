@@ -3,7 +3,7 @@ import {
   type OwnerContext,
   type OwnerKeyShape,
   selectInputOwner,
-} from "./input-owner-controller.js";
+} from "../components/Composer.js";
 import {
   clampTranscriptScroll,
   computeScrollViewportOffset,

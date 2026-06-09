@@ -46,10 +46,10 @@ describe("terminal input normalization", () => {
     });
   });
 
-  it("does not guess plain CR as Shift/Meta Enter when terminals only send CR", () => {
+  it("does not guess plain CR as Shift Enter when terminals only send CR", () => {
     expect(normalizeTerminalInput("\r", { ...key, return: true })).toEqual({ type: "ignore" });
     expect(normalizeTerminalInput("\r", { ...key, return: true, meta: true })).toEqual({
-      type: "ignore",
+      type: "newline",
     });
   });
 
@@ -65,9 +65,9 @@ describe("terminal input normalization", () => {
     });
   });
 
-  it("does not accept Meta+Enter key metadata without a parsed sequence", () => {
+  it("maps explicit Meta+Enter key metadata to newline", () => {
     expect(normalizeTerminalInput("", { ...key, return: true, meta: true })).toEqual({
-      type: "ignore",
+      type: "newline",
     });
   });
 

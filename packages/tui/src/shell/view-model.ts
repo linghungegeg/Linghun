@@ -6,14 +6,8 @@ import type { TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
 import { sanitizeMainScreenLeakage } from "../model-prompt-runtime.js";
 import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
+import { SLASH_COMMAND_REGISTRY } from "../natural-command-bridge.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
-import {
-  findConfigPanel,
-  getActionLabel,
-  getConfigPanels,
-  getPanelText,
-} from "./models/config-control-plane.js";
-import { buildFooterView } from "./models/footer-view.js";
 import { buildHelpPanelData } from "./models/help-panel.js";
 import { buildElevationOptions } from "./models/permission-elevation.js";
 import {
@@ -23,7 +17,6 @@ import {
   explainPolicyVerdict,
   explainSemantic,
 } from "./models/permission-explanation.js";
-import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
 import {
   buildTranscriptScreenBuffer,
   selectionLineIndexesForBlock,
@@ -43,6 +36,7 @@ import type {
   TaskActivityView,
   TaskFooterView,
   TaskPermissionView,
+  TaskSuggestion,
   TranscriptScrollView,
   TranscriptVirtualRangeView,
 } from "./types.js";
@@ -55,8 +49,6 @@ type TranscriptBlockHeightCache = Record<
 const shellText = {
   "zh-CN": {
     brand: "LingHun",
-    vision: "技术普惠会越来越成熟 而你就是最伟大的梦想家",
-    visionShort: "技术普惠，你是最伟大的梦想家",
     project: (name: string) => `项目：${name}`,
     model: (name: string) => `模型：${name}`,
     permission: (mode: string) => `权限：${mode}`,
@@ -106,8 +98,6 @@ const shellText = {
   },
   "en-US": {
     brand: "LingHun",
-    vision: "Technology will become more accessible, and you are the greatest dreamer.",
-    visionShort: "You are the greatest dreamer.",
     project: (name: string) => `Project: ${name}`,
     model: (name: string) => `Model: ${name}`,
     permission: (mode: string) => `Permission: ${mode}`,
@@ -273,7 +263,7 @@ export function createShellViewModel(
     effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length
       ? mapBackgroundSummariesToBlocks(
           options.backgroundSummaries.filter(
-            (s) => s.status === "running" || s.status === "paused" || s.status === "blocked",
+            (s) => s.status === "blocked" || s.status === "failed",
           ),
           language,
         )[0]
@@ -362,8 +352,7 @@ export function createShellViewModel(
 
   const viewMode = effectiveViewMode;
 
-  // Vision: use short version for narrow terminals
-  const homeVision = width <= 40 ? text.visionShort : text.vision;
+  const homeVision = "";
 
   // Composer: switch placeholder when permission is pending; setup flow uses
   // step-specific placeholders. Home no longer overrides with setupPlaceholder
@@ -407,33 +396,25 @@ export function createShellViewModel(
   const taskFooter: TaskFooterView | undefined =
     viewMode === "home"
       ? undefined
-      : {
-          ...buildFooterView({
-            language,
-            width,
-            permissionModeLabel: formatPermissionModeLabel(context.permissionMode, language),
-            cyclePermHint,
-            effectiveModel: context.model,
-            setupNeeded,
-            cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
-            indexStatus: context.index.status,
-            reasoningLevel: options.reasoningLevel,
-            reasoningSent: options.reasoningSent,
-            estimatedCostCny: sumFiniteNumbers(
-              (context.roleUsage ?? []).map((usage) => usage.estimatedCny),
-            ),
-            contextUsageLabel: context.cache.compactPressure
-              ? calculateContextPercentages(
-                  Math.ceil(context.cache.compactPressure.estimatedChars / 4),
-                  Math.ceil(context.cache.compactPressure.maxChars / 4),
-                ).label
-              : undefined,
-          }).view,
-          // Phase 6.6: workspaceStatus / runtimeStatus are no longer default
-          // in the footer. They surface via /details, /status, /doctor or
-          // explicit expand paths instead. The formatting functions remain
-          // available for those commands to populate the fields.
-        };
+      : buildTaskFooterView({
+          language,
+          width,
+          permissionModeLabel: formatPermissionModeLabel(context.permissionMode, language),
+          cyclePermHint,
+          effectiveModel: context.model,
+          setupNeeded,
+          cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
+          indexStatus: context.index.status,
+          reasoningLevel: options.reasoningLevel,
+          reasoningSent: options.reasoningSent,
+          estimatedCostCny: sumFiniteNumbers((context.roleUsage ?? []).map((usage) => usage.estimatedCny)),
+          contextUsageLabel: context.cache.compactPressure
+            ? calculateContextPercentages(
+                Math.ceil(context.cache.compactPressure.estimatedChars / 4),
+                Math.ceil(context.cache.compactPressure.maxChars / 4),
+              ).label
+            : undefined,
+        });
 
   // D.13E Step 2 — TaskSuggestionBar 数据。
   // 仅在 task / pending 模式渲染，避免 home 首屏被 suggestion 噪音污染。
@@ -446,7 +427,6 @@ export function createShellViewModel(
       : buildTaskSuggestions({
           language,
           setupHint,
-          permission: options.permission,
           failBlocks: failBlocksForSuggestions,
           slashCandidates: options.slashCandidates,
           // 修正 v3 #6：不在 SuggestionBar 暴露 14 panel 作为 configHints
@@ -898,6 +878,23 @@ function blockTextHash(block: ProductBlockViewModel): string {
   return `${text.length}:${text.slice(0, 80)}:${text.slice(-80)}`;
 }
 
+const CONFIG_PANELS = [
+  { id: "model", slash: "/model", titleZh: "模型", titleEn: "Model", summaryZh: "查看当前模型 / provider / 角色路由。", summaryEn: "Show current model / provider / role routing." },
+  { id: "language", slash: "/language", titleZh: "语言", titleEn: "Language", summaryZh: "切换 zh-CN / en-US 体验。", summaryEn: "Switch zh-CN / en-US UI." },
+  { id: "permissions", slash: "/permissions", titleZh: "权限规则", titleEn: "Permissions", summaryZh: "查看 / 编辑 allow / ask / deny 规则。", summaryEn: "View / edit allow / ask / deny rules." },
+  { id: "memory", slash: "/memory", titleZh: "记忆", titleEn: "Memory", summaryZh: "查看 LINGHUN.md / 候选 / 已接受记忆。", summaryEn: "Show LINGHUN.md / candidate / accepted memory." },
+  { id: "index", slash: "/index", titleZh: "索引", titleEn: "Index", summaryZh: "查看 codebase 索引状态与诊断。", summaryEn: "Show codebase index status and doctor." },
+  { id: "mcp", slash: "/mcp", titleZh: "MCP", titleEn: "MCP", summaryZh: "查看 MCP server 与工具。", summaryEn: "Show MCP servers and tools." },
+  { id: "cache", slash: "/cache", titleZh: "缓存", titleEn: "Cache", summaryZh: "查看缓存命中与日志。", summaryEn: "Show cache hit and log." },
+  { id: "background", slash: "/background", titleZh: "后台任务", titleEn: "Background", summaryZh: "查看后台 job 与远程任务。", summaryEn: "Show background jobs and remote tasks." },
+  { id: "remote", slash: "/remote", titleZh: "远程", titleEn: "Remote", summaryZh: "查看远程会话与控制平面。", summaryEn: "Show remote sessions and control plane." },
+  { id: "hooks", slash: "/doctor", titleZh: "Hooks", titleEn: "Hooks", summaryZh: "查看 hooks 启用与诊断。", summaryEn: "Show hook enablement and doctor." },
+  { id: "plugins", slash: "/plugins", titleZh: "插件", titleEn: "Plugins", summaryZh: "查看插件 manifest 与诊断。", summaryEn: "Show plugin manifests and doctor." },
+  { id: "skills", slash: "/skills", titleZh: "技能", titleEn: "Skills", summaryZh: "查看本地 skill 摘要。", summaryEn: "Show local skill summaries." },
+  { id: "workflows", slash: "/workflows", titleZh: "工作流", titleEn: "Workflows", summaryZh: "查看可用工作流模板。", summaryEn: "Show available workflow templates." },
+  { id: "trust", slash: "/trust", titleZh: "信任", titleEn: "Trust", summaryZh: "查看 / 调整本项目信任级别。", summaryEn: "Show / adjust project trust level." },
+] as const;
+
 /**
  * D.13E Step 2 — 把 controller 持有的 configPanelState 映射成 ShellViewModel.configPanel。
  * 只装配 i18n / 列表数据，不带任何键盘事件；导航事件由 ConfigPanel 组件自己 useInput
@@ -909,27 +906,15 @@ function mapConfigPanelState(
     | { phase: "panel_detail"; panelId: string; actionCursor: number },
   language: Language,
 ): ConfigPanelView | undefined {
-  if (state.phase === "panel_list") {
-    const panels = getConfigPanels().map((p) => {
-      const t = getPanelText(p, language);
-      return { id: p.id, title: t.title, summary: t.summary };
-    });
-    const total = panels.length;
-    const cursor = total === 0 ? 0 : Math.min(Math.max(0, state.cursor), total - 1);
-    return { phase: "panel_list", cursor, panels };
-  }
-  const panel = findConfigPanel(state.panelId as Parameters<typeof findConfigPanel>[0]);
-  if (!panel) return undefined;
-  const text = getPanelText(panel, language);
-  const actions = panel.actions.map((a) => ({ id: a.id, label: getActionLabel(a, language) }));
-  const total = actions.length;
-  const actionCursor = total === 0 ? 0 : Math.min(Math.max(0, state.actionCursor), total - 1);
-  return {
-    phase: "panel_detail",
-    panel: { id: panel.id, title: text.title, summary: text.summary },
-    actionCursor,
-    actions,
-  };
+  const panels = CONFIG_PANELS.map((p) => ({
+    id: p.id,
+    slash: p.slash,
+    title: language === "en-US" ? p.titleEn : p.titleZh,
+    summary: language === "en-US" ? p.summaryEn : p.summaryZh,
+  }));
+  const total = panels.length;
+  const cursor = total === 0 ? 0 : Math.min(Math.max(0, state.phase === "panel_list" ? state.cursor : 0), total - 1);
+  return { phase: "panel_list", cursor, panels };
 }
 
 /**
@@ -1873,9 +1858,141 @@ function formatBackground(count: number, language: Language, width: number): str
   return shellText[language].background(count);
 }
 
-// D.13Q-UX: footer 字段计算迁移到 packages/tui/src/shell/models/footer-view.ts。
-// 旧的 formatFooterModel / formatFooterCache / formatFooterReasoning 已移除，
-// 仅保留 fitBlockToWidth / truncateMiddle 等 block 级 helper（仍在使用）。
+const KNOWN_SLASH_COMMANDS: ReadonlySet<string> = new Set(SLASH_COMMAND_REGISTRY.map((entry) => entry.slash));
+
+function isKnownSlashCommand(command: string): boolean {
+  if (!command.startsWith("/")) return false;
+  if (KNOWN_SLASH_COMMANDS.has(command)) return true;
+  const head = command.split(/\s+/, 1)[0];
+  return Boolean(head && KNOWN_SLASH_COMMANDS.has(head));
+}
+
+function buildTaskSuggestions(inputs: {
+  language: Language;
+  setupHint?: string;
+  failBlocks?: ProductBlockViewModel[];
+  slashCandidates?: { slash: string; label: string }[];
+  configHints?: { id: string; label: string; slash: string }[];
+}): TaskSuggestion[] {
+  const suggestions: TaskSuggestion[] = [];
+  if (inputs.failBlocks?.length) {
+    const latest = inputs.failBlocks[inputs.failBlocks.length - 1];
+    suggestions.push({
+      id: `tool_error:details:${latest?.id ?? "latest"}`,
+      source: "tool_error",
+      label: inputs.language === "en-US" ? "Show full error output" : "查看完整错误",
+      hint:
+        inputs.language === "en-US"
+          ? `Press ${TOGGLE_DETAILS_KEYBIND} for the latest failure output (or /details)`
+          : `按 ${TOGGLE_DETAILS_KEYBIND} 查看最近一次失败输出（或 /details）`,
+      action: { kind: "slash", command: "/details" },
+    });
+  }
+  if (inputs.setupHint) {
+    suggestions.push({
+      id: "setup:resume",
+      source: "setup",
+      label: inputs.language === "en-US" ? "Continue model setup" : "继续模型配置",
+      hint: inputs.setupHint,
+      action: { kind: "slash", command: "/model" },
+    });
+  }
+  for (const hint of inputs.configHints ?? []) {
+    if (!isKnownSlashCommand(hint.slash)) continue;
+    suggestions.push({ id: `config:${hint.id}`, source: "config", label: hint.label, action: { kind: "slash", command: hint.slash } });
+  }
+  for (const candidate of inputs.slashCandidates ?? []) {
+    if (!isKnownSlashCommand(candidate.slash)) continue;
+    suggestions.push({
+      id: `slash:${candidate.slash}`,
+      source: "slash",
+      label: candidate.slash,
+      hint: candidate.label,
+      action: { kind: "slash", command: candidate.slash },
+    });
+  }
+  const seen = new Set<string>();
+  return suggestions.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  }).slice(0, 4);
+}
+
+type TaskFooterInput = {
+  language: Language;
+  width: number;
+  permissionModeLabel: string;
+  cyclePermHint: string;
+  effectiveModel: string | undefined;
+  setupNeeded: boolean;
+  cacheHitRate: number | null;
+  indexStatus: string;
+  reasoningLevel?: string;
+  reasoningSent?: boolean;
+  estimatedCostCny?: number;
+  contextUsageLabel?: string;
+};
+
+function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
+  const modelInfo = formatFooterModel(input.language, input.effectiveModel, input.setupNeeded, input.width);
+  return {
+    permissionMode: input.permissionModeLabel,
+    cyclePermHint: input.cyclePermHint,
+    model: modelInfo.text,
+    modelDim: modelInfo.dim,
+    cache: formatFooterCache(input.language, input.cacheHitRate),
+    cacheTone: formatFooterCacheTone(input.cacheHitRate),
+    index: formatFooterIndex(input.language, input.indexStatus),
+    reasoning: formatFooterReasoning(input.language, input.reasoningLevel, input.reasoningSent),
+    contextUsage: input.contextUsageLabel,
+    cost: formatFooterCost(input.language, input.estimatedCostCny),
+  };
+}
+
+function formatFooterModel(
+  language: Language,
+  effectiveModel: string | undefined,
+  setupNeeded: boolean,
+  width: number,
+): { text: string; dim: boolean } {
+  const label = language === "en-US" ? "Model" : "模型";
+  const trimmed = (effectiveModel ?? "").trim();
+  const placeholders = new Set(["", "unknown", "setup-needed", "openai-compatible-model"]);
+  if (setupNeeded || placeholders.has(trimmed.toLowerCase())) return { text: `${label} --`, dim: true };
+  return { text: `${label} ${truncateMiddle(trimmed, width <= 60 ? 12 : 22)}`, dim: false };
+}
+
+function formatFooterCache(language: Language, hitRate: number | null): string {
+  const label = language === "en-US" ? "Cache" : "缓存";
+  if (hitRate === null || hitRate === undefined) return `${label}?`;
+  return `${label} ${Math.max(0, Math.min(100, Math.round(hitRate * 100)))}%`;
+}
+
+function formatFooterCacheTone(hitRate: number | null): "default" | "warning" | "dim" {
+  if (hitRate === null || hitRate === undefined) return "dim";
+  return Math.max(0, Math.min(100, Math.round(hitRate * 100))) < 50 ? "warning" : "default";
+}
+
+function formatFooterIndex(language: Language, status: string): string {
+  const label = language === "en-US" ? "Index" : "索引";
+  const trimmed = (status ?? "").trim();
+  if (!trimmed || trimmed.toLowerCase() === "unknown") return language === "en-US" ? "Index?" : "索引?";
+  if (trimmed === "refresh_completed_but_unverified") return `${label} refresh`;
+  return `${label} ${truncateMiddle(trimmed, 10)}`;
+}
+
+function formatFooterReasoning(language: Language, level: string | undefined, sent: boolean | undefined): string | undefined {
+  if (!level || sent === false) return undefined;
+  const trimmed = level.trim();
+  if (!trimmed) return undefined;
+  return `${language === "en-US" ? "Reasoning" : "推理"} ${truncateMiddle(trimmed, 12)}`;
+}
+
+function formatFooterCost(language: Language, estimatedCostCny: number | undefined): string | undefined {
+  if (!Number.isFinite(estimatedCostCny)) return undefined;
+  return `${language === "en-US" ? "cost" : "费用"} ¥${Math.max(0, estimatedCostCny ?? 0).toFixed(4)} est`;
+}
 
 function normalizeWidth(width: number | undefined): number {
   if (!width || !Number.isFinite(width)) return 80;

@@ -13,7 +13,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     const result = sanitizeMainScreenLeakage(text, "zh-CN");
     expect(result).not.toContain("RuntimeStatusForModel");
     expect(result).not.toContain('"linghunMd"');
-    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).not.toContain("内部运行时上下文已从主屏省略");
   });
 
   it("strips ControlledMemorySummary / MemoryBoundary / EvidenceSummary / CommandCapabilitySummary echoes", () => {
@@ -48,7 +48,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     const result = sanitizeMainScreenLeakage(text, "zh-CN");
     expect(result).not.toContain("RunVerification");
     expect(result).toContain("没有运行过 验证命令 来验证测试通过或构建成功。");
-    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).not.toContain("内部运行时上下文已从主屏省略");
   });
 
   it("uses an English hint for en-US", () => {
@@ -58,7 +58,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).not.toContain("RuntimeStatusForModel");
     expect(result).not.toContain("RunVerification");
     expect(result).toContain("verification command was not called");
-    expect(result).toContain("Internal runtime context was omitted");
+    expect(result).not.toContain("Internal runtime context was omitted");
   });
 
   it("strips Phase 7.7 typed policy signal labels if a model echoes them", () => {
@@ -74,7 +74,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).not.toContain("permissionSignal");
     expect(result).not.toContain("modelRouteSignal");
     expect(result).not.toContain("verificationSignal");
-    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).not.toContain("内部运行时上下文已从主屏省略");
     expect(result).toContain("给用户的人话结论。");
   });
 
@@ -96,7 +96,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).not.toContain("notificationPlan");
     expect(result).not.toContain("memoryCandidate");
     expect(result).not.toContain("confidence");
-    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).not.toContain("内部运行时上下文已从主屏省略");
     expect(result).toContain("结论：先看源码事实。");
   });
 
@@ -115,7 +115,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).not.toContain("capabilityPlan");
     expect(result).not.toContain("rawPayload");
     expect(result).not.toContain("secret-sentinel");
-    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).not.toContain("内部运行时上下文已从主屏省略");
     expect(result).toContain("结论：已生成 capability 摘要。");
   });
 
@@ -132,7 +132,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).not.toContain("AppConnectorState");
     expect(result).not.toContain("raw connector response");
     expect(result).not.toContain("sk-connector-secret");
-    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).not.toContain("内部运行时上下文已从主屏省略");
     expect(result).toContain("结论：已连接 Demo Drawing。");
   });
 
