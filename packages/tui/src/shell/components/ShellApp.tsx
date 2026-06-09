@@ -135,7 +135,7 @@ function HomeLayout({
  *      the permission action row above the buffer when permission is active),
  *      accent rule.
  *   3. task footer (flexShrink=0) — single low-key line: permission mode ·
- *      index · optional hint. NOT the full StatusTray.
+ *      model · cache · index · reasoning. NOT the full StatusTray.
  *
  * The whole task region is left-aligned: no `alignItems="center"` and no
  * symmetric width clamp on the output column, so long output uses the full
@@ -269,11 +269,10 @@ function TaskLayout({
           </Text>
         </Box>
 
-        {/* Task footer — minimal status line: permission mode · index. NOT the
-            full StatusTray; the noisy line was identified as the
-            "[Linghun] 会话…" leak source and stays out of Task mode.
+        {/* Task footer — minimal status line: permission mode · model · cache · index · reasoning. NOT the
+            full StatusTray; cost and background summaries stay out of the default Task surface.
             D.13Q-UX：迁到 StatusFooter（左 mode pill + cyclePermHint，右 model/cache/index/reasoning），
-            window<60 走列向布局；model 占位时 dim，cache 低命中染 warning。 */}
+            window<60 走列向布局；model 占位时 dim。 */}
         {view.taskFooter ? (
           <StatusFooter
             footer={view.taskFooter}

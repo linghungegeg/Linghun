@@ -38,11 +38,17 @@ export function StatusFooter({
   cacheTone = "default",
 }: StatusFooterProps): React.ReactNode {
   void language;
-  // R1-8: 默认只保留 权限模式 + 模型 + 费用；缓存/索引/推理/上下文 → /status
+  // R1-8: 默认保留 权限模式 + 模型 + 缓存 + 索引 + 推理；费用估算避免误导，移入详情入口。
   const rightSegments: { key: string; text: string; tone?: "warning" | "dim" | "default" }[] = [
     { key: "model", text: footer.model, tone: modelDim ? "dim" : "default" },
+    {
+      key: "cache",
+      text: footer.cache,
+      tone: cacheTone === "warning" ? "warning" : cacheTone === "dim" ? "dim" : "default",
+    },
+    { key: "index", text: footer.index, tone: "default" },
   ];
-  if (footer.cost) rightSegments.push({ key: "cost", text: footer.cost, tone: "dim" });
+  if (footer.reasoning) rightSegments.push({ key: "reasoning", text: footer.reasoning });
 
   // 窄屏列向布局：左行（mode + cyclePermHint）一行，右栏分两行展示，避免挤压。
   const narrow = width < 60;

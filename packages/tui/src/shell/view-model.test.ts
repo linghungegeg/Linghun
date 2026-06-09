@@ -1235,7 +1235,7 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
-  it("folds terminal background statuses into a low-noise task runtime summary", () => {
+  it("keeps terminal background statuses out of the default task runtime summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1251,18 +1251,10 @@ describe("backgroundSummaries → blocks mapping", () => {
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
-    expect(view.taskRuntimeSummary?.id).toBe("bg-summary");
-    const joined = `${view.taskRuntimeSummary?.title ?? ""} ${view.taskRuntimeSummary?.summary ?? ""} ${view.taskRuntimeSummary?.nextAction ?? ""}`;
-    expect(joined).toContain("deploy");
-    expect(joined).not.toContain("health check");
-    expect(joined).not.toContain("sourceRef");
-    expect(joined).not.toContain("schema");
-    expect(joined).not.toContain("runner=");
-    expect(joined).not.toContain("endpoint");
-    expect(joined).not.toContain("raw evidence");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
-  it("keeps task runtime summary low-noise and strips raw/internal fields", () => {
+  it("keeps raw/internal background fields out of the default task surface", () => {
     const view = createShellViewModel(createContext(), {
       width: 100,
       viewMode: "task",
@@ -1280,31 +1272,7 @@ describe("backgroundSummaries → blocks mapping", () => {
     });
 
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
-    expect(view.taskRuntimeSummary?.title).toContain("后台 1");
-    expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
-    expect(view.taskRuntimeSummary?.summary).toContain("后台任务需要处理");
-    expect(view.taskRuntimeSummary?.nextAction).toContain("/background");
-    const joined = [
-      view.taskRuntimeSummary?.title,
-      view.taskRuntimeSummary?.summary,
-      view.taskRuntimeSummary?.nextAction,
-    ].join(" ");
-    for (const banned of [
-      "gateId",
-      "requestId",
-      "schemaLoaded",
-      "fullOutputPath",
-      "logPath",
-      "raw evidence",
-      "tool_result",
-      "endpoint",
-      "runner=",
-      "C:\\Users\\Admin",
-      "/tmp/private",
-      "job-raw-summary",
-    ]) {
-      expect(joined).not.toContain(banned);
-    }
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
   it("folds stale agent background status without exposing worker internals", () => {
@@ -1414,7 +1382,7 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(plain).not.toContain("Job cancelled");
   });
 
-  it("startup hydrate-style terminal and stale agent history stay out while running remains visible", () => {
+  it("startup hydrate-style terminal and stale agent history stay out of the default task surface", () => {
     const terminalOnly = createShellViewModel(createContext(), {
       width: 100,
       viewMode: "task",
@@ -1424,7 +1392,7 @@ describe("backgroundSummaries → blocks mapping", () => {
         { id: "agent-cancelled-old", kind: "agent", title: "Agent cancelled", status: "cancelled" },
       ],
     });
-    expect(terminalOnly.taskRuntimeSummary?.status).toBe("fail");
+    expect(terminalOnly.taskRuntimeSummary).toBeUndefined();
 
     const recoverable = createShellViewModel(createContext(), {
       width: 100,
@@ -1441,15 +1409,7 @@ describe("backgroundSummaries → blocks mapping", () => {
         },
       ],
     });
-    expect(recoverable.taskRuntimeSummary?.title).toContain("后台 1");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("智能体 1");
-    expect(recoverable.taskRuntimeSummary?.title).not.toContain("需要确认");
-    expect(recoverable.taskRuntimeSummary?.title).not.toContain("运行中 1");
-    expect(recoverable.taskRuntimeSummary?.title).not.toContain("可能卡住");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("异常 1");
-    expect(recoverable.taskRuntimeSummary?.title).not.toContain("可恢复");
-    expect(recoverable.taskRuntimeSummary?.summary).toContain("Agent cli-tui-worker");
-    expect(recoverable.taskRuntimeSummary?.summary).not.toContain("Agent resumed");
+    expect(recoverable.taskRuntimeSummary).toBeUndefined();
   });
 
   it("home mode does not show background blocks", () => {
@@ -1763,7 +1723,7 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     expect(bgBlock).toBeUndefined();
   });
 
-  it("running/blocked jobs fold into one low-noise task summary without terminal history", () => {
+  it("running/blocked jobs stay out of the default task summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1775,16 +1735,7 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
-    expect(view.taskRuntimeSummary?.status).toBe("blocked");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 2");
-    expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
-    expect(view.taskRuntimeSummary?.title).not.toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).not.toContain("可能卡住");
-    expect(view.taskRuntimeSummary?.title).toContain("异常 1");
-    expect(view.taskRuntimeSummary?.title).not.toContain("需要确认");
-    expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("health");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 });
 
@@ -2174,7 +2125,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(bgBlocks).toHaveLength(0);
   });
 
-  it("Task folds running/blocked background into one low-noise summary", () => {
+  it("Task keeps running/blocked background out of the default main surface", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -2187,18 +2138,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
-    expect(view.taskRuntimeSummary?.status).toBe("blocked");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 2");
-    expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
-    expect(view.taskRuntimeSummary?.title).not.toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).not.toContain("可能卡住");
-    expect(view.taskRuntimeSummary?.title).not.toContain("超时");
-    expect(view.taskRuntimeSummary?.title).toContain("异常 1");
-    expect(view.taskRuntimeSummary?.title).not.toContain("需要确认");
-    expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("health");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("old");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
   it("fail/blocking output prioritized over normal output", () => {
@@ -3660,7 +3600,9 @@ describe("D.13D Final Closure — interaction shell", () => {
     await shell.waitUntilExit();
     expect(output.text).not.toContain("LingHun");
     expect(output.text).toContain("默认模式");
-    expect(output.text).not.toContain("索引");
+    expect(output.text).toContain("模型");
+    expect(output.text).toContain("索引");
+    expect(output.text).not.toContain("费用");
     expect(output.text).not.toContain("项目：");
     // task placeholder used
     expect(output.text).toContain("继续输入…");
@@ -3790,10 +3732,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     expect(view.taskFooter?.workspaceStatus).toBeUndefined();
     expect(view.taskFooter?.runtimeStatus).toBeUndefined();
-    // Footer still has essential fields: permission mode, model, cache, index.
+    // Footer still has default-visible fields: permission mode, model, index.
     expect(view.taskFooter?.permissionMode).toBeDefined();
     expect(view.taskFooter?.model).toBeDefined();
-    expect(view.taskFooter?.cache).toBeDefined();
     expect(view.taskFooter?.index).toBeDefined();
 
     const rendered = renderPlainShell(view);
@@ -3837,8 +3778,12 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       source.indexOf("footer.cyclePermHint") + 220,
     );
     expect(cyclePermHintSnippet).not.toContain("theme.status.fail");
-    // 右栏（model · cache · index · reasoning · hint）按顺序作为 segments 渲染。
+    // 右栏默认渲染 model · cache · index · reasoning；cost 不进默认 task footer，避免费用估算误导。
     expect(source).toContain("rightSegments");
+    expect(source).toContain('key: "cache"');
+    expect(source).toContain('key: "index"');
+    expect(source).toContain('key: "reasoning"');
+    expect(source).not.toContain("footer.cost");
     expect(source.indexOf("footer.workspaceStatus")).toBeLessThan(
       source.indexOf("footer.runtimeStatus"),
     );

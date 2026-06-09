@@ -7,13 +7,13 @@
 ## 已完成功能
 
 - 删除 `config-control-plane` 独立模型，ConfigPanel 列表直接映射 slash 命令并通过现有 slash registry 过滤。
-- 删除 `footer-view` 独立模型，footer 默认只保留权限模式、模型名称、费用；缓存/索引/推理/上下文继续留在 `/status` 等详情入口。
+- 删除 `footer-view` 独立模型，footer 默认保留权限模式、模型名称、缓存、索引状态、推理强度；费用估算隐藏，避免不同模型真实费用不可确认时误导用户。
 - 删除 `task-suggestion` 独立模型，TaskSuggestion 类型和构造逻辑内联到 view-model，避免小文件噪音。
 - 删除 `input-owner-controller` 独立模型，Composer 内部直接保留优先级 if-chain。
 - 删除 Composer SGR wheel 死代码路径，不再在 Composer 内解析 transcript wheel/geometry。
 - 删除主屏内部 runtime context redaction note，不再追加“内部运行时上下文已从主屏省略”元噪音。
 - 删除 NO_COLOR 限制提示行。
-- 默认隐藏后台任务 running/paused 摘要；主屏只保留 blocked/failed 背景通知路径。
+- 默认隐藏后台任务摘要；blocked/failed/running 等后台状态不再进入默认 task 主屏，完整处理路径走 `/background`、`/details`、`/job report` 或日志。
 - 工具开始横幅默认抑制，工具结果仍保留。
 - Home vision 文本移除，普通首页只保留 `LingHun` 品牌行。
 - Shift/Meta + Enter 归一为 newline；底层 multiline enter sequence 支持 `\x1B\r`；Ctrl+J 仍插入 newline。
@@ -53,9 +53,9 @@
 ## 关键设计
 
 - R1 是降噪和 bugfix 阶段，只清掉默认主屏噪音与重复小模块，不新增 UI 系统。
-- Footer 默认降到三类信息；详情指标留给 `/status`，不丢能力。
+- Footer 默认保留权限模式、模型、缓存、索引、推理强度；费用估算和详情指标留给 `/status`，不丢能力。
 - ConfigPanel 不再维护单独 action 层，面板选择直接发 slash command，减少无效中转。
-- 后台任务 running 状态不再污染默认 transcript；异常态仍可见，完整列表走 `/background`。
+- 后台任务状态不再污染默认 transcript；异常态不在主屏展开，完整列表和处理入口走 `/background`。
 - Shift/Meta Enter 只在明确 key metadata 或已解析 escape sequence 时插入换行，不臆测普通 CR。
 
 ## 配置项
