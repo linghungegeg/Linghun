@@ -48,6 +48,7 @@ export function StatusFooter({
     },
     { key: "index", text: footer.index, tone: "default" },
   ];
+  if (footer.contextUsage) rightSegments.push({ key: "context", text: footer.contextUsage, tone: "dim" });
   if (footer.reasoning) rightSegments.push({ key: "reasoning", text: footer.reasoning });
 
   // 窄屏列向布局：左行（mode + cyclePermHint）一行，右栏分两行展示，避免挤压。

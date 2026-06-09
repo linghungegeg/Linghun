@@ -493,7 +493,7 @@ describe("Ink shell selection", () => {
     expect(source).not.toContain("onResize?.()");
   });
 
-  it("renders the mature home without setup or composer border cards", async () => {
+  it("renders the mature home with the R2 round composer and without setup cards", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -530,12 +530,10 @@ describe("Ink shell selection", () => {
     // No large setupHint block or old-style verbose guidance
     expect(output.text).not.toContain("还没有模型配置");
     expect(output.text).not.toContain("我要配置模型");
-    // CCB-style two-line composer: has horizontal lines, no round border
-    expect(output.text).toContain("─");
-    expect(output.text).not.toContain("╭");
-    expect(output.text).not.toContain("╮");
-    expect(output.text).not.toContain("╰");
-    expect(output.text).not.toContain("╯");
+    expect(output.text).toContain("╭");
+    expect(output.text).toContain("╮");
+    expect(output.text).toContain("╰");
+    expect(output.text).toContain("╯");
     expect(output.text).not.toContain("┌");
     // no old prompt prefix or hint text
     expect(output.text).not.toContain("你 >");
@@ -976,6 +974,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     expect(result?.phase).toBe("thinking");
     expect(result?.text).toBe("正在思考…");
     expect(result?.toolName).toBeUndefined();
+    expect(result?.language).toBe("zh-CN");
   });
 
   it("shows elapsed immediately for thinking activity", () => {
@@ -4090,18 +4089,14 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
 
-    expect(body).toContain("const composerRule = lineChar(noColor, capability).repeat(cw)");
-    expect(body).toContain("{composerRule}");
     expect(body).toContain("<Composer view={view}");
-    expect(body).toContain("<Box width={cw} paddingTop={1}>");
-    expect(body).toContain('<Box flexDirection="column" width={cw}>');
-    expect(body.indexOf("{composerRule}", body.indexOf("<Composer view={view}"))).toBeGreaterThan(
-      body.indexOf("<Composer view={view}"),
-    );
+    expect(body).toContain('<Box flexDirection="column" width={cw} paddingTop={1}>');
+    expect(body).not.toContain("const composerRule = lineChar(noColor, capability).repeat(cw)");
+    expect(body).not.toContain("{composerRule}");
     expect(body).not.toContain("width={cw} paddingX={1}");
     expect(body).toContain("view.taskRuntimeSummary");
     expect(body).toContain("<ProductBlock block={view.taskRuntimeSummary}");
-    expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("{composerRule}"));
+    expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("<Composer view={view}"));
     expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
     expect(body).not.toContain(
       "`${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`",
@@ -4730,9 +4725,10 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       source.indexOf("isLocalOutput ?", assistantStart),
     );
 
-    expect(userBranch).toContain("marginBottom={0}");
+    expect(userBranch).toContain("marginBottom={1}");
     expect(userBranch).toContain("│ ");
     expect(userBranch).toContain("wrapText");
+    expect(userBranch).toContain("backgroundColor");
     expect(userBranch).not.toContain("MessageMarkdown");
     expect(assistantBranch).toContain("marginTop={isAssistantText ? 1 : 0}");
     expect(assistantBranch).toContain("marginBottom={0}");
@@ -4810,7 +4806,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const workspaceIdx = text.indexOf("工作树：");
     const runtimeIdx = text.indexOf("详情 /background");
     const hintIdx = text.indexOf("最近缓存复用变低");
-    const composerSeparatorIdx = text.indexOf("----------", hintIdx);
+    const composerSeparatorIdx = text.indexOf("╭", hintIdx);
     const footerIdx = text.indexOf("Shift+Tab");
 
     expect(userIdx).toBeGreaterThan(0);
@@ -6126,6 +6122,23 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     const primaryText = view.blocks.map((block) => `${block.title}\n${block.summary}`).join("\n");
     expect(primaryText).not.toContain("SearchExtraTools matched raw list");
     expect(view.blocks.some((block) => block.id === "assistant-after-tools")).toBe(true);
+  });
+
+  it("Phase R2: two adjacent read/search tool outputs stay separate", () => {
+    const blocks: ProductBlockViewModel[] = [
+      createOutputBlock("Read(src/a.ts)", "zh-CN", "read-a"),
+      createOutputBlock("Glob(src/**/*.ts)", "zh-CN", "glob-b"),
+    ];
+
+    const view = createShellViewModel(createContext(), {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+
+    expect(view.blocks.some((block) => block.id.startsWith("tool-group-"))).toBe(false);
+    expect(view.blocks.map((block) => block.id)).toEqual(["read-a", "glob-b"]);
   });
 
   it("Phase 7.18: tool grouping does not cross assistant text or hide failed tool diagnostics", () => {

@@ -81,6 +81,29 @@ describe("Polish A runtime status presenter", () => {
     expect(line.length).toBeLessThanOrEqual(100);
   });
 
+  it("shows context usage progress when available", () => {
+    const line = formatRuntimeStatusLine(
+      {
+        session: "session-123456",
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        endpointProfile: "chat_completions",
+        reasoningStatus: "enabled",
+        mode: "default",
+        background: 0,
+        cacheHitRate: 0.8,
+        indexStatus: "ready",
+        gate: "none",
+        contextUsage: { usedTokens: 64_000, maxTokens: 128_000 },
+      },
+      "zh-CN",
+    );
+
+    expect(line).toContain("上下文");
+    expect(line).toContain("50%");
+    expect(line).toContain("████");
+  });
+
   it("uses short Chinese labels for the current mode", () => {
     const line = formatRuntimeStatusLine(
       {

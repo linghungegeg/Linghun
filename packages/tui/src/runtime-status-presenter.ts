@@ -1,4 +1,5 @@
 import type { Language, PermissionMode } from "@linghun/shared";
+import { formatContextProgressBar } from "./context-window-runtime.js";
 import { truncateDisplay } from "./startup-runtime.js";
 
 export type RuntimeStatusView = {
@@ -12,12 +13,14 @@ export type RuntimeStatusView = {
   cacheHitRate: number | null;
   indexStatus: string;
   gate: "waiting approval" | "waiting confirmation" | "none";
+  contextUsage?: { usedTokens: number; maxTokens: number };
 };
 
 export function formatRuntimeStatusLine(view: RuntimeStatusView, language: Language): string {
   const model = truncateDisplay(sanitizeStatusValue(view.model), 20);
   const mode = formatPermissionModeLabel(view.mode, language);
   const cache = formatCacheHitRate(view.cacheHitRate, language);
+  const contextUsage = view.contextUsage ? formatContextUsage(view.contextUsage, language) : undefined;
   const index = formatIndexStatus(view.indexStatus, language);
   const waitState =
     view.gate === "waiting approval"
@@ -33,6 +36,9 @@ export function formatRuntimeStatusLine(view: RuntimeStatusView, language: Langu
     language === "en-US"
       ? [`Model ${model}`, `Mode ${mode}`, cache, index, `background ${view.background}`]
       : [`模型 ${model}`, `模式 ${mode}`, cache, index, `后台 ${view.background}`];
+  if (contextUsage) {
+    parts.splice(3, 0, contextUsage);
+  }
   if (waitState) {
     parts.push(language === "en-US" ? waitState : `确认 ${waitState}`);
   }
@@ -65,6 +71,18 @@ function formatCacheHitRate(hitRate: number | null, language: Language): string 
   if (hitRate === null) return `${label}?`;
   const percent = Math.max(0, Math.min(100, Math.round(hitRate * 100)));
   return `${label} ${percent}%`;
+}
+
+function formatContextUsage(
+  usage: RuntimeStatusView["contextUsage"],
+  language: Language,
+): string {
+  const label = language === "en-US" ? "Ctx" : "上下文";
+  if (!usage) return `${label}?`;
+  const max = Number.isFinite(usage.maxTokens) ? Math.max(1, Math.ceil(usage.maxTokens)) : 1;
+  const used = Number.isFinite(usage.usedTokens) ? Math.max(0, Math.ceil(usage.usedTokens)) : 0;
+  const ratio = Math.min(1, used / max);
+  return `${label} ${formatContextProgressBar(ratio, 8)} ${(ratio * 100).toFixed(0)}%`;
 }
 
 function formatIndexStatus(status: string, language: Language): string {

@@ -232,6 +232,7 @@ export function createShellViewModel(
       ? {
           phase: "thinking",
           text: language === "en-US" ? "Thinking…" : "正在思考…",
+          language,
           elapsed: formatElapsedSince(
             new Date(options.submittedStartedAt ?? Date.now()).toISOString(),
           ),
@@ -602,7 +603,7 @@ function groupTranscriptToolBlocks(
   let group: ProductBlockViewModel[] = [];
 
   const flush = () => {
-    if (group.length >= 2) {
+    if (group.length >= 3) {
       result.push(createGroupedToolBlock(group, language));
     } else {
       result.push(...group);
@@ -1222,6 +1223,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     text: texts[phase] ?? texts[mapped] ?? "",
     toolName: toolName ?? undefined,
     elapsed,
+    language: context.language,
   };
 }
 

@@ -1,12 +1,11 @@
 import { Box, type DOMElement, Text } from "ink";
 import type React from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TerminalCapability } from "../terminal-capability.js";
 import {
   brandWordmark,
   composerMaxWidth,
   fitText,
-  lineChar,
   taskComposerMaxWidth,
 } from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
@@ -56,7 +55,6 @@ function HomeLayout({
   const noColor = view.themeMode === "no-color";
   const cw = composerMaxWidth(view.width);
   const brandLines = brandWordmark(noColor, view.width, capability);
-  const composerLine = lineChar(noColor, capability).repeat(cw);
 
   return (
     <Box
@@ -92,9 +90,7 @@ function HomeLayout({
 
       {/* Composer: single cursor owner */}
       <Box marginTop={1} flexDirection="column" width={cw}>
-        <Text color={theme.accent}>{composerLine}</Text>
         <Composer view={view} onInput={controller.onInput} capability={capability} />
-        <Text color={theme.accent}>{composerLine}</Text>
       </Box>
 
       {/* Status tray */}
@@ -159,7 +155,6 @@ function TaskLayout({
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
-  const composerRule = lineChar(noColor, capability).repeat(cw);
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>
@@ -214,7 +209,11 @@ function TaskLayout({
             压在更早的消息上方。blocks 存在时留 1 行间隔；首帧无 block 时贴顶。 */}
           {view.activity ? (
             <Box marginTop={view.blocks.length > 0 || view.streamingAssistantText ? 1 : 0}>
-              <ActivityIndicator activity={view.activity} theme={theme} />
+              <ActivityIndicator
+                activity={view.activity}
+                theme={theme}
+                tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
+              />
             </Box>
           ) : null}
 
@@ -255,18 +254,8 @@ function TaskLayout({
           </Box>
         ) : null}
 
-        <Box width={cw} paddingTop={1}>
-          <Text color={theme.border ?? theme.muted} dimColor>
-            {composerRule}
-          </Text>
-        </Box>
-        <Box flexDirection="column" width={cw}>
+        <Box flexDirection="column" width={cw} paddingTop={1}>
           <Composer view={view} onInput={controller.onInput} capability={capability} />
-        </Box>
-        <Box width={cw}>
-          <Text color={theme.border ?? theme.muted} dimColor>
-            {composerRule}
-          </Text>
         </Box>
 
         {/* Task footer — minimal status line: permission mode · model · cache · index · reasoning. NOT the
@@ -405,11 +394,21 @@ function PanelLayer({
 function ActivityIndicator({
   activity,
   theme,
+  tokenCount,
 }: {
   activity: TaskActivityView;
   theme: ReturnType<typeof createShellTheme>;
+  tokenCount?: number;
 }): React.ReactNode {
-  // "completed" uses info color — NOT pass. Only verification results use pass.
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    if (activity.phase === "completed" || activity.phase === "error" || activity.phase === "permission_waiting") {
+      return;
+    }
+    const timer = setInterval(() => setFrame((current) => current + 1), 100);
+    return () => clearInterval(timer);
+  }, [activity.phase]);
+
   const colorMap: Record<TaskActivityView["phase"], string | undefined> = {
     thinking: theme.status.running,
     tool_running: theme.status.running,
@@ -420,24 +419,70 @@ function ActivityIndicator({
   };
   const color = colorMap[activity.phase];
   const noColor = theme.mode === "no-color";
-  const marker =
-    activity.phase === "completed"
-      ? getStatusMarker("info", noColor)
-      : activity.phase === "error"
-        ? getStatusMarker("fail", noColor)
-        : getStatusMarker("running", noColor);
-
+  const marker = activityMarker(activity.phase, frame, noColor);
+  const seconds = parseElapsedSeconds(activity.elapsed);
+  const slow = seconds >= 8 && activity.phase !== "permission_waiting";
+  const showTokenCount =
+    seconds >= 30 && tokenCount !== undefined && (activity.phase === "thinking" || activity.phase === "continuing");
+  const text = activityText(activity, frame);
   return (
     <Box>
-      <Text color={color}>
-        {marker} {activity.text}
+      <Text color={color} bold={activity.phase === "thinking" && frame % 10 < 5}>
+        {marker} {text}
       </Text>
       {activity.elapsed ? (
-        <Text color={theme.muted} dimColor>
+        <Text color={slow ? (theme.warning ?? theme.status.partial) : theme.muted} dimColor={!slow}>
           {" "}
           {activity.elapsed}
         </Text>
       ) : null}
+      {slow ? (
+        <Text color={theme.muted} dimColor>
+          {activity.language === "en-US" ? " · still working" : " · 仍在处理"}
+        </Text>
+      ) : null}
+      {showTokenCount ? (
+        <Text color={theme.muted} dimColor>
+          {activity.language === "en-US" ? ` · ${tokenCount} tokens` : ` · ${tokenCount} tokens`}
+        </Text>
+      ) : null}
     </Box>
   );
+}
+
+function activityMarker(phase: TaskActivityView["phase"], frame: number, noColor: boolean): string {
+  if (phase === "completed") return getStatusMarker("info", noColor);
+  if (phase === "error") return getStatusMarker("fail", noColor);
+  if (phase === "permission_waiting") return getStatusMarker("blocked", noColor);
+  if (noColor) return ["-", "\\", "|", "/"][frame % 4] ?? "-";
+  return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][frame % 10] ?? "⠋";
+}
+
+function activityText(activity: TaskActivityView, frame: number): string {
+  if (activity.phase !== "thinking") return activity.text;
+  if (activity.text !== "Thinking…" && activity.text !== "正在思考…") return activity.text;
+  const verbs = activity.text.startsWith("Thinking")
+    ? ["Thinking", "Reading context", "Planning"]
+    : ["正在思考", "正在阅读上下文", "正在规划"];
+  const suffix = activity.text.endsWith("…") ? "…" : "";
+  return `${verbs[Math.floor(frame / 10) % verbs.length] ?? verbs[0]}${suffix}`;
+}
+
+function parseElapsedSeconds(elapsed: string | undefined): number {
+  if (!elapsed) return 0;
+  const matches = [...elapsed.matchAll(/(\d+)\s*(h|m|s)/giu)];
+  if (matches.length === 0) return 0;
+  let seconds = 0;
+  for (const match of matches) {
+    const value = Number(match[1] ?? 0);
+    const unit = (match[2] ?? "s").toLowerCase();
+    seconds += unit === "h" ? value * 3600 : unit === "m" ? value * 60 : value;
+  }
+  return seconds;
+}
+
+function estimateStreamingTokens(text: string | undefined): number | undefined {
+  const trimmed = text?.trim();
+  if (!trimmed) return undefined;
+  return Math.max(1, Math.ceil(trimmed.length / 4));
 }

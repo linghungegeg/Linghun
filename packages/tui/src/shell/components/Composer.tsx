@@ -1299,13 +1299,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         ? view.composer.taskPlaceholder
         : view.composer.placeholder;
 
+  const composerInnerWidth = Math.max(8, maxWidth - 4);
   const { lines, truncatedAbove, truncatedBelow, cursorCol, cursorRow } = formatComposerRenderLines(
     {
       buffer,
       placeholder: placeholderText,
       masking: view.composer.masking,
       noColor,
-      maxWidth,
+      maxWidth: composerInnerWidth,
     },
   );
 
@@ -1338,14 +1339,20 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const showUnknownHint = false;
 
   return (
-    <Box flexDirection="column" width={maxWidth}>
+    <Box
+      flexDirection="column"
+      width={maxWidth}
+      borderStyle="round"
+      borderColor={theme.border ?? theme.muted}
+      paddingX={1}
+    >
       {permissionActive && view.permission ? (
         <PermissionControl
           permission={view.permission}
           actions={permissionActions}
           focused={permissionFocus}
           theme={theme}
-          width={maxWidth}
+          width={composerInnerWidth}
           language={view.language}
         />
       ) : null}
@@ -1355,7 +1362,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           selectedIndex={slashSelectionClamped}
           theme={theme}
           language={view.language}
-          width={maxWidth}
+          width={composerInnerWidth}
           hint={
             view.language === "en-US"
               ? "Tab accept · ↑↓ pick · Esc hide · Enter submit"
@@ -1370,12 +1377,12 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         <Box
           ref={anchorRef}
           flexDirection="column"
-          width={Math.max(4, maxWidth - displayWidthOf(PROMPT_MARKER))}
+          width={Math.max(4, composerInnerWidth - displayWidthOf(PROMPT_MARKER))}
         >
           {lines.map((line, index) => {
             return (
               <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-                {sliceWidth(line, Math.max(4, maxWidth - displayWidthOf(PROMPT_MARKER)))}
+                {sliceWidth(line, Math.max(4, composerInnerWidth - displayWidthOf(PROMPT_MARKER)))}
               </Text>
             );
           })}
@@ -1383,10 +1390,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       </Box>
       {showUnknownHint ? (
         <Text color={theme.muted}>
-          {fitText(formatUnknownSlashCommand(text, view.language), maxWidth)}
+          {fitText(formatUnknownSlashCommand(text, view.language), composerInnerWidth)}
         </Text>
       ) : null}
-      {hintNotice ? <Text color={theme.muted}>{fitText(hintNotice, maxWidth)}</Text> : null}
+      {hintNotice ? <Text color={theme.muted}>{fitText(hintNotice, composerInnerWidth)}</Text> : null}
     </Box>
   );
 }
@@ -1472,7 +1479,12 @@ function PermissionActionRow({
     return (
       <Box flexDirection="column" width={width}>
         {segments.map((s) => (
-          <Text key={s.id} color={s.focused ? theme.accent : theme.muted} bold={s.focused}>
+          <Text
+            key={s.id}
+            color={s.focused ? undefined : theme.muted}
+            backgroundColor={s.focused && theme.mode !== "no-color" ? theme.permission : undefined}
+            inverse={s.focused}
+          >
             {fitText(s.text, Math.max(8, width - 2))}
           </Text>
         ))}
@@ -1483,7 +1495,12 @@ function PermissionActionRow({
     <Box width={width}>
       <Text>
         {segments.map((s) => (
-          <Text key={s.id} color={s.focused ? theme.accent : theme.muted} bold={s.focused}>
+          <Text
+            key={s.id}
+            color={s.focused ? undefined : theme.muted}
+            backgroundColor={s.focused && theme.mode !== "no-color" ? theme.permission : undefined}
+            inverse={s.focused}
+          >
             {`${s.text} `}
           </Text>
         ))}

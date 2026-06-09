@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import { Writable } from "node:stream";
 import type { TranscriptEvent } from "@linghun/core";
 import { buildExplicitDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
+import { calculateContextPercentages } from "./context-window-runtime.js";
 import { formatBackgroundDetails, formatBackgroundOutputDetails } from "./job-runner-presenter.js";
 import { formatLogArtifactSlice, readLogArtifactSlice } from "./log-artifact.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
@@ -252,6 +253,12 @@ export function writeStatus(output: Writable, context: TuiContext): void {
     : context.pendingNaturalCommand || context.pendingAutopilot
       ? "waiting confirmation"
       : "none";
+  const contextUsage = context.cache.compactPressure
+    ? calculateContextPercentages(
+        Math.ceil(context.cache.compactPressure.estimatedChars / 4),
+        Math.ceil(context.cache.compactPressure.maxChars / 4),
+      )
+    : undefined;
   writeLine(
     output,
     formatRuntimeStatusLine(
@@ -266,6 +273,7 @@ export function writeStatus(output: Writable, context: TuiContext): void {
         cacheHitRate: latestHitRate,
         indexStatus: context.index.status,
         gate,
+        contextUsage,
       },
       context.language,
     ),

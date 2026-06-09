@@ -6,6 +6,7 @@ export type ContextPercentage = {
   maxTokens: number;
   ratio: number;
   label: string;
+  bar: string;
 };
 
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
@@ -33,7 +34,15 @@ export function calculateContextPercentages(
     maxTokens: safeMax,
     ratio,
     label: `上下文 ${(ratio * 100).toFixed(1)}% (${formatCompactNumber(safeUsed)}/${formatCompactNumber(safeMax)})`,
+    bar: formatContextProgressBar(ratio),
   };
+}
+
+export function formatContextProgressBar(ratio: number, width = 10): string {
+  const safeWidth = Math.max(4, Math.floor(width));
+  const safeRatio = Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 0;
+  const filled = Math.round(safeRatio * safeWidth);
+  return `[${"█".repeat(filled)}${"░".repeat(safeWidth - filled)}]`;
 }
 
 function formatCompactNumber(value: number): string {

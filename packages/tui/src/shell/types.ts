@@ -153,6 +153,7 @@ export type TaskActivityView = {
   text: string;
   toolName?: string;
   elapsed?: string;
+  language?: "zh-CN" | "en-US";
 };
 
 /**
