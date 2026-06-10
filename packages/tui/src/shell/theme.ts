@@ -9,6 +9,7 @@ export type ShellTheme = {
   border: string | undefined;
   warning: string | undefined;
   userBackground: string | undefined;
+  background: string | undefined;
   status: Record<ProductBlockStatus, string | undefined>;
   assistantText: string | undefined;
   dim: string | undefined;
@@ -57,6 +58,7 @@ export function createShellTheme(
       success: undefined,
       error: undefined,
       inlineCode: undefined,
+      background: undefined,
       subtle: undefined,
       inactive: undefined,
       suggestion: undefined,
@@ -92,6 +94,7 @@ export function createShellTheme(
       subtle: "gray",
       inactive: "gray",
       suggestion: "blue",
+      background: "white",
     };
   }
   return {
@@ -123,6 +126,7 @@ export function createShellTheme(
     subtle: "gray",
     inactive: "gray",
     suggestion: "blueBright",
+    background: undefined,
   };
 }
 

@@ -1,6 +1,6 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
-import { fitText, formatBriefTimestamp, wrapText } from "../text-utils.js";
+import { fitText, wrapText } from "../text-utils.js";
 import { type ShellTheme, getStatusMarker } from "../theme.js";
 import type { MessageBlockKind, ProductBlockViewModel } from "../types.js";
 import { CtrlOToExpand } from "./CtrlOToExpand.js";
@@ -96,7 +96,6 @@ export function ProductBlock({
     if (isUserText) {
       const body = (block.fullText ?? block.title ?? "").trim();
       if (!body) return null;
-      const ts = block.timestamp ? formatBriefTimestamp(block.timestamp, language) : "";
       return (
         <Box marginTop={1} marginBottom={1} flexDirection="column">
           <Text color={theme.dim ?? theme.muted} dimColor>
@@ -104,18 +103,15 @@ export function ProductBlock({
           </Text>
           <Box flexDirection="row">
             <Text color={theme.inactive ?? theme.muted}>│ </Text>
-            {ts ? <Text dimColor>{ts} </Text> : null}
             <Box flexDirection="column">
-              {wrapText(body, Math.max(8, width - 2 - (ts ? ts.length + 3 : 0))).map(
-                (line, idx) => (
-                  <Text
-                    key={`${idx}-${line}`}
-                    backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}
-                  >
-                    {line}
-                  </Text>
-                ),
-              )}
+              {wrapText(body, Math.max(8, width - 2)).map((line, idx) => (
+                <Text
+                  key={`${idx}-${line}`}
+                  backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}
+                >
+                  {line}
+                </Text>
+              ))}
             </Box>
           </Box>
         </Box>

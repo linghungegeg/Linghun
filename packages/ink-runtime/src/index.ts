@@ -1,4 +1,5 @@
 export * from "ink";
+export * from "./ink-styles.js";
 export * from "./terminal-input.js";
 export * from "./terminal-modes.js";
 export * from "./terminal-selection.js";

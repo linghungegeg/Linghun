@@ -1528,13 +1528,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const showUnknownHint = false;
 
   return (
-    <Box
-      flexDirection="column"
-      width={maxWidth}
-      borderStyle="round"
-      borderColor={theme.border ?? theme.muted}
-      paddingX={1}
-    >
+    <Box flexDirection="column" width={maxWidth} paddingX={1}>
       {permissionActive && view.permission ? (
         <PermissionControl
           permission={view.permission}

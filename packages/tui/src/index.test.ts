@@ -28417,4 +28417,239 @@ describe("Phase A correctness focused guards", () => {
 
     expect(formatRoleUsageLines(context)[0]).toContain("estimated CNY 估算中");
   });
+
+  it("perf-stress: 5-round sendMessage with 500 session events, 60 accepted memories, 25 failure records", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-perf-heavy-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "perf-heavy-model" });
+    const config = createTestModelConfig({
+      defaultModel: "perf-heavy-model",
+      providers: {
+        "openai-compatible": {
+          type: "openai-compatible",
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "perf-heavy-model",
+        },
+      },
+    });
+    const gateway = createModelGateway(config);
+    const now = new Date().toISOString();
+
+    // ── 1. Pre-populate session with ~500 events ──
+    const verbs = ["analyze", "refactor", "debug", "optimize", "test", "deploy", "review", "fix", "migrate", "build"];
+    const nouns = ["auth module", "pipeline config", "type definitions", "error handling", "API routes",
+      "component tree", "state machine", "cache layer", "logger setup", "validation schemas"];
+    for (let i = 0; i < 100; i++) {
+      await store.appendEvent(session.id, {
+        type: "user_message",
+        id: `user-msg-${i}`,
+        text: `${verbs[i % verbs.length]} ${nouns[i % nouns.length]} — iteration ${i}. ${"context detail ".repeat(3)}`,
+        createdAt: now,
+      });
+    }
+    const toolNames = ["Read", "Write", "Edit", "Grep", "Bash", "Glob", "Todo", "Diff", "MultiEdit"];
+    for (let i = 0; i < 50; i++) {
+      const toolName = toolNames[i % toolNames.length];
+      await store.appendEvent(session.id, {
+        type: "tool_call_start",
+        id: `call-${i}`,
+        name: toolName,
+        input: { path: `src/module-${i % 10}.ts`, content: `data-${i}-${"payload ".repeat(20)}` },
+        createdAt: now,
+      });
+      await store.appendEvent(session.id, {
+        type: "tool_result",
+        toolUseId: `call-${i}`,
+        toolName,
+        content: `result for call-${i}: ${"output ".repeat(60)}file contents: line ${i * 10} to ${i * 10 + 50}`,
+        isError: i % 7 === 0,
+        createdAt: now,
+      });
+    }
+    // orphan tool_results (unpaired) to stress budget compact paths
+    for (let i = 0; i < 50; i++) {
+      await store.appendEvent(session.id, {
+        type: "tool_result",
+        toolUseId: `orphan-call-${i}`,
+        toolName: toolNames[i % toolNames.length],
+        content: `orphan result ${i}: ${"orphan-data ".repeat(50)}`,
+        isError: false,
+        createdAt: now,
+      });
+    }
+    // extra user messages to reach ~500 total events
+    for (let i = 100; i < 250; i++) {
+      await store.appendEvent(session.id, {
+        type: "user_message",
+        id: `user-msg-${i}`,
+        text: `${verbs[i % verbs.length]} the ${nouns[i % nouns.length]} — batch ${Math.floor(i / 10)} round ${i % 10}. ${"extra context padding ".repeat(2)}`,
+        createdAt: now,
+      });
+    }
+    // 50 more tool_call_results
+    for (let i = 50; i < 100; i++) {
+      await store.appendEvent(session.id, {
+        type: "tool_call_start",
+        id: `call-${i}`,
+        name: toolNames[i % toolNames.length],
+        input: { pattern: `search-term-${i}`, path: `src/components/Widget${i % 20}.tsx` },
+        createdAt: now,
+      });
+      await store.appendEvent(session.id, {
+        type: "tool_result",
+        toolUseId: `call-${i}`,
+        toolName: toolNames[i % toolNames.length],
+        content: `matched ${i * 3} lines in Widget${i % 20}.tsx: ${"matched-content ".repeat(40)}`,
+        isError: false,
+        createdAt: now,
+      });
+    }
+
+    // ── 2. Generate 60 accepted memories ──
+    const memoryCategories = ["preference", "frequent_behavior", "project_habit", "collaboration_rule"] as const;
+    const memoryTopics = ["code style", "testing", "naming", "error handling", "imports", "review process",
+      "commit messages", "branch strategy", "architecture", "performance", "accessibility", "security"];
+    const acceptedMemories: Array<{
+      id: string; scope: "project"; status: "accepted"; taxonomy: string; topic: string;
+      summary: string; source: string; sourceRefs: string[]; risk: "low" | "medium" | "high";
+      inferred: boolean; createdAt: string;
+    }> = [];
+    for (let i = 0; i < 60; i++) {
+      acceptedMemories.push({
+        id: `mem-accepted-${i}`,
+        scope: "project",
+        status: "accepted",
+        taxonomy: memoryCategories[i % 4],
+        topic: memoryTopics[i % memoryTopics.length],
+        summary: `Rule #${i}: Always ${verbs[i % verbs.length]} ${nouns[i % nouns.length]} before ${verbs[(i + 3) % verbs.length]}ing. Detail: ${"rule-detail ".repeat(5)}`.slice(0, 200),
+        source: i < 20 ? "user" : "auto-extraction",
+        sourceRefs: [`ev-${i}`, `msg-${i % 100}`],
+        risk: i % 5 === 0 ? "high" : i % 3 === 0 ? "medium" : "low",
+        inferred: i >= 20,
+        createdAt: new Date(Date.now() - (60 - i) * 3600_000).toISOString(),
+      });
+    }
+
+    // ── 3. Generate 25 active failure learning records ──
+    const failureCategories = ["provider_failure", "tool_failure", "verification_failure",
+      "git_operation_failure", "final_gate_downgrade", "report_guard", "resource_cap"] as const;
+    const activeRecords: Array<{
+      id: string; createdAt: string; lastSeen: string; projectScope: string;
+      sourceRef: string; category: string; failureSummary: string; rootCauseGuess: string;
+      inferred: boolean; avoidNextTime: string; relatedTarget?: string;
+      severity: "low" | "medium" | "high"; dedupeHash: string; count: number; status: "active";
+    }> = [];
+    for (let i = 0; i < 25; i++) {
+      const cat = failureCategories[i % failureCategories.length];
+      activeRecords.push({
+        id: `fl-${i}`,
+        createdAt: new Date(Date.now() - (30 - i) * 7200_000).toISOString(),
+        lastSeen: new Date(Date.now() - i * 600_000).toISOString(),
+        projectScope: "perf-heavy-project",
+        sourceRef: `ev-fl-${i}`,
+        category: cat,
+        failureSummary: `[${cat}] Failure #${i}: The ${nouns[i % nouns.length]} operation failed because ${verbs[i % verbs.length]} step was skipped. ${"detail ".repeat(8)}`.slice(0, 200),
+        rootCauseGuess: `Root cause for failure #${i}: missing precondition check on ${nouns[(i + 1) % nouns.length]}.`.slice(0, 160),
+        inferred: true,
+        avoidNextTime: `Always ${verbs[(i + 2) % verbs.length]} ${nouns[(i + 2) % nouns.length]} before proceeding.`.slice(0, 160),
+        relatedTarget: i % 3 === 0 ? undefined : toolNames[i % toolNames.length],
+        severity: i % 4 === 0 ? "high" : i % 2 === 0 ? "medium" : "low",
+        dedupeHash: `dedupe-fl-${i}-${cat}`,
+        count: (i % 5) + 1,
+        status: "active",
+      });
+    }
+
+    const ROUNDS = 5;
+    const allPerfEvents: string[][] = [];
+
+    for (let i = 0; i < ROUNDS; i++) {
+      const context = await createTestContext(project, store, session, config);
+      // Inject heavy data
+      context.turnContinuity = {
+        state: {
+          consecutiveFailures: 0,
+          consecutiveSuccesses: 0,
+          dominantTaskKind: null,
+          taskDomainSwitched: false,
+          lastUserStateKind: "neutral" as const,
+          userStatePersistence: 1,
+          totalTurns: 0,
+          messageLengthTrend: "stable" as const,
+          trustScore: 50,
+        },
+        windowSize: 5,
+        momentum: 0,
+      };
+      context.memory.accepted = acceptedMemories as unknown as typeof context.memory.accepted;
+      context.failureLearning.records = activeRecords as unknown as typeof context.failureLearning.records;
+
+      const requests = mockOpenAiTextFetch(`Round ${i + 1} response.`);
+      const output = new MemoryOutput();
+
+      try {
+        await __testSendMessage(
+          `perf heavy round ${i + 1}: ${verbs[i % verbs.length]} the ${nouns[i % nouns.length]} with full context`,
+          context,
+          gateway,
+          output,
+        );
+      } catch (err) {
+        if (i === 0) console.error(`[perf-heavy] round ${i + 1} error:`, String(err).slice(0, 300));
+      }
+
+      const events = context.lastMetaSchedulerDecision?.internalEvents ?? [];
+      const perfEvents = events.filter((e) => e.startsWith("perf:"));
+      if (perfEvents.length > 0) {
+        allPerfEvents.push(perfEvents);
+      }
+      vi.restoreAllMocks();
+    }
+
+    expect(allPerfEvents.length).toBeGreaterThan(0);
+
+    const stat: Record<string, number[]> = {};
+    for (const round of allPerfEvents) {
+      for (const event of round) {
+        const eq = event.indexOf("=");
+        const key = event.slice(0, eq);
+        const val = Number(event.slice(eq + 1));
+        if (!stat[key]) stat[key] = [];
+        if (Number.isFinite(val)) stat[key].push(val);
+      }
+    }
+
+    console.log("\n=== sendMessage HEAVY perf stress results (5 rounds) ===");
+    console.log(`Session events: ~500 | Accepted memories: 60 | Failure records: 25`);
+    console.log(`Rounds with perf data: ${allPerfEvents.length}/${ROUNDS}`);
+
+    for (const [key, vals] of Object.entries(stat).sort()) {
+      const sorted = [...vals].sort((a, b) => a - b);
+      const sum = sorted.reduce((a, b) => a + b, 0);
+      const avg = sum / sorted.length;
+      const p50 = sorted[Math.floor(sorted.length * 0.5)] ?? 0;
+      const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0;
+      const max = sorted[sorted.length - 1] ?? 0;
+      const min = sorted[0] ?? 0;
+      console.log(
+        `${key.padEnd(30)} n=${String(vals.length).padStart(2)}  avg=${avg.toFixed(2).padStart(7)}ms  p50=${p50.toFixed(2).padStart(7)}ms  p95=${p95.toFixed(2).padStart(7)}ms  min=${min.toFixed(2).padStart(7)}ms  max=${max.toFixed(2).padStart(7)}ms`,
+      );
+    }
+    console.log("=== end HEAVY perf stress results ===\n");
+
+    const expectedKeys = [
+      "perf:scheduler_eval_ms",
+      "perf:scheduler_input_ms",
+      "perf:scheduler_directive_ms",
+      "perf:continuity_update_ms",
+      "perf:system_prompt_ms",
+      "perf:preflight_ms",
+      "perf:memory_format_ms",
+    ];
+    for (const key of expectedKeys) {
+      expect(stat[key]?.length ?? 0, `missing perf key: ${key}`).toBeGreaterThan(0);
+    }
+  }, 120_000);
 });

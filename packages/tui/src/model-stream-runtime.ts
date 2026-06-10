@@ -425,6 +425,7 @@ export async function sendMessage(
   context.activeAbortController = controller;
   context.tools.abortSignal = controller.signal;
   context.interrupt = { type: "running", taskId: "model-stream", canCancel: true };
+  const perfEvents: string[] = [];
   startRequestActivity(
     output,
     context,
@@ -496,6 +497,7 @@ export async function sendMessage(
     const prevDecision = context.lastMetaSchedulerDecision;
     const prevTaskKind = prevDecision?.policyDecision.taskKind ?? "chat";
     const prevUserStateKind = prevDecision?.policyDecision.userState.kind ?? "neutral";
+    const _tCont0 = Date.now();
     context.turnContinuity = updateTurnContinuity(
       context.turnContinuity,
       {
@@ -514,6 +516,7 @@ export async function sendMessage(
       context.recentTaskKinds ?? [],
       context.recentMessageLengths ?? [],
     ).state;
+    perfEvents.push(`perf:continuity_update_ms=${Date.now() - _tCont0}`);
     context.recentTaskKinds = [...(context.recentTaskKinds ?? []), prevTaskKind].slice(-5);
     context.recentMessageLengths = [
       ...(context.recentMessageLengths ?? []),
@@ -521,8 +524,12 @@ export async function sendMessage(
     ].slice(-5);
   }
 
+  const _tMsInput0 = Date.now();
+  const _msInput = createMetaSchedulerInput(context, selectedRuntime, text, false);
+  perfEvents.push(`perf:scheduler_input_ms=${Date.now() - _tMsInput0}`);
+  const _tMsEval0 = Date.now();
   const metaSchedulerDecision = evaluateMetaScheduler({
-    ...createMetaSchedulerInput(context, selectedRuntime, text, false),
+    ..._msInput,
     userText: text,
     messages: createPolicyContextPressureMessages(runtimeStatus, text),
     ...(context.lastToolFailure ? { lastToolFailure: context.lastToolFailure } : {}),
@@ -536,10 +543,12 @@ export async function sendMessage(
         }
       : {}),
   });
+  perfEvents.push(`perf:scheduler_eval_ms=${Date.now() - _tMsEval0}`);
   context.lastMetaSchedulerDecision = metaSchedulerDecision;
   context.lastMetaSchedulerFailureLearningRequired =
     metaSchedulerDecision.shouldCaptureFailureLearning;
   context.lastMetaSchedulerFailureLearningFulfilled = false;
+  metaSchedulerDecision.internalEvents.push(...perfEvents);
   for (const event of metaSchedulerDecision.internalEvents) {
     await appendSystemEvent(context, sessionId, event, "info");
   }
@@ -568,6 +577,10 @@ export async function sendMessage(
     return;
   }
   const gitStatusSummary = await buildGitStatusSummary(context.projectPath);
+  const _tDirective0 = Date.now();
+  const _msDirective = formatMetaSchedulerDirective(metaSchedulerDecision);
+  metaSchedulerDecision.internalEvents.push(`perf:scheduler_directive_ms=${Date.now() - _tDirective0}`);
+  const _tSysPrompt0 = Date.now();
   const systemPrompt = createModelSystemPrompt(
     text,
     context,
@@ -575,9 +588,10 @@ export async function sendMessage(
     architectureDirective,
     summarizeWorktreeContextForPrompt(worktreeContext),
     buildFailureLearningSummaryForPrompt(context.failureLearning),
-    formatMetaSchedulerDirective(metaSchedulerDecision),
+    _msDirective,
     gitStatusSummary,
   );
+  metaSchedulerDecision.internalEvents.push(`perf:system_prompt_ms=${Date.now() - _tSysPrompt0}`);
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
       context,
@@ -630,6 +644,7 @@ export async function sendMessage(
         );
       }
       const contextMaxChars = getProviderContextMaxChars(context, selectedRuntime);
+      const _tPreflight0 = Date.now();
       const preflight = await prepareMessagesForProviderPreflight({
         messages: messagesForProvider,
         context,
@@ -638,6 +653,7 @@ export async function sendMessage(
         trigger: "request",
         deps: compactPreflightDeps,
       });
+      metaSchedulerDecision.internalEvents.push(`perf:preflight_ms=${Date.now() - _tPreflight0}`);
       if (preflight.blocked) {
         clearRequestActivity(context);
         context.activeAbortController = undefined;

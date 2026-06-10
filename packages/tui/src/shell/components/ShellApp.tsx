@@ -270,7 +270,6 @@ function TaskLayout({
             </Box>
           ) : null}
         </TranscriptViewport>
-        <PanelLayer view={view} controller={controller} width={view.width - 4} noColor={noColor} />
       </Box>
 
       <MouseInputRouter
@@ -348,6 +347,7 @@ function TaskLayout({
             flexShrink=0 确保 Yoga 不会在内容超长时把这一行吞掉。 */}
         <Box flexShrink={0} height={1} />
       </Box>
+      <PanelLayer view={view} controller={controller} width={view.width} noColor={noColor} />
     </Box>
   );
 }
@@ -407,7 +407,11 @@ function PanelLayer({
   // BackgroundTaskOverlay keeps its own frame (CCB PermissionDialog style).
   if (view.backgroundTaskOverlay) {
     return (
-      <BackgroundTaskOverlay overlay={view.backgroundTaskOverlay} width={width} noColor={noColor} />
+      <BackgroundTaskOverlay
+        overlay={view.backgroundTaskOverlay}
+        width={width - 4}
+        noColor={noColor}
+      />
     );
   }
 
@@ -415,9 +419,8 @@ function PanelLayer({
   const panel = resolvePanel(view, controller, width, noColor);
   if (!panel) return null;
 
-  // CCB modal: absolute full-cover overlay with ▔ divider.
-  const columns = view.width;
   const theme = createShellTheme(noColor);
+  const separatorWidth = Math.min(Math.max(40, Math.floor(width * 0.6)), 64);
   return (
     <Box
       position="absolute"
@@ -427,12 +430,15 @@ function PanelLayer({
       bottom={0}
       flexDirection="column"
       overflow="hidden"
+      backgroundColor={theme.background}
     >
       <Box flexGrow={1} minHeight={0} />
-      <Box flexShrink={0}>
-        <Text color={theme.permission ?? theme.muted}>{"▔".repeat(columns)}</Text>
+      <Box flexShrink={0} alignItems="center">
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {"─".repeat(separatorWidth)}
+        </Text>
       </Box>
-      <Box flexDirection="column" paddingX={2} flexShrink={0} overflow="hidden">
+      <Box flexDirection="column" paddingX={2} paddingTop={1} flexShrink={0} overflow="hidden">
         {panel}
       </Box>
       <Box flexShrink={0} height={1} />

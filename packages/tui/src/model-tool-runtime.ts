@@ -73,7 +73,6 @@ import {
   refreshIndexStatus,
   runIndexRepository,
 } from "./mcp-index-runtime.js";
-import { formatMetaSchedulerDirective } from "./meta-scheduler-runtime.js";
 import {
   AGENT_CONTROL_TOOL_NAME,
   COMMAND_PROPOSAL_TOOL_NAME,
