@@ -9,6 +9,8 @@ import {
   resolveTerminalInteractionModes,
   writeBestEffort,
 } from "./terminal-interaction-runtime.js";
+import { drainStdin, writeSGRResetAndFlush } from "./stdout-flush-barrier.js";
+import { recoverTerminalState } from "./terminal-state-recovery.js";
 import type { ShellController, ShellRenderOptions } from "./types.js";
 
 export type InkShellInstance = {
@@ -58,8 +60,17 @@ export function renderInkShell(
       alternateScreen: useAlternateScreen,
     });
   } catch (error) {
+    // Phase 6: Terminal state recovery on render startup error
     terminalInteractionSession.disable();
-    showTerminalCursor(stdout);
+    void recoverTerminalState(stdout, {
+      exitAlternateScreen: useAlternateScreen,
+      logError: (msg) => {
+        const stderr = options.stderr as NodeJS.WriteStream | undefined;
+        stderr?.write(`[linghun] ${msg}\n`);
+      },
+    }).catch(() => {
+      // Recovery failed, but still throw original error
+    });
     throw error;
   }
 
@@ -86,6 +97,13 @@ export function renderInkShell(
       // stdout/stdin may already be closed (e.g. Windows cmd window close)
     }
     terminalInteractionSession.disable();
+
+    // Phase 6: Exit cleanup - drain stdin and reset SGR state (async, non-blocking)
+    drainStdin(stdinStream);
+    void writeSGRResetAndFlush(stdout).catch(() => {
+      // Best-effort: ignore flush errors during unmount
+    });
+
     showTerminalCursor(stdout);
     // Unref stdin to prevent the process from hanging on exit
     const stdin = options.stdin as { unref?: () => void } | undefined;
@@ -96,8 +114,20 @@ export function renderInkShell(
     if (unmounted) return;
     try {
       instance.rerender(<ShellApp controller={controller} capability={capability} />);
-    } catch {
-      // Ignore Ink rerender errors from stream close / unmount races
+    } catch (error) {
+      // Phase 6: Terminal state recovery on rerender error
+      // Log error and attempt recovery, but don't throw (let app continue)
+      const stderr = options.stderr as NodeJS.WriteStream | undefined;
+      const message = error instanceof Error ? error.message : String(error);
+      stderr?.write(`[linghun] Render error: ${message}\n`);
+
+      // Attempt to recover terminal state asynchronously
+      void recoverTerminalState(stdout, {
+        exitAlternateScreen: false, // Don't exit alt screen on mid-session error
+        logError: (msg) => stderr?.write(`[linghun] ${msg}\n`),
+      }).catch(() => {
+        // Recovery failed, but we tried - continue anyway
+      });
     }
   };
 
@@ -107,12 +137,16 @@ export function renderInkShell(
       resizeTimer = undefined;
       if (unmounted) return;
       try {
+        // Phase 6: Clear and reassert terminal state after resize
+        // This ensures viewport is properly recalculated and clamped
         instance.clear();
       } catch {
         // Ignore clear errors if stdout is closed
       }
       terminalInteractionSession.reassert();
       rerender();
+      // Note: Viewport clamp happens automatically in ScrollViewport's useEffect
+      // after rerender measures new dimensions and calls onMeasure callback
     }, 60);
   };
 
