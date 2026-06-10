@@ -26,18 +26,50 @@ export function TaskListView({
         {text.r3TasksTitle}
       </Text>
       {list.rows.map((row) => {
+        const completed = row.status === "completed";
+        const blocked = row.status === "blocked";
+        const inProgress = row.status === "in_progress";
         const marker = taskMarker(row.status, noColor);
-        const owner = row.owner ? ` · ${row.owner}` : "";
-        const blocked = row.blockedBy && row.blockedBy.length > 0 ? ` · ${text.r3BlockedByLabel} ${row.blockedBy.join(",")}` : "";
+        const dimmed = completed || blocked;
+        const hasBlockers = blocked && row.blockedBy && row.blockedBy.length > 0;
+        const blockedByLabel = language === "en-US" ? "blocked by" : "被阻塞";
         return (
-          <Text key={row.id} color={row.status === "in_progress" ? theme.status.running : undefined}>
-            {fitText(`${marker} ${row.subject}${owner}${blocked}`, innerWidth)}
-          </Text>
+          <Box key={row.id} flexDirection="column">
+            {/* Row 1: marker + subject + owner + blockedBy */}
+            <Box flexDirection="row">
+              <Text
+                color={inProgress ? theme.status.running : undefined}
+                bold={inProgress}
+                strikethrough={completed}
+                dimColor={dimmed}
+              >
+                {marker} {fitText(row.subject, Math.max(8, innerWidth - 4 - (row.owner ? row.owner.length + 3 : 0)))}
+              </Text>
+              {row.owner ? (
+                <Text color={theme.muted} dimColor>
+                  {" "}(@{row.owner})
+                </Text>
+              ) : null}
+              {hasBlockers ? (
+                <Text color={theme.muted} dimColor>
+                  {" "}▸ {blockedByLabel} {row.blockedBy!.map((id) => `#${id}`).join(", ")}
+                </Text>
+              ) : null}
+            </Box>
+            {/* Row 2: activity summary (in_progress + not blocked + has activity) */}
+            {inProgress && !blocked && row.activity ? (
+              <Box paddingLeft={2}>
+                <Text color={theme.muted} dimColor>
+                  {fitText(`${row.activity}…`, Math.max(8, innerWidth - 4))}
+                </Text>
+              </Box>
+            ) : null}
+          </Box>
         );
       })}
       {list.hiddenPending > 0 ? (
         <Text color={theme.muted} dimColor>
-          {`…+${list.hiddenPending} ${text.r3PendingHiddenSuffix}`}
+          {`… +${list.hiddenPending} ${text.r3PendingHiddenSuffix}`}
         </Text>
       ) : null}
     </Box>

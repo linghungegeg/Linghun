@@ -93,6 +93,7 @@ export function buildTaskListView(context: TuiContext): TaskListView | undefined
       status: todo.status,
       owner: readOptionalString(todo, "owner"),
       blockedBy: readBlockedBy(todo),
+      activity: readOptionalString(todo, "evidence"),
     })),
     hiddenPending: todos.hiddenPending,
   };

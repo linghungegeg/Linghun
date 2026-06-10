@@ -370,6 +370,8 @@ export type TaskListView = {
     status: string;
     owner?: string;
     blockedBy?: string[];
+    /** Phase 7 — activity summary for row 2 (dimColor). Only shown when in_progress + non-empty. */
+    activity?: string;
   }[];
   hiddenPending: number;
 };
