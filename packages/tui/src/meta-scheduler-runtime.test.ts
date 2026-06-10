@@ -955,6 +955,86 @@ describe("Meta scheduler runtime", () => {
       expect(result.satisfied).toBe(true);
     });
   });
+
+  describe("Task 6: intent classifier — signal-aware multi-intent", () => {
+    it("forces code_fact when consecutive failures >= 2 and edit keywords dominate", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "修改 meta-scheduler-runtime.ts 的 bug",
+        consecutiveFailures: 2,
+      });
+
+      expect(decision.policyDecision.taskKind).toBe("code_fact");
+      expect(decision.policyDecision.executionPlan.preferSourceFirst).toBe(true);
+      expect(decision.internalEvents).toEqual(
+        expect.arrayContaining([expect.stringContaining("连续失败后强制源码优先")]),
+      );
+    });
+
+    it("flags ambiguous intent when no domain scores >= 10", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "帮我看看那个东西",
+      });
+
+      expect(decision.policyDecision.taskKind).toBe("chat");
+      expect(decision.internalEvents).toContain("meta_scheduler:intent_unclear_clarify");
+      expect(decision.directives).toContain("用户意图不明确，先澄清再操作");
+    });
+
+    it("appends verification to secondaries when last verification failed", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "修改文件",
+        lastVerificationStatus: "fail",
+      });
+
+      expect(decision.policyDecision.executionPlan.requireVerification).toBe(true);
+      expect(decision.internalEvents).toEqual(
+        expect.arrayContaining([expect.stringContaining("上轮验证失败")]),
+      );
+    });
+
+    it("scores edit over code_fact when edit keywords dominate", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "修改并实现这个功能",
+      });
+
+      // 修改(10) 实现(8) → edit=10, no code_fact keywords → clear edit win
+      expect(decision.policyDecision.taskKind).toBe("edit");
+    });
+
+    it("records provider failure history in classifier reason", () => {
+      const failureLearning = baseFailureLearning();
+      failureLearning.records.push({
+        id: "p-fail",
+        createdAt: new Date(0).toISOString(),
+        lastSeen: new Date(0).toISOString(),
+        projectScope: failureLearning.projectScope,
+        sourceRef: "evidence:xyz",
+        category: "provider_failure",
+        failureSummary: "provider rate limited",
+        rootCauseGuess: "rate limit",
+        inferred: true,
+        avoidNextTime: "use fallback",
+        severity: "high",
+        dedupeHash: "hash",
+        count: 1,
+        status: "active",
+      });
+
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "修改文件",
+        failureLearning,
+      });
+
+      expect(decision.internalEvents).toEqual(
+        expect.arrayContaining([expect.stringContaining("provider 历史失败")]),
+      );
+    });
+  });
 });
 
 function baseInput() {

@@ -258,6 +258,18 @@ export type PolicyDecision = {
   userStatePersistence: number;
 };
 
+export type TaskIntent = {
+  kind: PolicyDecision["taskKind"];
+  score: number; // 0-100
+};
+
+export type TaskClassification = {
+  primary: PolicyDecision["taskKind"];
+  secondaries: PolicyDecision["taskKind"][];
+  intentUnclear: boolean;
+  reason: string; // 调试用，写 internalEvents
+};
+
 export type PolicyHint = {
   id: string;
   severity: "info" | "warning";
@@ -339,10 +351,22 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   );
   const indexStrategy = classifyIndexStrategy(input.index);
   const capabilityPlan = createCapabilityPlan(input.userText);
-  const taskKind = adjustTaskKindForUserState(
-    classifyTaskKind(input.userText, capabilityPlan),
-    userStateDecision,
-  );
+  const classification = classifyTaskKind(input.userText, capabilityPlan, {
+    consecutiveFailures: input.consecutiveFailures,
+    taskDomainSwitched: input.taskDomainSwitched,
+    lastVerificationStatus: input.lastVerificationStatus,
+    userStatePersistence: input.userStatePersistence,
+    failureLearning: input.failureLearning,
+  });
+  let taskKind = adjustTaskKindForUserState(classification.primary, userStateDecision);
+  if (classification.intentUnclear) {
+    taskKind = "chat";
+    directives.push("用户意图不明确，先澄清再操作");
+    internalEvents.push("meta_scheduler:intent_unclear_clarify");
+  }
+  if (classification.reason) {
+    internalEvents.push(`meta_scheduler:classifier_reason=${classification.reason}`);
+  }
   const expectedMutating =
     userStateDecision.interactionPlan.allowImplementationPush &&
     expectsMutatingAction(input.userText, taskKind, capabilityPlan);
@@ -351,16 +375,22 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   const runtimeSignal = summarizeRuntimeSignal(input, evidenceFreshness);
   const includeFailureLearning = hasActiveFailureLearning(input.failureLearning);
   const failureSignal = summarizeFailureSignal(input.failureLearning);
-  const preferSourceFirst =
+  let preferSourceFirst =
     shouldPreferSourceFirst(taskKind, indexStrategy) ||
     userStateDecision.interactionPlan.sourceFactsFirst;
-  const requireVerification =
+  let requireVerification =
     highRiskClaim ||
     taskKind === "verification" ||
     expectedMutating ||
     isRiskyVerificationStatus(input.lastVerificationStatus) ||
     userStateDecision.verificationPlan.strength === "strengthened" ||
     userStateDecision.verificationPlan.strength === "release";
+  if (classification.secondaries.includes("code_fact")) {
+    preferSourceFirst = true;
+  }
+  if (classification.secondaries.includes("verification")) {
+    requireVerification = true;
+  }
   const surfaceWindowsSafeHint = shouldSurfaceWindowsSafeHint({
     userText: input.userText,
     taskKind,
@@ -708,39 +738,157 @@ function adjustTaskKindForUserState(
   return taskKind;
 }
 
+// ── 意图分类器：信号优先 + 关键词加权 + 模糊澄清 ──
+
+type KeywordWeight = [string, number];
+
+const DOMAIN_KEYWORD_WEIGHTS: Record<string, KeywordWeight[]> = {
+  code_fact: [
+    ["读", 10], ["定位", 10], ["源码", 10], ["read", 10], ["source", 10],
+    ["看", 8], ["找", 8], ["grep", 8], ["search", 8], ["调用链", 8], ["code", 8],
+    ["查看", 6], ["inspect", 6], ["trace", 6], ["文件", 6],
+    ["file", 4],
+  ],
+  edit: [
+    ["修改", 10], ["修", 10], ["改", 10], ["fix", 10], ["modify", 10],
+    ["实现", 8], ["写入", 8], ["write", 8], ["implement", 8], ["update", 8],
+    ["新增", 6], ["创建", 6], ["删除", 6], ["create", 6], ["delete", 6],
+  ],
+  verification: [
+    ["测试", 10], ["验证", 10], ["test", 10], ["verify", 10],
+    ["typecheck", 8], ["lint", 8], ["check", 8],
+    ["build", 6],
+    ["检查", 4],
+  ],
+  agent: [
+    ["agent", 10], ["智能体", 10], ["multi-agent", 10],
+    ["fork", 8],
+    ["多开", 6], ["并行", 6],
+  ],
+  workflow: [
+    ["workflow", 10], ["job", 10], ["工作流", 10],
+    ["流水线", 6],
+    ["后台", 4], ["托管", 4],
+  ],
+};
+
+function isLatinKeyword(s: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(s);
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matchKeyword(text: string, keyword: string): boolean {
+  if (isLatinKeyword(keyword)) {
+    return new RegExp(`\\b${escapeRegex(keyword)}\\b`, "iu").test(text);
+  }
+  return text.includes(keyword);
+}
+
+function scoreDomain(text: string, keywords: KeywordWeight[]): number {
+  let maxScore = 0;
+  for (const [keyword, weight] of keywords) {
+    if (matchKeyword(text, keyword)) {
+      maxScore = Math.max(maxScore, weight);
+    }
+  }
+  return maxScore;
+}
+
 function classifyTaskKind(
   userText: string,
   capabilityPlan: CapabilityPlan = createEmptyCapabilityPlan(),
-): PolicyDecision["taskKind"] {
-  if (
-    /(?:验证|复检|测试|typecheck|lint|build|test|verify|verification|claim-check)/iu.test(userText)
-  ) {
-    return "verification";
+  input?: Pick<
+    MetaSchedulerInput,
+    | "consecutiveFailures"
+    | "taskDomainSwitched"
+    | "lastVerificationStatus"
+    | "userStatePersistence"
+    | "failureLearning"
+  >,
+): TaskClassification {
+  // Layer 2: 对所有域独立打分
+  const scores: TaskIntent[] = [];
+  for (const [domain, keywords] of Object.entries(DOMAIN_KEYWORD_WEIGHTS)) {
+    scores.push({
+      kind: domain as PolicyDecision["taskKind"],
+      score: scoreDomain(userText, keywords),
+    });
   }
-  if (/(?:智能体|子智能体|\bagent\b|\bfork\b|multi-agent|多开)/iu.test(userText)) {
-    return "agent";
+  scores.push({
+    kind: "capability",
+    score: capabilityPlan.route === "capability" ? 15 : 0,
+  });
+  scores.push({ kind: "chat", score: 5 });
+
+  scores.sort((a, b) => b.score - a.score);
+  const dominant = scores[0];
+
+  const secondaries: PolicyDecision["taskKind"][] = [];
+  const reasons: string[] = [];
+
+  const consecutiveFailures = input?.consecutiveFailures ?? 0;
+  const lastVerificationStatus = input?.lastVerificationStatus;
+  const failureLearning = input?.failureLearning;
+
+  // Layer 1: 信号优先
+  if (consecutiveFailures >= 2 && dominant.kind === "edit") {
+    reasons.push("连续失败后强制源码优先");
   }
-  if (/(?:工作流|\bworkflow\b|\bjob\b|流水线)/iu.test(userText)) {
-    return "workflow";
+
+  if (lastVerificationStatus === "fail") {
+    if (!secondaries.includes("verification")) {
+      secondaries.push("verification");
+    }
+    reasons.push("上轮验证失败");
   }
-  if (capabilityPlan.route === "capability") {
-    return "capability";
+
+  const hasProviderFailure = failureLearning?.records.some(
+    (r) =>
+      r.status === "active" &&
+      r.category === "provider_failure" &&
+      r.projectScope === failureLearning.projectScope,
+  );
+  if (hasProviderFailure) {
+    reasons.push("provider 历史失败，避免重压力操作");
   }
-  if (
-    /(?:实现|修复|修改|更新|新增|删除|写入|创建|改动|edit|write|modify|update|fix|implement|create|delete)/iu.test(
-      userText,
-    )
-  ) {
-    return "edit";
+
+  // 确定 primary：信号可覆盖关键词打分
+  let primary: PolicyDecision["taskKind"];
+  if (consecutiveFailures >= 2 && dominant.kind === "edit") {
+    primary = "code_fact";
+  } else {
+    primary = dominant.kind;
   }
-  if (
-    /(?:源码|代码事实|文件|读取|定位|调用链|source|code|file|read|grep|search|inspect)/iu.test(
-      userText,
-    )
-  ) {
-    return "code_fact";
+
+  // Layer 3: 模糊时标记澄清
+  const intentUnclear = scores.every((s) => s.score < 10);
+  if (intentUnclear && reasons.length === 0) {
+    reasons.push("意图模糊，建议模型先澄清");
   }
-  return "chat";
+
+  // 归并 secondaries：第二高分 ≥ 最高分 * 0.6
+  const primaryScore =
+    primary === "code_fact" && dominant.kind === "edit"
+      ? dominant.score // 取原始 edit 分数作为参照
+      : scores.find((s) => s.kind === primary)?.score ?? 0;
+  for (const s of scores) {
+    if (s.kind === primary) continue;
+    if (s.score >= primaryScore * 0.6 && s.score > 0) {
+      if (!secondaries.includes(s.kind)) {
+        secondaries.push(s.kind);
+      }
+    }
+  }
+
+  return {
+    primary: intentUnclear ? "chat" : primary,
+    secondaries,
+    intentUnclear,
+    reason: reasons.join("; "),
+  };
 }
 
 function expectsMutatingAction(
