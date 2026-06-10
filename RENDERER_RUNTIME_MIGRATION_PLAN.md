@@ -1120,9 +1120,32 @@ Document what changed, what was intentionally not changed, test results, and kno
 
 ## Acceptance Criteria
 
-- [ ] A new maintainer can understand the architecture without reading the whole conversation.
-- [ ] The repo records what was verified and where risk remains.
-- [ ] Old redundant app-layer patches are removed or explicitly marked as final safety guards.
+- [x] A new maintainer can understand the architecture without reading the whole conversation.
+- [x] The repo records what was verified and where risk remains.
+- [x] Old redundant app-layer patches are removed or explicitly marked as final safety guards.
+
+## Phase 9 Closure
+
+**Status: COMPLETE**
+
+Delivery document written: `docs/delivery/phase-renderer-runtime-migration-delivery.md`
+
+Tasks completed:
+- [x] Write/update delivery document under the repo's existing delivery-doc convention.
+- [x] Document why stock Ink app-layer patching was not enough.
+- [x] Document new renderer/runtime ownership boundaries.
+- [x] Document CCB behavior alignment at behavior level.
+- [x] Document Linghun clean-room implementation notes.
+- [x] Document config/env knobs.
+- [x] Document automated test results.
+- [x] Document manual terminal test results (checklist provided, execution pending user).
+- [x] Document known limitations.
+- [x] Provide handoff packet for future maintenance.
+
+Acceptance:
+- Architecture is documented in the delivery doc with ownership diagram and file mapping.
+- Verified items (632 automated tests) and risk (manual test pending) are explicitly recorded.
+- Composer's stock useInput is explicitly marked as "final safety guard" in both code comments and delivery doc.
 
 ---
 
