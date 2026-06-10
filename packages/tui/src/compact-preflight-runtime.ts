@@ -1,7 +1,8 @@
 import type { ModelRole } from "@linghun/config";
 import type { ModelMessage } from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
-import { readPositiveIntEnv, redactCommonSecrets } from "@linghun/shared";
+import { redactCommonSecrets } from "@linghun/shared";
+import { getContextWindowForModel } from "./context-window-runtime.js";
 import { type CompactBoundary, compactMessagesToFit } from "./compact-context.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import {
@@ -57,7 +58,7 @@ export type ProviderPreflightCompactResult =
   | { blocked: true; messages: ModelMessage[]; message: string };
 
 const MAX_CONTEXT_MESSAGES = 12;
-const DEFAULT_CONTEXT_WINDOW_TOKENS = readPositiveIntEnv("LINGHUN_CONTEXT_WINDOW_TOKENS", 128_000);
+
 const CONTEXT_INPUT_HEADROOM_TOKENS = 8_192;
 const CONTEXT_CHARS_PER_TOKEN_ESTIMATE = 4;
 const AUTOCOMPACT_BUFFER_TOKENS = 13_000;
@@ -257,9 +258,7 @@ export function recordCompactBoundary(context: TuiContext, boundary: CompactBoun
 
 function getAutoCompactBufferTokens(context: TuiContext, runtime: CompactPreflightRuntime): number {
   const route = getRoleRoute(context.config, runtime.role);
-  const known = findKnownModel(runtime.model);
-  const contextWindowTokens =
-    route.maxInputTokens ?? known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+  const contextWindowTokens = getContextWindowForModel(runtime.model, route);
   if (contextWindowTokens >= HUGE_CONTEXT_WINDOW_TOKENS) {
     return HUGE_CONTEXT_BUFFER_TOKENS;
   }
@@ -523,12 +522,12 @@ export function getProviderContextMaxChars(
   runtime: CompactPreflightRuntime,
 ): number {
   const route = getRoleRoute(context.config, runtime.role);
-  const known = findKnownModel(runtime.model);
+  const contextWindow = getContextWindowForModel(runtime.model, route);
   const maxInputTokens =
     route.maxInputTokens ??
     Math.max(
       1,
-      (known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW_TOKENS) -
+      contextWindow -
         (route.maxOutputTokens ??
           context.config.providers[runtime.provider]?.maxOutputTokens ??
           CONTEXT_INPUT_HEADROOM_TOKENS),

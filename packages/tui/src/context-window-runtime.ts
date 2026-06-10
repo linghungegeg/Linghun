@@ -1,5 +1,6 @@
 import type { RoleModelRoute } from "@linghun/config";
 import { findKnownModel } from "@linghun/providers";
+import { readPositiveIntEnv } from "@linghun/shared";
 
 export type ContextPercentage = {
   usedTokens: number;
@@ -9,17 +10,21 @@ export type ContextPercentage = {
   bar: string;
 };
 
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
+const DEFAULT_CONTEXT_WINDOW_TOKENS = readPositiveIntEnv("LINGHUN_CONTEXT_WINDOW_TOKENS", 128_000);
+const CONTEXT_1M_TOKENS = 1_000_000;
+
+/** Model name ends with `[1m]` (case-insensitive) → explicit 1M opt-in. */
+function has1mSuffix(model: string | undefined): boolean {
+  return model ? /\[1m\]$/i.test(model) : false;
+}
 
 export function getContextWindowForModel(
   model: string | undefined,
   route?: Pick<RoleModelRoute, "maxInputTokens">,
 ): number {
-  return (
-    route?.maxInputTokens ??
-    findKnownModel(model ?? "")?.contextWindow ??
-    DEFAULT_CONTEXT_WINDOW_TOKENS
-  );
+  if (route?.maxInputTokens) return route.maxInputTokens;
+  if (has1mSuffix(model)) return CONTEXT_1M_TOKENS;
+  return findKnownModel(model ?? "")?.contextWindow ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
 }
 
 export function calculateContextPercentages(
