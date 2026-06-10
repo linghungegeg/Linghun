@@ -74,7 +74,9 @@ export type ToolName =
   | "Glob"
   | "Bash"
   | "Todo"
-  | "Diff";
+  | "Diff"
+  | "WebSearch"
+  | "WebFetch";
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "blocked";
 

@@ -128,6 +128,9 @@ function formatPrimaryToolLead(
     if (name === "Glob") return `File search summary: ${count ?? visibleLines} file(s).`;
     if (name === "Read") return `Read summary: ${totalLines ?? visibleLines} line(s).`;
     if (name === "Bash" && exitCode !== undefined) return `Bash finished: exit code ${exitCode}.`;
+    // Phase 17: WebSearch / WebFetch dedicated format.
+    if (name === "WebSearch") return formatWebSearchLead(output, language);
+    if (name === "WebFetch") return formatWebFetchLead(output, language);
     // Phase 18: try structured output for non-built-in tools.
     const enStructured = tryExtractLeadText(output.text);
     if (enStructured) return `${name}: ${enStructured}`;
@@ -137,6 +140,9 @@ function formatPrimaryToolLead(
   if (name === "Glob") return `文件搜索摘要：${count ?? visibleLines} 个文件。`;
   if (name === "Read") return `读取摘要：${totalLines ?? visibleLines} 行。`;
   if (name === "Bash" && exitCode !== undefined) return `Bash 已结束：退出码 ${exitCode}。`;
+  // Phase 17: WebSearch / WebFetch dedicated format.
+  if (name === "WebSearch") return formatWebSearchLead(output, language);
+  if (name === "WebFetch") return formatWebFetchLead(output, language);
   // Phase 18: try structured output for non-built-in tools.
   const zhStructured = tryExtractLeadText(output.text);
   if (zhStructured) return `${name}：${zhStructured}`;
@@ -161,6 +167,79 @@ function formatBashEndSummary(
   const exitCode = data && typeof data.exitCode === "number" ? data.exitCode : undefined;
   if (exitCode === undefined) return undefined;
   return language === "en-US" ? `Command exited ${exitCode}` : `命令已退出 ${exitCode}`;
+}
+
+/**
+ * Phase 17 — WebSearch lead format: "执行 N 次搜索 · Ss" / "Did N searches in Ss".
+ */
+function formatWebSearchLead(output: ToolOutput, language: Language): string {
+  const data =
+    output.data && typeof output.data === "object"
+      ? (output.data as Record<string, unknown>)
+      : undefined;
+  const searches =
+    typeof data?.searches === "number"
+      ? data.searches
+      : typeof data?.count === "number"
+        ? data.count
+        : undefined;
+  const duration =
+    typeof data?.duration === "number"
+      ? data.duration
+      : typeof data?.durationMs === "number"
+        ? data.durationMs / 1000
+        : undefined;
+  const parts: string[] = [];
+  if (searches !== undefined) {
+    parts.push(
+      language === "en-US"
+        ? `${searches} ${searches === 1 ? "search" : "searches"}`
+        : `执行 ${searches} 次搜索`,
+    );
+  }
+  if (duration !== undefined) {
+    parts.push(language === "en-US" ? `${duration.toFixed(1)}s` : `${duration.toFixed(1)}s`);
+  }
+  if (parts.length === 0) {
+    return language === "en-US" ? "WebSearch completed" : "WebSearch 已完成";
+  }
+  return parts.join(language === "en-US" ? " in " : " · ");
+}
+
+/**
+ * Phase 17 — WebFetch lead format: "收到 N KB · 200 OK" / "Received N KB · 200 OK".
+ */
+function formatWebFetchLead(output: ToolOutput, language: Language): string {
+  const data =
+    output.data && typeof output.data === "object"
+      ? (output.data as Record<string, unknown>)
+      : undefined;
+  const size =
+    typeof data?.size === "number"
+      ? data.size
+      : typeof data?.contentLength === "number"
+        ? data.contentLength
+        : undefined;
+  const status =
+    typeof data?.status === "number"
+      ? data.status
+      : typeof data?.statusCode === "number"
+        ? data.statusCode
+        : undefined;
+  const statusText = typeof data?.statusText === "string" ? data.statusText : undefined;
+  const parts: string[] = [];
+  if (size !== undefined) {
+    const kb = size >= 1024 ? `${(size / 1024).toFixed(1)}KB` : `${size}B`;
+    parts.push(language === "en-US" ? `Received ${kb}` : `收到 ${kb}`);
+  }
+  if (status !== undefined) {
+    const code = statusText ? `${status} ${statusText}` : String(status);
+    parts.push(code);
+  }
+  if (parts.length === 0) {
+    return language === "en-US" ? "WebFetch completed" : "WebFetch 已完成";
+  }
+  return parts.join(" · ");
 }
 
 /**
