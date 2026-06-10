@@ -1,6 +1,11 @@
 import type { LinghunConfig } from "@linghun/config";
 import type { SessionStore } from "@linghun/core";
-import type { EndpointProfile, ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
+import type {
+  EndpointProfile,
+  ModelGateway,
+  ModelMessage,
+  ModelToolCall,
+} from "@linghun/providers";
 import {
   CODEBASE_MEMORY_COMMAND as SHARED_CODEBASE_MEMORY_COMMAND,
   CODEBASE_MEMORY_ENV as SHARED_CODEBASE_MEMORY_ENV,
@@ -501,9 +506,14 @@ export type TuiContext = {
   /** Agent completion timestamps for eviction delay (Phase 5). Cleared on next render cycle. */
   agentCompletedAt?: Record<string, number>;
   /** R6 — notification callback, initialized by index.ts to push transient notifications. */
-  pushNotification?: (text: string, tone?: "default" | "dim" | "warning" | "error" | "success") => void;
+  pushNotification?: (
+    text: string,
+    tone?: "default" | "dim" | "warning" | "error" | "success",
+  ) => void;
   /** R7 — brief mode reduces TUI noise (env LINGHUN_TUI_BRIEF=1 or /brief toggle). */
   briefMode?: boolean;
+  /** Phase 9 — push a ProductBlockViewModel into the transcript block list. Set by the shell initializer. */
+  pushTranscriptBlock?: (block: import("./shell/types.js").ProductBlockViewModel) => void;
 };
 
 export const VERIFICATION_COMMAND_TIMEOUT_MS = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS;

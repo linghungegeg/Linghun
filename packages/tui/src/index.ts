@@ -1525,6 +1525,7 @@ async function runPlainTui(
   const { isNoColorTerminal } = await import("./shell/ink-renderer.js");
   const isTty = (input as { isTTY?: boolean }).isTTY === true;
   const blocks: ProductBlockViewModel[] = [];
+  context.pushTranscriptBlock = (block) => blocks.push(block);
 
   // Non-TTY (pipe/script) keeps legacy text startup for scripting compatibility.
   // TTY legacy (Windows cmd) gets the product-grade plain shell.
@@ -1649,6 +1650,7 @@ async function runInkShell(
   });
   const shellOutput = new ShellBlockOutput(context, blocks, () => shell?.rerender());
   context.compactOutputMemory = () => shellOutput.compactOutputMemory();
+  context.pushTranscriptBlock = (block) => blocks.push(block);
   const controller: ShellController = {
     getViewModel: () => {
       const runtime = getSelectedModelRuntime(context);
@@ -1833,7 +1835,10 @@ async function runInkShell(
         return;
       }
       if (event.type === "background-overlay-open") {
-        context.backgroundOverlayState = { open: true, cursor: context.backgroundOverlayState?.cursor ?? 0 };
+        context.backgroundOverlayState = {
+          open: true,
+          cursor: context.backgroundOverlayState?.cursor ?? 0,
+        };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -1876,7 +1881,12 @@ async function runInkShell(
                     text: selected.title,
                     taskRef: {
                       id: selected.id,
-                      kind: selected.kind === "agent" ? "agent" : selected.kind === "job" ? "job" : "background",
+                      kind:
+                        selected.kind === "agent"
+                          ? "agent"
+                          : selected.kind === "job"
+                            ? "job"
+                            : "background",
                     },
                     detailsText: selected.nextAction ?? selected.userVisibleSummary,
                   },
@@ -1897,7 +1907,8 @@ async function runInkShell(
         const agents = context.agents ?? [];
         const running = agents.filter((a) => a.status === "running");
         const cursor = context.agentTreeState?.cursor ?? -1;
-        const next = cursor < 0 ? 0 : Math.max(0, Math.min(cursor + event.delta, running.length - 1));
+        const next =
+          cursor < 0 ? 0 : Math.max(0, Math.min(cursor + event.delta, running.length - 1));
         context.agentTreeState = { cursor: next, expandedId: context.agentTreeState?.expandedId };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -1909,7 +1920,8 @@ async function runInkShell(
         const cursor = context.agentTreeState?.cursor ?? -1;
         if (cursor >= 0 && cursor < running.length) {
           const agent = running[cursor];
-          const expandedId = context.agentTreeState?.expandedId === agent?.id ? undefined : agent?.id;
+          const expandedId =
+            context.agentTreeState?.expandedId === agent?.id ? undefined : agent?.id;
           context.agentTreeState = { cursor, expandedId };
         }
         shell?.rerender();
@@ -1946,9 +1958,10 @@ async function runInkShell(
             pushTransientNotification(context, `Copy failed: ${copy.error}`, "warning");
           } else if (copy.ok) {
             const lineCount = Math.max(1, text.split("\n").length);
-            const message = context.language === "en-US"
-              ? `Copied ${lineCount} line${lineCount === 1 ? "" : "s"}`
-              : `已复制 ${lineCount} 行`;
+            const message =
+              context.language === "en-US"
+                ? `Copied ${lineCount} line${lineCount === 1 ? "" : "s"}`
+                : `已复制 ${lineCount} 行`;
             pushTransientNotification(context, message, "success");
           }
         }
@@ -2327,8 +2340,12 @@ async function runInkShell(
       // ─── D.13E Step 2 — config-* 三类事件：ConfigPanel 自带 useInput 上抛 ─────
       if (event.type === "config-move") {
         if (!context.configPanelState) return;
-        const current = context.configPanelState.phase === "panel_list" ? context.configPanelState.cursor : 0;
-        context.configPanelState = { phase: "panel_list", cursor: Math.max(0, Math.min(13, current + event.delta)) };
+        const current =
+          context.configPanelState.phase === "panel_list" ? context.configPanelState.cursor : 0;
+        context.configPanelState = {
+          phase: "panel_list",
+          cursor: Math.max(0, Math.min(13, current + event.delta)),
+        };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

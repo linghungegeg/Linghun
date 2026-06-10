@@ -343,7 +343,8 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
     if (
       messageKind &&
       messageKind !== "tool_result_error" &&
-      messageKind !== "assistant_thinking"
+      messageKind !== "assistant_thinking" &&
+      messageKind !== "compact_boundary"
     ) {
       const previewBody = messageBody(block, block.nextAction);
       const nextAction = visibleNextAction(block, previewBody);
@@ -373,6 +374,10 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
       const body = messageBody(block, nextAction);
       if (!body) return [];
       return [`${dim("\u2234 ", noColor)}${dim(body, noColor)}`];
+    }
+
+    if (messageKind === "compact_boundary") {
+      return [`${dim(`\u273b ${block.title}`, noColor)}`];
     }
 
     if (messageKind === "tool_result_error") {

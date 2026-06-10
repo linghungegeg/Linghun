@@ -1,6 +1,6 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
-import { fitText, wrapText, formatBriefTimestamp } from "../text-utils.js";
+import { fitText, formatBriefTimestamp, wrapText } from "../text-utils.js";
 import { type ShellTheme, getStatusMarker } from "../theme.js";
 import type { MessageBlockKind, ProductBlockViewModel } from "../types.js";
 import { CtrlOToExpand } from "./CtrlOToExpand.js";
@@ -106,14 +106,16 @@ export function ProductBlock({
             <Text color={theme.muted}>│ </Text>
             {ts ? <Text dimColor>{ts} </Text> : null}
             <Box flexDirection="column">
-              {wrapText(body, Math.max(8, width - 2 - (ts ? ts.length + 3 : 0))).map((line, idx) => (
-                <Text
-                  key={`${idx}-${line}`}
-                  backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}
-                >
-                  {line}
-                </Text>
-              ))}
+              {wrapText(body, Math.max(8, width - 2 - (ts ? ts.length + 3 : 0))).map(
+                (line, idx) => (
+                  <Text
+                    key={`${idx}-${line}`}
+                    backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}
+                  >
+                    {line}
+                  </Text>
+                ),
+              )}
             </Box>
           </Box>
         </Box>
@@ -151,7 +153,8 @@ export function ProductBlock({
     const dim = isCancelled || isRejected;
     const tone = isDiagnostic ? "diagnostic" : "default";
     const isAssistantText = block.messageKind === "assistant_text";
-    const useMessageResponse = isLocalOutput || block.messageKind === "tool_result_success" || isDiagnostic;
+    const useMessageResponse =
+      isLocalOutput || block.messageKind === "tool_result_success" || isDiagnostic;
     return (
       <Box flexDirection="column" marginTop={isAssistantText ? 1 : 0} marginBottom={0}>
         {useMessageResponse ? (
@@ -206,6 +209,15 @@ export function ProductBlock({
         {nextAction ? (
           <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
         ) : null}
+      </Box>
+    );
+  }
+
+  // compact_boundary: 对话压缩后插入 dim 边界标记，对齐 CCB CompactBoundaryMessage。
+  if (block.messageKind === "compact_boundary") {
+    return (
+      <Box marginY={1}>
+        <Text dimColor>{`✻ ${block.title}`}</Text>
       </Box>
     );
   }
@@ -265,7 +277,9 @@ export function ProductBlock({
             />
           </MessageResponse>
         ) : null}
-        {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} /> : null}
+        {nextAction ? (
+          <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
+        ) : null}
       </Box>
     );
   }

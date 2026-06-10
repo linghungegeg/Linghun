@@ -56,7 +56,8 @@ export type MessageBlockKind =
   | "notification"
   | "permission_panel"
   | "help_panel"
-  | "status";
+  | "status"
+  | "compact_boundary";
 
 export type ProductBlockViewModel = {
   id: string;

@@ -4,15 +4,9 @@ import type { ToolName } from "@linghun/tools";
 import { calculateContextPercentages } from "../context-window-runtime.js";
 import type { TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
-import { sanitizeMainScreenLeakage } from "../model-prompt-runtime.js";
 import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
+import { sanitizeMainScreenLeakage } from "../model-prompt-runtime.js";
 import { SLASH_COMMAND_REGISTRY } from "../natural-command-bridge.js";
-import {
-  buildAgentProgressTreeView,
-  buildBackgroundTaskOverlayView,
-  buildTaskListView,
-  buildWorkflowProgressView,
-} from "./progress-views.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
 import { buildHelpPanelData } from "./models/help-panel.js";
 import { buildElevationOptions } from "./models/permission-elevation.js";
@@ -24,11 +18,17 @@ import {
   explainSemantic,
 } from "./models/permission-explanation.js";
 import {
+  type TranscriptSelectionState,
   buildTranscriptScreenBuffer,
   selectionLineIndexesForBlock,
   selectionLineRangesForBlock,
-  type TranscriptSelectionState,
 } from "./models/transcript-selection-state.js";
+import {
+  buildAgentProgressTreeView,
+  buildBackgroundTaskOverlayView,
+  buildTaskListView,
+  buildWorkflowProgressView,
+} from "./progress-views.js";
 import { charWidth, displayWidth, truncateMiddle } from "./text-utils.js";
 import type {
   BackgroundTaskSummary,
@@ -406,7 +406,9 @@ export function createShellViewModel(
           indexStatus: context.index.status,
           reasoningLevel: options.reasoningLevel,
           reasoningSent: options.reasoningSent,
-          estimatedCostCny: sumFiniteNumbers((context.roleUsage ?? []).map((usage) => usage.estimatedCny)),
+          estimatedCostCny: sumFiniteNumbers(
+            (context.roleUsage ?? []).map((usage) => usage.estimatedCny),
+          ),
           contextUsageLabel: context.cache.compactPressure
             ? calculateContextPercentages(
                 Math.ceil(context.cache.compactPressure.estimatedChars / 4),
@@ -891,20 +893,118 @@ function blockTextHash(block: ProductBlockViewModel): string {
 }
 
 const CONFIG_PANELS = [
-  { id: "model", slash: "/model", titleZh: "模型", titleEn: "Model", summaryZh: "查看当前模型 / provider / 角色路由。", summaryEn: "Show current model / provider / role routing." },
-  { id: "language", slash: "/language", titleZh: "语言", titleEn: "Language", summaryZh: "切换 zh-CN / en-US 体验。", summaryEn: "Switch zh-CN / en-US UI." },
-  { id: "permissions", slash: "/permissions", titleZh: "权限规则", titleEn: "Permissions", summaryZh: "查看 / 编辑 allow / ask / deny 规则。", summaryEn: "View / edit allow / ask / deny rules." },
-  { id: "memory", slash: "/memory", titleZh: "记忆", titleEn: "Memory", summaryZh: "查看 LINGHUN.md / 候选 / 已接受记忆。", summaryEn: "Show LINGHUN.md / candidate / accepted memory." },
-  { id: "index", slash: "/index", titleZh: "索引", titleEn: "Index", summaryZh: "查看 codebase 索引状态与诊断。", summaryEn: "Show codebase index status and doctor." },
-  { id: "mcp", slash: "/mcp", titleZh: "MCP", titleEn: "MCP", summaryZh: "查看 MCP server 与工具。", summaryEn: "Show MCP servers and tools." },
-  { id: "cache", slash: "/cache", titleZh: "缓存", titleEn: "Cache", summaryZh: "查看缓存命中与日志。", summaryEn: "Show cache hit and log." },
-  { id: "background", slash: "/background", titleZh: "后台任务", titleEn: "Background", summaryZh: "查看后台 job 与远程任务。", summaryEn: "Show background jobs and remote tasks." },
-  { id: "remote", slash: "/remote", titleZh: "远程", titleEn: "Remote", summaryZh: "查看远程会话与控制平面。", summaryEn: "Show remote sessions and control plane." },
-  { id: "hooks", slash: "/doctor", titleZh: "Hooks", titleEn: "Hooks", summaryZh: "查看 hooks 启用与诊断。", summaryEn: "Show hook enablement and doctor." },
-  { id: "plugins", slash: "/plugins", titleZh: "插件", titleEn: "Plugins", summaryZh: "查看插件 manifest 与诊断。", summaryEn: "Show plugin manifests and doctor." },
-  { id: "skills", slash: "/skills", titleZh: "技能", titleEn: "Skills", summaryZh: "查看本地 skill 摘要。", summaryEn: "Show local skill summaries." },
-  { id: "workflows", slash: "/workflows", titleZh: "工作流", titleEn: "Workflows", summaryZh: "查看可用工作流模板。", summaryEn: "Show available workflow templates." },
-  { id: "trust", slash: "/trust", titleZh: "信任", titleEn: "Trust", summaryZh: "查看 / 调整本项目信任级别。", summaryEn: "Show / adjust project trust level." },
+  {
+    id: "model",
+    slash: "/model",
+    titleZh: "模型",
+    titleEn: "Model",
+    summaryZh: "查看当前模型 / provider / 角色路由。",
+    summaryEn: "Show current model / provider / role routing.",
+  },
+  {
+    id: "language",
+    slash: "/language",
+    titleZh: "语言",
+    titleEn: "Language",
+    summaryZh: "切换 zh-CN / en-US 体验。",
+    summaryEn: "Switch zh-CN / en-US UI.",
+  },
+  {
+    id: "permissions",
+    slash: "/permissions",
+    titleZh: "权限规则",
+    titleEn: "Permissions",
+    summaryZh: "查看 / 编辑 allow / ask / deny 规则。",
+    summaryEn: "View / edit allow / ask / deny rules.",
+  },
+  {
+    id: "memory",
+    slash: "/memory",
+    titleZh: "记忆",
+    titleEn: "Memory",
+    summaryZh: "查看 LINGHUN.md / 候选 / 已接受记忆。",
+    summaryEn: "Show LINGHUN.md / candidate / accepted memory.",
+  },
+  {
+    id: "index",
+    slash: "/index",
+    titleZh: "索引",
+    titleEn: "Index",
+    summaryZh: "查看 codebase 索引状态与诊断。",
+    summaryEn: "Show codebase index status and doctor.",
+  },
+  {
+    id: "mcp",
+    slash: "/mcp",
+    titleZh: "MCP",
+    titleEn: "MCP",
+    summaryZh: "查看 MCP server 与工具。",
+    summaryEn: "Show MCP servers and tools.",
+  },
+  {
+    id: "cache",
+    slash: "/cache",
+    titleZh: "缓存",
+    titleEn: "Cache",
+    summaryZh: "查看缓存命中与日志。",
+    summaryEn: "Show cache hit and log.",
+  },
+  {
+    id: "background",
+    slash: "/background",
+    titleZh: "后台任务",
+    titleEn: "Background",
+    summaryZh: "查看后台 job 与远程任务。",
+    summaryEn: "Show background jobs and remote tasks.",
+  },
+  {
+    id: "remote",
+    slash: "/remote",
+    titleZh: "远程",
+    titleEn: "Remote",
+    summaryZh: "查看远程会话与控制平面。",
+    summaryEn: "Show remote sessions and control plane.",
+  },
+  {
+    id: "hooks",
+    slash: "/doctor",
+    titleZh: "Hooks",
+    titleEn: "Hooks",
+    summaryZh: "查看 hooks 启用与诊断。",
+    summaryEn: "Show hook enablement and doctor.",
+  },
+  {
+    id: "plugins",
+    slash: "/plugins",
+    titleZh: "插件",
+    titleEn: "Plugins",
+    summaryZh: "查看插件 manifest 与诊断。",
+    summaryEn: "Show plugin manifests and doctor.",
+  },
+  {
+    id: "skills",
+    slash: "/skills",
+    titleZh: "技能",
+    titleEn: "Skills",
+    summaryZh: "查看本地 skill 摘要。",
+    summaryEn: "Show local skill summaries.",
+  },
+  {
+    id: "workflows",
+    slash: "/workflows",
+    titleZh: "工作流",
+    titleEn: "Workflows",
+    summaryZh: "查看可用工作流模板。",
+    summaryEn: "Show available workflow templates.",
+  },
+  {
+    id: "trust",
+    slash: "/trust",
+    titleZh: "信任",
+    titleEn: "Trust",
+    summaryZh: "查看 / 调整本项目信任级别。",
+    summaryEn: "Show / adjust project trust level.",
+  },
 ] as const;
 
 /**
@@ -925,7 +1025,10 @@ function mapConfigPanelState(
     summary: language === "en-US" ? p.summaryEn : p.summaryZh,
   }));
   const total = panels.length;
-  const cursor = total === 0 ? 0 : Math.min(Math.max(0, state.phase === "panel_list" ? state.cursor : 0), total - 1);
+  const cursor =
+    total === 0
+      ? 0
+      : Math.min(Math.max(0, state.phase === "panel_list" ? state.cursor : 0), total - 1);
   return { phase: "panel_list", cursor, panels };
 }
 
@@ -1126,6 +1229,28 @@ function summarizeExplicitFold(text: string): string {
   return nonEmpty.slice(0, 5).join("\n");
 }
 
+export function createCompactBoundaryBlock(
+  preChars: number,
+  postChars: number,
+  language: Language,
+): ProductBlockViewModel {
+  const freedPct = preChars > 0 ? Math.round(((preChars - postChars) / preChars) * 100) : 0;
+  const freedK = Math.max(0, Math.round((preChars - postChars) / 1024));
+  const copy = shellText[language];
+  const title =
+    language === "en-US"
+      ? `Conversation compacted · ~${freedK}K chars freed (${freedPct}%)`
+      : `对话已压缩 · 释放约 ${freedK}K 字符 (${freedPct}%)`;
+  return {
+    id: `compact-boundary-${Date.now()}`,
+    kind: "details",
+    status: "info",
+    title,
+    summary: "",
+    messageKind: "compact_boundary",
+  };
+}
+
 /**
  * Adds /details hint to output blocks only when the block actually has more
  * content than its summary. D13E-P3 cleanup #2: discipline tightened — the
@@ -1216,7 +1341,8 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
   }
 
   const toolName = (context as { requestActivityToolName?: string }).requestActivityToolName;
-  const retryInfo = (context as { retryInfo?: { attempt: number; max: number; delaySec: number } }).retryInfo;
+  const retryInfo = (context as { retryInfo?: { attempt: number; max: number; delaySec: number } })
+    .retryInfo;
   const textMap: Record<string, Record<string, string>> = {
     "zh-CN": {
       thinking: "正在思考…",
@@ -1657,7 +1783,9 @@ function formatBackground(count: number, language: Language, width: number): str
   return shellText[language].background(count);
 }
 
-const KNOWN_SLASH_COMMANDS: ReadonlySet<string> = new Set(SLASH_COMMAND_REGISTRY.map((entry) => entry.slash));
+const KNOWN_SLASH_COMMANDS: ReadonlySet<string> = new Set(
+  SLASH_COMMAND_REGISTRY.map((entry) => entry.slash),
+);
 
 function isKnownSlashCommand(command: string): boolean {
   if (!command.startsWith("/")) return false;
@@ -1698,7 +1826,12 @@ function buildTaskSuggestions(inputs: {
   }
   for (const hint of inputs.configHints ?? []) {
     if (!isKnownSlashCommand(hint.slash)) continue;
-    suggestions.push({ id: `config:${hint.id}`, source: "config", label: hint.label, action: { kind: "slash", command: hint.slash } });
+    suggestions.push({
+      id: `config:${hint.id}`,
+      source: "config",
+      label: hint.label,
+      action: { kind: "slash", command: hint.slash },
+    });
   }
   for (const candidate of inputs.slashCandidates ?? []) {
     if (!isKnownSlashCommand(candidate.slash)) continue;
@@ -1711,11 +1844,13 @@ function buildTaskSuggestions(inputs: {
     });
   }
   const seen = new Set<string>();
-  return suggestions.filter((item) => {
-    if (seen.has(item.id)) return false;
-    seen.add(item.id);
-    return true;
-  }).slice(0, 4);
+  return suggestions
+    .filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    })
+    .slice(0, 4);
 }
 
 type TaskFooterInput = {
@@ -1735,7 +1870,12 @@ type TaskFooterInput = {
 };
 
 function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
-  const modelInfo = formatFooterModel(input.language, input.effectiveModel, input.setupNeeded, input.width);
+  const modelInfo = formatFooterModel(
+    input.language,
+    input.effectiveModel,
+    input.setupNeeded,
+    input.width,
+  );
   return {
     permissionMode: input.permissionModeLabel,
     cyclePermHint: input.cyclePermHint,
@@ -1760,7 +1900,8 @@ function formatFooterModel(
   const label = language === "en-US" ? "Model" : "模型";
   const trimmed = (effectiveModel ?? "").trim();
   const placeholders = new Set(["", "unknown", "setup-needed", "openai-compatible-model"]);
-  if (setupNeeded || placeholders.has(trimmed.toLowerCase())) return { text: `${label} --`, dim: true };
+  if (setupNeeded || placeholders.has(trimmed.toLowerCase()))
+    return { text: `${label} --`, dim: true };
   return { text: `${label} ${truncateMiddle(trimmed, width <= 60 ? 12 : 22)}`, dim: false };
 }
 
@@ -1778,19 +1919,27 @@ function formatFooterCacheTone(hitRate: number | null): "default" | "warning" | 
 function formatFooterIndex(language: Language, status: string): string {
   const label = language === "en-US" ? "Index" : "索引";
   const trimmed = (status ?? "").trim();
-  if (!trimmed || trimmed.toLowerCase() === "unknown") return language === "en-US" ? "Index?" : "索引?";
+  if (!trimmed || trimmed.toLowerCase() === "unknown")
+    return language === "en-US" ? "Index?" : "索引?";
   if (trimmed === "refresh_completed_but_unverified") return `${label} refresh`;
   return `${label} ${truncateMiddle(trimmed, 10)}`;
 }
 
-function formatFooterReasoning(language: Language, level: string | undefined, sent: boolean | undefined): string | undefined {
+function formatFooterReasoning(
+  language: Language,
+  level: string | undefined,
+  sent: boolean | undefined,
+): string | undefined {
   if (!level || sent === false) return undefined;
   const trimmed = level.trim();
   if (!trimmed) return undefined;
   return `${language === "en-US" ? "Reasoning" : "推理"} ${truncateMiddle(trimmed, 12)}`;
 }
 
-function formatFooterCost(language: Language, estimatedCostCny: number | undefined): string | undefined {
+function formatFooterCost(
+  language: Language,
+  estimatedCostCny: number | undefined,
+): string | undefined {
   if (!Number.isFinite(estimatedCostCny)) return undefined;
   return `${language === "en-US" ? "cost" : "费用"} ¥${Math.max(0, estimatedCostCny ?? 0).toFixed(4)} est`;
 }

@@ -2,9 +2,9 @@ import type { ModelRole } from "@linghun/config";
 import type { ModelMessage } from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
 import { redactCommonSecrets } from "@linghun/shared";
-import { getContextWindowForModel } from "./context-window-runtime.js";
 import { type CompactBoundary, compactMessagesToFit } from "./compact-context.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
+import { getContextWindowForModel } from "./context-window-runtime.js";
 import {
   type DeepCompactRuntimeDeps,
   injectDeepCompactSummary,
@@ -14,6 +14,7 @@ import { createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import type { TuiContext } from "./index.js";
 import { getRoleRoute } from "./model-doctor-runtime.js";
+import { createCompactBoundaryBlock } from "./shell/view-model.js";
 import {
   sanitizeDiagnosticText,
   sanitizeDisplayPaths,
@@ -212,6 +213,13 @@ export async function prepareMessagesForProviderPreflight(input: {
     input.context.cache.compactFailure = undefined;
     input.context.cache.compactCooldownUntil = undefined;
     input.deps.refreshCacheFreshness(input.context);
+    input.context.pushTranscriptBlock?.(
+      createCompactBoundaryBlock(
+        projection.preCompactChars,
+        projection.postCompactChars,
+        input.context.language,
+      ),
+    );
     await appendCompactProjectionEvents(input.context, input.sessionId, projection, input.deps);
     return { blocked: false, messages: providerMessages };
   } catch (error) {
