@@ -2696,6 +2696,8 @@ function installToolProgressHandler(
       }),
     );
     const lines = message.split(/\r?\n/u).filter(Boolean);
+    context.requestActivityToolLines = (context.requestActivityToolLines ?? 0) + lines.length;
+    context.requestActivityToolBytes = (context.requestActivityToolBytes ?? 0) + Buffer.byteLength(message, "utf-8");
     const remainingLines = Math.max(0, 12 - visibleProgressLines);
     const visibleLines = lines.slice(0, remainingLines);
     if (remainingLines > 0) {

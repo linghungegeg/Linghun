@@ -1254,6 +1254,8 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     toolName: toolName ?? undefined,
     elapsed,
     language: context.language,
+    totalLines: (context as { requestActivityToolLines?: number }).requestActivityToolLines,
+    totalBytes: (context as { requestActivityToolBytes?: number }).requestActivityToolBytes,
   };
 }
 

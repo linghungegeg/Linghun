@@ -295,6 +295,8 @@ export function clearRequestActivity(context: TuiContext): void {
   context.requestActivity = undefined;
   context.requestActivityPhase = undefined;
   context.requestActivityToolName = undefined;
+  context.requestActivityToolLines = undefined;
+  context.requestActivityToolBytes = undefined;
   (context as { requestActivityStartedAt?: number }).requestActivityStartedAt = undefined;
 }
 
@@ -307,6 +309,8 @@ export function startRequestActivity(
   clearRequestActivity(context);
   context.requestActivityPhase = phase;
   context.requestActivityToolName = values.toolName;
+  context.requestActivityToolLines = 0;
+  context.requestActivityToolBytes = 0;
   (context as { requestActivityStartedAt?: number }).requestActivityStartedAt = Date.now();
   // D13E-P3 single-thinking display: in Ink/Task mode the ActivityIndicator
   // (driven by context.requestActivityPhase via mapRequestActivityToView) is

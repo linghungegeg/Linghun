@@ -480,26 +480,43 @@ function ActivityIndicator({
   const showTokenCount =
     seconds >= 30 && tokenCount !== undefined && (activity.phase === "thinking" || activity.phase === "continuing");
   const text = activityText(activity, frame);
+  const showStats = activity.phase === "tool_running" && (activity.totalLines || activity.totalBytes);
   return (
-    <Box>
-      <Text color={color} bold={activity.phase === "thinking" && frame % 10 < 5}>
-        {marker} {text}
-      </Text>
-      {activity.elapsed ? (
-        <Text color={slow ? (theme.warning ?? theme.status.partial) : theme.muted} dimColor={!slow}>
-          {" "}
-          {activity.elapsed}
+    <Box flexDirection="column">
+      <Box>
+        <Text color={color} bold={activity.phase === "thinking" && frame % 10 < 5}>
+          {marker} {text}
         </Text>
-      ) : null}
-      {slow ? (
-        <Text color={theme.muted} dimColor>
-          {activity.language === "en-US" ? " · still working" : " · 仍在处理"}
-        </Text>
-      ) : null}
-      {showTokenCount ? (
-        <Text color={theme.muted} dimColor>
-          {activity.language === "en-US" ? ` · ${tokenCount} tokens` : ` · ${tokenCount} tokens`}
-        </Text>
+        {activity.elapsed ? (
+          <Text color={slow ? (theme.warning ?? theme.status.partial) : theme.muted} dimColor={!slow}>
+            {" "}
+            ({activity.elapsed})
+          </Text>
+        ) : null}
+        {slow ? (
+          <Text color={theme.muted} dimColor>
+            {activity.language === "en-US" ? " · still working" : " · 仍在处理"}
+          </Text>
+        ) : null}
+        {showTokenCount ? (
+          <Text color={theme.muted} dimColor>
+            {activity.language === "en-US" ? ` · ${tokenCount} tokens` : ` · ${tokenCount} tokens`}
+          </Text>
+        ) : null}
+      </Box>
+      {showStats ? (
+        <Box>
+          <Text dimColor>
+            {"   "}
+            {activity.totalLines
+              ? activity.language === "en-US"
+                ? `~${activity.totalLines} lines`
+                : `~${activity.totalLines} 行`
+              : null}
+            {activity.totalLines && activity.totalBytes ? " · " : null}
+            {activity.totalBytes ? formatFileSize(activity.totalBytes) : null}
+          </Text>
+        </Box>
       ) : null}
     </Box>
   );
@@ -510,7 +527,8 @@ function activityMarker(phase: TaskActivityView["phase"], frame: number, noColor
   if (phase === "error") return getStatusMarker("fail", noColor);
   if (phase === "permission_waiting") return getStatusMarker("blocked", noColor);
   if (noColor) return ["-", "\\", "|", "/"][frame % 4] ?? "-";
-  return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][frame % 10] ?? "⠋";
+  // ● blink: visible frames 0-2, hidden frames 3-5 (600ms cycle at 100ms tick)
+  return frame % 6 < 3 ? "●" : " ";
 }
 
 function activityText(activity: TaskActivityView, frame: number): string {
@@ -534,6 +552,13 @@ function parseElapsedSeconds(elapsed: string | undefined): number {
     seconds += unit === "h" ? value * 3600 : unit === "m" ? value * 60 : value;
   }
   return seconds;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
 }
 
 function estimateStreamingTokens(text: string | undefined): number | undefined {

@@ -154,6 +154,8 @@ export type TaskActivityView = {
   toolName?: string;
   elapsed?: string;
   language?: "zh-CN" | "en-US";
+  totalLines?: number;
+  totalBytes?: number;
 };
 
 /**

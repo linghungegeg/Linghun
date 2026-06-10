@@ -362,6 +362,8 @@ export type TuiContext = {
   requestActivity?: { slowHintShown: boolean; slowTimer?: ReturnType<typeof setTimeout> };
   requestActivityPhase?: RequestActivityPhase;
   requestActivityToolName?: string;
+  requestActivityToolLines?: number;
+  requestActivityToolBytes?: number;
   lastModelRequest?: {
     phase: RequestActivityPhase;
     toolName?: string;
