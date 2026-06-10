@@ -35,7 +35,7 @@ export function ShellApp({
   capability: TerminalCapability;
 }): React.ReactNode {
   const view = controller.getViewModel();
-  const theme = createShellTheme(view.themeMode === "no-color");
+  const theme = useMemo(() => createShellTheme(view.themeMode === "no-color"), [view.themeMode]);
 
   if (view.viewMode === "task" || view.viewMode === "pending") {
     return <TaskLayout view={view} theme={theme} controller={controller} capability={capability} />;
@@ -345,7 +345,7 @@ function TaskLayout({
         {/* 底部呼吸：在 footer 与终端最底部之间留 1 行空白，避免 task footer
             贴在终端最后一行（光标 / 滚动条 / OS 任务栏会与之相邻不舒服）。
             flexShrink=0 确保 Yoga 不会在内容超长时把这一行吞掉。 */}
-        <Box flexShrink={0} height={1} />
+        <Box flexShrink={0} height={view.height >= 30 ? 2 : 1} />
       </Box>
       <PanelLayer view={view} controller={controller} width={view.width} noColor={noColor} />
     </Box>

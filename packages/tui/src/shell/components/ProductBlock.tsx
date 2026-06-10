@@ -148,11 +148,10 @@ export function ProductBlock({
     const isRejected = block.messageKind === "tool_result_rejected";
     const dim = isCancelled || isRejected;
     const tone = isDiagnostic ? "diagnostic" : "default";
-    const isAssistantText = block.messageKind === "assistant_text";
     const useMessageResponse =
       isLocalOutput || block.messageKind === "tool_result_success" || isDiagnostic;
     return (
-      <Box flexDirection="column" marginTop={isAssistantText ? 1 : 0} marginBottom={0}>
+      <Box flexDirection="column" marginTop={0} marginBottom={1}>
         {useMessageResponse ? (
           <MessageResponse>
             <MessageMarkdown

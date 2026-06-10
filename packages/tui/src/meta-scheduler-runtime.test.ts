@@ -1028,6 +1028,7 @@ describe("Meta scheduler runtime", () => {
         ...baseInput(),
         userText: "修改文件",
         failureLearning,
+        hasActiveProviderFailure: true,
       });
 
       expect(decision.internalEvents).toEqual(

@@ -1,5 +1,6 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
+import { useMemo } from "react";
 import { messages } from "../../tui-messages.js";
 import { fitText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
@@ -17,7 +18,7 @@ export function AgentProgressTree({
   language: "zh-CN" | "en-US";
 }): React.ReactNode {
   if (tree.rows.length === 0) return null;
-  const theme = createShellTheme(noColor);
+  const theme = useMemo(() => createShellTheme(noColor), [noColor]);
   const innerWidth = Math.max(20, width - 2);
   const text = messages[language];
 

@@ -51,6 +51,7 @@ import {
   evaluateMetaScheduler,
   formatMetaSchedulerDirective,
   formatPolicyDecisionSummary,
+  hasActiveProviderFailure,
   verifyFailureLearningContract,
 } from "./meta-scheduler-runtime.js";
 import { startModelSetup } from "./model-command-runtime.js";
@@ -1211,6 +1212,7 @@ function createMetaSchedulerInput(
     routeProviderFailure: Boolean(context.lastProviderFailure),
     currentArchitectureCard: Boolean(context.currentArchitectureCard),
     architectureDriftPending: context.pendingLocalApproval?.kind === "architecture_drift",
+    hasActiveProviderFailure: hasActiveProviderFailure(context.failureLearning),
     terminalCapability: detectTerminalCapability(),
     platform: process.platform,
     shellFamily: detectShellFamily(process.env),

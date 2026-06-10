@@ -1481,14 +1481,16 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         : view.composer.placeholder;
 
   const composerInnerWidth = Math.max(8, maxWidth - 4);
-  const { lines, truncatedAbove, truncatedBelow, cursorCol, cursorRow } = formatComposerRenderLines(
-    {
-      buffer,
-      placeholder: placeholderText,
-      masking: view.composer.masking,
-      noColor,
-      maxWidth: composerInnerWidth,
-    },
+  const { lines, truncatedAbove, truncatedBelow, cursorCol, cursorRow } = useMemo(
+    () =>
+      formatComposerRenderLines({
+        buffer,
+        placeholder: placeholderText,
+        masking: view.composer.masking,
+        noColor,
+        maxWidth: composerInnerWidth,
+      }),
+    [buffer, placeholderText, view.composer.masking, noColor, composerInnerWidth],
   );
 
   // Position native cursor — anchored to Composer's outer Box via parent-chain
@@ -1528,7 +1530,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const showUnknownHint = false;
 
   return (
-    <Box flexDirection="column" width={maxWidth} paddingX={1}>
+    <Box flexDirection="column" width={maxWidth} borderStyle="round" borderColor={theme.border ?? theme.muted} paddingLeft={2} paddingRight={1}>
       {permissionActive && view.permission ? (
         <PermissionControl
           permission={view.permission}

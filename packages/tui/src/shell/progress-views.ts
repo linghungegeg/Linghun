@@ -20,9 +20,12 @@ const AGENT_EVICTION_DELAY_MS = 5_000;
  * showing each one individually. CCB-style activity condensation.
  */
 function summarizeActivity(agents: AgentRun[]): string | undefined {
-  const running = agents.filter((a) => a.status === "running");
-  if (running.length === 0) return undefined;
-  const activities = running.map((a) => a.activitySummary ?? a.activeTask?.summary).filter(Boolean) as string[];
+  const activities: string[] = [];
+  for (const a of agents) {
+    if (a.status !== "running") continue;
+    const summary = a.activitySummary ?? a.activeTask?.summary;
+    if (summary) activities.push(summary);
+  }
   if (activities.length === 0) return undefined;
   const counts = new Map<string, number>();
   for (const act of activities) {

@@ -30,6 +30,7 @@ export type MessageMarkdownProps = {
   wrapWidth?: number;
   selectionLineIndexes?: number[];
   selectionLineRanges?: ProductBlockSelectionRange[];
+  isStreaming?: boolean;
 };
 
 type InlineToken =
@@ -669,6 +670,7 @@ export function MessageMarkdown({
   wrapWidth,
   selectionLineIndexes,
   selectionLineRanges,
+  isStreaming,
 }: MessageMarkdownProps): React.ReactNode {
   if (!text || text.length === 0) return null;
   if ((selectionLineIndexes?.length ?? 0) > 0 || (selectionLineRanges?.length ?? 0) > 0) {
@@ -681,6 +683,19 @@ export function MessageMarkdown({
       selectionLineIndexes,
       selectionLineRanges,
     });
+  }
+  if (isStreaming) {
+    const lines = text.replace(/\r/g, "").split("\n");
+    const color = baseColor(theme, dim, tone);
+    return (
+      <Box flexDirection="column">
+        {lines.map((line, i) => (
+          <Text key={`s${i}`} color={color} dimColor={dim}>
+            {line}
+          </Text>
+        ))}
+      </Box>
+    );
   }
   const effectiveWrapWidth = wrapWidth ?? 80;
   const tokens = getCachedMarkdownTokens(text.replace(/\r/g, ""));
@@ -885,6 +900,7 @@ export function StreamingMarkdown({
             dim={dim}
             tone={tone}
             wrapWidth={wrapWidth}
+            isStreaming
           />
           <Text color={theme.accent}>{"▌"}</Text>
         </Box>

@@ -59,6 +59,7 @@ export function TranscriptViewport({
   const lastReportedOverflow = useRef<boolean | undefined>(undefined);
   const lastReportedMeasure = useRef<string | undefined>(undefined);
   const lastReportedGeometry = useRef<string | undefined>(undefined);
+  const lastDimKey = useRef("");
 
   // Measure after layout. measureElement() returns 0 during render, so we read
   // the computed yoga layout in a post-render effect and store maxOffset. The
@@ -73,6 +74,9 @@ export function TranscriptViewport({
     const viewportWidth = viewportNode.getComputedWidth();
     const measuredContentHeight = contentNode.getComputedHeight();
     const contentHeight = virtualRange?.estimatedContentHeight ?? measuredContentHeight;
+    const dimKey = `${viewportHeight}:${contentHeight}`;
+    if (dimKey === lastDimKey.current) return;
+    lastDimKey.current = dimKey;
     const nextMax = Math.max(0, Math.floor(contentHeight - viewportHeight));
     const nextOffset = computeScrollViewportOffset(nextMax, scroll);
     const measureKey = `${viewportHeight}:${contentHeight}`;

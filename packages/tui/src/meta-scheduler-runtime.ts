@@ -132,6 +132,7 @@ export type MetaSchedulerInput = {
   routeProviderFailure?: boolean;
   currentArchitectureCard?: boolean;
   architectureDriftPending?: boolean;
+  hasActiveProviderFailure?: boolean;
   terminalCapability?: Pick<TerminalCapability, "tier" | "alternateScreen" | "cursorPositioning">;
   platform?: NodeJS.Platform;
   shellFamily?: "powershell" | "cmd" | "bash" | "zsh" | "sh" | "unknown";
@@ -357,6 +358,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     lastVerificationStatus: input.lastVerificationStatus,
     userStatePersistence: input.userStatePersistence,
     failureLearning: input.failureLearning,
+    hasActiveProviderFailure: input.hasActiveProviderFailure,
   });
   let taskKind = adjustTaskKindForUserState(classification.primary, userStateDecision);
   if (classification.intentUnclear) {
@@ -772,18 +774,25 @@ const DOMAIN_KEYWORD_WEIGHTS: Record<string, KeywordWeight[]> = {
   ],
 };
 
-function isLatinKeyword(s: string): boolean {
-  return /^[a-zA-Z0-9_-]+$/.test(s);
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// Precompiled Latin keyword regex patterns — built once at module load
+const LATIN_KEYWORD_PATTERNS: Map<string, RegExp> = new Map();
+for (const keywords of Object.values(DOMAIN_KEYWORD_WEIGHTS)) {
+  for (const [keyword] of keywords) {
+    if (/^[a-zA-Z0-9_-]+$/.test(keyword) && !LATIN_KEYWORD_PATTERNS.has(keyword)) {
+      LATIN_KEYWORD_PATTERNS.set(
+        keyword,
+        new RegExp(
+          `\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+          "iu",
+        ),
+      );
+    }
+  }
 }
 
 function matchKeyword(text: string, keyword: string): boolean {
-  if (isLatinKeyword(keyword)) {
-    return new RegExp(`\\b${escapeRegex(keyword)}\\b`, "iu").test(text);
-  }
+  const pattern = LATIN_KEYWORD_PATTERNS.get(keyword);
+  if (pattern) return pattern.test(text);
   return text.includes(keyword);
 }
 
@@ -807,6 +816,7 @@ function classifyTaskKind(
     | "lastVerificationStatus"
     | "userStatePersistence"
     | "failureLearning"
+    | "hasActiveProviderFailure"
   >,
 ): TaskClassification {
   // Layer 2: 对所有域独立打分
@@ -845,13 +855,7 @@ function classifyTaskKind(
     reasons.push("上轮验证失败");
   }
 
-  const hasProviderFailure = failureLearning?.records.some(
-    (r) =>
-      r.status === "active" &&
-      r.category === "provider_failure" &&
-      r.projectScope === failureLearning.projectScope,
-  );
-  if (hasProviderFailure) {
+  if (input?.hasActiveProviderFailure) {
     reasons.push("provider 历史失败，避免重压力操作");
   }
 
@@ -1012,6 +1016,15 @@ function shouldSurfaceWindowsSafeHint(input: {
 function hasActiveFailureLearning(state: FailureLearningState): boolean {
   return state.records.some(
     (record) => record.status === "active" && record.projectScope === state.projectScope,
+  );
+}
+
+export function hasActiveProviderFailure(state: FailureLearningState): boolean {
+  return state.records.some(
+    (record) =>
+      record.status === "active" &&
+      record.category === "provider_failure" &&
+      record.projectScope === state.projectScope,
   );
 }
 
@@ -1244,19 +1257,75 @@ function summarizeRuntimeSignal(
   },
   evidenceFreshness: VerificationRoute["evidenceFreshness"],
 ): PolicyDecision["runtimeSignal"] {
-  const runningAgents =
-    input.activeAgentCount ??
-    input.backgroundTasks.filter((task) => task.kind === "agent" && task.status === "running")
-      .length;
-  const runningJobs =
-    input.activeJobCount ??
-    input.backgroundTasks.filter((task) => task.kind === "job" && task.status === "running").length;
+  // Single pass over backgroundTasks: running counts, state counts, noPass reasons
+  let runningAgents = 0;
+  let runningJobs = 0;
+  const agentStates: RuntimeStateCounts = {
+    running: 0, completed: 0, blocked: 0, stale: 0, cancelled: 0, timeout: 0,
+  };
+  const jobStates: RuntimeStateCounts = {
+    running: 0, completed: 0, blocked: 0, stale: 0, cancelled: 0, timeout: 0,
+  };
+  const noPassReasonSet = new Set<string>();
+
+  for (const task of input.backgroundTasks) {
+    const isAgent = task.kind === "agent";
+    const isJob = task.kind === "job";
+    if (!isAgent && !isJob) continue;
+
+    if (isAgent && task.status === "running") runningAgents++;
+    if (isJob && task.status === "running") runningJobs++;
+
+    if (isAgent && task.status in agentStates) {
+      (agentStates as Record<string, number>)[task.status] += 1;
+    }
+    if (isJob && task.status in jobStates) {
+      (jobStates as Record<string, number>)[task.status] += 1;
+    }
+
+    // noPass reasons (inline collectRuntimeNoPassStates task-level)
+    if (
+      task.status === "blocked" || task.status === "stale" ||
+      task.status === "cancelled" || task.status === "timeout"
+    ) {
+      noPassReasonSet.add(`${task.kind}:${task.status}`);
+    }
+    if (
+      task.result === "stale" || task.result === "cancelled" ||
+      task.result === "timeout"
+    ) {
+      noPassReasonSet.add(`${task.kind}:${task.result}`);
+    }
+    if (task.status === "completed" && task.result !== "pass") {
+      noPassReasonSet.add(`${task.kind}:completed_not_pass`);
+    }
+  }
+
+  // Workflow-level noPass checks (preserved from collectRuntimeNoPassStates)
+  if (
+    input.workflow?.status === "blocked" ||
+    input.workflow?.status === "stale" ||
+    input.workflow?.status === "cancelled"
+  ) {
+    noPassReasonSet.add(`workflow:${input.workflow.status}`);
+  }
+  if (input.workflow?.status === "completed") {
+    noPassReasonSet.add("workflow:completed_not_pass");
+  }
+  for (const step of input.workflow?.steps ?? []) {
+    if (
+      step.status === "blocked" || step.status === "stale" ||
+      step.status === "cancelled"
+    ) {
+      noPassReasonSet.add(`workflow_step:${step.status}`);
+    }
+  }
+
+  runningAgents = input.activeAgentCount ?? runningAgents;
+  runningJobs = input.activeJobCount ?? runningJobs;
   const workflowStatus =
     input.activeWorkflowStatus ??
     normalizeWorkflowRuntimeStatus(input.workflow?.status, input.workflow?.steps);
-  const agentStates = countRuntimeStates(input.backgroundTasks, "agent");
-  const jobStates = countRuntimeStates(input.backgroundTasks, "job");
-  const noPassStates = collectRuntimeNoPassStates(input.backgroundTasks, input.workflow);
   const completedWithoutFreshVerification =
     evidenceFreshness !== "fresh" &&
     (agentStates.completed > 0 ||
@@ -1269,7 +1338,7 @@ function summarizeRuntimeSignal(
     agentStates,
     jobStates,
     completedWithoutFreshVerification,
-    noPassStates,
+    noPassStates: [...noPassReasonSet],
     resourceCapPressure: runningAgents > 0 || runningJobs > 0,
   };
 }
