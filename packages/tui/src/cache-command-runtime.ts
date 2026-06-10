@@ -3,7 +3,7 @@ import type { Writable } from "node:stream";
 import type { CacheFreshness } from "@linghun/core";
 import { redactCommonSecrets } from "@linghun/shared";
 import { diffFreshness } from "./cache-freshness.js";
-import { calculateContextPercentages, getContextWindowForModel } from "./context-window-runtime.js";
+import { calculateContextPercentages, formatContextProgressBar, getContextWindowForModel } from "./context-window-runtime.js";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelView } from "./shell/types.js";
 import { sanitizeDiagnosticText } from "./startup-runtime.js";

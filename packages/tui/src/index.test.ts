@@ -9495,7 +9495,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("正在思考…");
     expect(output.text).not.toContain("正在思考… provider=");
     expect(output.text).toContain(
-      "deepseek: type deepseek; provider deepseek; model deepseek-v4-pro; runtime profile deepseek_chat_completions; endpoint profile chat_completions; compatibility deepseek; base URL present; endpoint path /v1/chat/completions; tools enabled; tool schema openai_chat_tools; tool result chat_tool_message; retry 429/502/503/504x3; timeout 30000ms; idle timeout 30000ms; include usage no; reasoning not configured/未生效",
+      "deepseek: type deepseek; provider deepseek; model deepseek-v4-pro; runtime profile deepseek_chat_completions; endpoint profile chat_completions; compatibility deepseek; base URL present; endpoint path /v1/chat/completions; tools enabled; tool schema openai_chat_tools; tool result chat_tool_message; retry 429/502/503/504x3; timeout 600000ms; idle timeout 30000ms; include usage no; reasoning not configured/未生效",
     );
     expect(output.text).toContain("api key present");
     expect(output.text).toContain("masked sk-…cret");
@@ -9716,7 +9716,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Index: start init fast");
     expect(output.text).toContain("status: ready");
     expect(output.text).toContain("只做最小必要改动");
-    expect(output.text.match(/读取摘要/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
+    expect(output.text.match(/读取 \*\*/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
     expect(output.text).toContain("Cache status");
     expect(output.text).toContain("Memory status");
     expect(output.text).not.toContain("I can prepare this action");
@@ -10761,7 +10761,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("本轮工具调用已达上限");
     // 不应出现 provider 失败式的 /model doctor 甩锅（轮次耗尽不是 provider 故障）。
     expect(output.text).not.toContain("已达到工具轮次上限；将不再调用工具");
-    expect(output.text.match(/读取摘要/g)).toHaveLength(4);
+    expect(output.text.match(/读取 \*\*/g)).toHaveLength(4);
     expect(requests.length).toBeGreaterThanOrEqual(5);
   });
 
@@ -10797,7 +10797,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/读取摘要/g)).toHaveLength(41);
+    expect(output.text.match(/读取 \*\*/g)).toHaveLength(41);
     expect(output.text).toContain("已完成 41 轮有进展读取。");
     expect(output.text).not.toContain("工具调用上限");
     expect(output.text).not.toContain("执行轮次预算已耗尽");
@@ -10836,7 +10836,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/读取摘要/g)).toHaveLength(101);
+    expect(output.text.match(/读取 \*\*/g)).toHaveLength(101);
     expect(output.text).toContain("已完成 101 轮有进展读取。");
     expect(output.text).not.toContain("执行已在内部防 runaway 保护处暂停");
     expect(output.text).not.toContain("工具调用上限");
@@ -10932,7 +10932,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/读取摘要/g)).toHaveLength(4);
+    expect(output.text.match(/读取 \*\*/g)).toHaveLength(4);
     expect(output.text).toContain("已综合现有信息回答。");
     expect(output.text).not.toContain("工具调用上限");
     expect(requests.length).toBeGreaterThanOrEqual(6);
@@ -11021,7 +11021,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("Git 状态：");
-    expect(output.text).toContain("读取摘要");
+    expect(output.text).toContain("读取 **");
   });
 
   it("runtime budgets are layered instead of one short guard for every failure mode", async () => {
@@ -13239,7 +13239,7 @@ describe("Phase 06 TUI slash commands", () => {
     const toolMessage = second.messages?.find((message) => message.role === "tool");
     expect(toolMessage?.content).toContain('"ok":false');
     expect(toolMessage?.content).toMatch(/"exitCode":\d+/u);
-    expect(output.text).toContain("Bash 已结束");
+    expect(output.text).toContain("命令已退出");
     expect(output.text).toContain("Bash 失败结果已收到");
 
     const session = (
@@ -14853,7 +14853,7 @@ describe("Phase 06 TUI slash commands", () => {
     const formatted = formatToolOutput(
       "Edit",
       {
-        text: "raw edit preview should stay summarized\nline 2",
+        text: "已编辑 sample.txt：+1 -1; 改动文件 1\n细节省略",
         summary: "Edit sample.txt: +1 -1; changedFiles=1",
         details: "operation: Edit\n- before\n+ after",
         data: {
@@ -14868,12 +14868,12 @@ describe("Phase 06 TUI slash commands", () => {
       "ev-edit-1",
     );
 
-    expect(formatted).toContain("Edit 摘要");
+    expect(formatted).toContain("Edit：");
     expect(formatted).toContain("补丁 +1 -1");
     expect(formatted).toContain("读取保护已启用");
     expect(formatted).not.toContain("expectedHash");
     expect(formatted).toContain("输出已折叠，按 Ctrl+O 展开。");
-    expect(formatted).not.toContain("raw edit preview");
+    expect(formatted).not.toContain("细节省略");
     expect(formatted).not.toContain("operation: Edit");
     expect(formatted).not.toContain("ev-edit-1");
   });
@@ -14892,7 +14892,7 @@ describe("Phase 06 TUI slash commands", () => {
       "ev-bash-1",
     );
 
-    expect(formatted).toContain("Bash finished");
+    expect(formatted).toContain("Command exited");
     expect(formatted).toContain("50 line(s)");
     expect(formatted).toContain("exit code 0");
     expect(formatted).toContain("Output folded. Press Ctrl+O to expand.");
@@ -15556,7 +15556,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/permissions recent", context, output);
 
     expect(output.text).toContain("已切换权限模式：plan");
-    expect(output.text).toContain("读取摘要");
+    expect(output.text).toContain("读取 **");
     expect(output.text).toContain("权限已拒绝");
     expect(output.text).toContain("Plan 模式禁止写入");
     expect(output.text).not.toContain("命中 allow 规则");
@@ -16333,7 +16333,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("权限已拒绝");
     expect(output.text).toContain("本次请求：工具 Write");
     expect(output.text).not.toContain("已创建 checkpoint");
-    expect(output.text).toContain("Edit 摘要");
+    expect(output.text).toContain("Edit：");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
     await expect(readFile(join(project, "medium.txt"), "utf8")).rejects.toThrow();
   });
@@ -19887,7 +19887,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Architecture drift");
     expect(output.text).toContain("Linghun 想执行 Write packages/other/src/small.ts。");
     expect(output.text).toContain("允许本次执行？yes / no");
-    expect(output.text).toContain("Write 摘要");
+    expect(output.text).toContain("Write：");
     await expect(readFile(join(project, "packages/other/src/small.ts"), "utf8")).resolves.toBe(
       "// typo fix\n",
     );
@@ -20042,10 +20042,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests).toHaveLength(1);
     expect(output.text).toContain("正在思考…");
     expect(output.text).toContain("权限已拒绝");
-    expect(output.text).toContain("Write 摘要");
-    expect(output.text).toContain("摘要");
+    expect(output.text).toContain("Write：");
     expect(await readFile(join(project, "report.md"), "utf8")).toBe("final");
-    expect(output.text).toContain("Bash 已结束");
+    expect(output.text).toContain("命令已退出");
     expect(output.text).toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("MCP status");
