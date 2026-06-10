@@ -536,12 +536,6 @@ describe("Ink shell selection", () => {
     // No large setupHint block or old-style verbose guidance
     expect(output.text).not.toContain("还没有模型配置");
     expect(output.text).not.toContain("我要配置模型");
-    expect(output.text).toContain("╭");
-    expect(output.text).toContain("╮");
-    expect(output.text).toContain("╰");
-    expect(output.text).toContain("╯");
-    expect(output.text).not.toContain("┌");
-    // no old prompt prefix or hint text
     expect(output.text).not.toContain("你 >");
     expect(output.text).not.toContain("直接描述目标");
   });
@@ -623,7 +617,8 @@ describe("Ink shell selection", () => {
     await shell.waitUntilExit();
 
     expect(output.text).toContain("LingHun");
-    expect(output.text).toContain("──");
+    // Composer prompt marker present without heavy box-drawing borders
+    expect(output.text).toContain("›");
     expect(output.text).not.toContain("█");
     expect(output.text).not.toContain("▀▄▄▀");
     expect(output.text).not.toContain("L I N G H U N");
@@ -4812,14 +4807,15 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const workspaceIdx = text.indexOf("工作树：");
     const runtimeIdx = text.indexOf("详情 /background");
     const hintIdx = text.indexOf("最近缓存复用变低");
-    const composerSeparatorIdx = text.indexOf("╭", hintIdx);
+    // Composer has no border; locate it by the › prompt marker after hints
+    const composerIdx = text.indexOf("›", hintIdx);
     const footerIdx = text.indexOf("Shift+Tab");
 
     expect(userIdx).toBeGreaterThan(0);
     expect(assistantIdx).toBeGreaterThan(userIdx);
     expect(hintIdx).toBeGreaterThan(assistantIdx);
-    expect(composerSeparatorIdx).toBeGreaterThan(hintIdx);
-    expect(footerIdx).toBeGreaterThan(composerSeparatorIdx);
+    expect(composerIdx).toBeGreaterThan(hintIdx);
+    expect(footerIdx).toBeGreaterThan(composerIdx);
     // Phase 6.6: workspaceStatus / runtimeStatus are no longer rendered
     // by default in the footer. They move to /details / /status / doctor paths.
     expect(workspaceIdx).toBe(-1);

@@ -15,7 +15,7 @@ export type LayeredToolOutput = {
 };
 
 const TODO_OUTPUT_ITEM_LIMIT = 8;
-const BASH_TAIL_LINE_LIMIT = 3;
+const BASH_TAIL_LINE_LIMIT = 0;
 const RAW_TOOL_USE_PATTERNS = [
   /<tool_use(?:_error)?\b[\s\S]*?<\/tool_use(?:_error)?>/giu,
   /<tool_use(?:_error)?\b[^>]*\/>/giu,
@@ -556,8 +556,8 @@ function createSummaryFirstPreview(
     Boolean(output?.truncated) ||
     Boolean(output?.details) ||
     Boolean(output?.fullOutputPath) ||
-    lines.length > 3 ||
-    text.length > 200;
+    lines.length > 100 ||
+    text.length > 10000;
   if (hasHiddenContent) {
     const hint = formatDetailsHint(language);
     const tail = name === "Bash" && !looksLikeMojibake(text) ? formatBashTail(lines, language) : [];
@@ -567,6 +567,10 @@ function createSummaryFirstPreview(
     const tail = formatBashTail(lines, language);
     if (tail.length > 0) {
       return { text: [`- ${stats.join("; ")}`, ...tail].join("\n"), truncated: false };
+    }
+    // BASH_TAIL_LINE_LIMIT = 0: no separate tail section — show full text inline.
+    if (text.trim().length > 0) {
+      return { text: [`- ${stats.join("; ")}`, text].join("\n"), truncated: false };
     }
   }
   return { text: `- ${stats.join("; ")}`, truncated: false };
@@ -601,6 +605,7 @@ function formatToolLineStat(
 }
 
 function formatBashTail(lines: string[], language: Language): string[] {
+  if (BASH_TAIL_LINE_LIMIT === 0) return [];
   const tail = lines
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0)

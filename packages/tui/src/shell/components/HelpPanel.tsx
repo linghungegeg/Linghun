@@ -69,12 +69,13 @@ export function HelpPanel({
   return (
     <Box
       flexDirection="column"
-      borderStyle="single"
-      borderColor={theme.help ?? theme.border}
       paddingX={1}
       marginTop={1}
       width={cardWidth}
     >
+      <Text color={theme.dim ?? theme.muted} dimColor>
+        {"─".repeat(Math.min(cardWidth, 80))}
+      </Text>
       <Text color={theme.help ?? theme.accent} bold>
         {fitText(hint.title, innerWidth)}
       </Text>

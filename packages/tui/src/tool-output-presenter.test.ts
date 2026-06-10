@@ -150,17 +150,15 @@ describe("tool-output-presenter", () => {
       expect(text).toContain("命令已退出 2");
     });
 
-    it("长 Bash 输出主屏只显示摘要和尾部，完整内容仍需 Ctrl+O", () => {
+    it("长 Bash 输出主屏全量显示，不再截断尾部或折叠", () => {
       const text = Array.from({ length: 8 }, (_, index) => `bash line ${index + 1}`).join("\n");
       const formatted = formatToolOutput("Bash", { text, data: { exitCode: 0 } }, "zh-CN");
 
       expect(formatted).toContain("8 行");
-      expect(formatted).toContain("尾部：");
-      expect(formatted).toContain("bash line 6");
+      expect(formatted).toContain("bash line 1");
       expect(formatted).toContain("bash line 8");
-      expect(formatted).toContain("输出已折叠，按 Ctrl+O 展开。");
-      expect(formatted).not.toContain("bash line 1");
-      expect(formatted).not.toContain("bash line 5");
+      expect(formatted).not.toContain("输出已折叠");
+      expect(formatted).not.toContain("尾部：");
     });
 
     it("短 Read 输出没有隐藏内容时不显示 Ctrl+O", () => {
@@ -173,10 +171,10 @@ describe("tool-output-presenter", () => {
       expect(layered.truncated).toBe(false);
     });
 
-    it("Read 主屏走 summary-first：长输出才折叠，提示 Ctrl+O 展开", () => {
+    it("Read 主屏走 summary-first：超 100 行才折叠，提示 Ctrl+O 展开", () => {
       const layered = createLayeredToolOutput(
         "Read",
-        { text: "long\nfile\ncontent\n".repeat(20), data: { lines: 60 } },
+        { text: "line\n".repeat(150), data: { lines: 150 } },
         "zh-CN",
       );
       expect(layered.preview).toContain("Ctrl+O");
@@ -224,7 +222,7 @@ describe("tool-output-presenter", () => {
     it("英文也产出折叠提示（Press Ctrl+O to expand）", () => {
       const layered = createLayeredToolOutput(
         "Read",
-        { text: "abc\n".repeat(30), data: { lines: 30 } },
+        { text: "line\n".repeat(120), data: { lines: 120 } },
         "en-US",
       );
       expect(layered.preview).toContain("Ctrl+O");

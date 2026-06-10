@@ -86,12 +86,13 @@ export function SessionsPanel({
   return (
     <Box
       flexDirection="column"
-      borderStyle="single"
-      borderColor={theme.panel ?? theme.border}
       paddingX={1}
       marginTop={1}
       width={cardWidth}
     >
+      <Text color={theme.dim ?? theme.muted} dimColor>
+        {"─".repeat(Math.min(cardWidth, 80))}
+      </Text>
       <Text color={theme.accent} bold>
         {fitText(hint.title, innerWidth)}
       </Text>

@@ -382,11 +382,11 @@ describe("TUI Interaction Contract — Ctrl+O 提示真实性", () => {
     expect(layered.truncated).toBe(false);
   });
 
-  it("长输出（>3行）显示 Ctrl+O", async () => {
+  it("长输出（>100行）显示 Ctrl+O", async () => {
     const { createLayeredToolOutput } = await import("../../tool-output-presenter.js");
     const layered = createLayeredToolOutput(
       "Read",
-      { text: "a\nb\nc\nd\ne", data: { lines: 5 } },
+      { text: "line\n".repeat(150), data: { lines: 150 } },
       "zh-CN",
     );
     expect(layered.preview).toContain("Ctrl+O");

@@ -14901,9 +14901,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(formatted).not.toContain("Full log: .linghun/logs/tools/bash-test.log");
     expect(formatted).not.toContain("Evidence: ev-bash-1");
     expect(formatted).not.toContain("bash line 1");
-    expect(formatted).toContain("tail:");
-    expect(formatted).toContain("bash line 48");
-    expect(formatted).toContain("bash line 50");
+    expect(formatted).not.toContain("tail:");
+    expect(formatted).not.toContain("bash line 48");
+    expect(formatted).not.toContain("bash line 50");
   });
 
   it("summarizes possible Windows Bash mojibake without dumping garbled stdout", () => {
@@ -20062,8 +20062,6 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("- mode:");
     expect(output.text).not.toContain("Index: start refresh");
     expect(output.text).not.toContain("Index refresh completed\n- status: ready\n- nodes/edges");
-    expect(output.text).toContain("尾部：");
-    expect(output.text).toContain("journey-line-59");
   });
 
   it("handles Phase 14 skills, workflows, plugins, hooks, and freshness", async () => {

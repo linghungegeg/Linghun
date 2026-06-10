@@ -1466,8 +1466,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     <Box
       flexDirection="column"
       width={maxWidth}
-      borderStyle="round"
-      borderColor={theme.border ?? theme.muted}
       paddingX={1}
     >
       {permissionActive && view.permission ? (

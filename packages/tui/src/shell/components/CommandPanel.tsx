@@ -84,12 +84,13 @@ export function CommandPanel({
   return (
     <Box
       flexDirection="column"
-      borderStyle="single"
-      borderColor={borderColor}
       paddingX={1}
       marginTop={1}
       width={cardWidth}
     >
+      <Text color={theme.dim ?? theme.muted} dimColor>
+        {"─".repeat(Math.min(cardWidth, 80))}
+      </Text>
       {panel.title && panel.title.trim().length > 0 ? (
         <Text color={theme.accent} bold>
           {fitText(`❯ ${panel.title}`, innerWidth)}

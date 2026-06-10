@@ -59,12 +59,13 @@ export function ConfigPanel({
     return (
       <Box
         flexDirection="column"
-        borderStyle="single"
-        borderColor={theme.border}
         paddingX={1}
         marginTop={1}
         width={panelWidth}
       >
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {"─".repeat(Math.min(panelWidth, 80))}
+        </Text>
         <Text color={theme.accent} bold>
           {fitText("/config", innerWidth)}
         </Text>
@@ -91,12 +92,13 @@ export function ConfigPanel({
   return (
     <Box
       flexDirection="column"
-      borderStyle="single"
-      borderColor={theme.border}
       paddingX={1}
       marginTop={1}
       width={panelWidth}
     >
+      <Text color={theme.dim ?? theme.muted} dimColor>
+        {"─".repeat(Math.min(panelWidth, 80))}
+      </Text>
       <Text color={theme.accent} bold>
         {fitText(`/config · ${panel.panel.title}`, innerWidth)}
       </Text>

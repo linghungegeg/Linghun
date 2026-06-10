@@ -5,6 +5,7 @@ import { type ShellTheme, getStatusMarker } from "../theme.js";
 import type { MessageBlockKind, ProductBlockViewModel } from "../types.js";
 import { CtrlOToExpand } from "./CtrlOToExpand.js";
 import { MessageMarkdown } from "./MessageMarkdown.js";
+import { MessageResponse } from "./MessageResponse.js";
 
 /**
  * D13E-P3 cleanup #3 — title 噪音过滤：
@@ -146,23 +147,21 @@ export function ProductBlock({
     const dim = isCancelled || isRejected;
     const tone = isDiagnostic ? "diagnostic" : "default";
     const isAssistantText = block.messageKind === "assistant_text";
+    const useMessageResponse = isLocalOutput || block.messageKind === "tool_result_success" || isDiagnostic;
     return (
       <Box flexDirection="column" marginTop={isAssistantText ? 1 : 0} marginBottom={0}>
-        {isLocalOutput ? (
-          <Box flexDirection="row">
-            <Text color={theme.dim ?? theme.muted} dimColor>
-              {"  ⎿  "}
-            </Text>
+        {useMessageResponse ? (
+          <MessageResponse>
             <MessageMarkdown
               text={body}
               theme={theme}
               dim={dim}
               tone={tone}
-              wrapWidth={Math.max(8, width - 6)}
+              wrapWidth={Math.max(8, width - 4)}
               selectionLineIndexes={block.selectionLineIndexes}
               selectionLineRanges={block.selectionLineRanges}
             />
-          </Box>
+          </MessageResponse>
         ) : (
           <MessageMarkdown
             text={body}
@@ -218,7 +217,7 @@ export function ProductBlock({
     block.kind === "error" ||
     block.status === "fail" ||
     block.messageKind === "tool_result_error";
-  const emphasized = isAlert && !compact;
+  const emphasized = block.kind === "permission" && !compact;
   // permission 卡保持中性 border 色（与 P0-1 锚定问题行配色一致）；
   // error / blocked / fail 用 status 色边框：red / yellow / red。
   // D.13Q-UX：permission 卡用独立 permission 主题色，让 PermissionPanel 与
@@ -234,19 +233,14 @@ export function ProductBlock({
   // 边框态 paddingX=1，左右各 1 列+边框 2 列 = 4 列开销，预留出来防溢出。
   const innerWidth = Math.max(8, width - (emphasized ? 4 : 0));
 
-  // tool_result_error: 标题/状态行保留，正文走 MessageMarkdown 红色，可展开 hint 用 CtrlOToExpand。
+  // tool_result_error: title/status line preserved, body uses MessageResponse (⎿ prefix + error color),
+  // no border — flat message style aligned with CCB MessageResponse pattern.
   if (block.messageKind === "tool_result_error") {
     const previewBody = messageBody(block, block.nextAction);
     const nextAction = visibleNextAction(block, previewBody);
     const body = messageBody(block, nextAction);
     return (
-      <Box
-        flexDirection="column"
-        borderStyle="single"
-        borderColor={borderColor}
-        paddingX={1}
-        marginBottom={1}
-      >
+      <Box flexDirection="column" marginBottom={1}>
         {isMeaningfulTitle(block.title) ? (
           <Text>
             <Text color={theme.error ?? theme.status.fail}>
@@ -256,16 +250,18 @@ export function ProductBlock({
           </Text>
         ) : null}
         {body ? (
-          <MessageMarkdown
-            text={body}
-            theme={theme}
-            tone="error"
-            wrapWidth={innerWidth}
-            selectionLineIndexes={block.selectionLineIndexes}
-            selectionLineRanges={block.selectionLineRanges}
-          />
+          <MessageResponse>
+            <MessageMarkdown
+              text={body}
+              theme={theme}
+              tone="error"
+              wrapWidth={Math.max(8, width - 4)}
+              selectionLineIndexes={block.selectionLineIndexes}
+              selectionLineRanges={block.selectionLineRanges}
+            />
+          </MessageResponse>
         ) : null}
-        {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} /> : null}
+        {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} /> : null}
       </Box>
     );
   }
