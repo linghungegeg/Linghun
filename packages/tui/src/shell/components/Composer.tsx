@@ -1120,6 +1120,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // ─── Submit: Enter（无 shift / fallback modifier）──────────────────
       if (key.return) {
+        if (text.length === 0 && view.agentProgressTree && view.agentProgressTree.cursor >= 0) {
+          emitInput({ type: "agent-tree-enter" });
+          return;
+        }
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
           const index = Math.max(
             0,
@@ -1206,6 +1210,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           setSlashSelection(-1);
           return;
         }
+        if (text.length === 0 && view.agentProgressTree && view.agentProgressTree.cursor >= 0) {
+          emitInput({ type: "agent-tree-escape" });
+          return;
+        }
         if (view.composer.busy) {
           clearHintNotice();
           emitInput({ type: "interrupt" });
@@ -1235,6 +1243,19 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
         clearHintNotice();
         emitInput(view.composer.busy ? { type: "interrupt" } : { type: "escape" });
+        return;
+      }
+
+      // Agent tree: x 关闭选中的 agent（CCB eviction 模式，仅空输入 + 有 cursor 时生效）。
+      if (
+        text.length === 0 &&
+        input.toLowerCase() === "x" &&
+        !key.ctrl &&
+        !key.meta &&
+        view.agentProgressTree &&
+        view.agentProgressTree.cursor >= 0
+      ) {
+        emitInput({ type: "agent-tree-close" });
         return;
       }
 
@@ -1270,6 +1291,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           emitInput({ type: "task-suggestion-move", delta: -1 });
           return;
         }
+        if (text.length === 0 && view.agentProgressTree && view.agentProgressTree.rows.length > 0) {
+          emitInput({ type: "agent-tree-move", delta: -1 });
+          return;
+        }
         if (text.length === 0 && inTaskMode) {
           emitInput({ type: "transcript-scroll", action: "lineUp" });
           return;
@@ -1297,6 +1322,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
           emitInput({ type: "task-suggestion-move", delta: 1 });
+          return;
+        }
+        if (text.length === 0 && view.agentProgressTree && view.agentProgressTree.rows.length > 0) {
+          emitInput({ type: "agent-tree-move", delta: 1 });
           return;
         }
         if (text.length === 0 && inTaskMode) {

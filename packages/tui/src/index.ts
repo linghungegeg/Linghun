@@ -1689,6 +1689,7 @@ async function runInkShell(
         }
         if (context.ctrlOExpandState?.active) {
           context.ctrlOExpandState = { active: false };
+          context.agentTreeState = undefined;
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
           return;
@@ -1711,11 +1712,11 @@ async function runInkShell(
           context.btwPanelState = undefined;
           context.sessionsPanelState = undefined;
           context.backgroundOverlayState = undefined;
+          context.agentTreeState = undefined;
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
           return;
         }
-        await handleTuiKeypress("escape", context, shellOutput);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -1887,6 +1888,51 @@ async function runInkShell(
           await stopCommandPanelSelection(context, output);
           context.commandPanelState = undefined;
         }
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      // ─── Agent tree keyboard navigation (Phase 3 visual alignment) ──────────────
+      if (event.type === "agent-tree-move") {
+        const agents = context.agents ?? [];
+        const running = agents.filter((a) => a.status === "running");
+        const cursor = context.agentTreeState?.cursor ?? -1;
+        const next = cursor < 0 ? 0 : Math.max(0, Math.min(cursor + event.delta, running.length - 1));
+        context.agentTreeState = { cursor: next, expandedId: context.agentTreeState?.expandedId };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "agent-tree-enter") {
+        const agents = context.agents ?? [];
+        const running = agents.filter((a) => a.status === "running");
+        const cursor = context.agentTreeState?.cursor ?? -1;
+        if (cursor >= 0 && cursor < running.length) {
+          const agent = running[cursor];
+          const expandedId = context.agentTreeState?.expandedId === agent?.id ? undefined : agent?.id;
+          context.agentTreeState = { cursor, expandedId };
+        }
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "agent-tree-close") {
+        const agents = context.agents ?? [];
+        const running = agents.filter((a) => a.status === "running");
+        const cursor = context.agentTreeState?.cursor ?? -1;
+        if (cursor >= 0 && cursor < running.length) {
+          const agent = running[cursor];
+          if (agent) {
+            agent.status = "cancelled";
+          }
+          context.agentTreeState = { cursor: -1 };
+        }
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "agent-tree-escape") {
+        context.agentTreeState = { cursor: -1 };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

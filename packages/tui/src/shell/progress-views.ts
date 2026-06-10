@@ -12,7 +12,8 @@ import type {
 
 const MAX_LIST_ITEMS = 8;
 const MAX_DETAIL_LINES = 12;
-const MAX_MAINSCREEN_AGENTS = 4;
+/** Agent eviction delay: completed agents stay visible for 5s (CCB evictAfter pattern). */
+const AGENT_EVICTION_DELAY_MS = 5_000;
 
 /**
  * Summarize repetitive activities (e.g. "Read × 5, Glob × 3") instead of
@@ -37,10 +38,34 @@ function summarizeActivity(agents: AgentRun[]): string | undefined {
 
 export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTreeView | undefined {
   const allAgents = context.agents ?? [];
+  const now = Date.now();
+  let completedMap = context.agentCompletedAt;
+
+  // Track completion timestamps on first discovery (auto-record).
+  for (const agent of allAgents) {
+    if (agent.status === "completed" && (!completedMap || !completedMap[agent.id])) {
+      if (!completedMap) {
+        context.agentCompletedAt = {};
+        completedMap = context.agentCompletedAt;
+      }
+      completedMap[agent.id] = now;
+    }
+  }
+
+  // Eviction: recently completed agents stay visible for AGENT_EVICTION_DELAY_MS.
+  const recentlyCompleted = allAgents.filter(
+    (a) =>
+      a.status === "completed" &&
+      completedMap?.[a.id] !== undefined &&
+      now - completedMap[a.id] < AGENT_EVICTION_DELAY_MS,
+  );
+
   const running = allAgents.filter((a) => a.status === "running");
-  if (running.length === 0) return undefined;
-  const visible = running.slice(0, MAX_MAINSCREEN_AGENTS);
-  const hiddenCount = Math.max(0, allAgents.filter(isActiveAgent).length - visible.length);
+  const visible = [...running, ...recentlyCompleted];
+  if (visible.length === 0) return undefined;
+
+  const cursor = context.agentTreeState?.cursor ?? -1;
+  const state = context.agentTreeState;
   return {
     rows: visible.map((agent, index) => ({
       id: agent.id,
@@ -51,8 +76,10 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
       toolUses: agent.mailbox.length,
       tokens: 0,
     })),
-    hiddenPending: hiddenCount,
+    hiddenPending: 0,
     activitySummary: summarizeActivity(allAgents),
+    cursor,
+    expandedId: state?.expandedId,
   };
 }
 
@@ -142,10 +169,6 @@ export function getBackgroundOverlaySelectedTask(context: TuiContext): Backgroun
   const rows = (context.backgroundTasks ?? []).filter((task) => !context.dismissedBackgroundTaskIds?.has(task.id));
   const cursor = Math.max(0, Math.min(context.backgroundOverlayState?.cursor ?? 0, Math.max(0, rows.length - 1)));
   return rows[cursor];
-}
-
-function isActiveAgent(agent: AgentRun): boolean {
-  return agent.status === "running" || agent.status === "blocked" || agent.status === "stale";
 }
 
 function isActiveWorkflow(run: WorkflowRunState): boolean {

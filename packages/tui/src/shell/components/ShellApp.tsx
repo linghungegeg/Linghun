@@ -169,7 +169,7 @@ function TaskLayout({
   const mouseSelectionActive = process.env.LINGHUN_TUI_MOUSE_SELECTION === "1";
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
-      <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>
+      <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1} position="relative">
         <TranscriptViewport
           scroll={view.transcriptScroll}
           virtualRange={view.transcriptVirtualRange}
@@ -230,27 +230,9 @@ function TaskLayout({
           ) : null}
 
           {/* TaskSuggestionBar — 空输入时可用 ↑/↓/Enter 或数字选择。 */}
-          {view.agentProgressTree ? (
-            <AgentProgressTree
-              tree={view.agentProgressTree}
-              width={view.width - 4}
-              noColor={noColor}
-              language={view.language}
-            />
-          ) : null}
-
           {view.taskListView ? (
             <TaskListView
               list={view.taskListView}
-              width={view.width - 4}
-              noColor={noColor}
-              language={view.language}
-            />
-          ) : null}
-
-          {view.workflowProgressView ? (
-            <WorkflowProgressView
-              workflow={view.workflowProgressView}
               width={view.width - 4}
               noColor={noColor}
               language={view.language}
@@ -297,6 +279,29 @@ function TaskLayout({
         {view.taskRuntimeSummary ? (
           <Box width={cw} marginTop={1}>
             <ProductBlock block={view.taskRuntimeSummary} theme={theme} width={cw} />
+          </Box>
+        ) : null}
+
+        {/* Agent & Workflow trees — fixed bottom above composer (CCB FullscreenLayout bottom: Spinner → PromptInput → Footer). */}
+        {view.agentProgressTree ? (
+          <Box width={cw}>
+            <AgentProgressTree
+              tree={view.agentProgressTree}
+              width={cw}
+              noColor={noColor}
+              language={view.language}
+            />
+          </Box>
+        ) : null}
+
+        {view.workflowProgressView ? (
+          <Box width={cw}>
+            <WorkflowProgressView
+              workflow={view.workflowProgressView}
+              width={cw}
+              noColor={noColor}
+              language={view.language}
+            />
           </Box>
         ) : null}
 
@@ -379,6 +384,8 @@ function PanelLayer({
   noColor: boolean;
 }): React.ReactNode {
   if (view.permission) return null;
+
+  // BackgroundTaskOverlay keeps its own frame (CCB PermissionDialog style).
   if (view.backgroundTaskOverlay) {
     return (
       <BackgroundTaskOverlay
@@ -388,6 +395,44 @@ function PanelLayer({
       />
     );
   }
+
+  // Pick the active panel content.
+  const panel = resolvePanel(view, controller, width, noColor);
+  if (!panel) return null;
+
+  // CCB modal: absolute bottom-anchored overlay with ▔ divider, 2-row transcript peek.
+  const columns = view.width;
+  const maxPanelHeight = Math.max(4, view.height - 3);
+  const theme = createShellTheme(noColor);
+  return (
+    <Box
+      position="absolute"
+      bottom={0}
+      left={0}
+      right={0}
+      maxHeight={maxPanelHeight}
+      flexDirection="column"
+      overflow="hidden"
+      opaque
+    >
+      <Box flexShrink={0}>
+        <Text color={theme.permission ?? theme.muted}>
+          {"▔".repeat(columns)}
+        </Text>
+      </Box>
+      <Box flexDirection="column" paddingX={2} flexShrink={0} overflow="hidden">
+        {panel}
+      </Box>
+    </Box>
+  );
+}
+
+function resolvePanel(
+  view: ShellViewModel,
+  controller: ShellController,
+  width: number,
+  noColor: boolean,
+): React.ReactNode {
   if (view.helpPanel) {
     return (
       <HelpPanel

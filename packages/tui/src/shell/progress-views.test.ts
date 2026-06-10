@@ -106,7 +106,7 @@ describe("Phase R3 progress view projectors", () => {
     expect(overlay?.summary).toContain("运行中 1");
   });
 
-  it("agent tree only shows running agents, hides blocked/stale/completed from main screen", () => {
+  it("agent tree shows running and eviction-phase completed agents, hides blocked/stale", () => {
     const ctx = createContext();
     ctx.agents = [
       {
@@ -135,14 +135,19 @@ describe("Phase R3 progress view projectors", () => {
       },
     ] as unknown as TuiContext["agents"];
 
+    // Simulate that agent-3 completed 2 seconds ago (within 5s eviction window).
+    ctx.agentCompletedAt = { "agent-3": Date.now() - 2_000 };
+
     const view = buildAgentProgressTreeView(ctx);
 
-    expect(view?.rows).toHaveLength(1);
+    // Runner (running) + Done (recently completed, eviction) = 2 rows.
+    expect(view?.rows).toHaveLength(2);
     expect(view?.rows[0]?.name).toBe("Runner");
-    expect(view?.hiddenPending).toBe(1);
+    expect(view?.rows[1]?.name).toBe("Done");
+    expect(view?.rows[1]?.status).toBe("completed");
   });
 
-  it("returns undefined when no agents are running", () => {
+  it("returns undefined when no agents are running and eviction has expired", () => {
     const ctx = createContext();
     ctx.agents = [
       {
@@ -153,6 +158,9 @@ describe("Phase R3 progress view projectors", () => {
         cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
       },
     ] as unknown as TuiContext["agents"];
+
+    // Eviction expired (completed 10s ago, beyond 5s delay).
+    ctx.agentCompletedAt = { "agent-1": Date.now() - 10_000 };
 
     expect(buildAgentProgressTreeView(ctx)).toBeUndefined();
   });

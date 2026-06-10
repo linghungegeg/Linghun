@@ -354,6 +354,10 @@ export type AgentProgressTreeView = {
   }[];
   hiddenPending: number;
   activitySummary?: string;
+  /** Selected row index (-1 = no selection, >= 0 = selection active). */
+  cursor: number;
+  /** Expanded agent id (detail row visible). */
+  expandedId?: string;
 };
 
 export type TaskListView = {
@@ -635,7 +639,12 @@ export type ShellInputEvent =
   | { type: "stash" }
   | { type: "external-editor" }
   | { type: "clipboard-copied"; text: string }
-  | { type: "clipboard-failed"; error: string };
+  | { type: "clipboard-failed"; error: string }
+  /** Agent tree keyboard navigation (Phase 3 visual alignment). */
+  | { type: "agent-tree-move"; delta: -1 | 1 }
+  | { type: "agent-tree-enter" }
+  | { type: "agent-tree-close" }
+  | { type: "agent-tree-escape" };
 
 export type ShellController = {
   onInput: (event: ShellInputEvent) => Promise<void> | void;

@@ -6,16 +6,13 @@ import type { ShellTheme } from "../theme.js";
 import type { TaskFooterView } from "../types.js";
 
 /**
- * D.13Q-UX — StatusFooter
+ * D.13Q-UX — StatusFooter (Phase 5: two-line on wide screens, CCB PromptInputFooter layout).
  *
- * CCB PromptInputFooter / StatusLine / BuiltinStatusLine 范式：
- * - 三栏分区（左 mode pill + cyclePermHint，右 model · cache · index ·
- *   reasoning，hint 可选放最右）。
- * - 右对齐元数据用 flexShrink=0；左侧吃剩余宽度并 truncate。
- * - 窄屏（width < 60）走列向布局，避免单行挤压。
- * - cacheTone === "warning" 时 cache 段染 warning 色；模型 dim 时 model 段染 dim。
- *
- * 与 ShellApp 旧 TaskFooter 兼容：保留单行紧凑形态；语义颜色由 theme 决定。
+ * Layout by screen width:
+ * - ≥80 cols (wide): two rows
+ *   Row 1: StatusLine (workspaceStatus + runtimeStatus, dim)
+ *   Row 2: permissionMode · cyclePermHint (left) | model · cache · index · git · context (right)
+ * - <80 cols (narrow): single line, left mode + right segments, no StatusLine
  */
 
 export type StatusFooterProps = {
@@ -55,8 +52,8 @@ export function StatusFooter({
   if (footer.contextUsage) rightSegments.push({ key: "context", text: footer.contextUsage, tone: "dim" });
   if (footer.reasoning) rightSegments.push({ key: "reasoning", text: footer.reasoning });
 
-  // 窄屏列向布局：左行（mode + cyclePermHint）一行，右栏分两行展示，避免挤压。
-  const narrow = width < 60;
+  // Narrow (<80 cols): single-line compressed layout.
+  const narrow = width < 80;
   if (narrow) {
     return (
       <Box flexDirection="column" width={width} paddingX={2} paddingTop={1}>
@@ -79,6 +76,8 @@ export function StatusFooter({
     );
   }
 
+  // Wide (≥80 cols): two-line — StatusLine on top, metadata row below.
+  const hasStatusLine = !!(footer.workspaceStatus || footer.runtimeStatus);
   const reservedRight = rightSegments.reduce(
     (acc, seg, idx) => acc + (seg.text?.length ?? 0) + (idx > 0 ? 3 : 0),
     0,
@@ -89,6 +88,20 @@ export function StatusFooter({
 
   return (
     <Box flexDirection="column" width={width} paddingX={2} paddingTop={1}>
+      {hasStatusLine ? (
+        <Box width="100%" flexShrink={0}>
+          {footer.workspaceStatus ? (
+            <Text color={theme.dim ?? theme.muted} dimColor>
+              {fitText(footer.workspaceStatus, width - 4)}
+            </Text>
+          ) : null}
+          {footer.runtimeStatus ? (
+            <Text color={theme.dim ?? theme.muted} dimColor>
+              {fitText(footer.runtimeStatus, width - 4)}
+            </Text>
+          ) : null}
+        </Box>
+      ) : null}
       <Box width="100%">
         <Box flexGrow={1} flexShrink={1}>
           <Text>
@@ -109,7 +122,6 @@ export function StatusFooter({
           </Text>
         </Box>
       </Box>
-      <FooterDetailLines footer={footer} theme={theme} width={width} />
     </Box>
   );
 }

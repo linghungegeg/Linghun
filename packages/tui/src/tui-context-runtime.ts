@@ -496,6 +496,10 @@ export type TuiContext = {
   dismissedBackgroundTaskIds?: Set<string>;
   /** Visible-only Shift+Down background overlay state. */
   backgroundOverlayState?: { open: boolean; cursor: number; expanded?: boolean };
+  /** Agent tree keyboard selection state (Phase 3 visual alignment). */
+  agentTreeState?: { cursor: number; expandedId?: string };
+  /** Agent completion timestamps for eviction delay (Phase 5). Cleared on next render cycle. */
+  agentCompletedAt?: Record<string, number>;
   /** R6 — notification callback, initialized by index.ts to push transient notifications. */
   pushNotification?: (text: string, tone?: "default" | "dim" | "warning" | "error" | "success") => void;
   /** R7 — brief mode reduces TUI noise (env LINGHUN_TUI_BRIEF=1 or /brief toggle). */
