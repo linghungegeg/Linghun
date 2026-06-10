@@ -1392,7 +1392,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     onRetry: (info) => {
       context.requestActivityPhase = "provider_retrying";
       context.requestActivityToolName = undefined;
-      (context as { retryInfo?: { attempt: number; max: number; delaySec: number } }).retryInfo = {
+      context.retryInfo = {
         attempt: info.attempt,
         max: info.maxAttempts,
         delaySec: Math.ceil(info.delayMs / 1000),

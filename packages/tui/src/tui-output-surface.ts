@@ -277,6 +277,9 @@ export class ShellBlockOutput extends Writable {
       fullText: normalized,
       nextAction: hasMore ? errorHint : undefined,
       messageKind: "tool_result_error",
+      retrySeconds: this.context.retryInfo?.delaySec,
+      retryAttempt: this.context.retryInfo?.attempt,
+      retryMax: this.context.retryInfo?.max,
     });
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;

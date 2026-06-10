@@ -396,6 +396,14 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
         out.push(...renderPlainMarkdownLines(body, noColor, { error: true }));
       }
       if (nextAction) out.push(`  ${dim(nextAction, noColor)}`);
+      // Phase 15: retry hint (前 3 次降噪，对齐 CCB)
+      if (block.retrySeconds && block.retrySeconds > 0 && (block.retryAttempt ?? 0) >= 4) {
+        const hint =
+          view.language === "en-US"
+            ? `Retrying in ${block.retrySeconds}s… (attempt ${block.retryAttempt}/${block.retryMax})`
+            : `正在重试 ${block.retrySeconds}s 后… (第 ${block.retryAttempt}/${block.retryMax} 次)`;
+        out.push(dim(hint, noColor));
+      }
       return out;
     }
 

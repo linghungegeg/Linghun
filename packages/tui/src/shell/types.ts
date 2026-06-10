@@ -89,6 +89,10 @@ export type ProductBlockViewModel = {
   selectionLineRanges?: ProductBlockSelectionRange[];
   /** Phase 14 — message timestamp (ms since epoch), rendered dim next to user_text blocks. */
   timestamp?: number;
+  /** Phase 15 — retry countdown info for error recovery UI. */
+  retrySeconds?: number;
+  retryAttempt?: number;
+  retryMax?: number;
 };
 
 export type CtrlOExpandView = {

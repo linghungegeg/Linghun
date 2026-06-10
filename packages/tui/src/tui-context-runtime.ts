@@ -514,6 +514,8 @@ export type TuiContext = {
   briefMode?: boolean;
   /** Phase 9 — push a ProductBlockViewModel into the transcript block list. Set by the shell initializer. */
   pushTranscriptBlock?: (block: import("./shell/types.js").ProductBlockViewModel) => void;
+  /** Phase 15 — provider retry state, set by registerProviderHooks onRetry callback. */
+  retryInfo?: { attempt: number; max: number; delaySec: number };
 };
 
 export const VERIFICATION_COMMAND_TIMEOUT_MS = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS;

@@ -255,6 +255,13 @@ export function ProductBlock({
     const previewBody = messageBody(block, block.nextAction);
     const nextAction = visibleNextAction(block, previewBody);
     const body = messageBody(block, nextAction);
+    const showRetry =
+      block.retrySeconds && block.retrySeconds > 0 && (block.retryAttempt ?? 0) >= 4;
+    const retryHint = showRetry
+      ? language === "en-US"
+        ? `Retrying in ${block.retrySeconds}s… (attempt ${block.retryAttempt}/${block.retryMax})`
+        : `正在重试 ${block.retrySeconds}s 后… (第 ${block.retryAttempt}/${block.retryMax} 次)`
+      : undefined;
     return (
       <Box flexDirection="column" marginBottom={1}>
         {isMeaningfulTitle(block.title) ? (
@@ -280,6 +287,7 @@ export function ProductBlock({
         {nextAction ? (
           <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
         ) : null}
+        {retryHint ? <Text dimColor>{retryHint}</Text> : null}
       </Box>
     );
   }
