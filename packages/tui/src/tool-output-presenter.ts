@@ -1,4 +1,4 @@
-import { TOGGLE_DETAILS_KEYBIND, type Language } from "@linghun/shared";
+import { type Language, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName, ToolOutput } from "@linghun/tools";
 
 export type TuiOutputLayer = "primary" | "details" | "debug";
@@ -57,7 +57,10 @@ export function createLayeredToolOutput(
   return {
     layer: "primary",
     toolName: name,
-    summary: sanitizeToolSummaryForPrimary(output.summary ?? createToolSummary(name, output, language), language),
+    summary: sanitizeToolSummaryForPrimary(
+      output.summary ?? createToolSummary(name, output, language),
+      language,
+    ),
     preview: preview.text,
     details: output.details,
     truncated,
@@ -74,6 +77,16 @@ export function formatToolOutput(
 ): string {
   const layered = createLayeredToolOutput(name, output, language, evidenceId);
   const lines = [formatPrimaryToolLead(name, output, layered, language)];
+  // Phase 18: large response token warning (>10K characters).
+  const textLen = output.text?.length ?? 0;
+  if (textLen > 10_000) {
+    const approxTokens = Math.round(textLen / 4);
+    lines.push(
+      language === "en-US"
+        ? `⚠ Large response · ~${approxTokens} tokens`
+        : `⚠ 大响应 · ~${approxTokens} tokens`,
+    );
+  }
   if (layered.preview) {
     lines.push(layered.preview);
   }
@@ -115,12 +128,18 @@ function formatPrimaryToolLead(
     if (name === "Glob") return `File search summary: ${count ?? visibleLines} file(s).`;
     if (name === "Read") return `Read summary: ${totalLines ?? visibleLines} line(s).`;
     if (name === "Bash" && exitCode !== undefined) return `Bash finished: exit code ${exitCode}.`;
+    // Phase 18: try structured output for non-built-in tools.
+    const enStructured = tryExtractLeadText(output.text);
+    if (enStructured) return `${name}: ${enStructured}`;
     return `${name} summary: ${layered.summary}`;
   }
   if (name === "Grep") return `搜索摘要：${count ?? 0} 处。`;
   if (name === "Glob") return `文件搜索摘要：${count ?? visibleLines} 个文件。`;
   if (name === "Read") return `读取摘要：${totalLines ?? visibleLines} 行。`;
   if (name === "Bash" && exitCode !== undefined) return `Bash 已结束：退出码 ${exitCode}。`;
+  // Phase 18: try structured output for non-built-in tools.
+  const zhStructured = tryExtractLeadText(output.text);
+  if (zhStructured) return `${name}：${zhStructured}`;
   return `${name} 摘要：${layered.summary}`;
 }
 
@@ -397,7 +416,72 @@ function createToolOutputPreview(
     return createSummaryFirstPreview(name, text, language, output);
   }
 
+  // Phase 18: try structured JSON unpack for MCP / non-built-in tool outputs.
+  const unwrapped = tryUnwrapStructuredText(text);
+  if (unwrapped) return { text: unwrapped, truncated: text.length > 2000 };
+
   return { text, truncated: false };
+}
+
+/**
+ * Phase 18 — attempt to extract human-readable text from structured JSON
+ * tool output. MCP tools often return JSON payloads wrapping a single
+ * text/content/result field.
+ */
+function tryUnwrapStructuredText(text: string): string | undefined {
+  if (text.length < 3) return undefined;
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const obj = parsed as Record<string, unknown>;
+    // Single content/text/result field → unwrap.
+    if (typeof obj.content === "string" && obj.content.length > 0) {
+      return obj.content;
+    }
+    if (typeof obj.text === "string" && obj.text.length > 0) {
+      return obj.text;
+    }
+    if (typeof obj.result === "string" && obj.result.length > 0) {
+      return obj.result;
+    }
+    // Array of content items (e.g. [{type:"text", text:"hello"}])
+    if (Array.isArray(obj.content) && obj.content.length > 0) {
+      const parts = obj.content
+        .filter(
+          (item): item is Record<string, unknown> => typeof item === "object" && item !== null,
+        )
+        .map((item) =>
+          typeof item.text === "string"
+            ? item.text
+            : typeof item.content === "string"
+              ? item.content
+              : "",
+        )
+        .filter(Boolean);
+      if (parts.length > 0) return parts.join("\n");
+    }
+    // Fallback: pretty-print the JSON compact but readable.
+    if (Object.keys(obj).length >= 2) {
+      return JSON.stringify(obj, null, 2);
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Phase 18 — extract a short lead text from tool output for the summary line.
+ * For JSON-structured outputs, unwrap to first line; for plain text, take
+ * first 80 chars; returns undefined if no meaningful text found.
+ */
+function tryExtractLeadText(text: string): string | undefined {
+  if (!text || text.length < 3) return undefined;
+  const unwrapped = tryUnwrapStructuredText(text);
+  const source = unwrapped ?? text;
+  const firstLine = source.split("\n")[0]?.trim() ?? "";
+  if (!firstLine) return undefined;
+  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine;
 }
 
 function createTodoSurfacePreview(
@@ -436,7 +520,9 @@ function createTodoSurfacePreview(
           `完成 ${counts.completed}`,
           `阻塞 ${counts.blocked}`,
         ];
-  const lines = [language === "en-US" ? `Todo: ${parts.join(" · ")}` : `Todo：${parts.join(" · ")}`];
+  const lines = [
+    language === "en-US" ? `Todo: ${parts.join(" · ")}` : `Todo：${parts.join(" · ")}`,
+  ];
   if (lead) {
     const label =
       language === "en-US"
