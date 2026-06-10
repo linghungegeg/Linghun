@@ -1,6 +1,6 @@
-import { highlight } from "cli-highlight";
 import { Box, Text } from "@linghun/ink-runtime";
-import { lexer, type Token, type Tokens } from "marked";
+import { highlight } from "cli-highlight";
+import { type Token, type Tokens, lexer } from "marked";
 import { createContext, useContext } from "react";
 import type React from "react";
 import { memo, useRef } from "react";
@@ -41,7 +41,8 @@ type InlineToken =
 
 type TableCell = { text: string; lines: string[]; width: number };
 
-const INLINE_TOKEN_RE = /(`[^`\n]+`|\*\*[^*\n][^\n]*?\*\*|\*[^*\n][^\n]*?\*|\[[^\]\n]+\]\([^\s)\n]+\))/u;
+const INLINE_TOKEN_RE =
+  /(`[^`\n]+`|\*\*[^*\n][^\n]*?\*\*|\*[^*\n][^\n]*?\*|\[[^\]\n]+\]\([^\s)\n]+\))/u;
 const ANSI_REGEX = /\x1B\[[0-9;]*m/gu;
 const TABLE_VERTICAL_FALLBACK_WIDTH = 48;
 const MARKDOWN_TOKEN_CACHE_LIMIT = 128;
@@ -149,28 +150,46 @@ function InlineText({
         const key = `${tokenIndex}-${token.kind}-${token.value}`;
         if (token.kind === "code") {
           return (
-            <Text key={key} color={selected ? "white" : codeColor} dimColor={selected ? false : dim}>
+            <Text
+              key={key}
+              color={selected ? "white" : codeColor}
+              dimColor={selected ? false : dim}
+            >
               {token.value}
             </Text>
           );
         }
         if (token.kind === "bold") {
           return (
-            <Text key={key} bold color={selected ? "white" : color} dimColor={selected ? false : dim}>
+            <Text
+              key={key}
+              bold
+              color={selected ? "white" : color}
+              dimColor={selected ? false : dim}
+            >
               {token.value}
             </Text>
           );
         }
         if (token.kind === "italic") {
           return (
-            <Text key={key} italic color={selected ? "white" : color} dimColor={selected ? false : dim}>
+            <Text
+              key={key}
+              italic
+              color={selected ? "white" : color}
+              dimColor={selected ? false : dim}
+            >
               {token.value}
             </Text>
           );
         }
         if (token.kind === "link") {
           return (
-            <Text key={key} color={selected ? "white" : (theme.diagnostic ?? theme.accent)} underline>
+            <Text
+              key={key}
+              color={selected ? "white" : (theme.diagnostic ?? theme.accent)}
+              underline
+            >
               {token.value}
             </Text>
           );
@@ -286,14 +305,6 @@ function splitLineBySelectionRanges(
   return segments;
 }
 
-function codePrefix(theme: ShellTheme, dim: boolean): React.ReactNode {
-  return (
-    <Text color={theme.dim ?? theme.muted} dimColor={dim}>
-      {"  | "}
-    </Text>
-  );
-}
-
 function stripAnsi(value: string): string {
   return value.replace(ANSI_REGEX, "");
 }
@@ -354,16 +365,18 @@ function CodeLine({
   }
   return (
     <Box flexDirection="column">
-      {wrapText(line.length === 0 ? " " : (highlightedLine ?? line), wrapWidth).map((wrapped, index) => (
-        <Text
-          key={`${index}-${stripAnsi(wrapped)}`}
-          color={selected ? "white" : highlightedLine && !isDiff ? undefined : color}
-          backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
-          dimColor={selected ? false : dimLine}
-        >
-          {wrapped}
-        </Text>
-      ))}
+      {wrapText(line.length === 0 ? " " : (highlightedLine ?? line), wrapWidth).map(
+        (wrapped, index) => (
+          <Text
+            key={`${index}-${stripAnsi(wrapped)}`}
+            color={selected ? "white" : highlightedLine && !isDiff ? undefined : color}
+            backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
+            dimColor={selected ? false : dimLine}
+          >
+            {wrapped}
+          </Text>
+        ),
+      )}
     </Box>
   );
 }
@@ -385,27 +398,33 @@ function renderCodeBlock({
 }): React.ReactNode {
   const rawLines = code.split("\n");
   const highlighted = getCachedHighlightedCodeLines(code, lang);
+  const lineCount = rawLines.length;
+  const gutterWidth = String(lineCount).length;
   return (
     <Box key={blockKey} flexDirection="column" marginLeft={1}>
-      <Text color={theme.dim ?? theme.muted} dimColor={dim}>
-        {`  ┌${lang ? ` ${lang} ` : ""}`}
-      </Text>
-      {rawLines.map((line, lineIndex) => (
-        <Box key={`${blockKey}-line-${lineIndex}-${line}`} flexDirection="row">
-          {codePrefix(theme, dim)}
-          <CodeLine
-            line={line}
-            highlightedLine={highlighted[lineIndex]}
-            lang={lang}
-            theme={theme}
-            dim={dim}
-            wrapWidth={Math.max(8, wrapWidth - 5)}
-          />
-        </Box>
-      ))}
-      <Text color={theme.dim ?? theme.muted} dimColor={dim}>
-        {"  └"}
-      </Text>
+      {lang ? (
+        <Text color={theme.dim ?? theme.muted} dimColor={dim}>
+          {`  ${lang}`}
+        </Text>
+      ) : null}
+      {rawLines.map((line, lineIndex) => {
+        const num = String(lineIndex + 1).padStart(gutterWidth, " ");
+        return (
+          <Box key={`${blockKey}-line-${lineIndex}-${line}`} flexDirection="row">
+            <Text color={theme.dim ?? theme.muted} dimColor>
+              {`${num} │ `}
+            </Text>
+            <CodeLine
+              line={line}
+              highlightedLine={highlighted[lineIndex]}
+              lang={lang}
+              theme={theme}
+              dim={dim}
+              wrapWidth={Math.max(8, wrapWidth - gutterWidth - 4)}
+            />
+          </Box>
+        );
+      })}
     </Box>
   );
 }
@@ -466,7 +485,13 @@ function renderToken({
           <Text color={theme.dim ?? theme.muted} dimColor={dim}>
             {"▌ "}
           </Text>
-          <MessageMarkdown text={quote.text} theme={theme} dim={dim} tone={tone} wrapWidth={wrapWidth - 2} />
+          <MessageMarkdown
+            text={quote.text}
+            theme={theme}
+            dim={dim}
+            tone={tone}
+            wrapWidth={wrapWidth - 2}
+          />
         </Box>
       );
     }
@@ -475,11 +500,17 @@ function renderToken({
       return (
         <Box key={keyPrefix} flexDirection="column">
           {list.items.map((item, index) => {
-            const marker = list.ordered ? `${Number(list.start || 1) + index}.` : item.task ? (item.checked ? "☑" : "☐") : "-";
+            const marker = list.ordered
+              ? `${Number(list.start || 1) + index}.`
+              : item.task
+                ? item.checked
+                  ? "☑"
+                  : "☐"
+                : "-";
             return (
               <Box key={`${keyPrefix}-item-${index}`} flexDirection="row">
                 <Text color={dim ? theme.dim : theme.muted} dimColor={dim}>
-                  {marker} {" "}
+                  {marker}{" "}
                 </Text>
                 <InlineRow
                   value={item.text.replace(/\n+/gu, " ")}
@@ -540,7 +571,10 @@ function padDisplay(value: string, width: number): string {
 function tableWidths(table: Tokens.Table, wrapWidth: number): number[] {
   const columnCount = table.header.length;
   const rawWidths = Array.from({ length: columnCount }, (_, index) => {
-    const values = [table.header[index]?.text ?? "", ...table.rows.map((row) => row[index]?.text ?? "")];
+    const values = [
+      table.header[index]?.text ?? "",
+      ...table.rows.map((row) => row[index]?.text ?? ""),
+    ];
     return Math.min(24, Math.max(4, ...values.map((value) => displayWidth(value))));
   });
   const borderWidth = columnCount + 1;
@@ -589,29 +623,40 @@ function renderTable(
     const height = Math.max(...cells.map((cell) => cell.lines.length));
     return Array.from({ length: height }, (_, lineIndex) => (
       <Text key={`${rowKey}-${lineIndex}`}>
-        <Text color={borderColor} dimColor={dim}>│</Text>
+        <Text color={borderColor} dimColor={dim}>
+          │
+        </Text>
         {cells.map((cell, cellIndex) => (
           <Text key={`${rowKey}-${lineIndex}-${cellIndex}`}>
             {" "}
             <Text bold={boldHeader} color={boldHeader && !dim ? theme.accent : undefined}>
               {padDisplay(cell.lines[lineIndex] ?? "", cell.width)}
+            </Text>{" "}
+            <Text color={borderColor} dimColor={dim}>
+              │
             </Text>
-            {" "}
-            <Text color={borderColor} dimColor={dim}>│</Text>
           </Text>
         ))}
       </Text>
     ));
   };
   const header = table.header.map((cell, index) => buildTableCell(cell.text, widths[index] ?? 4));
-  const rows = table.rows.map((row) => row.map((cell, index) => buildTableCell(cell.text, widths[index] ?? 4)));
+  const rows = table.rows.map((row) =>
+    row.map((cell, index) => buildTableCell(cell.text, widths[index] ?? 4)),
+  );
   return (
     <Box key={keyPrefix} flexDirection="column">
-      <Text color={borderColor} dimColor={dim}>{border("┌", "┬", "┐")}</Text>
+      <Text color={borderColor} dimColor={dim}>
+        {border("┌", "┬", "┐")}
+      </Text>
       {renderRow(header, `${keyPrefix}-header`, true)}
-      <Text color={borderColor} dimColor={dim}>{border("├", "┼", "┤")}</Text>
+      <Text color={borderColor} dimColor={dim}>
+        {border("├", "┼", "┤")}
+      </Text>
       {rows.flatMap((row, index) => renderRow(row, `${keyPrefix}-row-${index}`))}
-      <Text color={borderColor} dimColor={dim}>{border("└", "┴", "┘")}</Text>
+      <Text color={borderColor} dimColor={dim}>
+        {border("└", "┴", "┘")}
+      </Text>
     </Box>
   );
 }
@@ -675,6 +720,7 @@ function renderSelectablePlainMarkdown({
   const effectiveWrapWidth = wrapWidth ?? 80;
   let inCode = false;
   let codeLang: string | undefined;
+  let codeLineNum = 0;
   const rendered: React.ReactNode[] = [];
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     const raw = lines[lineIndex] ?? "";
@@ -682,13 +728,18 @@ function renderSelectablePlainMarkdown({
     if (fence) {
       inCode = !inCode;
       codeLang = inCode ? fence[1] || undefined : undefined;
+      codeLineNum = 0;
       continue;
     }
     const ranges = selectedRangesByLine.get(lineIndex) ?? [];
     if (inCode) {
+      codeLineNum++;
+      const gutter = String(codeLineNum).padStart(2, " ");
       rendered.push(
         <Box key={`code-line-${lineIndex}-${raw}`} flexDirection="row">
-          {codePrefix(theme, dim)}
+          <Text color={theme.dim ?? theme.muted} dimColor>
+            {`${gutter} │ `}
+          </Text>
           <CodeLine
             line={raw}
             lang={codeLang}
@@ -818,14 +869,24 @@ export function StreamingMarkdown({
   return (
     <Box flexDirection="column">
       {stablePrefix ? (
-        <MemoMessageMarkdown text={stablePrefix} theme={theme} dim={dim} tone={tone} wrapWidth={wrapWidth} />
+        <MemoMessageMarkdown
+          text={stablePrefix}
+          theme={theme}
+          dim={dim}
+          tone={tone}
+          wrapWidth={wrapWidth}
+        />
       ) : null}
       {unstableSuffix ? (
         <Box flexDirection="row">
-          <MessageMarkdown text={unstableSuffix} theme={theme} dim={dim} tone={tone} wrapWidth={wrapWidth} />
-          <Text color={theme.accent}>
-            {"▌"}
-          </Text>
+          <MessageMarkdown
+            text={unstableSuffix}
+            theme={theme}
+            dim={dim}
+            tone={tone}
+            wrapWidth={wrapWidth}
+          />
+          <Text color={theme.accent}>{"▌"}</Text>
         </Box>
       ) : (
         <Text color={theme.accent}>{"▌"}</Text>
