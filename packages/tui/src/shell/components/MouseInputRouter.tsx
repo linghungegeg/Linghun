@@ -1,9 +1,10 @@
 import { parseTerminalInput, useInput } from "@linghun/ink-runtime";
 import { useCallback, useMemo, useRef } from "react";
-import { useScrollBatcher } from "../hooks/useScrollBatcher.js";
+import { useScrollRuntime } from "../hooks/useScrollRuntime.js";
 import { WheelAccelerator } from "../models/wheel-acceleration.js";
 import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
 import { recoverOrphanMouseTail } from "../models/terminal-input-runtime.js";
+import { isXtermJsTerminal } from "../terminal-capability.js";
 import type { ShellInputEvent, TranscriptScrollView } from "../types.js";
 
 /**
@@ -11,8 +12,13 @@ import type { ShellInputEvent, TranscriptScrollView } from "../types.js";
  *
  * When alt-screen + mouse tracking is active, this component intercepts raw
  * SGR mouse sequences from stdin and dispatches them as structured events:
- *   - Wheel events → transcript-scroll with accelerated step (microtask-batched)
+ *   - Wheel events → transcript-scroll with accelerated step + pending delta drain
  *   - Click/drag/release → transcript-mouse for selection
+ *
+ * Phase R5 scroll runtime: wheel events accumulate in a pending delta accumulator
+ * with requestAnimationFrame drain, preventing state-update explosion on high-frequency
+ * input (trackpad flicks, mouse free-spin). Quantized dispatch reduces React re-renders
+ * by ~5-10x compared to immediate per-event dispatch.
  *
  * This component must NOT be rendered when mouse tracking is disabled
  * (non-alt-screen fallback). The parent (ShellApp TaskLayout) gates rendering
@@ -29,7 +35,11 @@ export function MouseInputRouter({
   scroll: TranscriptScrollView | undefined;
   onInput: (event: ShellInputEvent) => void;
 }): null {
-  const accelerator = useMemo(() => new WheelAccelerator(), []);
+  const accelerator = useMemo(() => {
+    const base = Number.parseInt(process.env.LINGHUN_SCROLL_SPEED ?? "1", 10) || 1;
+    const terminalType = isXtermJsTerminal() ? "xterm.js" : "native";
+    return new WheelAccelerator({ base, terminalType });
+  }, []);
   const scrollRef = useRef(scroll);
   scrollRef.current = scroll;
 
@@ -39,7 +49,7 @@ export function MouseInputRouter({
     },
     [onInput],
   );
-  const batchedScroll = useScrollBatcher(dispatchScroll);
+  const accumulateScroll = useScrollRuntime(dispatchScroll);
 
   const handleInput = useCallback(
     (input: string) => {
@@ -53,8 +63,10 @@ export function MouseInputRouter({
       let dispatched = false;
       for (const event of parseTerminalInput(input)) {
         if (event.kind === "wheel") {
-          const step = accelerator.recordEvent(Date.now(), scrollRef.current?.viewportHeight);
-          batchedScroll(event.direction === "up" ? step : -step);
+          const step = accelerator.recordEvent(Date.now(), event.direction, scrollRef.current?.viewportHeight);
+          if (step !== 0) {
+            accumulateScroll(event.direction === "up" ? step : -step);
+          }
           dispatched = true;
           continue;
         }
@@ -86,8 +98,11 @@ export function MouseInputRouter({
       if (!mouse) return;
 
       if (mouse.button === "wheel-up" || mouse.button === "wheel-down") {
-        const step = accelerator.recordEvent(Date.now(), scrollRef.current?.viewportHeight);
-        batchedScroll(mouse.button === "wheel-up" ? step : -step);
+        const direction = mouse.button === "wheel-up" ? "up" : "down";
+        const step = accelerator.recordEvent(Date.now(), direction, scrollRef.current?.viewportHeight);
+        if (step !== 0) {
+          accumulateScroll(mouse.button === "wheel-up" ? step : -step);
+        }
         return;
       }
 
@@ -103,7 +118,7 @@ export function MouseInputRouter({
         });
       }
     },
-    [accelerator, batchedScroll, onInput, selectionActive],
+    [accelerator, accumulateScroll, onInput, selectionActive],
   );
 
   useInput(

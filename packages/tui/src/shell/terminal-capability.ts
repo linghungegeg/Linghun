@@ -220,3 +220,20 @@ function legacyCapability(): TerminalCapability {
     keyboardProtocols: [],
   };
 }
+
+/**
+ * Detect if the terminal uses xterm.js (VS Code / Cursor / Windsurf integrated terminals).
+ *
+ * xterm.js terminals send exactly 1 wheel event per notch (no pre-amplification),
+ * requiring app-side exponential decay curve to match native terminal feel.
+ *
+ * Detection heuristic:
+ * - TERM_PROGRAM=vscode (VS Code integrated terminal)
+ * - TERM_PROGRAM contains "cursor" or "windsurf" (similar xterm.js-based terminals)
+ *
+ * Behavioral reference: CCB scroll runtime (行为级参考，未复制源码).
+ */
+export function isXtermJsTerminal(env: NodeJS.ProcessEnv = process.env): boolean {
+  const termProgram = (env.TERM_PROGRAM ?? "").toLowerCase();
+  return termProgram === "vscode" || termProgram.includes("cursor") || termProgram.includes("windsurf");
+}
