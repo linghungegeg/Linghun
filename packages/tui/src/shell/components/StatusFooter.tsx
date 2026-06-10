@@ -1,5 +1,5 @@
-import type { Language } from "@linghun/shared";
 import { Box, Text } from "@linghun/ink-runtime";
+import type { Language } from "@linghun/shared";
 import type React from "react";
 import { fitText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
@@ -49,7 +49,8 @@ export function StatusFooter({
     { key: "index", text: footer.index, tone: "default" },
   ];
   if (gitBranch) rightSegments.push({ key: "branch", text: `⎇ ${gitBranch}`, tone: "dim" });
-  if (footer.contextUsage) rightSegments.push({ key: "context", text: footer.contextUsage, tone: "dim" });
+  if (footer.contextUsage)
+    rightSegments.push({ key: "context", text: footer.contextUsage, tone: "dim" });
   if (footer.reasoning) rightSegments.push({ key: "reasoning", text: footer.reasoning });
 
   // Narrow (<80 cols): single-line compressed layout.
@@ -76,16 +77,14 @@ export function StatusFooter({
           ))}
           {rightSegments.map((seg, idx) => (
             <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
-              {(remoteSegment.length > 0 || idx > 0) ? " · " : ""}
+              {remoteSegment.length > 0 || idx > 0 ? " · " : ""}
               {seg.text}
             </Text>
           ))}
         </Text>
         <FooterDetailLines footer={footer} theme={theme} width={width} />
         <Text color={theme.dim ?? theme.muted} dimColor>
-          {language === "en-US"
-            ? "Esc interrupt · ? shortcuts"
-            : "Esc 中断 · ? 快捷键"}
+          {language === "en-US" ? "Esc interrupt · ? shortcuts" : "Esc 中断 · ? 快捷键"}
         </Text>
       </Box>
     );
@@ -107,12 +106,12 @@ export function StatusFooter({
       {hasStatusLine ? (
         <Box width="100%" flexShrink={0}>
           {footer.workspaceStatus ? (
-            <Text color={theme.dim ?? theme.muted} dimColor>
+            <Text color={theme.subtle ?? theme.dim ?? theme.muted} dimColor>
               {fitText(footer.workspaceStatus, width - 4)}
             </Text>
           ) : null}
           {footer.runtimeStatus ? (
-            <Text color={theme.dim ?? theme.muted} dimColor>
+            <Text color={theme.subtle ?? theme.dim ?? theme.muted} dimColor>
               {fitText(footer.runtimeStatus, width - 4)}
             </Text>
           ) : null}
@@ -140,9 +139,7 @@ export function StatusFooter({
       </Box>
       <Box paddingTop={1}>
         <Text color={theme.dim ?? theme.muted} dimColor>
-          {language === "en-US"
-            ? "Esc interrupt · ? shortcuts"
-            : "Esc 中断 · ? 快捷键"}
+          {language === "en-US" ? "Esc interrupt · ? shortcuts" : "Esc 中断 · ? 快捷键"}
         </Text>
       </Box>
     </Box>
@@ -163,12 +160,12 @@ function FooterDetailLines({
   return (
     <Box flexDirection="column" marginTop={1}>
       {footer.workspaceStatus ? (
-        <Text color={theme.dim ?? theme.muted} dimColor>
+        <Text color={theme.subtle ?? theme.dim ?? theme.muted} dimColor>
           {fitText(footer.workspaceStatus, detailWidth)}
         </Text>
       ) : null}
       {footer.runtimeStatus ? (
-        <Text color={theme.dim ?? theme.muted} dimColor>
+        <Text color={theme.subtle ?? theme.dim ?? theme.muted} dimColor>
           {fitText(footer.runtimeStatus, detailWidth)}
         </Text>
       ) : null}

@@ -20,6 +20,10 @@ export type ShellTheme = {
   success: string | undefined;
   error: string | undefined;
   inlineCode: string | undefined;
+  /** Phase 11 — semantic color layers (CCB-aligned). */
+  subtle: string | undefined;
+  inactive: string | undefined;
+  suggestion: string | undefined;
 };
 
 export function createShellTheme(
@@ -53,6 +57,9 @@ export function createShellTheme(
       success: undefined,
       error: undefined,
       inlineCode: undefined,
+      subtle: undefined,
+      inactive: undefined,
+      suggestion: undefined,
     };
   }
   if (mode === "light") {
@@ -82,6 +89,9 @@ export function createShellTheme(
       success: "green",
       error: "red",
       inlineCode: "gray",
+      subtle: "gray",
+      inactive: "gray",
+      suggestion: "blue",
     };
   }
   return {
@@ -110,6 +120,9 @@ export function createShellTheme(
     success: "green",
     error: "red",
     inlineCode: "gray",
+    subtle: "gray",
+    inactive: "gray",
+    suggestion: "blueBright",
   };
 }
 

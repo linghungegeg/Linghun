@@ -103,7 +103,7 @@ export function ProductBlock({
             {"─".repeat(Math.min(Math.max(8, width), 72))}
           </Text>
           <Box flexDirection="row">
-            <Text color={theme.muted}>│ </Text>
+            <Text color={theme.inactive ?? theme.muted}>│ </Text>
             {ts ? <Text dimColor>{ts} </Text> : null}
             <Box flexDirection="column">
               {wrapText(body, Math.max(8, width - 2 - (ts ? ts.length + 3 : 0))).map(
@@ -126,7 +126,7 @@ export function ProductBlock({
     return (
       <Box marginTop={1} marginBottom={0}>
         <Text>
-          <Text color={theme.muted}>{marker}</Text>
+          <Text color={theme.inactive ?? theme.muted}>{marker}</Text>
           <Text color={textColor}>{fitText(block.title, Math.max(8, width - 2))}</Text>
         </Text>
       </Box>
@@ -326,7 +326,9 @@ export function ProductBlock({
         </Text>
       ) : null}
       {!summaryAsMarker && summaryTrimmed ? <Text>{block.summary}</Text> : null}
-      {block.detail ? <Text color={theme.muted}>{fitText(block.detail, innerWidth)}</Text> : null}
+      {block.detail ? (
+        <Text color={theme.inactive ?? theme.muted}>{fitText(block.detail, innerWidth)}</Text>
+      ) : null}
       {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} /> : null}
     </Box>
   );
