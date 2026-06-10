@@ -1,11 +1,8 @@
-import { useInput } from "@linghun/ink-runtime";
+import { parseTerminalInput, useInput } from "@linghun/ink-runtime";
 import { useCallback, useMemo, useRef } from "react";
 import { useScrollBatcher } from "../hooks/useScrollBatcher.js";
 import { WheelAccelerator } from "../models/wheel-acceleration.js";
-import {
-  isSgrMouseInput,
-  parseSgrMouseEvent,
-} from "../models/transcript-selection-state.js";
+import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
 import { recoverOrphanMouseTail } from "../models/terminal-input-runtime.js";
 import type { ShellInputEvent, TranscriptScrollView } from "../types.js";
 
@@ -24,9 +21,11 @@ import type { ShellInputEvent, TranscriptScrollView } from "../types.js";
 export function MouseInputRouter({
   active,
   scroll,
+  selectionActive = true,
   onInput,
 }: {
   active: boolean;
+  selectionActive?: boolean;
   scroll: TranscriptScrollView | undefined;
   onInput: (event: ShellInputEvent) => void;
 }): null {
@@ -44,6 +43,39 @@ export function MouseInputRouter({
 
   const handleInput = useCallback(
     (input: string) => {
+      if (input === "\x1B[O" || input === "[O") {
+        if (selectionActive) {
+          onInput({ type: "transcript-mouse", event: { x: 0, y: 0, button: "left", action: "focus-out" } });
+        }
+        return;
+      }
+
+      let dispatched = false;
+      for (const event of parseTerminalInput(input)) {
+        if (event.kind === "wheel") {
+          const step = accelerator.recordEvent(Date.now(), scrollRef.current?.viewportHeight);
+          batchedScroll(event.direction === "up" ? step : -step);
+          dispatched = true;
+          continue;
+        }
+        if (event.kind === "mouse") {
+          if (selectionActive) {
+            onInput({
+              type: "transcript-mouse",
+              event: {
+                x: Math.max(0, event.x - 1),
+                y: Math.max(0, event.y - 1),
+                button: event.button === 0 || event.button === 3 ? "left" : "other",
+                action: event.action === "press" ? "down" : event.action === "release" ? "up" : event.action,
+              },
+            });
+          }
+          dispatched = true;
+          continue;
+        }
+      }
+      if (dispatched) return;
+
       let seq = input;
       if (!isSgrMouseInput(seq)) {
         const recovered = recoverOrphanMouseTail(seq);
@@ -54,26 +86,24 @@ export function MouseInputRouter({
       if (!mouse) return;
 
       if (mouse.button === "wheel-up" || mouse.button === "wheel-down") {
-        const step = accelerator.recordEvent(
-          Date.now(),
-          scrollRef.current?.viewportHeight,
-        );
-        const delta = mouse.button === "wheel-up" ? step : -step;
-        batchedScroll(delta);
+        const step = accelerator.recordEvent(Date.now(), scrollRef.current?.viewportHeight);
+        batchedScroll(mouse.button === "wheel-up" ? step : -step);
         return;
       }
 
-      onInput({
-        type: "transcript-mouse",
-        event: {
-          x: mouse.x,
-          y: mouse.y,
-          button: mouse.button,
-          action: mouse.action,
-        },
-      });
+      if (selectionActive) {
+        onInput({
+          type: "transcript-mouse",
+          event: {
+            x: mouse.x,
+            y: mouse.y,
+            button: mouse.button,
+            action: mouse.action,
+          },
+        });
+      }
     },
-    [accelerator, batchedScroll, onInput],
+    [accelerator, batchedScroll, onInput, selectionActive],
   );
 
   useInput(

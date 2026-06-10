@@ -405,7 +405,7 @@ export type TranscriptMouseEventView = {
   x: number;
   y: number;
   button: "left" | "wheel-up" | "wheel-down" | "other";
-  action: "down" | "drag" | "up" | "wheel";
+  action: "down" | "drag" | "up" | "wheel" | "hover" | "focus-out";
 };
 
 /** Legacy task-scroll model shape; main transcript wiring uses TranscriptScrollView. */

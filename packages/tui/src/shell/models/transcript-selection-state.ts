@@ -1,70 +1,39 @@
-import type {
-  ProductBlockSelectionRange,
-  ProductBlockViewModel,
-  TranscriptScrollView,
-} from "../types.js";
+import {
+  isTerminalSelectionMouseInput,
+  isTerminalSelectionStale,
+  parseTerminalSelectionMouseEvent,
+  reduceTerminalSelection,
+  terminalSelectedTextFromRows,
+  terminalSelectionContainsRow,
+  terminalSelectionLineIndexesForBlock,
+  terminalSelectionLineRangesForBlock,
+  type TerminalSelectionCell,
+  type TerminalSelectionLineRange,
+  type TerminalSelectionMouseAction,
+  type TerminalSelectionMouseButton,
+  type TerminalSelectionMouseEvent,
+  type TerminalSelectionPoint,
+  type TerminalSelectionState,
+  type TerminalSelectionTextRow,
+  type TerminalSelectionViewportGeometry,
+} from "@linghun/ink-runtime";
+import type { ProductBlockSelectionRange, ProductBlockViewModel, TranscriptScrollView } from "../types.js";
 import { charWidth } from "../text-utils.js";
 
-export type TranscriptMouseButton = "left" | "wheel-up" | "wheel-down" | "other";
-
-export type TranscriptMouseAction = "down" | "drag" | "up" | "wheel";
-
-export type TranscriptMouseEvent = {
-  x: number;
-  y: number;
-  button: TranscriptMouseButton;
-  action: TranscriptMouseAction;
-};
-
-export type TranscriptViewportGeometry = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  contentHeight: number;
-  topOffset: number;
-};
-
-export type TranscriptTextRow = {
-  index: number;
-  blockId?: string;
-  lineInBlock?: number;
-  text: string;
-  cells: TranscriptScreenCell[];
-  sourceColumnStart?: number;
-  softWrapped?: boolean;
-  noSelect?: boolean;
-};
-
-export type TranscriptScreenCell = {
-  char: string;
-  selectableText: string;
-  width: number;
-  noSelect?: boolean;
-};
+export type TranscriptMouseButton = TerminalSelectionMouseButton;
+export type TranscriptMouseAction = TerminalSelectionMouseAction;
+export type TranscriptMouseEvent = TerminalSelectionMouseEvent;
+export type TranscriptViewportGeometry = TerminalSelectionViewportGeometry;
+export type TranscriptTextRow = TerminalSelectionTextRow;
+export type TranscriptScreenCell = TerminalSelectionCell;
 
 export type TranscriptScreenBuffer = {
   rows: TranscriptTextRow[];
   width: number;
 };
 
-export type TranscriptSelectionPoint = {
-  row: number;
-  column: number;
-};
-
-export type TranscriptSelectionState = {
-  dragging: boolean;
-  anchor?: TranscriptSelectionPoint;
-  focus?: TranscriptSelectionPoint;
-  selectedText?: string;
-  copiedText?: string;
-  lastCopyError?: string;
-  anchorMode?: "char" | "word" | "line";
-  lastClickTime?: number;
-  lastClickRow?: number;
-  clickCount?: number;
-};
+export type TranscriptSelectionPoint = TerminalSelectionPoint;
+export type TranscriptSelectionState = TerminalSelectionState;
 
 export type TranscriptSelectionInput = {
   state: TranscriptSelectionState | undefined;
@@ -72,6 +41,7 @@ export type TranscriptSelectionInput = {
   rows: TranscriptTextRow[];
   geometry?: TranscriptViewportGeometry;
   scroll?: TranscriptScrollView;
+  copyOnSelect?: boolean;
 };
 
 export type TranscriptSelectionResult = {
@@ -80,12 +50,6 @@ export type TranscriptSelectionResult = {
   scrollDelta?: number;
   consumed: boolean;
 };
-
-const EDGE_AUTOSCROLL_LINES = 2;
-const MULTI_CLICK_TIMEOUT_MS = 500;
-const LOST_RELEASE_TIMEOUT_MS = 5000;
-// biome-ignore lint/suspicious/noControlCharactersInRegex: SGR mouse input may start with ESC.
-const SGR_MOUSE_RE = /^\u001B?\[<(\d+);(\d+);(\d+)([mM])$/u;
 
 export function buildTranscriptScreenBuffer(
   blocks: ProductBlockViewModel[],
@@ -116,6 +80,61 @@ export function buildTranscriptTextRows(
   width = Number.POSITIVE_INFINITY,
 ): TranscriptTextRow[] {
   return buildTranscriptScreenBuffer(blocks, width).rows;
+}
+
+export function parseSgrMouseEvent(input: string): TranscriptMouseEvent | undefined {
+  return parseTerminalSelectionMouseEvent(input);
+}
+
+export function isSgrMouseInput(input: string): boolean {
+  return isTerminalSelectionMouseInput(input);
+}
+
+export function isSelectionStale(state: TranscriptSelectionState | undefined, now: number): boolean {
+  return isTerminalSelectionStale(state, now);
+}
+
+export function reduceTranscriptSelection(input: TranscriptSelectionInput): TranscriptSelectionResult {
+  return reduceTerminalSelection(input);
+}
+
+export function selectionContainsRow(
+  selection: TranscriptSelectionState | undefined,
+  rowIndex: number,
+): boolean {
+  return terminalSelectionContainsRow(selection, rowIndex);
+}
+
+export function selectionLineIndexesForBlock(
+  selection: TranscriptSelectionState | undefined,
+  rows: TranscriptTextRow[],
+  blockId: string,
+): number[] {
+  return terminalSelectionLineIndexesForBlock(selection, rows, blockId);
+}
+
+export function selectionLineRangesForBlock(
+  selection: TranscriptSelectionState | undefined,
+  rows: TranscriptTextRow[],
+  blockId: string,
+): ProductBlockSelectionRange[] {
+  return terminalSelectionLineRangesForBlock(selection, rows, blockId).map(toProductBlockSelectionRange);
+}
+
+export function selectedTextFromRows(
+  rows: TranscriptTextRow[],
+  anchor: TranscriptSelectionPoint,
+  focus: TranscriptSelectionPoint,
+): string {
+  return terminalSelectedTextFromRows(rows, anchor, focus);
+}
+
+function toProductBlockSelectionRange(range: TerminalSelectionLineRange): ProductBlockSelectionRange {
+  return {
+    lineIndex: range.lineIndex,
+    startColumn: range.startColumn,
+    endColumn: range.endColumn,
+  };
 }
 
 function screenTextForBlock(block: ProductBlockViewModel): string {
@@ -204,370 +223,4 @@ function cellsFromText(text: string, noSelect: boolean): TranscriptScreenCell[] 
     }
   }
   return cells;
-}
-
-export function parseSgrMouseEvent(input: string): TranscriptMouseEvent | undefined {
-  const match = input.match(SGR_MOUSE_RE);
-  if (!match) return undefined;
-  const code = Number.parseInt(match[1] ?? "", 10);
-  const x = Number.parseInt(match[2] ?? "", 10);
-  const y = Number.parseInt(match[3] ?? "", 10);
-  const suffix = match[4];
-  if (!Number.isFinite(code) || !Number.isFinite(x) || !Number.isFinite(y)) return undefined;
-  const action = actionFromCode(code, suffix === "m");
-  return {
-    x: Math.max(0, x - 1),
-    y: Math.max(0, y - 1),
-    button: buttonFromCode(code),
-    action,
-  };
-}
-
-export function isSgrMouseInput(input: string): boolean {
-  return SGR_MOUSE_RE.test(input);
-}
-
-/**
- * Check if a dragging selection has lost its mouse release (e.g., mouse left window).
- * If more than LOST_RELEASE_TIMEOUT_MS since last event, force-finish.
- */
-export function isSelectionStale(state: TranscriptSelectionState | undefined, now: number): boolean {
-  if (!state?.dragging || !state.lastClickTime) return false;
-  return now - state.lastClickTime > LOST_RELEASE_TIMEOUT_MS;
-}
-
-function detectClickCount(state: TranscriptSelectionState | undefined, point: TranscriptSelectionPoint, now: number): number {
-  if (!state?.lastClickTime || !state.lastClickRow === undefined) return 1;
-  if (now - state.lastClickTime > MULTI_CLICK_TIMEOUT_MS) return 1;
-  if (state.lastClickRow !== point.row) return 1;
-  return ((state.clickCount ?? 1) % 3) + 1;
-}
-
-function wordBoundsAt(row: TranscriptTextRow, column: number): { start: number; end: number } {
-  const cells = row.cells.length > 0 ? row.cells : cellsFromText(row.text, row.noSelect === true);
-  const col = Math.max(0, Math.min(column, cells.length - 1));
-  const charAtCol = cells[col]?.selectableText ?? " ";
-  const cls = charClass(charAtCol);
-  let start = col;
-  while (start > 0 && charClass(cells[start - 1]?.selectableText ?? " ") === cls) start--;
-  let end = col;
-  while (end < cells.length - 1 && charClass(cells[end + 1]?.selectableText ?? " ") === cls) end++;
-  return { start, end: end + 1 };
-}
-
-function charClass(ch: string): "ws" | "word" | "punct" {
-  if (/\s/.test(ch)) return "ws";
-  if (/[\w一-鿿㐀-䶿豈-﫿]/.test(ch)) return "word";
-  return "punct";
-}
-
-export function reduceTranscriptSelection(
-  input: TranscriptSelectionInput,
-): TranscriptSelectionResult {
-  const { event, geometry, rows } = input;
-  if (!geometry || rows.length === 0) return { state: input.state, consumed: false };
-  if (event.button !== "left" && event.button !== "wheel-up" && event.button !== "wheel-down") {
-    return { state: input.state, consumed: false };
-  }
-  if (event.action === "wheel") return { state: input.state, consumed: false };
-  if (!isInsideTranscript(event, geometry)) {
-    if (input.state?.dragging && (event.action === "drag" || event.action === "up")) {
-      return finishOrUpdateOutOfBoundsDrag(input);
-    }
-    return { state: input.state, consumed: false };
-  }
-
-  const point = pointFromMouse(event, geometry, rows);
-  const scrollDelta =
-    event.action === "drag" && input.state?.dragging
-      ? autoScrollDeltaForMouse(event.y, geometry, input.scroll)
-      : 0;
-
-  if (event.action === "down") {
-    const now = Date.now();
-    const clickCount = detectClickCount(input.state, point, now);
-    const targetRow = rows[point.row];
-
-    // Lost-release recovery: if a new press arrives while still dragging,
-    // the previous release was lost (mouse left the terminal window).
-    // Finish the prior selection so copy-on-select fires before we start anew.
-    let lostReleaseCopy: string | undefined;
-    if (input.state?.dragging && input.state.anchor) {
-      const finished = withSelectedText({ ...input.state, dragging: false }, rows);
-      lostReleaseCopy = finished.selectedText?.trimEnd() || undefined;
-    }
-
-    if (clickCount === 2 && targetRow && !targetRow.noSelect) {
-      const bounds = wordBoundsAt(targetRow, point.column);
-      const anchor: TranscriptSelectionPoint = { row: point.row, column: bounds.start };
-      const focus: TranscriptSelectionPoint = { row: point.row, column: bounds.end };
-      const next: TranscriptSelectionState = {
-        dragging: true, anchor, focus, anchorMode: "word",
-        lastClickTime: now, lastClickRow: point.row, clickCount,
-      };
-      return { state: withSelectedText(next, rows), copyText: lostReleaseCopy, consumed: true };
-    }
-    if (clickCount === 3 && targetRow && !targetRow.noSelect) {
-      const anchor: TranscriptSelectionPoint = { row: point.row, column: 0 };
-      const focus: TranscriptSelectionPoint = { row: point.row, column: targetRow.cells.length };
-      const next: TranscriptSelectionState = {
-        dragging: true, anchor, focus, anchorMode: "line",
-        lastClickTime: now, lastClickRow: point.row, clickCount,
-      };
-      return { state: withSelectedText(next, rows), copyText: lostReleaseCopy, consumed: true };
-    }
-
-    const next: TranscriptSelectionState = {
-      dragging: true, anchor: point, focus: point, anchorMode: "char",
-      lastClickTime: now, lastClickRow: point.row, clickCount,
-    };
-    return { state: withSelectedText(next, rows), copyText: lostReleaseCopy, consumed: true };
-  }
-
-  if (event.action === "drag") {
-    if (!input.state?.dragging || !input.state.anchor)
-      return { state: input.state, consumed: true };
-    let adjustedFocus = point;
-    if (input.state.anchorMode === "word") {
-      const targetRow = rows[point.row];
-      if (targetRow && !targetRow.noSelect) {
-        const bounds = wordBoundsAt(targetRow, point.column);
-        adjustedFocus = { row: point.row, column: point.row >= (input.state.anchor.row) ? bounds.end : bounds.start };
-      }
-    } else if (input.state.anchorMode === "line") {
-      const targetRow = rows[point.row];
-      if (targetRow) {
-        adjustedFocus = { row: point.row, column: point.row >= (input.state.anchor.row) ? targetRow.cells.length : 0 };
-      }
-    }
-    const next: TranscriptSelectionState = {
-      ...input.state,
-      dragging: true,
-      focus: adjustedFocus,
-      lastCopyError: undefined,
-    };
-    return {
-      state: withSelectedText(next, rows),
-      scrollDelta,
-      consumed: true,
-    };
-  }
-
-  if (event.action === "up") {
-    if (!input.state?.dragging || !input.state.anchor) return { state: undefined, consumed: true };
-    const next = withSelectedText({ ...input.state, dragging: false, focus: point }, rows);
-    const copyText = next.selectedText?.trimEnd();
-    if (!copyText) {
-      return {
-        state: {
-          dragging: false,
-          lastClickTime: input.state.lastClickTime,
-          lastClickRow: input.state.lastClickRow,
-          clickCount: input.state.clickCount,
-        },
-        consumed: true,
-      };
-    }
-    return {
-      state: { ...next, copiedText: copyText },
-      copyText,
-      consumed: true,
-    };
-  }
-
-  return { state: input.state, consumed: false };
-}
-
-function finishOrUpdateOutOfBoundsDrag(input: TranscriptSelectionInput): TranscriptSelectionResult {
-  const { event, geometry, rows } = input;
-  if (!geometry || !input.state?.anchor || rows.length === 0) {
-    return { state: undefined, consumed: true };
-  }
-  const point = pointFromMouse(event, geometry, rows);
-  if (event.action === "drag") {
-    const next = withSelectedText({ ...input.state, dragging: true, focus: point }, rows);
-    return {
-      state: next,
-      scrollDelta: autoScrollDeltaForMouse(event.y, geometry, input.scroll),
-      consumed: true,
-    };
-  }
-  const next = withSelectedText({ ...input.state, dragging: false, focus: point }, rows);
-  const copyText = next.selectedText?.trimEnd();
-  if (!copyText) return { state: undefined, consumed: true };
-  return {
-    state: { ...next, copiedText: copyText },
-    copyText,
-    consumed: true,
-  };
-}
-
-export function selectionContainsRow(
-  selection: TranscriptSelectionState | undefined,
-  rowIndex: number,
-): boolean {
-  if (!selection?.anchor || !selection.focus) return false;
-  const range = orderedPoints(selection.anchor, selection.focus);
-  return rowIndex >= range.start.row && rowIndex <= range.end.row;
-}
-
-export function selectionLineIndexesForBlock(
-  selection: TranscriptSelectionState | undefined,
-  rows: TranscriptTextRow[],
-  blockId: string,
-): number[] {
-  if (!selection?.anchor || !selection.focus) return [];
-  const selected = new Set<number>();
-  for (const row of rows) {
-    if (row.blockId !== blockId || row.lineInBlock === undefined) continue;
-    if (row.noSelect) continue;
-    if (selectionContainsRow(selection, row.index)) selected.add(row.lineInBlock);
-  }
-  return [...selected].sort((a, b) => a - b);
-}
-
-export function selectionLineRangesForBlock(
-  selection: TranscriptSelectionState | undefined,
-  rows: TranscriptTextRow[],
-  blockId: string,
-): ProductBlockSelectionRange[] {
-  if (!selection?.anchor || !selection.focus) return [];
-  const range = orderedPoints(selection.anchor, selection.focus);
-  const selectedRows = rows.slice(range.start.row, range.end.row + 1);
-  const ranges: ProductBlockSelectionRange[] = [];
-  for (let index = 0; index < selectedRows.length; index++) {
-    const row = selectedRows[index];
-    if (!row || row.noSelect || row.blockId !== blockId || row.lineInBlock === undefined) continue;
-    const start =
-      selectedRows.length === 1 || index === 0 ? Math.max(0, range.start.column) : 0;
-    const end =
-      selectedRows.length === 1 || index === selectedRows.length - 1
-        ? Math.max(start, range.end.column)
-        : row.cells.length;
-    if (end <= start) continue;
-    const sourceColumnStart = row.sourceColumnStart ?? 0;
-    ranges.push({
-      lineIndex: row.lineInBlock,
-      startColumn: sourceColumnStart + start,
-      endColumn: sourceColumnStart + Math.min(end, row.cells.length),
-    });
-  }
-  return ranges;
-}
-
-function withSelectedText(
-  state: TranscriptSelectionState,
-  rows: TranscriptTextRow[],
-): TranscriptSelectionState {
-  if (!state.anchor || !state.focus) return state;
-  return { ...state, selectedText: selectedTextFromRows(rows, state.anchor, state.focus) };
-}
-
-export function selectedTextFromRows(
-  rows: TranscriptTextRow[],
-  anchor: TranscriptSelectionPoint,
-  focus: TranscriptSelectionPoint,
-): string {
-  const range = orderedPoints(anchor, focus);
-  const selected = rows.slice(range.start.row, range.end.row + 1);
-  if (selected.length === 0) return "";
-  const parts: string[] = [];
-  for (let index = 0; index < selected.length; index++) {
-    const row = selected[index];
-    if (!row || row.noSelect) continue;
-    const text =
-      selected.length === 1
-        ? sliceRowCells(row, range.start.column, range.end.column)
-        : index === 0
-          ? sliceRowCells(row, range.start.column, undefined)
-          : index === selected.length - 1
-            ? sliceRowCells(row, 0, range.end.column)
-            : selectableTextFromRow(row);
-    if (parts.length > 0 && !row.softWrapped) parts.push("\n");
-    parts.push(text);
-  }
-  return parts.join("");
-}
-
-function orderedPoints(
-  a: TranscriptSelectionPoint,
-  b: TranscriptSelectionPoint,
-): { start: TranscriptSelectionPoint; end: TranscriptSelectionPoint } {
-  if (a.row < b.row) return { start: a, end: b };
-  if (a.row > b.row) return { start: b, end: a };
-  return a.column <= b.column ? { start: a, end: b } : { start: b, end: a };
-}
-
-function sliceRowCells(row: TranscriptTextRow, start: number, end: number | undefined): string {
-  const cells = row.cells.length > 0 ? row.cells : cellsFromText(row.text, row.noSelect === true);
-  return cells
-    .slice(Math.max(0, start), end === undefined ? undefined : Math.max(0, end))
-    .map((cell) => (cell.noSelect ? "" : cell.selectableText))
-    .join("");
-}
-
-function selectableTextFromRow(row: TranscriptTextRow): string {
-  return sliceRowCells(row, 0, undefined);
-}
-
-function pointFromMouse(
-  event: TranscriptMouseEvent,
-  geometry: TranscriptViewportGeometry,
-  rows: TranscriptTextRow[],
-): TranscriptSelectionPoint {
-  const visibleRow = clamp(Math.floor(event.y - geometry.y), 0, Math.max(0, geometry.height - 1));
-  const row = clamp(geometry.topOffset + visibleRow, 0, Math.max(0, rows.length - 1));
-  const column = clamp(
-    Math.floor(event.x - geometry.x),
-    0,
-    rows[row]?.cells.length ?? Array.from(rows[row]?.text ?? "").length,
-  );
-  return { row, column };
-}
-
-function autoScrollDeltaForMouse(
-  y: number,
-  geometry: TranscriptViewportGeometry,
-  scroll: TranscriptScrollView | undefined,
-): number {
-  const maxOffset = Math.max(0, geometry.contentHeight - geometry.height);
-  const current = scroll?.scrollOffset ?? 0;
-  if (y < geometry.y && current < maxOffset) {
-    return Math.min(EDGE_AUTOSCROLL_LINES, maxOffset - current);
-  }
-  if (y >= geometry.y + geometry.height && current > 0) {
-    return -Math.min(EDGE_AUTOSCROLL_LINES, current);
-  }
-  return 0;
-}
-
-function isInsideTranscript(
-  event: TranscriptMouseEvent,
-  geometry: TranscriptViewportGeometry,
-): boolean {
-  return (
-    event.x >= geometry.x &&
-    event.x < geometry.x + geometry.width &&
-    event.y >= geometry.y &&
-    event.y < geometry.y + geometry.height
-  );
-}
-
-function clamp(value: number, min: number, max: number): number {
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
-}
-
-function buttonFromCode(code: number): TranscriptMouseButton {
-  if ((code & 64) === 64) return (code & 1) === 1 ? "wheel-down" : "wheel-up";
-  if ((code & 3) === 0 || (code & 3) === 3) return "left";
-  return "other";
-}
-
-function actionFromCode(code: number, releaseSuffix: boolean): TranscriptMouseAction {
-  if ((code & 64) === 64) return "wheel";
-  if (releaseSuffix || (code & 3) === 3) return "up";
-  if ((code & 32) === 32) return "drag";
-  return "down";
 }

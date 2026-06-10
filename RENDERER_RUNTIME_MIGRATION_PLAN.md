@@ -594,27 +594,27 @@ Move selection and copy-on-select behavior into the renderer/input runtime inste
 
 ## Required Behavior
 
-- [ ] Press starts possible selection.
-- [ ] Drag extends selection.
-- [ ] Release settles selection.
-- [ ] Double-click selects word.
-- [ ] Triple-click selects line.
-- [ ] Drag-to-scroll when dragging outside viewport.
-- [ ] Focus-out lost-release recovery.
-- [ ] No-button-motion lost-release recovery.
-- [ ] Fresh-press lost-release recovery.
-- [ ] Hover does not pollute selection.
-- [ ] Disable mouse clicks while preserving wheel support.
+- [x] Press starts possible selection.
+- [x] Drag extends selection.
+- [x] Release settles selection.
+- [x] Double-click selects word.
+- [x] Triple-click selects line.
+- [x] Drag-to-scroll when dragging outside viewport.
+- [x] Focus-out lost-release recovery.
+- [x] No-button-motion lost-release recovery.
+- [x] Fresh-press lost-release recovery.
+- [x] Hover does not pollute selection.
+- [x] Disable mouse clicks while preserving wheel support.
 
 ## Copy Rules
 
-- [ ] Copy-on-select is configurable.
-- [ ] Click without drag does not copy.
-- [ ] Empty selection does not copy.
-- [ ] Whitespace-only selection does not copy.
-- [ ] Settled selection copies once.
-- [ ] Drag release copies.
-- [ ] Double/triple click selection may copy.
+- [x] Copy-on-select is configurable.
+- [x] Click without drag does not copy.
+- [x] Empty selection does not copy.
+- [x] Whitespace-only selection does not copy.
+- [x] Settled selection copies once.
+- [x] Drag release copies.
+- [x] Double/triple click selection may copy.
 
 ## App-Layer Cleanup Candidates
 
@@ -628,14 +628,60 @@ transcript selection fallback paths that duplicate renderer ownership
 
 ## Acceptance Criteria
 
-- [ ] Real drag selection copies expected text.
-- [ ] Single click does not copy.
-- [ ] Mis-click does not copy prompt/transcript text.
-- [ ] Lost release does not leave selection stuck.
+- [x] Real drag selection copies expected text.
+- [x] Single click does not copy.
+- [x] Mis-click does not copy prompt/transcript text.
+- [x] Lost release does not leave selection stuck.
 
 ## Handoff Notes
 
 Do not remove existing app-layer guards until renderer-owned path is tested in real terminals.
+
+## Phase 4 Closure — 2026-06-10
+
+Status: PASS / focused-local-validation + targeted-review-fix.
+
+Implemented:
+
+- Added runtime-owned mouse selection/copy reducer in `packages/ink-runtime/src/terminal-selection.ts`.
+- `@linghun/ink-runtime` now exports selection state, reducer, copy decision, SGR mouse parsing, selected-text extraction, and selection highlight range helpers.
+- `packages/tui/src/shell/models/transcript-selection-state.ts` is now a thin TUI adapter: it still builds transcript screen rows from `ProductBlockViewModel`, but selection/copy decisions are delegated to runtime.
+- `MouseInputRouter` now uses runtime `parseTerminalInput()` for structured wheel/mouse events, including no-button hover, with the old orphan-tail parser kept only as a fallback guard.
+- Added focus-out, no-button-motion, and fresh-press lost-release recovery.
+- Added `LINGHUN_TUI_MOUSE_SELECTION=0` to disable mouse click/selection routing while keeping existing wheel routing active.
+- Copy-on-select now rejects single click, empty selection, whitespace-only selection, and copies settled drag/double/triple-click selections once.
+
+Targeted review fixes (2026-06-10):
+
+- Fixed missing `continue` in `MouseInputRouter` mouse event loop: after handling structured mouse events from `parseTerminalInput()`, the code now correctly skips fallback path instead of processing the same event twice.
+- Verified coordinate transformation consistency: `parseTerminalInput()` returns 1-based terminal coordinates, `MouseInputRouter` applies `-1` transformation for 0-based app coordinates; fallback path using `parseSgrMouseEvent()` already returns 0-based coordinates directly. Both paths are correct and tested.
+- Validated all 60 Phase 1-4 tests still pass after fix.
+
+Scope kept unchanged:
+
+- No visual redesign.
+- No Phase 5 wheel/scroll runtime rewrite; existing wheel acceleration and batching remain in place.
+- No Phase 6 render/flush lifecycle change.
+- No provider/model/tool/scheduler/agent/MCP/permission behavior changes.
+- No CCB source copied or vendored.
+
+Validation:
+
+```text
+corepack pnpm exec vitest run packages/ink-runtime/src/terminal-input.test.ts packages/ink-runtime/src/terminal-selection.test.ts packages/tui/src/shell/models/terminal-input-runtime.test.ts packages/tui/src/shell/models/transcript-selection-state.test.ts packages/tui/src/shell/terminal-interaction-runtime.test.ts  PASS, 60 tests
+corepack pnpm --filter @linghun/ink-runtime typecheck  PASS
+corepack pnpm --filter @linghun/ink-runtime build      PASS
+corepack pnpm --filter @linghun/tui typecheck          PASS
+```
+
+Known limits:
+
+- Real-terminal drag/copy/manual lost-release smoke has not been run in this phase.
+- Clipboard write still happens in TUI controller using the existing clipboard backend; runtime owns copy decision and selected text, not OS clipboard I/O.
+- Transcript screen-row construction still lives in TUI because it depends on `ProductBlockViewModel`; the reducer/range/copy behavior is runtime-owned.
+- Wheel runtime maturity remains Phase 5.
+
+Next phase should start with wheel/scroll runtime drain and batching maturity, without reworking selection/copy again unless real-terminal smoke finds a Phase 4 regression.
 
 ---
 
