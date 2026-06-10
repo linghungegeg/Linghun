@@ -71,14 +71,15 @@ export function ConfigPanel({
         <Text color={theme.muted}>{fitText(hint.list, innerWidth)}</Text>
         {panel.panels.map((p, idx) => {
           const active = idx === panel.cursor;
-          const line = `${active ? "▸ " : "  "}${p.title}  ${p.summary}`;
+          const prefix = active ? "▸ " : "  ";
           return (
             <Box key={p.id} flexDirection="column">
-              {wrapText(line, innerWidth).map((part, lineIdx) => (
-                <Text key={`${p.id}-${lineIdx}`} color={active ? theme.accent : undefined}>
-                  {lineIdx === 0 ? part : `  ${fitText(part, Math.max(8, innerWidth - 2))}`}
-                </Text>
-              ))}
+              <Text color={active ? theme.accent : undefined}>
+                {fitText(`${prefix}${p.title}`, innerWidth)}
+              </Text>
+              <Text color={theme.muted}>
+                {fitText(`    ${p.summary}`, innerWidth)}
+              </Text>
             </Box>
           );
         })}

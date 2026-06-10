@@ -25286,7 +25286,8 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：上下文接近上限，先压缩再请求模型。");
+    // context-pressure is no longer surfaced as user notification (internal scheduler hint)
+    expect(notifications).not.toContain("策略：上下文接近上限，先压缩再请求模型。");
     expect(notifications).toContain("策略：已有任务阻塞，先检查 workflow/agent 状态。");
     const transcript = (await store.resume(session.id)).transcript;
     const raw = JSON.stringify(transcript);

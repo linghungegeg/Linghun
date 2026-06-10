@@ -428,7 +428,7 @@ describe("OpenAI compatible provider", () => {
       sendReasoning: false,
       retryStatuses: [429, 502, 503, 504],
       maxAttempts: 3,
-      requestTimeoutMs: 30_000,
+      requestTimeoutMs: 600_000,
       streamIdleTimeoutMs: 30_000,
     });
     expect(strictChat).toMatchObject({
@@ -606,7 +606,7 @@ describe("OpenAI compatible provider", () => {
       };
 
       const result = expect(collect()).rejects.toMatchObject({ code: "PROVIDER_REQUEST_TIMEOUT" });
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(600_000);
       await result;
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
@@ -647,7 +647,7 @@ describe("OpenAI compatible provider", () => {
       };
 
       const result = expect(collect()).rejects.toMatchObject({ code: "PROVIDER_REQUEST_TIMEOUT" });
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(600_000);
       await result;
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {

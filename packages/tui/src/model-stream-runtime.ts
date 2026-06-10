@@ -1178,12 +1178,8 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
 
 function shouldSurfacePolicyHint(id: string, decision: PolicyDecision): boolean {
   return (
-    id === "user-state-trust_repair" ||
-    id === "user-state-high_stakes_release" ||
     id === "provider-cooldown" ||
-    id === "blocked-runtime" ||
-    id === "compact-before-provider" ||
-    id === "provider-fallback"
+    id === "blocked-runtime"
   );
 }
 

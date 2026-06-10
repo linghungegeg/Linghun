@@ -1922,11 +1922,9 @@ async function runInkShell(
                 type: "scroll",
                 delta: event.delta,
               });
-        if (!isSameTranscriptScrollState(previous, next)) {
-          context.transcriptScrollState = next;
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
-        }
+        context.transcriptScrollState = next;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
         return;
       }
       if (event.type === "transcript-scroll-measure") {
@@ -2225,10 +2223,14 @@ async function runInkShell(
         context.configPanelState = undefined;
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
-        blocks.push(createCommandBlock(commandSequence++, event.command));
+        let command = event.command;
+        if (command === "/language") {
+          command = context.language === "zh-CN" ? "/language en-US" : "/language zh-CN";
+        }
+        blocks.push(createCommandBlock(commandSequence++, command));
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
-        await processTuiLine(event.command, context, gateway, shellOutput, store);
+        await processTuiLine(command, context, gateway, shellOutput, store);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
