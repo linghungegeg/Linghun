@@ -68,6 +68,11 @@ export async function flushStdout(stdout: Writable | undefined): Promise<void> {
 /**
  * Write SGR reset sequence and flush.
  * Used before exit to clear any leftover styles/modes.
+ *
+ * NOTE: This does NOT write mouse mode disable sequences. Mouse mode cleanup
+ * is handled by `terminalInteractionSession.disable()` (conditional on what
+ * was actually enabled) and by `recoverTerminalState()` (error recovery path
+ * which unconditionally disables all modes as a safety net).
  */
 export async function writeSGRResetAndFlush(stdout: Writable | undefined): Promise<void> {
   if (!stdout || stdout.destroyed || stdout.closed) return;
@@ -76,8 +81,7 @@ export async function writeSGRResetAndFlush(stdout: Writable | undefined): Promi
   try {
     // SGR reset: \x1b[0m (reset all attributes)
     // Show cursor: \x1b[?25h
-    // Disable SGR mouse: \x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l
-    const resetSequence = "\x1b[0m\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
+    const resetSequence = "\x1b[0m\x1b[?25h";
 
     if (stdout.writable && !stdout.destroyed) {
       stdout.write(resetSequence);

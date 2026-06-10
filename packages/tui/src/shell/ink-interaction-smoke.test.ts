@@ -560,6 +560,32 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("keeps wheel active but suppresses click selection when LINGHUN_TUI_MOUSE_SELECTION=0", async () => {
+    vi.stubEnv("LINGHUN_TUI_MOUSE_SELECTION", "0");
+    const view = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      transcriptViewportGeometry: {
+        x: 0,
+        y: 2,
+        width: 80,
+        height: 8,
+        contentHeight: 40,
+        topOffset: 20,
+      },
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    // Mouse press/drag/release should NOT produce transcript-mouse events
+    await writeInput(input, shell, "\x1b[<0;10;5M");
+    await writeInput(input, shell, "\x1b[<32;12;6M");
+    await writeInput(input, shell, "\x1b[<0;12;6m");
+
+    expect(events.some((event) => event.type === "transcript-mouse")).toBe(false);
+
+    shell.unmount();
+  });
+
   it("keeps Delete flowing to the editor instead of keybinding chord pending", async () => {
     const view: ShellViewModel = {
       ...baseTaskView(),

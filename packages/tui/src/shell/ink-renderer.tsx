@@ -115,19 +115,14 @@ export function renderInkShell(
     try {
       instance.rerender(<ShellApp controller={controller} capability={capability} />);
     } catch (error) {
-      // Phase 6: Terminal state recovery on rerender error
-      // Log error and attempt recovery, but don't throw (let app continue)
+      // Phase 6/7: Log rerender error but do NOT call recoverTerminalState here.
+      // This is a mid-session error (e.g. stream-close race) — the terminal session
+      // is still active and the interaction session manages modes. Heavy-handed
+      // recovery (cursor show, mouse disable, SGR reset) would interfere with the
+      // ongoing session. Full recovery runs only on unmount/exit.
       const stderr = options.stderr as NodeJS.WriteStream | undefined;
       const message = error instanceof Error ? error.message : String(error);
       stderr?.write(`[linghun] Render error: ${message}\n`);
-
-      // Attempt to recover terminal state asynchronously
-      void recoverTerminalState(stdout, {
-        exitAlternateScreen: false, // Don't exit alt screen on mid-session error
-        logError: (msg) => stderr?.write(`[linghun] ${msg}\n`),
-      }).catch(() => {
-        // Recovery failed, but we tried - continue anyway
-      });
     }
   };
 

@@ -449,15 +449,19 @@ describe("Ink shell selection", () => {
     const rerenderMock = vi.fn(() => {
       throw new Error("stream closed");
     });
-    vi.doMock("ink", () => ({
-      render: () => ({
-        rerender: rerenderMock,
-        clear: vi.fn(),
-        unmount: vi.fn(),
-        waitUntilExit: vi.fn(async () => undefined),
-        waitUntilRenderFlush: vi.fn(async () => undefined),
-      }),
-    }));
+    vi.doMock("@linghun/ink-runtime", async () => {
+      const actual = await vi.importActual<typeof import("@linghun/ink-runtime")>("@linghun/ink-runtime");
+      return {
+        ...actual,
+        render: () => ({
+          rerender: rerenderMock,
+          clear: vi.fn(),
+          unmount: vi.fn(),
+          waitUntilExit: vi.fn(async () => undefined),
+          waitUntilRenderFlush: vi.fn(async () => undefined),
+        }),
+      };
+    });
 
     try {
       const { renderInkShell: renderInkShellWithMock } = await import("./ink-renderer.js");
@@ -480,7 +484,7 @@ describe("Ink shell selection", () => {
       expect(output.text).not.toContain("\x1B[?25l");
       expect(output.text).not.toContain("\x1B[?25h");
     } finally {
-      vi.doUnmock("ink");
+      vi.doUnmock("@linghun/ink-runtime");
       vi.resetModules();
     }
   });

@@ -101,8 +101,10 @@ describe("stdout-flush-barrier", () => {
       const written = Buffer.concat(chunks).toString();
       expect(written).toContain("\x1b[0m"); // SGR reset
       expect(written).toContain("\x1b[?25h"); // Show cursor
-      expect(written).toContain("\x1b[?1000l"); // Disable mouse modes
-      expect(written).toContain("\x1b[?1006l");
+      // Phase 7: mouse mode disable is now handled by terminalInteractionSession.disable(),
+      // not by writeSGRResetAndFlush (which only handles SGR attributes + cursor).
+      expect(written).not.toContain("\x1b[?1000l");
+      expect(written).not.toContain("\x1b[?1006l");
     });
 
     it("does not throw on write error", async () => {

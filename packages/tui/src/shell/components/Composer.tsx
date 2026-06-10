@@ -719,8 +719,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   useInput(
     (input, key) => {
-      // Block mouse sequences and terminal responses from reaching the edit buffer.
-      // MouseInputRouter handles mouse; terminal responses are discarded.
+      // Phase 7 safety guard: runtime hooks (useWheelInput/useMouseInput/useTerminalResponse)
+      // now own terminal input classification at the runtime layer. This guard remains as a
+      // final defense against non-keyboard input reaching the edit buffer, because stock Ink
+      // broadcasts all stdin to every active useInput handler. Once stock Ink useInput is
+      // fully replaced by runtime-level routing, this guard can be removed.
       if (classifyTerminalInput(input) !== "keyboard") return;
 
       const buffer = bufferRef.current;

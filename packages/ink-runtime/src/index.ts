@@ -2,3 +2,8 @@ export * from "ink";
 export * from "./terminal-input.js";
 export * from "./terminal-modes.js";
 export * from "./terminal-selection.js";
+export * from "./useTerminalInput.js";
+export * from "./useWheelInput.js";
+export * from "./useMouseInput.js";
+export * from "./usePasteInput.js";
+export * from "./useTerminalResponse.js";
