@@ -542,6 +542,7 @@ import type {
   ShellInputEvent,
 } from "./shell/types.js";
 import {
+  buildConfigPanelActions,
   createOutputBlock,
   createShellViewModel,
   mapPendingApprovalToPermission,
@@ -2340,12 +2341,25 @@ async function runInkShell(
       // ─── D.13E Step 2 — config-* 三类事件：ConfigPanel 自带 useInput 上抛 ─────
       if (event.type === "config-move") {
         if (!context.configPanelState) return;
-        const current =
-          context.configPanelState.phase === "panel_list" ? context.configPanelState.cursor : 0;
-        context.configPanelState = {
-          phase: "panel_list",
-          cursor: Math.max(0, Math.min(13, current + event.delta)),
-        };
+        if (context.configPanelState.phase === "panel_detail") {
+          const actions = buildConfigPanelActions(
+            context.configPanelState.panelId,
+            context.language,
+          );
+          context.configPanelState = {
+            ...context.configPanelState,
+            actionCursor: Math.max(
+              0,
+              Math.min(actions.length - 1, context.configPanelState.actionCursor + event.delta),
+            ),
+          };
+        } else {
+          const current = context.configPanelState.cursor;
+          context.configPanelState = {
+            phase: "panel_list",
+            cursor: Math.max(0, Math.min(13, current + event.delta)),
+          };
+        }
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2355,7 +2369,12 @@ async function runInkShell(
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         let command = event.command;
-        if (command === "/language") {
+        // Detail action routing: lang-zh / lang-en toggle language directly.
+        if (command === "lang-zh" || command === "lang-en") {
+          const targetLang = command === "lang-zh" ? "zh-CN" : "en-US";
+          context.language = targetLang;
+          command = `/language ${targetLang}`;
+        } else if (command === "/language") {
           command = context.language === "zh-CN" ? "/language en-US" : "/language zh-CN";
         }
         blocks.push(createCommandBlock(commandSequence++, command));
@@ -2367,11 +2386,38 @@ async function runInkShell(
         return;
       }
       if (event.type === "config-enter") {
+        if (!context.configPanelState || context.configPanelState.phase !== "panel_list") return;
+        const CONFIG_PANEL_IDS = [
+          "model",
+          "language",
+          "permissions",
+          "memory",
+          "index",
+          "mcp",
+          "cache",
+          "background",
+          "status",
+          "shortcuts",
+          "context",
+          "compact",
+          "verification",
+          "doctor",
+        ];
+        const panelId = CONFIG_PANEL_IDS[context.configPanelState.cursor];
+        if (panelId && buildConfigPanelActions(panelId, context.language).length > 0) {
+          context.configPanelState = { phase: "panel_detail", panelId, actionCursor: 0 };
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+        }
         return;
       }
       if (event.type === "config-back") {
         if (!context.configPanelState) return;
-        context.configPanelState = undefined;
+        if (context.configPanelState.phase === "panel_detail") {
+          context.configPanelState = { phase: "panel_list", cursor: 0 };
+        } else {
+          context.configPanelState = undefined;
+        }
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

@@ -1012,12 +1012,42 @@ const CONFIG_PANELS = [
  * 只装配 i18n / 列表数据，不带任何键盘事件；导航事件由 ConfigPanel 组件自己 useInput
  * → controller.onInput({ type: "config-*" }) 触发。
  */
+
+export function buildConfigPanelActions(
+  panelId: string,
+  language: Language,
+): { id: string; label: string }[] {
+  const isEn = language === "en-US";
+  if (panelId === "language") {
+    return [
+      { id: "lang-zh", label: isEn ? "Switch to Chinese (zh-CN)" : "切换到中文 (zh-CN)" },
+      { id: "lang-en", label: isEn ? "Switch to English (en-US)" : "切换到英文 (en-US)" },
+    ];
+  }
+  return [];
+}
+
 function mapConfigPanelState(
   state:
     | { phase: "panel_list"; cursor: number }
     | { phase: "panel_detail"; panelId: string; actionCursor: number },
   language: Language,
 ): ConfigPanelView | undefined {
+  if (state.phase === "panel_detail") {
+    const panel = CONFIG_PANELS.find((p) => p.id === state.panelId);
+    if (!panel) return undefined;
+    const actions = buildConfigPanelActions(state.panelId, language);
+    return {
+      phase: "panel_detail",
+      panel: {
+        id: panel.id,
+        title: language === "en-US" ? panel.titleEn : panel.titleZh,
+        summary: language === "en-US" ? panel.summaryEn : panel.summaryZh,
+      },
+      actionCursor: Math.min(Math.max(0, state.actionCursor), Math.max(0, actions.length - 1)),
+      actions,
+    };
+  }
   const panels = CONFIG_PANELS.map((p) => ({
     id: p.id,
     slash: p.slash,

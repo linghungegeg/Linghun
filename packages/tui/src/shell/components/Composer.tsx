@@ -4,17 +4,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { computeGhostText } from "../../ghost-text.js";
 import { resolveKeybinding } from "../../keybinding-runtime.js";
 import { createPromptStash, toggleStash } from "../../prompt-stash.js";
-import { type UndoRing, createUndoRing, undoRingPop, undoRingPush } from "../../undo-ring.js";
 import {
   formatUnknownSlashCommand,
   getCoreSlashCandidates,
   getSlashPrefixCandidates,
 } from "../../slash-dispatch.js";
+import { type UndoRing, createUndoRing, undoRingPop, undoRingPush } from "../../undo-ring.js";
 import {
+  classifyTerminalInput,
   isMultilineEnterSequence as isNormalizedMultilineEnterSequence,
   normalizeTerminalInput,
   sanitizeTerminalText,
-  classifyTerminalInput,
 } from "../models/terminal-input-runtime.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
@@ -35,7 +35,6 @@ type ComposerProps = {
   onInput: (event: ShellInputEvent) => void | Promise<void>;
   capability: TerminalCapability;
 };
-
 
 // ---------------------------------------------------------------------------
 // Edit buffer — the core editing model
@@ -438,11 +437,7 @@ function isSlashOwnerKey(input: string, key: OwnerKeyShape): boolean {
 
 function isModifiedEnter(input: string, key: OwnerKeyShape): boolean {
   return Boolean(
-    key.return &&
-      (key.shift || key.meta) &&
-      input.length > 0 &&
-      input !== "\r" &&
-      input !== "\n",
+    key.return && (key.shift || key.meta) && input.length > 0 && input !== "\r" && input !== "\n",
   );
 }
 
@@ -570,7 +565,13 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   );
 
   const configPanelActive = Boolean(
-    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel || view.backgroundTaskOverlay || view.historySearchPanel || view.shortcutPanel,
+    view.configPanel ||
+      view.helpPanel ||
+      view.btwPanel ||
+      view.sessionsPanel ||
+      view.backgroundTaskOverlay ||
+      view.historySearchPanel ||
+      view.shortcutPanel,
   );
   const terminalInteractionModes = useMemo(
     () => resolveTerminalInteractionModes({ capability, appOwnedScreen: false }),
@@ -829,7 +830,12 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
       }
 
-      if (!permissionActive && key.downArrow && key.shift && (view.viewMode === "task" || view.viewMode === "pending")) {
+      if (
+        !permissionActive &&
+        key.downArrow &&
+        key.shift &&
+        (view.viewMode === "task" || view.viewMode === "pending")
+      ) {
         emitInput({ type: "background-overlay-open" });
         return;
       }
@@ -948,9 +954,18 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           if (key.return) {
             if (view.configPanel.phase === "panel_list") {
               const selected = view.configPanel.panels[view.configPanel.cursor];
-              if (selected) emitInput({ type: "config-submit", command: selected.slash });
+              if (selected) {
+                // Panels with detail actions (language toggle) need config-enter;
+                // all others dispatch slash command directly.
+                if (selected.id === "language") {
+                  emitInput({ type: "config-enter" });
+                } else {
+                  emitInput({ type: "config-submit", command: selected.slash });
+                }
+              }
             } else {
-              emitInput({ type: "config-enter" });
+              const action = view.configPanel.actions[view.configPanel.actionCursor];
+              if (action) emitInput({ type: "config-submit", command: action.id });
             }
           } else if (key.upArrow) emitInput({ type: "config-move", delta: -1 });
           else if (key.downArrow) emitInput({ type: "config-move", delta: 1 });
@@ -1212,7 +1227,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           slashCandidates.map((c) => ({ slash: c.slash, description: c.descriptionZh })),
         );
         if (ghost) {
-          resetBuffer(text + ghost + " ");
+          resetBuffer(`${text}${ghost} `);
           return;
         }
         return;
@@ -1516,6 +1531,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     <Box
       flexDirection="column"
       width={maxWidth}
+      borderStyle="round"
+      borderColor={theme.border ?? theme.muted}
       paddingX={1}
     >
       {permissionActive && view.permission ? (
@@ -1570,13 +1587,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           {fitText(formatUnknownSlashCommand(text, view.language), composerInnerWidth)}
         </Text>
       ) : null}
-      {hintNotice ? <Text color={theme.muted}>{fitText(hintNotice, composerInnerWidth)}</Text> : null}
-      {!text && !permissionActive && !showSuggestions && !showUnknownHint && !view.permission && !view.configPanel && !view.helpPanel && !view.shortcutPanel ? (
-        <Text dimColor color={theme.dim ?? theme.muted}>
-          {view.language === "en-US"
-            ? "? shortcuts"
-            : "? 快捷键"}
-        </Text>
+      {hintNotice ? (
+        <Text color={theme.muted}>{fitText(hintNotice, composerInnerWidth)}</Text>
       ) : null}
     </Box>
   );

@@ -1,15 +1,10 @@
 import { Box, type DOMElement, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { TerminalCapability } from "../terminal-capability.js";
 import { resolveAlternateScreen } from "../ink-renderer.js";
+import type { TerminalCapability } from "../terminal-capability.js";
 import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
-import {
-  brandWordmark,
-  composerMaxWidth,
-  fitText,
-  taskComposerMaxWidth,
-} from "../text-utils.js";
+import { brandWordmark, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
 import type { ShellController, ShellViewModel, TaskActivityView } from "../types.js";
 import type { ProductBlockViewModel } from "../types.js";
@@ -108,7 +103,13 @@ function HomeLayout({
       {view.blocks.length > 0 ? (
         <Box flexDirection="column" marginTop={1} width={cw}>
           {view.blocks.map((block) => (
-            <ProductBlock key={block.id} block={block} theme={theme} width={view.width} language={view.language} />
+            <ProductBlock
+              key={block.id}
+              block={block}
+              theme={theme}
+              width={view.width}
+              language={view.language}
+            />
           ))}
         </Box>
       ) : null}
@@ -163,13 +164,24 @@ function TaskLayout({
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
   const mouseActive = useMemo(
-    () => resolveTerminalInteractionModes({ capability, appOwnedScreen: resolveAlternateScreen(capability) }).mouseTracking,
+    () =>
+      resolveTerminalInteractionModes({
+        capability,
+        appOwnedScreen: resolveAlternateScreen(capability),
+      }).mouseTracking,
     [capability],
   );
   const mouseSelectionActive = process.env.LINGHUN_TUI_MOUSE_SELECTION === "1";
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
-      <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1} position="relative">
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        minHeight={0}
+        paddingX={2}
+        paddingTop={1}
+        position="relative"
+      >
         <TranscriptViewport
           scroll={view.transcriptScroll}
           virtualRange={view.transcriptVirtualRange}
@@ -265,7 +277,9 @@ function TaskLayout({
         active={mouseActive}
         selectionActive={mouseSelectionActive}
         scroll={view.transcriptScroll}
-        onInput={(event) => { void controller.onInput(event); }}
+        onInput={(event) => {
+          void controller.onInput(event);
+        }}
       />
 
       {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents
@@ -278,7 +292,12 @@ function TaskLayout({
         <NotificationStack notifications={view.notifications} theme={theme} />
         {view.taskRuntimeSummary ? (
           <Box width={cw} marginTop={1}>
-            <ProductBlock block={view.taskRuntimeSummary} theme={theme} width={cw} language={view.language} />
+            <ProductBlock
+              block={view.taskRuntimeSummary}
+              theme={theme}
+              width={cw}
+              language={view.language}
+            />
           </Box>
         ) : null}
 
@@ -388,11 +407,7 @@ function PanelLayer({
   // BackgroundTaskOverlay keeps its own frame (CCB PermissionDialog style).
   if (view.backgroundTaskOverlay) {
     return (
-      <BackgroundTaskOverlay
-        overlay={view.backgroundTaskOverlay}
-        width={width}
-        noColor={noColor}
-      />
+      <BackgroundTaskOverlay overlay={view.backgroundTaskOverlay} width={width} noColor={noColor} />
     );
   }
 
@@ -400,29 +415,27 @@ function PanelLayer({
   const panel = resolvePanel(view, controller, width, noColor);
   if (!panel) return null;
 
-  // CCB modal: absolute bottom-anchored overlay with ▔ divider, 2-row transcript peek.
+  // CCB modal: absolute full-cover overlay with ▔ divider.
   const columns = view.width;
-  const maxPanelHeight = Math.max(4, view.height - 3);
   const theme = createShellTheme(noColor);
   return (
     <Box
       position="absolute"
-      bottom={0}
+      top={0}
       left={0}
       right={0}
-      maxHeight={maxPanelHeight}
+      bottom={0}
       flexDirection="column"
       overflow="hidden"
-      opaque
     >
+      <Box flexGrow={1} minHeight={0} />
       <Box flexShrink={0}>
-        <Text color={theme.permission ?? theme.muted}>
-          {"▔".repeat(columns)}
-        </Text>
+        <Text color={theme.permission ?? theme.muted}>{"▔".repeat(columns)}</Text>
       </Box>
       <Box flexDirection="column" paddingX={2} flexShrink={0} overflow="hidden">
         {panel}
       </Box>
+      <Box flexShrink={0} height={1} />
     </Box>
   );
 }
@@ -502,7 +515,11 @@ function ActivityIndicator({
 }): React.ReactNode {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
-    if (activity.phase === "completed" || activity.phase === "error" || activity.phase === "permission_waiting") {
+    if (
+      activity.phase === "completed" ||
+      activity.phase === "error" ||
+      activity.phase === "permission_waiting"
+    ) {
       return;
     }
     const timer = setInterval(() => setFrame((current) => current + 1), 100);
@@ -523,9 +540,12 @@ function ActivityIndicator({
   const seconds = parseElapsedSeconds(activity.elapsed);
   const slow = seconds >= 8 && activity.phase !== "permission_waiting";
   const showTokenCount =
-    seconds >= 30 && tokenCount !== undefined && (activity.phase === "thinking" || activity.phase === "continuing");
+    seconds >= 30 &&
+    tokenCount !== undefined &&
+    (activity.phase === "thinking" || activity.phase === "continuing");
   const text = activityText(activity, frame);
-  const showStats = activity.phase === "tool_running" && (activity.totalLines || activity.totalBytes);
+  const showStats =
+    activity.phase === "tool_running" && (activity.totalLines || activity.totalBytes);
   return (
     <Box flexDirection="column">
       <Box>
@@ -533,7 +553,10 @@ function ActivityIndicator({
           {marker} {text}
         </Text>
         {activity.elapsed ? (
-          <Text color={slow ? (theme.warning ?? theme.status.partial) : theme.muted} dimColor={!slow}>
+          <Text
+            color={slow ? (theme.warning ?? theme.status.partial) : theme.muted}
+            dimColor={!slow}
+          >
             {" "}
             ({activity.elapsed})
           </Text>
