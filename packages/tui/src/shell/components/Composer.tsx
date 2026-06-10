@@ -957,9 +957,30 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
         if (view.sessionsPanel) {
+          // Phase 8: search mode routes all input to search box.
+          if (view.sessionsPanel.mode === "search") {
+            if (key.escape) emitInput({ type: "sessions-search-close" });
+            else if (key.return) emitInput({ type: "sessions-search-close" });
+            else if (key.backspace || key.delete) emitInput({ type: "sessions-search-delete" });
+            else if (input && !key.ctrl && !key.meta && !key.tab) {
+              emitInput({ type: "sessions-search-input", input });
+            }
+            return;
+          }
+          // Phase 8: preview mode — only Esc to return to list.
+          if (view.sessionsPanel.mode === "preview") {
+            if (key.escape) emitInput({ type: "sessions-preview-close" });
+            return;
+          }
+          // List mode: navigation + enter search/preview.
           if (key.return) emitInput({ type: "sessions-resume" });
           else if (key.upArrow) emitInput({ type: "sessions-move", delta: -1 });
           else if (key.downArrow) emitInput({ type: "sessions-move", delta: 1 });
+          else if (input === "/" && !key.ctrl && !key.meta) {
+            emitInput({ type: "sessions-search" });
+          } else if (input === "v" && key.ctrl) {
+            emitInput({ type: "sessions-preview" });
+          }
           return;
         }
         if (view.backgroundTaskOverlay) {

@@ -2256,6 +2256,74 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      // ─── Phase 8: SessionsPanel 搜索 + 预览 ─────────────────────────────
+      if (event.type === "sessions-search") {
+        if (!context.sessionsPanelState) return;
+        context.sessionsPanelState = {
+          ...context.sessionsPanelState,
+          mode: "search",
+          searchQuery: "",
+        };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "sessions-search-input") {
+        if (!context.sessionsPanelState || context.sessionsPanelState.mode !== "search") return;
+        context.sessionsPanelState = {
+          ...context.sessionsPanelState,
+          searchQuery: (context.sessionsPanelState.searchQuery ?? "") + event.input,
+        };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "sessions-search-delete") {
+        if (!context.sessionsPanelState || context.sessionsPanelState.mode !== "search") return;
+        const q = context.sessionsPanelState.searchQuery ?? "";
+        context.sessionsPanelState = {
+          ...context.sessionsPanelState,
+          searchQuery: q.slice(0, -1),
+        };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "sessions-search-close") {
+        if (!context.sessionsPanelState) return;
+        context.sessionsPanelState = {
+          ...context.sessionsPanelState,
+          mode: undefined,
+          searchQuery: undefined,
+        };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "sessions-preview") {
+        if (!context.sessionsPanelState) return;
+        const target = context.sessionsPanelState.entries[context.sessionsPanelState.cursor];
+        if (!target || target.isCurrent) return;
+        context.sessionsPanelState = {
+          ...context.sessionsPanelState,
+          mode: "preview",
+          previewEntryId: target.id,
+        };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "sessions-preview-close") {
+        if (!context.sessionsPanelState) return;
+        context.sessionsPanelState = {
+          ...context.sessionsPanelState,
+          mode: undefined,
+          previewEntryId: undefined,
+        };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
       // ─── D.13E Step 2 — config-* 三类事件：ConfigPanel 自带 useInput 上抛 ─────
       if (event.type === "config-move") {
         if (!context.configPanelState) return;

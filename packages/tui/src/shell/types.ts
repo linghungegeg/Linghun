@@ -531,6 +531,10 @@ export type ShellViewModel = {
       messageCount: number;
       isCurrent: boolean;
     }[];
+    /** Phase 8: search | preview | undefined (list). */
+    mode?: "search" | "preview";
+    searchQuery?: string;
+    previewEntryId?: string;
   };
   /**
    * R4 — HistorySearchPanel UI 状态。Ctrl+R 打开交互式历史搜索。
@@ -606,6 +610,13 @@ export type ShellInputEvent =
   | { type: "sessions-move"; delta: -1 | 1 }
   | { type: "sessions-resume" }
   | { type: "sessions-close" }
+  /** Phase 8: search input + preview mode. */
+  | { type: "sessions-search" }
+  | { type: "sessions-search-input"; input: string }
+  | { type: "sessions-search-delete" }
+  | { type: "sessions-search-close" }
+  | { type: "sessions-preview" }
+  | { type: "sessions-preview-close" }
   /**
    * Transcript scroll events. CCB-compatible behavior is implemented in
    * shell/models/transcript-scroll-state.ts: PgUp/PgDn are page actions,
