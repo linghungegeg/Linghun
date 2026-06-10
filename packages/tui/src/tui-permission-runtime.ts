@@ -180,6 +180,22 @@ export async function decidePermission(
     workspaceRoot: context.projectPath,
   });
 
+  // 哲学模块 1.3：权限引擎读取调度决策，预加热写入确认。
+  const schedulerDecision = context.lastMetaSchedulerDecision;
+  if (schedulerDecision?.policyDecision.permissionPlan.requireExplicitGate && verdict.semantic === "mutating") {
+    if (context.permissionMode === "default" || context.permissionMode === "full-access") {
+      return {
+        request,
+        decision: "ask",
+        reason:
+          context.language === "en-US"
+            ? "Scheduler expects mutating actions this turn; confirmation required."
+            : "调度器预测本轮有写入操作，需要确认。",
+        verdict,
+      };
+    }
+  }
+
   // D.13N — policy engine auto_allow_readonly short-circuit.
   // Runs *after* hard-deny and *before* rule / mode policy so the engine can
   // widen the implicit allow surface for safe readonly Bash / Read calls

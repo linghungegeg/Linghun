@@ -121,6 +121,7 @@ import { formatError, writeLine } from "./startup-runtime.js";
 import { createAssistantPrimaryTextSanitizer } from "./tool-output-presenter.js";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 import type { PendingModelContinuation, TuiContext } from "./tui-context-runtime.js";
+import { updateTurnContinuity } from "./turn-continuity-runtime.js";
 import {
   createSingleToolCallContinuation,
   runtimeFromContinuation,
@@ -491,6 +492,35 @@ export async function sendMessage(
     }
   }
 
+  if (context.turnContinuity) {
+    const prevDecision = context.lastMetaSchedulerDecision;
+    const prevTaskKind = prevDecision?.policyDecision.taskKind ?? "chat";
+    const prevUserStateKind = prevDecision?.policyDecision.userState.kind ?? "neutral";
+    context.turnContinuity = updateTurnContinuity(
+      context.turnContinuity,
+      {
+        taskKind: prevTaskKind,
+        userStateKind: prevUserStateKind,
+        hadToolFailure: Boolean(context.lastToolFailure),
+        hadProviderFailure: Boolean(context.lastProviderFailure),
+        hadVerificationFailure: context.lastVerification?.status === "fail",
+        lastVerificationStatus: context.lastVerification?.status,
+        userText: text,
+        userCorrectedAssistant:
+          /(?:不对|错了|不是这样|不是这个|别|不要|停|wrong|incorrect|no that.s not|stop|don.t|not what i|更正|纠正|重新|再来)/iu.test(
+            text,
+          ),
+      },
+      context.recentTaskKinds ?? [],
+      context.recentMessageLengths ?? [],
+    ).state;
+    context.recentTaskKinds = [...(context.recentTaskKinds ?? []), prevTaskKind].slice(-5);
+    context.recentMessageLengths = [
+      ...(context.recentMessageLengths ?? []),
+      text.length,
+    ].slice(-5);
+  }
+
   const metaSchedulerDecision = evaluateMetaScheduler({
     ...createMetaSchedulerInput(context, selectedRuntime, text, false),
     userText: text,
@@ -506,6 +536,7 @@ export async function sendMessage(
         }
       : {}),
   });
+  context.lastMetaSchedulerDecision = metaSchedulerDecision;
   context.lastMetaSchedulerFailureLearningRequired =
     metaSchedulerDecision.shouldCaptureFailureLearning;
   context.lastMetaSchedulerFailureLearningFulfilled = false;
@@ -514,6 +545,28 @@ export async function sendMessage(
   }
   enqueuePolicyHints(context, metaSchedulerDecision.policyDecision);
   await appendPolicyDecisionEvent(context, sessionId, metaSchedulerDecision.policyDecision);
+  if (
+    metaSchedulerDecision.policyDecision.userStatePersistence >= 5
+  ) {
+    context.userStateCooldownUntilMs = Date.now() + 300_000;
+    context.userStateDismissedUntilMs = Date.now() + 300_000;
+  }
+  if (metaSchedulerDecision.shouldStopForBlockedRuntime) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Blocked workflows/agents detected. Resolve them first, then retry."
+        : "检测到阻塞的 workflow/agent，请先处理后再继续。",
+    );
+    writeStatus(output, context);
+    await appendSystemEvent(
+      context,
+      sessionId,
+      "meta_scheduler:blocked_runtime_stop",
+      "warning",
+    );
+    return;
+  }
   const gitStatusSummary = await buildGitStatusSummary(context.projectPath);
   const systemPrompt = createModelSystemPrompt(
     text,
@@ -553,6 +606,7 @@ export async function sendMessage(
     let noProgressRounds = 0;
     let todoOnlyHintSent = false;
     let rawToolProtocolTextRetries = 0;
+    let toolFailureRetries = 0;
     modelRoundLoop: for (let round = 0; ; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-${assistantEventId}-${round}`;
@@ -594,7 +648,7 @@ export async function sendMessage(
         return;
       }
       messagesForProvider = preflight.messages;
-      const requestMessages = preflight.messages;
+      const requestMessages = messagesForProvider;
       if (estimateModelMessageChars(requestMessages) > contextMaxChars) {
         const warning =
           context.language === "en-US"
@@ -864,7 +918,7 @@ export async function sendMessage(
           }
         }
         // D.13V-B — Architecture / Completeness Final Gate（共享一次重试预算）
-        if (!finalAnswerClaimRetried && assistantText) {
+        if (!finalAnswerClaimRetried && assistantText && metaSchedulerDecision.shouldRunFinalAnswerGate) {
           const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
           if (extended.status === "needs_disclaimer") {
             await appendSystemEvent(
@@ -924,6 +978,21 @@ export async function sendMessage(
           tool_call_id: toolCall.id,
           content: JSON.stringify(result),
         });
+      }
+      const roundHadToolFailure = toolCalls.length > 0 && !roundHadProgress;
+      if (roundHadToolFailure && metaSchedulerDecision.shouldUseRetryGuard) {
+        toolFailureRetries += 1;
+        if (toolFailureRetries > 1) {
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `meta_scheduler:retry_guard_limit tool_failure_retries=${toolFailureRetries}`,
+            "warning",
+          );
+          break;
+        }
+      } else if (roundHadProgress) {
+        toolFailureRetries = 0;
       }
       if (todoOnly && consecutiveTodoOnlyRounds >= MAX_TODO_ONLY_CONSECUTIVE_ROUNDS && !todoOnlyHintSent) {
         const todoHint =
@@ -1049,6 +1118,26 @@ export async function sendMessage(
       createdAt: new Date().toISOString(),
     });
   }
+  if (metaSchedulerDecision.shouldPreferVerifier && assistantText) {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `meta_scheduler:prefer_verifier auto_trigger candidate assistant_chars=${assistantText.length}`,
+      "info",
+    );
+    context.notifications ??= [];
+    context.notifications.push({
+      key: "policy:verifier-auto-trigger",
+      text:
+        context.language === "en-US"
+          ? "Verification recommended for this turn. Run /verify focused or review the output."
+          : "本轮建议验证。可运行 /verify focused 或检查输出。",
+      priority: "medium",
+      timeoutMs: 8000,
+      createdAt: Date.now(),
+      tone: "warning",
+    });
+  }
   writeLightHints(output, context);
   writeStatus(output, context);
 }
@@ -1128,6 +1217,15 @@ function createMetaSchedulerInput(
           ? "stale"
           : undefined,
     ...(providerCooldownBlocked ? { providerCooldownBlocked: true } : {}),
+    userStateDismissedUntilMs: context.userStateDismissedUntilMs,
+    userStateCooldownUntilMs: context.userStateCooldownUntilMs,
+    userStatePolicyEnabled: true,
+    consecutiveFailures: context.turnContinuity?.consecutiveFailures ?? 0,
+    consecutiveSuccesses: context.turnContinuity?.consecutiveSuccesses ?? 0,
+    taskDomainSwitched: context.turnContinuity?.taskDomainSwitched ?? false,
+    userStatePersistence: context.turnContinuity?.userStatePersistence ?? 1,
+    trustScore: context.turnContinuity?.trustScore ?? 50,
+    totalTurns: context.turnContinuity?.totalTurns ?? 0,
   };
 }
 
@@ -1180,10 +1278,18 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
   }
 }
 
-function shouldSurfacePolicyHint(id: string, decision: PolicyDecision): boolean {
+function shouldSurfacePolicyHint(id: string, _decision: PolicyDecision): boolean {
   return (
     id === "provider-cooldown" ||
-    id === "blocked-runtime"
+    id === "blocked-runtime" ||
+    id === "verification-required" ||
+    id === "windows-safe" ||
+    id === "permission-risk" ||
+    id === "compact-before-provider" ||
+    id === "provider-fallback" ||
+    id === "source-first" ||
+    id === "failure-learning" ||
+    id === "architecture-guard"
   );
 }
 

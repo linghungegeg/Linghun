@@ -8,6 +8,8 @@
  * D.14A Global Architecture Guard — Anti-Hallucination Runtime Enhancement.
  */
 
+import type { VerificationRoute } from "./meta-scheduler-runtime.js";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -84,12 +86,17 @@ const LEVEL_PASS_THRESHOLD: VerificationEvidenceLevel = "build";
  */
 export function classifyVerificationLevel(
   input: VerificationLevelInput,
+  verificationRoute?: VerificationRoute,
 ): VerificationLevelClassification {
   const level = inferLevel(input);
   const levelOrder = LEVEL_ORDER[level];
   const canClaimMature = levelOrder >= LEVEL_ORDER[LEVEL_MATURITY_THRESHOLD];
-  const canClaimPass = levelOrder >= LEVEL_ORDER[LEVEL_PASS_THRESHOLD];
+  let canClaimPass = levelOrder >= LEVEL_ORDER[LEVEL_PASS_THRESHOLD];
   const upgradeBlocked = hasUpgradeBlocker(input);
+
+  if (verificationRoute?.conservativeNoPass) {
+    canClaimPass = false;
+  }
 
   return {
     level,

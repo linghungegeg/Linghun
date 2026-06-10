@@ -22,7 +22,9 @@ import type { ArchitectureCard } from "./architecture-runtime.js";
 import type { IndexState } from "./index-runtime.js";
 import type { Keybinding } from "./keybinding-runtime.js";
 import type { MemoryMutation } from "./memory-command-runtime.js";
+import type { MetaSchedulerDecision, PolicyDecision } from "./meta-scheduler-runtime.js";
 import type { SolutionCompletenessStatus } from "./model-loop-runtime.js";
+import type { TurnContinuityState } from "./turn-continuity-runtime.js";
 import type { PendingModelSetup } from "./model-setup-runtime.js";
 import type { PendingNaturalCommand } from "./natural-command-bridge.js";
 import type { SLASH_COMMAND_REGISTRY } from "./natural-command-bridge.js";
@@ -359,6 +361,18 @@ export type TuiContext = {
   /** meta-scheduler failure-learning contract tracking */
   lastMetaSchedulerFailureLearningRequired?: boolean;
   lastMetaSchedulerFailureLearningFulfilled?: boolean;
+  /** 最近一轮 MetaScheduler 完整决策，供主链各子系统消费 */
+  lastMetaSchedulerDecision?: MetaSchedulerDecision;
+  /** 跨轮人格连续性状态 */
+  turnContinuity?: TurnContinuityState;
+  /** 最近 N 轮的 taskKind 历史（用于 dominantTaskKind 计算） */
+  recentTaskKinds?: PolicyDecision["taskKind"][];
+  /** 最近 N 条用户消息长度（用于 messageLengthTrend 计算） */
+  recentMessageLengths?: number[];
+  /** 用户状态 suppression 的结束时间戳（ms） */
+  userStateDismissedUntilMs?: number;
+  /** 用户状态 cooldown 的结束时间戳（ms） */
+  userStateCooldownUntilMs?: number;
   /** most recent tool failure captured for meta-scheduler input */
   lastToolFailure?: { toolName: string; summary: string };
   providerBreaker: ProviderCircuitBreakerState;

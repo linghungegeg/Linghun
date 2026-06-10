@@ -146,6 +146,13 @@ export type MetaSchedulerInput = {
   activePrompt?: boolean;
   otherPanelOpen?: boolean;
   nowMs?: number;
+  /** 跨轮连续性信号 */
+  consecutiveFailures?: number;
+  consecutiveSuccesses?: number;
+  taskDomainSwitched?: boolean;
+  userStatePersistence?: number;
+  trustScore?: number;
+  totalTurns?: number;
 };
 
 export type CapabilityPlan = {
@@ -248,6 +255,7 @@ export type PolicyDecision = {
   };
   providerPlan: "keepCurrent" | "fallbackCandidate" | "cooldownBlocked";
   hints: PolicyHint[];
+  userStatePersistence: number;
 };
 
 export type PolicyHint = {
@@ -374,6 +382,59 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       ? "fallbackCandidate"
       : "keepCurrent";
 
+  // 连续性信号驱动的决策增强
+  const trustScore = input.trustScore ?? 50;
+  const consecutiveFailures = input.consecutiveFailures ?? 0;
+  const consecutiveSuccesses = input.consecutiveSuccesses ?? 0;
+  const taskDomainSwitched = input.taskDomainSwitched ?? false;
+  const userStatePersistence = input.userStatePersistence ?? 1;
+  const totalTurns = input.totalTurns ?? 0;
+
+  let adjustedUserStateDecision = userStateDecision;
+  let adjustedIncludeFailureLearning = includeFailureLearning;
+  let adjustedShouldCompact = pressure.shouldCompact;
+  let adjustedRequireVerification = requireVerification;
+  let adjustedRequireFinalGate = highRiskClaim || userStateDecision.verificationPlan.forbidEarlyPass;
+  let adjustedShouldUseRetryGuard = toolFailure || providerFailure;
+  let adjustedVerificationStrength = userStateDecision.verificationPlan.strength;
+
+  if (trustScore < 30 && userStateDecision.kind === "neutral") {
+    adjustedUserStateDecision = {
+      ...userStateDecision,
+      kind: "trust_repair",
+      interactionPlan: { ...userStateDecision.interactionPlan, sourceFactsFirst: true, explainFirst: true },
+    };
+    internalEvents.push("meta_scheduler:continuity_trust_repair_escalation");
+  }
+
+  if (consecutiveFailures >= 2) {
+    adjustedShouldUseRetryGuard = true;
+    internalEvents.push("meta_scheduler:continuity_retry_guard_escalation");
+  }
+
+  if (consecutiveSuccesses >= 5 && trustScore > 70) {
+    adjustedVerificationStrength = "focused";
+    adjustedRequireFinalGate = false;
+    internalEvents.push("meta_scheduler:continuity_verification_downgrade");
+  }
+
+  if (taskDomainSwitched) {
+    adjustedIncludeFailureLearning = false;
+    internalEvents.push("meta_scheduler:continuity_domain_switch_failure_reset");
+  }
+
+  if (userStatePersistence >= 5) {
+    directives.push(
+      `User state "${userStateDecision.kind}" persisted for ${userStatePersistence} turns; suppressing repeat hints for 5 minutes.`,
+    );
+    internalEvents.push("meta_scheduler:continuity_user_state_cooldown");
+  }
+
+  if (totalTurns > 30) {
+    adjustedShouldCompact = true;
+    internalEvents.push("meta_scheduler:continuity_long_session_compact");
+  }
+
   if (highRiskClaim) {
     directives.push(
       "High-risk completion or verification claims require existing verification/final-answer-gate evidence before PASS.",
@@ -407,11 +468,11 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     runtimeSignal,
     failureSignal,
     resourceCapPressure: runtimeSignal.resourceCapPressure,
-    userStateDecision,
+    userStateDecision: adjustedUserStateDecision,
   });
   directives.push(formatVerificationRouteDirective(verificationRoute));
-  directives.push(formatUserStateDirective(userStateDecision));
-  appendUserStateInternalEvents(internalEvents, userStateDecision);
+  directives.push(formatUserStateDirective(adjustedUserStateDecision));
+  appendUserStateInternalEvents(internalEvents, adjustedUserStateDecision);
 
   const policyDecision = createPolicyDecision({
     taskKind,
@@ -422,17 +483,17 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       providerFailure,
       toolFailure,
       pressure: pressure.shouldCompact,
-      userStateDecision,
+      userStateDecision: adjustedUserStateDecision,
     }),
     includeMemory: (input.memoryAcceptedCount ?? 0) > 0,
-    includeFailureLearning,
-    compactBeforeProvider: pressure.shouldCompact,
+    includeFailureLearning: adjustedIncludeFailureLearning,
+    compactBeforeProvider: adjustedShouldCompact,
     preferSourceFirst,
     preferWorkflow:
-      taskKind === "workflow" && userStateDecision.interactionPlan.allowImplementationPush,
-    preferAgent: taskKind === "agent" && userStateDecision.interactionPlan.allowImplementationPush,
-    requireVerification,
-    requireFinalGate: highRiskClaim || userStateDecision.verificationPlan.forbidEarlyPass,
+      taskKind === "workflow" && adjustedUserStateDecision.interactionPlan.allowImplementationPush,
+    preferAgent: taskKind === "agent" && adjustedUserStateDecision.interactionPlan.allowImplementationPush,
+    requireVerification: adjustedRequireVerification,
+    requireFinalGate: adjustedRequireFinalGate,
     expectedMutating,
     requireExplicitGate: expectedMutating || blockedRuntime || Boolean(input.pendingApproval),
     providerPlan,
@@ -440,8 +501,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     toolFailure,
     providerFailure,
     surfaceWindowsSafeHint,
-    userState: userStateDecision,
+    userState: adjustedUserStateDecision,
     capabilityPlan,
+    userStatePersistence,
     permissionSignal: {
       permissionMode: input.permissionMode ?? "default",
       recentDenied: recentDeniedCount > 0,
@@ -464,15 +526,17 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       suggestedRole,
     },
     verificationSignal: {
-      required: requireVerification,
-      recommendedLevel: classifyVerificationLevel({
-        highRiskClaim,
-        expectedMutating,
-        taskKind,
-        blockedRuntime,
-        lastStatus: input.lastVerificationStatus,
-        userStateDecision,
-      }),
+      required: adjustedRequireVerification,
+      recommendedLevel: adjustedVerificationStrength === "focused"
+        ? "focused"
+        : classifyVerificationLevel({
+            highRiskClaim,
+            expectedMutating,
+            taskKind,
+            blockedRuntime,
+            lastStatus: input.lastVerificationStatus,
+            userStateDecision: adjustedUserStateDecision,
+          }),
       route: verificationRoute,
       reason: highRiskClaim
         ? "high_risk_claim"
@@ -503,7 +567,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       windowsSafeHint: (input.platform ?? "unknown") === "win32",
     },
     budgetSignal: {
-      contextPressure: pressure.shouldCompact,
+      contextPressure: adjustedShouldCompact,
       usageNearLimit: Boolean(input.roleBudgetStop),
       toolResultBudgetPressure: (input.toolResultBudgetPersistedCount ?? 0) > 0,
     },
@@ -512,13 +576,13 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   return {
     directives,
     policyDecision,
-    shouldRunFinalAnswerGate: highRiskClaim || userStateDecision.verificationPlan.forbidEarlyPass,
+    shouldRunFinalAnswerGate: adjustedRequireFinalGate,
     shouldPreferVerifier:
-      (highRiskClaim || userStateDecision.verificationPlan.strength === "release") &&
+      (highRiskClaim || adjustedUserStateDecision.verificationPlan.strength === "release") &&
       evidenceFreshness !== "fresh",
     shouldCaptureFailureLearning: toolFailure || providerFailure,
-    shouldUseRetryGuard: toolFailure || providerFailure,
-    shouldCompactBeforeProvider: pressure.shouldCompact,
+    shouldUseRetryGuard: adjustedShouldUseRetryGuard,
+    shouldCompactBeforeProvider: adjustedShouldCompact,
     shouldStopForBlockedRuntime: blockedRuntime,
     indexStrategy,
     internalEvents,
@@ -1152,6 +1216,7 @@ function createPolicyDecision(input: {
   toolFailure: boolean;
   providerFailure: boolean;
   surfaceWindowsSafeHint: boolean;
+  userStatePersistence: number;
   userState: UserStateDecision;
   permissionSignal: PolicyDecision["permissionSignal"];
   modelRouteSignal: PolicyDecision["modelRouteSignal"];
@@ -1391,6 +1456,7 @@ function createPolicyDecision(input: {
     },
     providerPlan: input.providerPlan,
     hints,
+    userStatePersistence: input.userStatePersistence,
   };
 }
 

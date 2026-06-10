@@ -589,6 +589,7 @@ import {
   formatToolOutput,
   formatToolStart,
 } from "./tool-output-presenter.js";
+import { createInitialContinuityState } from "./turn-continuity-runtime.js";
 import {
   type ToolResultBudgetRecord,
   type ToolResultBudgetState,
@@ -1374,6 +1375,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     backgroundAbortControllers: new Map(),
     discoveredDeferredToolNames: new Set<string>(),
   };
+  context.turnContinuity = createInitialContinuityState();
+  context.recentTaskKinds = [];
   context.workflows.templates = mergeWorkflowTemplates(
     context.workflows.templates,
     context.agentRegistry.agents.map(registryAgentToWorkflowTemplate),
