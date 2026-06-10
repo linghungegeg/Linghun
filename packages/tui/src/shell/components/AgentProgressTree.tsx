@@ -87,6 +87,14 @@ export function AgentProgressTree({
               : "↑↓ 选择 · Enter 查看 · x 关闭 · Esc 取消"}
           </Text>
         </Box>
+      ) : tree.rows.some((r) => r.status === "running") ? (
+        <Box paddingLeft={2}>
+          <Text color={theme.muted} dimColor>
+            {language === "en-US"
+              ? "↑↓ navigate · x stop · esc cancel"
+              : "↑↓ 导航 · x 停止 · Esc 取消"}
+          </Text>
+        </Box>
       ) : null}
     </Box>
   );

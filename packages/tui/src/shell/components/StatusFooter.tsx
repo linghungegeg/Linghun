@@ -82,6 +82,11 @@ export function StatusFooter({
           ))}
         </Text>
         <FooterDetailLines footer={footer} theme={theme} width={width} />
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {language === "en-US"
+            ? "Esc interrupt · ? shortcuts"
+            : "Esc 中断 · ? 快捷键"}
+        </Text>
       </Box>
     );
   }
@@ -132,6 +137,13 @@ export function StatusFooter({
             ))}
           </Text>
         </Box>
+      </Box>
+      <Box paddingTop={1}>
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {language === "en-US"
+            ? "Esc interrupt · ? shortcuts"
+            : "Esc 中断 · ? 快捷键"}
+        </Text>
       </Box>
     </Box>
   );

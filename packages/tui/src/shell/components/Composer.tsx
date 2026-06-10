@@ -1550,6 +1550,13 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         </Text>
       ) : null}
       {hintNotice ? <Text color={theme.muted}>{fitText(hintNotice, composerInnerWidth)}</Text> : null}
+      {!text && !permissionActive && !showSuggestions && !showUnknownHint && !view.permission && !view.configPanel && !view.helpPanel && !view.shortcutPanel ? (
+        <Text dimColor color={theme.dim ?? theme.muted}>
+          {view.language === "en-US"
+            ? "? shortcuts"
+            : "? 快捷键"}
+        </Text>
+      ) : null}
     </Box>
   );
 }
