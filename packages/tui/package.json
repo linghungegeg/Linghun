@@ -18,11 +18,11 @@
     "@larksuiteoapi/node-sdk": "1.59.0",
     "@linghun/config": "workspace:*",
     "@linghun/core": "workspace:*",
+    "@linghun/ink-runtime": "workspace:*",
     "@linghun/providers": "workspace:*",
     "@linghun/shared": "workspace:*",
     "@linghun/tools": "workspace:*",
     "cli-highlight": "^2.1.11",
-    "ink": "^7.0.3",
     "marked": "^18.0.5",
     "react": "^19.2.6"
   },

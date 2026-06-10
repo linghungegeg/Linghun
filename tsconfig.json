@@ -4,6 +4,7 @@
     { "path": "./packages/shared" },
     { "path": "./packages/core" },
     { "path": "./packages/config" },
+    { "path": "./packages/ink-runtime" },
     { "path": "./packages/tui" },
     { "path": "./packages/providers" },
     { "path": "./packages/tools" },

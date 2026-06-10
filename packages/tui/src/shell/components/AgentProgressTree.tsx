@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import { messages } from "../../tui-messages.js";
 import { fitText } from "../text-utils.js";

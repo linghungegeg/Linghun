@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import type { ShellTheme } from "../theme.js";
 import type { StatusTrayViewModel } from "../types.js";

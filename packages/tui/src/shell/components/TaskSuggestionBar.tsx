@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import type { TaskSuggestion } from "../types.js";
 import { fitText } from "../text-utils.js";

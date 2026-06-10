@@ -114,6 +114,18 @@ describe("classifyTerminalInput", () => {
   it("classifies full SGR mouse sequence as mouse", () => {
     expect(classifyTerminalInput("[<64;44;14M")).toBe("mouse");
   });
+
+  it("classifies SGR mouse fragments as mouse so they never reach Composer text", () => {
+    expect(classifyTerminalInput("[<")).toBe("mouse");
+    expect(classifyTerminalInput("[<64;47;")).toBe("mouse");
+    expect(classifyTerminalInput(";47;20M")).toBe("mouse");
+    expect(classifyTerminalInput("64;47;20M")).toBe("mouse");
+  });
+
+  it("classifies bracketed paste and terminal responses outside keyboard", () => {
+    expect(classifyTerminalInput("\x1B[200~hello \x1B[<64;44;14M\x1B[201~")).toBe("paste");
+    expect(classifyTerminalInput("\x1B[?1000;1$y")).toBe("terminal-response");
+  });
 });
 
 describe("recoverOrphanMouseTail", () => {

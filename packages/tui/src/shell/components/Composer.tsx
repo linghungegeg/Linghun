@@ -1,4 +1,4 @@
-import { Box, type DOMElement, Text, useInput } from "ink";
+import { Box, type DOMElement, Text, useInput } from "@linghun/ink-runtime";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { computeGhostText } from "../../ghost-text.js";

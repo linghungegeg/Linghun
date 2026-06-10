@@ -1,4 +1,4 @@
-import { Box, type DOMElement } from "ink";
+import { Box, type DOMElement } from "@linghun/ink-runtime";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { computeScrollViewportOffset } from "../models/transcript-scroll-state.js";

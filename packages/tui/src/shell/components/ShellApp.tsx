@@ -1,4 +1,4 @@
-import { Box, type DOMElement, Text } from "ink";
+import { Box, type DOMElement, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TerminalCapability } from "../terminal-capability.js";

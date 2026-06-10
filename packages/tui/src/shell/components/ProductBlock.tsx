@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import { fitText, wrapText } from "../text-utils.js";
 import { type ShellTheme, getStatusMarker } from "../theme.js";

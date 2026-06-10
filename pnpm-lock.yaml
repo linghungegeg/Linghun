@@ -58,6 +58,19 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/ink-runtime:
+    dependencies:
+      ink:
+        specifier: ^7.0.3
+        version: 7.0.3(@types/react@19.2.15)(react@19.2.6)
+    devDependencies:
+      '@types/react':
+        specifier: ^19.2.15
+        version: 19.2.15
+      react:
+        specifier: ^19.2.6
+        version: 19.2.6
+
   packages/providers:
     dependencies:
       '@linghun/core':
@@ -82,6 +95,9 @@ importers:
       '@linghun/core':
         specifier: workspace:*
         version: link:../core
+      '@linghun/ink-runtime':
+        specifier: workspace:*
+        version: link:../ink-runtime
       '@linghun/providers':
         specifier: workspace:*
         version: link:../providers
@@ -94,9 +110,6 @@ importers:
       cli-highlight:
         specifier: ^2.1.11
         version: 2.1.11
-      ink:
-        specifier: ^7.0.3
-        version: 7.0.3(@types/react@19.2.15)(react@19.2.6)
       marked:
         specifier: ^18.0.5
         version: 18.0.5

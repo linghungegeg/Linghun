@@ -1,4 +1,4 @@
-import type { Key } from "ink";
+import { classifyParsedTerminalInput, type Key } from "@linghun/ink-runtime";
 
 export type TerminalInputAction =
   | { type: "backspace" }
@@ -8,7 +8,7 @@ export type TerminalInputAction =
   | { type: "text"; text: string }
   | { type: "ignore" };
 
-export type InputClassification = "keyboard" | "mouse" | "terminal-response";
+export type InputClassification = "keyboard" | "mouse" | "paste" | "terminal-response" | "unknown-escape";
 
 /**
  * Classify raw terminal input BEFORE it reaches any handler.
@@ -17,25 +17,7 @@ export type InputClassification = "keyboard" | "mouse" | "terminal-response";
  * "keyboard" for everything else.
  */
 export function classifyTerminalInput(input: string): InputClassification {
-  if (looksLikeSgrMouse(input)) return "mouse";
-  if (looksLikeTerminalResponse(input)) return "terminal-response";
-  return "keyboard";
-}
-
-function looksLikeSgrMouse(input: string): boolean {
-  const start = input.startsWith("\x1B[<") ? 3 : input.startsWith("[<") ? 2 : -1;
-  if (start < 0) return false;
-  const tail = input.slice(start);
-  return /^\d+;\d+;\d+[mM]$/.test(tail);
-}
-
-function looksLikeTerminalResponse(input: string): boolean {
-  if (!input.startsWith("\x1B[")) return false;
-  const body = input.slice(2);
-  if (body.startsWith("?") && /^[\d;]*[cn$y]$/.test(body.slice(1))) return true;
-  if (/^[\d;]*R$/.test(body)) return true;
-  if (body.startsWith(">") && /^\d+;\d+;\d+c$/.test(body.slice(1))) return true;
-  return false;
+  return classifyParsedTerminalInput(input);
 }
 
 /**

@@ -10,6 +10,7 @@
     { "path": "../shared" },
     { "path": "../core" },
     { "path": "../config" },
+    { "path": "../ink-runtime" },
     { "path": "../providers" },
     { "path": "../tools" }
   ]

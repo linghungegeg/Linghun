@@ -1,5 +1,5 @@
 import { highlight } from "cli-highlight";
-import { Box, Text } from "ink";
+import { Box, Text } from "@linghun/ink-runtime";
 import { lexer, type Token, type Tokens } from "marked";
 import { createContext, useContext } from "react";
 import type React from "react";

@@ -1,4 +1,4 @@
-import { type DOMElement, useBoxMetrics, useCursor } from "ink";
+import { type DOMElement, useBoxMetrics, useCursor } from "@linghun/ink-runtime";
 import type { TerminalCapability } from "../terminal-capability.js";
 
 /**

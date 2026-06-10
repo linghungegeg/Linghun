@@ -1,4 +1,4 @@
-import { useInput } from "ink";
+import { useInput } from "@linghun/ink-runtime";
 import { useCallback, useMemo, useRef } from "react";
 import { useScrollBatcher } from "../hooks/useScrollBatcher.js";
 import { WheelAccelerator } from "../models/wheel-acceleration.js";

@@ -1,5 +1,5 @@
 import type { Language } from "@linghun/shared";
-import { Box, Text } from "ink";
+import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import { fitText, wrapText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";

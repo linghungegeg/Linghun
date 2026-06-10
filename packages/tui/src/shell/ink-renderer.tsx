@@ -1,5 +1,5 @@
 import type { Readable, Writable } from "node:stream";
-import { render } from "ink";
+import { render } from "@linghun/ink-runtime";
 import React from "react";
 import { ShellApp } from "./components/ShellApp.js";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";

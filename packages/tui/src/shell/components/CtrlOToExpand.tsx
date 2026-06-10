@@ -1,4 +1,4 @@
-import { Text } from "ink";
+import { Text } from "@linghun/ink-runtime";
 import { createContext, useContext } from "react";
 import type React from "react";
 import type { ShellTheme } from "../theme.js";
