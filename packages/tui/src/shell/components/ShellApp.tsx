@@ -108,7 +108,7 @@ function HomeLayout({
       {view.blocks.length > 0 ? (
         <Box flexDirection="column" marginTop={1} width={cw}>
           {view.blocks.map((block) => (
-            <ProductBlock key={block.id} block={block} theme={theme} width={view.width} />
+            <ProductBlock key={block.id} block={block} theme={theme} width={view.width} language={view.language} />
           ))}
         </Box>
       ) : null}
@@ -278,7 +278,7 @@ function TaskLayout({
         <NotificationStack notifications={view.notifications} theme={theme} />
         {view.taskRuntimeSummary ? (
           <Box width={cw} marginTop={1}>
-            <ProductBlock block={view.taskRuntimeSummary} theme={theme} width={cw} />
+            <ProductBlock block={view.taskRuntimeSummary} theme={theme} width={cw} language={view.language} />
           </Box>
         ) : null}
 

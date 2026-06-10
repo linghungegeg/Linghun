@@ -104,7 +104,7 @@ export function buildUserTextBlockId(sequence: number, _text: string): string {
   return `${USER_TEXT_TRANSCRIPT_ID_PREFIX}${sequence}`;
 }
 
-export function createUserTextBlock(sequence: number, text: string): ProductBlockViewModel {
+export function createUserTextBlock(sequence: number, text: string, timestamp?: number): ProductBlockViewModel {
   const trimmed = text.trim();
   // 主屏 title 只取首行，多行长粘贴不会撑爆 transcript；fullText 留完整正文。
   const firstLine = trimmed.split("\n").find((line) => line.trim()) ?? trimmed;
@@ -117,5 +117,6 @@ export function createUserTextBlock(sequence: number, text: string): ProductBloc
     keep: true,
     fullText: trimmed,
     messageKind: "user_text",
+    timestamp,
   };
 }

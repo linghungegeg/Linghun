@@ -2477,7 +2477,7 @@ async function runInkShell(
         const isModelSetup = Boolean(context.pendingModelSetup);
         const isPendingConfirm = hasPendingEnterConfirmation(context);
         if (!isModelSetup && !isPendingConfirm) {
-          blocks.push(createUserTextBlock(commandSequence++, event.text));
+          blocks.push(createUserTextBlock(commandSequence++, event.text, Date.now()));
         }
       }
       shell?.rerender();

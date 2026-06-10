@@ -160,3 +160,33 @@ export function brandWordmark(
   void capability;
   return ["LingHun"];
 }
+
+/** Phase 14 — CCB-aligned brief timestamp by time gradient. */
+export function formatBriefTimestamp(ms: number, language: "zh-CN" | "en-US"): string {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const dayDiff = startOfDay(now) - startOfDay(d);
+  const daysAgo = Math.round(dayDiff / 86_400_000);
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+
+  if (daysAgo === 0) return time;
+
+  if (daysAgo > 0 && daysAgo < 7) {
+    if (language === "zh-CN") {
+      return `${ZH_WEEKDAY[d.getDay()]} ${time}`;
+    }
+    return `${EN_WEEKDAY[d.getDay()]} ${time}`;
+  }
+
+  const date = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  return `${date} ${time}`;
+}
+
+function startOfDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+const ZH_WEEKDAY = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+const EN_WEEKDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];

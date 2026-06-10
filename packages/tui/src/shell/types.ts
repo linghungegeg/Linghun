@@ -86,6 +86,8 @@ export type ProductBlockViewModel = {
   selectionLineIndexes?: number[];
   /** Cell-column ranges highlighted by the app-owned transcript selection substrate. */
   selectionLineRanges?: ProductBlockSelectionRange[];
+  /** Phase 14 — message timestamp (ms since epoch), rendered dim next to user_text blocks. */
+  timestamp?: number;
 };
 
 export type CtrlOExpandView = {
