@@ -413,6 +413,7 @@ export function createShellViewModel(
                 Math.ceil(context.cache.compactPressure.maxChars / 4),
               ).label
             : undefined,
+          isRemoteMode: context.remote?.enabled ?? false,
         });
 
   // D.13E Step 2 — TaskSuggestionBar 数据。
@@ -1730,6 +1731,7 @@ type TaskFooterInput = {
   reasoningSent?: boolean;
   estimatedCostCny?: number;
   contextUsageLabel?: string;
+  isRemoteMode: boolean;
 };
 
 function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
@@ -1745,6 +1747,7 @@ function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
     reasoning: formatFooterReasoning(input.language, input.reasoningLevel, input.reasoningSent),
     contextUsage: input.contextUsageLabel,
     cost: formatFooterCost(input.language, input.estimatedCostCny),
+    isRemoteMode: input.isRemoteMode,
   };
 }
 

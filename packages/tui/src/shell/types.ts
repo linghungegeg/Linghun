@@ -255,6 +255,7 @@ export type TaskFooterView = {
    * Footer 第二行：当前 active/resumable runtime 状态。历史 terminal 任务不进这里。
    */
   runtimeStatus?: string;
+  isRemoteMode?: boolean;
 };
 
 /**

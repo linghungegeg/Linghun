@@ -54,19 +54,29 @@ export function StatusFooter({
 
   // Narrow (<80 cols): single-line compressed layout.
   const narrow = width < 80;
+  const remoteSegment = footer.isRemoteMode
+    ? [{ key: "remote", text: "● remote", tone: "dim" as const }]
+    : [];
+
   if (narrow) {
     return (
       <Box flexDirection="column" width={width} paddingX={2} paddingTop={1}>
         <Text>
-          <Text>{footer.permissionMode}</Text>
+          <Text dimColor={footer.isRemoteMode}>{footer.permissionMode}</Text>
           <Text color={theme.dim ?? theme.muted} dimColor>
             {footer.cyclePermHint}
           </Text>
         </Text>
         <Text>
-          {rightSegments.map((seg, idx) => (
+          {remoteSegment.map((seg, idx) => (
             <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
               {idx > 0 ? " · " : ""}
+              {seg.text}
+            </Text>
+          ))}
+          {rightSegments.map((seg, idx) => (
+            <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
+              {(remoteSegment.length > 0 || idx > 0) ? " · " : ""}
               {seg.text}
             </Text>
           ))}
@@ -78,7 +88,8 @@ export function StatusFooter({
 
   // Wide (≥80 cols): two-line — StatusLine on top, metadata row below.
   const hasStatusLine = !!(footer.workspaceStatus || footer.runtimeStatus);
-  const reservedRight = rightSegments.reduce(
+  const allRightSegments = [...remoteSegment, ...rightSegments];
+  const reservedRight = allRightSegments.reduce(
     (acc, seg, idx) => acc + (seg.text?.length ?? 0) + (idx > 0 ? 3 : 0),
     0,
   );
@@ -105,7 +116,7 @@ export function StatusFooter({
       <Box width="100%">
         <Box flexGrow={1} flexShrink={1}>
           <Text>
-            <Text>{footer.permissionMode}</Text>
+            <Text dimColor={footer.isRemoteMode}>{footer.permissionMode}</Text>
             <Text color={theme.dim ?? theme.muted} dimColor>
               {fittedLeft.slice(footer.permissionMode.length)}
             </Text>
@@ -113,7 +124,7 @@ export function StatusFooter({
         </Box>
         <Box flexShrink={0}>
           <Text>
-            {rightSegments.map((seg, idx) => (
+            {allRightSegments.map((seg, idx) => (
               <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
                 {idx > 0 ? " · " : ""}
                 {seg.text}
