@@ -524,24 +524,65 @@ Disable on exit in safe reverse order:
 
 ## Tasks
 
-- [ ] Move terminal mode ownership into runtime package.
-- [ ] Ensure cleanup on normal exit.
-- [ ] Ensure cleanup on render error.
-- [ ] Ensure cleanup on suspend.
-- [ ] Ensure restore on resume.
-- [ ] Reassert modes after stdin long gap or terminal reset signal if needed.
-- [ ] Restore cursor/raw-mode state.
+- [x] Move terminal mode ownership into runtime package.
+- [x] Ensure cleanup on normal exit.
+- [x] Ensure cleanup on render error.
+- [x] Ensure cleanup on suspend.
+- [x] Ensure restore on resume.
+- [x] Reassert modes after stdin long gap or terminal reset signal if needed.
+- [x] Restore cursor/raw-mode state.
 
 ## Acceptance Criteria
 
-- [ ] Exiting Linghun never leaves shell in mouse reporting mode.
-- [ ] Ctrl+C/error path restores terminal modes.
-- [ ] Suspend/resume does not break mouse/paste handling.
-- [ ] App code no longer independently toggles conflicting mouse modes.
+- [x] Exiting Linghun never leaves shell in mouse reporting mode.
+- [x] Ctrl+C/error path restores terminal modes.
+- [x] Suspend/resume does not break mouse/paste handling.
+- [x] App code no longer independently toggles conflicting mouse modes.
 
 ## Handoff Notes
 
 Mode changes have high blast radius. Keep tests and manual validation close to this phase.
+
+## Phase 3 Closure — 2026-06-10
+
+Status: PASS / terminal mode runtime closed.
+
+Implemented:
+
+- Moved terminal mode enable/disable/reassert/write helpers into `packages/ink-runtime/src/terminal-modes.ts`.
+- `@linghun/ink-runtime` now owns mode sequences for kitty keyboard, modifyOtherKeys, SGR mouse, focus events, and bracketed paste.
+- SGR mouse enable now uses `1000 + 1002 + 1003 + 1006`.
+- Disable order is safe reverse order: `2004`, `1004`, `1006`, `1003`, `1002`, `1000`, then keyboard protocols.
+- Added `createTerminalInteractionSession()` to make enable/disable/reassert idempotent at runtime boundary.
+- Added `bindTerminalInteractionSignals()` for suspend/resume lifecycle: suspend disables modes before `SIGTSTP`, resume restores modes, dispose removes signal listeners.
+- `packages/tui/src/shell/terminal-interaction-runtime.ts` now only resolves capability/env policy and re-exports runtime-owned terminal mode operations.
+- `packages/tui/src/shell/ink-renderer.tsx` uses the runtime session for render start, render-error cleanup, unmount cleanup, resize reassert, and signal binding disposal.
+
+Scope kept unchanged:
+
+- No visual redesign.
+- No renderer-owned selection/copy/scroll behavior yet.
+- No provider/model/tool/scheduler/agent/MCP/permission behavior changes.
+- No CCB source copied or vendored.
+
+Validation:
+
+```text
+corepack pnpm exec vitest run packages/tui/src/shell/terminal-interaction-runtime.test.ts  PASS, 10 tests
+corepack pnpm --filter @linghun/ink-runtime typecheck  PASS
+corepack pnpm --filter @linghun/tui typecheck          PASS
+corepack pnpm --filter @linghun/ink-runtime build      PASS
+corepack pnpm --filter @linghun/tui build              PASS
+corepack pnpm typecheck                                PASS
+```
+
+Known limits:
+
+- Manual real-terminal suspend/resume and heavy-mouse smoke have not been run in this phase.
+- Selection/copy maturity remains app-owned and belongs to Phase 4.
+- Scroll drain/wheel acceleration/render lifecycle maturity remains Phase 5+.
+
+Next phase should start with renderer-owned mouse selection/copy runtime, using the now-available `1002/1003/1006` mode coverage and parser boundary.
 
 ---
 

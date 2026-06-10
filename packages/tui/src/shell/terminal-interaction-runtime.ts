@@ -1,12 +1,25 @@
-import type { Writable } from "node:stream";
+import type { TerminalInteractionModes } from "@linghun/ink-runtime";
 import type { TerminalCapability } from "./terminal-capability.js";
 
-export const ENABLE_MODIFY_OTHER_KEYS = "\x1B[>4;2m";
-export const DISABLE_MODIFY_OTHER_KEYS = "\x1B[>4m";
-export const ENABLE_KITTY_KEYBOARD = "\x1B[>1u";
-export const DISABLE_KITTY_KEYBOARD = "\x1B[<u";
-export const ENABLE_SGR_MOUSE = "\x1B[?1000h\x1B[?1006h";
-export const DISABLE_SGR_MOUSE = "\x1B[?1006l\x1B[?1000l";
+export {
+  DISABLE_BRACKETED_PASTE,
+  DISABLE_FOCUS_EVENTS,
+  DISABLE_KITTY_KEYBOARD,
+  DISABLE_MODIFY_OTHER_KEYS,
+  DISABLE_SGR_MOUSE,
+  ENABLE_BRACKETED_PASTE,
+  ENABLE_FOCUS_EVENTS,
+  ENABLE_KITTY_KEYBOARD,
+  ENABLE_MODIFY_OTHER_KEYS,
+  ENABLE_SGR_MOUSE,
+  bindTerminalInteractionSignals,
+  createTerminalInteractionSession,
+  disableTerminalInteractionModes,
+  enableTerminalInteractionModes,
+  reassertTerminalInteractionModes,
+  writeBestEffort,
+} from "@linghun/ink-runtime";
+export type { TerminalInteractionModes } from "@linghun/ink-runtime";
 
 export type TerminalInteractionOptions = {
   capability: TerminalCapability;
@@ -14,22 +27,13 @@ export type TerminalInteractionOptions = {
   appOwnedScreen?: boolean;
 };
 
-export type TerminalInteractionModes = {
-  kittyKeyboard: boolean;
-  modifyOtherKeys: boolean;
-  mouseTracking: boolean;
-};
-
 export function resolveTerminalInteractionModes({
   capability,
   env = process.env,
   appOwnedScreen = false,
 }: TerminalInteractionOptions): TerminalInteractionModes {
-  const mouseTracking =
-    env.LINGHUN_TUI_MOUSE !== "0" &&
-    capability.cursorPositioning &&
-    appOwnedScreen &&
-    capability.alternateScreen;
+  const appOwnedInteractive = capability.cursorPositioning && appOwnedScreen && capability.alternateScreen;
+  const mouseTracking = env.LINGHUN_TUI_MOUSE !== "0" && appOwnedInteractive;
   return {
     kittyKeyboard:
       capability.kittyKeyboard ||
@@ -37,31 +41,7 @@ export function resolveTerminalInteractionModes({
       capability.keyboardProtocols.includes("csi-u"),
     modifyOtherKeys: capability.keyboardProtocols.includes("modifyOtherKeys"),
     mouseTracking,
+    focusEvents: appOwnedInteractive,
+    bracketedPaste: appOwnedInteractive,
   };
-}
-
-export function enableTerminalInteractionModes(
-  stdout: Writable | undefined,
-  modes: TerminalInteractionModes,
-): void {
-  if (modes.kittyKeyboard) writeBestEffort(stdout, ENABLE_KITTY_KEYBOARD);
-  if (modes.modifyOtherKeys) writeBestEffort(stdout, ENABLE_MODIFY_OTHER_KEYS);
-  if (modes.mouseTracking) writeBestEffort(stdout, ENABLE_SGR_MOUSE);
-}
-
-export function disableTerminalInteractionModes(
-  stdout: Writable | undefined,
-  modes: TerminalInteractionModes,
-): void {
-  if (modes.mouseTracking) writeBestEffort(stdout, DISABLE_SGR_MOUSE);
-  if (modes.modifyOtherKeys) writeBestEffort(stdout, DISABLE_MODIFY_OTHER_KEYS);
-  if (modes.kittyKeyboard) writeBestEffort(stdout, DISABLE_KITTY_KEYBOARD);
-}
-
-export function writeBestEffort(stdout: Writable | undefined, text: string): void {
-  try {
-    stdout?.write(text);
-  } catch {
-    // stdout may already be closed during terminal teardown.
-  }
 }

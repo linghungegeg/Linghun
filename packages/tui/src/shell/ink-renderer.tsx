@@ -4,8 +4,8 @@ import React from "react";
 import { ShellApp } from "./components/ShellApp.js";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
 import {
-  disableTerminalInteractionModes,
-  enableTerminalInteractionModes,
+  bindTerminalInteractionSignals,
+  createTerminalInteractionSession,
   resolveTerminalInteractionModes,
   writeBestEffort,
 } from "./terminal-interaction-runtime.js";
@@ -44,10 +44,12 @@ export function renderInkShell(
     capability,
     appOwnedScreen: useAlternateScreen,
   });
+  const terminalInteractionSession = createTerminalInteractionSession(stdout, terminalInteractionModes);
+  const terminalInteractionSignals = bindTerminalInteractionSignals(process, terminalInteractionSession);
   let instance: ReturnType<typeof render>;
 
   try {
-    enableTerminalInteractionModes(stdout, terminalInteractionModes);
+    terminalInteractionSession.enable();
     instance = render(<ShellApp controller={controller} capability={capability} />, {
       stdin: options.stdin as NodeJS.ReadStream | undefined,
       stdout,
@@ -56,7 +58,7 @@ export function renderInkShell(
       alternateScreen: useAlternateScreen,
     });
   } catch (error) {
-    disableTerminalInteractionModes(stdout, terminalInteractionModes);
+    terminalInteractionSession.disable();
     showTerminalCursor(stdout);
     throw error;
   }
@@ -71,6 +73,7 @@ export function renderInkShell(
       clearTimeout(resizeTimer);
       resizeTimer = undefined;
     }
+    terminalInteractionSignals.dispose();
     stdout?.off("resize", onResize);
     stdinStream?.off("close", doUnmount);
     stdinStream?.off("end", doUnmount);
@@ -82,7 +85,7 @@ export function renderInkShell(
     } catch {
       // stdout/stdin may already be closed (e.g. Windows cmd window close)
     }
-    disableTerminalInteractionModes(stdout, terminalInteractionModes);
+    terminalInteractionSession.disable();
     showTerminalCursor(stdout);
     // Unref stdin to prevent the process from hanging on exit
     const stdin = options.stdin as { unref?: () => void } | undefined;
@@ -108,6 +111,7 @@ export function renderInkShell(
       } catch {
         // Ignore clear errors if stdout is closed
       }
+      terminalInteractionSession.reassert();
       rerender();
     }, 60);
   };
