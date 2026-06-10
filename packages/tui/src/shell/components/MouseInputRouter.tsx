@@ -91,12 +91,11 @@ export function MouseInputRouter({
     { isActive: active },
   );
 
-  // Focus-out detection (terminal focus-out report: ESC[O or orphan [O)
   useTerminalInput(
     useCallback(
       (event: ParsedTerminalInput) => {
-        if (event.kind !== "key") return;
-        if (event.input !== "\x1B[O" && event.input !== "[O") return;
+        if (event.kind !== "terminal-response") return;
+        if (event.response !== "\x1B[O") return;
         if (!selectionActive) return;
         onInput({ type: "transcript-mouse", event: { x: 0, y: 0, button: "left", action: "focus-out" } });
       },

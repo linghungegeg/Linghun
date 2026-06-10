@@ -17,6 +17,7 @@ export type InputClassification = "keyboard" | "mouse" | "paste" | "terminal-res
  * "keyboard" for everything else.
  */
 export function classifyTerminalInput(input: string): InputClassification {
+  if (input === "[I" || input === "[O") return "terminal-response";
   return classifyParsedTerminalInput(input);
 }
 

@@ -125,6 +125,8 @@ describe("classifyTerminalInput", () => {
   it("classifies bracketed paste and terminal responses outside keyboard", () => {
     expect(classifyTerminalInput("\x1B[200~hello \x1B[<64;44;14M\x1B[201~")).toBe("paste");
     expect(classifyTerminalInput("\x1B[?1000;1$y")).toBe("terminal-response");
+    expect(classifyTerminalInput("\x1B[O")).toBe("terminal-response");
+    expect(classifyTerminalInput("[O")).toBe("terminal-response");
   });
 });
 

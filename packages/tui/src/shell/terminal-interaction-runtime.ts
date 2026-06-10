@@ -33,7 +33,9 @@ export function resolveTerminalInteractionModes({
   appOwnedScreen = false,
 }: TerminalInteractionOptions): TerminalInteractionModes {
   const appOwnedInteractive = capability.cursorPositioning && appOwnedScreen && capability.alternateScreen;
-  const mouseTracking = env.LINGHUN_TUI_MOUSE !== "0" && appOwnedInteractive;
+  const mouseTracking = env.LINGHUN_TUI_MOUSE === "1" && appOwnedInteractive;
+  const selectionActive = env.LINGHUN_TUI_MOUSE_SELECTION === "1";
+  const focusEvents = mouseTracking && selectionActive && env.LINGHUN_TUI_FOCUS === "1";
   return {
     kittyKeyboard:
       capability.kittyKeyboard ||
@@ -41,7 +43,7 @@ export function resolveTerminalInteractionModes({
       capability.keyboardProtocols.includes("csi-u"),
     modifyOtherKeys: capability.keyboardProtocols.includes("modifyOtherKeys"),
     mouseTracking,
-    focusEvents: appOwnedInteractive,
+    focusEvents,
     bracketedPaste: appOwnedInteractive,
   };
 }

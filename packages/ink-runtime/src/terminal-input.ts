@@ -97,6 +97,9 @@ function parseNext(input: string, flush: boolean): ParseResult {
   const orphanMouse = parseOrphanSgrMouse(input);
   if (orphanMouse) return orphanMouse;
 
+  const orphanFocus = parseOrphanFocusReport(input);
+  if (orphanFocus) return orphanFocus;
+
   const x10Mouse = parseX10Mouse(input, flush);
   if (x10Mouse) return x10Mouse;
 
@@ -138,6 +141,12 @@ function parseOrphanSgrMouse(input: string): ParseResult | undefined {
   const match = ORPHAN_SGR_MOUSE_RE.exec(input);
   if (!match) return undefined;
   return mouseEventFromSgr(match, `${ESC}${match[0]}`);
+}
+
+function parseOrphanFocusReport(input: string): ParseResult | undefined {
+  if (input !== "[I" && input !== "[O") return undefined;
+  const response = `${ESC}${input}`;
+  return { status: "parsed", event: { kind: "terminal-response", response, raw: input }, length: input.length };
 }
 
 function mouseEventFromSgr(match: RegExpExecArray, raw: string): ParseResult {
@@ -225,6 +234,7 @@ function findCsiFinalIndex(input: string): number {
 
 function isTerminalResponse(raw: string): boolean {
   const body = raw.slice(2);
+  if (body === "I" || body === "O") return true;
   if (/^\?\d+(?:;\d+)*[cn]$/u.test(body)) return true;
   if (/^>\d+(?:;\d+)*c$/u.test(body)) return true;
   if (/^\d+(?:;\d+)*R$/u.test(body)) return true;

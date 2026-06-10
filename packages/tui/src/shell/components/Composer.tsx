@@ -533,6 +533,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const pasteChunksRef = useRef<string[]>([]);
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pastePendingRef = useRef(false);
+  const focusReportPrefixPendingRef = useRef(false);
   const lastEscAtRef = useRef(0);
   const lastCtrlCAtRef = useRef(0);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -719,11 +720,18 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   useInput(
     (input, key) => {
-      // Phase 7 safety guard: runtime hooks (useWheelInput/useMouseInput/useTerminalResponse)
-      // now own terminal input classification at the runtime layer. This guard remains as a
-      // final defense against non-keyboard input reaching the edit buffer, because stock Ink
-      // broadcasts all stdin to every active useInput handler. Once stock Ink useInput is
-      // fully replaced by runtime-level routing, this guard can be removed.
+      if (input === "\x1B[I" || input === "\x1B[O" || input === "[I" || input === "[O") {
+        focusReportPrefixPendingRef.current = false;
+        return;
+      }
+      if (input === "\x1B[") {
+        focusReportPrefixPendingRef.current = true;
+        return;
+      }
+      if (focusReportPrefixPendingRef.current) {
+        focusReportPrefixPendingRef.current = false;
+        if (input === "I" || input === "O") return;
+      }
       if (classifyTerminalInput(input) !== "keyboard") return;
 
       const buffer = bufferRef.current;
@@ -1248,7 +1256,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         return;
       }
 
-      // Up / Down — slash 列表优先；多行先在内部走，到达边界再走历史。
+      // Up / Down — task mode 输入为空时优先滚动任务区（终端无 mouse tracking 时
+      // 滚轮到达 app 的形式就是 Up/Down 箭头）；其余走 slash / 多行 / 历史。
       if (key.upArrow) {
         if (slashVisible && slashSelection >= 0) {
           setSlashSelection((current) => {
@@ -1259,6 +1268,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
           emitInput({ type: "task-suggestion-move", delta: -1 });
+          return;
+        }
+        if (text.length === 0 && inTaskMode) {
+          emitInput({ type: "transcript-scroll", action: "lineUp" });
           return;
         }
         const moved = bufferMoveVisualUp(buffer, maxWidth);
@@ -1284,6 +1297,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
           emitInput({ type: "task-suggestion-move", delta: 1 });
+          return;
+        }
+        if (text.length === 0 && inTaskMode) {
+          emitInput({ type: "transcript-scroll", action: "lineDown" });
           return;
         }
         const moved = bufferMoveVisualDown(buffer, maxWidth);

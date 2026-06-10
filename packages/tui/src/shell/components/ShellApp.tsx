@@ -166,7 +166,7 @@ function TaskLayout({
     () => resolveTerminalInteractionModes({ capability, appOwnedScreen: resolveAlternateScreen(capability) }).mouseTracking,
     [capability],
   );
-  const mouseSelectionActive = process.env.LINGHUN_TUI_MOUSE_SELECTION !== "0";
+  const mouseSelectionActive = process.env.LINGHUN_TUI_MOUSE_SELECTION === "1";
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
       <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>

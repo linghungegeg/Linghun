@@ -65,6 +65,13 @@ describe("terminal input tokenizer", () => {
     expect(classifyParsedTerminalInput("\x1B[?1000;1$y")).toBe("terminal-response");
   });
 
+  it("classifies focus reports separately from keyboard input", () => {
+    expect(classifyParsedTerminalInput("\x1B[I")).toBe("terminal-response");
+    expect(classifyParsedTerminalInput("\x1B[O")).toBe("terminal-response");
+    expect(classifyParsedTerminalInput("[I")).toBe("terminal-response");
+    expect(classifyParsedTerminalInput("[O")).toBe("terminal-response");
+  });
+
   it("preserves ordinary keyboard input", () => {
     expect(parseTerminalInput("hello")).toEqual([
       { kind: "key", input: "h" },

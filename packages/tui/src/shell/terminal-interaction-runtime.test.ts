@@ -69,14 +69,34 @@ describe("terminal interaction modes", () => {
     ).toBe(false);
   });
 
-  it("enables app-owned wheel tracking by default", () => {
-    expect(
-      resolveTerminalInteractionModes({
-        capability: capability(),
-        env: {},
-        appOwnedScreen: true,
-      }).mouseTracking,
-    ).toBe(true);
+  it("keeps app-owned mouse tracking off by default so native selection remains available", () => {
+    const modes = resolveTerminalInteractionModes({
+      capability: capability(),
+      env: {},
+      appOwnedScreen: true,
+    });
+    expect(modes.mouseTracking).toBe(false);
+    expect(modes.focusEvents).toBe(false);
+  });
+
+  it("enables app-owned wheel tracking only when explicitly requested", () => {
+    const modes = resolveTerminalInteractionModes({
+      capability: capability(),
+      env: { LINGHUN_TUI_MOUSE: "1" },
+      appOwnedScreen: true,
+    });
+    expect(modes.mouseTracking).toBe(true);
+    expect(modes.focusEvents).toBe(false);
+  });
+
+  it("enables selection focus recovery only when explicitly requested", () => {
+    const modes = resolveTerminalInteractionModes({
+      capability: capability(),
+      env: { LINGHUN_TUI_MOUSE: "1", LINGHUN_TUI_MOUSE_SELECTION: "1", LINGHUN_TUI_FOCUS: "1" },
+      appOwnedScreen: true,
+    });
+    expect(modes.mouseTracking).toBe(true);
+    expect(modes.focusEvents).toBe(true);
   });
 
   it("does not enable wheel tracking when the Ink shell is not using an app-owned screen", () => {

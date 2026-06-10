@@ -1986,6 +1986,7 @@ async function runInkShell(
           rows,
           geometry: context.transcriptViewportGeometry,
           scroll: context.transcriptScrollState,
+          copyOnSelect: false,
         });
         if (!result.consumed) return;
         context.transcriptSelectionState = result.state;
