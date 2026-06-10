@@ -76,7 +76,8 @@ export function formatToolOutput(
   evidenceId?: string,
 ): string {
   const layered = createLayeredToolOutput(name, output, language, evidenceId);
-  const lines = [formatPrimaryToolLead(name, output, layered, language)];
+  const lead = formatPrimaryToolLead(name, output, layered, language);
+  const lines: string[] = lead ? [lead] : [];
   // Phase 18: large response token warning (>10K characters).
   const textLen = output.text?.length ?? 0;
   if (textLen > 10_000) {
@@ -119,15 +120,14 @@ function formatPrimaryToolLead(
 ): string {
   const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
   const count = readNumber(metadata, "count");
-  const exitCode = readNumber(metadata, "exitCode");
   const totalLines = readNumber(metadata, "totalLines") ?? readNumber(metadata, "contentLines");
   const visibleLines =
     readNumber(metadata, "windowLines") ?? readNumber(metadata, "lines") ?? lineCount(output.text);
   if (language === "en-US") {
-    if (name === "Grep") return `Search summary: ${count ?? 0} match(es).`;
-    if (name === "Glob") return `File search summary: ${count ?? visibleLines} file(s).`;
-    if (name === "Read") return `Read summary: ${totalLines ?? visibleLines} line(s).`;
-    if (name === "Bash" && exitCode !== undefined) return `Bash finished: exit code ${exitCode}.`;
+    if (name === "Grep") return `Found **${count ?? 0}** matches.`;
+    if (name === "Glob") return `Found **${count ?? visibleLines}** files.`;
+    if (name === "Read") return `Read **${totalLines ?? visibleLines}** lines.`;
+    if (name === "Bash") return "";
     // Phase 17: WebSearch / WebFetch dedicated format.
     if (name === "WebSearch") return formatWebSearchLead(output, language);
     if (name === "WebFetch") return formatWebFetchLead(output, language);
@@ -136,10 +136,10 @@ function formatPrimaryToolLead(
     if (enStructured) return `${name}: ${enStructured}`;
     return `${name} summary: ${layered.summary}`;
   }
-  if (name === "Grep") return `搜索摘要：${count ?? 0} 处。`;
-  if (name === "Glob") return `文件搜索摘要：${count ?? visibleLines} 个文件。`;
-  if (name === "Read") return `读取摘要：${totalLines ?? visibleLines} 行。`;
-  if (name === "Bash" && exitCode !== undefined) return `Bash 已结束：退出码 ${exitCode}。`;
+  if (name === "Grep") return `找到 **${count ?? 0}** 处匹配。`;
+  if (name === "Glob") return `找到 **${count ?? visibleLines}** 个文件。`;
+  if (name === "Read") return `读取 **${totalLines ?? visibleLines}** 行。`;
+  if (name === "Bash") return "";
   // Phase 17: WebSearch / WebFetch dedicated format.
   if (name === "WebSearch") return formatWebSearchLead(output, language);
   if (name === "WebFetch") return formatWebFetchLead(output, language);
