@@ -121,17 +121,37 @@ export function formatCompactStatus(context: TuiContext): string {
   const projection = context.cache.compactProjection;
   const deep = context.cache.deepCompact;
   const failure = context.cache.compactFailure;
-  return [
+  const lines = [
     "Context Compact status",
+    `- pressure: ${pressure ? `${formatPercent(pressure.ratio)} (${pressure.estimatedChars}/${pressure.maxChars} chars; trigger ${pressure.triggerChars})` : "unknown"}`,
+    `- compacted: ${context.cache.compacted ? "yes" : "no"} · boundaries: ${context.cache.compactBoundaries.length}`,
+    `- latest: ${latest ? `${latest.kind}/${latest.id}` : "none"}`,
+    `- latest tokens: ${latest ? `${latest.preCompactTokenEstimate ?? "-"}→${latest.postCompactTokenEstimate ?? "-"}` : "-"}`,
+    `- latest compact time: ${deep?.createdAt ?? projection?.createdAt ?? latest?.createdAt ?? "none"}`,
+  ];
+  // Phase 10: 可视化 token 分布条形图
+  if (contextUsage) {
+    const bar = formatContextProgressBar(contextUsage.ratio, 24);
+    lines.push(`  context ${bar} ${contextUsage.usedTokens}/${contextUsage.maxTokens}`);
+  }
+  // Phase 10: token 组成细分（若 API 回报了输入/输出 token）
+  if (context.lastApiTokenCount?.inputTokens) {
+    const api = context.lastApiTokenCount;
+    const inputK = Math.round(api.inputTokens / 1000);
+    const outputK = api.outputTokens ? Math.round(api.outputTokens / 1000) : 0;
+    const total = api.inputTokens + (api.outputTokens ?? 0);
+    const inputPct = total > 0 ? Math.round((api.inputTokens / total) * 100) : 0;
+    const outputPct = 100 - inputPct;
+    const barWidth = 20;
+    const inputW = Math.round((inputPct / 100) * barWidth);
+    const outputW = barWidth - inputW;
+    lines.push(
+      `  latest request  █${"█".repeat(inputW)}${"─".repeat(outputW)}  input ${inputK}k (${inputPct}%) · output ${outputK}k (${outputPct}%)`,
+    );
+  }
+  lines.push(
     "- deep scope: full transcript semantic compact",
     "- projection scope: provider-visible recent context projection",
-    `- pressure: ${pressure ? `${formatPercent(pressure.ratio)} (${pressure.estimatedChars}/${pressure.maxChars} chars; trigger ${pressure.triggerChars})` : "unknown"}`,
-    `- context usage: ${contextUsage?.label ?? "unknown"}`,
-    `- compacted: ${context.cache.compacted ? "yes" : "no"}`,
-    `- boundaries: ${context.cache.compactBoundaries.length}`,
-    `- latest: ${latest ? `${latest.kind}/${latest.id}` : "none"}`,
-    `- latest tokens: ${latest ? `${latest.preCompactTokenEstimate ?? "-"}->${latest.postCompactTokenEstimate ?? "-"}` : "-"}`,
-    `- latest compact time: ${deep?.createdAt ?? projection?.createdAt ?? latest?.createdAt ?? "none"}`,
     `- deep packet: ${deep ? `${deep.id}; trigger ${deep.trigger}; events ${deep.transcriptEventCount}` : "none"}`,
     `- deep summary: ${deep ? sanitizeCompactStatusText(deep.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
     `- projection summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
@@ -141,7 +161,46 @@ export function formatCompactStatus(context: TuiContext): string {
     `- preserved evidence refs: ${deep?.preservedEvidenceRefs.length ?? latest?.preservedEvidenceRefs.length ?? 0}`,
     `- preserved files: ${deep?.preservedFiles.length ?? latest?.preservedFiles.length ?? 0}`,
     "- boundary: deep summary and projection are redacted; raw transcript, secrets, large tool results, provider raw requests, and absolute paths stay out.",
-  ].join("\n");
+  );
+  // Phase 10: 优化建议
+  const suggestions = buildCompactSuggestions(context, contextUsage, pressure);
+  if (suggestions.length > 0) {
+    lines.push("", ...suggestions);
+  }
+  return lines.join("\n");
+}
+
+function buildCompactSuggestions(
+  context: TuiContext,
+  usage: ReturnType<typeof calculateContextPercentages> | undefined,
+  pressure:
+    | { ratio: number; toolPairingSafe: boolean; estimatedChars: number; triggerChars: number }
+    | undefined,
+): string[] {
+  const out: string[] = [];
+  const en = context.language === "en-US";
+  if (!usage || !pressure) return out;
+  if (usage.ratio > 0.85) {
+    out.push(
+      en
+        ? `⚠ Suggestion: Context at ${(usage.ratio * 100).toFixed(0)}% — run /compact deep to semantically summarize older context and free capacity.`
+        : `⚠ 建议：上下文使用率 ${(usage.ratio * 100).toFixed(0)}% — 运行 /compact deep 语义摘要较早上下文以释放容量。`,
+    );
+  } else if (usage.ratio > 0.7) {
+    out.push(
+      en
+        ? `Suggestion: Context at ${(usage.ratio * 100).toFixed(0)}% — approaching limit. Deep compact is available when needed.`
+        : `建议：上下文使用率 ${(usage.ratio * 100).toFixed(0)}% — 接近上限。需要时可运行 deep compact。`,
+    );
+  }
+  if (usage.ratio > 0.6 && !context.cache.compacted) {
+    out.push(
+      en
+        ? "Tip: Auto-compact triggers around 80%. You can also /compact manual for a semantic rewrite of older context."
+        : "提示：自动压缩约在 80% 触发。你也可以 /compact manual 对较早上下文做语义重写。",
+    );
+  }
+  return out;
 }
 
 function sanitizeCompactStatusText(value: string): string {
