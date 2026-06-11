@@ -156,7 +156,9 @@ export function resolveInitialModel(config: LinghunConfig): string {
   if (executor && !isDefaultExecutorRoute(executor, config) && executor.primaryModel) {
     return executor.primaryModel;
   }
-  return config.defaultModel || executor?.primaryModel || resolveFirstProviderModel(config);
+  const providerModel =
+    executor?.provider ? config.providers[executor.provider]?.model : undefined;
+  return config.defaultModel || executor?.primaryModel || providerModel || resolveFirstProviderModel(config);
 }
 
 export function getSelectedModelRuntime(
@@ -164,12 +166,18 @@ export function getSelectedModelRuntime(
   role: ModelRole = "executor",
 ): SelectedModelRuntime {
   const route = getRoleRoute(context.config, role);
+  const providerModel =
+    route.provider ? context.config.providers[route.provider]?.model : undefined;
+  // primaryModel (per-role override) > provider.model (global) > context.model (volatile)
+  const effectivePrimaryModel = route.primaryModel || providerModel || "";
   const useContextModel =
     role === "executor" &&
     isDefaultExecutorRoute(route, context.config) &&
     context.model &&
-    context.model !== route.primaryModel;
-  const model = useContextModel ? context.model : route.primaryModel || context.model;
+    context.model !== effectivePrimaryModel;
+  const model = useContextModel
+    ? context.model
+    : effectivePrimaryModel || context.model;
   const provider = useContextModel
     ? resolveProviderForModel(context.config, model)
     : route.provider || resolveProviderForModel(context.config, model);
@@ -263,15 +271,19 @@ export function resolveRoleRoute(
   triggerReason: string,
 ): ResolvedRoleRoute {
   const baseRoute = getRoleRoute(context.config, role);
+  const effectivePrimaryModel =
+    baseRoute.primaryModel ||
+    (baseRoute.provider ? context.config.providers[baseRoute.provider]?.model : undefined) ||
+    "";
   const primaryProblems = diagnoseConcreteRoute(
     baseRoute,
-    baseRoute.primaryModel,
+    effectivePrimaryModel,
     baseRoute.provider,
     context.config,
   );
   const primaryBlocking = getRouteBlockingProblems(primaryProblems);
   let selectedProvider = baseRoute.provider;
-  let selectedModel = baseRoute.primaryModel;
+  let selectedModel = effectivePrimaryModel;
   let stopConditions = primaryBlocking;
   let fallbackUsed = false;
 
