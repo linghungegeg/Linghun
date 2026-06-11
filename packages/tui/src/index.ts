@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, accessSync } from "node:fs";
+import { constants, accessSync, type Dirent } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
@@ -1387,6 +1387,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   await refreshIndexStatus(context);
   await hydrateDurableJobBackgroundTasks(context);
   await hydratePersistentAgents(context);
+  await cleanStaleToolLogs(context);
+  await cleanStaleDurableJobDirs(context);
+  context.store.prune(50).catch(() => {
+    /* best-effort, don't block startup */
+  });
   context.failureLearning.records = await loadFailureRecords(context.failureLearning);
   const gateway = createModelGateway(context.config);
   // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
@@ -1448,6 +1453,65 @@ type TuiStartupState = {
 };
 
 type TuiLineResult = "continue" | "exit";
+
+const MAX_TOOL_LOG_FILES = 200;
+
+async function cleanStaleToolLogs(context: TuiContext): Promise<void> {
+  const logsRoot = resolveStoragePaths(context.config, context.projectPath).logs;
+  const subdirs = ["tools", "verification"];
+  for (const sub of subdirs) {
+    const dir = resolve(logsRoot, sub);
+    let entries: Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const files = entries.filter((e) => e.isFile()).sort((a, b) => b.name.localeCompare(a.name));
+    // Keep the most recent MAX_TOOL_LOG_FILES, delete the rest.
+    if (files.length <= MAX_TOOL_LOG_FILES) continue;
+    for (const file of files.slice(MAX_TOOL_LOG_FILES)) {
+      try {
+        await rm(resolve(dir, file.name));
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+const TERMINAL_DURABLE_JOB_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "timeout",
+]);
+
+async function cleanStaleDurableJobDirs(context: TuiContext): Promise<void> {
+  const root = getDurableJobsRootImpl(context);
+  let entries: Dirent[];
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const statePath = join(root, entry.name, "state.json");
+    let state: { status?: string } | null = null;
+    try {
+      state = JSON.parse(await readFile(statePath, "utf8"));
+    } catch {
+      continue;
+    }
+    if (!state?.status || !TERMINAL_DURABLE_JOB_STATUSES.has(state.status)) continue;
+    try {
+      await rm(join(root, entry.name), { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+}
 
 async function prepareTuiStartup(
   input: Readable,
@@ -2151,7 +2215,11 @@ async function runInkShell(
         let nextOffset = oldOffset;
         if (nextCursor < oldOffset) nextOffset = nextCursor;
         else if (nextCursor >= oldOffset + MAX_VISIBLE) nextOffset = nextCursor - MAX_VISIBLE + 1;
-        context.helpPanelState = { ...context.helpPanelState, cursor: nextCursor, scrollOffset: nextOffset };
+        context.helpPanelState = {
+          ...context.helpPanelState,
+          cursor: nextCursor,
+          scrollOffset: nextOffset,
+        };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2364,7 +2432,8 @@ async function runInkShell(
           const oldOffset = context.configPanelState.scrollOffset ?? 0;
           let nextOffset = oldOffset;
           if (nextActionCursor < oldOffset) nextOffset = nextActionCursor;
-          else if (nextActionCursor >= oldOffset + MAX_VISIBLE) nextOffset = nextActionCursor - MAX_VISIBLE + 1;
+          else if (nextActionCursor >= oldOffset + MAX_VISIBLE)
+            nextOffset = nextActionCursor - MAX_VISIBLE + 1;
           context.configPanelState = {
             ...context.configPanelState,
             actionCursor: nextActionCursor,
@@ -2428,7 +2497,12 @@ async function runInkShell(
         ];
         const panelId = CONFIG_PANEL_IDS[context.configPanelState.cursor];
         if (panelId && buildConfigPanelActions(panelId, context.language).length > 0) {
-          context.configPanelState = { phase: "panel_detail", panelId, actionCursor: 0, scrollOffset: 0 };
+          context.configPanelState = {
+            phase: "panel_detail",
+            panelId,
+            actionCursor: 0,
+            scrollOffset: 0,
+          };
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
         }

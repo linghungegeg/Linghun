@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants, accessSync } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
@@ -434,7 +434,8 @@ function upsertWorkflowRun(context: TuiContext, run: WorkflowRunState): Workflow
 }
 
 function getWorkflowRun(context: TuiContext, runId: string): WorkflowRunState | undefined {
-  const run = context.workflows.activeRuns?.find((item) => item.id === runId) ??
+  const run =
+    context.workflows.activeRuns?.find((item) => item.id === runId) ??
     (context.workflows.activeRun?.id === runId ? context.workflows.activeRun : undefined);
   if (run && !context.workflows.activeRuns?.some((item) => item.id === run.id)) {
     context.workflows.activeRuns = [run, ...(context.workflows.activeRuns ?? [])];
@@ -509,6 +510,18 @@ export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
     ) {
       continue;
     }
+    // Only hydrate workflows that were still running at shutdown.
+    // Terminal workflows (completed, failed, cancelled, blocked, stale)
+    // are session-scoped and must not be resurrected across restarts.
+    if (state.status !== "running") {
+      const dirPath = join(root, entry.name);
+      try {
+        await rm(dirPath, { recursive: true });
+      } catch {
+        /* best-effort */
+      }
+      continue;
+    }
     const run = recoverWorkflowRunState(state);
     const background = createWorkflowBackgroundProjection(state.backgroundTask, run);
     upsertWorkflowBackgroundTask(context, background);
@@ -573,9 +586,7 @@ async function appendWorkflowHydrateWarning(context: TuiContext, message: string
   }
 }
 
-function recoverWorkflowRunState(
-  state: DurableWorkflowRunState,
-): WorkflowRunState {
+function recoverWorkflowRunState(state: DurableWorkflowRunState): WorkflowRunState {
   const recoveredSteps = state.steps.map((step) =>
     step.status === "running"
       ? {
@@ -690,7 +701,9 @@ export function formatWorkflowStatus(context: TuiContext): string {
     lines.push(`- goal: ${truncateDisplay(run.goal, 120)}`);
 
     if (problemStep) {
-      lines.push(`- stopped at: ${truncateDisplay(problemStep.summary ?? "", 80)} [${problemStep.status}]`);
+      lines.push(
+        `- stopped at: ${truncateDisplay(problemStep.summary ?? "", 80)} [${problemStep.status}]`,
+      );
     }
 
     if (run.status === "running") {
@@ -1365,7 +1378,9 @@ async function executeRegistryWorkflowStep(
           evidenceRefs: [],
         };
       }
-      const run = workflowRunId ? getWorkflowRun(context, workflowRunId) : context.workflows.activeRun;
+      const run = workflowRunId
+        ? getWorkflowRun(context, workflowRunId)
+        : context.workflows.activeRun;
       if (!run?.confirmedPhaseStopPoints?.includes(workflow.id)) {
         return {
           status: "blocked",
@@ -2356,7 +2371,7 @@ export async function finishWorkflowRun(
             ? "cancelled"
             : status === "blocked"
               ? "blocked"
-            : "failed";
+              : "failed";
   task.result =
     status === "completed" || status === "partial" || status === "blocked"
       ? "partial"
@@ -2375,7 +2390,7 @@ export async function finishWorkflowRun(
       ? "Review verification evidence; workflow completion is lifecycle only."
       : status === "blocked"
         ? "Inspect the blocked workflow step, unblock the prerequisite, then rerun."
-      : "Inspect /failures and rerun after fixing the failed step.";
+        : "Inspect /failures and rerun after fixing the failed step.";
   if (run) {
     await persistWorkflowRunState(context, run, task);
   }

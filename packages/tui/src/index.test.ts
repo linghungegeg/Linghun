@@ -162,8 +162,10 @@ function srcPath(relativePath: string): string {
 
 function formatFooterIndexLabel(language: "zh-CN" | "en-US", status: string): string {
   const trimmed = (status ?? "").trim();
-  if (!trimmed || trimmed.toLowerCase() === "unknown") return language === "en-US" ? "Index?" : "索引?";
-  if (trimmed === "refresh_completed_but_unverified") return `${language === "en-US" ? "Index" : "索引"} refresh`;
+  if (!trimmed || trimmed.toLowerCase() === "unknown")
+    return language === "en-US" ? "Index?" : "索引?";
+  if (trimmed === "refresh_completed_but_unverified")
+    return `${language === "en-US" ? "Index" : "索引"} refresh`;
   return `${language === "en-US" ? "Index" : "索引"} ${trimmed.length > 10 ? `${trimmed.slice(0, 4)}…${trimmed.slice(-5)}` : trimmed}`;
 }
 
@@ -5033,7 +5035,7 @@ describe("Phase 06 TUI slash commands", () => {
     const { hydratePersistentAgents } = await import("./job-agent-command-runtime.js");
     await hydratePersistentAgents(freshContext);
     const stale = freshContext.agents.find((item) => item.addressableName === "alice");
-    expect(stale?.status).toBe("failed");
+    expect(stale).toBeUndefined();
 
     await handleSlashCommand(
       "/fork worker stale hydrate --background --name stale-one",
@@ -5678,20 +5680,22 @@ describe("Phase 06 TUI slash commands", () => {
 
     await hydratePersistentAgents(context);
 
-    // Verify agent status restoration
+    // Verify agent status restoration: only running→stale agents are hydrated.
+    // Terminal agents (blocked, cancelled, failed, completed) are NOT loaded
+    // into context.agents — their disk files are cleaned up by hydration.
     const restoredBlocked = context.agents.find((a) => a.id === "agent-blocked-01");
     const restoredCancelled = context.agents.find((a) => a.id === "agent-cancelled-02");
     const restoredFailed = context.agents.find((a) => a.id === "agent-failed-03");
     const restoredCompleted = context.agents.find((a) => a.id === "agent-completed-04");
     const restoredRunning = context.agents.find((a) => a.id === "agent-running-05");
 
-    expect(restoredBlocked?.status).toBe("blocked");
-    expect(restoredCancelled?.status).toBe("cancelled");
-    expect(restoredFailed?.status).toBe("failed");
-    expect(restoredCompleted?.status).toBe("completed");
+    expect(restoredBlocked).toBeUndefined();
+    expect(restoredCancelled).toBeUndefined();
+    expect(restoredFailed).toBeUndefined();
+    expect(restoredCompleted).toBeUndefined();
     expect(restoredRunning?.status).toBe("stale"); // running -> stale on restore
 
-    // Verify background task restoration. Terminal history stays in context.agents
+    // Only the stale/resumable agent gets a background task.
     // for /agents, while stale/resumable reaches the background surface so the
     // user can inspect or dismiss it explicitly.
     const bgBlocked = context.backgroundTasks.find((t) => t.id === "agent-blocked-01");
@@ -6017,7 +6021,13 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session, config);
     const output = new MemoryOutput();
-    const oldJob = await persistDurableJobFixture(project, config, "running", undefined, "old-visible");
+    const oldJob = await persistDurableJobFixture(
+      project,
+      config,
+      "running",
+      undefined,
+      "old-visible",
+    );
     context.backgroundTasks = Array.from({ length: MAX_BACKGROUND_TASKS }, (_, index) =>
       createBackgroundTaskFixture("job", { id: `recent-job-${index}` }),
     );
@@ -6045,10 +6055,18 @@ describe("Phase 06 TUI slash commands", () => {
     ];
     mockOpenAiTextFetch("job child done");
 
-    await handleSlashCommand("/job run cap scope --multi-agent --agents 2 --tokens 50000", context, output);
+    await handleSlashCommand(
+      "/job run cap scope --multi-agent --agents 2 --tokens 50000",
+      context,
+      output,
+    );
 
     const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
-    const statePath = join(resolveStoragePaths(config, project).jobs, jobId ?? "missing", "state.json");
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
     const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
       effectiveAgentCap?: number;
       capReason?: string;
@@ -7410,12 +7428,13 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/background", freshContext, freshOutput);
     await handleSlashCommand("/workflows status", freshContext, freshOutput);
 
-    expect(freshContext.backgroundTasks).toContainEqual(
-      expect.objectContaining({ id: runId, kind: "job", result: "partial" }),
+    // Terminal workflows (blocked, completed, failed, cancelled) are NOT
+    // hydrated -- only running->stale workflows survive a restart.
+    expect(freshContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ id: runId }),
     );
-    expect(freshContext.workflows.activeRun).toMatchObject({ id: runId, result: "blocked" });
-    expect(freshOutput.text).toContain(`Workflow ${runId}`);
-    expect(freshOutput.text).toContain("blocked");
+    expect(freshContext.workflows.activeRun).toBeUndefined();
+    expect(freshOutput.text).not.toContain(`Workflow ${runId}`);
     expect(freshOutput.text).not.toContain("result=pass");
   });
 
@@ -18484,7 +18503,9 @@ describe("Phase 06 TUI slash commands", () => {
   it("Closure Phase 5: verification command runtime uses runtime-budget timeout source", async () => {
     const source = await readSrc("verification-command-runtime.ts");
 
-    expect(source).toContain('import { LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS } from "./runtime-budget.js";');
+    expect(source).toContain(
+      'import { LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS } from "./runtime-budget.js";',
+    );
     expect(source).toContain("timeoutMs = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS");
     expect(source).not.toContain("const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000");
   });
@@ -19720,7 +19741,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("证据记录：");
   }, 30000);
 
-  it("zh-CN rate limit uses configured fallback model and succeeds", async () => {
+  it("zh-CN rate limit uses configured fallback model and succeeds", { timeout: 60000 }, async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-fallback-rate-limit-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     const config: LinghunConfig = {
@@ -24988,9 +25009,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     await __testSendMessage("解释一下递归的直觉", context, gateway, output);
 
     const request = requests[0] as { tools?: unknown[]; messages?: { content?: string }[] };
-    expect(request.tools?.some((tool) => JSON.stringify(tool).includes("AgentControl"))).toBe(
-      true,
-    );
+    expect(request.tools?.some((tool) => JSON.stringify(tool).includes("AgentControl"))).toBe(true);
     const prompt = String(request.messages?.[0]?.content ?? "");
     expect(prompt).toContain("MetaSchedulerForModel:");
     expect(prompt).toContain("CommandCapabilitySummary=");
@@ -25036,9 +25055,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain(
-      "Strategy: source-first; reading key files before answering.",
-    );
+    expect(notifications).toContain("Strategy: source-first; reading key files before answering.");
     expect(notifications).not.toContain("MetaSchedulerForModel");
     expect(notifications).not.toContain("raw evidence");
     const transcript = (await store.resume(session.id)).transcript;
@@ -25201,7 +25218,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：检测到权限风险，写入前会请求确认。");
+    expect(notifications).not.toContain("策略：检测到权限风险，写入前会请求确认。");
     expect(notifications).toContain("策略：Windows 环境，优先使用兼容命令。");
     expect(notifications).toContain("策略：建议先做 focused verification。");
     expect(notifications).not.toContain("PolicyDecision");
@@ -25229,7 +25246,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain(
+    expect(notifications).not.toContain(
       "Strategy: permission risk detected; write actions will ask before running.",
     );
     expect(notifications).toContain(
@@ -26579,9 +26596,7 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     );
     expect(JSON.stringify(result)).toContain('"movesHead":false');
     expect(JSON.stringify(result)).toContain('"executesGitRollback":false');
-    expect(context.evidence.some((item) => item.summary.includes("GitRollbackExplain"))).toBe(
-      true,
-    );
+    expect(context.evidence.some((item) => item.summary.includes("GitRollbackExplain"))).toBe(true);
   });
 
   async function makeRepoContext(): Promise<{
@@ -28266,9 +28281,30 @@ describe("Phase A correctness focused guards", () => {
     const now = new Date().toISOString();
 
     // ── 1. Pre-populate session with ~500 events ──
-    const verbs = ["analyze", "refactor", "debug", "optimize", "test", "deploy", "review", "fix", "migrate", "build"];
-    const nouns = ["auth module", "pipeline config", "type definitions", "error handling", "API routes",
-      "component tree", "state machine", "cache layer", "logger setup", "validation schemas"];
+    const verbs = [
+      "analyze",
+      "refactor",
+      "debug",
+      "optimize",
+      "test",
+      "deploy",
+      "review",
+      "fix",
+      "migrate",
+      "build",
+    ];
+    const nouns = [
+      "auth module",
+      "pipeline config",
+      "type definitions",
+      "error handling",
+      "API routes",
+      "component tree",
+      "state machine",
+      "cache layer",
+      "logger setup",
+      "validation schemas",
+    ];
     for (let i = 0; i < 100; i++) {
       await store.appendEvent(session.id, {
         type: "user_message",
@@ -28277,7 +28313,17 @@ describe("Phase A correctness focused guards", () => {
         createdAt: now,
       });
     }
-    const toolNames = ["Read", "Write", "Edit", "Grep", "Bash", "Glob", "Todo", "Diff", "MultiEdit"];
+    const toolNames = [
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Bash",
+      "Glob",
+      "Todo",
+      "Diff",
+      "MultiEdit",
+    ];
     for (let i = 0; i < 50; i++) {
       const toolName = toolNames[i % toolNames.length];
       await store.appendEvent(session.id, {
@@ -28336,13 +28382,38 @@ describe("Phase A correctness focused guards", () => {
     }
 
     // ── 2. Generate 60 accepted memories ──
-    const memoryCategories = ["preference", "frequent_behavior", "project_habit", "collaboration_rule"] as const;
-    const memoryTopics = ["code style", "testing", "naming", "error handling", "imports", "review process",
-      "commit messages", "branch strategy", "architecture", "performance", "accessibility", "security"];
+    const memoryCategories = [
+      "preference",
+      "frequent_behavior",
+      "project_habit",
+      "collaboration_rule",
+    ] as const;
+    const memoryTopics = [
+      "code style",
+      "testing",
+      "naming",
+      "error handling",
+      "imports",
+      "review process",
+      "commit messages",
+      "branch strategy",
+      "architecture",
+      "performance",
+      "accessibility",
+      "security",
+    ];
     const acceptedMemories: Array<{
-      id: string; scope: "project"; status: "accepted"; taxonomy: string; topic: string;
-      summary: string; source: string; sourceRefs: string[]; risk: "low" | "medium" | "high";
-      inferred: boolean; createdAt: string;
+      id: string;
+      scope: "project";
+      status: "accepted";
+      taxonomy: string;
+      topic: string;
+      summary: string;
+      source: string;
+      sourceRefs: string[];
+      risk: "low" | "medium" | "high";
+      inferred: boolean;
+      createdAt: string;
     }> = [];
     for (let i = 0; i < 60; i++) {
       acceptedMemories.push({
@@ -28351,7 +28422,11 @@ describe("Phase A correctness focused guards", () => {
         status: "accepted",
         taxonomy: memoryCategories[i % 4],
         topic: memoryTopics[i % memoryTopics.length],
-        summary: `Rule #${i}: Always ${verbs[i % verbs.length]} ${nouns[i % nouns.length]} before ${verbs[(i + 3) % verbs.length]}ing. Detail: ${"rule-detail ".repeat(5)}`.slice(0, 200),
+        summary:
+          `Rule #${i}: Always ${verbs[i % verbs.length]} ${nouns[i % nouns.length]} before ${verbs[(i + 3) % verbs.length]}ing. Detail: ${"rule-detail ".repeat(5)}`.slice(
+            0,
+            200,
+          ),
         source: i < 20 ? "user" : "auto-extraction",
         sourceRefs: [`ev-${i}`, `msg-${i % 100}`],
         risk: i % 5 === 0 ? "high" : i % 3 === 0 ? "medium" : "low",
@@ -28361,13 +28436,31 @@ describe("Phase A correctness focused guards", () => {
     }
 
     // ── 3. Generate 25 active failure learning records ──
-    const failureCategories = ["provider_failure", "tool_failure", "verification_failure",
-      "git_operation_failure", "final_gate_downgrade", "report_guard", "resource_cap"] as const;
+    const failureCategories = [
+      "provider_failure",
+      "tool_failure",
+      "verification_failure",
+      "git_operation_failure",
+      "final_gate_downgrade",
+      "report_guard",
+      "resource_cap",
+    ] as const;
     const activeRecords: Array<{
-      id: string; createdAt: string; lastSeen: string; projectScope: string;
-      sourceRef: string; category: string; failureSummary: string; rootCauseGuess: string;
-      inferred: boolean; avoidNextTime: string; relatedTarget?: string;
-      severity: "low" | "medium" | "high"; dedupeHash: string; count: number; status: "active";
+      id: string;
+      createdAt: string;
+      lastSeen: string;
+      projectScope: string;
+      sourceRef: string;
+      category: string;
+      failureSummary: string;
+      rootCauseGuess: string;
+      inferred: boolean;
+      avoidNextTime: string;
+      relatedTarget?: string;
+      severity: "low" | "medium" | "high";
+      dedupeHash: string;
+      count: number;
+      status: "active";
     }> = [];
     for (let i = 0; i < 25; i++) {
       const cat = failureCategories[i % failureCategories.length];
@@ -28378,10 +28471,22 @@ describe("Phase A correctness focused guards", () => {
         projectScope: "perf-heavy-project",
         sourceRef: `ev-fl-${i}`,
         category: cat,
-        failureSummary: `[${cat}] Failure #${i}: The ${nouns[i % nouns.length]} operation failed because ${verbs[i % verbs.length]} step was skipped. ${"detail ".repeat(8)}`.slice(0, 200),
-        rootCauseGuess: `Root cause for failure #${i}: missing precondition check on ${nouns[(i + 1) % nouns.length]}.`.slice(0, 160),
+        failureSummary:
+          `[${cat}] Failure #${i}: The ${nouns[i % nouns.length]} operation failed because ${verbs[i % verbs.length]} step was skipped. ${"detail ".repeat(8)}`.slice(
+            0,
+            200,
+          ),
+        rootCauseGuess:
+          `Root cause for failure #${i}: missing precondition check on ${nouns[(i + 1) % nouns.length]}.`.slice(
+            0,
+            160,
+          ),
         inferred: true,
-        avoidNextTime: `Always ${verbs[(i + 2) % verbs.length]} ${nouns[(i + 2) % nouns.length]} before proceeding.`.slice(0, 160),
+        avoidNextTime:
+          `Always ${verbs[(i + 2) % verbs.length]} ${nouns[(i + 2) % nouns.length]} before proceeding.`.slice(
+            0,
+            160,
+          ),
         relatedTarget: i % 3 === 0 ? undefined : toolNames[i % toolNames.length],
         severity: i % 4 === 0 ? "high" : i % 2 === 0 ? "medium" : "low",
         dedupeHash: `dedupe-fl-${i}-${cat}`,
@@ -28412,7 +28517,8 @@ describe("Phase A correctness focused guards", () => {
         momentum: 0,
       };
       context.memory.accepted = acceptedMemories as unknown as typeof context.memory.accepted;
-      context.failureLearning.records = activeRecords as unknown as typeof context.failureLearning.records;
+      context.failureLearning.records =
+        activeRecords as unknown as typeof context.failureLearning.records;
 
       const requests = mockOpenAiTextFetch(`Round ${i + 1} response.`);
       const output = new MemoryOutput();

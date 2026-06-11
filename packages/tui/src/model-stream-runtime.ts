@@ -1354,7 +1354,6 @@ function shouldSurfacePolicyHint(id: string, _decision: PolicyDecision): boolean
     id === "blocked-runtime" ||
     id === "verification-required" ||
     id === "windows-safe" ||
-    id === "permission-risk" ||
     id === "compact-before-provider" ||
     id === "provider-fallback" ||
     id === "source-first" ||

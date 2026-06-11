@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import { type JsonlDiagnostic, appendJsonl, readJsonl } from "./jsonl.js";
@@ -178,6 +178,31 @@ export class SessionStore {
     };
     await this.writeMetadata(project.projectId, updated);
     return updated;
+  }
+
+  async delete(sessionId: string): Promise<void> {
+    assertValidSessionId(sessionId);
+    const project = identifyProject(this.projectPath);
+    const dir = this.getSessionDir(project.projectId, sessionId);
+    try {
+      await rm(dir, { recursive: true });
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "ENOENT")) throw error;
+    }
+  }
+
+  async prune(maxSessions: number): Promise<number> {
+    const all = await this.list();
+    if (all.length <= maxSessions) return 0;
+    const toDelete = all.slice(maxSessions);
+    for (const s of toDelete) {
+      try {
+        await this.delete(s.id);
+      } catch {
+        /* best-effort */
+      }
+    }
+    return toDelete.length;
   }
 
   private getProjectDir(projectId: string): string {

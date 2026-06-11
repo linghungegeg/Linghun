@@ -12,8 +12,8 @@ import type {
 
 const MAX_LIST_ITEMS = 8;
 const MAX_DETAIL_LINES = 12;
-/** Agent eviction delay: completed agents stay visible for 5s (CCB evictAfter pattern). */
-const AGENT_EVICTION_DELAY_MS = 5_000;
+/** Agent eviction delay: completed agents are removed from the tree immediately. */
+const AGENT_EVICTION_DELAY_MS = 0;
 /** Workflow eviction delay: completed/failed workflows stay visible for 8s then auto-dismiss. */
 const WORKFLOW_EVICTION_DELAY_MS = 8_000;
 

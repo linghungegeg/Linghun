@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { type ModelRole, type RoleModelRoute, resolveStoragePaths } from "@linghun/config";
@@ -3545,6 +3545,11 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       const raw = await readFile(resolve(getAgentRunsDir(context), file), "utf8");
       const parsed = JSON.parse(raw) as AgentRun;
       if (!parsed.id || existing.has(parsed.id)) continue;
+      if (parsed.status !== "running") {
+        const filePath = resolve(getAgentRunsDir(context), file);
+        try { await rm(filePath); } catch { /* best-effort cleanup */ }
+        continue;
+      }
       const now = new Date().toISOString();
       const allowedTools = normalizeRegistryAllowedTools(parsed.allowedTools);
       const maxTurns = normalizeRegistryAgentMaxTurns(parsed.maxTurns);
