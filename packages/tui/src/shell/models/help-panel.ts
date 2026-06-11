@@ -26,6 +26,8 @@ export type HelpPanelData = {
   group: HelpPanelGroup;
   /** 当前 cursor 位置（被选中条目下标）。 */
   cursor: number;
+  /** 滚动偏移（用于 scroll viewport）。 */
+  scrollOffset: number;
   /** 该分组的命令清单。 */
   entries: HelpPanelEntry[];
 };
@@ -114,11 +116,12 @@ export function getHelpPanelEntries(group: HelpPanelGroup, language: Language): 
 export function buildHelpPanelData(
   group: HelpPanelGroup,
   cursor: number,
+  scrollOffset: number,
   language: Language,
 ): HelpPanelData {
   const entries = getHelpPanelEntries(group, language);
   const safe = entries.length === 0 ? 0 : Math.min(Math.max(0, cursor), entries.length - 1);
-  return { group, cursor: safe, entries };
+  return { group, cursor: safe, scrollOffset, entries };
 }
 
 export const HELP_PANEL_GROUPS: HelpPanelGroup[] = ["core", "advanced", "details"];

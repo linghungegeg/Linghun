@@ -5785,7 +5785,7 @@ describe("D.13Q-UX Task Surface — ConfigPanel 装配", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
-      configPanelState: { phase: "panel_list", cursor: 0 },
+      configPanelState: { phase: "panel_list", cursor: 0, scrollOffset: 0 },
     });
     expect(view.configPanel).toBeDefined();
     expect(view.configPanel?.phase).toBe("panel_list");

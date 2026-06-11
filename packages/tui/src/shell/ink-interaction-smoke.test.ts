@@ -500,6 +500,7 @@ describe("Ink TTY interaction smoke", () => {
       helpPanel: {
         group: "core",
         cursor: 0,
+        scrollOffset: 0,
         entries: [
           { slash: "/help", description: "Help" },
           { slash: "/model", description: "Model" },

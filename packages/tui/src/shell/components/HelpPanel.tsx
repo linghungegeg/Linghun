@@ -6,17 +6,16 @@ import { createShellTheme } from "../theme.js";
 import type { ShellController } from "../types.js";
 
 /**
- * HelpPanel — D.13Q-UX Closure
+ * HelpPanel — D.13Q-UX Closure + P0 scroll viewport
  *
- * 真 UI 面板替换 /help 的 writeLine 文本表。CCB HelpV2 范式：
+ * 真 UI 面板替换 /help 的 writeLine 文本表。
  * - Pane border + 标题 + 分组 Tab（core / advanced / details）
  * - Select 列表：↑↓ 选择，Enter dispatch slash，Esc 关闭
  * - Tab 或 ←→ 切组
- * - 隐藏命令（userVisible=false / /status 等）永远过滤（数据层在 help-panel.ts）
- *
- * 自带 useInput；与 Composer 互斥（Composer.useInput 在 helpPanel 渲染时
- * isActive=false）。dispatch 通过 controller.onInput → index.ts wiring。
+ * - scrollOffset 视窗：最多 MAX_VISIBLE 条可见，cursor 自动带滚动
  */
+
+const MAX_VISIBLE = 10;
 
 const HINT_TEXT = {
   "zh-CN": {
@@ -25,6 +24,8 @@ const HINT_TEXT = {
     groupCore: "核心",
     groupAdvanced: "进阶",
     groupDetails: "详情",
+    count: (start: number, end: number, total: number) =>
+      `第 ${start}-${end} 项，共 ${total} 项`,
   },
   "en-US": {
     title: "/help",
@@ -32,19 +33,22 @@ const HINT_TEXT = {
     groupCore: "Core",
     groupAdvanced: "Advanced",
     groupDetails: "Details",
+    count: (start: number, end: number, total: number) =>
+      `${start}-${end} of ${total}`,
   },
 } as const;
 
 export function HelpPanel({
   panel,
   controller: _controller,
-  width,
+  width: _width,
   noColor,
   language,
 }: {
   panel: {
     group: "core" | "advanced" | "details";
     cursor: number;
+    scrollOffset: number;
     entries: { slash: string; description: string }[];
   };
   controller: ShellController;
@@ -57,70 +61,94 @@ export function HelpPanel({
 
   useInput(() => undefined, { isActive: false });
 
-  const cardWidth = Math.min(width, 84);
-  const innerWidth = Math.max(20, cardWidth - 4);
+  const total = panel.entries.length;
+  const maxOffset = Math.max(0, total - MAX_VISIBLE);
+  const scrollOffset = Math.max(0, Math.min(panel.scrollOffset, maxOffset));
+  const visible = panel.entries.slice(scrollOffset, scrollOffset + MAX_VISIBLE);
+  const visibleEnd = Math.min(scrollOffset + MAX_VISIBLE, total);
 
-  const groupLabel = (g: "core" | "advanced" | "details", current: boolean): string => {
-    const text =
-      g === "core" ? hint.groupCore : g === "advanced" ? hint.groupAdvanced : hint.groupDetails;
-    return current ? `[ ${text} ]` : `  ${text}  `;
-  };
+  const groupTabs: ("core" | "advanced" | "details")[] = ["core", "advanced", "details"];
+  const accent = theme.help ?? theme.accent;
 
   return (
-    <Box
-      flexDirection="column"
-      paddingX={1}
-      marginTop={1}
-      width={cardWidth}
-    >
+    <Box flexDirection="column" paddingX={1} marginTop={1}>
+      <Text color={accent} bold>
+        {fitText(hint.title, 76)}
+      </Text>
+
+      {/* Group tabs — current group underlined with accent, others muted */}
+      <Box marginTop={1}>
+        {groupTabs.map((g, i) => {
+          const active = g === panel.group;
+          const label =
+            g === "core"
+              ? hint.groupCore
+              : g === "advanced"
+                ? hint.groupAdvanced
+                : hint.groupDetails;
+          return (
+            <Box key={g}>
+              {i > 0 ? (
+                <Text color={theme.dim ?? theme.muted}>  </Text>
+              ) : null}
+              {active ? (
+                <Box flexDirection="column">
+                  <Text color={accent} bold>
+                    {label}
+                  </Text>
+                  <Text color={accent}>
+                    {"─".repeat([...label].length)}
+                  </Text>
+                </Box>
+              ) : (
+                <Text color={theme.muted} dimColor>
+                  {label}
+                </Text>
+              )}
+            </Box>
+          );
+        })}
+      </Box>
+
+      {/* Count hint */}
+      {total > 0 ? (
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {hint.count(scrollOffset + 1, visibleEnd, total)}
+        </Text>
+      ) : null}
+
+      {/* Nav hint */}
       <Text color={theme.dim ?? theme.muted} dimColor>
-        {"─".repeat(Math.min(cardWidth, 80))}
+        {fitText(hint.nav, 76)}
       </Text>
-      <Text color={theme.help ?? theme.accent} bold>
-        {fitText(hint.title, innerWidth)}
-      </Text>
-      <Text>
-        <Text
-          color={panel.group === "core" ? (theme.help ?? theme.accent) : theme.muted}
-          bold={panel.group === "core"}
-        >
-          {groupLabel("core", panel.group === "core")}
-        </Text>
-        <Text
-          color={panel.group === "advanced" ? (theme.help ?? theme.accent) : theme.muted}
-          bold={panel.group === "advanced"}
-        >
-          {groupLabel("advanced", panel.group === "advanced")}
-        </Text>
-        <Text
-          color={panel.group === "details" ? (theme.help ?? theme.accent) : theme.muted}
-          bold={panel.group === "details"}
-        >
-          {groupLabel("details", panel.group === "details")}
-        </Text>
-      </Text>
-      <Text color={theme.dim ?? theme.muted} dimColor>
-        {fitText(hint.nav, innerWidth)}
-      </Text>
-      {panel.entries.length === 0 ? (
+
+      {/* Entry list — virtual window */}
+      {total === 0 ? (
         <Text color={theme.dim ?? theme.muted} dimColor>
           {language === "en-US" ? "(no commands in this group)" : "（此分组没有命令）"}
         </Text>
       ) : (
-        panel.entries.map((entry, idx) => {
-          const active = idx === panel.cursor;
-          const slashCol = entry.slash.padEnd(20);
-          const line = `${active ? "▸ " : "  "}${slashCol}${entry.description}`;
-          return (
-            <Text
-              key={entry.slash}
-              color={active ? (theme.help ?? theme.accent) : undefined}
-              bold={active}
-            >
-              {fitText(line, innerWidth)}
-            </Text>
-          );
-        })
+        <Box flexDirection="column" marginTop={1}>
+          {visible.map((entry, vi) => {
+            const realIdx = scrollOffset + vi;
+            const active = realIdx === panel.cursor;
+            const slashWidth = Math.min(
+              22,
+              Math.max(12, ...panel.entries.map((e) => [...e.slash].length)) + 2,
+            );
+            const slashCol = entry.slash.padEnd(slashWidth);
+            const line = `${active ? "▸" : " "} ${slashCol}${entry.description}`;
+            return (
+              <Text
+                key={entry.slash}
+                color={active ? accent : undefined}
+                bold={active}
+              >
+                {fitText(line, 76)}
+              </Text>
+            );
+          })}
+        </Box>
       )}
     </Box>
   );

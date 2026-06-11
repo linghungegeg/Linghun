@@ -279,12 +279,14 @@ export type ConfigPanelView =
   | {
       phase: "panel_list";
       cursor: number;
+      scrollOffset: number;
       panels: { id: string; title: string; summary: string; slash: string }[];
     }
   | {
       phase: "panel_detail";
       panel: { id: string; title: string; summary: string };
       actionCursor: number;
+      scrollOffset: number;
       actions: { id: string; label: string }[];
     };
 
@@ -513,6 +515,7 @@ export type ShellViewModel = {
   helpPanel?: {
     group: "core" | "advanced" | "details";
     cursor: number;
+    scrollOffset: number;
     entries: { slash: string; description: string }[];
   };
   /**

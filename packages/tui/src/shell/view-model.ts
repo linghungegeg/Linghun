@@ -182,8 +182,8 @@ export type ShellViewModelOptions = {
    * View-model maps this to ShellViewModel.configPanel via mapConfigPanelState.
    */
   configPanelState?:
-    | { phase: "panel_list"; cursor: number }
-    | { phase: "panel_detail"; panelId: string; actionCursor: number };
+    | { phase: "panel_list"; cursor: number; scrollOffset: number }
+    | { phase: "panel_detail"; panelId: string; actionCursor: number; scrollOffset: number };
   /**
    * D13E-P3 cleanup #5 — 当前 executor provider 的 reasoning level（如 "High"）。
    * view-model 只负责把它格式化成 "推理 High" / "Reasoning High" 后挂到
@@ -562,10 +562,10 @@ export function createShellViewModel(
     ).transcriptViewportGeometry,
     helpPanel: (() => {
       const state = (
-        context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number } }
+        context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number; scrollOffset: number } }
       ).helpPanelState;
       if (!state) return undefined;
-      return buildHelpPanelData(state.group, state.cursor, language);
+      return buildHelpPanelData(state.group, state.cursor, state.scrollOffset ?? 0, language);
     })(),
     btwPanel: (context as { btwPanelState?: NonNullable<ShellViewModel["btwPanel"]> })
       .btwPanelState,
@@ -1029,8 +1029,8 @@ export function buildConfigPanelActions(
 
 function mapConfigPanelState(
   state:
-    | { phase: "panel_list"; cursor: number }
-    | { phase: "panel_detail"; panelId: string; actionCursor: number },
+    | { phase: "panel_list"; cursor: number; scrollOffset: number }
+    | { phase: "panel_detail"; panelId: string; actionCursor: number; scrollOffset: number },
   language: Language,
 ): ConfigPanelView | undefined {
   if (state.phase === "panel_detail") {
@@ -1045,6 +1045,7 @@ function mapConfigPanelState(
         summary: language === "en-US" ? panel.summaryEn : panel.summaryZh,
       },
       actionCursor: Math.min(Math.max(0, state.actionCursor), Math.max(0, actions.length - 1)),
+      scrollOffset: state.scrollOffset ?? 0,
       actions,
     };
   }
@@ -1059,7 +1060,7 @@ function mapConfigPanelState(
     total === 0
       ? 0
       : Math.min(Math.max(0, state.phase === "panel_list" ? state.cursor : 0), total - 1);
-  return { phase: "panel_list", cursor, panels };
+  return { phase: "panel_list", cursor, scrollOffset: state.scrollOffset ?? 0, panels };
 }
 
 /**

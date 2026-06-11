@@ -2099,7 +2099,7 @@ async function runInkShell(
         const trimmed = event.text;
         // 推 transcript 命令行（与其它 slash 一致），让用户能看到他敲了 /config
         blocks.push(createCommandBlock(commandSequence++, trimmed));
-        context.configPanelState = { phase: "panel_list", cursor: 0 };
+        context.configPanelState = { phase: "panel_list", cursor: 0, scrollOffset: 0 };
         submittedPending = false;
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -2118,7 +2118,7 @@ async function runInkShell(
                 ? "details"
                 : "core";
           blocks.push(createCommandBlock(commandSequence++, trimmed));
-          context.helpPanelState = { group, cursor: 0 };
+          context.helpPanelState = { group, cursor: 0, scrollOffset: 0 };
           submittedPending = false;
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
@@ -2126,7 +2126,7 @@ async function runInkShell(
         }
       }
       if (event.type === "help-open") {
-        context.helpPanelState = { group: event.group ?? "core", cursor: 0 };
+        context.helpPanelState = { group: event.group ?? "core", cursor: 0, scrollOffset: 0 };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2140,11 +2140,16 @@ async function runInkShell(
       if (event.type === "help-move") {
         if (!context.helpPanelState) return;
         const { buildHelpPanelData: build } = await import("./shell/models/help-panel.js");
-        const entries = build(context.helpPanelState.group, 0, context.language).entries;
+        const entries = build(context.helpPanelState.group, 0, 0, context.language).entries;
         const total = entries.length;
         if (total === 0) return;
-        const next = (context.helpPanelState.cursor + event.delta + total) % total;
-        context.helpPanelState = { ...context.helpPanelState, cursor: next };
+        const MAX_VISIBLE = 10;
+        const nextCursor = (context.helpPanelState.cursor + event.delta + total) % total;
+        const oldOffset = context.helpPanelState.scrollOffset ?? 0;
+        let nextOffset = oldOffset;
+        if (nextCursor < oldOffset) nextOffset = nextCursor;
+        else if (nextCursor >= oldOffset + MAX_VISIBLE) nextOffset = nextCursor - MAX_VISIBLE + 1;
+        context.helpPanelState = { ...context.helpPanelState, cursor: nextCursor, scrollOffset: nextOffset };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2154,7 +2159,7 @@ async function runInkShell(
         const groups: ("core" | "advanced" | "details")[] = ["core", "advanced", "details"];
         const idx = groups.indexOf(context.helpPanelState.group);
         const next = groups[(idx + event.delta + groups.length) % groups.length] ?? "core";
-        context.helpPanelState = { group: next, cursor: 0 };
+        context.helpPanelState = { group: next, cursor: 0, scrollOffset: 0 };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2162,7 +2167,7 @@ async function runInkShell(
       if (event.type === "help-enter") {
         if (!context.helpPanelState) return;
         const { buildHelpPanelData: build } = await import("./shell/models/help-panel.js");
-        const entries = build(context.helpPanelState.group, 0, context.language).entries;
+        const entries = build(context.helpPanelState.group, 0, 0, context.language).entries;
         const target = entries[context.helpPanelState.cursor];
         if (!target) return;
         context.helpPanelState = undefined;
@@ -2179,7 +2184,7 @@ async function runInkShell(
       if (event.type === "help-select") {
         if (!context.helpPanelState) return;
         const { buildHelpPanelData: build } = await import("./shell/models/help-panel.js");
-        const entries = build(context.helpPanelState.group, 0, context.language).entries;
+        const entries = build(context.helpPanelState.group, 0, 0, context.language).entries;
         const target = entries[event.index];
         if (!target) return;
         context.helpPanelState = undefined;
@@ -2344,23 +2349,36 @@ async function runInkShell(
       // ─── D.13E Step 2 — config-* 三类事件：ConfigPanel 自带 useInput 上抛 ─────
       if (event.type === "config-move") {
         if (!context.configPanelState) return;
+        const MAX_VISIBLE = 10;
         if (context.configPanelState.phase === "panel_detail") {
           const actions = buildConfigPanelActions(
             context.configPanelState.panelId,
             context.language,
           );
+          const nextActionCursor = Math.max(
+            0,
+            Math.min(actions.length - 1, context.configPanelState.actionCursor + event.delta),
+          );
+          const oldOffset = context.configPanelState.scrollOffset ?? 0;
+          let nextOffset = oldOffset;
+          if (nextActionCursor < oldOffset) nextOffset = nextActionCursor;
+          else if (nextActionCursor >= oldOffset + MAX_VISIBLE) nextOffset = nextActionCursor - MAX_VISIBLE + 1;
           context.configPanelState = {
             ...context.configPanelState,
-            actionCursor: Math.max(
-              0,
-              Math.min(actions.length - 1, context.configPanelState.actionCursor + event.delta),
-            ),
+            actionCursor: nextActionCursor,
+            scrollOffset: nextOffset,
           };
         } else {
           const current = context.configPanelState.cursor;
+          const nextCursor = Math.max(0, Math.min(13, current + event.delta));
+          const oldOffset = context.configPanelState.scrollOffset ?? 0;
+          let nextOffset = oldOffset;
+          if (nextCursor < oldOffset) nextOffset = nextCursor;
+          else if (nextCursor >= oldOffset + MAX_VISIBLE) nextOffset = nextCursor - MAX_VISIBLE + 1;
           context.configPanelState = {
             phase: "panel_list",
-            cursor: Math.max(0, Math.min(13, current + event.delta)),
+            cursor: nextCursor,
+            scrollOffset: nextOffset,
           };
         }
         shell?.rerender();
@@ -2408,7 +2426,7 @@ async function runInkShell(
         ];
         const panelId = CONFIG_PANEL_IDS[context.configPanelState.cursor];
         if (panelId && buildConfigPanelActions(panelId, context.language).length > 0) {
-          context.configPanelState = { phase: "panel_detail", panelId, actionCursor: 0 };
+          context.configPanelState = { phase: "panel_detail", panelId, actionCursor: 0, scrollOffset: 0 };
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
         }
@@ -2417,7 +2435,7 @@ async function runInkShell(
       if (event.type === "config-back") {
         if (!context.configPanelState) return;
         if (context.configPanelState.phase === "panel_detail") {
-          context.configPanelState = { phase: "panel_list", cursor: 0 };
+          context.configPanelState = { phase: "panel_list", cursor: 0, scrollOffset: 0 };
         } else {
           context.configPanelState = undefined;
         }

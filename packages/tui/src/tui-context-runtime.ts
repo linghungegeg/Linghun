@@ -350,8 +350,8 @@ export type TuiContext = {
   // 由 runInkShell.onInput 拦截 /config 与 config-* 事件，经
   // reduceConfigState 推进；view-model 用 mapConfigPanelState 映射给 UI。
   configPanelState?:
-    | { phase: "panel_list"; cursor: number }
-    | { phase: "panel_detail"; panelId: string; actionCursor: number };
+    | { phase: "panel_list"; cursor: number; scrollOffset: number }
+    | { phase: "panel_detail"; panelId: string; actionCursor: number; scrollOffset: number };
   workspaceTrustEnforced?: boolean;
   activeAbortController?: AbortController;
   backgroundAbortControllers?: Map<string, AbortController>;
@@ -447,7 +447,7 @@ export type TuiContext = {
    */
   helpPanelState?: {
     group: "core" | "advanced" | "details";
-    cursor: number;
+    cursor: number; scrollOffset: number;
   };
   /**
    * D.13Q-UX Closure — BtwPanel 状态（side question 独立面板，不进主 conversation）。

@@ -37,6 +37,55 @@ export function ShellApp({
   const view = controller.getViewModel();
   const theme = useMemo(() => createShellTheme(view.themeMode === "no-color"), [view.themeMode]);
 
+  // Panel active → independent fullscreen (no overlay, no workspace-cell conflict).
+  // Composer MUST be mounted for keyboard input routing — all panel navigation
+  // (help-select, command-panel-move, etc.) flows through Composer's useInput.
+  // It's rendered at height=0 so it registers its input handler without taking
+  // any terminal cells.
+  const panel = resolvePanel(view, controller, view.width, view.themeMode === "no-color");
+  if (panel) {
+    const cardWidth = Math.min(view.width - 4, 80);
+    return (
+      <Box
+        width={view.width}
+        height={view.height}
+        flexDirection="column"
+        backgroundColor={theme.background}
+        alignItems="center"
+      >
+        <Box flexGrow={1} minHeight={0} />
+        <Box flexShrink={0} width={cardWidth}>
+          <Text color={theme.dim ?? theme.muted} dimColor>
+            {"─".repeat(cardWidth)}
+          </Text>
+        </Box>
+        <Box flexDirection="column" paddingTop={1} flexShrink={1} overflow="hidden" width={cardWidth}>
+          {panel}
+        </Box>
+        <Box flexShrink={0} width={cardWidth}>
+          <Text color={theme.dim ?? theme.muted} dimColor>
+            {"─".repeat(cardWidth)}
+          </Text>
+        </Box>
+        <Box flexGrow={1} minHeight={0} />
+        {view.taskFooter ? (
+          <StatusFooter
+            footer={view.taskFooter}
+            theme={theme}
+            width={view.width}
+            language={view.language}
+            modelDim={view.taskFooter.modelDim}
+            cacheTone={view.taskFooter.cacheTone}
+          />
+        ) : null}
+        {/* Headless Composer — keyboard routing only, zero visual footprint. */}
+        <Box height={0} overflow="hidden">
+          <Composer view={view} onInput={controller.onInput} capability={capability} />
+        </Box>
+      </Box>
+    );
+  }
+
   if (view.viewMode === "task" || view.viewMode === "pending") {
     return <TaskLayout view={view} theme={theme} controller={controller} capability={capability} />;
   }
@@ -287,6 +336,13 @@ function TaskLayout({
           Border-color rules use theme.border (muted) instead of theme.accent
           so the lines don't compete with content. */}
       <Box flexShrink={0} flexDirection="column">
+        {view.backgroundTaskOverlay && !view.permission ? (
+          <BackgroundTaskOverlay
+            overlay={view.backgroundTaskOverlay}
+            width={view.width - 4}
+            noColor={noColor}
+          />
+        ) : null}
         {/* D.13Q-UX：轻提示固定在 composer 上方，不和 footer/runtime summary 抢最底部。 */}
         <NotificationStack notifications={view.notifications} theme={theme} />
         {view.taskRuntimeSummary ? (
@@ -347,7 +403,7 @@ function TaskLayout({
             flexShrink=0 确保 Yoga 不会在内容超长时把这一行吞掉。 */}
         <Box flexShrink={0} height={view.height >= 30 ? 2 : 1} />
       </Box>
-      <PanelLayer view={view} controller={controller} width={view.width} noColor={noColor} />
+
     </Box>
   );
 }
@@ -387,61 +443,6 @@ function MeasuredTranscriptBlock({
   return (
     <Box ref={ref} flexDirection="column">
       <ProductBlock block={block} theme={theme} width={width} />
-    </Box>
-  );
-}
-
-function PanelLayer({
-  view,
-  controller,
-  width,
-  noColor,
-}: {
-  view: ShellViewModel;
-  controller: ShellController;
-  width: number;
-  noColor: boolean;
-}): React.ReactNode {
-  if (view.permission) return null;
-
-  // BackgroundTaskOverlay keeps its own frame (CCB PermissionDialog style).
-  if (view.backgroundTaskOverlay) {
-    return (
-      <BackgroundTaskOverlay
-        overlay={view.backgroundTaskOverlay}
-        width={width - 4}
-        noColor={noColor}
-      />
-    );
-  }
-
-  // Pick the active panel content.
-  const panel = resolvePanel(view, controller, width, noColor);
-  if (!panel) return null;
-
-  const theme = createShellTheme(noColor);
-  const separatorWidth = Math.min(Math.max(40, Math.floor(width * 0.6)), 64);
-  return (
-    <Box
-      position="absolute"
-      top={0}
-      left={0}
-      right={0}
-      bottom={0}
-      flexDirection="column"
-      overflow="hidden"
-      backgroundColor={theme.background}
-    >
-      <Box flexGrow={1} minHeight={0} />
-      <Box flexShrink={0} alignItems="center">
-        <Text color={theme.dim ?? theme.muted} dimColor>
-          {"─".repeat(separatorWidth)}
-        </Text>
-      </Box>
-      <Box flexDirection="column" paddingX={2} paddingTop={1} flexShrink={0} overflow="hidden">
-        {panel}
-      </Box>
-      <Box flexShrink={0} height={1} />
     </Box>
   );
 }
