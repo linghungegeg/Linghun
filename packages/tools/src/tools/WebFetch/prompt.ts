@@ -1,0 +1,2 @@
+export const prompt =
+  "WebFetch fetches the content of a URL and returns it as text (HTML pages are converted to plain text). Use it to read documentation, articles, or any web page the user references. The tool strips scripts/styles/navigation and returns only the meaningful text content. Results are truncated at ~50K characters. If you provide a prompt, the returned content is scoped to what you asked about. The URL must be a fully-formed https? URL. Internal/private addresses (localhost, 127.0.0.1, 192.168.x, etc.) are blocked for security.";

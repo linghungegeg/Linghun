@@ -180,6 +180,28 @@ export function createToolInputSchema(name: ToolName): unknown {
       properties: { files: { type: "array", items: { type: "string" } } },
     };
   }
+  if (name === "WebSearch") {
+    return {
+      ...base,
+      properties: {
+        query: { type: "string" },
+        num_results: { type: "number" },
+        allowed_domains: { type: "array", items: { type: "string" } },
+        blocked_domains: { type: "array", items: { type: "string" } },
+      },
+      required: ["query"],
+    };
+  }
+  if (name === "WebFetch") {
+    return {
+      ...base,
+      properties: {
+        url: { type: "string" },
+        prompt: { type: "string" },
+      },
+      required: ["url"],
+    };
+  }
   return {
     ...base,
     properties: {},

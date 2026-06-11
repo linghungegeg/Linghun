@@ -7,7 +7,7 @@ import { formatElapsedSince } from "../job-runner-presenter.js";
 import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
 import { sanitizeMainScreenLeakage } from "../model-prompt-runtime.js";
 import { SLASH_COMMAND_REGISTRY } from "../natural-command-bridge.js";
-import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
+import { formatPermissionModeLabel, permissionModeColor, permissionModeSymbol } from "../runtime-status-presenter.js";
 import { buildHelpPanelData } from "./models/help-panel.js";
 import { buildElevationOptions } from "./models/permission-elevation.js";
 import {
@@ -399,6 +399,7 @@ export function createShellViewModel(
           language,
           width,
           permissionModeLabel: formatPermissionModeLabel(context.permissionMode, language),
+          permissionMode: context.permissionMode,
           cyclePermHint,
           effectiveModel: context.model,
           setupNeeded,
@@ -1401,6 +1402,19 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     },
   };
   const texts = textMap[context.language] ?? textMap["en-US"];
+  const thinkingLabelMap: Record<string, Record<string, string>> = {
+    "zh-CN": {
+      request_started: "正在连接…",
+      request_started_report: "正在生成报告…",
+      waiting_first_delta: "正在接收响应…",
+    },
+    "en-US": {
+      request_started: "Connecting…",
+      request_started_report: "Generating report…",
+      waiting_first_delta: "Receiving response…",
+    },
+  };
+  const thinkingLabels = thinkingLabelMap[context.language] ?? thinkingLabelMap["en-US"];
   const startedAt = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
   let elapsed: string | undefined;
   if (startedAt && mapped !== "completed" && mapped !== "error") {
@@ -1414,6 +1428,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     language: context.language,
     totalLines: (context as { requestActivityToolLines?: number }).requestActivityToolLines,
     totalBytes: (context as { requestActivityToolBytes?: number }).requestActivityToolBytes,
+    thinkingLabel: thinkingLabels[phase],
   };
 }
 
@@ -1662,7 +1677,7 @@ function inferSemanticByToolName(toolName: string): PolicySemantic {
   if (toolName === "Bash") return "destructive";
   if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") return "mutating";
   if (toolName === "Read" || toolName === "Glob" || toolName === "Grep") return "readonly";
-  if (toolName === "WebFetch") return "network";
+  if (toolName === "WebSearch" || toolName === "WebFetch") return "network";
   return "unknown";
 }
 
@@ -1726,6 +1741,14 @@ function buildPermissionActionSummary(
   if (toolName === "Glob" || toolName === "Grep") {
     const target = str("pattern") ?? str("path");
     if (target) return zh ? `搜索：${target}` : `Search: ${target}`;
+  }
+  if (toolName === "WebSearch") {
+    const query = str("query");
+    if (query) return zh ? `搜索网页：${query}` : `Web search: ${query}`;
+  }
+  if (toolName === "WebFetch") {
+    const url = str("url");
+    if (url) return zh ? `抓取网页：${url}` : `Web fetch: ${url}`;
   }
   return zh ? `使用工具：${toolName}` : `Use tool: ${toolName}`;
 }
@@ -1888,6 +1911,7 @@ type TaskFooterInput = {
   language: Language;
   width: number;
   permissionModeLabel: string;
+  permissionMode: PermissionMode;
   cyclePermHint: string;
   effectiveModel: string | undefined;
   setupNeeded: boolean;
@@ -1908,7 +1932,8 @@ function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
     input.width,
   );
   return {
-    permissionMode: input.permissionModeLabel,
+    permissionMode: `${permissionModeSymbol(input.permissionMode)} ${input.permissionModeLabel}`,
+    permissionModeColor: permissionModeColor(input.permissionMode),
     cyclePermHint: input.cyclePermHint,
     model: modelInfo.text,
     modelDim: modelInfo.dim,

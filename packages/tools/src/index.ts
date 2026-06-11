@@ -10,6 +10,10 @@ import {
 } from "./tool-runtime.js";
 import { toolPrompts } from "./tools/prompts.js";
 import { toolUserFacingNames } from "./tools/ui.js";
+import { bingSearch, formatSearchOutput, applyDomainFilter } from "./tools/WebSearch/bing-scraper.js";
+import type { WebSearchInput, SearchResult } from "./tools/WebSearch/bing-scraper.js";
+import { webFetch, formatFetchOutput } from "./tools/WebFetch/web-fetch.js";
+import type { WebFetchInput } from "./tools/WebFetch/web-fetch.js";
 
 export type {
   ToolDefinition,
@@ -111,6 +115,8 @@ export type TodoInput =
   | { action: "add"; content: string; id?: string }
   | { action: "start" | "done" | "block"; id: string; evidence?: string };
 export type DiffInput = { files?: string[] };
+export type { WebSearchInput, SearchResult } from "./tools/WebSearch/bing-scraper.js";
+export type { WebFetchInput } from "./tools/WebFetch/web-fetch.js";
 
 export type ToolRunResult = {
   id: string;
@@ -364,6 +370,56 @@ const toolDefinitions = {
     getToolUseSummary: () => "Diff summary",
     getActivityDescription: () => "Summarizing changes",
   }),
+  WebSearch: defineTool<WebSearchInput>({
+    name: "WebSearch",
+    title: "搜索网页",
+    description: "通过 Bing 搜索互联网，返回标题、链接和摘要。零 API Key，国内直连。",
+    permission: {
+      risk: "low",
+      scope: "session",
+      reason: "只读搜索公开网页信息，不涉及工作区文件。",
+      phase06Mode: "metadata-only",
+    },
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    lifecycle: {
+      enabled: true,
+      destructive: false,
+      interruptBehavior: "abortable",
+      maxResultSizeChars: 20_000,
+    },
+    validateInput: validateWebSearchInput,
+    call: webSearchTool,
+    prompt: () => toolPrompts.WebSearch,
+    userFacingName: () => toolUserFacingNames.WebSearch,
+    getToolUseSummary: (input) => `搜索 "${input.query}"`,
+    getActivityDescription: (input) => `搜索网页: ${input.query}`,
+  }),
+  WebFetch: defineTool<WebFetchInput>({
+    name: "WebFetch",
+    title: "抓取网页",
+    description: "抓取指定 URL 的网页内容并转为纯文本。零 API Key。",
+    permission: {
+      risk: "low",
+      scope: "session",
+      reason: "只读抓取公开网页内容，内网地址已拦截。",
+      phase06Mode: "metadata-only",
+    },
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    lifecycle: {
+      enabled: true,
+      destructive: false,
+      interruptBehavior: "abortable",
+      maxResultSizeChars: 60_000,
+    },
+    validateInput: validateWebFetchInput,
+    call: webFetchTool,
+    prompt: () => toolPrompts.WebFetch,
+    userFacingName: () => toolUserFacingNames.WebFetch,
+    getToolUseSummary: (input) => `Fetch ${input.url}`,
+    getActivityDescription: (input) => `抓取网页: ${input.url}`,
+  }),
 } satisfies Record<ToolName, ToolDefinition>;
 
 export const builtInTools: Record<ToolName, ToolDefinition> = toolDefinitions;
@@ -572,6 +628,38 @@ function validateDiffInput(input: unknown): DiffInput {
   return { files };
 }
 
+function validateWebSearchInput(input: unknown): WebSearchInput {
+  const record = validateRecord(input, "WebSearch");
+  const query = readString(record, "query", "WebSearch");
+  const num_results = readOptionalPositiveInteger(record, "num_results", "WebSearch") ?? 8;
+  const allowed_domains = readOptionalStringArray(record, "allowed_domains", "WebSearch");
+  const blocked_domains = readOptionalStringArray(record, "blocked_domains", "WebSearch");
+  if (allowed_domains && blocked_domains) {
+    throw new Error("WebSearch: allowed_domains 和 blocked_domains 不能同时使用。");
+  }
+  return { query, num_results, allowed_domains, blocked_domains };
+}
+
+function validateWebFetchInput(input: unknown): WebFetchInput {
+  const record = validateRecord(input, "WebFetch");
+  const url = readString(record, "url", "WebFetch");
+  const prompt = readOptionalString(record, "prompt", "WebFetch");
+  return { url, prompt };
+}
+
+function readOptionalStringArray(
+  record: Record<string, unknown>,
+  key: string,
+  toolName: ToolName,
+): string[] | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error(`${toolName}.${key} 必须是字符串数组或 undefined。`);
+  }
+  return value;
+}
+
 async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOutput> {
   const filePath = resolveWorkspacePath(context.workspaceRoot, input.path);
   const content = await readFile(filePath, "utf8");
@@ -769,6 +857,27 @@ async function globTool(input: GlobInput, context: ToolContext): Promise<ToolOut
   };
 }
 
+type SecretPattern = [RegExp, string | ((m: string, ...args: any[]) => string)];
+
+const SECRET_PATTERNS: SecretPattern[] = [
+  [/(?:-H\s+|--header\s+)?["']?\s*[Aa]uthorization\s*:\s*Bearer\s+\S+/g, "Authorization: Bearer [REDACTED]"],
+  [/(?:-H\s+|--header\s+)?["']?\s*[Aa]uthorization\s*:\s*Basic\s+\S+/g, "Authorization: Basic [REDACTED]"],
+  [/(?:-H\s+|--header\s+)?["']?\s*[Xx]-(?:[Aa]pi|[Ff]unctions|[Aa]uth|[Tt]oken)[- ]?[Kk]ey\s*:\s*\S+/g, (m: string) => `${m.split(":")[0]}: [REDACTED_HEADER]`],
+  [/--(?:token|api-key|api[_\-]?key|secret|access[_\-]?token|pat)\s+["']?\s*\S+/g, (m: string) => `${m.split(/\s+/)[0] ?? m} [REDACTED]`],
+  [/(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|AZURE_OPENAI_API_KEY|GITHUB_TOKEN|GITLAB_TOKEN|NPM_TOKEN|DOCKER_PASSWORD|OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|COHERE_API_KEY|HF_TOKEN|HUGGINGFACE_TOKEN|DEEPSEEK_API_KEY)\s*[=:]\s*\S+/gi, (m: string) => `${m.split(/[=:]/)[0] ?? m}=[REDACTED_ENV]`],
+  [/(?:SECRET|TOKEN|KEY|PASSWORD|PASSWD)\s*[=:]\s*\S{8,}/gi, (m: string) => `${m.split(/[=:]/)[0] ?? m}=[REDACTED]`],
+];
+
+function sanitizeSecrets(text: string): string {
+  let sanitized = text;
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    sanitized = typeof replacement === "string"
+      ? sanitized.replace(pattern, replacement)
+      : sanitized.replace(pattern, replacement);
+  }
+  return sanitized;
+}
+
 async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOutput> {
   const logRoot = context.logRoot ?? join(context.workspaceRoot, ".linghun", "logs", "tools");
   await mkdir(logRoot, { recursive: true });
@@ -791,12 +900,12 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
         ];
   const commandForLog = adapted.logCommand ?? adapted.command;
   const fullText = [
-    `$ ${commandForLog}`,
+    `$ ${sanitizeSecrets(commandForLog)}`,
     ...adapterLines,
     `exit code ${result.exitCode}`,
     `outcome ${result.outcome}`,
     "",
-    result.output,
+    sanitizeSecrets(result.output),
   ].join("\n");
   await writeFile(fullOutputPath, fullText, "utf8");
   const truncated = fullText.length > BASH_PREVIEW_LIMIT;
@@ -1189,6 +1298,47 @@ async function diffTool(input: DiffInput, context: ToolContext): Promise<ToolOut
     text: `${summary.summary}\n${changedFiles.map((file) => `- ${file}`).join("\n")}`.trim(),
     data: summary,
   };
+}
+
+// ---------------------------------------------------------------------------
+// WebSearch tool
+// ---------------------------------------------------------------------------
+
+async function webSearchTool(input: WebSearchInput, _context: ToolContext): Promise<ToolOutput> {
+  const start = Date.now();
+  const result = await bingSearch(input);
+
+  if (!result.ok) {
+    return {
+      text: `WebSearch failed: ${result.error}`,
+      data: {
+        query: input.query,
+        results: [],
+        searches: 1,
+        count: 0,
+        durationMs: Date.now() - start,
+        error: result.error,
+      },
+    };
+  }
+
+  const filtered = applyDomainFilter(
+    result.results,
+    input.allowed_domains,
+    input.blocked_domains,
+  );
+
+  return formatSearchOutput(input.query, filtered, Date.now() - start);
+}
+
+// ---------------------------------------------------------------------------
+// WebFetch tool
+// ---------------------------------------------------------------------------
+
+async function webFetchTool(input: WebFetchInput, _context: ToolContext): Promise<ToolOutput> {
+  const start = Date.now();
+  const result = await webFetch(input);
+  return formatFetchOutput(input.url, result, Date.now() - start);
 }
 
 type ExistingFile = {
