@@ -91,7 +91,7 @@ describe("tui permission runtime — CCB-aligned modes", () => {
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 
-  it("auto-review asks for medium risk Write and MultiEdit instead of treating them as low risk", async () => {
+  it("auto-review allows medium risk Write and MultiEdit — only high risk still asks", async () => {
     const { context, sessionId } = await createTestContext();
     context.permissionMode = "auto-review";
 
@@ -115,8 +115,8 @@ describe("tui permission runtime — CCB-aligned modes", () => {
     );
 
     expect(edit.decision).toBe("allow");
-    expect(write.decision).toBe("ask");
-    expect(multiEdit.decision).toBe("ask");
+    expect(write.decision).toBe("allow");
+    expect(multiEdit.decision).toBe("allow");
     expect(write.request.risk).toBe("medium");
     expect(multiEdit.request.risk).toBe("medium");
   });

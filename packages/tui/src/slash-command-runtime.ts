@@ -124,7 +124,7 @@ import {
   formatBreakCacheStatus,
   writeBreakCacheMarker,
 } from "./break-cache-runtime.js";
-import { classifyBtwIntent, runBtwSideQuestion } from "./btw-runtime.js";
+import { runBtwSideQuestion } from "./btw-runtime.js";
 import {
   buildCacheStatusPanel,
   formatCacheLog,
@@ -526,7 +526,6 @@ import {
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
   matchesNaturalGateConfirmation,
-  routeNaturalIntent,
 } from "./natural-command-bridge.js";
 import {
   formatPendingApprovalDetails,
@@ -662,10 +661,6 @@ import {
 } from "./runtime-budget.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
-import {
-  createRuntimeStatusSnapshot,
-  formatRuntimeStatusSnapshotForBtw,
-} from "./runtime-status-snapshot.js";
 import {
   createCommandBlock,
   createUserTextBlock,
@@ -1837,21 +1832,9 @@ export async function handleBtwCommand(
     );
     return;
   }
-  const btwIntent = classifyBtwIntent(routeNaturalIntent(question, context.language));
-  if (btwIntent === "status_query") {
-    const statusAnswer = formatBtwStatusAnswer(context);
-    if (context.isInkSession) {
-      context.btwPanelState = { question, phase: "answered", answer: statusAnswer };
-    } else {
-      writeLine(output, statusAnswer);
-    }
-    return;
-  }
-  // D.14D — /btw 现在是 model-backed side question（参考 CCB sideQuestion.ts 行为）：
-  // 隔离单轮、无工具、不污染 main conversation / Todo / Plan / checkpoint / git stable
-  // point / evidence / D.13U/D.13V completion gate。只把临时问题与答案写进 session
-  // store（btw_question event）供 /details 审计；不调用 recordToolEvidence，也不进
-  // final-answer claim gate。
+  // D.14D — /btw is now model-backed for every question (no status_query short-circuit):
+  // isolated single-turn, no tools, does not pollute main conversation / Todo / Plan /
+  // checkpoint / git stable point / evidence / D.13U/D.13V completion gate.
   const sessionId = await ensureSession(context);
   const gateway = context.modelGateway;
   // ink 路径：先开 loading 面板，让用户看到"正在回答"；plain 路径无面板。
@@ -1912,22 +1895,6 @@ export async function handleBtwCommand(
   } else if (!context.isInkSession) {
     writeLine(output, result.status === "answered" ? result.answer : result.error);
   }
-}
-
-function formatBtwStatusAnswer(context: TuiContext): string {
-  const snapshot = createRuntimeStatusSnapshot({
-    language: context.language,
-    requestActivityPhase: context.requestActivityPhase,
-    requestActivityStartedAt: (context as { requestActivityStartedAt?: number })
-      .requestActivityStartedAt,
-    requestActivityToolName: context.requestActivityToolName,
-    pendingApproval: Boolean(context.pendingLocalApproval),
-    workflow: context.workflows.activeRun,
-    backgroundTasks: context.backgroundTasks,
-    lastVerification: context.lastVerification,
-    lastModelRequest: context.lastModelRequest,
-  });
-  return formatRuntimeStatusSnapshotForBtw(snapshot, context.language);
 }
 
 export async function handleResumeCommand(

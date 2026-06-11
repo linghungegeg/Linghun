@@ -249,30 +249,29 @@ export async function decidePermission(
   }
 
   if (context.permissionMode === "auto-review") {
+    // Policy engine readonly shortcut takes priority even in auto-review.
     if (verdict.decision === "auto_allow_readonly") {
       return {
         request,
         decision: "allow",
-        reason: `auto-review 允许安全只读动作：${verdict.reason}`,
+        reason: `auto-review 放行安全只读动作：${verdict.reason}`,
         autoAllowReadonly: verdict,
         verdict,
       };
     }
-    if (isLowRiskWorkspaceEdit(name, tool.permission.risk, files)) {
-      return {
-        request,
-        decision: "allow",
-        reason: "auto-review 自动允许工作区内普通文件编辑。",
-        preflight: formatDiffBeforeWrite(name, files, tool.permission.risk),
-        verdict,
-      };
+    // Only non-readonly high-risk actions still ask in auto-review.
+    if (tool.permission.risk === "high") {
+      const reason =
+        "auto-review 已放行常规操作，但本次动作涉及高风险，需确认。";
+      return { request, decision: "ask", reason, verdict };
     }
-    if (tool.isReadOnly || name === "Todo" || name === "Diff") {
-      return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。", verdict };
-    }
-    const reason =
-      "auto-review 仅自动放行安全只读动作和低风险工作区编辑；写入、非只读 Bash、安装、联网或权限变更仍需确认，硬拒绝和路径安全仍由权限底座处理。";
-    return { request, decision: "ask", reason, verdict };
+    const reason = "auto-review 放行非高风险操作。";
+    return {
+      request,
+      decision: "allow",
+      reason,
+      verdict,
+    };
   }
 
   if (context.permissionMode === "full-access") {

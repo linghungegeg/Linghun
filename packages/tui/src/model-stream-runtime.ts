@@ -130,8 +130,9 @@ import {
 import {
   MAX_CONTEXT_MESSAGES,
   MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
-  MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
   REQUEST_SLOW_HINT_MS,
+  TODO_ONLY_KILL_GRACE,
+  MAX_TODO_ONLY_CODE_FACT,
 } from "./tui-context-runtime.js";
 import type { RemoteInboundDecision, RemoteInboundMessage } from "./tui-data-types.js";
 import {
@@ -620,8 +621,12 @@ export async function sendMessage(
     let consecutiveTodoOnlyRounds = 0;
     let noProgressRounds = 0;
     let todoOnlyHintSent = false;
+    let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
     let toolFailureRetries = 0;
+    const _suggestedMax = metaSchedulerDecision.suggestedMaxTodoRounds;
+    const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
+    const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
     modelRoundLoop: for (let round = 0; ; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-${assistantEventId}-${round}`;
@@ -870,7 +875,7 @@ export async function sendMessage(
         });
       }
       if (toolCalls.length === 0) {
-        if (consecutiveTodoOnlyRounds >= MAX_TODO_ONLY_CONSECUTIVE_ROUNDS && todoOnlyHintSent) {
+        if (consecutiveTodoOnlyRounds >= _killThreshold && todoOnlyWarningSent) {
           const limitMsg =
             evidenceRounds === 0
               ? context.language === "en-US"
@@ -1011,7 +1016,7 @@ export async function sendMessage(
       } else if (roundHadProgress) {
         toolFailureRetries = 0;
       }
-      if (todoOnly && consecutiveTodoOnlyRounds >= MAX_TODO_ONLY_CONSECUTIVE_ROUNDS && !todoOnlyHintSent) {
+      if (todoOnly && consecutiveTodoOnlyRounds >= _hintThreshold && !todoOnlyHintSent) {
         const todoHint =
           context.language === "en-US"
             ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect); otherwise execution will pause at the runaway guard."
@@ -1020,8 +1025,17 @@ export async function sendMessage(
         todoOnlyHintSent = true;
         continue;
       }
+      if (todoOnly && consecutiveTodoOnlyRounds >= _suggestedMax && !todoOnlyWarningSent) {
+        const warnMsg =
+          context.language === "en-US"
+            ? "Planning phase is complete. This round will proceed without tools; the next round MUST call tools (Read/Grep/Bash or StartAgent/RunWorkflow) or execution will pause."
+            : "规划阶段已完成。本轮不会调用工具；下一轮必须调用工具（Read/Grep/Bash 或 StartAgent/RunWorkflow）执行，否则将暂停。";
+        messagesForProvider.push({ role: "user", content: warnMsg });
+        todoOnlyWarningSent = true;
+        continue;
+      }
       noProgressRounds = todoOnly || !roundHadProgress ? noProgressRounds + 1 : 0;
-      if (noProgressRounds > MAX_TODO_ONLY_CONSECUTIVE_ROUNDS) {
+      if (noProgressRounds > _killThreshold) {
         const onlyPlanning = evidenceRounds === 0;
         const limitMsg = onlyPlanning
           ? context.language === "en-US"
@@ -2047,8 +2061,12 @@ export async function continueModelAfterToolResults(
     let consecutiveTodoOnlyRounds = 0;
     let noProgressRounds = 0;
     let todoOnlyHintSent = false;
+    let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
     let runtimeFallbackAttempted = false;
+    const _suggestedMax = context.lastMetaSchedulerDecision?.suggestedMaxTodoRounds ?? MAX_TODO_ONLY_CODE_FACT;
+    const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
+    const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
     continuationRoundLoop: for (let round = 0; ; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
@@ -2335,7 +2353,7 @@ export async function continueModelAfterToolResults(
           content: JSON.stringify(result),
         });
       }
-      if (todoOnly && consecutiveTodoOnlyRounds >= MAX_TODO_ONLY_CONSECUTIVE_ROUNDS) {
+      if (todoOnly && consecutiveTodoOnlyRounds >= _hintThreshold) {
         if (!todoOnlyHintSent) {
           const todoHint =
             context.language === "en-US"
@@ -2347,7 +2365,7 @@ export async function continueModelAfterToolResults(
         }
       }
       noProgressRounds = todoOnly || !roundHadProgress ? noProgressRounds + 1 : 0;
-      if (noProgressRounds > MAX_TODO_ONLY_CONSECUTIVE_ROUNDS) {
+      if (noProgressRounds > _killThreshold) {
         const onlyPlanning = evidenceRounds === 0;
         const limitMsg = onlyPlanning
           ? context.language === "en-US"

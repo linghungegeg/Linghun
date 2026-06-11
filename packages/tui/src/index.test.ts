@@ -9180,7 +9180,7 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(false);
   });
 
-  it("auto-review asks for /image generate metadata while cancel does not write it", async () => {
+  it("auto-review allows /image generate directly without pending approval", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -9191,16 +9191,9 @@ describe("Phase 06 TUI slash commands", () => {
     context.permissionMode = "auto-review";
     await handleSlashCommand("/image generate logo concept", context, output);
 
-    expect(context.pendingLocalApproval?.kind).toBe("image_generation");
-    const autoReviewPending =
-      context.pendingLocalApproval?.kind === "image_generation"
-        ? context.pendingLocalApproval
-        : undefined;
-    await handleNaturalInput("yes", context, output);
+    // auto-review auto-allows Write (medium risk) — image generation proceeds immediately.
     expect(context.imageResults).toHaveLength(1);
-    expect(await readFile(autoReviewPending?.assetPath ?? "", "utf8")).toContain(
-      "image_generation_metadata",
-    );
+    expect(context.pendingLocalApproval).toBeUndefined();
 
     context.permissionMode = "default";
     await handleSlashCommand("/image generate second concept", context, output);
@@ -11328,7 +11321,7 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
   });
 
-  it("asks before model Write to existing large files in auto-review", async () => {
+  it("auto-allows model Write to existing large files in auto-review", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -11363,9 +11356,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("Linghun 想执行 Write big.ts");
-    expect(output.text).toContain("允许本次执行？yes / no");
-    await expect(readFile(join(project, "big.ts"), "utf8")).resolves.toBe(original);
+    // auto-review auto-allows Write (medium risk) — no permission prompt is shown.
+    expect(output.text).not.toContain("Linghun 想执行 Write big.ts");
+    expect(output.text).not.toContain("允许本次执行？yes / no");
   });
 
   it("formats report Write prompts with the actual pending target path", () => {
@@ -11729,7 +11722,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain('"evidenceId"');
   });
 
-  it("auto-review report Write asks through the normal workspace edit path", async () => {
+  it("auto-review report Write is auto-allowed through the normal workspace edit path", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -11742,9 +11735,8 @@ describe("Phase 06 TUI slash commands", () => {
       session.id,
     );
 
-    expect(permission.decision).toBe("ask");
+    expect(permission.decision).toBe("allow");
     expect(context.permissions.recentDenied).toHaveLength(0);
-    await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
   });
 
   it("auto-review report Write completes after foreground approval", async () => {
@@ -16315,7 +16307,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("full-access");
   });
 
-  it("auto-review allows low-risk edits while asking for medium writes", async () => {
+  it("auto-review allows low-risk edits and medium writes without asking", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "sample.txt"), "alpha", "utf8");
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -16326,16 +16318,12 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/mode acceptEdits", context, output);
     await handleSlashCommand("/read sample.txt", context, output);
     await handleSlashCommand("/edit sample.txt alpha => beta", context, output);
-    await handleSlashCommand("/write medium.txt should-not-write", context, output);
+    await handleSlashCommand("/write medium.txt should-write", context, output);
     await handleSlashCommand("/bash node --version", context, output);
 
     expect(output.text).toContain("已切换权限模式：auto-review");
-    expect(output.text).toContain("权限已拒绝");
-    expect(output.text).toContain("本次请求：工具 Write");
-    expect(output.text).not.toContain("已创建 checkpoint");
-    expect(output.text).toContain("Edit：");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
-    await expect(readFile(join(project, "medium.txt"), "utf8")).rejects.toThrow();
+    expect(await readFile(join(project, "medium.txt"), "utf8")).toBe("should-write");
   });
 
   it("keeps full-access behind hard denies", async () => {
@@ -16774,11 +16762,15 @@ describe("Phase 06 TUI slash commands", () => {
 
     context.backgroundTasks = [createBackgroundTaskFixture("bash")];
     await handleSlashCommand("/bash node --version", context, output);
-    expect(output.text).toContain("bash 后台任务已达到上限 1");
+    // Per-kind caps removed — bash no longer blocked by the old cap=1 limit.
+    // Heavy check still applies: only one heavy operation at a time.
+    expect(output.text).toContain("已有 bash 重任务正在运行");
+    expect(output.text).not.toContain("bash 后台任务已达到上限");
 
     context.backgroundTasks = [createBackgroundTaskFixture("verification")];
     await handleSlashCommand("/verify smoke", context, output);
-    expect(output.text).toContain("verification 后台任务已达到上限 1");
+    // Per-kind caps removed — verification no longer blocks on a single running verification.
+    expect(output.text).not.toContain("verification 后台任务已达到上限");
 
     const indexTaskNow = new Date().toISOString();
     context.backgroundTasks = [
@@ -16786,7 +16778,8 @@ describe("Phase 06 TUI slash commands", () => {
     ];
     context.permissionMode = "full-access";
     await handleSlashCommand("/index refresh", context, output);
-    expect(output.text).toContain("index 后台任务已达到上限 1");
+    // Per-kind caps removed — index no longer blocks on a single running index task.
+    expect(output.text).not.toContain("index 后台任务已达到上限");
 
     output.text = "";
     context.backgroundTasks = Array.from({ length: 6 }, (_, index) =>
@@ -24828,170 +24821,6 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     expect(body).not.toContain("routeNaturalIntent(");
   });
 
-  it("/btw 当前在做什么只返回短状态，不调用模型插问或刷内部细节", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
-    context.backgroundTasks.push({
-      id: "task-status",
-      kind: "bash",
-      title: "Bash",
-      status: "running",
-      currentStep: "running command",
-      startedAt: new Date(Date.now() - 65_000).toISOString(),
-      updatedAt: new Date().toISOString(),
-      heartbeatIntervalMs: 30_000,
-      staleAfterMs: 60_000,
-      hasOutput: false,
-      userVisibleSummary: "running command",
-    });
-
-    const result = await handleSlashCommand("/btw 当前在做什么", context, output);
-
-    expect(result).toBe("handled");
-    expect(output.text).toContain("正在运行：background task 运行中 · running command");
-    expect(output.text).toContain("耗时");
-    expect(output.text).not.toContain("tool_use");
-    expect(output.text).not.toContain("RuntimeStatus");
-    expect(output.text).not.toContain("gateId");
-  });
-
-  it("/btw 当前进度读取 running workflow 的轻量状态", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
-    const startedAt = new Date(Date.now() - 30_000).toISOString();
-    context.workflows.activeRun = {
-      id: "workflow-status",
-      goal: "修复登录问题",
-      planId: "plan-status",
-      status: "running",
-      startedAt,
-      result: "partial",
-      steps: [
-        {
-          id: "read",
-          title: "读取登录代码",
-          status: "completed",
-          runtime: "details",
-          evidenceRefs: ["raw-evidence-should-not-leak"],
-        },
-        {
-          id: "verify",
-          title: "运行 focused verification",
-          status: "running",
-          runtime: "verification",
-          evidenceRefs: [],
-          startedAt,
-        },
-      ],
-    };
-
-    await handleSlashCommand("/btw 当前进度状态", context, output);
-
-    expect(output.text).toContain("正在运行：workflow 运行中 · 1/2 · 运行 focused verification");
-    expect(output.text).not.toContain("raw-evidence-should-not-leak");
-    expect(output.text).not.toContain("evidenceRefs");
-  });
-
-  it("/btw 当前进度读取 blocked job 的轻量状态", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
-    context.backgroundTasks.push({
-      id: "job-blocked",
-      kind: "job",
-      title: "Job",
-      status: "blocked",
-      result: "partial",
-      currentStep: "等待用户确认后继续",
-      startedAt: new Date(Date.now() - 45_000).toISOString(),
-      updatedAt: new Date().toISOString(),
-      heartbeatIntervalMs: 30_000,
-      staleAfterMs: 120_000,
-      hasOutput: true,
-      userVisibleSummary: "内部 transcript 不应外露",
-      nextAction: "确认后继续",
-    });
-    context.pendingLocalApproval = {
-      kind: "break_cache_mutation",
-      sessionId: session.id,
-      action: "clear",
-    } as NonNullable<TuiContext["pendingLocalApproval"]>;
-
-    await handleSlashCommand("/btw 目前状态", context, output);
-
-    expect(output.text).toContain("当前：正在等待你的确认");
-    expect(output.text).toContain("需处理：job 阻塞 · 等待用户确认后继续");
-    expect(output.text).not.toContain("break_cache_mutation");
-    expect(output.text).not.toContain("sessionId");
-    expect(output.text).not.toContain("内部 transcript");
-  });
-
-  it("/btw 当前进度读取 completed verification 的最近结果", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
-    const now = new Date().toISOString();
-    context.lastVerification = {
-      id: "verify-status",
-      status: "pass",
-      summary: "typecheck 通过",
-      commands: [],
-      unverified: [],
-      risk: [],
-      startedAt: now,
-      endedAt: now,
-      durationMs: 120,
-      nextAction: "继续主任务",
-    };
-
-    await handleSlashCommand("/btw 当前进度如何", context, output);
-
-    expect(output.text).toContain("当前：没有正在运行的任务");
-    expect(output.text).toContain("最近：verification 通过 · typecheck 通过");
-    expect(output.text).not.toContain("模型配置缺少 api_key");
-    expect(output.text).not.toContain("verify-status");
-    expect(output.text).not.toContain("commands");
-  });
-
-  it("/btw 当前进度无活跃任务时说明空态和最近 job 结果", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
-    context.backgroundTasks.push({
-      id: "job-done",
-      kind: "job",
-      title: "Job",
-      status: "completed",
-      result: "pass",
-      currentStep: "handoff 写入完成",
-      startedAt: new Date(Date.now() - 90_000).toISOString(),
-      updatedAt: new Date().toISOString(),
-      heartbeatIntervalMs: 30_000,
-      staleAfterMs: 120_000,
-      hasOutput: true,
-      userVisibleSummary: "raw evidence should stay hidden",
-    });
-
-    await handleSlashCommand("/btw 当前状态", context, output);
-
-    expect(output.text).toContain("当前：没有正在运行的任务");
-    expect(output.text).toContain("最近：job 通过 · handoff 写入完成");
-    expect(output.text).not.toContain("raw evidence");
-    expect(output.text).not.toContain("job-done");
-  });
-
   it("/model doctor 之后 /details 必须展开完整 doctor 正文（含 endpointPath=/v1/messages）", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -26560,7 +26389,7 @@ describe("D.13V-B/C source invariants", () => {
     expect(text).toMatch(/"full-access":\s*"full access \(safety on\)"/);
   });
 
-  it("auto-review 允许安全只读和低风险 Edit，但 medium Write 和危险动作仍走 ask/deny", async () => {
+  it("auto-review 允许安全只读和低风险 Edit 及 medium Write，危险动作仍走硬拒绝", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -26592,7 +26421,7 @@ describe("D.13V-B/C source invariants", () => {
       context,
       session.id,
     );
-    expect(write.decision).toBe("ask");
+    expect(write.decision).toBe("allow");
 
     const secretWrite = await decidePermission(
       "Write",
