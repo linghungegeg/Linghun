@@ -194,6 +194,8 @@ export type WorkflowAgentRuntimeBridgeOptions = {
   currentPhaseId?: string;
   confirmedPhaseStopPoints?: string[];
   runningCap?: number;
+  /** Set of "${providerId}::${model}" keys blocked by the provider circuit breaker. */
+  blockedProviderKeys?: Set<string>;
 };
 
 type BridgeWorkflowSlice = WorkflowSlice & {
@@ -288,6 +290,11 @@ export function bridgeWorkflowPlanToMainChainRequests(
     0,
     runningCap - currentPhase.slices.filter((slice) => slice.status === "running").length,
   );
+  // If any provider is blocked (cooldown or at capacity), clamp runnableSlots
+  // to 1 to prevent dispatching a flood of slices into a degraded provider.
+  if (options.blockedProviderKeys && options.blockedProviderKeys.size > 0) {
+    runnableSlots = Math.min(runnableSlots, 1);
+  }
   const initialRunnableSlots = runnableSlots;
 
   const requests = currentPhase.slices.map((slice) => {

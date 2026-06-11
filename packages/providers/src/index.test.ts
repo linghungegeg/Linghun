@@ -427,7 +427,7 @@ describe("OpenAI compatible provider", () => {
       toolResultShape: "chat_tool_message",
       sendReasoning: false,
       retryStatuses: [429, 502, 503, 504],
-      maxAttempts: 3,
+      maxAttempts: 10,
       requestTimeoutMs: 600_000,
       streamIdleTimeoutMs: 30_000,
     });
@@ -474,9 +474,9 @@ describe("OpenAI compatible provider", () => {
     };
 
     await expect(collect()).rejects.toMatchObject({ code: "PROVIDER_SERVER_ERROR" });
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
-    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)).stream).toBe(false);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).stream).toBe(false);
   });
 
   it("uses an internal abort signal when streaming without caller signal", async () => {

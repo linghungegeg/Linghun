@@ -93,7 +93,7 @@ import {
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
-import { BREAKER_CONSTANTS, clearProviderBreaker, formatCooldownMessage, recordProviderFailure } from "./provider-circuit-breaker.js";
+import { BREAKER_CONSTANTS, checkProviderGate, clearProviderBreaker, formatCooldownMessage, recordProviderFailure } from "./provider-circuit-breaker.js";
 import {
   checkAndWriteProviderCooldown,
   recordProviderFallbackAttempt,
@@ -404,6 +404,9 @@ export async function sendMessage(
   context.sessionEnded = false;
   await context.store.appendEvent(sessionId, createUserMessageEvent(text));
   let selectedRuntime = getSelectedModelRuntime(context);
+  // Remember the original provider+model for correct breaker clear after fallback.
+  const originalProvider = selectedRuntime.provider;
+  const originalModel = selectedRuntime.model;
   context.model = selectedRuntime.model;
   let selectedTools = currentModelSupportsTools(context, selectedRuntime);
   const reportWriteGuard = createReportWriteGuard(text);
@@ -624,6 +627,7 @@ export async function sendMessage(
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
     let toolFailureRetries = 0;
+    let providerRetryCount = 0;
     const _suggestedMax = metaSchedulerDecision.suggestedMaxTodoRounds;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
@@ -775,6 +779,37 @@ export async function sendMessage(
               "warning",
             );
           }
+          // Main-chain retry: each retry is a single HTTP attempt visible to the breaker.
+          const MAX_MAIN_CHAIN_RETRIES = 5;
+          if (providerRetryCount < MAX_MAIN_CHAIN_RETRIES) {
+            const gate = checkProviderGate(
+              context.providerBreaker,
+              selectedRuntime.provider,
+              selectedRuntime.model,
+            );
+            if (gate.allowed) {
+              const baseMs = 500 * 2 ** providerRetryCount;
+              const cappedMs = Math.min(baseMs, 32_000);
+              const delayMs = cappedMs + Math.random() * 0.25 * cappedMs;
+              context.retryInfo = {
+                attempt: providerRetryCount + 1,
+                max: MAX_MAIN_CHAIN_RETRIES,
+                delaySec: Math.ceil(delayMs / 1000),
+              };
+              context.requestActivityPhase = "provider_retrying";
+              await abortAwareSleep(delayMs, context.activeAbortController?.signal);
+              providerRetryCount += 1;
+              continue modelRoundLoop;
+            }
+            if (gate.reason === "at_capacity") {
+              // Wait for capacity to free up, then retry.
+              await abortAwareSleep(1000 + Math.random() * 2000, context.activeAbortController?.signal);
+              providerRetryCount += 1;
+              continue modelRoundLoop;
+            }
+            // cooldown — fall through to fallback logic.
+          }
+          // Fallback after retries exhausted or breaker open.
           const fallback = resolveRuntimeFallback(context, selectedRuntime, event.error);
           if (fallback) {
             await recordProviderFallbackAttempt(context, sessionId, {
@@ -1059,8 +1094,11 @@ export async function sendMessage(
     context.interrupt = { type: "idle" };
   }
 
-  // Successful response — clear the circuit breaker for this provider+model
+  // Successful response — clear the circuit breaker for both the current and original provider+model.
   clearProviderBreaker(context.providerBreaker, selectedRuntime.provider, selectedRuntime.model);
+  if (selectedRuntime.provider !== originalProvider || selectedRuntime.model !== originalModel) {
+    clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
+  }
   if (
     context.lastProviderFallbackAttempt?.toProvider === selectedRuntime.provider &&
     context.lastProviderFallbackAttempt.toModel === selectedRuntime.model &&
@@ -1881,6 +1919,9 @@ async function streamFinalModelAnswerWithoutTools(
     writeFinalAssistantText(output, assistantText);
   }
   clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
+  if (continuation.provider !== originalProvider || continuation.model !== originalModel) {
+    clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
+  }
   if (
     context.lastProviderFallbackAttempt?.toProvider === continuation.provider &&
     context.lastProviderFallbackAttempt.toModel === continuation.model &&
@@ -2044,12 +2085,15 @@ export async function continueModelAfterToolResults(
   output: Writable,
 ): Promise<void> {
   const controller = new AbortController();
+  const originalContProvider = continuation.provider;
+  const originalContModel = continuation.model;
   context.activeAbortController = controller;
   context.tools.abortSignal = controller.signal;
   context.interrupt = { type: "running", taskId: "model-continuation", canCancel: true };
   startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
   let finalAnswerClaimRetried = false;
+  let continuationProviderRetryCount = 0;
   let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
@@ -2170,6 +2214,27 @@ export async function continueModelAfterToolResults(
               "warning",
             );
           }
+          // Main-chain retry for continuation path.
+          const CONT_MAX_RETRIES = 5;
+          const retryDecision = decideProviderRetry(
+            context,
+            continuation.provider,
+            continuation.model,
+            continuationProviderRetryCount,
+            CONT_MAX_RETRIES,
+          );
+          if (retryDecision.action === "retry") {
+            context.retryInfo = {
+              attempt: continuationProviderRetryCount + 1,
+              max: CONT_MAX_RETRIES,
+              delaySec: Math.ceil(retryDecision.delayMs / 1000),
+            };
+            context.requestActivityPhase = "provider_retrying";
+            await abortAwareSleep(retryDecision.delayMs, controller.signal);
+            continuationProviderRetryCount += 1;
+            continue continuationRoundLoop;
+          }
+          // Fallback after retries exhausted or breaker open.
           const fallback = runtimeFallbackAttempted
             ? undefined
             : resolveRuntimeFallback(context, currentRuntime, event.error);
@@ -2446,6 +2511,9 @@ export async function continueModelAfterToolResults(
       });
     }
     clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
+    if (continuation.provider !== originalContProvider || continuation.model !== originalContModel) {
+      clearProviderBreaker(context.providerBreaker, originalContProvider, originalContModel);
+    }
     if (
       context.lastProviderFallbackAttempt?.toProvider === continuation.provider &&
       context.lastProviderFallbackAttempt.toModel === continuation.model &&
@@ -2628,6 +2696,59 @@ function formatRawToolProtocolRetryFailure(language: Language): string {
   return language === "en-US"
     ? "The model returned tool protocol as plain text again. I did not run any unstructured tool request; please retry or use an explicit slash command."
     : "模型再次把工具协议写成了正文。Linghun 没有执行任何非结构化工具请求；请重试或使用明确的 slash 命令。";
+}
+
+/**
+ * Decide whether the main chain should retry a failed provider request.
+ * Checks the breaker/gate state and remaining retry budget.
+ * Retry decisions are visible to the breaker — every retry increments failure count.
+ */
+function decideProviderRetry(
+  context: TuiContext,
+  providerId: string,
+  model: string,
+  retryCount: number,
+  maxRetries: number,
+): { action: "retry"; delayMs: number } | { action: "fail" } {
+  if (retryCount >= maxRetries) return { action: "fail" };
+  const gate = checkProviderGate(context.providerBreaker, providerId, model);
+  if (gate.allowed) {
+    const baseMs = 500 * 2 ** retryCount;
+    const cappedMs = Math.min(baseMs, 32_000);
+    const delayMs = cappedMs + Math.random() * 0.25 * cappedMs;
+    return { action: "retry", delayMs };
+  }
+  if (gate.reason === "at_capacity") {
+    // Short wait for capacity to free up, then retry.
+    return { action: "retry", delayMs: 1000 + Math.random() * 2000 };
+  }
+  // cooldown — do not retry.
+  return { action: "fail" };
+}
+
+/**
+ * Sleep with abort signal awareness. Rejects if the signal fires before the timer.
+ * Used by provider retry loops so /interrupt kills in-flight retry waits immediately.
+ */
+function abortAwareSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error("Aborted"));
+        return;
+      }
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(signal.reason ?? new Error("Aborted"));
+        },
+        { once: true },
+      );
+    }
+  });
 }
 
 function isTodoOnlyRound(toolCalls: ModelToolCall[]): boolean {

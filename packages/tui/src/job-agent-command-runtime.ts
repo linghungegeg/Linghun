@@ -2789,14 +2789,15 @@ export async function runModelBackedAgent(
       }
       if (!retryWithFallback) {
         providerRequestCompleted = true;
+        // Clear breaker on every successful agent provider request.
+        clearProviderBreaker(
+          context.providerBreaker,
+          currentRuntime.provider,
+          currentRuntime.model,
+        );
         if (activeFallback) {
           syncAgentRuntimeFallbackMetadata(context, agent, activeFallback.from, activeFallback.to);
           await persistAgentRun(context, agent);
-          clearProviderBreaker(
-            context.providerBreaker,
-            currentRuntime.provider,
-            currentRuntime.model,
-          );
           await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, {
             ...activeFallback,
             status: "succeeded",

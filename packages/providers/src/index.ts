@@ -1181,35 +1181,42 @@ function inferEndpointProfileFromBaseUrl(baseUrl: string | undefined): EndpointP
   return undefined;
 }
 
+/**
+ * Single-attempt HTTP fetch with request timeout.
+ * Retry decisions are made by the main chain (model-stream-runtime.ts)
+ * so that every retry is visible to the circuit breaker and concurrency gate.
+ */
 async function fetchWithProviderRetry(
   url: string,
   init: RequestInit,
   requestContext?: "foreground" | "agent",
 ): Promise<Response> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= PROVIDER_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      const response = await fetchWithRequestTimeout(url, init, PROVIDER_REQUEST_TIMEOUT_MS);
-      if (!PROVIDER_RETRY_STATUSES.has(response.status) || attempt === PROVIDER_MAX_ATTEMPTS) {
-        return response;
-      }
+  try {
+    const response = await fetchWithRequestTimeout(url, init, PROVIDER_REQUEST_TIMEOUT_MS);
+    if (PROVIDER_RETRY_STATUSES.has(response.status)) {
       const retryAfterMs = readRetryAfterMs(response);
-      const baseMs = retryAfterMs ?? PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1);
-      const delayMs = baseMs + Math.random() * 0.3 * baseMs;
-      getRegisteredHooks().onRetry?.({ attempt, maxAttempts: PROVIDER_MAX_ATTEMPTS, delayMs, statusCode: response.status, requestContext });
-      await sleep(delayMs);
-    } catch (error) {
-      lastError = error;
-      if (!(error instanceof TypeError) || attempt === PROVIDER_MAX_ATTEMPTS) {
-        throw error;
-      }
-      const baseMs = PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1);
-      const delayMs = baseMs + Math.random() * 0.3 * baseMs;
-      getRegisteredHooks().onRetry?.({ attempt, maxAttempts: PROVIDER_MAX_ATTEMPTS, delayMs, statusCode: 0, requestContext });
-      await sleep(delayMs);
+      const delayMs = retryAfterMs ?? PROVIDER_BASE_RETRY_MS;
+      getRegisteredHooks().onRetry?.({
+        attempt: 1,
+        maxAttempts: PROVIDER_MAX_ATTEMPTS,
+        delayMs,
+        statusCode: response.status,
+        requestContext,
+      });
     }
+    return response;
+  } catch (error) {
+    if (error instanceof TypeError) {
+      getRegisteredHooks().onRetry?.({
+        attempt: 1,
+        maxAttempts: PROVIDER_MAX_ATTEMPTS,
+        delayMs: PROVIDER_BASE_RETRY_MS,
+        statusCode: 0,
+        requestContext,
+      });
+    }
+    throw error;
   }
-  throw new Error("Provider retry loop exhausted without returning a response.");
 }
 
 async function fetchWithRequestTimeout(
@@ -1275,8 +1282,20 @@ function readRetryAfterMs(response: Response): number | undefined {
   return undefined;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(resolvePromise, ms);
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          rejectPromise(signal.reason ?? new Error("Aborted"));
+        },
+        { once: true },
+      );
+    }
+  });
 }
 
 async function safeReadResponseText(response: Response): Promise<string | undefined> {

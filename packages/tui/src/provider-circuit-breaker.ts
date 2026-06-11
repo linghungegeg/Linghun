@@ -2,11 +2,11 @@ import type { Language } from "@linghun/shared";
 import { readPositiveIntEnv } from "@linghun/shared";
 
 /**
- * Provider Circuit Breaker / Cooldown — D.8 Provider Resilience Lite
+ * Provider Circuit Breaker / Cooldown + Concurrency Gate
  *
- * In-memory, per provider+model cooldown to avoid hammering a provider
- * that is returning recoverable failures (429/502/503/504, request timeout,
- * stream idle timeout, network TypeError).
+ * In-memory, per provider+model cooldown + concurrency limiter.
+ * All provider requests — foreground and agent — funnel through the same gate
+ * so that retries and failures are visible to the breaker in real time.
  *
  * Does NOT persist state. Does NOT block user manual retry after cooldown.
  * Does NOT affect auth/schema/abort failures.
@@ -22,16 +22,21 @@ export type BreakerEntry = {
   lastFailureAt: number;
   cooldownUntil: number;
   reasonCode: string;
+  /** Number of in-flight requests for this provider+model. */
+  activeCount: number;
+  /** Max concurrent requests for this provider+model. */
+  activeLimit: number;
 };
 
 export type ProviderCircuitBreakerState = {
   entries: Map<BreakerKey, BreakerEntry>;
 };
 
-const BREAKER_FAILURE_THRESHOLD = 10;
+const BREAKER_FAILURE_THRESHOLD = 5;
 const BREAKER_COOLDOWN_MS = readPositiveIntEnv("LINGHUN_PROVIDER_BREAKER_COOLDOWN_MS", 120_000);
+const PROVIDER_ACTIVE_LIMIT = readPositiveIntEnv("LINGHUN_PROVIDER_ACTIVE_LIMIT", 3);
 
-/** Recoverable error codes that trigger the breaker. */
+/** Recoverable error codes that trigger the breaker and consume retry budget. */
 const RECOVERABLE_CODES = new Set([
   "PROVIDER_SERVER_ERROR",
   "PROVIDER_RATE_LIMITED",
@@ -43,6 +48,7 @@ const RECOVERABLE_CODES = new Set([
   "PROVIDER_RETRY_EXHAUSTED",
   "PROVIDER_NON_SSE_STREAM",
   "PROVIDER_MALFORMED_STREAM",
+  "PROVIDER_QUOTA_EXHAUSTED",
 ]);
 
 export function createProviderCircuitBreakerState(): ProviderCircuitBreakerState {
@@ -60,6 +66,98 @@ export function makeBreakerKey(providerId: string, model: string): BreakerKey {
 export function isRecoverableProviderFailure(errorCode: string): boolean {
   return RECOVERABLE_CODES.has(errorCode);
 }
+
+// ─── Concurrency Gate ────────────────────────────────────────────────
+
+export type ProviderGateResult =
+  | { allowed: true }
+  | { allowed: false; reason: "cooldown"; remainingMs: number; reasonCode: string }
+  | { allowed: false; reason: "at_capacity"; activeCount: number; activeLimit: number };
+
+/**
+ * Check whether a new request can proceed for this provider+model.
+ * Blocks on cooldown (open breaker) and concurrency cap (activeCount ≥ limit).
+ */
+export function checkProviderGate(
+  state: ProviderCircuitBreakerState,
+  providerId: string,
+  model: string,
+): ProviderGateResult {
+  // Check cooldown first — if the breaker is open, no request can proceed.
+  const cooldown = checkProviderCooldown(state, providerId, model);
+  if (cooldown.blocked) {
+    return {
+      allowed: false,
+      reason: "cooldown",
+      remainingMs: cooldown.remainingMs,
+      reasonCode: cooldown.reasonCode,
+    };
+  }
+  // Check concurrency capacity.
+  const key = makeBreakerKey(providerId, model);
+  const entry = state.entries.get(key);
+  const limit = entry?.activeLimit ?? PROVIDER_ACTIVE_LIMIT;
+  const count = entry?.activeCount ?? 0;
+  if (count >= limit) {
+    return { allowed: false, reason: "at_capacity", activeCount: count, activeLimit: limit };
+  }
+  return { allowed: true };
+}
+
+/**
+ * Attempt to reserve a concurrency slot for this provider+model.
+ * Returns true if a slot was acquired.
+ */
+export function acquireProviderSlot(
+  state: ProviderCircuitBreakerState,
+  providerId: string,
+  model: string,
+): boolean {
+  const key = makeBreakerKey(providerId, model);
+  const existing = state.entries.get(key);
+  const limit = existing?.activeLimit ?? PROVIDER_ACTIVE_LIMIT;
+  const count = existing?.activeCount ?? 0;
+  if (count >= limit) return false;
+  state.entries.set(key, {
+    providerId,
+    model,
+    state: existing?.state ?? "closed",
+    consecutiveFailures: existing?.consecutiveFailures ?? 0,
+    lastFailureAt: existing?.lastFailureAt ?? 0,
+    cooldownUntil: existing?.cooldownUntil ?? 0,
+    reasonCode: existing?.reasonCode ?? "",
+    activeCount: count + 1,
+    activeLimit: limit,
+  });
+  return true;
+}
+
+/**
+ * Release a concurrency slot for this provider+model.
+ * Cleans up the entry if it has no meaningful state left.
+ */
+export function releaseProviderSlot(
+  state: ProviderCircuitBreakerState,
+  providerId: string,
+  model: string,
+): void {
+  const key = makeBreakerKey(providerId, model);
+  const existing = state.entries.get(key);
+  if (!existing) return;
+  const count = Math.max(0, existing.activeCount - 1);
+  if (
+    count === 0 &&
+    existing.state === "closed" &&
+    existing.consecutiveFailures === 0 &&
+    existing.cooldownUntil === 0
+  ) {
+    state.entries.delete(key);
+  } else {
+    state.entries.set(key, { ...existing, activeCount: count });
+  }
+}
+
+// ─── Failure Recording ───────────────────────────────────────────────
 
 /**
  * Record a provider failure. If the failure is recoverable and the threshold
@@ -91,9 +189,13 @@ export function recordProviderFailure(
     lastFailureAt: now,
     cooldownUntil,
     reasonCode: errorCode,
+    activeCount: existing?.activeCount ?? 0,
+    activeLimit: existing?.activeLimit ?? PROVIDER_ACTIVE_LIMIT,
   });
   return breakerState === "open" && previousState !== "open";
 }
+
+// ─── Breaker Clear ───────────────────────────────────────────────────
 
 /**
  * Clear the breaker for a provider+model after a successful request.
@@ -103,8 +205,28 @@ export function clearProviderBreaker(
   providerId: string,
   model: string,
 ): void {
-  state.entries.delete(makeBreakerKey(providerId, model));
+  // Preserve activeCount through the clear — concurrent requests may still be in-flight.
+  const key = makeBreakerKey(providerId, model);
+  const existing = state.entries.get(key);
+  const count = existing?.activeCount ?? 0;
+  if (count > 0) {
+    state.entries.set(key, {
+      providerId,
+      model,
+      state: "closed",
+      consecutiveFailures: 0,
+      lastFailureAt: 0,
+      cooldownUntil: 0,
+      reasonCode: "",
+      activeCount: count,
+      activeLimit: existing?.activeLimit ?? PROVIDER_ACTIVE_LIMIT,
+    });
+  } else {
+    state.entries.delete(key);
+  }
 }
+
+// ─── Cooldown Check ──────────────────────────────────────────────────
 
 export type CooldownCheckResult =
   | { blocked: false }
@@ -113,6 +235,7 @@ export type CooldownCheckResult =
 /**
  * Check if a provider+model is currently in cooldown.
  * Returns remaining cooldown time if blocked.
+ * On cooldown expiry, transitions to half-open and resets the failure count.
  */
 export function checkProviderCooldown(
   state: ProviderCircuitBreakerState,
@@ -126,8 +249,11 @@ export function checkProviderCooldown(
   }
   const now = Date.now();
   if (now >= entry.cooldownUntil) {
+    // Half-open: cooldown expired, reset failure count so the next failure
+    // starts from 1 instead of continuing from the previous accumulation.
     entry.state = "half-open";
     entry.cooldownUntil = 0;
+    entry.consecutiveFailures = 0;
     state.entries.set(key, entry);
     return { blocked: false };
   }
@@ -138,6 +264,8 @@ export function checkProviderCooldown(
     entry,
   };
 }
+
+// ─── Formatting ──────────────────────────────────────────────────────
 
 /**
  * Format a human-readable cooldown message for the user.
@@ -193,5 +321,6 @@ export function formatCooldownDoctorLine(
 export const BREAKER_CONSTANTS = {
   FAILURE_THRESHOLD: BREAKER_FAILURE_THRESHOLD,
   COOLDOWN_MS: BREAKER_COOLDOWN_MS,
+  PROVIDER_ACTIVE_LIMIT,
   RECOVERABLE_CODES,
 } as const;
