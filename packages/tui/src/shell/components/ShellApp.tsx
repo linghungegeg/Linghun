@@ -356,9 +356,14 @@ function TaskLayout({
           </Box>
         ) : null}
 
-        {/* Agent & Workflow trees — fixed bottom above composer (CCB FullscreenLayout bottom: Spinner → PromptInput → Footer). */}
+        <Box flexDirection="column" width={cw} paddingTop={1}>
+          <Composer view={view} onInput={controller.onInput} capability={capability} />
+        </Box>
+
+        {/* Agent & Workflow trees — pinned below composer, above footer.
+            CCB FullscreenLayout: Spinner → PromptInput → TeammatePills → Footer. */}
         {view.agentProgressTree ? (
-          <Box width={cw}>
+          <Box width={cw} marginTop={1}>
             <AgentProgressTree
               tree={view.agentProgressTree}
               width={cw}
@@ -369,7 +374,7 @@ function TaskLayout({
         ) : null}
 
         {view.workflowProgressView ? (
-          <Box width={cw}>
+          <Box width={cw} marginTop={1}>
             <WorkflowProgressView
               workflow={view.workflowProgressView}
               width={cw}
@@ -378,10 +383,6 @@ function TaskLayout({
             />
           </Box>
         ) : null}
-
-        <Box flexDirection="column" width={cw} paddingTop={1}>
-          <Composer view={view} onInput={controller.onInput} capability={capability} />
-        </Box>
 
         {/* Task footer — minimal status line: permission mode · model · cache · index · reasoning. NOT the
             full StatusTray; cost and background summaries stay out of the default Task surface.
@@ -608,6 +609,9 @@ function activityMarker(phase: TaskActivityView["phase"], frame: number, noColor
 
 function activityText(activity: TaskActivityView, frame: number): string {
   if (activity.phase !== "thinking") return activity.text;
+  // Use concrete sub-phase label from the runtime when available.
+  if (activity.thinkingLabel) return activity.thinkingLabel;
+  // Fallback: cycle verbs only when the runtime hasn't provided a concrete label.
   if (activity.text !== "Thinking…" && activity.text !== "正在思考…") return activity.text;
   const verbs = activity.text.startsWith("Thinking")
     ? ["Thinking", "Reading context", "Planning"]

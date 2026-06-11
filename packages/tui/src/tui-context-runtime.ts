@@ -521,6 +521,8 @@ export type TuiContext = {
   agentTreeState?: { cursor: number; expandedId?: string };
   /** Agent completion timestamps for eviction delay (Phase 5). Cleared on next render cycle. */
   agentCompletedAt?: Record<string, number>;
+  /** Workflow completion timestamps for eviction delay. Completed workflows stay visible briefly then auto-dismiss. */
+  workflowCompletedAt?: Record<string, number>;
   /** R6 — notification callback, initialized by index.ts to push transient notifications. */
   pushNotification?: (
     text: string,

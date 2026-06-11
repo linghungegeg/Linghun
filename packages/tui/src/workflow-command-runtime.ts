@@ -266,6 +266,7 @@ export async function handleWorkflowsCommand(
     const result = generateWorkflowPlanPreview({
       goal,
       permissionMode: context.permissionMode,
+      language: context.language,
       ...buildWorkflowPlannerContextInput(context),
     });
     const isEn = context.language === "en-US";
@@ -789,6 +790,7 @@ export async function runWorkflowSteps(
   const preview = generateWorkflowPlanPreview({
     goal,
     permissionMode: context.permissionMode,
+    language: context.language,
     agents: options.agents,
     multiAgent: options.multiAgent,
     runningCap: options.runningCap,

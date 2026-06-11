@@ -32,6 +32,7 @@ export type WorkflowPlannerEntryResult =
 export type WorkflowPlannerGoal = {
   goal: string;
   permissionMode: PermissionMode;
+  language?: "zh-CN" | "en-US";
   confirmedPhaseStopPoints?: string[];
   agents?: number;
   multiAgent?: boolean;
@@ -191,6 +192,7 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
           runningCap,
           multiAgent: input.multiAgent === true,
           teamName: input.teamName,
+          language: input.language,
         }),
       },
     ],
@@ -201,11 +203,37 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
   };
 }
 
+const WORKFLOW_STEP_TITLES: Record<string, Record<string, string>> = {
+  "zh-CN": {
+    "Explore source surface": "探索源码层面",
+    "Explore verification surface": "探索验证层面",
+    "Explore context": "探索上下文",
+    "Architecture review": "架构审查",
+    "Run durable multi-agent job batch": "运行持久化多智能体作业",
+    "Implement changes": "实施变更",
+    "Verify result": "验证结果",
+  },
+  "en-US": {
+    "Explore source surface": "Explore source surface",
+    "Explore verification surface": "Explore verification surface",
+    "Explore context": "Explore context",
+    "Architecture review": "Architecture review",
+    "Run durable multi-agent job batch": "Run durable multi-agent job batch",
+    "Implement changes": "Implement changes",
+    "Verify result": "Verify result",
+  },
+};
+
+function t(key: string, language: "zh-CN" | "en-US"): string {
+  return WORKFLOW_STEP_TITLES[language]?.[key] ?? key;
+}
+
 function buildSlicesForGoal(
   goal: string,
   permissionMode: PermissionMode,
-  options: { requestedAgents?: number; runningCap?: number; multiAgent: boolean; teamName?: string },
+  options: { requestedAgents?: number; runningCap?: number; multiAgent: boolean; teamName?: string; language?: "zh-CN" | "en-US" },
 ) {
+  const lang = options.language ?? "zh-CN";
   const readonlyAuditGoal = isReadonlyAuditGoal(goal);
   const multiSliceGoal =
     options.multiAgent ||
@@ -216,7 +244,7 @@ function buildSlicesForGoal(
     ? [
         {
           id: "slice-explore-source",
-          title: "Explore source surface",
+          title: t("Explore source surface", lang),
           role: "explorer",
           status: "queued",
           dependsOnSliceIds: [],
@@ -228,7 +256,7 @@ function buildSlicesForGoal(
         },
         {
           id: "slice-explore-verification",
-          title: "Explore verification surface",
+          title: t("Explore verification surface", lang),
           role: "verifier",
           status: "queued",
           dependsOnSliceIds: [],
@@ -242,7 +270,7 @@ function buildSlicesForGoal(
     : [
         {
           id: "slice-explore",
-          title: "Explore context",
+          title: t("Explore context", lang),
           role: "explorer",
           status: "queued",
           dependsOnSliceIds: [],
@@ -258,7 +286,7 @@ function buildSlicesForGoal(
     ...exploreSlices,
     {
       id: "slice-architecture-review",
-      title: "Architecture review",
+      title: t("Architecture review", lang),
       role: "planner",
       status: "queued",
       dependsOnSliceIds: exploreDeps,
@@ -287,7 +315,7 @@ function buildSlicesForGoal(
     const useDurableJobBatch = multiSliceGoal && (options.multiAgent || (options.requestedAgents ?? 0) > 1);
     slices.push({
       id: "slice-implement",
-      title: useDurableJobBatch ? "Run durable multi-agent job batch" : "Implement changes",
+      title: useDurableJobBatch ? t("Run durable multi-agent job batch", lang) : t("Implement changes", lang),
       role: "worker",
       status: "queued",
       dependsOnSliceIds: ["slice-architecture-review"],
@@ -319,7 +347,7 @@ function buildSlicesForGoal(
 
   slices.push({
     id: "slice-verify",
-    title: "Verify result",
+    title: t("Verify result", lang),
     role: "verifier",
     status: "queued",
     dependsOnSliceIds: [lastExecutionSlice],

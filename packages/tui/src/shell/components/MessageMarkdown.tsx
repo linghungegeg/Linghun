@@ -46,6 +46,10 @@ const INLINE_TOKEN_RE =
   /(`[^`\n]+`|\*\*[^*\n][^\n]*?\*\*|\*[^*\n][^\n]*?\*|\[[^\]\n]+\]\([^\s)\n]+\))/u;
 const ANSI_REGEX = /\x1B\[[0-9;]*m/gu;
 const TABLE_VERTICAL_FALLBACK_WIDTH = 48;
+const TABLE_MAX_COLUMN_WIDTH = 48;
+const TABLE_MIN_COLUMN_WIDTH = 6;
+/** When content forces per-column width below this, switch to vertical key-value mode. */
+const TABLE_MIN_ACCEPTABLE_COLUMN = 8;
 const MARKDOWN_TOKEN_CACHE_LIMIT = 128;
 const markdownTokenCache = new Map<string, Token[]>();
 const codeHighlightCache = new Map<string, string[]>();
@@ -571,20 +575,29 @@ function padDisplay(value: string, width: number): string {
 
 function tableWidths(table: Tokens.Table, wrapWidth: number): number[] {
   const columnCount = table.header.length;
+  const maxPerCol = Math.max(TABLE_MIN_COLUMN_WIDTH, Math.min(TABLE_MAX_COLUMN_WIDTH, Math.floor(wrapWidth * 0.45)));
   const rawWidths = Array.from({ length: columnCount }, (_, index) => {
     const values = [
       table.header[index]?.text ?? "",
       ...table.rows.map((row) => row[index]?.text ?? ""),
     ];
-    return Math.min(24, Math.max(4, ...values.map((value) => displayWidth(value))));
+    return Math.min(maxPerCol, Math.max(TABLE_MIN_COLUMN_WIDTH, ...values.map((value) => displayWidth(value))));
   });
   const borderWidth = columnCount + 1;
   const paddingWidth = columnCount * 2;
-  const available = Math.max(columnCount * 4, wrapWidth - borderWidth - paddingWidth);
+  const available = Math.max(columnCount * TABLE_MIN_COLUMN_WIDTH, wrapWidth - borderWidth - paddingWidth);
   const total = rawWidths.reduce((sum, width) => sum + width, 0);
   if (total <= available) return rawWidths;
-  const perColumn = Math.max(4, Math.floor(available / columnCount));
-  return rawWidths.map((width) => Math.min(width, perColumn));
+  // Proportional scaling: give wider columns proportionally more room.
+  const scale = available / total;
+  const proportional = rawWidths.map((w) => Math.max(TABLE_MIN_COLUMN_WIDTH, Math.floor(w * scale)));
+  // If any column dips below the acceptable minimum after proportional scaling,
+  // signal the caller to fall back to vertical mode.
+  if (proportional.some((w) => w < TABLE_MIN_ACCEPTABLE_COLUMN)) {
+    // Return raw (un-compressed) widths so renderTable triggers the vertical fallback.
+    return rawWidths;
+  }
+  return proportional;
 }
 
 function renderTable(
@@ -654,7 +667,16 @@ function renderTable(
       <Text color={borderColor} dimColor={dim}>
         {border("├", "┼", "┤")}
       </Text>
-      {rows.flatMap((row, index) => renderRow(row, `${keyPrefix}-row-${index}`))}
+      {rows.flatMap((row, index) => [
+        ...renderRow(row, `${keyPrefix}-row-${index}`),
+        ...(index < rows.length - 1
+          ? [
+              <Text key={`${keyPrefix}-sep-${index}`} color={borderColor} dimColor={dim}>
+                {border("├", "┼", "┤")}
+              </Text>,
+            ]
+          : []),
+      ])}
       <Text color={borderColor} dimColor={dim}>
         {border("└", "┴", "┘")}
       </Text>

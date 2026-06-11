@@ -63,7 +63,9 @@ export function StatusFooter({
     return (
       <Box flexDirection="column" width={width} paddingX={2} paddingTop={1}>
         <Text>
-          <Text dimColor={footer.isRemoteMode}>{footer.permissionMode}</Text>
+          <Text color={footer.permissionModeColor || undefined} dimColor={footer.isRemoteMode}>
+            {footer.permissionMode}
+          </Text>
           <Text color={theme.dim ?? theme.muted} dimColor>
             {footer.cyclePermHint}
           </Text>

@@ -14,6 +14,8 @@ const MAX_LIST_ITEMS = 8;
 const MAX_DETAIL_LINES = 12;
 /** Agent eviction delay: completed agents stay visible for 5s (CCB evictAfter pattern). */
 const AGENT_EVICTION_DELAY_MS = 5_000;
+/** Workflow eviction delay: completed/failed workflows stay visible for 8s then auto-dismiss. */
+const WORKFLOW_EVICTION_DELAY_MS = 8_000;
 
 /**
  * Summarize repetitive activities (e.g. "Read × 5, Glob × 3") instead of
@@ -109,7 +111,31 @@ export function buildWorkflowProgressView(context: TuiContext): WorkflowProgress
     ...(context.workflows.activeRun ? [context.workflows.activeRun] : []),
   ];
   const runs = dedupeById(activeRuns).filter((run) => run.steps.length > 0);
-  const sliced = smartSlice(runs, 3, isActiveWorkflow);
+
+  // Track completion timestamps on first discovery.
+  const now = Date.now();
+  let completedMap = context.workflowCompletedAt;
+  for (const run of runs) {
+    if (
+      (run.status === "completed" || run.status === "failed" || run.status === "cancelled") &&
+      (!completedMap || !completedMap[run.id])
+    ) {
+      if (!completedMap) {
+        context.workflowCompletedAt = {};
+        completedMap = context.workflowCompletedAt;
+      }
+      completedMap[run.id] = now;
+    }
+  }
+
+  // Eviction: recently completed workflows stay visible for WORKFLOW_EVICTION_DELAY_MS.
+  const visible = runs.filter((run) => {
+    if (run.status === "running" || run.status === "blocked" || run.status === "stale") return true;
+    if (!completedMap?.[run.id]) return true;
+    return now - completedMap[run.id] < WORKFLOW_EVICTION_DELAY_MS;
+  });
+
+  const sliced = smartSlice(visible, 3, isActiveWorkflow);
   if (sliced.visible.length === 0) return undefined;
   return {
     runs: sliced.visible.map((run) => {

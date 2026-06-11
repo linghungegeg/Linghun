@@ -2530,6 +2530,11 @@ function currentModelSupportsTools(
   ) {
     return false;
   }
+  // Honour role route allowTools — reviewer/planner may be configured read-only.
+  const route = context.config.modelRoutes.routes.find((r) => r.role === runtime.role);
+  if (route && !route.allowTools) {
+    return false;
+  }
   const known = findKnownModel(runtime.model);
   return known?.supportsTools !== false;
 }

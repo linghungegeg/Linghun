@@ -163,6 +163,8 @@ export type TaskActivityView = {
   language?: "zh-CN" | "en-US";
   totalLines?: number;
   totalBytes?: number;
+  /** Concrete sub-phase label (e.g. "reading_context"), set by the runtime instead of the UI cycling arbitrarily. */
+  thinkingLabel?: string;
 };
 
 /**
@@ -231,6 +233,7 @@ export type TaskPermissionView = {
  */
 export type TaskFooterView = {
   permissionMode: string;
+  permissionModeColor?: string;
   model: string;
   cache: string;
   index: string;

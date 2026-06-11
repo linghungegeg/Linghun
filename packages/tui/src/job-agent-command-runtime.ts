@@ -4149,6 +4149,8 @@ async function runAgentToolInCwd(
   const scoped = createToolContext(agent.cwd);
   scoped.abortSignal = previousSignal;
   scoped.todos = context.tools.todos;
+  scoped.readSnapshots = context.tools.readSnapshots;
+  scoped.patchSummaries = context.tools.patchSummaries;
   const result = await runTool(toolName, input, scoped);
   context.tools.changedFiles.push(
     ...scoped.changedFiles.map((file) =>

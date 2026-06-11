@@ -66,6 +66,22 @@ export function formatPermissionModeLabel(mode: PermissionMode, language: Langua
   return labels[mode] ?? mode;
 }
 
+export function permissionModeSymbol(mode: PermissionMode): string {
+  const symbols: Record<PermissionMode, string> = {
+    default: "○",    // ○
+    "auto-review": "◐", // ◐
+    plan: "⏵⏵",  // ⏵⏵
+    "full-access": "▲", // ▲
+  };
+  return symbols[mode] ?? mode;
+}
+
+export function permissionModeColor(mode: PermissionMode): string {
+  if (mode === "full-access") return "#ff6600";
+  if (mode === "plan") return "#00aaff";
+  return "";
+}
+
 function formatCacheHitRate(hitRate: number | null, language: Language): string {
   const label = language === "en-US" ? "Cache" : "缓存";
   if (hitRate === null) return `${label}?`;
