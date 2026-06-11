@@ -129,8 +129,8 @@ export const toolRegistryStatus = "ready" as const;
 
 const DEFAULT_LIMIT = 200;
 const DEFAULT_SEARCH_LIMIT = 100;
-const DEFAULT_TOOL_TEXT_LIMIT = 8_000;
-const BASH_PREVIEW_LIMIT = 4_000;
+const DEFAULT_TOOL_TEXT_LIMIT = 50_000;
+const BASH_PREVIEW_LIMIT = 30_000;
 const BASH_TIMEOUT_MS = 120_000;
 const MAX_TODO_ITEMS = 100;
 const SEARCH_EXCLUDED_DIR_NAMES = ["node_modules", "dist", ".git", ".codebase-memory"];

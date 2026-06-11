@@ -1394,6 +1394,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   // R6 — Register provider retry hook so the TUI can show retry activity.
   registerProviderHooks({
     onRetry: (info) => {
+      // Agent/workflow background retries must not overwrite main-screen status.
+      if (info.requestContext === "agent") return;
       context.requestActivityPhase = "provider_retrying";
       context.requestActivityToolName = undefined;
       context.retryInfo = {
@@ -2664,7 +2666,18 @@ async function runInkShell(
       stderr: errorOutput,
     });
     activityTicker = setInterval(() => {
-      if (!submittedPending && !context.requestActivityPhase && !context.activeAbortController) {
+      const hasAgents = (context.agents ?? []).length > 0;
+      const hasWorkflows =
+        (context.workflows?.activeRuns ?? []).length > 0 || Boolean(context.workflows?.activeRun);
+      const hasBgTasks = (context.backgroundTasks ?? []).length > 0;
+      if (
+        !submittedPending &&
+        !context.requestActivityPhase &&
+        !context.activeAbortController &&
+        !hasAgents &&
+        !hasWorkflows &&
+        !hasBgTasks
+      ) {
         return;
       }
       shell?.rerender();

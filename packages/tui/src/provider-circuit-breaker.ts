@@ -28,8 +28,8 @@ export type ProviderCircuitBreakerState = {
   entries: Map<BreakerKey, BreakerEntry>;
 };
 
-const BREAKER_FAILURE_THRESHOLD = 2;
-const BREAKER_COOLDOWN_MS = readPositiveIntEnv("LINGHUN_PROVIDER_BREAKER_COOLDOWN_MS", 45_000);
+const BREAKER_FAILURE_THRESHOLD = 10;
+const BREAKER_COOLDOWN_MS = readPositiveIntEnv("LINGHUN_PROVIDER_BREAKER_COOLDOWN_MS", 120_000);
 
 /** Recoverable error codes that trigger the breaker. */
 const RECOVERABLE_CODES = new Set([

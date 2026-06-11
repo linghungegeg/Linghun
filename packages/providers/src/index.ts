@@ -378,11 +378,7 @@ export type ProviderBaseUrlDiagnostic = {
 
 const PROVIDER_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const PROVIDER_MAX_ATTEMPTS = 10;
-/** Agent sub-requests get fewer retries to avoid amplifying rate-limit cascades. */
-const PROVIDER_MAX_ATTEMPTS_AGENT = 3;
 const PROVIDER_BASE_RETRY_MS = 500;
-/** Agent sub-requests bail immediately when Retry-After exceeds this threshold. */
-const AGENT_LONG_RETRY_THRESHOLD_MS = 30_000;
 
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = readPositiveIntEnv(
   "LINGHUN_PROVIDER_STREAM_IDLE_TIMEOUT_MS",
@@ -1190,31 +1186,26 @@ async function fetchWithProviderRetry(
   init: RequestInit,
   requestContext?: "foreground" | "agent",
 ): Promise<Response> {
-  const isAgent = requestContext === "agent";
-  const maxAttempts = isAgent ? PROVIDER_MAX_ATTEMPTS_AGENT : PROVIDER_MAX_ATTEMPTS;
   let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= PROVIDER_MAX_ATTEMPTS; attempt += 1) {
     try {
       const response = await fetchWithRequestTimeout(url, init, PROVIDER_REQUEST_TIMEOUT_MS);
-      if (!PROVIDER_RETRY_STATUSES.has(response.status) || attempt === maxAttempts) {
+      if (!PROVIDER_RETRY_STATUSES.has(response.status) || attempt === PROVIDER_MAX_ATTEMPTS) {
         return response;
       }
       const retryAfterMs = readRetryAfterMs(response);
-      if (isAgent && retryAfterMs !== undefined && retryAfterMs > AGENT_LONG_RETRY_THRESHOLD_MS) {
-        return response;
-      }
       const baseMs = retryAfterMs ?? PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1);
       const delayMs = baseMs + Math.random() * 0.3 * baseMs;
-      getRegisteredHooks().onRetry?.({ attempt, maxAttempts, delayMs, statusCode: response.status });
+      getRegisteredHooks().onRetry?.({ attempt, maxAttempts: PROVIDER_MAX_ATTEMPTS, delayMs, statusCode: response.status, requestContext });
       await sleep(delayMs);
     } catch (error) {
       lastError = error;
-      if (!(error instanceof TypeError) || attempt === maxAttempts) {
+      if (!(error instanceof TypeError) || attempt === PROVIDER_MAX_ATTEMPTS) {
         throw error;
       }
       const baseMs = PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1);
       const delayMs = baseMs + Math.random() * 0.3 * baseMs;
-      getRegisteredHooks().onRetry?.({ attempt, maxAttempts, delayMs, statusCode: 0 });
+      getRegisteredHooks().onRetry?.({ attempt, maxAttempts: PROVIDER_MAX_ATTEMPTS, delayMs, statusCode: 0, requestContext });
       await sleep(delayMs);
     }
   }

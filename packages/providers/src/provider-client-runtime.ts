@@ -22,7 +22,7 @@ export type ProviderClientFactories = {
 export type ProviderClientHooks = {
   beforeRequest?: (context: ProviderClientFactoryContext & { url: string }) => void | Promise<void>;
   afterFallback?: (context: ProviderClientFactoryContext & { reason: string }) => void | Promise<void>;
-  onRetry?: (info: { attempt: number; maxAttempts: number; delayMs: number; statusCode: number }) => void;
+  onRetry?: (info: { attempt: number; maxAttempts: number; delayMs: number; statusCode: number; requestContext?: "foreground" | "agent" }) => void;
 };
 
 let registeredFactories: ProviderClientFactories | undefined;
