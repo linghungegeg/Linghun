@@ -2668,6 +2668,7 @@ export async function runModelBackedAgent(
           messages: preflight.messages,
           model: currentRuntime.model,
           endpointProfile: currentRuntime.endpointProfile,
+          requestContext: "agent",
           ...(currentRuntime.reasoningSent
             ? { reasoningLevel: currentRuntime.reasoningLevel }
             : {}),
