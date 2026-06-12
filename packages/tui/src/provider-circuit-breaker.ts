@@ -51,6 +51,7 @@ const RECOVERABLE_CODES = new Set([
   "PROVIDER_RETRY_EXHAUSTED",
   "PROVIDER_NON_SSE_STREAM",
   "PROVIDER_MALFORMED_STREAM",
+  "PROVIDER_PARTIAL_TOOL_CALL",
   "PROVIDER_QUOTA_EXHAUSTED",
 ]);
 
@@ -410,6 +411,13 @@ export async function* withProviderRetry(
     maxDelayMs?: number;
     skipGate?: boolean;
     skipCooldownCheck?: boolean;
+    onRetry?: (info: {
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      kind: ProviderFailureKind;
+      code: string;
+    }) => void;
   },
 ): AsyncGenerator<LinghunEvent> {
   const maxRetries = opts?.maxRetries ?? PROVIDER_RETRY_MAX_ATTEMPTS;
@@ -535,6 +543,13 @@ export async function* withProviderRetry(
     const baseDelay = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
     const jitter = Math.random() * 0.25 * baseDelay;
     const delayMs = baseDelay + jitter;
+    opts?.onRetry?.({
+      attempt: attempt + 1,
+      maxAttempts: maxRetries,
+      delayMs,
+      kind,
+      code,
+    });
     await sleepAbortable(delayMs, signal);
   }
 }

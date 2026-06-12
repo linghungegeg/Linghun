@@ -73,6 +73,8 @@ describe("D.14B Failure Learning — presenter (summary-first)", () => {
     mergeFailureRecord(state, seed());
     const details = formatFailureLearningDetails(state, "zh-CN");
     expect(details).toContain("根因(推断)");
+    expect(details).toContain("first seen");
+    expect(details).toContain("last seen");
     expect(details).toContain("/failures resolve");
     expect(details).toContain("不代表已修复");
   });

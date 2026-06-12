@@ -113,7 +113,7 @@ export type BashInput = { command: string; timeoutMs?: number };
 export type TodoInput =
   | { action: "list" }
   | { action: "add"; content: string; id?: string }
-  | { action: "start" | "done" | "block"; id: string; evidence?: string };
+  | { action: "start" | "done" | "block"; id: string; content?: string; evidence?: string };
 export type DiffInput = { files?: string[] };
 export type { WebSearchInput, SearchResult } from "./tools/WebSearch/bing-scraper.js";
 export type { WebFetchInput } from "./tools/WebFetch/web-fetch.js";
@@ -610,6 +610,7 @@ function validateTodoInput(input: unknown): TodoInput {
     return {
       action,
       id: readString(record, "id", "Todo"),
+      content: readOptionalString(record, "content", "Todo"),
       evidence: readOptionalString(record, "evidence", "Todo"),
     };
   }
@@ -1244,7 +1245,7 @@ async function todoTool(input: TodoInput, context: ToolContext): Promise<ToolOut
     };
   }
   if (input.action === "start") {
-    const item = findTodo(context.todos, input.id);
+    const item = findTodo(context.todos, input.id, input.content);
     for (const todo of context.todos) {
       if (todo.status === "in_progress") {
         todo.status = "pending";
@@ -1254,12 +1255,12 @@ async function todoTool(input: TodoInput, context: ToolContext): Promise<ToolOut
     item.evidence = input.evidence ?? item.evidence;
   }
   if (input.action === "done") {
-    const item = findTodo(context.todos, input.id);
+    const item = findTodo(context.todos, input.id, input.content);
     item.status = "completed";
     item.evidence = input.evidence ?? item.evidence;
   }
   if (input.action === "block") {
-    const item = findTodo(context.todos, input.id);
+    const item = findTodo(context.todos, input.id, input.content);
     item.status = "blocked";
     item.evidence = input.evidence ?? item.evidence;
   }
@@ -2054,12 +2055,24 @@ foreach ($targetPid in $pids) {
   });
 }
 
-function findTodo(items: TodoItem[], id: string): TodoItem {
+function findTodo(items: TodoItem[], id: string, content?: string): TodoItem {
   const item = items.find((todo) => todo.id === id);
-  if (!item) {
-    throw new Error(`未找到 Todo：${id}。建议：先运行 /todo 查看当前任务。`);
+  if (item) return item;
+
+  const normalizedContent = normalizeTodoContent(content);
+  if (normalizedContent) {
+    const matches = items.filter((todo) => normalizeTodoContent(todo.content) === normalizedContent);
+    if (matches.length === 1) return matches[0] as TodoItem;
+    if (matches.length > 1) {
+      throw new Error(`未找到唯一 Todo：${id}。content 匹配到 ${matches.length} 条；建议：先运行 /todo 查看当前任务。`);
+    }
   }
-  return item;
+
+  throw new Error(`未找到 Todo：${id}。建议：先运行 /todo 查看当前任务。`);
+}
+
+function normalizeTodoContent(content: string | undefined): string {
+  return (content ?? "").trim().replace(/\s+/gu, " ");
 }
 
 function formatTodos(items: TodoItem[]): string {

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LinghunError } from "@linghun/core";
 import { ModelGateway, type LinghunEvent, type ModelInfo, type Provider } from "@linghun/providers";
 import {
   BREAKER_CONSTANTS,
@@ -456,6 +457,79 @@ describe("provider-circuit-breaker", () => {
         randomSpy.mockRestore();
       }
     });
+
+    it("notifies callers before retrying recoverable stream failures", async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        let calls = 0;
+        const retryEvents: Array<{ attempt: number; maxAttempts: number; code: string }> = [];
+        const model: ModelInfo = {
+          id: "gpt-4o",
+          displayName: "GPT-4o",
+          providerId: "openai",
+          contextWindow: 128_000,
+          maxOutputTokens: 4_096,
+          supportsTools: true,
+          supportsVision: false,
+          supportsThinking: false,
+          supportsPromptCache: false,
+        };
+        const provider: Provider = {
+          id: "openai",
+          displayName: "OpenAI",
+          supports: { streaming: true, usage: true },
+          async listModels() {
+            return [model];
+          },
+          async *stream() {
+            calls += 1;
+            if (calls === 1) {
+              yield {
+                type: "error",
+                error: new LinghunError({
+                  code: "PROVIDER_PARTIAL_TOOL_CALL",
+                  message: "unfinished tool call",
+                  recoverable: true,
+                }),
+              } satisfies LinghunEvent;
+              return;
+            }
+            yield {
+              type: "message_stop",
+              id: "stop-retry",
+              chunkCount: 1,
+              hadUsage: false,
+            } satisfies LinghunEvent;
+          },
+        };
+        const gateway = new ModelGateway([provider]);
+        const events: LinghunEvent[] = [];
+        const run = (async () => {
+          for await (const event of withProviderRetry(
+            gateway,
+            state,
+            "openai",
+            { messages: [], model: "gpt-4o" },
+            new AbortController().signal,
+            { maxRetries: 1, onRetry: (info) => retryEvents.push(info) },
+          )) {
+            events.push(event);
+          }
+        })();
+
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(500);
+        await run;
+
+        expect(calls).toBe(2);
+        expect(retryEvents).toMatchObject([
+          { attempt: 1, maxAttempts: 1, code: "PROVIDER_PARTIAL_TOOL_CALL" },
+        ]);
+        expect(events.some((event) => event.type === "message_stop")).toBe(true);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
   });
 
   describe("constants", () => {
@@ -480,6 +554,7 @@ describe("provider-circuit-breaker", () => {
           "PROVIDER_RETRY_EXHAUSTED",
           "PROVIDER_NON_SSE_STREAM",
           "PROVIDER_MALFORMED_STREAM",
+          "PROVIDER_PARTIAL_TOOL_CALL",
         ]),
       );
     });

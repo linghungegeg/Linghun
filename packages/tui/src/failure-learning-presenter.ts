@@ -2,7 +2,7 @@
 //
 // /failures 的 summary-first 文本视图。主屏只露出：active/resolved/ignored 计数 +
 // 最近高价值 active 教训的人话摘要；完整 details（含 root cause guess、source ref、
-// dedupe count、lastSeen）进 detailsText（Ctrl+O 展开）。
+// dedupe count、firstSeen/lastSeen）进 detailsText（Ctrl+O 展开）。
 // 不泄漏 secret/baseUrl/token/长绝对路径（记录在写入时已脱敏）。
 
 import type { Language } from "@linghun/shared";
@@ -122,7 +122,7 @@ export function formatFailureLearningDetails(
     lines.push(`    ${isEn ? "root cause (inferred)" : "根因(推断)"}: ${r.rootCauseGuess}`);
     lines.push(`    ${isEn ? "avoid next time" : "下次避免"}: ${r.avoidNextTime}`);
     lines.push(
-      `    ${isEn ? "severity" : "严重度"} ${r.severity}; last seen ${r.lastSeen}; source ${r.sourceRef}`,
+      `    ${isEn ? "severity" : "严重度"} ${r.severity}; first seen ${r.createdAt}; last seen ${r.lastSeen}; source ${r.sourceRef}`,
     );
   }
   lines.push(

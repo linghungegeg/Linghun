@@ -30,6 +30,7 @@ describe("Phase E request lifecycle provider failure coverage", () => {
     [{ status: 429, message: "too many requests" }, "rate_limit"],
     [{ message: "extended_thinking is unsupported_param" }, "reasoning_unsupported"],
     [{ code: "PROVIDER_STREAM_DECODE_ERROR", message: "bad frame" }, "transit"],
+    [{ code: "PROVIDER_PARTIAL_TOOL_CALL", message: "unfinished tool call" }, "transit"],
     [{ code: "PROVIDER_AUTH_ERROR", message: "unauthorized" }, "auth"],
     [{ code: "MODEL_NOT_FOUND", message: "model not found" }, "not_found"],
     [{ status: 503, message: "service unavailable" }, "gateway"],

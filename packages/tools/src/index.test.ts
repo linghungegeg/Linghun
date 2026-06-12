@@ -112,6 +112,27 @@ describe("Phase 05 core tools", () => {
     expect(todoAdd.output.data).toMatchObject({ createdId: "1" });
   });
 
+  it("resolves a missing Todo id by exact unique content match", async () => {
+    const context = createToolContext();
+
+    await runTool("Todo", { action: "add", content: "实现用户可见通知" }, context);
+    await runTool("Todo", { action: "start", id: "semantic-id", content: "实现用户可见通知" }, context);
+
+    expect(context.todos[0]?.id).toBe("1");
+    expect(context.todos[0]?.status).toBe("in_progress");
+  });
+
+  it("does not guess a missing Todo id when content is ambiguous", async () => {
+    const context = createToolContext();
+
+    await runTool("Todo", { action: "add", content: "重复任务" }, context);
+    await runTool("Todo", { action: "add", content: "重复任务" }, context);
+
+    await expect(
+      runTool("Todo", { action: "start", id: "semantic-id", content: "重复任务" }, context),
+    ).rejects.toThrow("未找到唯一 Todo");
+  });
+
   it("streams Bash progress before returning final output", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);

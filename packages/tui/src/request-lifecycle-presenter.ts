@@ -229,7 +229,8 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
     code === "PROVIDER_STREAM_DECODE_ERROR" ||
     code === "PROVIDER_RETRY_EXHAUSTED" ||
     code === "PROVIDER_NON_SSE_STREAM" ||
-    code === "PROVIDER_MALFORMED_STREAM"
+    code === "PROVIDER_MALFORMED_STREAM" ||
+    code === "PROVIDER_PARTIAL_TOOL_CALL"
   ) {
     return "transit";
   }
@@ -318,7 +319,6 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
     code === "PROVIDER_BAD_REQUEST" ||
     code === "MODEL_TOOLS_UNSUPPORTED" ||
     code === "PROVIDER_PROFILE_MISMATCH" ||
-    code === "PROVIDER_PARTIAL_TOOL_CALL" ||
     /schema|tool_choice|tools?|tool_result|profile mismatch|endpointProfile|请求格式|工具.*不支持/iu.test(
       text,
     )
