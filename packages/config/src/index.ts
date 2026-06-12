@@ -1214,7 +1214,6 @@ async function readProviderEnvConfig(home = homedir()): Promise<Partial<LinghunC
 function mergeProviderEnvConfig(
   projectSettings: Partial<LinghunConfig>,
   providerEnv: Partial<LinghunConfig>,
-  options: { preserveExistingModelRoutes?: boolean } = { preserveExistingModelRoutes: true },
 ): Partial<LinghunConfig> {
   // D.13J Block 1：记录 provider.env 在本次合并中真正覆盖了哪些字段。
   // doctor 据此对用户说明"~/.linghun/provider.env 已合并/覆盖了 modelRoutes/defaultModel/providers"。
@@ -1225,16 +1224,11 @@ function mergeProviderEnvConfig(
     Boolean(providerEnv.modelRoutes) ||
     providerEnvProviderIds.length > 0;
   if (applied) {
-    const preservedProjectModelRoutes = Boolean(
-      options.preserveExistingModelRoutes && projectSettings.modelRoutes,
-    );
     lastProviderEnvMerge = {
       applied: true,
-      overrodeModelRoutes: Boolean(providerEnv.modelRoutes) && !preservedProjectModelRoutes,
+      overrodeModelRoutes: Boolean(providerEnv.modelRoutes && projectSettings.modelRoutes),
       overrodeDefaultModel:
-        Boolean(providerEnv.defaultModel) &&
-        Boolean(projectSettings.defaultModel) &&
-        !preservedProjectModelRoutes,
+        Boolean(providerEnv.defaultModel) && Boolean(projectSettings.defaultModel),
       providerIds: providerEnvProviderIds,
     };
   } else {
@@ -1245,27 +1239,17 @@ function mergeProviderEnvConfig(
       providerIds: [],
     };
   }
-  const preserveProjectRoutes = Boolean(
-    options.preserveExistingModelRoutes && projectSettings.modelRoutes,
-  );
-  const envConfig = preserveProjectRoutes ? omitModelRouteOverrides(providerEnv) : providerEnv;
   return {
     ...projectSettings,
-    ...envConfig,
+    ...providerEnv,
     providers: {
       ...projectSettings.providers,
-      ...envConfig.providers,
+      ...providerEnv.providers,
     },
     modelRoutes:
-      projectSettings.modelRoutes ??
       providerEnv.modelRoutes ??
-      (providerEnv.defaultModel ? undefined : projectSettings.modelRoutes),
+      projectSettings.modelRoutes,
   };
-}
-
-function omitModelRouteOverrides(config: Partial<LinghunConfig>): Partial<LinghunConfig> {
-  const { defaultModel: _defaultModel, modelRoutes: _modelRoutes, ...next } = config;
-  return next;
 }
 
 async function readUserSettings(home = homedir()): Promise<Partial<LinghunConfig>> {

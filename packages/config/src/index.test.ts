@@ -365,7 +365,7 @@ describe("config directories", () => {
     expect(executor?.primaryModel).toBe("deepseek-reasoner");
   });
 
-  it("keeps explicit project routes when shell provider env is complete", async () => {
+  it("uses complete shell provider env over explicit project routes", async () => {
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
     vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
@@ -406,10 +406,70 @@ describe("config directories", () => {
     const config = await envLoadConfig(project);
     const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
 
-    expect(config.defaultModel).toBe("deepseek-reasoner");
+    expect(config.defaultModel).toBe("gpt-5.5");
     expect(config.providers["openai-compatible"]?.apiKey).toBe("sk-shell-openai-secret");
-    expect(executor?.provider).toBe("deepseek");
-    expect(executor?.primaryModel).toBe("deepseek-reasoner");
+    expect(executor?.provider).toBe("openai-compatible");
+    expect(executor?.primaryModel).toBe("gpt-5.5");
+  });
+
+  it("uses user provider.env model over explicit project routes after restart reload", async () => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("USERPROFILE", home);
+    const {
+      getProjectConfigDir: envGetProjectConfigDir,
+      getProjectSettingsPath: envGetProjectSettingsPath,
+      getProviderEnvPath: envGetProviderEnvPath,
+      loadConfig: envLoadConfig,
+    } = await import("./index.js");
+    await mkdir(envGetProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      envGetProjectSettingsPath(project),
+      JSON.stringify({
+        defaultModel: "deepseek-reasoner",
+        modelRoutes: {
+          defaultModel: "deepseek-reasoner",
+          routes: [
+            {
+              role: "executor",
+              provider: "deepseek",
+              primaryModel: "deepseek-reasoner",
+              fallbackModels: [],
+              requiredCapabilities: ["text"],
+              allowTools: true,
+              allowWrite: true,
+              allowBash: true,
+              requireApprovalBeforeRun: true,
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      envGetProviderEnvPath(home),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1",
+        "LINGHUN_OPENAI_API_KEY=sk-provider-secret",
+        "LINGHUN_OPENAI_MODEL=provider-model",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = await envLoadConfig(project);
+    const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
+
+    expect(config.defaultModel).toBe("provider-model");
+    expect(config.providers["openai-compatible"]?.baseUrl).toBe("https://provider.invalid/v1");
+    expect(config.providers["openai-compatible"]?.apiKey).toBe("sk-provider-secret");
+    expect(config.providers["openai-compatible"]?.model).toBe("provider-model");
+    expect(executor?.provider).toBe("openai-compatible");
+    expect(executor?.primaryModel).toBe("provider-model");
   });
 
   it("loads openai endpoint profile and inference level from env", async () => {
