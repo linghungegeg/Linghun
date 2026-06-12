@@ -170,11 +170,14 @@ export function renderInkShell(
 }
 
 export function resolveAlternateScreen(capability: TerminalCapability): boolean {
-  if (process.env.LINGHUN_FULLSCREEN === "0") return false;
-  if (!capability.alternateScreen) return false;
-  // tmux command mode (tmux -CC) does not support alt-screen apps
-  if (process.env.TMUX_PANE || process.env.TERM_PROGRAM === "tmux") return false;
-  return true;
+  // Task 区需要终端原生 scrollback（滚动/选择/复制），不进 alt-screen。
+  // 保留环境变量 LINGHUN_FULLSCREEN=1 作为强制全屏的 opt-in 通道。
+  if (process.env.LINGHUN_FULLSCREEN === "1") {
+    if (!capability.alternateScreen) return false;
+    if (process.env.TMUX_PANE || process.env.TERM_PROGRAM === "tmux") return false;
+    return true;
+  }
+  return false;
 }
 
 function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {

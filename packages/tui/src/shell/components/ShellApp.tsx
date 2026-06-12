@@ -1,9 +1,8 @@
-import { Box, type DOMElement, Text } from "@linghun/ink-runtime";
+import { Box, Static, Text } from "@linghun/ink-runtime";
 import type React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { resolveAlternateScreen } from "../ink-renderer.js";
 import type { TerminalCapability } from "../terminal-capability.js";
-import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
 import { brandWordmark, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
 import type { ShellController, ShellViewModel, TaskActivityView } from "../types.js";
@@ -16,10 +15,8 @@ import { Composer } from "./Composer.js";
 import { ConfigPanel } from "./ConfigPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
 import { StreamingMarkdown } from "./MessageMarkdown.js";
-import { MouseInputRouter } from "./MouseInputRouter.js";
 import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
-import { TranscriptViewport } from "./ScrollViewport.js";
 import { SessionsPanel } from "./SessionsPanel.js";
 import { StatusFooter } from "./StatusFooter.js";
 import { StatusTray } from "./StatusTray.js";
@@ -212,138 +209,90 @@ function TaskLayout({
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
-  const mouseActive = useMemo(
-    () =>
-      resolveTerminalInteractionModes({
-        capability,
-        appOwnedScreen: resolveAlternateScreen(capability),
-      }).mouseTracking,
-    [capability],
-  );
-  const mouseSelectionActive = process.env.LINGHUN_TUI_MOUSE_SELECTION === "1";
+  const contentWidth = Math.max(8, view.width - 4);
+
+  const staticBlocks = view.blocks.filter((b) => b.status !== "running");
+  const dynamicBlocks = view.blocks.filter((b) => b.status === "running");
+
   return (
-    <Box flexDirection="column" width={view.width} height={view.height}>
-      <Box
-        flexDirection="column"
-        flexGrow={1}
-        minHeight={0}
-        paddingX={2}
-        paddingTop={1}
-        position="relative"
-      >
-        <TranscriptViewport
-          scroll={view.transcriptScroll}
-          virtualRange={view.transcriptVirtualRange}
-          onMeasure={(measurement) => {
-            queueMicrotask(() => {
-              void controller.onInput({ type: "transcript-scroll-measure", ...measurement });
-            });
-          }}
-          onGeometry={(geometry) => {
-            queueMicrotask(() => {
-              void controller.onInput({ type: "transcript-viewport-geometry", geometry });
-            });
-          }}
-        >
-          {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
-            ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
-            blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
-          {view.blocks.length > 0 ? (
-            <Box flexDirection="column">
-              {view.blocks.map((block) => (
-                <MeasuredTranscriptBlock
-                  key={block.id}
-                  block={block}
-                  controller={controller}
-                  theme={theme}
-                  cacheWidth={view.width}
-                  width={view.width - 4}
-                />
-              ))}
-            </Box>
-          ) : null}
+    <Box flexDirection="column" width={view.width}>
+      {/* Static zone — completed blocks commit to terminal scrollback */}
+      <Static items={staticBlocks}>
+        {(block) => (
+          <Box key={block.id} paddingX={2}>
+            <ProductBlock block={block} theme={theme} width={contentWidth} language={view.language} />
+          </Box>
+        )}
+      </Static>
 
-          {view.transcriptVirtualRange && view.transcriptVirtualRange.bottomSpacer > 0 ? (
-            <Box height={view.transcriptVirtualRange.bottomSpacer} flexShrink={0} />
-          ) : null}
+      {/* Dynamic zone — running blocks, streaming, activity, composer */}
+      <Box flexDirection="column" paddingX={2}>
+        {dynamicBlocks.length > 0 ? (
+          <Box flexDirection="column">
+            {dynamicBlocks.map((block) => (
+              <ProductBlock key={block.id} block={block} theme={theme} width={contentWidth} language={view.language} />
+            ))}
+          </Box>
+        ) : null}
 
-          {view.streamingAssistantText ? (
-            <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
-              <StreamingMarkdown
-                text={view.streamingAssistantText}
-                theme={theme}
-                wrapWidth={Math.max(8, view.width - 4)}
-              />
-            </Box>
-          ) : null}
-
-          {/* C3：activity / "thinking" 指示器渲染在 transcript 块**之后**（最新
-            用户消息下方），与 CCB 行为一致（spinner 位于对话流底部），而不是
-            压在更早的消息上方。blocks 存在时留 1 行间隔；首帧无 block 时贴顶。 */}
-          {view.activity ? (
-            <Box marginTop={view.blocks.length > 0 || view.streamingAssistantText ? 1 : 0}>
-              <ActivityIndicator
-                activity={view.activity}
-                theme={theme}
-                tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
-              />
-            </Box>
-          ) : null}
-
-          {/* TaskSuggestionBar — 空输入时可用 ↑/↓/Enter 或数字选择。 */}
-          {view.taskListView ? (
-            <TaskListView
-              list={view.taskListView}
-              width={view.width - 4}
-              noColor={noColor}
-              language={view.language}
+        {view.streamingAssistantText ? (
+          <Box marginTop={dynamicBlocks.length > 0 || staticBlocks.length > 0 ? 1 : 0}>
+            <StreamingMarkdown
+              text={view.streamingAssistantText}
+              theme={theme}
+              wrapWidth={contentWidth}
             />
-          ) : null}
+          </Box>
+        ) : null}
 
-          {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
-            <TaskSuggestionBar
-              suggestions={view.taskSuggestions}
-              cursor={view.taskSuggestionCursor ?? 0}
-              width={view.width}
-              noColor={noColor}
+        {view.activity ? (
+          <Box marginTop={dynamicBlocks.length > 0 || view.streamingAssistantText || staticBlocks.length > 0 ? 1 : 0}>
+            <ActivityIndicator
+              activity={view.activity}
+              theme={theme}
+              tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
             />
-          ) : null}
+          </Box>
+        ) : null}
 
-          {view.limitations.length > 0 ? (
-            <Box flexDirection="column" marginTop={1}>
-              {view.limitations.map((item) => (
-                <Text key={item} color={theme.muted}>
-                  {item}
-                </Text>
-              ))}
-            </Box>
-          ) : null}
-        </TranscriptViewport>
+        {view.taskListView ? (
+          <TaskListView
+            list={view.taskListView}
+            width={contentWidth}
+            noColor={noColor}
+            language={view.language}
+          />
+        ) : null}
+
+        {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
+          <TaskSuggestionBar
+            suggestions={view.taskSuggestions}
+            cursor={view.taskSuggestionCursor ?? 0}
+            width={view.width}
+            noColor={noColor}
+          />
+        ) : null}
+
+        {view.limitations.length > 0 ? (
+          <Box flexDirection="column" marginTop={1}>
+            {view.limitations.map((item) => (
+              <Text key={item} color={theme.muted}>
+                {item}
+              </Text>
+            ))}
+          </Box>
+        ) : null}
       </Box>
 
-      <MouseInputRouter
-        active={mouseActive}
-        selectionActive={mouseSelectionActive}
-        scroll={view.transcriptScroll}
-        onInput={(event) => {
-          void controller.onInput(event);
-        }}
-      />
-
-      {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents
-          Yoga from collapsing the band when output is tall. Left alignment
-          matches the Task page's full-width top-left output rhythm.
-          Border-color rules use theme.border (muted) instead of theme.accent
-          so the lines don't compete with content. */}
+      {/* Composer band — always at bottom of dynamic output */}
       <Box flexShrink={0} flexDirection="column">
         {view.backgroundTaskOverlay && !view.permission ? (
           <BackgroundTaskOverlay
             overlay={view.backgroundTaskOverlay}
-            width={view.width - 4}
+            width={contentWidth}
             noColor={noColor}
           />
         ) : null}
-        {/* D.13Q-UX：轻提示固定在 composer 上方，不和 footer/runtime summary 抢最底部。 */}
         <NotificationStack notifications={view.notifications} theme={theme} />
         {view.taskRuntimeSummary ? (
           <Box width={cw} marginTop={1}>
@@ -360,10 +309,6 @@ function TaskLayout({
           <Composer view={view} onInput={controller.onInput} capability={capability} />
         </Box>
 
-        {/* Task footer — minimal status line: permission mode · model · cache · index · reasoning. NOT the
-            full StatusTray; cost and background summaries stay out of the default Task surface.
-            D.13Q-UX：迁到 StatusFooter（左 mode pill + cyclePermHint，右 model/cache/index/reasoning），
-            window<60 走列向布局；model 占位时 dim。 */}
         {view.taskFooter ? (
           <StatusFooter
             footer={view.taskFooter}
@@ -375,12 +320,11 @@ function TaskLayout({
           />
         ) : null}
 
-        {/* Agent & Workflow trees — footer-adjacent runtime status. */}
         {view.agentProgressTree ? (
           <Box width={view.width} paddingX={2}>
             <AgentProgressTree
               tree={view.agentProgressTree}
-              width={view.width - 4}
+              width={contentWidth}
               noColor={noColor}
               language={view.language}
             />
@@ -391,61 +335,18 @@ function TaskLayout({
           <Box width={view.width} paddingX={2}>
             <WorkflowProgressView
               workflow={view.workflowProgressView}
-              width={view.width - 4}
+              width={contentWidth}
               noColor={noColor}
               language={view.language}
             />
           </Box>
         ) : null}
-
-        {/* 底部呼吸：在 footer 与终端最底部之间留 1 行空白，避免 task footer
-            贴在终端最后一行（光标 / 滚动条 / OS 任务栏会与之相邻不舒服）。
-            flexShrink=0 确保 Yoga 不会在内容超长时把这一行吞掉。 */}
-        <Box flexShrink={0} height={view.height >= 30 ? 2 : 1} />
       </Box>
-
     </Box>
   );
 }
 
 // D.13Q-UX: 旧的 TaskFooter 组件已迁到 packages/tui/src/shell/components/StatusFooter.tsx。
-
-function MeasuredTranscriptBlock({
-  block,
-  controller,
-  theme,
-  cacheWidth,
-  width,
-}: {
-  block: ProductBlockViewModel;
-  controller: ShellController;
-  theme: ReturnType<typeof createShellTheme>;
-  cacheWidth: number;
-  width: number;
-}): React.ReactNode {
-  const ref = useRef<DOMElement | null>(null);
-  const last = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    const node = ref.current?.yogaNode;
-    if (!node) return;
-    const measuredWidth = Math.floor(node.getComputedWidth());
-    const measuredHeight = Math.max(1, Math.floor(node.getComputedHeight()));
-    const key = `${block.id}:${measuredWidth}:${measuredHeight}`;
-    if (last.current === key) return;
-    last.current = key;
-    void controller.onInput({
-      type: "transcript-block-measure",
-      id: block.id,
-      width: cacheWidth,
-      height: measuredHeight,
-    });
-  });
-  return (
-    <Box ref={ref} flexDirection="column">
-      <ProductBlock block={block} theme={theme} width={width} />
-    </Box>
-  );
-}
 
 function resolvePanel(
   view: ShellViewModel,
