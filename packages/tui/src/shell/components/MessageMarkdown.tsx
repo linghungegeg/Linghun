@@ -7,6 +7,7 @@ import { memo, useRef } from "react";
 import { charWidth, displayWidth, wrapText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 import type { ProductBlockSelectionRange } from "../types.js";
+import { StructuredDiff } from "./StructuredDiff.js";
 
 const MessageResponseContext = createContext<boolean>(false);
 
@@ -401,6 +402,10 @@ function renderCodeBlock({
   wrapWidth: number;
   blockKey: string;
 }): React.ReactNode {
+  // Phase 3: diff/patch blocks use StructuredDiff for visual diff rendering.
+  if (lang === "diff" || lang === "patch") {
+    return <StructuredDiff key={blockKey} code={code} theme={theme} wrapWidth={wrapWidth} dim={dim} />;
+  }
   const rawLines = code.split("\n");
   const highlighted = getCachedHighlightedCodeLines(code, lang);
   const lineCount = rawLines.length;

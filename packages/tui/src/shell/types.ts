@@ -159,6 +159,8 @@ export type TaskActivityView = {
   phase: "thinking" | "tool_running" | "permission_waiting" | "continuing" | "completed" | "error";
   text: string;
   toolName?: string;
+  /** Short target summary for tool_running phase (e.g. file path, command snippet). */
+  toolTarget?: string;
   elapsed?: string;
   language?: "zh-CN" | "en-US";
   totalLines?: number;

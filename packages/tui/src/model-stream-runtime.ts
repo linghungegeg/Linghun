@@ -243,6 +243,20 @@ function applyHighReasoningToolsRetryShape(
   return request;
 }
 
+function showProviderRetryActivity(
+  context: TuiContext,
+  info: { attempt: number; maxAttempts: number; delayMs: number },
+): void {
+  context.requestActivityPhase = "provider_retrying";
+  context.requestActivityToolName = undefined;
+  context.retryInfo = {
+    attempt: info.attempt,
+    max: info.maxAttempts,
+    delaySec: Math.ceil(info.delayMs / 1000),
+  };
+  context.shellRerender?.();
+}
+
 export function evaluateAggregatedFinalAnswerGate(
   context: TuiContext,
   assistantText: string,
@@ -446,17 +460,19 @@ export function clearRequestActivity(context: TuiContext): void {
   context.requestActivityToolLines = undefined;
   context.requestActivityToolBytes = undefined;
   (context as { requestActivityStartedAt?: number }).requestActivityStartedAt = undefined;
+  (context as { requestActivityToolTarget?: string }).requestActivityToolTarget = undefined;
 }
 
 export function startRequestActivity(
   output: Writable,
   context: TuiContext,
   phase: RequestActivityPhase,
-  values: { reportPath?: string; toolName?: string } = {},
+  values: { reportPath?: string; toolName?: string; toolTarget?: string } = {},
 ): void {
   clearRequestActivity(context);
   context.requestActivityPhase = phase;
   context.requestActivityToolName = values.toolName;
+  (context as { requestActivityToolTarget?: string }).requestActivityToolTarget = values.toolTarget;
   context.requestActivityToolLines = 0;
   context.requestActivityToolBytes = 0;
   (context as { requestActivityStartedAt?: number }).requestActivityStartedAt = Date.now();
@@ -867,6 +883,7 @@ export async function sendMessage(
         selectedRuntime.provider,
         providerRequest,
         controller.signal,
+        { onRetry: (info) => showProviderRetryActivity(context, info) },
       )) {
         if (controller.signal.aborted) {
           clearRequestActivity(context);
@@ -1863,6 +1880,7 @@ async function streamFinalModelAnswerWithoutTools(
       ...promptCacheFields,
     },
     signal,
+    { onRetry: (info) => showProviderRetryActivity(context, info) },
   )) {
     if (signal.aborted) {
       clearRequestActivity(context);
@@ -2242,6 +2260,7 @@ export async function continueModelAfterToolResults(
         continuation.provider,
         providerRequest,
         controller.signal,
+        { onRetry: (info) => showProviderRetryActivity(context, info) },
       )) {
         // D.13O — abort 后必须早返回，迟到的 SSE delta 不再写主屏 / transcript /
         // continuation messages。与 sendMessage 顶层的 controller.signal.aborted

@@ -1424,6 +1424,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     phase: mapped,
     text: texts[phase] ?? texts[mapped] ?? "",
     toolName: toolName ?? undefined,
+    toolTarget: (context as { requestActivityToolTarget?: string }).requestActivityToolTarget,
     elapsed,
     language: context.language,
     totalLines: (context as { requestActivityToolLines?: number }).requestActivityToolLines,

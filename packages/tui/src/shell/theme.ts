@@ -25,6 +25,13 @@ export type ShellTheme = {
   subtle: string | undefined;
   inactive: string | undefined;
   suggestion: string | undefined;
+  /** Phase 1 output-maturity — diff semantic colors. */
+  diffAdded: string | undefined;
+  diffRemoved: string | undefined;
+  diffAddedWord: string | undefined;
+  diffRemovedWord: string | undefined;
+  /** Phase 1 output-maturity — tool execution state color. */
+  toolRunning: string | undefined;
 };
 
 export function createShellTheme(
@@ -62,6 +69,11 @@ export function createShellTheme(
       subtle: undefined,
       inactive: undefined,
       suggestion: undefined,
+      diffAdded: undefined,
+      diffRemoved: undefined,
+      diffAddedWord: undefined,
+      diffRemovedWord: undefined,
+      toolRunning: undefined,
     };
   }
   if (mode === "light") {
@@ -69,10 +81,10 @@ export function createShellTheme(
       mode: "color",
       brand: "black",
       accent: "blue",
-      muted: "gray",
-      border: "gray",
+      muted: "#777777",
+      border: "#bbbbbb",
       warning: "red",
-      userBackground: "gray",
+      userBackground: "#eeeeee",
       status: {
         info: "blue",
         running: "yellow",
@@ -82,29 +94,34 @@ export function createShellTheme(
         blocked: "yellow",
       },
       assistantText: "black",
-      dim: "gray",
-      panel: "gray",
+      dim: "#999999",
+      panel: "#f5f5f5",
       permission: "magenta",
       help: "blue",
       diagnostic: "blue",
-      notification: "gray",
+      notification: "#5a6a7a",
       success: "green",
-      error: "red",
-      inlineCode: "gray",
-      subtle: "gray",
-      inactive: "gray",
+      error: "#d32f2f",
+      inlineCode: "#555555",
+      subtle: "#aaaaaa",
+      inactive: "#666666",
       suggestion: "blue",
       background: "white",
+      diffAdded: "#d4edda",
+      diffRemoved: "#f8d7da",
+      diffAddedWord: "#28a745",
+      diffRemovedWord: "#dc3545",
+      toolRunning: "#b8860b",
     };
   }
   return {
     mode: "color",
     brand: "white",
     accent: "cyan",
-    muted: "gray",
-    border: "gray",
+    muted: "#999999",
+    border: "#444444",
     warning: "redBright",
-    userBackground: "gray",
+    userBackground: "#363636",
     status: {
       info: "cyan",
       running: "yellow",
@@ -114,19 +131,24 @@ export function createShellTheme(
       blocked: "yellow",
     },
     assistantText: undefined,
-    dim: "gray",
-    panel: "gray",
-    permission: "magenta",
+    dim: "#888888",
+    panel: "#333333",
+    permission: "magentaBright",
     help: "blueBright",
     diagnostic: "cyan",
-    notification: "gray",
+    notification: "#7a8a9a",
     success: "green",
-    error: "red",
-    inlineCode: "gray",
-    subtle: "gray",
-    inactive: "gray",
+    error: "#ff6b80",
+    inlineCode: "#b0b0b0",
+    subtle: "#555555",
+    inactive: "#666666",
     suggestion: "blueBright",
     background: undefined,
+    diffAdded: "#1a3d1a",
+    diffRemoved: "#3d1a1a",
+    diffAddedWord: "#2ea043",
+    diffRemovedWord: "#f85149",
+    toolRunning: "#d4a72c",
   };
 }
 

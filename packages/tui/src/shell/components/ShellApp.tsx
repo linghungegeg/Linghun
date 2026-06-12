@@ -455,12 +455,28 @@ function ActivityIndicator({
   const slowText = slowActivityText(activity, tokenCount);
   const showStats =
     activity.phase === "tool_running" && (activity.totalLines || activity.totalBytes);
+  // Phase 2: tool_running with toolName renders CCB-style "● Edit(router.ts)  3s"
+  const isToolHeader = activity.phase === "tool_running" && activity.toolName;
   return (
     <Box flexDirection="column">
       <Box>
-        <Text color={color} bold={activity.phase === "thinking" && frame % 10 < 5}>
-          {marker} {text}
-        </Text>
+        {isToolHeader ? (
+          <>
+            <Text color={theme.toolRunning ?? color}>
+              {marker}{" "}
+            </Text>
+            <Text bold color={theme.toolRunning ?? color}>
+              {activity.toolName}
+            </Text>
+            {activity.toolTarget ? (
+              <Text color={theme.muted}>({activity.toolTarget})</Text>
+            ) : null}
+          </>
+        ) : (
+          <Text color={color} bold={activity.phase === "thinking" && frame % 10 < 5}>
+            {marker} {text}
+          </Text>
+        )}
         {activity.elapsed ? (
           <Text
             color={slow ? (theme.warning ?? theme.status.partial) : theme.muted}

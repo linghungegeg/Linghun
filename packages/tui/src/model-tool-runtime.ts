@@ -203,6 +203,33 @@ import {
   runWorkflowVerificationStep,
 } from "./workflow-command-runtime.js";
 
+/**
+ * Extract a short target summary from tool input for ActivityIndicator display.
+ * Returns e.g. "src/router.ts" for file tools, truncated command for Bash, etc.
+ */
+function extractToolTarget(toolName: string, input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const obj = input as Record<string, unknown>;
+  // File-based tools: Read, Write, Edit, etc.
+  if (typeof obj.file_path === "string") {
+    return basename(obj.file_path);
+  }
+  if (typeof obj.path === "string" && typeof obj.pattern === "string") {
+    // Grep/Glob — show pattern
+    return obj.pattern.length > 30 ? `${obj.pattern.slice(0, 27)}…` : obj.pattern;
+  }
+  if (typeof obj.command === "string") {
+    // Bash — first 40 chars of command
+    const cmd = obj.command.trim();
+    return cmd.length > 40 ? `${cmd.slice(0, 37)}…` : cmd;
+  }
+  if (typeof obj.query === "string") {
+    const q = obj.query.trim();
+    return q.length > 30 ? `${q.slice(0, 27)}…` : q;
+  }
+  return undefined;
+}
+
 export function formatAgentRunToolResultData(agent: AgentRun | undefined) {
   if (!agent) {
     return { status: "not_found" };
@@ -626,7 +653,7 @@ export async function executeApprovedModelToolUse(
     rememberBackgroundTask(context, task);
     await appendBackgroundTaskEvent(context, sessionId, task);
   }
-  startRequestActivity(output, context, "tool_running", { toolName });
+  startRequestActivity(output, context, "tool_running", { toolName, toolTarget: extractToolTarget(toolName, toolCall.input) });
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
     id: toolCall.id,
@@ -775,7 +802,7 @@ export async function executeDeferredDispatchToolUse(
   evidenceId?: string;
 }> {
   const dispatchName = toolCall.name;
-  startRequestActivity(output, context, "tool_running", { toolName: dispatchName });
+  startRequestActivity(output, context, "tool_running", { toolName: dispatchName, toolTarget: extractToolTarget(dispatchName, toolCall.input) });
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
     id: toolCall.id,
@@ -1024,7 +1051,7 @@ export async function executeLinghunControlToolUse(
   evidenceId?: string;
   pendingApproval?: boolean;
 }> {
-  startRequestActivity(output, context, "tool_running", { toolName: toolCall.name });
+  startRequestActivity(output, context, "tool_running", { toolName: toolCall.name, toolTarget: extractToolTarget(toolCall.name, toolCall.input) });
   const previousCommandPanelState = context.commandPanelState;
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",

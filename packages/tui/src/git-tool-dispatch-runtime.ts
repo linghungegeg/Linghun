@@ -45,6 +45,19 @@ import {
 import type { PendingModelContinuation, TuiContext } from "./index.js";
 import type { CheckpointState, EvidenceRecord } from "./tui-data-types.js";
 
+/** Extract a short target hint from git tool input (branch name, message, etc.) */
+function extractGitToolTarget(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const obj = input as Record<string, unknown>;
+  if (typeof obj.branch === "string") return obj.branch;
+  if (typeof obj.message === "string") {
+    const msg = obj.message.trim();
+    return msg.length > 30 ? `${msg.slice(0, 27)}…` : msg;
+  }
+  if (typeof obj.ref === "string") return obj.ref;
+  return undefined;
+}
+
 export type GitToolResult = {
   ok: boolean;
   tool: string;
@@ -85,7 +98,7 @@ export type GitToolDispatchDeps = {
     output: Writable,
     context: TuiContext,
     phase: "tool_running",
-    values: { toolName?: string },
+    values: { toolName?: string; toolTarget?: string },
   ) => void;
   clearRequestActivity: (context: TuiContext) => void;
   writeLine: (output: Writable, text: string) => void;
@@ -240,7 +253,7 @@ export async function executeGitToolUse(
   deps: GitToolDispatchDeps,
   continuation?: PendingModelContinuation,
 ): Promise<GitToolResult> {
-  deps.startRequestActivity(output, context, "tool_running", { toolName: toolCall.name });
+  deps.startRequestActivity(output, context, "tool_running", { toolName: toolCall.name, toolTarget: extractGitToolTarget(toolCall.input) });
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
     id: toolCall.id,

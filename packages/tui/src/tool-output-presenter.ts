@@ -726,7 +726,15 @@ function createSummaryFirstPreview(
   if (hasHiddenContent) {
     const hint = formatDetailsHint(language);
     const tail = name === "Bash" && !looksLikeMojibake(text) ? formatBashTail(lines, language) : [];
-    return { text: [`- ${stats.join("; ")}`, ...tail, `- ${hint}`].join("\n"), truncated: true };
+    // Phase 3 — editing tools: inject compact diff fence from details so
+    // MessageMarkdown → StructuredDiff renders a visual patch preview.
+    const diffFence = isEditingTool(name) ? extractCompactDiffFence(output?.details) : "";
+    return {
+      text: [`- ${stats.join("; ")}`, ...tail, diffFence, `- ${hint}`]
+        .filter(Boolean)
+        .join("\n"),
+      truncated: true,
+    };
   }
   if (name === "Bash" && !looksLikeMojibake(text)) {
     const tail = formatBashTail(lines, language);
@@ -802,6 +810,53 @@ function readStringList(value: object | undefined, key: string): string[] {
 
 function isEditingTool(name: ToolName): boolean {
   return name === "Write" || name === "Edit" || name === "MultiEdit";
+}
+
+/**
+ * Phase 3 — extract the before/after changed-line sections from createPatchDetails()
+ * output and wrap them in a ```diff fence so StructuredDiff renders automatically.
+ * Caps at EDIT_DIFF_PREVIEW_LINES to keep primary output compact.
+ */
+const EDIT_DIFF_PREVIEW_LINES = 24;
+
+function extractCompactDiffFence(details: string | undefined): string {
+  if (!details) return "";
+  // createPatchDetails format:
+  //   --- before (first changed context)
+  //   - line1
+  //   - line2
+  //   +++ after (first changed context)
+  //   + line1
+  //   + line2
+  const beforeIdx = details.indexOf("--- before");
+  const afterIdx = details.indexOf("+++ after");
+  if (beforeIdx < 0 || afterIdx < 0) return "";
+
+  const removedRaw = details
+    .slice(beforeIdx, afterIdx)
+    .split("\n")
+    .slice(1) // skip header
+    .filter((l) => l.startsWith("- ") || l.startsWith("-\t"));
+
+  const addedRaw = details
+    .slice(afterIdx)
+    .split("\n")
+    .slice(1) // skip header
+    .filter((l) => l.startsWith("+ ") || l.startsWith("+\t"));
+
+  if (removedRaw.length === 0 && addedRaw.length === 0) return "";
+
+  // Build unified-style lines (without real @@ header, StructuredDiff handles bare +/- too)
+  const diffLines: string[] = [];
+  for (const line of removedRaw.slice(0, EDIT_DIFF_PREVIEW_LINES)) {
+    diffLines.push(line); // already starts with "- "
+  }
+  for (const line of addedRaw.slice(0, EDIT_DIFF_PREVIEW_LINES - diffLines.length)) {
+    diffLines.push(line); // already starts with "+ "
+  }
+  if (diffLines.length === 0) return "";
+
+  return "```diff\n" + diffLines.join("\n") + "\n```";
 }
 
 function looksLikeMojibake(text: string): boolean {

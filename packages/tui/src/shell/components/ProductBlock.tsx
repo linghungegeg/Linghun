@@ -303,8 +303,11 @@ export function ProductBlock({
   return (
     <Box
       flexDirection="column"
-      borderStyle={emphasized ? "single" : undefined}
+      borderStyle={emphasized ? "round" : undefined}
       borderColor={borderColor}
+      borderLeft={false}
+      borderRight={false}
+      borderBottom={false}
       paddingX={emphasized ? 1 : 0}
       marginBottom={1}
     >
