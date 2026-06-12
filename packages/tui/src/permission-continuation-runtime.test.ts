@@ -389,15 +389,32 @@ describe("permission-continuation-runtime", () => {
 
     describe("isReportFileWriteRequest", () => {
       it("detects Chinese report write request", () => {
-        expect(isReportFileWriteRequest("生成报告文件")).toBe(true);
+        expect(isReportFileWriteRequest("生成报告文件 report.md")).toBe(true);
       });
 
       it("detects English report write request", () => {
-        expect(isReportFileWriteRequest("generate report file")).toBe(true);
+        expect(isReportFileWriteRequest("generate report file audit.md")).toBe(true);
       });
 
       it("rejects non-report request", () => {
         expect(isReportFileWriteRequest("read the file")).toBe(false);
+      });
+
+      it("rejects request without .md path", () => {
+        expect(isReportFileWriteRequest("生成报告")).toBe(false);
+        expect(isReportFileWriteRequest("保存报告")).toBe(false);
+      });
+
+      it("rejects false positives like 汇报改动文件", () => {
+        expect(isReportFileWriteRequest("汇报改动文件")).toBe(false);
+        expect(isReportFileWriteRequest("报告汇总")).toBe(false);
+        expect(isReportFileWriteRequest("修复后汇报")).toBe(false);
+        expect(isReportFileWriteRequest("输出结果")).toBe(false);
+      });
+
+      it("requires explicit .md file path", () => {
+        expect(isReportFileWriteRequest("生成报告保存为 report.md")).toBe(true);
+        expect(isReportFileWriteRequest("写入报告到 audit.md")).toBe(true);
       });
     });
 

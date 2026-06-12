@@ -348,11 +348,19 @@ function shouldAttemptSameProviderRetry(kind: ProviderFailureKind): boolean {
 }
 
 function getProviderErrorCode(error: unknown): string {
-  return error instanceof LinghunError
-    ? error.code
-    : error instanceof Error && "code" in error && typeof (error as Record<string, unknown>).code === "string"
-      ? (error as Record<string, string>).code
-      : "PROVIDER_ERROR";
+  if (error instanceof LinghunError) return error.code;
+  if (error instanceof Error && "code" in error && typeof (error as Record<string, unknown>).code === "string") {
+    return (error as Record<string, string>).code;
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as Record<string, unknown>).code === "string"
+  ) {
+    return (error as Record<string, string>).code;
+  }
+  return "PROVIDER_ERROR";
 }
 
 const PROVIDER_RETRY_BASE_MS = 500;
@@ -427,7 +435,7 @@ export async function* withProviderRetry(
             PROVIDER_GATE_WAIT_MS_MIN + Math.random() * PROVIDER_GATE_WAIT_JITTER_MS,
             signal,
           );
-          if (attempt > 0) attempt = Math.max(0, attempt - 1);
+          attempt -= 1;
           continue;
         }
         if (gate.reason === "cooldown") {
@@ -445,16 +453,30 @@ export async function* withProviderRetry(
       }
     }
 
-    // Reserve a slot before streaming.
     const slotAcquired = acquireProviderSlot(state, provider, model);
+    if (!slotAcquired) {
+      await sleepAbortable(
+        PROVIDER_GATE_WAIT_MS_MIN + Math.random() * PROVIDER_GATE_WAIT_JITTER_MS,
+        signal,
+      );
+      attempt -= 1;
+      continue;
+    }
+
     let streamError: unknown;
     let streamCompleted = false;
+    const pendingToolUses: LinghunEvent[] = [];
 
     try {
       for await (const event of gateway.stream(provider, request, signal ?? new AbortController().signal)) {
         if (event.type === "error") {
           streamError = event.error;
+          pendingToolUses.length = 0;
           break;
+        }
+        if (event.type === "tool_use") {
+          pendingToolUses.push(event);
+          continue;
         }
         yield event;
         if (event.type === "message_stop") {
@@ -463,15 +485,23 @@ export async function* withProviderRetry(
       }
     } catch (error) {
       streamError = error;
+      pendingToolUses.length = 0;
     } finally {
-      if (slotAcquired) {
-        releaseProviderSlot(state, provider, model);
-      }
+      releaseProviderSlot(state, provider, model);
+    }
+
+    if (!streamError && !streamCompleted) {
+      streamError = new LinghunError({
+        code: "PROVIDER_STREAM_ERROR",
+        message: `Provider ${provider}/${model} stream ended before message_stop.`,
+        recoverable: true,
+      });
     }
 
     if (!streamError) {
       // Success — clear the breaker for this provider+model.
       clearProviderBreaker(state, provider, model);
+      for (const ev of pendingToolUses) yield ev;
       return;
     }
 

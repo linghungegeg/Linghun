@@ -28502,19 +28502,15 @@ describe("Phase A correctness focused guards", () => {
       const context = await createTestContext(project, store, session, config);
       // Inject heavy data
       context.turnContinuity = {
-        state: {
-          consecutiveFailures: 0,
-          consecutiveSuccesses: 0,
-          dominantTaskKind: null,
-          taskDomainSwitched: false,
-          lastUserStateKind: "neutral" as const,
-          userStatePersistence: 1,
-          totalTurns: 0,
-          messageLengthTrend: "stable" as const,
-          trustScore: 50,
-        },
-        windowSize: 5,
-        momentum: 0,
+        consecutiveFailures: 0,
+        consecutiveSuccesses: 0,
+        dominantTaskKind: null,
+        taskDomainSwitched: false,
+        lastUserStateKind: "neutral" as const,
+        userStatePersistence: 1,
+        totalTurns: 0,
+        messageLengthTrend: "stable" as const,
+        trustScore: 50,
       };
       context.memory.accepted = acceptedMemories as unknown as typeof context.memory.accepted;
       context.failureLearning.records =

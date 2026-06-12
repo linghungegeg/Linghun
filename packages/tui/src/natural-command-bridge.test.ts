@@ -765,8 +765,8 @@ describe("D.13R Git Readiness — /git /worktree /checkpoint 在发现层可见"
 
   it("HelpPanel advanced 分组含 /git / /worktree / /checkpoint", async () => {
     const { buildHelpPanelData } = await import("./shell/models/help-panel.js");
-    const advancedZh = buildHelpPanelData("advanced", 0, "zh-CN");
-    const advancedEn = buildHelpPanelData("advanced", 0, "en-US");
+    const advancedZh = buildHelpPanelData("advanced", 0, 0, "zh-CN");
+    const advancedEn = buildHelpPanelData("advanced", 0, 0, "en-US");
     const slashesZh = advancedZh.entries.map((entry) => entry.slash);
     const slashesEn = advancedEn.entries.map((entry) => entry.slash);
     for (const slash of ["/git", "/worktree", "/checkpoint"]) {

@@ -134,20 +134,11 @@ export function formatCompactStatus(context: TuiContext): string {
     const bar = formatContextProgressBar(contextUsage.ratio, 24);
     lines.push(`  context ${bar} ${contextUsage.usedTokens}/${contextUsage.maxTokens}`);
   }
-  // Phase 10: token 组成细分（若 API 回报了输入/输出 token）
-  if (context.lastApiTokenCount?.inputTokens) {
-    const api = context.lastApiTokenCount;
-    const inputK = Math.round(api.inputTokens / 1000);
-    const outputK = api.outputTokens ? Math.round(api.outputTokens / 1000) : 0;
-    const total = api.inputTokens + (api.outputTokens ?? 0);
-    const inputPct = total > 0 ? Math.round((api.inputTokens / total) * 100) : 0;
-    const outputPct = 100 - inputPct;
-    const barWidth = 20;
-    const inputW = Math.round((inputPct / 100) * barWidth);
-    const outputW = barWidth - inputW;
-    lines.push(
-      `  latest request  █${"█".repeat(inputW)}${"─".repeat(outputW)}  input ${inputK}k (${inputPct}%) · output ${outputK}k (${outputPct}%)`,
-    );
+  // Phase 10: API token count 当前只持久化 inputTokens；不要展示未记录的 output。
+  const apiInputTokens = context.lastApiTokenCount?.inputTokens;
+  if (apiInputTokens !== undefined) {
+    const inputK = Math.round(apiInputTokens / 1000);
+    lines.push(`  latest request tokens: input ${inputK}k`);
   }
   lines.push(
     "- deep scope: full transcript semantic compact",

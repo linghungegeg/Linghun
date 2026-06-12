@@ -410,11 +410,11 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
           : `推理 ${reasoningLevel} 不会发送（当前网关或模型不接受）`;
     const reasoningTechnical = reasoningLevel
       ? endpointProfile === "responses"
-        ? `effective/sent level ${reasoningLevel}`
+        ? `effective/sent reasoning.effort=${reasoningLevel}`
         : endpointProfile === "anthropic_messages"
-          ? `effective/sent level ${reasoningLevel}`
+          ? `effective/sent thinking.budget_tokens=${reasoningLevel === "Low" ? "1024" : reasoningLevel === "Medium" ? "4096" : reasoningLevel === "High" ? "8192" : reasoningLevel}`
           : compatibilityProfile === "permissive_openai_compatible"
-            ? `effective/sent level ${reasoningLevel}`
+            ? `effective/sent reasoning.effort=${reasoningLevel}`
             : `ignored/unsupported/未生效 compatibility profile ${compatibilityProfile}`
       : "not configured/未生效";
     // 顺序保持 technical 在前，让诊断仍容易搜索；human-readable 段放在括号里，

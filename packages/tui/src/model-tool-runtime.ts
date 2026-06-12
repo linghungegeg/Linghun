@@ -173,6 +173,7 @@ import type { PendingModelContinuation, TuiContext } from "./tui-context-runtime
 import { MAX_CHECKPOINTS } from "./tui-context-runtime.js";
 import { createSingleToolCallContinuation } from "./tui-context-runtime.js";
 import type {
+  AgentRun,
   AgentType,
   BackgroundTaskState,
   CheckpointState,
@@ -201,6 +202,21 @@ import {
   runWorkflowSteps,
   runWorkflowVerificationStep,
 } from "./workflow-command-runtime.js";
+
+export function formatAgentRunToolResultData(agent: AgentRun | undefined) {
+  if (!agent) {
+    return { status: "not_found" };
+  }
+  return {
+    agentId: agent.id,
+    status: agent.status,
+    lastTerminalStatus: agent.lastTerminalStatus ?? null,
+    transcriptSessionId: agent.transcriptSessionId,
+    summary: agent.summary,
+    recentResult: agent.lastResultSummary ?? agent.summary,
+    resultFullReport: agent.lastResultFullReport ?? null,
+  };
+}
 
 export async function executeModelToolUse(
   toolCall: ModelToolCall,
@@ -1035,7 +1051,7 @@ export async function executeLinghunControlToolUse(
         ? `Agent ${agent.status}: ${agent.summary}`
         : formatStartAgentDidNotStartMessage(input, context);
       return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
-        agentId: agent?.id,
+        ...formatAgentRunToolResultData(agent),
         status: agent?.status ?? "blocked",
       });
     }
@@ -1068,6 +1084,8 @@ export async function executeLinghunControlToolUse(
                 ? { id: agent.activeTask.id, status: agent.activeTask.status }
                 : null,
               recentResult: agent.lastResultSummary ?? agent.summary,
+              resultFullReport: agent.lastResultFullReport ?? null,
+              transcriptSessionId: agent.transcriptSessionId,
             })),
           },
         );
@@ -1097,7 +1115,7 @@ export async function executeLinghunControlToolUse(
             ? `Agent ${agent.status}: ${agent.summary}`
             : `Agent not found: ${input.agentRef ?? "latest"}`,
           !agent,
-          { agentId: agent?.id, status: agent?.status ?? "not_found" },
+          formatAgentRunToolResultData(agent),
         );
       }
       const agent = await cancelAgentByRef(input.agentRef, context, output);

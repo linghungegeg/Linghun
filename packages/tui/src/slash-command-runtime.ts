@@ -2501,7 +2501,7 @@ export async function recordAgentExecutionEvidence(
     `agent_execution ${agent.type} ${result.status}: ${result.summary}`,
     `agent:${agent.id}`,
     result.status === "completed"
-      ? ["agent_execution", `agent_${agent.type}`, "action_executed"]
+      ? ["agent_execution", `agent_${agent.type}`, "action_executed", "agent_terminal_status"]
       : ["tool_failure", "agent_execution", `agent_${agent.type}`],
   );
   rememberEvidence(context, evidence);

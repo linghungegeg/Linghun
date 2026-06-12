@@ -48,7 +48,11 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
 
   // Track completion timestamps on first discovery (auto-record).
   for (const agent of allAgents) {
-    if (agent.status === "completed" && (!completedMap || !completedMap[agent.id])) {
+    if (
+      agent.status === "idle" &&
+      agent.lastTerminalStatus === "completed" &&
+      (!completedMap || !completedMap[agent.id])
+    ) {
       if (!completedMap) {
         context.agentCompletedAt = {};
         completedMap = context.agentCompletedAt;
@@ -60,7 +64,8 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
   // Eviction: recently completed agents stay visible for AGENT_EVICTION_DELAY_MS.
   const recentlyCompleted = allAgents.filter(
     (a) =>
-      a.status === "completed" &&
+      a.status === "idle" &&
+      a.lastTerminalStatus === "completed" &&
       completedMap?.[a.id] !== undefined &&
       now - completedMap[a.id] < AGENT_EVICTION_DELAY_MS,
   );

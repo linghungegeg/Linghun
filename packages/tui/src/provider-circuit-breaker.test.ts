@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ModelGateway, type LinghunEvent, type ModelInfo, type Provider } from "@linghun/providers";
 import {
   BREAKER_CONSTANTS,
   type ProviderCircuitBreakerState,
@@ -10,6 +11,7 @@ import {
   isRecoverableProviderFailure,
   makeBreakerKey,
   recordProviderFailure,
+  withProviderRetry,
 } from "./provider-circuit-breaker.js";
 
 describe("provider-circuit-breaker", () => {
@@ -360,6 +362,99 @@ describe("provider-circuit-breaker", () => {
       // Schema error should not increment — still at 1
       expect(state.entries.get("openai::gpt-4o")?.consecutiveFailures).toBe(1);
       expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
+    });
+  });
+
+  describe("withProviderRetry", () => {
+    it("queues requests above the provider active limit", async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        const releases: Array<() => void> = [];
+        let active = 0;
+        let maxActive = 0;
+        let started = 0;
+        const model: ModelInfo = {
+          id: "gpt-4o",
+          displayName: "GPT-4o",
+          providerId: "openai",
+          contextWindow: 128_000,
+          maxOutputTokens: 4_096,
+          supportsTools: true,
+          supportsVision: false,
+          supportsThinking: false,
+          supportsPromptCache: false,
+        };
+        const provider: Provider = {
+          id: "openai",
+          displayName: "OpenAI",
+          supports: { streaming: true, usage: true },
+          async listModels() {
+            return [model];
+          },
+          async *stream() {
+            const streamId = started + 1;
+            started += 1;
+            active += 1;
+            maxActive = Math.max(maxActive, active);
+            await new Promise<void>((resolve) => releases.push(resolve));
+            active -= 1;
+            yield {
+              type: "message_stop",
+              id: `stop-${streamId}`,
+              chunkCount: 1,
+              hadUsage: false,
+            } satisfies LinghunEvent;
+          },
+        };
+        const gateway = new ModelGateway([provider]);
+        const signal = new AbortController().signal;
+        const flushMicrotasks = async () => {
+          for (let i = 0; i < 5; i += 1) {
+            await Promise.resolve();
+          }
+        };
+        const collect = async () => {
+          const events: LinghunEvent[] = [];
+          for await (const event of withProviderRetry(
+            gateway,
+            state,
+            "openai",
+            { messages: [], model: "gpt-4o" },
+            signal,
+            { maxRetries: 0 },
+          )) {
+            events.push(event);
+          }
+          return events;
+        };
+
+        const limit = BREAKER_CONSTANTS.PROVIDER_ACTIVE_LIMIT;
+        const runs = Array.from({ length: limit + 1 }, () => collect());
+        await flushMicrotasks();
+
+        expect(started).toBe(limit);
+        expect(maxActive).toBe(limit);
+
+        releases[0]?.();
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(3_000);
+        await flushMicrotasks();
+
+        expect(started).toBe(limit + 1);
+        expect(maxActive).toBe(limit);
+        expect(releases).toHaveLength(limit + 1);
+
+        for (const release of releases.slice(1)) {
+          release();
+        }
+
+        const results = await Promise.all(runs);
+        expect(results).toHaveLength(limit + 1);
+        expect(results.every((events) => events.some((event) => event.type === "message_stop"))).toBe(true);
+        expect(state.entries.size).toBe(0);
+      } finally {
+        randomSpy.mockRestore();
+      }
     });
   });
 

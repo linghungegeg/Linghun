@@ -454,6 +454,7 @@ export type AgentRun = {
   maxTurns?: number;
   permissionMode: PermissionMode;
   status: "running" | "idle" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
+  lastTerminalStatus?: "completed" | "failed" | "blocked";
   activityStatus?:
     | "processing"
     | "idle"
@@ -464,6 +465,7 @@ export type AgentRun = {
   activitySummary?: string;
   activeTask?: AgentSharedTask;
   lastResultSummary?: string;
+  lastResultFullReport?: string;
   transcriptPath: string;
   transcriptSessionId: string;
   mailbox: AgentMailboxMessage[];
@@ -527,6 +529,8 @@ export type DurableJobAgent = {
   startedAt?: string;
   endedAt?: string;
   summary?: string;
+  resultSummary?: string;
+  resultFullReport?: string;
 };
 
 export type NativeRunnerResolutionStatus =

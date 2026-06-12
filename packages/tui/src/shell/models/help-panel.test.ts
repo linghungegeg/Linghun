@@ -30,12 +30,12 @@ describe("help-panel: 分组 + 内容", () => {
   });
 
   it("buildHelpPanelData 把超界 cursor 收敛到合法范围", () => {
-    const data = buildHelpPanelData("core", 999, "zh-CN");
+    const data = buildHelpPanelData("core", 999, 0, "zh-CN");
     expect(data.cursor).toBeLessThan(data.entries.length);
   });
 
   it("buildHelpPanelData 把负 cursor 收敛到 0", () => {
-    const data = buildHelpPanelData("advanced", -5, "zh-CN");
+    const data = buildHelpPanelData("advanced", -5, 0, "zh-CN");
     expect(data.cursor).toBe(0);
   });
 
@@ -48,7 +48,7 @@ describe("help-panel: 分组 + 内容", () => {
 
   it("core help panel is short and does not surface debug/schema/gate internals", () => {
     for (const lang of ["zh-CN", "en-US"] as const) {
-      const data = buildHelpPanelData("core", 0, lang);
+      const data = buildHelpPanelData("core", 0, 0, lang);
       const main = data.entries.map((entry) => `${entry.slash} ${entry.description}`).join("\n");
 
       expect(data.entries.length).toBeLessThanOrEqual(8);

@@ -466,6 +466,9 @@ export type TuiContext = {
    */
   sessionsPanelState?: {
     cursor: number;
+    mode?: "search" | "preview";
+    searchQuery?: string;
+    previewEntryId?: string;
     entries: {
       id: string;
       title: string;

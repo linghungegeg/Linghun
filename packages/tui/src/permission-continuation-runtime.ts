@@ -257,14 +257,15 @@ export function createReportWriteGuard(text: string): ReportWriteGuard | undefin
 }
 
 export function isReportFileWriteRequest(text: string): boolean {
+  const hasExplicitPath = /\.md\b/iu.test(text);
+  if (!hasExplicitPath) {
+    return false;
+  }
   const asksForReport = /报告|report/iu.test(text);
-  const asksToWrite = /生成|写入|创建|保存|输出|写到|写在|generate|write|create|save|output/iu.test(
+  const asksToWrite = /生成|写入|创建|保存|写到|写在|保存为|generate|write|create|save|save as/iu.test(
     text,
   );
-  const asksForFile = /根目录|文件|file|\.md\b|写到|写在|保存为|save as|as\s+[^\s]+\.md/iu.test(
-    text,
-  );
-  return asksForReport && asksToWrite && asksForFile;
+  return asksForReport && asksToWrite;
 }
 
 export function extractRequestedReportPath(text: string): string | undefined {

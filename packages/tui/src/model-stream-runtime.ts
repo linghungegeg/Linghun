@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
-import type { EndpointProfile, ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
+import type {
+  EndpointProfile,
+  ModelGateway,
+  ModelMessage,
+  ModelToolCall,
+} from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import {
@@ -61,7 +66,7 @@ import {
   createModelToolDefinitionsForReportGuard,
   evaluateFinalAnswerClaims,
 } from "./model-loop-runtime.js";
-import type { FinalAnswerClaimVerdict } from "./model-loop-runtime.js";
+import type { FinalAnswerClaimVerdict, FinalAnswerExtendedVerdict } from "./model-loop-runtime.js";
 import {
   buildExtendedDowngradedFinalAnswer,
   createExtendedFinalAnswerReminder,
@@ -93,7 +98,7 @@ import {
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
-import { BREAKER_CONSTANTS, checkProviderGate, clearProviderBreaker, formatCooldownMessage, recordProviderFailure, withProviderRetry } from "./provider-circuit-breaker.js";
+import { clearProviderBreaker, withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   checkAndWriteProviderCooldown,
   recordProviderFallbackAttempt,
@@ -150,6 +155,105 @@ import {
   writeErrorLine,
 } from "./tui-output-surface.js";
 import { ShellBlockOutput } from "./tui-output-surface.js";
+
+type ModelToolExecutionResult = {
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+  pendingApproval?: boolean;
+};
+
+type AggregatedFinalAnswerGateResult =
+  | { status: "passed" }
+  | {
+      status: "needs_disclaimer";
+      claimVerdict?: FinalAnswerClaimVerdict;
+      extendedVerdict?: FinalAnswerExtendedVerdict;
+      unsupportedKinds: string[];
+    };
+
+export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok">): boolean {
+  return result.ok !== true;
+}
+
+export function createToolBatchFailFastSkippedResult(
+  toolCall: ModelToolCall,
+  reason: string,
+): ModelToolExecutionResult {
+  return {
+    ok: false,
+    tool: toolCall.name,
+    text: `Skipped by tool batch fail-fast after consecutive failures: ${reason}`,
+    data: { skipped: true, reason: "tool_batch_fail_fast", lastFailure: reason },
+  };
+}
+
+function pushToolResultMessage(
+  messages: ModelMessage[],
+  toolCall: ModelToolCall,
+  result: ModelToolExecutionResult,
+): void {
+  messages.push({
+    role: "tool",
+    tool_call_id: toolCall.id,
+    content: JSON.stringify(result),
+  });
+}
+
+export function evaluateAggregatedFinalAnswerGate(
+  context: TuiContext,
+  assistantText: string,
+  runExtendedGate = true,
+): AggregatedFinalAnswerGateResult {
+  const claimVerdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
+  const extended = runExtendedGate
+    ? runArchitectureAndCompletenessFinalGate(context, assistantText)
+    : { status: "passed" as const };
+  const needsClaim = claimVerdict.status === "needs_disclaimer";
+  const needsExtended = extended.status === "needs_disclaimer";
+  if (!needsClaim && !needsExtended) {
+    return { status: "passed" };
+  }
+  return {
+    status: "needs_disclaimer",
+    ...(needsClaim ? { claimVerdict } : {}),
+    ...(needsExtended ? { extendedVerdict: extended.verdict } : {}),
+    unsupportedKinds: [
+      ...(needsClaim ? claimVerdict.unsupportedKinds : []),
+      ...(needsExtended ? extended.verdict.unsupportedKinds : []),
+    ],
+  };
+}
+
+function createAggregatedFinalAnswerReminder(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  language: Language,
+): string {
+  return [
+    result.claimVerdict ? createFinalAnswerClaimReminder(result.claimVerdict, language) : "",
+    result.extendedVerdict
+      ? createExtendedFinalAnswerReminder(result.extendedVerdict, language)
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildAggregatedDowngradedFinalAnswer(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  language: Language,
+): string {
+  return [
+    result.claimVerdict ? buildDowngradedFinalAnswer(result.claimVerdict, language) : "",
+    result.extendedVerdict
+      ? buildExtendedDowngradedFinalAnswer(result.extendedVerdict, language)
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
 
 export function handleNaturalInput(
   text: string,
@@ -627,7 +731,6 @@ export async function sendMessage(
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
     let toolFailureRetries = 0;
-    let providerRetryCount = 0;
     const _suggestedMax = metaSchedulerDecision.suggestedMaxTodoRounds;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
@@ -695,7 +798,9 @@ export async function sendMessage(
         return;
       }
       const promptCacheFields = await buildPromptCacheRequestFields(context);
-      for await (const event of gateway.stream(
+      for await (const event of withProviderRetry(
+        gateway,
+        context.providerBreaker,
         selectedRuntime.provider,
         {
           messages: requestMessages,
@@ -767,49 +872,8 @@ export async function sendMessage(
         if (event.type === "error") {
           clearRequestActivity(context);
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
-          const breakerOpened = recordProviderFailure(
-            context.providerBreaker,
-            selectedRuntime.provider,
-            selectedRuntime.model,
-            event.error.code ?? "UNKNOWN",
-          );
-          if (breakerOpened) {
-            context.pushNotification?.(
-              formatCooldownMessage(selectedRuntime.provider, selectedRuntime.model, BREAKER_CONSTANTS.COOLDOWN_MS, context.language),
-              "warning",
-            );
-          }
-          // Main-chain retry: each retry is a single HTTP attempt visible to the breaker.
-          const MAX_MAIN_CHAIN_RETRIES = 5;
-          if (providerRetryCount < MAX_MAIN_CHAIN_RETRIES) {
-            const gate = checkProviderGate(
-              context.providerBreaker,
-              selectedRuntime.provider,
-              selectedRuntime.model,
-            );
-            if (gate.allowed) {
-              const baseMs = 500 * 2 ** providerRetryCount;
-              const cappedMs = Math.min(baseMs, 32_000);
-              const delayMs = cappedMs + Math.random() * 0.25 * cappedMs;
-              context.retryInfo = {
-                attempt: providerRetryCount + 1,
-                max: MAX_MAIN_CHAIN_RETRIES,
-                delaySec: Math.ceil(delayMs / 1000),
-              };
-              context.requestActivityPhase = "provider_retrying";
-              await abortAwareSleep(delayMs, context.activeAbortController?.signal);
-              providerRetryCount += 1;
-              continue modelRoundLoop;
-            }
-            if (gate.reason === "at_capacity") {
-              // Wait for capacity to free up, then retry.
-              await abortAwareSleep(1000 + Math.random() * 2000, context.activeAbortController?.signal);
-              providerRetryCount += 1;
-              continue modelRoundLoop;
-            }
-            // cooldown — fall through to fallback logic.
-          }
-          // Fallback after retries exhausted or breaker open.
+          // withProviderRetry already handled same-provider retries, concurrency gating,
+          // and breaker transitions. Only fallback to a different model remains.
           const fallback = resolveRuntimeFallback(context, selectedRuntime, event.error);
           if (fallback) {
             await recordProviderFallbackAttempt(context, sessionId, {
@@ -952,41 +1016,25 @@ export async function sendMessage(
           reportWriteGuard.finalReferenceReminderSent = true;
           continue;
         }
-        // D.13U — Final Answer Claim Gate（仅一次自我修正）
+        // D.13U — Final Answer Claim Gate 和 Extended Gate 聚合检查
         if (!finalAnswerClaimRetried && assistantText) {
-          const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
-          if (verdict.status === "needs_disclaimer") {
+          const gateResult = evaluateAggregatedFinalAnswerGate(
+            context,
+            assistantText,
+            metaSchedulerDecision.shouldRunFinalAnswerGate,
+          );
+
+          if (gateResult.status === "needs_disclaimer") {
             await appendSystemEvent(
               context,
               sessionId,
-              `final_answer_claim_gate retry kinds=${verdict.unsupportedKinds.join(",")}`,
+              `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
               "warning",
             );
+
             messagesForProvider.push({
               role: "user",
-              content: createFinalAnswerClaimReminder(verdict, context.language),
-            });
-            finalAnswerClaimRetried = true;
-            assistantText = "";
-            // D.13V — 同时清掉本轮 streaming block 累计的违规原文，
-            // 避免 Ctrl+O/details/lastFullOutput 残留。
-            discardAssistantBlock(output, assistantStreamBlockId);
-            continue;
-          }
-        }
-        // D.13V-B — Architecture / Completeness Final Gate（共享一次重试预算）
-        if (!finalAnswerClaimRetried && assistantText && metaSchedulerDecision.shouldRunFinalAnswerGate) {
-          const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
-          if (extended.status === "needs_disclaimer") {
-            await appendSystemEvent(
-              context,
-              sessionId,
-              `final_answer_extended_gate retry kinds=${extended.verdict.unsupportedKinds.join(",")}`,
-              "warning",
-            );
-            messagesForProvider.push({
-              role: "user",
-              content: createExtendedFinalAnswerReminder(extended.verdict, context.language),
+              content: createAggregatedFinalAnswerReminder(gateResult, context.language),
             });
             finalAnswerClaimRetried = true;
             assistantText = "";
@@ -1010,6 +1058,8 @@ export async function sendMessage(
         evidenceRounds += 1;
       }
       let roundHadProgress = false;
+      let batchFailureCount = 0;
+      let lastBatchFailureReason: string | undefined;
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(toolCall, context, sessionId, output, {
           messages: messagesForProvider,
@@ -1024,8 +1074,33 @@ export async function sendMessage(
         if (result.pendingApproval) {
           return;
         }
-        if (result.ok || result.evidenceId) {
+        if (!isToolBatchFailure(result)) {
           roundHadProgress = true;
+          batchFailureCount = 0;
+        } else {
+          batchFailureCount += 1;
+          lastBatchFailureReason = result.text;
+          if (batchFailureCount >= 3) {
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `tool_batch_fail_fast: stopped after ${batchFailureCount} consecutive failures in this batch; last: ${lastBatchFailureReason}`,
+              "warning",
+            );
+            messagesForProvider.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(result),
+            });
+            for (const skippedToolCall of toolCalls.slice(toolCalls.indexOf(toolCall) + 1)) {
+              pushToolResultMessage(
+                messagesForProvider,
+                skippedToolCall,
+                createToolBatchFailFastSkippedResult(skippedToolCall, lastBatchFailureReason),
+              );
+            }
+            break;
+          }
         }
         if (doesWriteSatisfyReportGuard(reportWriteGuard, toolCall, result)) {
           reportWriteGuard.completed = true;
@@ -1124,26 +1199,15 @@ export async function sendMessage(
     // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
     // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
     {
-      const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
-      if (verdict.status === "needs_disclaimer") {
-        assistantText = await downgradeUnsupportedFinalAnswer(
-          assistantText,
-          verdict,
-          context,
-          sessionId,
-          output,
-          assistantStreamBlockId,
-        );
-      }
-      const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
-      if (extended.status === "needs_disclaimer") {
+      const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
+      if (gateResult.status === "needs_disclaimer") {
         await appendSystemEvent(
           context,
           sessionId,
-          `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
+          `final_answer_gate_aggregated downgrade kinds=${gateResult.unsupportedKinds.join(",")}`,
           "warning",
         );
-        assistantText = buildExtendedDowngradedFinalAnswer(extended.verdict, context.language);
+        assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
       const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -1704,6 +1768,8 @@ async function streamFinalModelAnswerWithoutTools(
   let hadThinking = false;
   let ignoredRawToolProtocolText = false;
   let pendingAssistantPreviewText = "";
+  const originalProvider = continuation.provider;
+  const originalModel = continuation.model;
   const runtime = runtimeFromContinuation(continuation);
   const preflight = await prepareMessagesForProviderPreflight({
     messages: continuation.messages,
@@ -1872,26 +1938,15 @@ async function streamFinalModelAnswerWithoutTools(
   }
   if (assistantText) {
     startRequestActivity(output, context, "verifying_final_answer");
-    const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
-    if (verdict.status === "needs_disclaimer") {
-      assistantText = await downgradeUnsupportedFinalAnswer(
-        assistantText,
-        verdict,
-        context,
-        sessionId,
-        output,
-        assistantStreamBlockId,
-      );
-    }
-    const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
-    if (extended.status === "needs_disclaimer") {
+    const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
+    if (gateResult.status === "needs_disclaimer") {
       await appendSystemEvent(
         context,
         sessionId,
-        `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
+        `final_answer_gate_aggregated downgrade kinds=${gateResult.unsupportedKinds.join(",")}`,
         "warning",
       );
-      assistantText = buildExtendedDowngradedFinalAnswer(extended.verdict, context.language);
+      assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
     const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -1928,41 +1983,6 @@ async function streamFinalModelAnswerWithoutTools(
     );
   }
   return assistantText;
-}
-
-async function downgradeUnsupportedFinalAnswer(
-  assistantText: string,
-  verdict: FinalAnswerClaimVerdict,
-  context: TuiContext,
-  sessionId: string,
-  output: Writable,
-  assistantStreamBlockId: string,
-): Promise<string> {
-  await appendSystemEvent(
-    context,
-    sessionId,
-    `final_answer_claim_gate downgrade kinds=${verdict.unsupportedKinds.join(",")}`,
-    "warning",
-  );
-  const downgraded = buildDowngradedFinalAnswer(verdict, context.language);
-  replaceAssistantBlockContent(output, assistantStreamBlockId, downgraded);
-  const isBenignSecretSafety =
-    (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(assistantText) &&
-      !/代码里|调用链是|\bin\s+the\s+code\b|\bcall\s+chain\s+is\b/iu.test(assistantText)) ||
-    verdict.unsupportedKinds.length === 0;
-  if (!isBenignSecretSafety) {
-    await captureFailureLearning(context, sessionId, {
-      category: "final_gate_downgrade",
-      failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
-      rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
-      avoidNextTime:
-        "Only declare completion/verification/fixed when matching evidence exists; otherwise remove the claim or gather evidence first",
-      sourceRef: "event:final_answer_claim_gate",
-      relatedTarget: verdict.unsupportedKinds.join(","),
-      severity: "high",
-    });
-  }
-  return downgraded;
 }
 
 type SuccessfulToolCoherenceKind = "write" | "edit" | "bash";
@@ -2084,7 +2104,6 @@ export async function continueModelAfterToolResults(
   startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
   let finalAnswerClaimRetried = false;
-  let continuationProviderRetryCount = 0;
   let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
@@ -2134,7 +2153,10 @@ export async function continueModelAfterToolResults(
       continuation.messages = preflight.messages;
       const requestMessages = preflight.messages;
       const promptCacheFields = await buildPromptCacheRequestFields(context);
-      for await (const event of gateway.stream(
+      const pendingContinuationToolUses: Array<{ id: string; name: string; input: unknown }> = [];
+      for await (const event of withProviderRetry(
+        gateway,
+        context.providerBreaker,
         continuation.provider,
         {
           messages: requestMessages,
@@ -2174,7 +2196,7 @@ export async function continueModelAfterToolResults(
             pendingAssistantPreviewText = "";
           }
           clearRequestActivity(context);
-          toolCalls.push({ id: event.id, name: event.name, input: event.input });
+          pendingContinuationToolUses.push({ id: event.id, name: event.name, input: event.input });
           continue;
         }
         if (event.type === "usage") {
@@ -2191,41 +2213,11 @@ export async function continueModelAfterToolResults(
         }
         if (event.type === "error") {
           clearRequestActivity(context);
+          pendingContinuationToolUses.length = 0;
           const currentRuntime = runtimeFromContinuation(continuation);
           await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
-          const breakerOpened3 = recordProviderFailure(
-            context.providerBreaker,
-            continuation.provider,
-            continuation.model,
-            event.error.code ?? "UNKNOWN",
-          );
-          if (breakerOpened3) {
-            context.pushNotification?.(
-              formatCooldownMessage(continuation.provider, continuation.model, BREAKER_CONSTANTS.COOLDOWN_MS, context.language),
-              "warning",
-            );
-          }
-          // Main-chain retry for continuation path.
-          const CONT_MAX_RETRIES = 5;
-          const retryDecision = decideProviderRetry(
-            context,
-            continuation.provider,
-            continuation.model,
-            continuationProviderRetryCount,
-            CONT_MAX_RETRIES,
-          );
-          if (retryDecision.action === "retry") {
-            context.retryInfo = {
-              attempt: continuationProviderRetryCount + 1,
-              max: CONT_MAX_RETRIES,
-              delaySec: Math.ceil(retryDecision.delayMs / 1000),
-            };
-            context.requestActivityPhase = "provider_retrying";
-            await abortAwareSleep(retryDecision.delayMs, controller.signal);
-            continuationProviderRetryCount += 1;
-            continue continuationRoundLoop;
-          }
-          // Fallback after retries exhausted or breaker open.
+          // withProviderRetry already handled same-provider retries, concurrency gating,
+          // and breaker transitions. Only fallback to a different model remains.
           const fallback = runtimeFallbackAttempted
             ? undefined
             : resolveRuntimeFallback(context, currentRuntime, event.error);
@@ -2261,6 +2253,9 @@ export async function continueModelAfterToolResults(
           writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
+      }
+      for (const ev of pendingContinuationToolUses) {
+        toolCalls.push(ev);
       }
       const finalVisibleText = textSanitizer.flush();
       assistantText += finalVisibleText;
@@ -2327,43 +2322,23 @@ export async function continueModelAfterToolResults(
           reportWriteGuard.finalReferenceReminderSent = true;
           continue;
         }
-        // D.13U — Final Answer Claim Gate（仅一次自我修正，continuation 镜像）
+        // D.13U — Final Answer Claim Gate + Extended Gate 聚合（continuation 镜像）
         if (!finalAnswerClaimRetried && assistantText) {
-          const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
-          if (verdict.status === "needs_disclaimer") {
+          const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
+          if (gateResult.status === "needs_disclaimer") {
             await appendSystemEvent(
               context,
               sessionId,
-              `final_answer_claim_gate retry kinds=${verdict.unsupportedKinds.join(",")}`,
+              `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
               "warning",
             );
             continuation.messages.push({
               role: "user",
-              content: createFinalAnswerClaimReminder(verdict, context.language),
+              content: createAggregatedFinalAnswerReminder(gateResult, context.language),
             });
             finalAnswerClaimRetried = true;
             assistantText = "";
             // D.13V — 同步丢弃 continuation 当前 streaming block 累计的违规原文。
-            discardAssistantBlock(output, assistantStreamBlockId);
-            continue;
-          }
-        }
-        // D.13V-B — Architecture / Completeness Final Gate（continuation 镜像）
-        if (!finalAnswerClaimRetried && assistantText) {
-          const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
-          if (extended.status === "needs_disclaimer") {
-            await appendSystemEvent(
-              context,
-              sessionId,
-              `final_answer_extended_gate retry kinds=${extended.verdict.unsupportedKinds.join(",")}`,
-              "warning",
-            );
-            continuation.messages.push({
-              role: "user",
-              content: createExtendedFinalAnswerReminder(extended.verdict, context.language),
-            });
-            finalAnswerClaimRetried = true;
-            assistantText = "";
             discardAssistantBlock(output, assistantStreamBlockId);
             continue;
           }
@@ -2385,6 +2360,8 @@ export async function continueModelAfterToolResults(
         evidenceRounds += 1;
       }
       let roundHadProgress = false;
+      let batchFailureCount = 0;
+      let lastBatchFailureReason: string | undefined;
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(
           toolCall,
@@ -2397,8 +2374,33 @@ export async function continueModelAfterToolResults(
         if (result.pendingApproval) {
           return;
         }
-        if (result.ok || result.evidenceId) {
+        if (!isToolBatchFailure(result)) {
           roundHadProgress = true;
+          batchFailureCount = 0;
+        } else {
+          batchFailureCount += 1;
+          lastBatchFailureReason = result.text;
+          if (batchFailureCount >= 3) {
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `tool_batch_fail_fast: stopped after ${batchFailureCount} consecutive failures in continuation batch; last: ${lastBatchFailureReason}`,
+              "warning",
+            );
+            continuation.messages.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(result),
+            });
+            for (const skippedToolCall of toolCalls.slice(toolCalls.indexOf(toolCall) + 1)) {
+              pushToolResultMessage(
+                continuation.messages,
+                skippedToolCall,
+                createToolBatchFailFastSkippedResult(skippedToolCall, lastBatchFailureReason),
+              );
+            }
+            break;
+          }
         }
         if (doesWriteSatisfyReportGuard(continuation.reportWriteGuard, toolCall, result)) {
           continuation.reportWriteGuard.completed = true;
@@ -2440,26 +2442,15 @@ export async function continueModelAfterToolResults(
       // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
       // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
       {
-        const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
-        if (verdict.status === "needs_disclaimer") {
-          assistantText = await downgradeUnsupportedFinalAnswer(
-            assistantText,
-            verdict,
-            context,
-            sessionId,
-            output,
-            assistantStreamBlockId,
-          );
-        }
-        const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
-        if (extended.status === "needs_disclaimer") {
+        const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
+        if (gateResult.status === "needs_disclaimer") {
           await appendSystemEvent(
             context,
             sessionId,
-            `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
+            `final_answer_gate_aggregated downgrade kinds=${gateResult.unsupportedKinds.join(",")}`,
             "warning",
           );
-          assistantText = buildExtendedDowngradedFinalAnswer(extended.verdict, context.language);
+          assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
         const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -2687,59 +2678,6 @@ function formatRawToolProtocolRetryFailure(language: Language): string {
   return language === "en-US"
     ? "The model returned tool protocol as plain text again. I did not run any unstructured tool request; please retry or use an explicit slash command."
     : "模型再次把工具协议写成了正文。Linghun 没有执行任何非结构化工具请求；请重试或使用明确的 slash 命令。";
-}
-
-/**
- * Decide whether the main chain should retry a failed provider request.
- * Checks the breaker/gate state and remaining retry budget.
- * Retry decisions are visible to the breaker — every retry increments failure count.
- */
-function decideProviderRetry(
-  context: TuiContext,
-  providerId: string,
-  model: string,
-  retryCount: number,
-  maxRetries: number,
-): { action: "retry"; delayMs: number } | { action: "fail" } {
-  if (retryCount >= maxRetries) return { action: "fail" };
-  const gate = checkProviderGate(context.providerBreaker, providerId, model);
-  if (gate.allowed) {
-    const baseMs = 500 * 2 ** retryCount;
-    const cappedMs = Math.min(baseMs, 32_000);
-    const delayMs = cappedMs + Math.random() * 0.25 * cappedMs;
-    return { action: "retry", delayMs };
-  }
-  if (gate.reason === "at_capacity") {
-    // Short wait for capacity to free up, then retry.
-    return { action: "retry", delayMs: 1000 + Math.random() * 2000 };
-  }
-  // cooldown — do not retry.
-  return { action: "fail" };
-}
-
-/**
- * Sleep with abort signal awareness. Rejects if the signal fires before the timer.
- * Used by provider retry loops so /interrupt kills in-flight retry waits immediately.
- */
-function abortAwareSleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    if (signal) {
-      if (signal.aborted) {
-        clearTimeout(timer);
-        reject(signal.reason ?? new Error("Aborted"));
-        return;
-      }
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(signal.reason ?? new Error("Aborted"));
-        },
-        { once: true },
-      );
-    }
-  });
 }
 
 function isTodoOnlyRound(toolCalls: ModelToolCall[]): boolean {

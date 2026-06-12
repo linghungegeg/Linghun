@@ -1272,8 +1272,12 @@ function syncJobAssignmentFromAgent(
   assignment.status =
     agent.status === "running"
       ? "running"
-      : agent.status === "completed" || agent.status === "idle"
-        ? "completed"
+      : agent.status === "idle"
+        ? agent.lastTerminalStatus === "failed"
+          ? "failed"
+          : agent.lastTerminalStatus === "blocked"
+            ? "blocked"
+            : "completed"
         : agent.status === "cancelled"
           ? "cancelled"
           : agent.status === "failed"
@@ -2093,6 +2097,21 @@ export async function handleForkCommand(
   }
   const route = resolved.route;
   const effectiveModel = registryAgent?.model ?? route.primaryModel ?? context.model;
+  const cooldown = checkProviderCooldown(
+    context.providerBreaker,
+    route.provider ?? "unconfigured",
+    effectiveModel,
+  );
+  if (cooldown.blocked) {
+    const message = formatCooldownMessage(
+      route.provider ?? "unconfigured",
+      effectiveModel,
+      cooldown.remainingMs,
+      context.language,
+    );
+    writeLine(output, message);
+    return;
+  }
   const registryAllowedTools = normalizeRegistryAllowedTools(registryAgent?.allowedTools);
   const registryMaxTurns = normalizeRegistryAgentMaxTurns(registryAgent?.maxTurns);
   const child = await context.store.create({
@@ -2222,8 +2241,10 @@ export async function completeAgent(
   agent.status = result.status;
   agent.summary = result.summary;
   if (result.status === "completed") {
+    agent.lastTerminalStatus = "completed";
     setAgentIdle(agent, result.summary, now);
   } else {
+    agent.lastTerminalStatus = result.status === "failed" ? "failed" : "blocked";
     setAgentActivity(agent, "blocked", result.summary);
     if (agent.activeTask) {
       agent.activeTask.status = "blocked";
@@ -2297,6 +2318,7 @@ async function failAgent(
   const now = new Date().toISOString();
   const message = error instanceof Error ? error.message : String(error);
   agent.status = "failed";
+  agent.lastTerminalStatus = "failed";
   agent.summary = `agent ${agent.id} 执行失败：${truncateDisplay(message, 160)}`;
   agent.updatedAt = now;
   syncBackgroundWithAgentStatus(task, agent);
@@ -2357,6 +2379,8 @@ export async function runAgentWork(
       report.status === "pass" && !hasRealVerificationPass
         ? `verifier 已完成 synthetic self-check；真实验证未运行；任务「${agent.task}」。`
         : `verifier 已运行验证，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`;
+    const fullReport = `验证报告：\n${report.commands.map((cmd) => `${cmd.kind}: ${cmd.status} (${cmd.durationMs}ms)\n${cmd.summary}`).join("\n")}`;
+    agent.lastResultFullReport = fullReport;
     return {
       status:
         report.status === "pass" ? "completed" : report.status === "fail" ? "failed" : "blocked",
@@ -2633,34 +2657,6 @@ export async function runModelBackedAgent(
         };
       }
       messages.splice(0, messages.length, ...preflight.messages);
-      const cooldown = checkProviderCooldown(
-        context.providerBreaker,
-        currentRuntime.provider,
-        currentRuntime.model,
-      );
-      if (cooldown.blocked) {
-        const message = formatCooldownMessage(
-          currentRuntime.provider,
-          currentRuntime.model,
-          cooldown.remainingMs,
-          context.language,
-        );
-        await context.store.appendEvent(agent.transcriptSessionId, {
-          type: "system_event",
-          id: randomUUID(),
-          level: "warning",
-          message: `agent child provider cooldown: provider ${currentRuntime.provider}; model ${currentRuntime.model}; code ${cooldown.reasonCode}`,
-          createdAt: new Date().toISOString(),
-        });
-        return {
-          status: "blocked",
-          summary:
-            context.language === "en-US"
-              ? `${agent.type} blocked: child model request is waiting before retry. ${message}`
-              : `${agent.type} blocked：子 agent 模型请求正在等待恢复。${message}`,
-          evidenceRefs: [],
-        };
-      }
       let retryWithFallback = false;
       for await (const event of withProviderRetry(
         continuation.gateway,
@@ -2847,6 +2843,7 @@ export async function runModelBackedAgent(
       evidenceRefs: [],
     };
   }
+  agent.lastResultFullReport = finalText;
   return {
     status: "completed",
     summary: `${agent.type} completed：${truncateDisplay(finalText, 500)}`,
@@ -3302,6 +3299,7 @@ export async function cancelAgent(
   }
   const now = new Date().toISOString();
   agent.status = "cancelled";
+  agent.lastTerminalStatus = "blocked";
   agent.summary = `agent ${agent.id} 已取消；主会话可继续。`;
   setAgentActivity(agent, "cancelled", agent.summary);
   if (agent.activeTask) {
@@ -3453,10 +3451,10 @@ export function syncBackgroundWithAgentStatus(
       total: 1,
       label: background.progress?.label ?? agent.type,
     };
-  } else if (agent.status === "idle" || agent.status === "completed") {
+  } else if (agent.status === "idle") {
     background.status = "completed";
     background.currentStep = activitySummary ? `idle: ${activitySummary}` : "idle";
-    background.result = mapAgentBackgroundResult(agent, undefined);
+    background.result = mapAgentBackgroundResult(agent, agent.lastTerminalStatus);
     background.progress = {
       completed: 1,
       total: 1,

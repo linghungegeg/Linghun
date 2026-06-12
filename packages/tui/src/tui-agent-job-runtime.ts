@@ -135,7 +135,7 @@ export function createAgentBackgroundTask(
   const isEn = context.language === "en-US";
   const isTerminal =
     agent.status === "blocked" || agent.status === "cancelled" || agent.status === "failed";
-  const isIdle = agent.status === "idle" || agent.status === "completed";
+  const isIdle = agent.status === "idle";
   const backgroundStatus: BackgroundTaskState["status"] = isTerminal
     ? agent.status === "blocked"
       ? "blocked"
@@ -154,7 +154,7 @@ export function createAgentBackgroundTask(
       ? "cancelled"
       : "fail"
     : isIdle
-      ? mapAgentBackgroundResult(agent, undefined)
+      ? mapAgentBackgroundResult(agent, agent.lastTerminalStatus)
       : agent.status === "stale"
         ? "partial"
         : undefined;
@@ -207,12 +207,16 @@ export function isAgentCancellable(agent: Pick<AgentRun, "status">): boolean {
 
 export function mapAgentBackgroundResult(
   agent: AgentRun,
-  verifierStatus?: string,
+  lastTerminalStatus?: "completed" | "failed" | "blocked",
 ): BackgroundTaskState["result"] {
   if (agent.type !== "verifier") {
     return "partial";
   }
-  return verifierStatus === "pass" ? "partial" : verifierStatus === "fail" ? "fail" : "partial";
+  return lastTerminalStatus === "completed"
+    ? "partial"
+    : lastTerminalStatus === "failed"
+      ? "fail"
+      : "partial";
 }
 
 export function findAgent(context: TuiContext, id: string | undefined): AgentRun | undefined {
@@ -229,7 +233,6 @@ export function findAgent(context: TuiContext, id: string | undefined): AgentRun
   return (
     context.agents.find((agent) => agent.status === "running") ??
     context.agents.find((agent) => agent.status === "idle") ??
-    context.agents.find((agent) => agent.status === "completed") ??
     context.agents.find((agent) => agent.status === "stale") ??
     context.agents.find((agent) => agent.status === "blocked") ??
     context.agents[0]
@@ -241,7 +244,10 @@ export function listCancellableAgents(context: TuiContext): AgentRun[] {
 }
 
 export function formatAgentSummary(agent: AgentRun, _context: TuiContext): string {
-  return `[agent] ${agent.id} · ${agent.type} · ${agent.status} · ${agent.summary}`;
+  const displayStatus = agent.status === "idle" && agent.lastTerminalStatus
+    ? agent.lastTerminalStatus
+    : agent.status;
+  return `[agent] ${agent.id} · ${agent.type} · ${displayStatus} · ${agent.summary}`;
 }
 
 export function findBackgroundTask(

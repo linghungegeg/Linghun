@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { type Language, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
+import { type Language, type PermissionMode, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
 import { calculateContextPercentages } from "../context-window-runtime.js";
 import type { TuiContext } from "../index.js";

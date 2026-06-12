@@ -691,10 +691,10 @@ export function formatJobAgentLabels(agents: DurableJobAgent[]): string {
     agents
       .map(
         (agent) =>
-          `${agent.id}:${agent.displayName ?? deriveAgentDisplayName(agent.type, agent.goal)}:${agent.status}${agent.runId ? `:${agent.runId}` : ""}`,
+          `${agent.id}:${agent.displayName ?? deriveAgentDisplayName(agent.type, agent.goal)}:${agent.status}${agent.runId ? `:${agent.runId}` : ""}${agent.resultSummary ? `:${truncateDisplay(agent.resultSummary, 80)}` : ""}`,
       )
       .join(", "),
-    140,
+    200,
   );
 }
 

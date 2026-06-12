@@ -789,8 +789,28 @@ describe("model-doctor-runtime", () => {
         },
       };
       const output = await formatModelRouteDoctor(makeContext(config));
-      expect(output).toContain("reasoning effective/sent level High");
+      expect(output).toContain("reasoning effective/sent thinking.budget_tokens=8192");
       expect(output).not.toContain("reasoning ignored/unsupported");
+    });
+
+    it("D.13K: anthropic_messages provider + reasoningLevel=Low matches provider budget 1024", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "claude-relay": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test-claude-1234567890",
+            model: "claude-opus-4-7",
+            endpointProfile: "anthropic_messages",
+            reasoningLevel: "Low",
+          },
+        },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("reasoning effective/sent thinking.budget_tokens=1024");
+      expect(output).not.toContain("thinking.budget_tokens=2048");
     });
 
     it("D.13K: anthropic_messages provider 无 reasoningLevel → reasoning=not configured/未生效", async () => {
@@ -859,7 +879,7 @@ describe("model-doctor-runtime", () => {
         "provider openai-compatible; model gpt-5.5; runtime profile openai_responses; endpoint profile responses",
       );
       expect(output).toContain("endpoint path /responses");
-      expect(output).toContain("reasoning effective/sent level High");
+      expect(output).toContain("reasoning effective/sent reasoning.effort=High");
       expect(output).not.toContain("reasoning ignored/unsupported");
     });
 
