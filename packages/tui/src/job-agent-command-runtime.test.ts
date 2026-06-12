@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { evaluateChildAgentSummaryClaims } from "./job-agent-command-runtime.js";
 import { formatAgentRunToolResultData } from "./model-tool-runtime.js";
 import { formatAgentSummary } from "./tui-agent-job-runtime.js";
-import type { AgentRun } from "./tui-data-types.js";
+import type { AgentRun, EvidenceRecord } from "./tui-data-types.js";
 
 function makeAgent(overrides: Partial<AgentRun> = {}): AgentRun {
   return {
@@ -57,5 +58,52 @@ describe("agent terminal status and full report consumption", () => {
 
   it("keeps missing agents explicit instead of fabricating a report", () => {
     expect(formatAgentRunToolResultData(undefined)).toEqual({ status: "not_found" });
+  });
+});
+
+describe("child agent summary claim gate", () => {
+  const evidence = (supportsClaims: string[]): EvidenceRecord => ({
+    id: `ev-${supportsClaims.join("-")}`,
+    kind: "command_output",
+    summary: "test evidence",
+    source: "test",
+    supportsClaims,
+    createdAt: new Date().toISOString(),
+  });
+
+  it("does not downgrade ordinary read-only audit findings", () => {
+    const result = evaluateChildAgentSummaryClaims(
+      "只读审计完成：已读取 README.md 并列出风险边界。",
+      [],
+      "zh-CN",
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.text).toContain("只读审计完成");
+  });
+
+  it("downgrades unsupported test pass claims before agent summary returns", () => {
+    const result = evaluateChildAgentSummaryClaims("测试通过，PASS。", [], "zh-CN");
+
+    expect(result.status).toBe("downgraded");
+    expect(result.text).toContain("高风险结论");
+    expect(result.missingEvidenceKinds).toContain("test result evidence");
+  });
+
+  it("allows test pass claims when matching test evidence exists", () => {
+    const result = evaluateChildAgentSummaryClaims(
+      "测试通过，PASS。",
+      [evidence(["test_passed"])],
+      "zh-CN",
+    );
+
+    expect(result.status).toBe("passed");
+  });
+
+  it("downgrades unsupported file change claims", () => {
+    const result = evaluateChildAgentSummaryClaims("已经修复完成。", [], "zh-CN");
+
+    expect(result.status).toBe("downgraded");
+    expect(result.missingEvidenceKinds).toContain("file change evidence");
   });
 });

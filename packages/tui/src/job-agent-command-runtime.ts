@@ -52,7 +52,11 @@ import {
 } from "./job-runtime.js";
 import { getRoleRoute } from "./model-doctor-runtime.js";
 import { inferProviderForRouteModel } from "./model-doctor-runtime.js";
-import { createModelToolDefinitionsForTools } from "./model-loop-runtime.js";
+import {
+  type FinalAnswerClaimMatch,
+  createModelToolDefinitionsForTools,
+  evaluateStructuredFinalAnswerClaims,
+} from "./model-loop-runtime.js";
 import { getWorkflowRuns } from "./workflow-command-runtime.js";
 import {
   checkProviderCooldown,
@@ -110,6 +114,7 @@ import type {
   DurableJobAgentStatus,
   DurableJobState,
   DurableJobStatus,
+  EvidenceRecord,
   RoleHandoff,
   RoleRouteDecision,
   VerificationReport,
@@ -2909,11 +2914,104 @@ export async function runModelBackedAgent(
     };
   }
   agent.lastResultFullReport = finalText;
+  const summaryGate = evaluateChildAgentSummaryClaims(
+    finalText,
+    context.evidence,
+    context.language,
+  );
+  if (summaryGate.status === "downgraded") {
+    await context.store.appendEvent(agent.transcriptSessionId, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "warning",
+      message: `child_summary_claim_gate: downgraded unsupported claims; missing ${summaryGate.missingEvidenceKinds.join(", ") || "matching evidence"}`,
+      createdAt: new Date().toISOString(),
+    });
+  }
   return {
     status: "completed",
-    summary: `${agent.type} completed：${truncateDisplay(finalText, 500)}`,
+    summary: `${agent.type} completed：${truncateDisplay(summaryGate.text, 500)}`,
     evidenceRefs: [],
   };
+}
+
+export function evaluateChildAgentSummaryClaims(
+  text: string,
+  evidence: EvidenceRecord[],
+  language: TuiContext["language"],
+): {
+  status: "passed" | "downgraded";
+  text: string;
+  missingEvidenceKinds: string[];
+  unsupportedKinds: string[];
+} {
+  const claims = detectChildAgentSummaryClaims(text);
+  if (claims.length === 0) {
+    return { status: "passed", text, missingEvidenceKinds: [], unsupportedKinds: [] };
+  }
+  const verdict = evaluateStructuredFinalAnswerClaims(claims, evidence, new Date(), text);
+  if (verdict.status === "passed") {
+    return { status: "passed", text, missingEvidenceKinds: [], unsupportedKinds: [] };
+  }
+  const missing =
+    Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching evidence";
+  const unsupported = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
+  const safeText =
+    language === "en-US"
+      ? [
+          "Child agent completed its run, but its high-risk claim was downgraded before reporting.",
+          `Missing evidence: ${missing}.`,
+          `Blocked claim types: ${unsupported}.`,
+          "Use the child transcript, tool results, or verification evidence before treating the original claim as proven.",
+        ].join("\n")
+      : [
+          "子 agent 已完成本次运行，但其高风险结论在回流前已被降级。",
+          `缺少证据：${missing}。`,
+          `被拦截的声明类型：${unsupported}。`,
+          "请先查看子 transcript、工具结果或验证 evidence，再把原始结论当作已证明事实。",
+        ].join("\n");
+  return {
+    status: "downgraded",
+    text: safeText,
+    missingEvidenceKinds: verdict.missingEvidenceKinds,
+    unsupportedKinds: verdict.unsupportedKinds,
+  };
+}
+
+function detectChildAgentSummaryClaims(text: string): FinalAnswerClaimMatch[] {
+  const claims: FinalAnswerClaimMatch[] = [];
+  const seen = new Set<string>();
+  const add = (kind: FinalAnswerClaimMatch["kind"], phrase: string): void => {
+    const key = `${kind}\u0000${phrase}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    claims.push({ kind, phrase });
+  };
+  const patterns: Array<{ kind: FinalAnswerClaimMatch["kind"]; pattern: RegExp }> = [
+    {
+      kind: "test_claim",
+      pattern: /测试(?:已)?通过|tests?\s+passed|pytest\s+passed|vitest\s+passed|jest\s+passed/iu,
+    },
+    {
+      kind: "completion_pass",
+      pattern:
+        /(?:typecheck|type\s+check|tsc|build|smoke|测试|构建|类型检查|冒烟).{0,32}(?:PASS|passed|通过)|\bPASS\b/iu,
+    },
+    {
+      kind: "verification_claim",
+      pattern: /验证(?:已)?通过|verification\s+passed|verified\s+pass|verified\s+success/iu,
+    },
+    {
+      kind: "file_change_claim",
+      pattern:
+        /(?:已|已经)?(?:修复|修改|写入|更新)(?:完成|成功|好了)?|fixed\b|implemented\b|wrote\b|updated\b/iu,
+    },
+  ];
+  for (const { kind, pattern } of patterns) {
+    const match = pattern.exec(text);
+    if (match?.[0]) add(kind, match[0]);
+  }
+  return claims;
 }
 
 async function executeAgentToolCall(
@@ -3026,13 +3124,33 @@ async function executeAgentToolCall(
     };
   }
   await appendAgentToolEvents(agent, context, toolName, toolCall.input, result.output, toolCall.id);
+  const evidenceId = shouldRecordAgentToolEvidence(toolName)
+    ? await deps().recordAgentToolEvidence(
+        context,
+        parentSessionId,
+        agent,
+        toolName,
+        result.output,
+        toolCall.input,
+      )
+    : undefined;
   const failed = isAgentToolOutputFailure(toolName, result.output);
   return {
     ok: !failed,
     tool: toolName,
     text: result.output.text,
     data: result.output.data,
+    evidenceId,
   };
+}
+
+function shouldRecordAgentToolEvidence(toolName: ToolName): boolean {
+  return (
+    toolName === "Bash" ||
+    toolName === "Write" ||
+    toolName === "Edit" ||
+    toolName === "MultiEdit"
+  );
 }
 
 export async function executeApprovedAgentToolUse(
