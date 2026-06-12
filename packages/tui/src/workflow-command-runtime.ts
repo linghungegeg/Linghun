@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants, accessSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
@@ -481,7 +481,7 @@ async function persistWorkflowRunState(
   const path = getWorkflowRunStatePath(context, run.id);
   const state: DurableWorkflowRunState = {
     ...run,
-    projectPath: context.projectPath,
+    projectPath: resolve(context.projectPath),
     updatedAt: new Date().toISOString(),
     backgroundTask: task,
   };
@@ -506,20 +506,9 @@ export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
     const state = await readWorkflowRunState(context, join(root, entry.name, "state.json"));
     if (
       !state ||
-      resolve(state.projectPath).toLowerCase() !== resolve(context.projectPath).toLowerCase()
+      resolve(resolve(context.projectPath), state.projectPath).toLowerCase() !==
+        resolve(context.projectPath).toLowerCase()
     ) {
-      continue;
-    }
-    // Only hydrate workflows that were still running at shutdown.
-    // Terminal workflows (completed, failed, cancelled, blocked, stale)
-    // are session-scoped and must not be resurrected across restarts.
-    if (state.status !== "running") {
-      const dirPath = join(root, entry.name);
-      try {
-        await rm(dirPath, { recursive: true });
-      } catch {
-        /* best-effort */
-      }
       continue;
     }
     const run = recoverWorkflowRunState(state);

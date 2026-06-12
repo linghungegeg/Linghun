@@ -1481,13 +1481,6 @@ async function cleanStaleToolLogs(context: TuiContext): Promise<void> {
   }
 }
 
-const TERMINAL_DURABLE_JOB_STATUSES = new Set([
-  "completed",
-  "failed",
-  "cancelled",
-  "timeout",
-]);
-
 async function cleanStaleDurableJobDirs(context: TuiContext): Promise<void> {
   const root = getDurableJobsRootImpl(context);
   let entries: Dirent[];
@@ -1505,12 +1498,7 @@ async function cleanStaleDurableJobDirs(context: TuiContext): Promise<void> {
     } catch {
       continue;
     }
-    if (!state?.status || !TERMINAL_DURABLE_JOB_STATUSES.has(state.status)) continue;
-    try {
-      await rm(join(root, entry.name), { recursive: true });
-    } catch {
-      /* best-effort */
-    }
+    if (state?.status) continue;
   }
 }
 

@@ -7432,13 +7432,11 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/background", freshContext, freshOutput);
     await handleSlashCommand("/workflows status", freshContext, freshOutput);
 
-    // Terminal workflows (blocked, completed, failed, cancelled) are NOT
-    // hydrated -- only running->stale workflows survive a restart.
-    expect(freshContext.backgroundTasks).not.toContainEqual(
-      expect.objectContaining({ id: runId }),
+    expect(freshContext.backgroundTasks).toContainEqual(
+      expect.objectContaining({ id: runId, result: "partial" }),
     );
-    expect(freshContext.workflows.activeRun).toBeUndefined();
-    expect(freshOutput.text).not.toContain(`Workflow ${runId}`);
+    expect(freshContext.workflows.activeRun?.id).toBe(runId);
+    expect(freshOutput.text).toContain(`Workflow ${runId}`);
     expect(freshOutput.text).not.toContain("result=pass");
   });
 

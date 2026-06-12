@@ -476,7 +476,10 @@ export async function listDurableJobs(context: JobContext): Promise<DurableJobSt
 }
 
 function isCurrentProjectJob(job: DurableJobState, projectPath: string): boolean {
-  return resolve(job.projectPath).toLowerCase() === resolve(projectPath).toLowerCase();
+  const currentProjectPath = resolve(projectPath);
+  return (
+    resolve(currentProjectPath, job.projectPath).toLowerCase() === currentProjectPath.toLowerCase()
+  );
 }
 
 export async function findDurableJob(

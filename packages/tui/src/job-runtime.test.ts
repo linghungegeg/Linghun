@@ -649,6 +649,25 @@ describe("read/write roundtrip", () => {
     expect(jobs.map((job) => job.id)).toEqual(["job-project-a"]);
     expect((await findDurableJob(context, "project-b"))?.id).toBeUndefined();
   });
+
+  it("lists persisted jobs whose legacy projectPath was stored as a relative dot", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "job-rt-test-"));
+    const jobsRoot = join(tempDir, "user-data", "jobs");
+    const config = structuredClone(defaultConfig) as LinghunConfig;
+    config.storage.jobs = { scope: "custom", path: jobsRoot };
+    const context = createTestJobContext({ config, projectPath: tempDir });
+    const job = createMinimalJob({
+      id: "job-relative-project",
+      projectPath: ".",
+      logPath: join(jobsRoot, "job-relative-project", "job.log"),
+      reportPath: join(jobsRoot, "job-relative-project", "report.md"),
+      fullOutputPath: join(jobsRoot, "job-relative-project", "full-output.log"),
+    });
+
+    await persistDurableJob(job);
+
+    expect((await findDurableJob(context, "relative-project"))?.id).toBe("job-relative-project");
+  });
 });
 
 describe("pure computation helpers", () => {

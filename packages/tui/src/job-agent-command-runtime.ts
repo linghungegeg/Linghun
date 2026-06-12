@@ -966,7 +966,7 @@ export async function createDurableJob(
   return {
     id,
     goal: options.goal,
-    projectPath: context.projectPath,
+    projectPath: resolve(context.projectPath),
     phase: options.phase,
     target: options.target,
     plan: options.plan,
