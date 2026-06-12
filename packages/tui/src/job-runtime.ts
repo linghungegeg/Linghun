@@ -59,6 +59,7 @@ export type ParsedJobRunOptions = {
   allowEdit: boolean;
   allowBash: boolean;
   allowMultiAgent: boolean;
+  isolation?: "worktree";
   // P1-5 — 仅当用户显式传入 --tokens / --max-steps / --timeout 时为 true。
   // 未显式设置时 /job 没有用户可见预算，enforcement 不触发，UI 显示"budget: not set"。
   budgetExplicit: { tokens: boolean; steps: boolean; runtime: boolean };
@@ -86,6 +87,7 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
   let allowEdit = false;
   let allowBash = false;
   let allowMultiAgent = false;
+  let isolation: "worktree" | undefined;
   const budgetExplicit = { tokens: false, steps: false, runtime: false };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -142,6 +144,11 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
       allowMultiAgent = true;
       continue;
     }
+    if (arg === "--isolation") {
+      if (args[index + 1] === "worktree") isolation = "worktree";
+      index += 1;
+      continue;
+    }
     goalParts.push(arg);
   }
   const goal = goalParts.join(" ").trim();
@@ -164,6 +171,7 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
     allowEdit,
     allowBash,
     allowMultiAgent,
+    isolation,
     budgetExplicit,
   };
 }
@@ -502,6 +510,7 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     `- status: ${job.status}`,
     `- goal: ${job.goal}`,
     `- projectPath: ${formatDisplayPath(job.projectPath, job.projectPath)}`,
+    `- isolation: ${job.isolation ?? "none"}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- permission: ${job.permissionPolicy}; edit ${job.allowEdit}; bash ${job.allowBash}; multi-agent ${job.allowMultiAgent}`,
     `- budget: max tokens ${job.budget.maxTokens}; used ${job.budget.usedTokens ?? 0}; remaining ${job.budget.remainingTokens ?? job.budget.maxTokens}; max steps ${getDurableJobMaxSteps(job)}; used steps ${job.budget.usedSteps ?? 0}; running agent cap ${job.budget.maxRunningAgents}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}; timeout ${job.timeoutMs}ms; max runtime ${job.budget.maxRuntimeMs ?? job.timeoutMs}ms`,
@@ -617,6 +626,7 @@ export function formatJobStatus(job: DurableJobState): string {
     "- resume check: handoff/evidence/index/resource guard before any worker step",
     `- goal: ${truncateDisplay(job.goal, 120)}`,
     `- projectPath: ${formatDisplayPath(job.projectPath, job.projectPath)}`,
+    `- isolation: ${job.isolation ?? "none"}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- agents: planned ${job.agents.length}; scheduled ${job.agents.filter((agent) => agent.runId).length}; started ${job.agents.filter((agent) => agent.startedAt).length}; running ${counts.running}; completed ${counts.completed}; queued ${counts.queued}; sleeping ${counts.sleeping}; skipped ${counts.skipped}; budget limited ${counts.budget_limited}; resource limited ${counts.resource_limited}; blocked ${counts.blocked}; stale ${counts.stale}; cap ${job.budget.maxRunningAgents}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}`,
     `- status semantics: ${formatJobLifecycleLegend()}`,
@@ -638,6 +648,7 @@ export function formatJobReport(job: DurableJobState): string {
     `- conclusion: ${formatJobReportConclusion(job)}`,
     `- next action: ${formatJobNextAction(job, "en-US")}`,
     `- task graph: ${job.plan.length} steps; worker ${job.worker?.status ?? "not_started"}; used steps ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
+    `- isolation: ${job.isolation ?? "none"}`,
     `- agent assignment: ${formatJobAgentLabels(job.agents)}`,
     `- agent counts: planned ${job.agents.length}; scheduled ${job.agents.filter((agent) => agent.runId).length}; started ${job.agents.filter((agent) => agent.startedAt).length}; running ${counts.running}; completed ${counts.completed}; queued ${counts.queued}; sleeping ${counts.sleeping}; skipped ${counts.skipped}; budget limited ${counts.budget_limited}; resource limited ${counts.resource_limited}; blocked ${counts.blocked}; stale ${counts.stale}; cap ${job.budget.maxRunningAgents}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}`,
     `- status semantics: ${formatJobLifecycleLegend()}`,

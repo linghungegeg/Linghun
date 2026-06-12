@@ -599,6 +599,7 @@ export type DurableJobState = {
   allowEdit: boolean;
   allowBash: boolean;
   allowMultiAgent: boolean;
+  isolation?: "worktree";
   status: DurableJobStatus;
   pauseReason?: string;
   agents: DurableJobAgent[];

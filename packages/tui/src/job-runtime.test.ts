@@ -185,6 +185,12 @@ describe("parseJobRunOptions", () => {
     expect(result.allowBash).toBe(true);
   });
 
+  it("parses explicit worktree isolation", () => {
+    const result = parseJobRunOptions(["--multi-agent", "--isolation", "worktree", "do work"]);
+    expect(result.isolation).toBe("worktree");
+    expect(result.allowMultiAgent).toBe(true);
+  });
+
   it("generates plan array", () => {
     const result = parseJobRunOptions(["fix bug"]);
     expect(result.plan).toHaveLength(4);

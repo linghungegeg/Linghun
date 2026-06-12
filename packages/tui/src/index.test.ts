@@ -8075,6 +8075,34 @@ describe("Phase 06 TUI slash commands", () => {
     expect(text).toContain("/model doctor");
   });
 
+  it("/batch creates an isolated durable job with short explicit syntax", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-batch-shortcut-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/batch audit isolated agents --agents 2 --cap 1 --max-steps 2", context, output);
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+    const state = await readDurableJobState(
+      join(resolveStoragePaths(config, project).jobs, jobId ?? "missing", "state.json"),
+    );
+    expect(state).toMatchObject({
+      isolation: "worktree",
+      allowMultiAgent: true,
+      allowEdit: true,
+      allowBash: true,
+    });
+    expect(state?.agents).toHaveLength(2);
+    expect(state?.budget.maxRunningAgents).toBe(1);
+  });
+
   it("recovers Phase 17A durable jobs into background and marks missing owner heartbeat stale", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const config: LinghunConfig = {

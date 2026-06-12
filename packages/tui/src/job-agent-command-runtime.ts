@@ -696,7 +696,7 @@ export async function handleJobCommand(
     if (!options.goal) {
       writeLine(
         output,
-        "用法：/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--running-cap <n>] [--tokens <n>] [--max-steps <n>] [--timeout <ms>] [--allow-edit] [--allow-bash] [--multi-agent]",
+        "用法：/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--running-cap <n>] [--tokens <n>] [--max-steps <n>] [--timeout <ms>] [--allow-edit] [--allow-bash] [--multi-agent] [--isolation worktree]",
       );
       return;
     }
@@ -808,6 +808,36 @@ export async function handleJobCommand(
   writeLine(
     output,
     "用法：/job list | /job run <goal> | /job create <goal> | /job status <id> | /job logs <id> | /job report <id> | /job pause <id> | /job resume <id> | /job cancel <id>",
+  );
+}
+
+export async function handleBatchCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  if (args.length === 0) {
+    writeLine(output, "用法：/batch <目标> [--agents <n>] [--cap <n>] [--max-steps <n>]");
+    return;
+  }
+  await handleJobCommand(
+    [
+      "run",
+      "--multi-agent",
+      "--agents",
+      "5",
+      "--running-cap",
+      "3",
+      "--max-steps",
+      "20",
+      "--allow-edit",
+      "--allow-bash",
+      "--isolation",
+      "worktree",
+      ...args,
+    ],
+    context,
+    output,
   );
 }
 
@@ -991,6 +1021,7 @@ export async function createDurableJob(
     allowEdit: options.allowEdit,
     allowBash: options.allowBash,
     allowMultiAgent: options.allowMultiAgent,
+    isolation: options.isolation,
     status,
     pauseReason,
     agents,
@@ -1192,11 +1223,21 @@ async function startDurableJobAgentRun(
   const now = new Date().toISOString();
   const task = assignment.task ?? assignment.goal;
   const effectiveModel = resolved.route.primaryModel ?? context.model;
+  const cwdResult =
+    job.isolation === "worktree" && resolved.usable
+      ? await createDurableJobAgentWorktree(context, job, assignment)
+      : { ok: true as const, cwd: context.projectPath, isolation: undefined, evidenceText: undefined };
   const child = await context.store.create({
     model: effectiveModel,
     summary: `job-agent:${job.id}:${assignment.type}:${truncateDisplay(task, 40)}`,
   });
   const packet = job.handoffPacket ?? (await loadOrCreateHandoffPacket(context, parentSessionId));
+  const routeUsable = resolved.usable && cwdResult.ok;
+  const blockedSummary = !resolved.usable
+    ? formatRoutePauseMessage(role, resolved.decision)
+    : cwdResult.ok
+      ? "job child agent blocked"
+      : cwdResult.text;
   const agent: AgentRun = {
     id: `agent-${randomUUID().slice(0, 8)}`,
     type: assignment.type,
@@ -1208,18 +1249,17 @@ async function startDurableJobAgentRun(
     task,
     model: effectiveModel,
     permissionMode: getAgentPermissionMode(assignment.type, context.permissionMode),
-    status: resolved.usable ? "running" : "blocked",
-    activityStatus: resolved.usable ? "processing" : "blocked",
-    activitySummary: resolved.usable ? "job child agent running" : "route unusable",
+    status: routeUsable ? "running" : "blocked",
+    activityStatus: routeUsable ? "processing" : "blocked",
+    activitySummary: routeUsable ? "job child agent running" : "route/worktree unusable",
     transcriptPath: child.transcriptPath,
     transcriptSessionId: child.id,
     mailbox: [],
-    cwd: context.projectPath,
+    cwd: cwdResult.ok ? cwdResult.cwd : context.projectPath,
+    ...(cwdResult.ok && cwdResult.isolation ? { isolation: cwdResult.isolation } : {}),
     cancelTokenId: randomUUID(),
-    heartbeatAt: resolved.usable ? now : undefined,
-    summary: resolved.usable
-      ? "job child agent running"
-      : formatRoutePauseMessage(role, resolved.decision),
+    heartbeatAt: routeUsable ? now : undefined,
+    summary: routeUsable ? "job child agent running" : blockedSummary,
     contextSummary: createDurableJobAgentContextSummary(packet, job, assignment),
     cost: createEmptyAgentCost(task),
     startedAt: now,
@@ -1243,14 +1283,45 @@ async function startDurableJobAgentRun(
     type: "system_event",
     id: randomUUID(),
     level: agent.status === "running" ? "info" : "warning",
-    message: agent.contextSummary,
+    message: `${agent.contextSummary} | cwd ${agent.cwd} | isolation ${agent.isolation ?? "none"}`,
     createdAt: now,
   });
+  if (cwdResult.ok && cwdResult.evidenceText) {
+    await context.store.appendEvent(child.id, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "info",
+      message: cwdResult.evidenceText,
+      createdAt: now,
+    });
+  }
   await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
   if (agent.status !== "running") {
     writeLine(output, agent.summary);
   }
   return agent;
+}
+
+async function createDurableJobAgentWorktree(
+  context: TuiContext,
+  job: DurableJobState,
+  assignment: DurableJobState["agents"][number],
+): Promise<
+  | { ok: true; cwd: string; isolation: "worktree"; evidenceText: string }
+  | { ok: false; text: string }
+> {
+  const name = `${job.id}-${assignment.id}`.replace(/[^a-z0-9-]/giu, "-").slice(0, 48);
+  const outcome = await createManagedWorktree(context.projectPath, { name });
+  const summary = summarizeWorktreeCreateOutcome(outcome, context.language);
+  if (!summary.ok || (outcome.kind !== "created" && outcome.kind !== "resumed")) {
+    return { ok: false, text: summary.text };
+  }
+  return {
+    ok: true,
+    cwd: outcome.path,
+    isolation: "worktree",
+    evidenceText: `managed_worktree ${outcome.kind}: ${summary.text}`,
+  };
 }
 
 function syncJobAssignmentFromAgent(

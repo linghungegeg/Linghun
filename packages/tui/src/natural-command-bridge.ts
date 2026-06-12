@@ -166,6 +166,7 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/permissions", capabilityId: "permissions", userVisible: true },
   { slash: "/background", capabilityId: "background", userVisible: true },
   { slash: "/job", capabilityId: "job", userVisible: true },
+  { slash: "/batch", capabilityId: "job", userVisible: true },
   { slash: "/remote", capabilityId: "remote", userVisible: true },
   { slash: "/details", capabilityId: "details", userVisible: true },
   { slash: "/agents", capabilityId: "agents", userVisible: true },

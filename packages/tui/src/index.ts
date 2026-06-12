@@ -459,6 +459,7 @@ import {
   executeApprovedAgentToolUse,
   handleAgentsCommand,
   handleBackgroundCommand,
+  handleBatchCommand,
   handleForkCommand,
   handleJobCommand,
   hydrateDurableJobBackgroundTasks,
@@ -2913,6 +2914,10 @@ export async function handleSlashCommand(
   }
   if (command === "/job") {
     await handleJobCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/batch") {
+    await handleBatchCommand(rest, context, output);
     return "handled";
   }
   if (command === "/remote") {

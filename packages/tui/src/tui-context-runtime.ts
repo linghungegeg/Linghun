@@ -90,6 +90,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/permissions",
   "/background",
   "/job",
+  "/batch",
   "/remote",
   "/details",
   "/agents",
