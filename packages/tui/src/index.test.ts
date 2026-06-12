@@ -15874,7 +15874,7 @@ describe("Phase 06 TUI slash commands", () => {
     await waitForTestCondition(() => output.text.includes("选择输出语言 / Choose output language"));
     input.write("\n");
     await waitForTestCondition(() => output.text.includes("工作区信任"));
-    input.emit("keypress", "", { name: "escape" });
+    input.emit("keypress", undefined, { name: "escape" });
     await waitForTestCondition(() => output.text.includes("工作区信任：restricted"));
     input.write("/write trust.txt blocked\n/help\n/status\n/doctor readiness\n/exit\n");
 
@@ -15903,6 +15903,8 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     await waitForTestCondition(() => output.text.includes("选择输出语言 / Choose output language"));
+    input.emit("keypress", undefined, { name: "down" });
+    await waitForTestCondition(() => output.text.includes("❯ [x] English (en-US)"));
     input.write("2\n");
     await waitForTestCondition(() => output.text.includes("Language switched to English."));
     await expect(readFile(join(project, ".linghun", "settings.json"), "utf8")).rejects.toThrow();

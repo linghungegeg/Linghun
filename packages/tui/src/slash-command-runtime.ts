@@ -1211,9 +1211,9 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
       rl.close();
       resolveDecision(language);
     };
-    const onKeypress = (str: string, key: { name?: string } = {}) => {
+    const onKeypress = (str: string | undefined, key: { name?: string } = {}) => {
       const name = key.name;
-      const value = str.trim().toLowerCase();
+      const value = typeof str === "string" ? str.trim().toLowerCase() : "";
       if (name === "escape") {
         finish("zh-CN");
         return;
@@ -1245,7 +1245,6 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
         return;
       }
       // Plain typed choices are handled by readline 'line'; ignore other raw input here.
-      void str;
     };
     const onLine = (line: string) => {
       const normalized = line.trim().toLowerCase();
@@ -1386,9 +1385,9 @@ async function readInitialWorkspaceTrustDecision(
       rl.close();
       resolveDecision(trusted);
     };
-    const onKeypress = (str: string, key: { name?: string } = {}) => {
+    const onKeypress = (str: string | undefined, key: { name?: string } = {}) => {
       const name = key.name;
-      const value = str.trim().toLowerCase();
+      const value = typeof str === "string" ? str.trim().toLowerCase() : "";
       if (name === "escape") {
         finish(false);
         return;
