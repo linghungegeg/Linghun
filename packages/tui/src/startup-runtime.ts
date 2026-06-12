@@ -358,7 +358,7 @@ export async function* readInputLines(
       }
       if (key.name === "return" && handlers.onEnter) {
         const currentLine = (readline as unknown as { line?: string }).line ?? "";
-        if (currentLine.trim() === "") {
+        if ((currentLine ?? "").trim() === "") {
           skipNextEmptyLine = true;
           void handlers.onEnter();
         }

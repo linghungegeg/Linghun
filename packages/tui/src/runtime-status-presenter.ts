@@ -53,7 +53,7 @@ export function formatPermissionModeLabel(mode: PermissionMode, language: Langua
       default: "default mode",
       "auto-review": "auto-review",
       plan: "plan mode",
-      "full-access": "full access (safety on)",
+      "full-access": "full access",
     };
     return labels[mode] ?? mode;
   }
@@ -61,7 +61,7 @@ export function formatPermissionModeLabel(mode: PermissionMode, language: Langua
     default: "默认模式",
     "auto-review": "自动审核",
     plan: "计划模式",
-    "full-access": "全权限（仍守安全）",
+    "full-access": "完全放行",
   };
   return labels[mode] ?? mode;
 }

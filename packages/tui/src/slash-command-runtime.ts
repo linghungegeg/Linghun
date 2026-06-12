@@ -126,6 +126,10 @@ import {
 } from "./break-cache-runtime.js";
 import { runBtwSideQuestion } from "./btw-runtime.js";
 import {
+  createRuntimeStatusSnapshot,
+  formatRuntimeStatusSnapshotForBtw,
+} from "./runtime-status-snapshot.js";
+import {
   buildCacheStatusPanel,
   formatCacheLog,
   formatCacheStatus,
@@ -1858,6 +1862,20 @@ export async function handleBtwCommand(
   const runtime = getSelectedModelRuntime(context);
   const controller = new AbortController();
   context.activeBtwAbortController = controller;
+  const snapshot = createRuntimeStatusSnapshot({
+    language: context.language,
+    requestActivityPhase: context.requestActivityPhase,
+    requestActivityStartedAt: (context as { requestActivityStartedAt?: number }).requestActivityStartedAt,
+    requestActivityToolName: context.requestActivityToolName,
+    pendingApproval: Boolean(context.pendingLocalApproval),
+    workflow: context.workflows?.activeRun,
+    backgroundTasks: context.backgroundTasks,
+  });
+  const deepSummary = context.cache.deepCompact?.summary;
+  const snapshotText = formatRuntimeStatusSnapshotForBtw(snapshot, context.language);
+  const contextSnapshot = deepSummary
+    ? `${snapshotText}\n\n--- Session summary ---\n${deepSummary}`
+    : snapshotText;
   const result = await runBtwSideQuestion(
     question,
     gateway,
@@ -1871,6 +1889,7 @@ export async function handleBtwCommand(
     context.language,
     controller.signal,
     context.providerBreaker,
+    contextSnapshot,
   );
   if (context.activeBtwAbortController === controller) {
     context.activeBtwAbortController = undefined;

@@ -216,7 +216,7 @@ function TaskLayout({
 
   return (
     <Box flexDirection="column" width={view.width}>
-      {/* Static zone — completed blocks commit to terminal scrollback */}
+      {/* Static zone — completed blocks commit to terminal scrollback. */}
       <Static items={staticBlocks}>
         {(block) => (
           <Box key={block.id} paddingX={2}>
@@ -225,7 +225,7 @@ function TaskLayout({
         )}
       </Static>
 
-      {/* Dynamic zone — running blocks, streaming, activity, composer */}
+      {/* Dynamic zone — keep natural height so native scrollback stays visible above the composer. */}
       <Box flexDirection="column" paddingX={2}>
         {dynamicBlocks.length > 0 ? (
           <Box flexDirection="column">
@@ -255,15 +255,6 @@ function TaskLayout({
           </Box>
         ) : null}
 
-        {view.taskListView ? (
-          <TaskListView
-            list={view.taskListView}
-            width={contentWidth}
-            noColor={noColor}
-            language={view.language}
-          />
-        ) : null}
-
         {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
           <TaskSuggestionBar
             suggestions={view.taskSuggestions}
@@ -284,7 +275,7 @@ function TaskLayout({
         ) : null}
       </Box>
 
-      {/* Composer band — always at bottom of dynamic output */}
+      {/* Composer band — pinned to terminal bottom */}
       <Box flexShrink={0} flexDirection="column">
         {view.backgroundTaskOverlay && !view.permission ? (
           <BackgroundTaskOverlay
@@ -300,6 +291,17 @@ function TaskLayout({
               block={view.taskRuntimeSummary}
               theme={theme}
               width={cw}
+              language={view.language}
+            />
+          </Box>
+        ) : null}
+
+        {view.taskListView ? (
+          <Box paddingX={2} marginBottom={1}>
+            <TaskListView
+              list={view.taskListView}
+              width={contentWidth}
+              noColor={noColor}
               language={view.language}
             />
           </Box>

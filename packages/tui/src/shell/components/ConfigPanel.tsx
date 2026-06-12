@@ -1,7 +1,7 @@
 import type { Language } from "@linghun/shared";
 import { Box, Text, useInput } from "@linghun/ink-runtime";
 import type React from "react";
-import { fitText, lineChar, wrapText } from "../text-utils.js";
+import { fitText, wrapText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type { ConfigPanelView, ShellController } from "../types.js";
 
@@ -56,7 +56,6 @@ export function ConfigPanel({
     Math.max(Math.min(width - 2, MIN_PANEL_WIDTH), Math.min(width - 2, MAX_PANEL_WIDTH)),
   );
   const innerWidth = Math.max(36, panelWidth - 4);
-  const rule = lineChar(noColor);
 
   if (panel.phase === "panel_list") {
     const total = panel.panels.length;
@@ -71,10 +70,7 @@ export function ConfigPanel({
     const summaryWidth = Math.max(16, innerWidth - titleWidth - 5);
 
     return (
-      <Box flexDirection="column" paddingX={1} marginTop={1} width={panelWidth}>
-        <Text color={theme.panel ?? theme.border} dimColor>
-          {`${rule.repeat(2)} CONFIG ${rule.repeat(Math.max(8, innerWidth - 9))}`}
-        </Text>
+      <Box flexDirection="column" paddingX={3} marginTop={1} width={panelWidth}>
         <Box>
           <Text color={theme.accent} bold>
             CONFIG
@@ -93,7 +89,7 @@ export function ConfigPanel({
             const active = realIdx === panel.cursor;
             const titleCol = p.title.padEnd(titleWidth);
             return (
-              <Box key={p.id}>
+              <Box key={p.id} marginTop={vi > 0 ? 1 : 0}>
                 <Text color={active ? theme.accent : (theme.dim ?? theme.muted)} bold={active}>
                   {active ? "▌ " : "  "}
                 </Text>
@@ -106,11 +102,6 @@ export function ConfigPanel({
               </Box>
             );
           })}
-        </Box>
-        <Box marginTop={1}>
-          <Text color={theme.panel ?? theme.border} dimColor>
-            {rule.repeat(innerWidth)}
-          </Text>
         </Box>
       </Box>
     );
@@ -125,10 +116,7 @@ export function ConfigPanel({
   const visibleEnd = Math.min(scrollOffset + MAX_VISIBLE, total);
 
   return (
-    <Box flexDirection="column" paddingX={1} marginTop={1} width={panelWidth}>
-      <Text color={theme.panel ?? theme.border} dimColor>
-        {`${rule.repeat(2)} CONFIG ${rule.repeat(Math.max(8, innerWidth - 9))}`}
-      </Text>
+    <Box flexDirection="column" paddingX={3} marginTop={1} width={panelWidth}>
       <Box>
         <Text color={theme.accent} bold>
           {fitText(panel.panel.title.toUpperCase(), Math.max(8, Math.floor(innerWidth * 0.45)))}
@@ -160,7 +148,7 @@ export function ConfigPanel({
           const realIdx = scrollOffset + vi;
           const active = realIdx === panel.actionCursor;
           return (
-            <Box key={a.id} flexDirection="column">
+            <Box key={a.id} flexDirection="column" marginTop={vi > 0 ? 1 : 0}>
               {wrapText(`${active ? "▌ " : "  "}${a.label}`, innerWidth).map((part, lineIdx) => (
                 <Text
                   key={`${a.id}-${lineIdx}`}
@@ -173,11 +161,6 @@ export function ConfigPanel({
             </Box>
           );
         })}
-      </Box>
-      <Box marginTop={1}>
-        <Text color={theme.panel ?? theme.border} dimColor>
-          {rule.repeat(innerWidth)}
-        </Text>
       </Box>
     </Box>
   );

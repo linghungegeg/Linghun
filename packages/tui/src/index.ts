@@ -1247,6 +1247,7 @@ export {
 
 import { getDurableJobPaths } from "./tui-agent-job-runtime.js";
 import { containsSecret } from "./tui-memory-runtime.js";
+import { runMemoryEviction } from "./memory-eviction-runtime.js";
 import {
   createModelGateway,
   getSelectedModelRuntime,
@@ -2722,6 +2723,7 @@ async function runInkShell(
         return;
       }
       await shell?.waitUntilRenderFlush();
+      runMemoryEviction(context, blocks);
     },
   };
 

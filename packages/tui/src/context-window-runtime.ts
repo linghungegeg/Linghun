@@ -10,7 +10,7 @@ export type ContextPercentage = {
   bar: string;
 };
 
-const DEFAULT_CONTEXT_WINDOW_TOKENS = readPositiveIntEnv("LINGHUN_CONTEXT_WINDOW_TOKENS", 128_000);
+const DEFAULT_CONTEXT_WINDOW_TOKENS = readPositiveIntEnv("LINGHUN_CONTEXT_WINDOW_TOKENS", 200_000);
 const CONTEXT_1M_TOKENS = 1_000_000;
 
 /** Model name ends with `[1m]` (case-insensitive) → explicit 1M opt-in. */

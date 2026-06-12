@@ -1,0 +1,11 @@
+
+ RUN  v3.2.4 F:/Linghun
+
+ ✓ packages/tui/src/index.test.ts (682 tests | 681 skipped) 11511ms
+   ✓ Phase 06 TUI slash commands > shows provider stream errors as actionable model errors  11509ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 681 skipped (682)
+   Start at  02:24:24
+   Duration  15.64s (transform 2.15s, setup 0ms, collect 3.55s, tests 11.51s, environment 0ms, prepare 229ms)
+

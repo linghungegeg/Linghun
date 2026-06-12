@@ -1632,6 +1632,9 @@ function PermissionControl({
         {fitText(headline, innerWidth)}
       </Text>
       <Text color={theme.muted}>{fitText(summaryLine, innerWidth)}</Text>
+      <Text color={theme.dim ?? theme.muted} dimColor>
+        {"─".repeat(Math.min(innerWidth, 60))}
+      </Text>
       <PermissionActionRow actions={actions} focused={focused} theme={theme} width={innerWidth} />
       <Text color={theme.dim ?? theme.muted} dimColor>
         {fitText(
@@ -1662,41 +1665,19 @@ function PermissionActionRow({
     const text = isFocused ? `[ ${action.label}${shortcut} ]` : `  ${action.label}${shortcut}  `;
     return { text, focused: isFocused, id: action.id };
   });
-  // Narrow-screen guard: at 40/60 columns the inline action row would overflow.
-  // Fall back to a vertical column layout below ~64 columns so each action
-  // gets its own line and stays inside the composer width.
-  const inlineLine = segments.map((s) => s.text).join(" ");
-  const compact = width < 64 || inlineLine.length > Math.max(20, width - 2);
-  if (compact) {
-    return (
-      <Box flexDirection="column" width={width}>
-        {segments.map((s) => (
-          <Text
-            key={s.id}
-            color={s.focused ? undefined : theme.muted}
-            backgroundColor={s.focused && theme.mode !== "no-color" ? theme.permission : undefined}
-            inverse={s.focused}
-          >
-            {fitText(s.text, Math.max(8, width - 2))}
-          </Text>
-        ))}
-      </Box>
-    );
-  }
+  // 始终使用纵向布局，每个按钮一行
   return (
-    <Box width={width}>
-      <Text>
-        {segments.map((s) => (
-          <Text
-            key={s.id}
-            color={s.focused ? undefined : theme.muted}
-            backgroundColor={s.focused && theme.mode !== "no-color" ? theme.permission : undefined}
-            inverse={s.focused}
-          >
-            {`${s.text} `}
-          </Text>
-        ))}
-      </Text>
+    <Box flexDirection="column" width={width}>
+      {segments.map((s) => (
+        <Text
+          key={s.id}
+          color={s.focused ? undefined : theme.muted}
+          backgroundColor={s.focused && theme.mode !== "no-color" ? theme.permission : undefined}
+          inverse={s.focused}
+        >
+          {fitText(s.text, Math.max(8, width - 2))}
+        </Text>
+      ))}
     </Box>
   );
 }

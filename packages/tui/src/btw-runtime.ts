@@ -33,27 +33,30 @@ export type BtwIntent = "status_query" | "general_side_question" | "unknown";
 
 const BTW_SYSTEM_PROMPT_ZH =
   "你正在以「临时插问」(side question) 身份回答一个独立的小问题。这是一个隔离的单轮请求：" +
-  "不要假设你能看到主任务的完整上下文，不要调用任何工具，不要声称已完成/已验证/已修复任何主任务，" +
-  "不要修改任何状态。直接、简洁地回答这个问题即可。如果需要主任务上下文才能回答，请说明这一点。";
+  "不要调用任何工具，不要声称已完成/已验证/已修复任何主任务，" +
+  "不要修改任何状态。直接、简洁地回答这个问题即可。如果需要更多上下文才能回答，请说明这一点。";
 
 const BTW_SYSTEM_PROMPT_EN =
   "You are answering a standalone side question. This is an isolated single-turn request: " +
-  "do not assume you can see the full main-task context, do not call any tools, do not claim that " +
+  "do not call any tools, do not claim that " +
   "any main-task work is done/verified/fixed, and do not modify any state. Answer the question " +
-  "directly and concisely. If you would need the main task context to answer, say so.";
+  "directly and concisely. If you would need more context to answer, say so.";
 
 /**
- * 把 side-question 问题包成隔离的 system+user 消息对。不注入 RuntimeStatusForModel /
- * EvidenceSummary / ControlledMemorySummary / CommandCapabilitySummary 等主链字段，
- * 避免 side question 复述内部 token，也避免误导模型以为这是主任务。
+ * 把 side-question 问题包成隔离的 system+user 消息对。注入只读上下文摘要让模型
+ * 能回答进度类问题，但不注入 tool definitions / permission / evidence 等可操作字段。
  */
 export function buildBtwMessages(
   question: string,
   language: Language,
+  contextSnapshot?: string,
 ): { role: "system" | "user"; content: string }[] {
   const system = language === "en-US" ? BTW_SYSTEM_PROMPT_EN : BTW_SYSTEM_PROMPT_ZH;
+  const systemContent = contextSnapshot
+    ? `${system}\n\n--- Current session context (read-only) ---\n${contextSnapshot}`
+    : system;
   return [
-    { role: "system", content: system },
+    { role: "system", content: systemContent },
     { role: "user", content: question },
   ];
 }
@@ -108,8 +111,9 @@ export async function runBtwSideQuestion(
   language: Language,
   signal: AbortSignal,
   breakerState?: ProviderCircuitBreakerState,
+  contextSnapshot?: string,
 ): Promise<BtwSideQuestionResult> {
-  const messages = buildBtwMessages(question, language);
+  const messages = buildBtwMessages(question, language, contextSnapshot);
   let text = "";
   let hadThinking = false;
   let providerError: string | undefined;
