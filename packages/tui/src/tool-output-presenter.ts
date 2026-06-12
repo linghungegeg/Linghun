@@ -123,10 +123,30 @@ function formatPrimaryToolLead(
   const totalLines = readNumber(metadata, "totalLines") ?? readNumber(metadata, "contentLines");
   const visibleLines =
     readNumber(metadata, "windowLines") ?? readNumber(metadata, "lines") ?? lineCount(output.text);
+  // Editing tools: show tool name + filename prominently.
+  if (isEditingTool(name)) {
+    const changedFiles = readStringList(metadata, "changedFiles");
+    const filePart = changedFiles.length > 0 ? `**${changedFiles[0]}**` : "";
+    const addedLines = readNumber(metadata, "addedLines") ?? 0;
+    const removedLines = readNumber(metadata, "removedLines") ?? 0;
+    const patchPart = `+${addedLines} -${removedLines}`;
+    if (language === "en-US") {
+      return filePart
+        ? `${name}(${filePart}) ${patchPart}`
+        : `${name} ${patchPart}`;
+    }
+    return filePart
+      ? `${name}(${filePart}) ${patchPart}`
+      : `${name} ${patchPart}`;
+  }
   if (language === "en-US") {
     if (name === "Grep") return `Found **${count ?? 0}** matches.`;
     if (name === "Glob") return `Found **${count ?? visibleLines}** files.`;
-    if (name === "Read") return `Read **${totalLines ?? visibleLines}** lines.`;
+    if (name === "Read") {
+      const readFile = readStringValue(metadata, "file") ?? readStringValue(metadata, "path");
+      const lineLabel = `**${totalLines ?? visibleLines}** lines`;
+      return readFile ? `Read(${readFile}) ${lineLabel}.` : `Read ${lineLabel}.`;
+    }
     if (name === "Bash") return "";
     // Phase 17: WebSearch / WebFetch dedicated format.
     if (name === "WebSearch") return formatWebSearchLead(output, language);
@@ -138,7 +158,11 @@ function formatPrimaryToolLead(
   }
   if (name === "Grep") return `找到 **${count ?? 0}** 处匹配。`;
   if (name === "Glob") return `找到 **${count ?? visibleLines}** 个文件。`;
-  if (name === "Read") return `读取 **${totalLines ?? visibleLines}** 行。`;
+  if (name === "Read") {
+    const readFile = readStringValue(metadata, "file") ?? readStringValue(metadata, "path");
+    const lineLabel = `**${totalLines ?? visibleLines}** 行`;
+    return readFile ? `Read(${readFile}) ${lineLabel}` : `读取 ${lineLabel}`;
+  }
   if (name === "Bash") return "";
   // Phase 17: WebSearch / WebFetch dedicated format.
   if (name === "WebSearch") return formatWebSearchLead(output, language);

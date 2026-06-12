@@ -2,7 +2,7 @@ import type { Writable } from "node:stream";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
 import { composerMaxWidth, displayWidth, taskComposerMaxWidth, wrapText } from "./text-utils.js";
 import { getStatusMarker } from "./theme.js";
-import type { ProductBlockStatus, ShellViewModel } from "./types.js";
+import type { ProductBlockStatus, ProductBlockViewModel, ShellViewModel } from "./types.js";
 
 export function renderPlainShell(view: ShellViewModel, capability?: TerminalCapability): string {
   const cap = capability ?? detectTerminalCapability();
@@ -319,7 +319,39 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
 // ---------------------------------------------------------------------------
 
 function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
-  return view.blocks.flatMap((block) => {
+  const result: string[] = [];
+  let prevKind: string | undefined;
+  for (const block of view.blocks) {
+    const blockLines = formatSingleBlock(block, view, noColor);
+    if (blockLines.length === 0) continue;
+    // Inter-block spacing: empty line between assistant_text ↔ tool_result
+    // transitions and between consecutive tool_result blocks, giving visual
+    // separation without wasting vertical space on tight tool sequences.
+    const curKind = block.messageKind ?? block.kind;
+    if (prevKind && curKind) {
+      const prevIsTool = prevKind.startsWith("tool_result");
+      const curIsTool = curKind.startsWith("tool_result");
+      const prevIsAssistant = prevKind === "assistant_text";
+      const curIsAssistant = curKind === "assistant_text";
+      if (
+        (prevIsAssistant && curIsTool) ||
+        (prevIsTool && curIsAssistant) ||
+        (prevIsTool && curIsTool)
+      ) {
+        result.push("");
+      }
+    }
+    result.push(...blockLines);
+    prevKind = curKind;
+  }
+  return result;
+}
+
+function formatSingleBlock(
+  block: ProductBlockViewModel,
+  view: ShellViewModel,
+  noColor: boolean,
+): string[] {
     // Command transcript row — slash command 提交后作为独立 `❯ /command` 行进入
     // task transcript（plain 渲染同步 Ink ProductBlock 的 command 分支）。
     if (block.kind === "command") {
@@ -355,11 +387,12 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
         messageKind === "tool_result_cancelled" || messageKind === "tool_result_rejected";
       const isDiagnostic = messageKind === "diagnostic";
       const isLocalOutput = messageKind === "local_command_output";
+      const isToolSuccess = messageKind === "tool_result_success";
       const renderedMessage = renderPlainMarkdownLines(body, noColor, {
         dimAll,
         diagnostic: isDiagnostic,
       });
-      const out: string[] = isLocalOutput
+      const out: string[] = isLocalOutput || isToolSuccess
         ? renderedMessage.map((line) => `${dim("  \u23BF  ", noColor)}${line}`)
         : renderedMessage;
       if (nextAction) {
@@ -417,7 +450,6 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
       block.detail ? `  ${dim(block.detail, noColor)}` : undefined,
       nextAction ? `  ${colorCyan(nextAction, noColor)}` : undefined,
     ].filter((line): line is string => Boolean(line));
-  });
 }
 
 function formatStatusTray(view: ShellViewModel): string {

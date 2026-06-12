@@ -1613,20 +1613,47 @@ describe("D.12B — P0-3: plain renderer permission risk level", () => {
   });
 });
 
-describe("D.12B — P1-1: output blocks keep last 3", () => {
-  it("keeps up to 3 output blocks in task mode", () => {
-    const blocks = [
-      createOutputBlock("first", "zh-CN", "out-1"),
-      createOutputBlock("second", "zh-CN", "out-2"),
-      createOutputBlock("third", "zh-CN", "out-3"),
-      createOutputBlock("fourth", "zh-CN", "out-4"),
-    ];
-    const view = createShellViewModel(createContext(), { width: 80, outputBlocks: blocks });
-    const outputIds = view.blocks.map((b) => b.id);
-    expect(outputIds).toContain("out-2");
-    expect(outputIds).toContain("out-3");
-    expect(outputIds).toContain("out-4");
+describe("D.12B — P1-1: output blocks keep last 20", () => {
+  it("keeps up to 20 output blocks in task mode", () => {
+    // Use messageKind="assistant_text" blocks that won't be grouped.
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 22 }, (_, i) => ({
+      id: `out-${i}`,
+      kind: "details" as const,
+      status: "info" as const,
+      title: "",
+      summary: `unique block ${i}`,
+      fullText: `unique block ${i}`,
+      messageKind: "assistant_text" as const,
+    }));
+    // height=200 ensures viewport virtualization doesn't clip blocks.
+    const view = createShellViewModel(createContext(), { width: 80, height: 200, outputBlocks: blocks });
+    const outputIds = view.blocks.map((b) => b.id).filter((id) => id.startsWith("out-"));
+    // maxEphemeral=20: oldest 2 pruned, 20 remain.
+    expect(outputIds.length).toBe(20);
+    expect(outputIds).not.toContain("out-0");
     expect(outputIds).not.toContain("out-1");
+    expect(outputIds).toContain("out-2");
+    expect(outputIds).toContain("out-21");
+  });
+
+  it("prunes oldest ephemeral blocks beyond cap", () => {
+    // Same verification from a different angle.
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 25 }, (_, i) => ({
+      id: `out-${i}`,
+      kind: "details" as const,
+      status: "info" as const,
+      title: "",
+      summary: `unique block ${i}`,
+      fullText: `unique block ${i}`,
+      messageKind: "assistant_text" as const,
+    }));
+    const view = createShellViewModel(createContext(), { width: 80, height: 200, outputBlocks: blocks });
+    const outputIds = view.blocks.map((b) => b.id).filter((id) => id.startsWith("out-"));
+    // Oldest 5 ephemeral pruned (25 - 20 = 5).
+    expect(outputIds).not.toContain("out-0");
+    expect(outputIds).not.toContain("out-4");
+    expect(outputIds).toContain("out-5");
+    expect(outputIds).toContain("out-24");
   });
 
   it("still suppresses output blocks when permission is pending", () => {
@@ -2143,39 +2170,46 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
 
   it("fail/blocking output prioritized over normal output", () => {
     // D.13Q-UX Real Smoke Fix v3：fail 块按 append 顺序保留，不再被推到顶；
-    // 限流只对 ephemeral 生效（cap=3），fail/keep 不计入 cap。
+    // 限流只对 ephemeral 生效（cap=20），fail/keep 不计入 cap。
     const failBlock: ProductBlockViewModel = {
       id: "out-fail",
       kind: "error",
       status: "fail",
       title: "Error",
       summary: "Something failed",
+      fullText: "Something failed",
+      messageKind: "tool_result_error",
     };
-    const normalBlocks: ProductBlockViewModel[] = [
-      { id: "out-1", kind: "details", status: "info", title: "Output 1", summary: "ok" },
-      { id: "out-2", kind: "details", status: "info", title: "Output 2", summary: "ok" },
-      { id: "out-3", kind: "details", status: "info", title: "Output 3", summary: "ok" },
-      { id: "out-4", kind: "details", status: "info", title: "Output 4", summary: "ok" },
-    ];
+    const normalBlocks: ProductBlockViewModel[] = Array.from({ length: 22 }, (_, i) => ({
+      id: `out-${i}`,
+      kind: "details" as const,
+      status: "info" as const,
+      title: `Unique-Normal-${i}`,
+      summary: `ok ${i}`,
+      fullText: `ok ${i}`,
+      messageKind: "assistant_text" as const,
+    }));
     const view = createShellViewModel(createContext(), {
       width: 80,
+      height: 200,
       viewMode: "task",
       outputBlocks: [failBlock, ...normalBlocks],
     });
     const outputBlocks = view.blocks.filter((b) => b.id.startsWith("out-"));
     expect(outputBlocks.find((b) => b.id === "out-fail")).toBeDefined();
-    // ephemeral cap=3，fail 不计入：1 fail + 最近 3 ephemeral = 4 块。
+    // ephemeral cap=20，fail 不计入：22 ephemeral - cap 20 = 2 pruned。
     const ephemeralCount = outputBlocks.filter(
       (b) => b.status !== "fail" && b.status !== "blocked" && !b.keep,
     ).length;
-    expect(ephemeralCount).toBeLessThanOrEqual(3);
-    // out-1 应该被丢（最早 ephemeral 超出 cap），out-2/3/4 保留。
+    expect(ephemeralCount).toBeLessThanOrEqual(20);
+    // out-0/out-1 应该被丢（最早 ephemeral 超出 cap），out-21 保留。
+    expect(outputBlocks.find((b) => b.id === "out-0")).toBeUndefined();
     expect(outputBlocks.find((b) => b.id === "out-1")).toBeUndefined();
-    expect(outputBlocks.find((b) => b.id === "out-4")).toBeDefined();
+    expect(outputBlocks.find((b) => b.id === "out-21")).toBeDefined();
   });
 
-  it("normal output max 3 items", () => {
-    const blocks: ProductBlockViewModel[] = Array.from({ length: 5 }, (_, i) => ({
+  it("normal output max 20 items", () => {
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 25 }, (_, i) => ({
       id: `out-${i}`,
       kind: "details" as const,
       status: "info" as const,
@@ -2188,7 +2222,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       outputBlocks: blocks,
     });
     const outputBlocks = view.blocks.filter((b) => b.id.startsWith("out-"));
-    expect(outputBlocks.length).toBeLessThanOrEqual(3);
+    expect(outputBlocks.length).toBeLessThanOrEqual(20);
   });
 
   it("ordinary multi-line assistant output stays fully visible without Ctrl+O", () => {
@@ -3249,8 +3283,9 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
       outputBlocks: blocks,
     });
     const outputBlocks = view.blocks.filter((b) => b.id.startsWith("out-"));
-    // At least 3 (capped at 3)
-    expect(outputBlocks).toHaveLength(3);
+    // maxEphemeral=20, so 5 blocks all retained.
+    expect(outputBlocks.length).toBeGreaterThanOrEqual(3);
+    expect(outputBlocks).toHaveLength(5);
   });
 
   it("Task Composer in permission pending shows permission placeholder", () => {
@@ -4033,7 +4068,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toMatch(/^\s*writeStatus\(output, context\);\s*$/m);
   });
 
-  it("ShellApp TaskLayout uses scrollable transcript surface with top-left layout", async () => {
+  it("ShellApp TaskLayout uses Static-based transcript with top-left layout", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     // The TaskLayout outer Box must not center the whole region.
@@ -4041,17 +4076,11 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(taskLayoutStart).toBeGreaterThan(0);
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
-    // Output region uses flexGrow=1; the composer band uses flexShrink=0.
-    // Phase 7.17.1: ordinary task transcript uses the measured viewport path,
-    // while composer/footer stay outside the scrollable transcript surface.
-    expect(body).toContain("flexGrow={1}");
-    expect(body).toContain("<TranscriptViewport");
-    expect(body).toContain("virtualRange={view.transcriptVirtualRange}");
-    expect(body).toContain("view.transcriptVirtualRange.bottomSpacer");
-    expect(body).toContain("<MeasuredTranscriptBlock");
-    expect(body).toContain('type: "transcript-scroll-measure"');
-    expect(body).toContain('type: "transcript-viewport-geometry"');
-    expect(body).toContain("flexShrink={0}");
+    // Static-based layout: completed blocks commit to terminal scrollback,
+    // dynamic blocks stay in the rerender zone below.
+    expect(body).toContain("<Static items={staticBlocks}>");
+    expect(body).toContain("<ProductBlock");
+    expect(body).toContain("<Composer view={view}");
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
     expect(outerWrapper).not.toContain('alignItems="center"');
@@ -4119,9 +4148,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
   it("Phase 7.18 source: controller records measured block heights into the same cache", async () => {
     const { readFile } = await import("node:fs/promises");
-    const shellSource = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
-    expect(shellSource).toContain('type: "transcript-block-measure"');
+    const typesSource = await readFile(join(SRC_ROOT, "shell/types.ts"), "utf8");
+    // The event type is defined in types and handled by the controller in index.ts.
+    expect(typesSource).toContain('type: "transcript-block-measure"');
     expect(source).toContain('event.type === "transcript-block-measure"');
     expect(source).toContain("context.transcriptBlockHeightCache ??= {}");
     expect(source).toContain("context.transcriptBlockHeightCache[event.id]");
@@ -5270,21 +5300,33 @@ describe("D.13Q-UX Real Smoke Fix v3 — transcript 顺序", () => {
   });
 
   it("ephemeral 限流只丢最早的 ephemeral，不影响 keep 与 fail 的位置", () => {
+    // 需要超过 maxEphemeral=20 条 ephemeral 才能触发限流
     const blocks: ProductBlockViewModel[] = [
-      { id: "eph:1", kind: "details", status: "info", title: "", summary: "e1", fullText: "e1" },
+      ...Array.from({ length: 10 }, (_, i) => ({
+        id: `eph:${i + 1}`,
+        kind: "details" as const,
+        status: "info" as const,
+        title: "",
+        summary: `e${i + 1}`,
+        fullText: `e${i + 1}`,
+      })),
       {
         id: "usr:1",
-        kind: "command",
-        status: "info",
+        kind: "command" as const,
+        status: "info" as const,
         title: "kept user",
         summary: "",
         keep: true,
-        messageKind: "user_text",
+        messageKind: "user_text" as const,
       },
-      { id: "eph:2", kind: "details", status: "info", title: "", summary: "e2", fullText: "e2" },
-      { id: "eph:3", kind: "details", status: "info", title: "", summary: "e3", fullText: "e3" },
-      { id: "eph:4", kind: "details", status: "info", title: "", summary: "e4", fullText: "e4" },
-      { id: "eph:5", kind: "details", status: "info", title: "", summary: "e5", fullText: "e5" },
+      ...Array.from({ length: 15 }, (_, i) => ({
+        id: `eph:${i + 11}`,
+        kind: "details" as const,
+        status: "info" as const,
+        title: "",
+        summary: `e${i + 11}`,
+        fullText: `e${i + 11}`,
+      })),
     ];
     const view = createShellViewModel(createContext(), {
       width: 80,
@@ -5294,17 +5336,16 @@ describe("D.13Q-UX Real Smoke Fix v3 — transcript 顺序", () => {
     const ids = view.blocks
       .map((b) => b.id)
       .filter((id) => id.startsWith("eph:") || id.startsWith("usr:"));
-    // 5 条 ephemeral 超过 cap=3，应丢最早的 2 条；keep 的 usr:1 必须保留且不被推到顶。
+    // 25 条 ephemeral 超过 cap=20，应丢最早的 5 条；keep 的 usr:1 必须保留且不被推到顶。
     expect(ids).toContain("usr:1");
-    expect(ids).toContain("eph:3");
-    expect(ids).toContain("eph:4");
-    expect(ids).toContain("eph:5");
+    expect(ids).toContain("eph:25");
+    expect(ids).toContain("eph:6");
     expect(ids).not.toContain("eph:1");
-    expect(ids).not.toContain("eph:2");
-    // 顺序：先 usr:1（在 eph:2 之前出现），再 eph:3 → eph:4 → eph:5
+    expect(ids).not.toContain("eph:5");
+    // 顺序：usr:1 在 eph:11 之前出现
     const usrPos = ids.indexOf("usr:1");
-    const eph3Pos = ids.indexOf("eph:3");
-    expect(usrPos).toBeLessThan(eph3Pos);
+    const eph11Pos = ids.indexOf("eph:11");
+    expect(usrPos).toBeLessThan(eph11Pos);
   });
 });
 

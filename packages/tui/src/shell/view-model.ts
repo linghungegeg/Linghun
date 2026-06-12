@@ -290,7 +290,7 @@ export function createShellViewModel(
     const ephemeralIndices = allOutputBlocks
       .map((b, i) => (isEphemeral(b) ? i : -1))
       .filter((i) => i >= 0);
-    const maxEphemeral = 3;
+    const maxEphemeral = 20;
     const dropEphemeralIndices = new Set<number>(
       ephemeralIndices.length > maxEphemeral
         ? ephemeralIndices.slice(0, ephemeralIndices.length - maxEphemeral)
