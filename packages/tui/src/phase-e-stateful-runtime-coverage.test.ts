@@ -19,6 +19,7 @@ import { createCacheState, createMemoryState, createMcpState, createRemoteState 
 import { createIndexState } from "./index-runtime.js";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import {
   captureFailureLearning,
   recordProviderFailureEvidence,
@@ -448,6 +449,7 @@ async function createTestContext(): Promise<TuiContext> {
     recentlyMentionedFiles: [],
     solutionCompleteness: createSolutionCompletenessStatus(),
     discoveredDeferredToolNames: new Set<string>(),
+    providerBreaker: createProviderCircuitBreakerState(),
   } as unknown as TuiContext;
 }
 

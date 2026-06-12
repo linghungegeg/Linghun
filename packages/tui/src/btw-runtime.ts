@@ -14,6 +14,8 @@
 import type { EndpointProfile, ModelGateway } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import type { NaturalIntent } from "./natural-command-bridge.js";
+import type { ProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
+import { withProviderRetry } from "./provider-circuit-breaker.js";
 
 export type BtwSideQuestionRuntime = {
   provider: string;
@@ -105,24 +107,39 @@ export async function runBtwSideQuestion(
   runtime: BtwSideQuestionRuntime,
   language: Language,
   signal: AbortSignal,
+  breakerState?: ProviderCircuitBreakerState,
 ): Promise<BtwSideQuestionResult> {
   const messages = buildBtwMessages(question, language);
   let text = "";
   let hadThinking = false;
   let providerError: string | undefined;
   try {
-    for await (const event of gateway.stream(
-      runtime.provider,
-      {
-        messages,
-        model: runtime.model,
-        endpointProfile: runtime.endpointProfile,
-        ...(runtime.reasoningSent ? { reasoningLevel: runtime.reasoningLevel } : {}),
-        // 关键：单轮、强制无工具，避免 side question 触发 tool loop / 权限。
-        toolChoice: "none",
-      },
-      signal,
-    )) {
+    const stream = breakerState
+      ? withProviderRetry(
+          gateway,
+          breakerState,
+          runtime.provider,
+          {
+            messages,
+            model: runtime.model,
+            endpointProfile: runtime.endpointProfile,
+            ...(runtime.reasoningSent ? { reasoningLevel: runtime.reasoningLevel } : {}),
+            toolChoice: "none",
+          },
+          signal,
+        )
+      : gateway.stream(
+          runtime.provider,
+          {
+            messages,
+            model: runtime.model,
+            endpointProfile: runtime.endpointProfile,
+            ...(runtime.reasoningSent ? { reasoningLevel: runtime.reasoningLevel } : {}),
+            toolChoice: "none",
+          },
+          signal,
+        );
+    for await (const event of stream) {
       if (signal.aborted) {
         return {
           status: "error",

@@ -1,5 +1,8 @@
 import type { Language } from "@linghun/shared";
 import { readPositiveIntEnv } from "@linghun/shared";
+import type { LinghunEvent, ModelGateway, ModelRequest } from "@linghun/providers";
+import { LinghunError } from "@linghun/core";
+import { classifyProviderFailure, type ProviderFailureKind } from "./request-lifecycle-presenter.js";
 
 /**
  * Provider Circuit Breaker / Cooldown + Concurrency Gate
@@ -324,3 +327,184 @@ export const BREAKER_CONSTANTS = {
   PROVIDER_ACTIVE_LIMIT,
   RECOVERABLE_CODES,
 } as const;
+
+// ─── Provider Retry Wrapper ────────────────────────────────────────────
+
+/**
+ * Provider failure kinds eligible for same-provider retry.
+ * These are transient failures where retrying the same provider has a
+ * reasonable chance of success. Quota/auth/schema/not_found/abort are
+ * excluded — retrying won't help.
+ */
+const RETRYABLE_KINDS: Set<ProviderFailureKind> = new Set([
+  "gateway",
+  "transit",
+  "timeout",
+  "rate_limit",
+]);
+
+function shouldAttemptSameProviderRetry(kind: ProviderFailureKind): boolean {
+  return RETRYABLE_KINDS.has(kind);
+}
+
+function getProviderErrorCode(error: unknown): string {
+  return error instanceof LinghunError
+    ? error.code
+    : error instanceof Error && "code" in error && typeof (error as Record<string, unknown>).code === "string"
+      ? (error as Record<string, string>).code
+      : "PROVIDER_ERROR";
+}
+
+const PROVIDER_RETRY_BASE_MS = 500;
+const PROVIDER_RETRY_MAX_MS = 32_000;
+const PROVIDER_RETRY_MAX_ATTEMPTS = 3;
+const PROVIDER_GATE_WAIT_MS_MIN = 1000;
+const PROVIDER_GATE_WAIT_JITTER_MS = 2000;
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener("abort", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    }
+  });
+}
+
+/**
+ * Wraps `gateway.stream()` with same-provider retry, concurrency gating,
+ * and exponential backoff + jitter.
+ *
+ * On transient errors (gateway, transit, timeout, rate_limit): retries
+ * the SAME provider up to `maxRetries` times with backoff. On non-transient
+ * errors or after retries are exhausted: yields the error event so callers
+ * can fall back to a different model or degrade gracefully.
+ *
+ * Callers that already perform their own cooldown check can set
+ * `skipGate: true` and pass `skipCooldownCheck: true` to avoid redundant
+ * breaker inspection.
+ */
+export async function* withProviderRetry(
+  gateway: ModelGateway,
+  state: ProviderCircuitBreakerState,
+  provider: string,
+  request: ModelRequest,
+  signal: AbortSignal | undefined,
+  opts?: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    skipGate?: boolean;
+    skipCooldownCheck?: boolean;
+  },
+): AsyncGenerator<LinghunEvent> {
+  const maxRetries = opts?.maxRetries ?? PROVIDER_RETRY_MAX_ATTEMPTS;
+  const baseDelayMs = opts?.baseDelayMs ?? PROVIDER_RETRY_BASE_MS;
+  const maxDelayMs = opts?.maxDelayMs ?? PROVIDER_RETRY_MAX_MS;
+  const model = request.model ?? "";
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) {
+      yield {
+        type: "error",
+        error: new LinghunError({ code: "ABORT_ERR", message: "Request aborted.", recoverable: false }),
+      };
+      return;
+    }
+
+    if (!opts?.skipGate) {
+      const gate = checkProviderGate(state, provider, model);
+      if (!gate.allowed) {
+        if (gate.reason === "at_capacity") {
+          // Wait for a slot to open, then retry without counting as an attempt.
+          await sleepAbortable(
+            PROVIDER_GATE_WAIT_MS_MIN + Math.random() * PROVIDER_GATE_WAIT_JITTER_MS,
+            signal,
+          );
+          if (attempt > 0) attempt = Math.max(0, attempt - 1);
+          continue;
+        }
+        if (gate.reason === "cooldown") {
+          yield {
+            type: "error",
+            error: new LinghunError({
+              code: gate.reasonCode,
+              message: `Provider ${provider}/${model} is in cooldown (${Math.ceil(gate.remainingMs / 1000)}s remaining).`,
+              recoverable: true,
+              suggestion: "Wait for cooldown to expire, or switch provider/model with /model.",
+            }),
+          };
+          return;
+        }
+      }
+    }
+
+    // Reserve a slot before streaming.
+    const slotAcquired = acquireProviderSlot(state, provider, model);
+    let streamError: unknown;
+    let streamCompleted = false;
+
+    try {
+      for await (const event of gateway.stream(provider, request, signal ?? new AbortController().signal)) {
+        if (event.type === "error") {
+          streamError = event.error;
+          break;
+        }
+        yield event;
+        if (event.type === "message_stop") {
+          streamCompleted = true;
+        }
+      }
+    } catch (error) {
+      streamError = error;
+    } finally {
+      if (slotAcquired) {
+        releaseProviderSlot(state, provider, model);
+      }
+    }
+
+    if (!streamError) {
+      // Success — clear the breaker for this provider+model.
+      clearProviderBreaker(state, provider, model);
+      return;
+    }
+
+    if (signal?.aborted) {
+      yield {
+        type: "error",
+        error: new LinghunError({ code: "ABORT_ERR", message: "Request aborted.", recoverable: false }),
+      };
+      return;
+    }
+
+    const kind = classifyProviderFailure(streamError);
+    const code = getProviderErrorCode(streamError);
+    recordProviderFailure(state, provider, model, code);
+
+    if (!shouldAttemptSameProviderRetry(kind) || attempt >= maxRetries) {
+      // Non-retryable or retries exhausted — yield the error as-is.
+      const error =
+        streamError instanceof LinghunError
+          ? streamError
+          : new LinghunError({
+              code,
+              message: streamError instanceof Error ? streamError.message : String(streamError),
+              recoverable: kind === "gateway" || kind === "transit" || kind === "timeout",
+            });
+      yield { type: "error", error };
+      return;
+    }
+
+    // Backoff before retry.
+    const baseDelay = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
+    const jitter = Math.random() * 0.25 * baseDelay;
+    const delayMs = baseDelay + jitter;
+    await sleepAbortable(delayMs, signal);
+  }
+}

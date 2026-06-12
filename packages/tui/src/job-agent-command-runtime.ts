@@ -58,7 +58,7 @@ import {
   checkProviderCooldown,
   clearProviderBreaker,
   formatCooldownMessage,
-  recordProviderFailure,
+  withProviderRetry,
 } from "./provider-circuit-breaker.js";
 import {
   type ProviderFailureKind,
@@ -2662,7 +2662,9 @@ export async function runModelBackedAgent(
         };
       }
       let retryWithFallback = false;
-      for await (const event of continuation.gateway.stream(
+      for await (const event of withProviderRetry(
+        continuation.gateway,
+        context.providerBreaker,
         currentRuntime.provider,
         {
           messages: preflight.messages,
@@ -2693,12 +2695,6 @@ export async function runModelBackedAgent(
         if (event.type === "error") {
           const code = event.error.code ?? "PROVIDER_ERROR";
           const kind = classifyProviderFailure(event.error);
-          recordProviderFailure(
-            context.providerBreaker,
-            currentRuntime.provider,
-            currentRuntime.model,
-            code,
-          );
           await context.store.appendEvent(agent.transcriptSessionId, {
             type: "system_event",
             id: randomUUID(),

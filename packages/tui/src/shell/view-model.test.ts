@@ -3662,7 +3662,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       activity: { phase: "thinking", text: "正在思考…" },
     });
     expect(view.taskFooter).toBeDefined();
-    expect(view.taskFooter?.permissionMode).toBe("默认模式");
+    expect(view.taskFooter?.permissionMode).toBe("○ 默认模式");
     expect(view.taskFooter?.index).toContain("索引");
     // Critical: TaskFooter must not pull in the noisy session/model/cache/gate/bg line.
     expect(view.taskFooter?.permissionMode ?? "").not.toContain("[Linghun]");
@@ -4719,20 +4719,20 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ProductBlock.tsx"), "utf8");
     const userStart = source.indexOf('block.messageKind === "user_text"');
-    const assistantStart = source.indexOf('block.messageKind === "assistant_text"');
+    const messageStart = source.indexOf("isMessageKind(block.messageKind)");
     const userBranch = source.slice(userStart, source.indexOf("const marker", userStart));
-    const assistantBranch = source.slice(
-      assistantStart,
-      source.indexOf("isLocalOutput ?", assistantStart),
-    );
+    const messageBranch = source.slice(messageStart, source.indexOf('if (block.messageKind === "assistant_thinking")', messageStart));
 
+    // user_text: plain text, no Markdown, dim separator + wrapText + background fill
     expect(userBranch).toContain("marginBottom={1}");
     expect(userBranch).toContain("│ ");
     expect(userBranch).toContain("wrapText");
     expect(userBranch).toContain("backgroundColor");
     expect(userBranch).not.toContain("MessageMarkdown");
-    expect(assistantBranch).toContain("marginTop={isAssistantText ? 1 : 0}");
-    expect(assistantBranch).toContain("marginBottom={0}");
+    // assistant_text (via unified isMessageKind path): MessageMarkdown, compact margins
+    expect(messageBranch).toContain("marginTop={0}");
+    expect(messageBranch).toContain("marginBottom={1}");
+    expect(messageBranch).toContain("MessageMarkdown");
   });
 
   it("Ink task layout keeps transcript, notices, composer, footer, and light hints separated", async () => {

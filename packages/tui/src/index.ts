@@ -393,6 +393,7 @@ import {
   formatCooldownDoctorLine,
   formatCooldownMessage,
   recordProviderFailure,
+  withProviderRetry,
 } from "./provider-circuit-breaker.js";
 import {
   configureRemoteCommandRuntime,

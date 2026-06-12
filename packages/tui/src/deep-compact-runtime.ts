@@ -8,6 +8,7 @@ import { estimateTranscriptContextChars } from "./context-estimator.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import type { TuiContext } from "./index.js";
 import { formatIndexRuntimeRef } from "./index-runtime.js";
+import { withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   sanitizeDiagnosticText,
   sanitizeDisplayPaths,
@@ -95,7 +96,9 @@ export async function runDeepCompact(input: {
   const signal = input.signal ?? new AbortController().signal;
   let summary = "";
   try {
-    for await (const event of input.gateway.stream(
+    for await (const event of withProviderRetry(
+      input.gateway,
+      input.context.providerBreaker,
       input.runtime.provider,
       {
         messages: requestMessages,

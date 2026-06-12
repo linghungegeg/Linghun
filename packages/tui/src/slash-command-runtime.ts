@@ -1871,6 +1871,7 @@ export async function handleBtwCommand(
     },
     context.language,
     controller.signal,
+    context.providerBreaker,
   );
   if (context.activeBtwAbortController === controller) {
     context.activeBtwAbortController = undefined;

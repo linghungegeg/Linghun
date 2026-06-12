@@ -93,7 +93,7 @@ import {
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
-import { BREAKER_CONSTANTS, checkProviderGate, clearProviderBreaker, formatCooldownMessage, recordProviderFailure } from "./provider-circuit-breaker.js";
+import { BREAKER_CONSTANTS, checkProviderGate, clearProviderBreaker, formatCooldownMessage, recordProviderFailure, withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   checkAndWriteProviderCooldown,
   recordProviderFallbackAttempt,
@@ -1722,7 +1722,9 @@ async function streamFinalModelAnswerWithoutTools(
   }
   continuation.messages = preflight.messages;
   const promptCacheFields = await buildPromptCacheRequestFields(context);
-  for await (const event of gateway.stream(
+  for await (const event of withProviderRetry(
+    gateway,
+    context.providerBreaker,
     continuation.provider,
     {
       messages: preflight.messages,
@@ -1786,18 +1788,8 @@ async function streamFinalModelAnswerWithoutTools(
       clearRequestActivity(context);
       const currentRuntime = runtimeFromContinuation(continuation);
       await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
-      const breakerOpened2 = recordProviderFailure(
-        context.providerBreaker,
-        continuation.provider,
-        continuation.model,
-        event.error.code ?? "UNKNOWN",
-      );
-      if (breakerOpened2) {
-        context.pushNotification?.(
-          formatCooldownMessage(continuation.provider, continuation.model, BREAKER_CONSTANTS.COOLDOWN_MS, context.language),
-          "warning",
-        );
-      }
+      // withProviderRetry already recorded the failure and exhausted same-provider
+      // retries. Only fallback to a different model remains.
       const fallback = fallbackAttempted
         ? undefined
         : resolveRuntimeFallback(context, currentRuntime, event.error);
