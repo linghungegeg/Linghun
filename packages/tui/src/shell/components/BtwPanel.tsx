@@ -1,7 +1,7 @@
 import type { Language } from "@linghun/shared";
 import { Box, Text, useInput } from "@linghun/ink-runtime";
 import type React from "react";
-import { fitText } from "../text-utils.js";
+import { fitText, wrapText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type { ShellController } from "../types.js";
 
@@ -70,17 +70,17 @@ export function BtwPanel({
         </Text>
       ) : null}
       {panel.phase === "answered" && panel.answer
-        ? panel.answer
-            .split("\n")
-            .map((line, idx) => (
-              <Text key={`${idx}-${line.slice(0, 8)}`}>{fitText(line, innerWidth)}</Text>
-            ))
+        ? wrapText(panel.answer, innerWidth).map((line, idx) => (
+            <Text key={`${idx}-${line.slice(0, 8)}`}>{line}</Text>
+          ))
         : null}
-      {panel.phase === "error" ? (
-        <Text color={theme.error ?? theme.status.fail}>
-          {fitText(panel.error ?? "error", innerWidth)}
-        </Text>
-      ) : null}
+      {panel.phase === "error"
+        ? wrapText(panel.error ?? "error", innerWidth).map((line, idx) => (
+            <Text key={`${idx}-${line.slice(0, 8)}`} color={theme.error ?? theme.status.fail}>
+              {line}
+            </Text>
+          ))
+        : null}
       <Text color={theme.dim ?? theme.muted} dimColor>
         {fitText(hint.nav, innerWidth)}
       </Text>

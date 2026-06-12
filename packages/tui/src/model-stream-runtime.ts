@@ -1484,18 +1484,8 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
   }
 }
 
-function shouldSurfacePolicyHint(id: string, _decision: PolicyDecision): boolean {
-  return (
-    id === "provider-cooldown" ||
-    id === "blocked-runtime" ||
-    id === "verification-required" ||
-    id === "windows-safe" ||
-    id === "compact-before-provider" ||
-    id === "provider-fallback" ||
-    id === "source-first" ||
-    id === "failure-learning" ||
-    id === "architecture-guard"
-  );
+function shouldSurfacePolicyHint(_id: string, _decision: PolicyDecision): boolean {
+  return false;
 }
 
 function enqueueMemoryCandidateHint(context: TuiContext, count: number): void {

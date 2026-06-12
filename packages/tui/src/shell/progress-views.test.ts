@@ -29,6 +29,7 @@ describe("Phase R3 progress view projectors", () => {
         displayName: "Explore",
         status: "running",
         activitySummary: "reading files",
+        startedAt: new Date(Date.now() - 12_000).toISOString(),
         mailbox: [{ id: "m1" }, { id: "m2" }],
         cost: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
       },
@@ -37,6 +38,7 @@ describe("Phase R3 progress view projectors", () => {
     const view = buildAgentProgressTreeView(ctx);
 
     expect(view?.rows[0]).toMatchObject({ name: "Explore", status: "running", toolUses: 2, tokens: 0 });
+    expect(view?.rows[0]?.elapsed).toMatch(/\d+s/);
   });
 
   it("projects todos with owner and blocked-by fields when present", () => {
@@ -63,6 +65,7 @@ describe("Phase R3 progress view projectors", () => {
         id: "wf-1",
         goal: "R3",
         status: "running",
+        startedAt: new Date(Date.now() - 65_000).toISOString(),
         steps: [
           { id: "s1", title: "Scan", status: "completed" },
           { id: "s2", title: "Implement", status: "running" },
@@ -73,6 +76,7 @@ describe("Phase R3 progress view projectors", () => {
     const view = buildWorkflowProgressView(ctx);
 
     expect(view?.runs[0]?.currentStepId).toBe("s2");
+    expect(view?.runs[0]?.elapsed).toMatch(/\d+m\d{2}s/);
     expect(view?.runs[0]?.steps[1]).toMatchObject({ title: "Implement", active: true });
   });
 

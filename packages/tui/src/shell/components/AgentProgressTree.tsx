@@ -21,6 +21,7 @@ export function AgentProgressTree({
   const theme = useMemo(() => createShellTheme(noColor), [noColor]);
   const innerWidth = Math.max(20, width - 2);
   const text = messages[language];
+  const workLabel = language === "en-US" ? "working" : "工作";
 
   return (
     <Box flexDirection="column" marginTop={1}>
@@ -37,33 +38,26 @@ export function AgentProgressTree({
             ? "└─"
             : "├─";
         const completed = row.status === "completed";
-        const statusColor = completed
-          ? theme.status.info
-          : row.status === "blocked"
-            ? theme.status.blocked
-            : theme.muted;
+        const rowText = `${row.name}${row.activity ? `: ${row.activity}` : ""}${
+          row.elapsed ? ` · ${workLabel} ${row.elapsed}` : ""
+        }`;
 
         return (
           <Box key={row.id} flexDirection="column">
             <Box>
               {/* Selection pointer: ▶ when selected, space otherwise (CCB figures.pointer pattern) */}
               <Text
-                color={selected ? theme.accent : undefined}
+                color={theme.dim ?? theme.muted}
                 bold={selected}
+                dimColor={!selected}
               >
                 {completed ? "✓" : selected ? "▶" : " "}
               </Text>
-              <Text color={statusColor} dimColor={!selected && !completed}>
+              <Text color={theme.dim ?? theme.muted} dimColor={!selected}>
                 {treeChar}{" "}
               </Text>
-              <Text
-                color={selected ? theme.accent : statusColor}
-                dimColor={!selected || completed}
-              >
-                {fitText(
-                  `${row.name}${row.activity ? `: ${row.activity}` : ""}`,
-                  innerWidth - 2,
-                )}
+              <Text color={theme.dim ?? theme.muted} dimColor={!selected || completed}>
+                {fitText(rowText, innerWidth - 2)}
               </Text>
             </Box>
             {/* Expanded detail row (CCB enter-to-view pattern) */}
@@ -73,6 +67,7 @@ export function AgentProgressTree({
                   {text.r3AgentDetailStatus}: {row.status}
                   {" · "}
                   {text.r3AgentDetailTools}: {row.toolUses}
+                  {row.elapsed ? ` · ${workLabel} ${row.elapsed}` : ""}
                 </Text>
               </Box>
             ) : null}

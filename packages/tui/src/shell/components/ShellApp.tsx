@@ -360,30 +360,6 @@ function TaskLayout({
           <Composer view={view} onInput={controller.onInput} capability={capability} />
         </Box>
 
-        {/* Agent & Workflow trees — pinned below composer, above footer.
-            CCB FullscreenLayout: Spinner → PromptInput → TeammatePills → Footer. */}
-        {view.agentProgressTree ? (
-          <Box width={cw} marginTop={1}>
-            <AgentProgressTree
-              tree={view.agentProgressTree}
-              width={cw}
-              noColor={noColor}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
-        {view.workflowProgressView ? (
-          <Box width={cw} marginTop={1}>
-            <WorkflowProgressView
-              workflow={view.workflowProgressView}
-              width={cw}
-              noColor={noColor}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
         {/* Task footer — minimal status line: permission mode · model · cache · index · reasoning. NOT the
             full StatusTray; cost and background summaries stay out of the default Task surface.
             D.13Q-UX：迁到 StatusFooter（左 mode pill + cyclePermHint，右 model/cache/index/reasoning），
@@ -397,6 +373,29 @@ function TaskLayout({
             modelDim={view.taskFooter.modelDim}
             cacheTone={view.taskFooter.cacheTone}
           />
+        ) : null}
+
+        {/* Agent & Workflow trees — footer-adjacent runtime status. */}
+        {view.agentProgressTree ? (
+          <Box width={view.width} paddingX={2}>
+            <AgentProgressTree
+              tree={view.agentProgressTree}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          </Box>
+        ) : null}
+
+        {view.workflowProgressView ? (
+          <Box width={view.width} paddingX={2}>
+            <WorkflowProgressView
+              workflow={view.workflowProgressView}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          </Box>
         ) : null}
 
         {/* 底部呼吸：在 footer 与终端最底部之间留 1 行空白，避免 task footer

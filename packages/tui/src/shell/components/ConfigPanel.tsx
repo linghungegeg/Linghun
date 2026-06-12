@@ -1,7 +1,7 @@
 import type { Language } from "@linghun/shared";
 import { Box, Text, useInput } from "@linghun/ink-runtime";
 import type React from "react";
-import { fitText, wrapText } from "../text-utils.js";
+import { fitText, lineChar, wrapText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type { ConfigPanelView, ShellController } from "../types.js";
 
@@ -17,26 +17,26 @@ import type { ConfigPanelView, ShellController } from "../types.js";
  */
 
 const MAX_VISIBLE = 10;
+const MIN_PANEL_WIDTH = 64;
+const MAX_PANEL_WIDTH = 108;
 
 const HINT_TEXT = {
   "zh-CN": {
     list: "↑↓ 选择 · Enter 进入 · Esc 关闭",
     detail: "↑↓ 选择 · Enter 执行 · Esc 返回",
-    count: (start: number, end: number, total: number) =>
-      `第 ${start}-${end} 项，共 ${total} 项`,
+    count: (start: number, end: number, total: number) => `第 ${start}-${end} 项，共 ${total} 项`,
   },
   "en-US": {
     list: "↑↓ select · Enter open · Esc close",
     detail: "↑↓ select · Enter dispatch · Esc back",
-    count: (start: number, end: number, total: number) =>
-      `${start}-${end} of ${total}`,
+    count: (start: number, end: number, total: number) => `${start}-${end} of ${total}`,
   },
 } as const;
 
 export function ConfigPanel({
   panel,
   controller: _controller,
-  width: _width,
+  width,
   noColor,
   language,
 }: {
@@ -51,7 +51,12 @@ export function ConfigPanel({
 
   useInput(() => undefined, { isActive: false });
 
-  const innerWidth = 76;
+  const panelWidth = Math.max(
+    40,
+    Math.max(Math.min(width - 2, MIN_PANEL_WIDTH), Math.min(width - 2, MAX_PANEL_WIDTH)),
+  );
+  const innerWidth = Math.max(36, panelWidth - 4);
+  const rule = lineChar(noColor);
 
   if (panel.phase === "panel_list") {
     const total = panel.panels.length;
@@ -60,37 +65,52 @@ export function ConfigPanel({
     const visible = panel.panels.slice(scrollOffset, scrollOffset + MAX_VISIBLE);
     const visibleEnd = Math.min(scrollOffset + MAX_VISIBLE, total);
     const titleWidth = Math.min(
-      20,
+      18,
       Math.max(8, ...panel.panels.map((p) => [...p.title].length)) + 2,
     );
+    const summaryWidth = Math.max(16, innerWidth - titleWidth - 5);
 
     return (
-      <Box flexDirection="column" paddingX={1} marginTop={1}>
-        <Text color={theme.accent} bold>
-          {fitText("/config", innerWidth)}
+      <Box flexDirection="column" paddingX={1} marginTop={1} width={panelWidth}>
+        <Text color={theme.panel ?? theme.border} dimColor>
+          {`${rule.repeat(2)} CONFIG ${rule.repeat(Math.max(8, innerWidth - 9))}`}
         </Text>
-        {total > 0 ? (
-          <Text color={theme.dim ?? theme.muted} dimColor>
-            {hint.count(scrollOffset + 1, visibleEnd, total)}
+        <Box>
+          <Text color={theme.accent} bold>
+            CONFIG
           </Text>
-        ) : null}
+          <Text color={theme.dim ?? theme.muted} dimColor>
+            {fitText(
+              `  /config  ${total > 0 ? hint.count(scrollOffset + 1, visibleEnd, total) : ""}`,
+              innerWidth - 6,
+            )}
+          </Text>
+        </Box>
         <Text color={theme.muted}>{fitText(hint.list, innerWidth)}</Text>
         <Box flexDirection="column" marginTop={1}>
           {visible.map((p, vi) => {
             const realIdx = scrollOffset + vi;
             const active = realIdx === panel.cursor;
             const titleCol = p.title.padEnd(titleWidth);
-            const line = `${active ? "▸" : " "} ${titleCol}${p.summary}`;
             return (
-              <Text
-                key={p.id}
-                color={active ? theme.accent : undefined}
-                bold={active}
-              >
-                {fitText(line, innerWidth)}
-              </Text>
+              <Box key={p.id}>
+                <Text color={active ? theme.accent : (theme.dim ?? theme.muted)} bold={active}>
+                  {active ? "▌ " : "  "}
+                </Text>
+                <Text color={active ? theme.accent : undefined} bold={active}>
+                  {fitText(titleCol, titleWidth)}
+                </Text>
+                <Text color={active ? undefined : (theme.dim ?? theme.muted)}>
+                  {fitText(p.summary, summaryWidth)}
+                </Text>
+              </Box>
             );
           })}
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.panel ?? theme.border} dimColor>
+            {rule.repeat(innerWidth)}
+          </Text>
         </Box>
       </Box>
     );
@@ -105,10 +125,21 @@ export function ConfigPanel({
   const visibleEnd = Math.min(scrollOffset + MAX_VISIBLE, total);
 
   return (
-    <Box flexDirection="column" paddingX={1} marginTop={1}>
-      <Text color={theme.accent} bold>
-        {fitText(`/config · ${panel.panel.title}`, innerWidth)}
+    <Box flexDirection="column" paddingX={1} marginTop={1} width={panelWidth}>
+      <Text color={theme.panel ?? theme.border} dimColor>
+        {`${rule.repeat(2)} CONFIG ${rule.repeat(Math.max(8, innerWidth - 9))}`}
       </Text>
+      <Box>
+        <Text color={theme.accent} bold>
+          {fitText(panel.panel.title.toUpperCase(), Math.max(8, Math.floor(innerWidth * 0.45)))}
+        </Text>
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {fitText(
+            `  /config · ${panel.panel.title}`,
+            Math.max(8, innerWidth - panel.panel.title.length - 2),
+          )}
+        </Text>
+      </Box>
       <Box flexDirection="column" marginTop={1}>
         {wrapText(panel.panel.summary, innerWidth).map((line, idx) => (
           <Text key={`summary-${idx}-${line}`} color={theme.muted}>
@@ -116,25 +147,25 @@ export function ConfigPanel({
           </Text>
         ))}
       </Box>
-      {total > 0 ? (
-        <Text color={theme.dim ?? theme.muted} dimColor>
-          {hint.count(scrollOffset + 1, visibleEnd, total)}
-        </Text>
-      ) : null}
-      <Text color={theme.muted}>{fitText(hint.detail, innerWidth)}</Text>
+      <Text color={theme.muted}>
+        {fitText(
+          [total > 0 ? hint.count(scrollOffset + 1, visibleEnd, total) : "", hint.detail]
+            .filter(Boolean)
+            .join(" · "),
+          innerWidth,
+        )}
+      </Text>
       <Box flexDirection="column" marginTop={1}>
         {visible.map((a, vi) => {
           const realIdx = scrollOffset + vi;
           const active = realIdx === panel.actionCursor;
           return (
             <Box key={a.id} flexDirection="column">
-              {wrapText(
-                `${active ? "▸ " : "  "}${a.label}`,
-                innerWidth,
-              ).map((part, lineIdx) => (
+              {wrapText(`${active ? "▌ " : "  "}${a.label}`, innerWidth).map((part, lineIdx) => (
                 <Text
                   key={`${a.id}-${lineIdx}`}
                   color={active ? theme.accent : undefined}
+                  bold={active}
                 >
                   {lineIdx === 0 ? part : `  ${fitText(part, Math.max(8, innerWidth - 2))}`}
                 </Text>
@@ -142,6 +173,11 @@ export function ConfigPanel({
             </Box>
           );
         })}
+      </Box>
+      <Box marginTop={1}>
+        <Text color={theme.panel ?? theme.border} dimColor>
+          {rule.repeat(innerWidth)}
+        </Text>
       </Box>
     </Box>
   );

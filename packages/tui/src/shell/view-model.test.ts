@@ -4099,6 +4099,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).toContain("block={view.taskRuntimeSummary}");
     expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("<Composer view={view}"));
     expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
+    expect(body.indexOf("<AgentProgressTree")).toBeGreaterThan(body.indexOf("<StatusFooter"));
+    expect(body.indexOf("<WorkflowProgressView")).toBeGreaterThan(body.indexOf("<StatusFooter"));
     expect(body).not.toContain(
       "`${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`",
     );

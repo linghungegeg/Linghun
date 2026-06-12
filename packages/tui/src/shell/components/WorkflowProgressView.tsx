@@ -20,21 +20,25 @@ export function WorkflowProgressView({
   const theme = createShellTheme(noColor);
   const innerWidth = Math.max(20, width - 2);
   const text = messages[language];
+  const workLabel = language === "en-US" ? "working" : "工作";
   return (
     <Box flexDirection="column" marginTop={1}>
-      <Text color={theme.muted} bold>
+      <Text color={theme.dim ?? theme.muted} dimColor>
         {text.r3WorkflowsTitle}
       </Text>
       {workflow.runs.map((run) => (
         <Box key={run.id} flexDirection="column">
-          <Text color={run.status === "blocked" ? theme.status.blocked : theme.accent}>
-            {fitText(`${run.goal} · ${run.status}`, innerWidth)}
+          <Text color={theme.dim ?? theme.muted} dimColor>
+            {fitText(
+              `${run.goal} · ${run.status}${run.elapsed ? ` · ${workLabel} ${run.elapsed}` : ""}`,
+              innerWidth,
+            )}
           </Text>
           {run.steps.map((step, index) => {
             const branch = index === run.steps.length - 1 ? "└─" : "├─";
             const marker = workflowMarker(step.status, noColor);
             return (
-              <Text key={step.id} color={step.active ? theme.status.running : theme.muted}>
+              <Text key={step.id} color={theme.dim ?? theme.muted} dimColor={!step.active}>
                 {fitText(`${branch} ${marker} ${step.title}`, innerWidth)}
               </Text>
             );

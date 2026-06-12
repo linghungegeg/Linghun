@@ -22299,7 +22299,7 @@ describe("D.8 provider circuit breaker integration", () => {
     }
   });
 
-  it("Policy: provider cooldown records a strategy hint without calling the gateway", async () => {
+  it("Policy: provider cooldown records an internal strategy event without calling the gateway", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-policy-cooldown-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -22322,7 +22322,7 @@ describe("D.8 provider circuit breaker integration", () => {
 
     expect(gateway.stream).not.toHaveBeenCalled();
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：Provider 冷却中");
+    expect(notifications).not.toContain("策略：Provider 冷却中");
     expect(notifications).not.toContain("policy_decision");
     const transcript = (await store.resume(session.id)).transcript;
     expect(JSON.stringify(transcript)).toContain("provider 冷却阻塞");
@@ -25063,7 +25063,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：源码优先，先读取关键文件。");
+    expect(notifications).not.toContain("策略：源码优先，先读取关键文件。");
     expect(notifications).not.toContain("PolicyDecision");
     expect(notifications).not.toContain("policy_decision");
     const transcript = (await store.resume(session.id)).transcript;
@@ -25085,7 +25085,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("Strategy: source-first; reading key files before answering.");
+    expect(notifications).not.toContain("Strategy: source-first; reading key files before answering.");
     expect(notifications).not.toContain("MetaSchedulerForModel");
     expect(notifications).not.toContain("raw evidence");
     const transcript = (await store.resume(session.id)).transcript;
@@ -25115,9 +25115,9 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：建议先做 focused verification。");
+    expect(notifications).not.toContain("策略：建议先做 focused verification。");
     expect(notifications).not.toContain("策略：高风险结论需要验证后再说通过。");
-    expect(notifications).toContain("策略：参考历史失败，只作为风险提示。");
+    expect(notifications).not.toContain("策略：参考历史失败，只作为风险提示。");
     const transcript = (await store.resume(session.id)).transcript;
     const raw = JSON.stringify(transcript);
     expect(raw).toContain("source-first");
@@ -25159,8 +25159,8 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
     // context-pressure is no longer surfaced as user notification (internal scheduler hint)
-    expect(notifications).toContain("策略：上下文接近上限，先压缩再请求模型。");
-    expect(notifications).toContain("策略：已有任务阻塞，先检查 workflow/agent 状态。");
+    expect(notifications).not.toContain("策略：上下文接近上限，先压缩再请求模型。");
+    expect(notifications).not.toContain("策略：已有任务阻塞，先检查 workflow/agent 状态。");
     const transcript = (await store.resume(session.id)).transcript;
     const raw = JSON.stringify(transcript);
     expect(raw).toContain("compact_required");
@@ -25226,7 +25226,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：高风险结论需要验证后再说通过。");
+    expect(notifications).not.toContain("策略：高风险结论需要验证后再说通过。");
     expect(notifications).not.toContain("策略：已有后台 agent/job 占用，先避免重复启动。");
     expect(notifications).not.toContain("PolicyDecision");
     const transcript = (await store.resume(session.id)).transcript;
@@ -25249,8 +25249,8 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
     expect(notifications).not.toContain("策略：检测到权限风险，写入前会请求确认。");
-    expect(notifications).toContain("策略：Windows 环境，优先使用兼容命令。");
-    expect(notifications).toContain("策略：建议先做 focused verification。");
+    expect(notifications).not.toContain("策略：Windows 环境，优先使用兼容命令。");
+    expect(notifications).not.toContain("策略：建议先做 focused verification。");
     expect(notifications).not.toContain("PolicyDecision");
     expect(notifications).not.toContain("MetaSchedulerForModel");
     const transcript = (await store.resume(session.id)).transcript;
@@ -25279,10 +25279,10 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(notifications).not.toContain(
       "Strategy: permission risk detected; write actions will ask before running.",
     );
-    expect(notifications).toContain(
+    expect(notifications).not.toContain(
       "Strategy: Windows environment; using compatible commands first.",
     );
-    expect(notifications).toContain(
+    expect(notifications).not.toContain(
       "Strategy: focused verification is recommended before completion.",
     );
     expect(notifications).not.toContain("policy_decision");

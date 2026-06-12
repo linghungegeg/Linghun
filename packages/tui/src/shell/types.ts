@@ -362,6 +362,7 @@ export type AgentProgressTreeView = {
     name: string;
     status: string;
     activity?: string;
+    elapsed?: string;
     toolUses: number;
     tokens: number;
   }[];
@@ -391,6 +392,7 @@ export type WorkflowProgressView = {
     id: string;
     goal: string;
     status: string;
+    elapsed?: string;
     currentStepId?: string;
     steps: { id: string; title: string; status: string; active: boolean }[];
   }[];

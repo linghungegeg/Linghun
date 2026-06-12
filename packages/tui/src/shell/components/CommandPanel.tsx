@@ -1,7 +1,7 @@
 import type { Language } from "@linghun/shared";
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
-import { fitText, wrapText } from "../text-utils.js";
+import { fitText, lineChar, wrapText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type { CommandPanelRow, CommandPanelView, ShellController } from "../types.js";
 
@@ -38,6 +38,8 @@ const DETAILS_HINT_TEXT = {
 } as const;
 
 const MAX_SELECTABLE_ROWS = 8;
+const MIN_PANEL_WIDTH = 56;
+const MAX_PANEL_WIDTH = 108;
 
 export function CommandPanel({
   panel,
@@ -71,7 +73,10 @@ export function CommandPanel({
     ? (selectedDetailsText ?? panel.detailsText)
     : undefined;
 
-  const cardWidth = Math.max(20, Math.min(width, 110));
+  const cardWidth = Math.max(
+    Math.min(width - 2, MIN_PANEL_WIDTH),
+    Math.min(width - 2, MAX_PANEL_WIDTH),
+  );
   const innerWidth = Math.max(20, cardWidth - 4);
   const tone = panel.tone ?? "neutral";
   const borderColor =
@@ -80,28 +85,44 @@ export function CommandPanel({
       : tone === "warning"
         ? theme.warning
         : (theme.panel ?? theme.border);
+  const rule = lineChar(noColor);
+  const title = panel.title?.trim() ?? "";
+  const titleLabel = formatPanelTitle(title);
+  const titleMeta = title && titleLabel !== title ? title : "";
+  const topRuleWidth = Math.max(8, innerWidth - titleLabel.length - 4);
 
   return (
-    <Box
-      flexDirection="column"
-      paddingX={1}
-      marginTop={1}
-      width={cardWidth}
-    >
-      <Text color={theme.dim ?? theme.muted} dimColor>
-        {"─".repeat(Math.min(cardWidth, 80))}
-      </Text>
-      {panel.title && panel.title.trim().length > 0 ? (
-        <Text color={theme.accent} bold>
-          {fitText(`❯ ${panel.title}`, innerWidth)}
-        </Text>
+    <Box flexDirection="column" paddingX={1} marginTop={1} width={cardWidth}>
+      {title ? (
+        <Box flexDirection="column">
+          <Text color={borderColor} dimColor>
+            {`${rule.repeat(2)} ${titleLabel} ${rule.repeat(topRuleWidth)}`}
+          </Text>
+          <Box>
+            <Text color={theme.accent} bold>
+              {fitText(`❯ ${titleLabel}`, Math.max(8, Math.floor(innerWidth * 0.45)))}
+            </Text>
+            {titleMeta ? (
+              <Text color={theme.dim ?? theme.muted} dimColor>
+                {fitText(`  ${titleMeta}`, Math.max(8, innerWidth - titleLabel.length - 2))}
+              </Text>
+            ) : null}
+          </Box>
+        </Box>
       ) : null}
       {panel.summary && panel.summary.length > 0 ? (
-        <Box flexDirection="column">
+        <Box flexDirection="column" marginTop={title ? 1 : 0}>
           {panel.summary.map((line, idx) => (
             <Box key={`${idx}-${line}`} flexDirection="column">
-              {wrapText(line, innerWidth).map((part, lineIdx) => (
-                <Text key={`${idx}-${lineIdx}-${part}`}>{part}</Text>
+              {renderSummaryLine(line, innerWidth).map(({ label, value }, lineIdx) => (
+                <Box key={`${idx}-${lineIdx}-${label}-${value}`}>
+                  {label ? (
+                    <Text color={theme.dim ?? theme.muted}>{fitText(label, 16)}</Text>
+                  ) : null}
+                  <Text bold={Boolean(label)}>
+                    {fitText(value, label ? innerWidth - 16 : innerWidth)}
+                  </Text>
+                </Box>
               ))}
             </Box>
           ))}
@@ -131,7 +152,7 @@ export function CommandPanel({
               >
                 {section.title ? (
                   <Text color={theme.muted} bold>
-                    {fitText(section.title, innerWidth)}
+                    {fitText(section.title.toUpperCase(), innerWidth)}
                   </Text>
                 ) : null}
                 {renderedRows}
@@ -160,13 +181,25 @@ export function CommandPanel({
         <Box flexDirection="column" marginTop={1}>
           {panel.actions.map((action, idx) => (
             <Box key={`action-${idx}-${action}`} flexDirection="column">
-              {wrapText(`→ ${action}`, innerWidth).map((part, lineIdx) => (
-                <Text key={`action-${idx}-${lineIdx}-${part}`} color={theme.dim ?? theme.muted}>
-                  {part}
-                </Text>
-              ))}
+              {wrapText(`${idx === 0 ? "Actions  " : "         "}${action}`, innerWidth).map(
+                (part, lineIdx) => (
+                  <Text
+                    key={`action-${idx}-${lineIdx}-${part}`}
+                    color={lineIdx === 0 ? theme.accent : (theme.dim ?? theme.muted)}
+                  >
+                    {part}
+                  </Text>
+                ),
+              )}
             </Box>
           ))}
+        </Box>
+      ) : null}
+      {renderedHint ? (
+        <Box marginTop={1}>
+          <Text color={borderColor} dimColor>
+            {rule.repeat(innerWidth)}
+          </Text>
         </Box>
       ) : null}
       {renderedHint ? (
@@ -176,6 +209,26 @@ export function CommandPanel({
       ) : null}
     </Box>
   );
+}
+
+function formatPanelTitle(title: string): string {
+  const normalized = title.replace(/^\/+/, "").replace(/\s+/gu, " ").trim();
+  if (!normalized) return "";
+  return normalized.split(" ")[0]?.toUpperCase() ?? normalized.toUpperCase();
+}
+
+function renderSummaryLine(
+  line: string,
+  innerWidth: number,
+): Array<{ label: string; value: string }> {
+  const colon = line.match(/^([^：:]{1,16})[：:]\s*(.+)$/u);
+  if (colon?.[1] && colon[2]) {
+    return wrapText(colon[2], Math.max(8, innerWidth - 16)).map((part, idx) => ({
+      label: idx === 0 ? `${colon[1]} ` : "",
+      value: part,
+    }));
+  }
+  return wrapText(line, innerWidth).map((part) => ({ label: "", value: part }));
 }
 
 function getSelectableRows(panel: CommandPanelView): Exclude<CommandPanelRow, string>[] {
@@ -220,13 +273,14 @@ function renderCommandPanelRow({
   const text = getRowText(row);
   const isSelectable = selectableIndex >= 0;
   const selected = isSelectable && selectableIndex === cursor;
-  const prefix = isSelectable ? (selected ? "> " : "  ") : "";
+  const prefix = isSelectable ? (selected ? "▌ > " : "    ") : "";
   return (
-    <Box key={`row-${selectableIndex}-${text}`} flexDirection="column">
+    <Box key={`row-${selectableIndex}-${text}`} flexDirection="column" marginTop={selected ? 0 : 0}>
       {wrapText(`${prefix}${text}`, innerWidth).map((part, lineIdx) => (
         <Text
           key={`row-${selectableIndex}-${lineIdx}-${part}`}
           color={selected ? theme.accent : undefined}
+          bold={selected}
         >
           {lineIdx === 0 ? part : `  ${fitText(part, Math.max(8, innerWidth - 2))}`}
         </Text>

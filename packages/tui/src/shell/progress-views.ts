@@ -83,6 +83,7 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
       name: agent.displayName ?? agent.addressableName ?? agent.id,
       status: agent.status,
       activity: agent.activitySummary ?? agent.activeTask?.summary ?? agent.lastResultSummary,
+      elapsed: typeof agent.startedAt === "string" ? formatElapsedSince(agent.startedAt, now) : undefined,
       toolUses: agent.mailbox.length,
       tokens: 0,
     })),
@@ -149,6 +150,7 @@ export function buildWorkflowProgressView(context: TuiContext): WorkflowProgress
         id: run.id,
         goal: run.goal,
         status: run.status,
+        elapsed: typeof run.startedAt === "string" ? formatElapsedSince(run.startedAt, now) : undefined,
         currentStepId: current?.id,
         steps: smartSlice(run.steps, MAX_LIST_ITEMS, (step) => step.status === "running").visible.map(
           (step) => ({
@@ -254,6 +256,18 @@ function readOptionalString(todo: TodoItem, key: string): string | undefined {
 function readBlockedBy(todo: TodoItem): string[] | undefined {
   const value = (todo as unknown as Record<string, unknown>).blockedBy;
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : undefined;
+}
+
+function formatElapsedSince(startedAt: string, nowMs: number): string {
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return "0s";
+  const seconds = Math.max(0, Math.floor((nowMs - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return `${minutes}m${rest.toString().padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${(minutes % 60).toString().padStart(2, "0")}m`;
 }
 
 function formatOverlaySummary(
