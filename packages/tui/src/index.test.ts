@@ -5963,6 +5963,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.budget?.usedTokens).toBeGreaterThan(0);
     expect(persisted.agents).toHaveLength(5);
     expect(persisted.agents?.[0]?.displayName).toBe("implement-durable-loop-planner");
+    expect(await readFile(persisted.reportPath ?? "missing", "utf8")).toContain(
+      `# Job Report ${jobId}`,
+    );
+    expect(await readFile(persisted.logPath ?? "missing", "utf8")).toContain("job");
     expect(persisted.agents?.[1]?.displayName).toBe("implement-durable-loop-worker");
     expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
     expect(persisted.agents?.filter((agent) => agent.status === "completed")).toHaveLength(1);

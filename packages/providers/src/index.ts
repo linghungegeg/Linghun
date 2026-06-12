@@ -133,6 +133,7 @@ export type ModelRequest = {
   maxOutputTokens?: number;
   tools?: ModelToolDefinition[];
   toolChoice?: "auto" | "none";
+  parallelToolCalls?: boolean;
   endpointProfile?: EndpointProfile;
   reasoningLevel?: string;
   // D.13F：prompt cache 输入。enabled 默认由上层（TUI/runtime）解析后注入；
@@ -178,6 +179,7 @@ export type OpenAiChatRequest = {
   max_tokens?: number;
   tools?: OpenAiToolDefinition[];
   tool_choice?: "auto" | "none";
+  parallel_tool_calls?: boolean;
   reasoning?: { effort: string };
   stream_options?: { include_usage: true };
 };
@@ -189,6 +191,7 @@ export type OpenAiResponsesRequest = {
   max_output_tokens?: number;
   tools?: OpenAiResponsesToolDefinition[];
   tool_choice?: "auto" | "none";
+  parallel_tool_calls?: boolean;
   reasoning?: { effort: string };
 };
 
@@ -273,10 +276,10 @@ export type AnthropicToolDefinition = {
 };
 
 export type AnthropicToolChoice =
-  | { type: "auto" }
-  | { type: "any" }
+  | { type: "auto"; disable_parallel_tool_use?: boolean }
+  | { type: "any"; disable_parallel_tool_use?: boolean }
   | { type: "none" }
-  | { type: "tool"; name: string };
+  | { type: "tool"; name: string; disable_parallel_tool_use?: boolean };
 
 // Anthropic Messages API extended thinking 配置；budget_tokens 为 thinking 上限。
 // 仅在 Linghun reasoningLevel 非空且 endpointProfile=anthropic_messages 时由 builder 注入。
@@ -1565,7 +1568,13 @@ function createChatProfileRequest(
     stream: true,
     ...createOptionalMaxTokens("max_tokens", request, config),
     ...(tools && tools.length > 0
-      ? { tools, tool_choice: request.toolChoice ?? "auto" }
+      ? {
+          tools,
+          tool_choice: request.toolChoice ?? "auto",
+          ...(request.parallelToolCalls !== undefined
+            ? { parallel_tool_calls: request.parallelToolCalls }
+            : {}),
+        }
       : request.toolChoice === "none"
         ? { tool_choice: "none" as const }
         : {}),
@@ -1598,7 +1607,13 @@ function createResponsesProfileRequest(
     stream: true,
     ...createOptionalMaxTokens("max_output_tokens", request, config),
     ...(tools && tools.length > 0
-      ? { tools, tool_choice: request.toolChoice ?? "auto" }
+      ? {
+          tools,
+          tool_choice: request.toolChoice ?? "auto",
+          ...(request.parallelToolCalls !== undefined
+            ? { parallel_tool_calls: request.parallelToolCalls }
+            : {}),
+        }
       : request.toolChoice === "none"
         ? { tool_choice: "none" as const }
         : {}),
@@ -1769,7 +1784,15 @@ function createAnthropicMessagesProfileRequest(
   // 用于保护 prompt cache 前缀 hash。tool_choice 默认 "auto"；显式 "none" 时同步透传。
   if (contract.supportsTools && request.tools && request.tools.length > 0) {
     body.tools = createAnthropicTools(request);
-    body.tool_choice = request.toolChoice === "none" ? { type: "none" } : { type: "auto" };
+    body.tool_choice =
+      request.toolChoice === "none"
+        ? { type: "none" }
+        : {
+            type: "auto",
+            ...(request.parallelToolCalls === false
+              ? { disable_parallel_tool_use: true }
+              : {}),
+          };
   }
   if (systemSegments.length > 0) {
     // D.13F：promptCacheEnabled=true 时，system 写为 block array，并在最后一个 block 上挂
@@ -2075,6 +2098,7 @@ export async function* parseOpenAiStream(
     chunkCount: 0,
     finishReason: undefined,
     hadUsage: false,
+    hadText: false,
     lastId: "assistant",
   };
 
@@ -2445,6 +2469,7 @@ type OpenAiStreamParseState = {
   chunkCount: number;
   finishReason?: string;
   hadUsage: boolean;
+  hadText: boolean;
   lastId: string;
 };
 
@@ -2511,8 +2536,19 @@ function parseOpenAiStreamLine(
     type?: string;
     output_index?: number;
     delta?: string;
-    item?: { type?: string; call_id?: string; id?: string; name?: string; arguments?: string };
-    response?: { id?: string; usage?: ResponsesUsage };
+    item?: {
+      type?: string;
+      call_id?: string;
+      id?: string;
+      name?: string;
+      arguments?: string;
+      content?: Array<{ type?: string; text?: string }>;
+    };
+    response?: {
+      id?: string;
+      usage?: ResponsesUsage;
+      output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
+    };
     choices?: OpenAiStreamChoice[];
     usage?: OpenAiStreamUsage;
     error?: { message?: string; type?: string; code?: string } | string;
@@ -2610,8 +2646,19 @@ function parseResponsesEvent(
     type?: string;
     output_index?: number;
     delta?: string;
-    item?: { type?: string; call_id?: string; id?: string; name?: string; arguments?: string };
-    response?: { id?: string; usage?: ResponsesUsage };
+    item?: {
+      type?: string;
+      call_id?: string;
+      id?: string;
+      name?: string;
+      arguments?: string;
+      content?: Array<{ type?: string; text?: string }>;
+    };
+    response?: {
+      id?: string;
+      usage?: ResponsesUsage;
+      output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
+    };
     usage?: OpenAiStreamUsage;
   },
   state: OpenAiStreamParseState,
@@ -2638,6 +2685,7 @@ function parseResponsesEvent(
     state.lastId = parsed.response.id;
   }
   if (parsed.type === "response.output_text.delta" && parsed.delta) {
+    state.hadText = true;
     return [{ type: "assistant_text_delta", id: parsed.id ?? state.lastId, text: parsed.delta }];
   }
   if (
@@ -2687,25 +2735,60 @@ function parseResponsesEvent(
       },
     ];
   }
-  const usage = parsed.response?.usage;
-  if (parsed.type === "response.completed" && usage) {
-    state.hadUsage = true;
-    return [
-      {
-        type: "usage",
-        usage: {
-          inputTokens: usage.input_tokens ?? 0,
-          outputTokens: usage.output_tokens ?? 0,
-          totalTokens: usage.total_tokens ?? 0,
-          cacheReadTokens: usage.input_tokens_details?.cached_tokens,
-          cacheWriteTokens: undefined,
-          rawUsage: usage,
-          endpoint,
+  if (parsed.type === "response.output_item.done" && parsed.item?.type === "message" && !state.hadText) {
+    const text = extractResponsesOutputText(parsed.item.content);
+    if (text) {
+      state.hadText = true;
+      return [{ type: "assistant_text_delta", id: parsed.item.id ?? parsed.id ?? state.lastId, text }];
+    }
+  }
+  const response = parsed.response;
+  const usage = response?.usage;
+  if (parsed.type === "response.completed" && response) {
+    const events: LinghunEvent[] = [];
+    const text = state.hadText ? "" : extractResponsesOutputTextFromResponse(response);
+    if (text) {
+      state.hadText = true;
+      events.push({ type: "assistant_text_delta", id: response.id ?? state.lastId, text });
+    }
+    if (usage) {
+      state.hadUsage = true;
+      events.push(
+        {
+          type: "usage",
+          usage: {
+            inputTokens: usage.input_tokens ?? 0,
+            outputTokens: usage.output_tokens ?? 0,
+            totalTokens: usage.total_tokens ?? 0,
+            cacheReadTokens: usage.input_tokens_details?.cached_tokens,
+            cacheWriteTokens: undefined,
+            rawUsage: usage,
+            endpoint,
+          },
         },
-      },
-    ];
+      );
+    }
+    return events;
   }
   return [];
+}
+
+function extractResponsesOutputText(
+  content: Array<{ type?: string; text?: string }> | undefined,
+): string {
+  return (content ?? [])
+    .filter((part) => part.type === "output_text" && typeof part.text === "string")
+    .map((part) => part.text ?? "")
+    .join("");
+}
+
+function extractResponsesOutputTextFromResponse(response: {
+  output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
+}): string {
+  return (response.output ?? [])
+    .filter((item) => item.type === "message")
+    .map((item) => extractResponsesOutputText(item.content))
+    .join("");
 }
 
 function parseOpenAiToolCalls(

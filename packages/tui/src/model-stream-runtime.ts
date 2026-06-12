@@ -4,6 +4,7 @@ import type {
   EndpointProfile,
   ModelGateway,
   ModelMessage,
+  ModelRequest,
   ModelToolCall,
 } from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
@@ -200,6 +201,46 @@ function pushToolResultMessage(
     tool_call_id: toolCall.id,
     content: JSON.stringify(result),
   });
+}
+
+function isHighReasoningLevel(level: string | undefined): boolean {
+  return level?.trim().toLowerCase() === "high";
+}
+
+function isHighReasoningToolProfile(endpointProfile: EndpointProfile | undefined): boolean {
+  return endpointProfile === "responses" || endpointProfile === "anthropic_messages";
+}
+
+export function shouldRetryHighReasoningToolsEmptyResponse(input: {
+  endpointProfile?: EndpointProfile;
+  reasoningLevel?: string;
+  reasoningSent: boolean;
+  toolsEnabled: boolean;
+  alreadyRetried: boolean;
+}): boolean {
+  return (
+    !input.alreadyRetried &&
+    input.toolsEnabled &&
+    input.reasoningSent &&
+    isHighReasoningLevel(input.reasoningLevel) &&
+    isHighReasoningToolProfile(input.endpointProfile)
+  );
+}
+
+function createHighReasoningToolsEmptyRetryPrompt(language: Language): string {
+  return language === "en-US"
+    ? "The previous high-reasoning tool-capable stream ended without visible text or tool calls. Retry with the same High reasoning level. Either call the needed tool or provide a visible final answer; do not reduce reasoning level."
+    : "上一次 High reasoning + tools 流没有返回可见文本或工具调用。请保持相同 High 推理等级重试；要么调用必要工具，要么给出可见最终回答；不要降低推理等级。";
+}
+
+function applyHighReasoningToolsRetryShape(
+  request: ModelRequest,
+  endpointProfile: EndpointProfile | undefined,
+): ModelRequest {
+  if (isHighReasoningToolProfile(endpointProfile) && request.tools && request.tools.length > 0) {
+    return { ...request, parallelToolCalls: false };
+  }
+  return request;
 }
 
 export function evaluateAggregatedFinalAnswerGate(
@@ -731,6 +772,7 @@ export async function sendMessage(
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
     let toolFailureRetries = 0;
+    let highReasoningToolsEmptyRetried = false;
     const _suggestedMax = metaSchedulerDecision.suggestedMaxTodoRounds;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
@@ -798,25 +840,32 @@ export async function sendMessage(
         return;
       }
       const promptCacheFields = await buildPromptCacheRequestFields(context);
+      let providerRequest: ModelRequest = {
+        messages: requestMessages,
+        model: selectedRuntime.model,
+        endpointProfile: selectedRuntime.endpointProfile,
+        ...(selectedRuntime.reasoningSent
+          ? { reasoningLevel: selectedRuntime.reasoningLevel }
+          : {}),
+        ...(modelSupportsTools
+          ? {
+              tools: createModelToolDefinitionsForReportGuard(reportWriteGuard),
+              toolChoice: "auto" as const,
+            }
+          : {}),
+        ...promptCacheFields,
+      };
+      if (highReasoningToolsEmptyRetried) {
+        providerRequest = applyHighReasoningToolsRetryShape(
+          providerRequest,
+          selectedRuntime.endpointProfile,
+        );
+      }
       for await (const event of withProviderRetry(
         gateway,
         context.providerBreaker,
         selectedRuntime.provider,
-        {
-          messages: requestMessages,
-          model: selectedRuntime.model,
-          endpointProfile: selectedRuntime.endpointProfile,
-          ...(selectedRuntime.reasoningSent
-            ? { reasoningLevel: selectedRuntime.reasoningLevel }
-            : {}),
-          ...(modelSupportsTools
-            ? {
-                tools: createModelToolDefinitionsForReportGuard(reportWriteGuard),
-                toolChoice: "auto" as const,
-              }
-            : {}),
-          ...promptCacheFields,
-        },
+        providerRequest,
         controller.signal,
       )) {
         if (controller.signal.aborted) {
@@ -949,6 +998,29 @@ export async function sendMessage(
       }
 
       if (!roundAssistantText && toolCalls.length === 0) {
+        if (
+          shouldRetryHighReasoningToolsEmptyResponse({
+            endpointProfile: selectedRuntime.endpointProfile,
+            reasoningLevel: selectedRuntime.reasoningLevel,
+            reasoningSent: selectedRuntime.reasoningSent,
+            toolsEnabled: modelSupportsTools,
+            alreadyRetried: highReasoningToolsEmptyRetried,
+          })
+        ) {
+          highReasoningToolsEmptyRetried = true;
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `high_reasoning_tools_empty_retry: provider=${selectedRuntime.provider}; model=${selectedRuntime.model}; endpointProfile=${selectedRuntime.endpointProfile}; shape=preserve_high_disable_parallel_tools`,
+            "warning",
+          );
+          messagesForProvider.push({
+            role: "user",
+            content: createHighReasoningToolsEmptyRetryPrompt(context.language),
+          });
+          discardAssistantBlock(output, assistantStreamBlockId);
+          continue;
+        }
         clearRequestActivity(context);
         const result = await recordProviderEmptyResponse(
           context,
@@ -2118,6 +2190,7 @@ export async function continueModelAfterToolResults(
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
     let runtimeFallbackAttempted = false;
+    let highReasoningToolsEmptyRetried = false;
     const _suggestedMax = context.lastMetaSchedulerDecision?.suggestedMaxTodoRounds ?? MAX_TODO_ONLY_CODE_FACT;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
@@ -2129,6 +2202,10 @@ export async function continueModelAfterToolResults(
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       let pendingAssistantPreviewText = "";
+      let roundChunkCount = 0;
+      let roundHadUsage = false;
+      let roundFinishReason: string | undefined;
+      let roundHadThinking = false;
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       const continuationRuntime = runtimeFromContinuation(continuation);
       const preflight = await prepareMessagesForProviderPreflight({
@@ -2154,19 +2231,26 @@ export async function continueModelAfterToolResults(
       const requestMessages = preflight.messages;
       const promptCacheFields = await buildPromptCacheRequestFields(context);
       const pendingContinuationToolUses: Array<{ id: string; name: string; input: unknown }> = [];
+      let providerRequest: ModelRequest = {
+        messages: requestMessages,
+        model: continuation.model,
+        endpointProfile: continuation.endpointProfile,
+        ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
+        tools: createModelToolDefinitionsForReportGuard(continuation.reportWriteGuard),
+        toolChoice: "auto",
+        ...promptCacheFields,
+      };
+      if (highReasoningToolsEmptyRetried) {
+        providerRequest = applyHighReasoningToolsRetryShape(
+          providerRequest,
+          continuation.endpointProfile,
+        );
+      }
       for await (const event of withProviderRetry(
         gateway,
         context.providerBreaker,
         continuation.provider,
-        {
-          messages: requestMessages,
-          model: continuation.model,
-          endpointProfile: continuation.endpointProfile,
-          ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
-          tools: createModelToolDefinitionsForReportGuard(continuation.reportWriteGuard),
-          toolChoice: "auto",
-          ...promptCacheFields,
-        },
+        providerRequest,
         controller.signal,
       )) {
         // D.13O — abort 后必须早返回，迟到的 SSE delta 不再写主屏 / transcript /
@@ -2199,7 +2283,12 @@ export async function continueModelAfterToolResults(
           pendingContinuationToolUses.push({ id: event.id, name: event.name, input: event.input });
           continue;
         }
+        if (event.type === "assistant_thinking_delta") {
+          roundHadThinking = true;
+          continue;
+        }
         if (event.type === "usage") {
+          roundHadUsage = true;
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
           await recordApiTokenCountIfAvailable(
@@ -2209,6 +2298,12 @@ export async function continueModelAfterToolResults(
             preflight.messages,
             controller.signal,
           );
+          continue;
+        }
+        if (event.type === "message_stop") {
+          roundChunkCount = event.chunkCount;
+          roundHadUsage = roundHadUsage || event.hadUsage;
+          roundFinishReason = event.finishReason;
           continue;
         }
         if (event.type === "error") {
@@ -2294,6 +2389,45 @@ export async function continueModelAfterToolResults(
         });
       }
       if (toolCalls.length === 0) {
+        if (!roundAssistantText) {
+          if (
+            shouldRetryHighReasoningToolsEmptyResponse({
+              endpointProfile: continuation.endpointProfile,
+              reasoningLevel: continuation.reasoningLevel,
+              reasoningSent: continuation.reasoningSent,
+              toolsEnabled: true,
+              alreadyRetried: highReasoningToolsEmptyRetried,
+            })
+          ) {
+            highReasoningToolsEmptyRetried = true;
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `high_reasoning_tools_empty_retry: provider=${continuation.provider}; model=${continuation.model}; endpointProfile=${continuation.endpointProfile}; shape=preserve_high_disable_parallel_tools; continuation=yes`,
+              "warning",
+            );
+            continuation.messages.push({
+              role: "user",
+              content: createHighReasoningToolsEmptyRetryPrompt(context.language),
+            });
+            discardAssistantBlock(output, assistantStreamBlockId);
+            continue;
+          }
+          const result = await recordProviderEmptyResponse(
+            context,
+            sessionId,
+            roundChunkCount,
+            roundHadUsage,
+            roundFinishReason,
+            roundHadThinking,
+          );
+          if (result.isError) {
+            writeErrorLine(output, result.message);
+          } else {
+            writeLine(output, result.message);
+          }
+          break;
+        }
         const reportWriteGuard = continuation.reportWriteGuard;
         if (reportWriteGuard && shouldSendReportEvidenceReminder(reportWriteGuard)) {
           continuation.messages.push({

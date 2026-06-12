@@ -3,6 +3,7 @@ import {
   createToolBatchFailFastSkippedResult,
   evaluateAggregatedFinalAnswerGate,
   isToolBatchFailure,
+  shouldRetryHighReasoningToolsEmptyResponse,
 } from "./model-stream-runtime.js";
 
 function withClaims(text: string, claims: Array<{ kind: string; phrase: string }>): string {
@@ -40,6 +41,50 @@ describe("tool batch fail-fast helpers", () => {
       tool: "Read",
       data: { skipped: true, reason: "tool_batch_fail_fast", lastFailure: "Read failed" },
     });
+  });
+});
+
+describe("high reasoning tool empty response retry", () => {
+  it("retries once for High reasoning tool-capable Responses and Anthropic profiles", () => {
+    expect(
+      shouldRetryHighReasoningToolsEmptyResponse({
+        endpointProfile: "responses",
+        reasoningLevel: "High",
+        reasoningSent: true,
+        toolsEnabled: true,
+        alreadyRetried: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRetryHighReasoningToolsEmptyResponse({
+        endpointProfile: "anthropic_messages",
+        reasoningLevel: "High",
+        reasoningSent: true,
+        toolsEnabled: true,
+        alreadyRetried: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not retry by lowering non-High reasoning or after the retry was used", () => {
+    expect(
+      shouldRetryHighReasoningToolsEmptyResponse({
+        endpointProfile: "responses",
+        reasoningLevel: "Medium",
+        reasoningSent: true,
+        toolsEnabled: true,
+        alreadyRetried: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRetryHighReasoningToolsEmptyResponse({
+        endpointProfile: "responses",
+        reasoningLevel: "High",
+        reasoningSent: true,
+        toolsEnabled: true,
+        alreadyRetried: true,
+      }),
+    ).toBe(false);
   });
 });
 

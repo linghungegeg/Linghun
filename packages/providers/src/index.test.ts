@@ -273,6 +273,29 @@ describe("OpenAI compatible provider", () => {
     expect(request.reasoning).toEqual({ effort: "high" });
   });
 
+  it("can disable parallel tool calls for Responses compatibility retries without dropping reasoning", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+      reasoningLevel: "High",
+    });
+
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "你好" }],
+      tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
+      toolChoice: "auto",
+      parallelToolCalls: false,
+    });
+
+    expect(request.reasoning).toEqual({ effort: "high" });
+    expect(request.parallel_tool_calls).toBe(false);
+    expect(request.tools).toHaveLength(1);
+  });
+
   it("converts responses tool results to function_call_output input items", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
@@ -1013,6 +1036,41 @@ describe("OpenAI stream parser", () => {
         hadUsage: true,
       },
     ]);
+  });
+
+  it("uses Responses completed message text when the gateway omits output_text deltas", async () => {
+    const events = await collectOpenAiEvents(
+      [
+        `data: ${JSON.stringify({ type: "response.output_item.done", item: { id: "msg-1", type: "message", content: [{ type: "output_text", text: "final from done" }] } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-1", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 }, output: [{ type: "message", content: [{ type: "output_text", text: "final from completed" }] }] } })}\n\n`,
+        "data: [DONE]\n\n",
+      ],
+      "/v1/responses",
+    );
+
+    expect(events).toContainEqual({
+      type: "assistant_text_delta",
+      id: "msg-1",
+      text: "final from done",
+    });
+    expect(events.filter((event) => event.type === "assistant_text_delta")).toHaveLength(1);
+  });
+
+  it("uses Responses completed message text even when the gateway omits usage", async () => {
+    const events = await collectOpenAiEvents(
+      [
+        `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-1", output: [{ type: "message", content: [{ type: "output_text", text: "final without usage" }] }] } })}\n\n`,
+        "data: [DONE]\n\n",
+      ],
+      "/v1/responses",
+    );
+
+    expect(events).toContainEqual({
+      type: "assistant_text_delta",
+      id: "resp-1",
+      text: "final without usage",
+    });
+    expect(events.some((event) => event.type === "usage")).toBe(false);
   });
 
   it("converts responses streamed function call argument deltas", async () => {
@@ -1891,6 +1949,26 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
       input_schema: { type: "object" },
     });
     expect(body.tool_choice).toEqual({ type: "auto" });
+  });
+
+  it("can disable parallel tool use for anthropic_messages compatibility retries without dropping reasoning", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      reasoningLevel: "High",
+    });
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+      parallelToolCalls: false,
+    });
+
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+    expect(body.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
   });
 
   it("D.13G: still throws MODEL_TOOLS_UNSUPPORTED when provider explicitly disables tools", () => {

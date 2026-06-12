@@ -702,23 +702,17 @@ export async function handleJobCommand(
     }
     const start = action === "run";
     const job = await createDurableJob(context, options, start);
-    if (start && job.status === "running") {
-      await startRunnerForDurableJob(context, job);
-    }
-    await persistDurableJob(job);
-    await appendJobLog(
+    await persistDurableJobProgress(
+      context,
       job,
       `job ${action}: ${job.status}; pause reason ${job.pauseReason ?? "none"}`,
     );
-    await writeDurableJobReport(job);
-    const background = upsertJobBackgroundTask(context, job);
-    await deps().appendBackgroundTaskEvent(
-      context,
-      await deps().ensureSession(context),
-      background,
-    );
+    if (start && job.status === "running") {
+      await startRunnerForDurableJob(context, job);
+    }
     if (start && job.status === "running") {
       await runDurableJobLiteTick(context, job);
+      await persistDurableJobProgress(context, job, `job ${action}: final state ${job.status}`);
     }
     writeLine(output, formatJobPrimary(job, context));
     return;
