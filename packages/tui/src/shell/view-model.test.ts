@@ -4068,7 +4068,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toMatch(/^\s*writeStatus\(output, context\);\s*$/m);
   });
 
-  it("ShellApp TaskLayout uses Static-based transcript with top-left layout", async () => {
+  it("ShellApp TaskLayout uses Static-based transcript without a full-height blank frame", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     // The TaskLayout outer Box must not center the whole region.
@@ -4081,6 +4081,12 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).toContain("<Static items={staticBlocks}>");
     expect(body).toContain("<ProductBlock");
     expect(body).toContain("<Composer view={view}");
+    expect(body).toContain('<Box flexDirection="column" width={view.width}>');
+    expect(body).toContain('<Box flexDirection="column" paddingX={2}>');
+    expect(body).not.toContain(
+      '<Box flexDirection="column" width={view.width} height={view.height}>',
+    );
+    expect(body).not.toContain('flexGrow={1} overflow="hidden" paddingX={2}');
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
     expect(outerWrapper).not.toContain('alignItems="center"');
