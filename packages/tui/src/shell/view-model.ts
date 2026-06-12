@@ -230,14 +230,14 @@ export function createShellViewModel(
   // D.13Q-UX Real Smoke Fix v2 — A. submitted=true 且 options.activity 缺省时，
   // 合成一条 thinking fallback activity，避免任务页首帧空白（submittedPending
   // 已切到 pending viewMode，但 requestActivityPhase 尚未由 streaming 链路置位
-  // 时，主屏没有任何"正在思考…"反馈，看上去像消息被吞）。
+  // 时，主屏没有任何提交反馈，看上去像消息被吞）。
   // 真实 activity（mapRequestActivityToView）会覆盖此 fallback。
   const effectiveActivity: TaskActivityView | undefined =
     options.activity ??
     (options.submitted
       ? {
           phase: "thinking",
-          text: language === "en-US" ? "Thinking…" : "正在思考…",
+          text: language === "en-US" ? "Submitting request…" : "提交请求…",
           language,
           elapsed: formatElapsedSince(
             new Date(options.submittedStartedAt ?? Date.now()).toISOString(),
@@ -1377,26 +1377,26 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     .retryInfo;
   const textMap: Record<string, Record<string, string>> = {
     "zh-CN": {
-      thinking: "正在思考…",
+      thinking: "思考中…",
       provider_retrying: retryInfo
-        ? `重试中 (${retryInfo.attempt}/${retryInfo.max})…${retryInfo.delaySec}s 后重试`
-        : "重试中…",
-      tool_running: toolName ? `正在运行 ${toolName}…` : "正在运行工具…",
-      continuing: "工具完成，继续处理…",
-      verifying_final_answer: "正在验证最终回答…",
-      permission_waiting: "等待权限确认…",
+        ? `重试请求 ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s 后继续`
+        : "重试请求…",
+      tool_running: toolName ? `运行 ${toolName}…` : "运行工具…",
+      continuing: "整理工具结果…",
+      verifying_final_answer: "验证回答…",
+      permission_waiting: "等待权限确认",
       error: shellText["zh-CN"].activityError,
       completed: shellText["zh-CN"].activityCompleted,
     },
     "en-US": {
       thinking: "Thinking…",
       provider_retrying: retryInfo
-        ? `Retrying (${retryInfo.attempt}/${retryInfo.max})… retry in ${retryInfo.delaySec}s`
+        ? `Retry request ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s remaining`
         : "Retrying…",
       tool_running: toolName ? `Running ${toolName}…` : "Running tool…",
-      continuing: "Continuing after tool…",
-      verifying_final_answer: "Verifying final answer…",
-      permission_waiting: "Waiting for permission…",
+      continuing: "Reviewing tool result…",
+      verifying_final_answer: "Verifying answer…",
+      permission_waiting: "Waiting for permission",
       error: shellText["en-US"].activityError,
       completed: shellText["en-US"].activityCompleted,
     },
@@ -1404,14 +1404,14 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
   const texts = textMap[context.language] ?? textMap["en-US"];
   const thinkingLabelMap: Record<string, Record<string, string>> = {
     "zh-CN": {
-      request_started: "正在连接…",
-      request_started_report: "正在生成报告…",
-      waiting_first_delta: "正在接收响应…",
+      request_started: "连接模型…",
+      request_started_report: "生成报告…",
+      waiting_first_delta: "等待模型响应…",
     },
     "en-US": {
-      request_started: "Connecting…",
+      request_started: "Connecting model…",
       request_started_report: "Generating report…",
-      waiting_first_delta: "Receiving response…",
+      waiting_first_delta: "Waiting for model response…",
     },
   };
   const thinkingLabels = thinkingLabelMap[context.language] ?? thinkingLabelMap["en-US"];

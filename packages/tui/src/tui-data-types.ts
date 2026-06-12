@@ -437,6 +437,57 @@ export type ImageGenerationResult = {
   createdAt: string;
 };
 
+export type AgentCompletionStatus = "completed" | "failed" | "blocked" | "cancelled" | "stale";
+
+export type AgentCompletionValidity = "valid" | "partial" | "invalid";
+
+export type AgentCompletionNotice = {
+  id: string;
+  agentId: string;
+  agentType: AgentType;
+  agentRole: ModelRole;
+  displayName?: string;
+  teamName?: string;
+  parentSessionId?: string;
+  workflowRunId?: string;
+  task: string;
+  status: AgentCompletionStatus;
+  validity: AgentCompletionValidity;
+  summary: string;
+  evidenceRefs: string[];
+  nextAction: string;
+  createdAt: string;
+  updatedAt: string;
+  reportedAt?: string;
+};
+
+export type AgentCompletionBatchSummary = {
+  id: string;
+  scopeKey: string;
+  teamName?: string;
+  parentSessionId?: string;
+  workflowRunId?: string;
+  total: number;
+  valid: number;
+  partial: number;
+  invalid: number;
+  completed: number;
+  failed: number;
+  blocked: number;
+  stale: number;
+  cancelled: number;
+  evidenceRefs: string[];
+  summary: string;
+  createdAt: string;
+};
+
+export type AgentCompletionState = {
+  notices: AgentCompletionNotice[];
+  batchSummaries: AgentCompletionBatchSummary[];
+  lastNotificationAt: Record<string, number>;
+  reportedNoticeIds: string[];
+};
+
 export type AgentRun = {
   id: string;
   type: AgentType;

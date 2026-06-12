@@ -550,7 +550,8 @@ function ActivityIndicator({
     seconds >= 30 &&
     tokenCount !== undefined &&
     (activity.phase === "thinking" || activity.phase === "continuing");
-  const text = activityText(activity, frame);
+  const text = activityText(activity, tokenCount);
+  const slowText = slowActivityText(activity, tokenCount);
   const showStats =
     activity.phase === "tool_running" && (activity.totalLines || activity.totalBytes);
   return (
@@ -568,9 +569,9 @@ function ActivityIndicator({
             ({activity.elapsed})
           </Text>
         ) : null}
-        {slow ? (
+        {slowText ? (
           <Text color={theme.muted} dimColor>
-            {activity.language === "en-US" ? " · still working" : " · 仍在处理"}
+            {slowText}
           </Text>
         ) : null}
         {showTokenCount ? (
@@ -606,17 +607,34 @@ function activityMarker(phase: TaskActivityView["phase"], frame: number, noColor
   return frame % 6 < 3 ? "●" : " ";
 }
 
-function activityText(activity: TaskActivityView, frame: number): string {
+function activityText(activity: TaskActivityView, tokenCount?: number): string {
+  if (
+    tokenCount !== undefined &&
+    tokenCount > 0 &&
+    (activity.phase === "thinking" || activity.phase === "continuing")
+  ) {
+    return activity.language === "en-US" ? "Generating answer…" : "生成回答中…";
+  }
   if (activity.phase !== "thinking") return activity.text;
-  // Use concrete sub-phase label from the runtime when available.
   if (activity.thinkingLabel) return activity.thinkingLabel;
-  // Fallback: cycle verbs only when the runtime hasn't provided a concrete label.
-  if (activity.text !== "Thinking…" && activity.text !== "正在思考…") return activity.text;
-  const verbs = activity.text.startsWith("Thinking")
-    ? ["Thinking", "Reading context", "Planning"]
-    : ["正在思考", "正在阅读上下文", "正在规划"];
-  const suffix = activity.text.endsWith("…") ? "…" : "";
-  return `${verbs[Math.floor(frame / 10) % verbs.length] ?? verbs[0]}${suffix}`;
+  return activity.text;
+}
+
+function slowActivityText(activity: TaskActivityView, tokenCount?: number): string | undefined {
+  const isEn = activity.language === "en-US";
+  if (activity.phase === "permission_waiting" || activity.phase === "completed" || activity.phase === "error") {
+    return undefined;
+  }
+  if (activity.phase === "tool_running") {
+    return isEn ? " · tool still running" : " · 工具仍在运行";
+  }
+  if (tokenCount !== undefined && tokenCount > 0) {
+    return isEn ? " · still generating" : " · 持续生成";
+  }
+  if (activity.phase === "continuing") {
+    return isEn ? " · processing result" : " · 处理结果中";
+  }
+  return isEn ? " · waiting for model" : " · 等待模型";
 }
 
 function parseElapsedSeconds(elapsed: string | undefined): number {

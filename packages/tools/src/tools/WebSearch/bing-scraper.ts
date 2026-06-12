@@ -176,10 +176,6 @@ export function formatSearchOutput(
     const snippet = r.snippet ? `: ${r.snippet.slice(0, 200)}` : "";
     lines.push(`  ${i + 1}. [${title}](${url})${snippet}`);
   }
-  lines.push("");
-  lines.push(
-    "REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.",
-  );
 
   return {
     text: lines.join("\n"),

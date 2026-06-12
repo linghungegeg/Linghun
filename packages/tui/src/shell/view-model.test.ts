@@ -973,7 +973,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("thinking");
-    expect(result?.text).toBe("正在思考…");
+    expect(result?.text).toBe("思考中…");
     expect(result?.toolName).toBeUndefined();
     expect(result?.language).toBe("zh-CN");
   });
@@ -1014,7 +1014,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("tool_running");
-    expect(result?.text).toBe("正在运行 Write…");
+    expect(result?.text).toBe("运行 Write…");
     expect(result?.toolName).toBe("Write");
     expect(result?.elapsed).toBe("1m05s");
   });
@@ -1044,7 +1044,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("continuing");
-    expect(result?.text).toBe("工具完成，继续处理…");
+    expect(result?.text).toBe("整理工具结果…");
   });
 
   it("maps final answer verification to a clear waiting state", () => {
@@ -1054,7 +1054,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("continuing");
-    expect(result?.text).toBe("正在验证最终回答…");
+    expect(result?.text).toBe("验证回答…");
   });
 
   it("maps permission_waiting phase correctly", () => {
@@ -1064,7 +1064,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("permission_waiting");
-    expect(result?.text).toBe("等待权限确认…");
+    expect(result?.text).toBe("等待权限确认");
   });
 
   it("maps en-US language correctly", () => {
@@ -4983,7 +4983,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — A. submitted thinking activity fallback
     expect(view.viewMode).toBe("pending");
     expect(view.activity).toBeDefined();
     expect(view.activity?.phase).toBe("thinking");
-    expect(view.activity?.text).toBe("正在思考…");
+    expect(view.activity?.text).toBe("提交请求…");
   });
 
   it("submitted=true en-US 合成 Thinking… fallback", () => {
@@ -4992,7 +4992,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — A. submitted thinking activity fallback
       submitted: true,
     });
     expect(view.activity?.phase).toBe("thinking");
-    expect(view.activity?.text).toBe("Thinking…");
+    expect(view.activity?.text).toBe("Submitting request…");
   });
 
   it("真实 activity（mapRequestActivityToView 输出）覆盖 submitted fallback", () => {

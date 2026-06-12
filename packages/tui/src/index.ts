@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, accessSync, type Dirent } from "node:fs";
+import { constants, type Dirent, accessSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
@@ -70,6 +70,7 @@ import {
   createToolContext,
   runTool,
 } from "@linghun/tools";
+import { createAgentCompletionState } from "./agent-completion-finalizer.js";
 import {
   type RegistryAgentDefinition,
   type RegistryWorkflowDefinition,
@@ -591,7 +592,6 @@ import {
   formatToolOutput,
   formatToolStart,
 } from "./tool-output-presenter.js";
-import { createInitialContinuityState } from "./turn-continuity-runtime.js";
 import {
   type ToolResultBudgetRecord,
   type ToolResultBudgetState,
@@ -599,6 +599,7 @@ import {
   formatToolResultBudgetEvidenceSummary,
   formatToolResultBudgetSystemEvent,
 } from "./tool-result-budget.js";
+import { createInitialContinuityState } from "./turn-continuity-runtime.js";
 export {
   LINGHUN_BASH_MAX_OUTPUT_DEFAULT,
   LINGHUN_BASH_MAX_OUTPUT_UPPER_LIMIT,
@@ -1363,6 +1364,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     plugins: await createPluginState(config, projectPath),
     remote: createRemoteState(config),
     agents: [],
+    agentCompletions: createAgentCompletionState(),
     roleUsage: [],
     routeDecisions: [],
     roleHandoffs: [],

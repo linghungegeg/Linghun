@@ -24,7 +24,6 @@ import type { Keybinding } from "./keybinding-runtime.js";
 import type { MemoryMutation } from "./memory-command-runtime.js";
 import type { MetaSchedulerDecision, PolicyDecision } from "./meta-scheduler-runtime.js";
 import type { SolutionCompletenessStatus } from "./model-loop-runtime.js";
-import type { TurnContinuityState } from "./turn-continuity-runtime.js";
 import type { PendingModelSetup } from "./model-setup-runtime.js";
 import type { PendingNaturalCommand } from "./natural-command-bridge.js";
 import type { SLASH_COMMAND_REGISTRY } from "./natural-command-bridge.js";
@@ -34,15 +33,16 @@ import type { RequestActivityPhase } from "./request-lifecycle-presenter.js";
 import {
   LINGHUN_MAX_AGENTIC_TURNS,
   LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
+  LINGHUN_MAX_TODO_ONLY_CODE_FACT,
   LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
   LINGHUN_TODO_ONLY_KILL_GRACE,
-  LINGHUN_MAX_TODO_ONLY_CODE_FACT,
   LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS,
 } from "./runtime-budget.js";
 import type { TranscriptSelectionState } from "./shell/models/transcript-selection-state.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import type { ToolResultBudgetState } from "./tool-result-budget.js";
 import type {
+  AgentCompletionState,
   AgentRun,
   BackgroundTaskState,
   CacheState,
@@ -70,6 +70,7 @@ import type {
 } from "./tui-data-types.js";
 import type { SelectedModelRuntime } from "./tui-model-runtime.js";
 import { formatReasoningEffectiveState } from "./tui-model-runtime.js";
+import type { TurnContinuityState } from "./turn-continuity-runtime.js";
 
 type PendingIndexSafetyRepairPlan = {
   path: ".linghunignore" | ".cbmignore";
@@ -332,6 +333,7 @@ export type TuiContext = {
   plugins: PluginState;
   remote: RemoteState;
   agents: AgentRun[];
+  agentCompletions?: AgentCompletionState;
   roleUsage: RoleUsage[];
   routeDecisions: RoleRouteDecision[];
   roleHandoffs: RoleHandoff[];
@@ -450,7 +452,8 @@ export type TuiContext = {
    */
   helpPanelState?: {
     group: "core" | "advanced" | "details";
-    cursor: number; scrollOffset: number;
+    cursor: number;
+    scrollOffset: number;
   };
   /**
    * D.13Q-UX Closure — BtwPanel 状态（side question 独立面板，不进主 conversation）。

@@ -13,6 +13,12 @@ import {
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import type { ToolName, ToolOutput, ToolRunResult } from "@linghun/tools";
 import { builtInTools, createToolContext, runTool } from "@linghun/tools";
+import {
+  collectPendingAgentCompletionNotices,
+  enqueueAgentCompletionNotice,
+  formatAgentCompletionDigest,
+  markAgentCompletionNoticeReported,
+} from "./agent-completion-finalizer.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import type {
   CompactPreflightRuntime,
@@ -57,7 +63,6 @@ import {
   createModelToolDefinitionsForTools,
   evaluateStructuredFinalAnswerClaims,
 } from "./model-loop-runtime.js";
-import { getWorkflowRuns } from "./workflow-command-runtime.js";
 import {
   checkProviderCooldown,
   clearProviderBreaker,
@@ -107,6 +112,7 @@ import {
   upsertJobBackgroundTask,
 } from "./tui-agent-job-runtime.js";
 import type {
+  AgentCompletionStatus,
   AgentMailboxMessage,
   AgentRun,
   AgentType,
@@ -124,6 +130,7 @@ import { messages } from "./tui-messages.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
 import { decidePermission } from "./tui-permission-runtime.js";
 import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
+import { getWorkflowRuns } from "./workflow-command-runtime.js";
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
 type AgentWorkResult = {
@@ -369,6 +376,36 @@ function ensureAgentBackgroundTask(agent: AgentRun, context: TuiContext): Backgr
 
 function clearAgentAbortController(context: TuiContext, agentId: string): void {
   context.backgroundAbortControllers?.delete(agentId);
+}
+
+function mapAgentCompletionStatusFromRun(agent: AgentRun): AgentCompletionStatus {
+  if (agent.status === "cancelled" || agent.status === "failed" || agent.status === "stale")
+    return agent.status;
+  if (agent.status === "idle" && agent.lastTerminalStatus === "completed") return "completed";
+  if (agent.lastTerminalStatus === "failed") return "failed";
+  if (agent.lastTerminalStatus === "blocked") return "blocked";
+  return "blocked";
+}
+
+function enqueueAgentCompletionReturn(
+  context: TuiContext,
+  agent: AgentRun,
+  task: BackgroundTaskState | undefined,
+  status: AgentCompletionStatus,
+  summary: string,
+  evidenceRefs: string[] = [],
+  parentSessionId?: string,
+  workflowRunId?: string,
+): void {
+  enqueueAgentCompletionNotice(context, {
+    agent,
+    task,
+    status,
+    summary,
+    evidenceRefs,
+    parentSessionId,
+    workflowRunId,
+  });
 }
 
 async function appendAgentLifecycleSystemEvent(
@@ -1231,7 +1268,12 @@ async function startDurableJobAgentRun(
   const cwdResult =
     job.isolation === "worktree" && resolved.usable
       ? await createDurableJobAgentWorktree(context, job, assignment)
-      : { ok: true as const, cwd: context.projectPath, isolation: undefined, evidenceText: undefined };
+      : {
+          ok: true as const,
+          cwd: context.projectPath,
+          isolation: undefined,
+          evidenceText: undefined,
+        };
   const child = await context.store.create({
     model: effectiveModel,
     summary: `job-agent:${job.id}:${assignment.type}:${truncateDisplay(task, 40)}`,
@@ -1379,6 +1421,16 @@ async function syncLinkedAgentRunsForJobTransition(
     agent.updatedAt = now;
     const background = context.backgroundTasks.find((task) => task.id === agent.id);
     if (background) syncBackgroundWithAgentStatus(background, agent);
+    enqueueAgentCompletionReturn(
+      context,
+      agent,
+      background,
+      mapAgentCompletionStatusFromRun(agent),
+      agent.summary,
+      job.evidenceRefs.map((item) => item.id),
+      agent.parentSessionId ?? job.ownerSessionId,
+      background?.workflowRunId,
+    );
     context.backgroundAbortControllers?.get(agent.id)?.abort();
     await persistAgentRun(context, agent);
   }
@@ -2025,27 +2077,60 @@ export async function handleAgentsCommand(
       (a) => a.status === "idle" || a.status === "completed",
     ).length;
     const cancellable = listCancellableAgents(context);
+    const pendingCompletions = collectPendingAgentCompletionNotices(context);
     showCommandPanel(context, output, {
       title: "/agents",
-      tone: "neutral",
+      tone: pendingCompletions.some((notice) => notice.validity === "invalid")
+        ? "warning"
+        : "neutral",
       summary: [
         isEn
-          ? `Agents · ${running} running now · ${idle} current-session idle/completed · ${total} historical loaded · ${cancellable.length} cancellable — Ctrl+O for details.`
-          : `Agents：当前运行 ${running} · 当前会话空闲/完成 ${idle} · 历史已加载 ${total} · 可取消 ${cancellable.length} — Ctrl+O 查看详情。`,
+          ? `Agents · ${running} running now · ${idle} current-session idle/completed · ${total} historical loaded · ${cancellable.length} cancellable · ${pendingCompletions.length} returned result(s) pending — Ctrl+O for details.`
+          : `Agents：当前运行 ${running} · 当前会话空闲/完成 ${idle} · 历史已加载 ${total} · 可取消 ${cancellable.length} · 待处理回流 ${pendingCompletions.length} — Ctrl+O 查看详情。`,
       ],
       actions:
-        cancellable.length > 0
-          ? ["/agents show <id>", "/agents cancel <id>", "/agents cancel all"]
-          : total > 0
-            ? ["/agents show <id>"]
-            : context.agentRegistry.agents.length > 0
-              ? [
-                  "/agents registry",
-                  "/fork explorer|planner|verifier|worker|<custom-agent-id> <task>",
-                ]
-              : ["/fork explorer|planner|verifier|worker <task>"],
+        pendingCompletions.length > 0
+          ? [
+              "/agents completions",
+              "/agents show <id>",
+              "/agents cancel <id>",
+              "/agents cancel all",
+            ]
+          : cancellable.length > 0
+            ? ["/agents show <id>", "/agents cancel <id>", "/agents cancel all"]
+            : total > 0
+              ? ["/agents show <id>"]
+              : context.agentRegistry.agents.length > 0
+                ? [
+                    "/agents registry",
+                    "/fork explorer|planner|verifier|worker|<custom-agent-id> <task>",
+                  ]
+                : ["/fork explorer|planner|verifier|worker <task>"],
       detailsText: formatAgentsList(context),
     });
+    return;
+  }
+  if (action === "completions" || action === "returns") {
+    const pending = collectPendingAgentCompletionNotices(context);
+    const digest = formatAgentCompletionDigest(context);
+    if (!digest) {
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "No unreported agent result returns."
+          : "没有未汇报的 agent 结果回流。",
+      );
+      return;
+    }
+    showCommandPanel(context, output, {
+      title: "/agents completions",
+      tone: pending.some((notice) => notice.validity === "invalid") ? "warning" : "neutral",
+      summary: digest.split("\n").slice(0, 2),
+      actions: ["/agents show <id>", "/background", "/details"],
+      detailsText: digest,
+    });
+    const now = new Date().toISOString();
+    for (const notice of pending) markAgentCompletionNoticeReported(context, notice.id, now);
     return;
   }
   if (action === "send") {
@@ -2105,7 +2190,7 @@ export async function handleAgentsCommand(
   }
   writeLine(
     output,
-    "用法：/agents | /agents registry | /agents show <id> | /agents resume <id> | /agents cancel <id>|all | /agents send <id|name> <message> | /agents send --team <team> <message>",
+    "用法：/agents | /agents registry | /agents completions | /agents show <id> | /agents resume <id> | /agents cancel <id>|all | /agents send <id|name> <message> | /agents send --team <team> <message>",
   );
 }
 
@@ -2143,7 +2228,8 @@ export async function handleForkCommand(
     return;
   }
   const workflowTaskId =
-    runtimeOptions.workflowRunId ?? getWorkflowRuns(context).find((run) => run.status === "running")?.id;
+    runtimeOptions.workflowRunId ??
+    getWorkflowRuns(context).find((run) => run.status === "running")?.id;
   const guard = deps().checkBackgroundStartGuard(context, "agent", false, workflowTaskId);
   if (guard) {
     writeLine(output, guard);
@@ -2296,6 +2382,16 @@ export async function completeAgent(
     result = await runAgentWork(agent, context, output);
   } catch (error) {
     if (agent.status === "stale") {
+      enqueueAgentCompletionReturn(
+        context,
+        agent,
+        task,
+        "stale",
+        agent.summary,
+        [],
+        parentSessionId,
+        task.workflowRunId,
+      );
       await persistAgentRun(context, agent);
       await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
       return;
@@ -2304,6 +2400,18 @@ export async function completeAgent(
     return;
   }
   if (agent.status === "cancelled" || agent.status === "stale") {
+    if (agent.status === "stale") {
+      enqueueAgentCompletionReturn(
+        context,
+        agent,
+        task,
+        "stale",
+        agent.summary,
+        [],
+        parentSessionId,
+        task.workflowRunId,
+      );
+    }
     await persistAgentRun(context, agent);
     return;
   }
@@ -2365,6 +2473,16 @@ export async function completeAgent(
   if (agentEvidenceId) {
     result.evidenceRefs = Array.from(new Set([...result.evidenceRefs, agentEvidenceId]));
   }
+  enqueueAgentCompletionReturn(
+    context,
+    agent,
+    task,
+    result.status,
+    result.summary,
+    result.evidenceRefs,
+    parentSessionId,
+    task.workflowRunId,
+  );
   await persistAgentRun(context, agent);
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
   clearAgentAbortController(context, agent.id);
@@ -2406,6 +2524,16 @@ async function failAgent(
     createdAt: now,
   });
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
+  enqueueAgentCompletionReturn(
+    context,
+    agent,
+    task,
+    "failed",
+    agent.summary,
+    [],
+    parentSessionId,
+    task.workflowRunId,
+  );
   await persistAgentRun(context, agent);
   // 真实失败搭车进 D.14B；失败摘要交给 captureFailureLearning 内部脱敏，只当风险提示，
   // 不进 context.evidence，不污染 D.13U/D.13V final answer gate。
@@ -2682,7 +2810,11 @@ export async function runModelBackedAgent(
   }
   let finalText = "";
   const maxTurns = getAgentMaxTurns(agent);
-  let currentRuntime = resolveAgentRuntimeForModel(context, continuation, agent.model || continuation.model);
+  let currentRuntime = resolveAgentRuntimeForModel(
+    context,
+    continuation,
+    agent.model || continuation.model,
+  );
   const attemptedFallbackModels = new Set<string>();
   let activeFallback:
     | {
@@ -3146,10 +3278,7 @@ async function executeAgentToolCall(
 
 function shouldRecordAgentToolEvidence(toolName: ToolName): boolean {
   return (
-    toolName === "Bash" ||
-    toolName === "Write" ||
-    toolName === "Edit" ||
-    toolName === "MultiEdit"
+    toolName === "Bash" || toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit"
   );
 }
 
@@ -3388,7 +3517,9 @@ async function consumeAgentMailbox(
 
 function getAgentAllowedTools(agent: AgentRun): (typeof builtInTools)[ToolName][] {
   if (agent.allowedTools !== undefined) {
-    return normalizeRegistryAllowedTools(agent.allowedTools)?.map((name) => builtInTools[name]) ?? [];
+    return (
+      normalizeRegistryAllowedTools(agent.allowedTools)?.map((name) => builtInTools[name]) ?? []
+    );
   }
   const readOnly = [builtInTools.Read, builtInTools.Grep, builtInTools.Glob, builtInTools.Todo];
   if (agent.type === "explorer" || agent.type === "planner") return readOnly;
@@ -3512,6 +3643,16 @@ export async function cancelAgent(
   if (background) {
     await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
   }
+  enqueueAgentCompletionReturn(
+    context,
+    agent,
+    background,
+    "cancelled",
+    agent.summary,
+    [],
+    parentSessionId,
+    background?.workflowRunId,
+  );
   await persistAgentRun(context, agent);
   writeLine(output, agent.summary);
   deps().writeStatus(output, context);
@@ -3724,7 +3865,11 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       if (!parsed.id || existing.has(parsed.id)) continue;
       if (parsed.status !== "running") {
         const filePath = resolve(getAgentRunsDir(context), file);
-        try { await rm(filePath); } catch { /* best-effort cleanup */ }
+        try {
+          await rm(filePath);
+        } catch {
+          /* best-effort cleanup */
+        }
         continue;
       }
       const now = new Date().toISOString();
