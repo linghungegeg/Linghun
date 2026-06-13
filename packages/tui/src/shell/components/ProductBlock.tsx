@@ -140,7 +140,7 @@ export function ProductBlock({
     return (
       <Box flexDirection="column" marginTop={0} marginBottom={1}>
         {useMessageResponse ? (
-          <MessageResponse>
+          <MessageResponse width={width}>
             <MessageMarkdown
               text={body}
               theme={theme}
@@ -255,7 +255,7 @@ export function ProductBlock({
           </Text>
         ) : null}
         {body ? (
-          <MessageResponse>
+          <MessageResponse width={width}>
             <MessageMarkdown
               text={body}
               theme={theme}

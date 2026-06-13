@@ -46,8 +46,14 @@ export function renderInkShell(
     capability,
     appOwnedScreen: useAlternateScreen,
   });
-  const terminalInteractionSession = createTerminalInteractionSession(stdout, terminalInteractionModes);
-  const terminalInteractionSignals = bindTerminalInteractionSignals(process, terminalInteractionSession);
+  const terminalInteractionSession = createTerminalInteractionSession(
+    stdout,
+    terminalInteractionModes,
+  );
+  const terminalInteractionSignals = bindTerminalInteractionSignals(
+    process,
+    terminalInteractionSession,
+  );
   let instance: ReturnType<typeof render>;
 
   try {
@@ -132,9 +138,9 @@ export function renderInkShell(
       resizeTimer = undefined;
       if (unmounted) return;
       try {
-        // Phase 6: Clear and reassert terminal state after resize
-        // This ensures viewport is properly recalculated and clamped
-        instance.clear();
+        if (useAlternateScreen) {
+          instance.clear();
+        }
       } catch {
         // Ignore clear errors if stdout is closed
       }

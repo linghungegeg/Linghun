@@ -1504,7 +1504,16 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // terminal cannot position it, useAnchoredCursor hides it via capability.
   void truncatedAbove;
   void truncatedBelow;
-  const declaredRow = cursorRow;
+  const showSuggestions =
+    !permissionActive && slashCandidates.length > 0 && slashSelection >= 0 && !slashHidden;
+
+  const declaredRow = composerCursorAnchorRowOffset({
+    permissionActive,
+    permissionActionCount: permissionActions.length,
+    showSuggestions,
+    slashCandidateCount: slashCandidates.length,
+    cursorRow,
+  });
   useAnchoredCursor(
     permissionActive ? null : { row: declaredRow, col: cursorCol },
     anchorRef,
@@ -1513,9 +1522,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   const placeholderColor = noColor ? undefined : "gray";
   const color = text ? undefined : placeholderColor;
-
-  const showSuggestions =
-    !permissionActive && slashCandidates.length > 0 && slashSelection >= 0 && !slashHidden;
 
   const ghostSuffix = useMemo(() => {
     if (permissionActive || slashHidden) return undefined;
@@ -1530,7 +1536,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const showUnknownHint = false;
 
   return (
-    <Box flexDirection="column" width={maxWidth} borderStyle="round" borderColor={theme.border ?? theme.muted} paddingLeft={2} paddingRight={1}>
+    <Box
+      flexDirection="column"
+      width={maxWidth}
+      borderStyle="round"
+      borderColor={theme.border ?? theme.muted}
+      paddingLeft={2}
+      paddingRight={1}
+    >
       {permissionActive && view.permission ? (
         <PermissionControl
           permission={view.permission}
@@ -1935,6 +1948,29 @@ export function splitLineAtDisplayCol(
   const cursorChar = chars[i] ?? " ";
   const after = chars.slice(i + 1).join("");
   return { before, cursorChar, after };
+}
+
+export function composerCursorAnchorRowOffset({
+  permissionActive,
+  permissionActionCount,
+  showSuggestions,
+  slashCandidateCount,
+  cursorRow,
+}: {
+  permissionActive: boolean;
+  permissionActionCount: number;
+  showSuggestions: boolean;
+  slashCandidateCount: number;
+  cursorRow: number;
+}): number {
+  let offset = 0;
+  if (permissionActive) {
+    offset += 2 + Math.max(0, permissionActionCount) + 2;
+  }
+  if (showSuggestions) {
+    offset += Math.max(0, slashCandidateCount) + 1;
+  }
+  return offset + 1 + Math.max(0, cursorRow);
 }
 
 function hasSelectableCommandPanelRows(panel: CommandPanelView | undefined): boolean {

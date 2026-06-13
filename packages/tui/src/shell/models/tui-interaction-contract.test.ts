@@ -544,6 +544,7 @@ describe("TUI Interaction Contract — diff/code width propagation", () => {
     const markdown = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
 
     expect(productBlock).toContain('block.messageKind === "tool_result_success"');
+    expect(productBlock).toContain("<MessageResponse width={width}>");
     expect(productBlock).toContain("wrapWidth={Math.max(8, width - 4)}");
     expect(productBlock).toContain("wrapWidth={Math.max(8, width)}");
     expect(markdown).toContain("<StructuredDiff");

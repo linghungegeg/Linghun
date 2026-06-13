@@ -369,24 +369,27 @@ function CodeLine({
       </Text>
     );
   }
+  const rawWrapped = wrapText(line.length === 0 ? " " : line, wrapWidth);
+  const highlightedFits =
+    highlightedLine &&
+    rawWrapped.length === 1 &&
+    displayWidth(stripAnsi(highlightedLine)) <= wrapWidth;
+  const rows = highlightedFits ? [highlightedLine] : rawWrapped;
   return (
     <Box flexDirection="column">
-      {wrapText(line.length === 0 ? " " : (highlightedLine ?? line), wrapWidth).map(
-        (wrapped, index) => {
-          const visibleWidth = stripAnsi(wrapped).length;
-          const padded = visibleWidth < wrapWidth ? `${wrapped}${" ".repeat(wrapWidth - visibleWidth)}` : wrapped;
-          return (
-            <Text
-              key={`${index}-${stripAnsi(wrapped)}`}
-              color={selected ? "white" : highlightedLine && !isDiff ? undefined : color}
-              backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
-              dimColor={selected ? false : dimLine}
-            >
-              {padded}
-            </Text>
-          );
-        },
-      )}
+      {rows.map((wrapped, index) => {
+        const padded = padDisplay(wrapped, wrapWidth);
+        return (
+          <Text
+            key={`${index}-${stripAnsi(wrapped)}`}
+            color={selected ? "white" : highlightedFits && !isDiff ? undefined : color}
+            backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
+            dimColor={selected ? false : dimLine}
+          >
+            {padded}
+          </Text>
+        );
+      })}
     </Box>
   );
 }
@@ -408,7 +411,9 @@ function renderCodeBlock({
 }): React.ReactNode {
   // Phase 3: diff/patch blocks use StructuredDiff for visual diff rendering.
   if (lang === "diff" || lang === "patch") {
-    return <StructuredDiff key={blockKey} code={code} theme={theme} wrapWidth={wrapWidth} dim={dim} />;
+    return (
+      <StructuredDiff key={blockKey} code={code} theme={theme} wrapWidth={wrapWidth} dim={dim} />
+    );
   }
   const rawLines = code.split("\n");
   const highlighted = getCachedHighlightedCodeLines(code, lang);
@@ -473,10 +478,19 @@ function renderToken({
     case "heading": {
       const heading = token as Tokens.Heading;
       return (
-        <Box key={keyPrefix} marginTop={heading.depth <= 2 ? 1 : 0}>
-          <Text bold color={dim ? theme.dim : (theme.accent ?? theme.brand)} dimColor={dim}>
-            {`${"#".repeat(heading.depth)} ${heading.text}`}
-          </Text>
+        <Box key={keyPrefix} flexDirection="column" marginTop={heading.depth <= 2 ? 1 : 0}>
+          {wrapText(`${"#".repeat(heading.depth)} ${heading.text}`, wrapWidth).map(
+            (line, index) => (
+              <Text
+                key={`${keyPrefix}-heading-${index}-${line}`}
+                bold
+                color={dim ? theme.dim : (theme.accent ?? theme.brand)}
+                dimColor={dim}
+              >
+                {line}
+              </Text>
+            ),
+          )}
         </Box>
       );
     }
@@ -584,22 +598,33 @@ function padDisplay(value: string, width: number): string {
 
 function tableWidths(table: Tokens.Table, wrapWidth: number): number[] {
   const columnCount = table.header.length;
-  const maxPerCol = Math.max(TABLE_MIN_COLUMN_WIDTH, Math.min(TABLE_MAX_COLUMN_WIDTH, Math.floor(wrapWidth * 0.45)));
+  const maxPerCol = Math.max(
+    TABLE_MIN_COLUMN_WIDTH,
+    Math.min(TABLE_MAX_COLUMN_WIDTH, Math.floor(wrapWidth * 0.45)),
+  );
   const rawWidths = Array.from({ length: columnCount }, (_, index) => {
     const values = [
       table.header[index]?.text ?? "",
       ...table.rows.map((row) => row[index]?.text ?? ""),
     ];
-    return Math.min(maxPerCol, Math.max(TABLE_MIN_COLUMN_WIDTH, ...values.map((value) => displayWidth(value))));
+    return Math.min(
+      maxPerCol,
+      Math.max(TABLE_MIN_COLUMN_WIDTH, ...values.map((value) => displayWidth(value))),
+    );
   });
   const borderWidth = columnCount + 1;
   const paddingWidth = columnCount * 2;
-  const available = Math.max(columnCount * TABLE_MIN_COLUMN_WIDTH, wrapWidth - borderWidth - paddingWidth);
+  const available = Math.max(
+    columnCount * TABLE_MIN_COLUMN_WIDTH,
+    wrapWidth - borderWidth - paddingWidth,
+  );
   const total = rawWidths.reduce((sum, width) => sum + width, 0);
   if (total <= available) return rawWidths;
   // Proportional scaling: give wider columns proportionally more room.
   const scale = available / total;
-  const proportional = rawWidths.map((w) => Math.max(TABLE_MIN_COLUMN_WIDTH, Math.floor(w * scale)));
+  const proportional = rawWidths.map((w) =>
+    Math.max(TABLE_MIN_COLUMN_WIDTH, Math.floor(w * scale)),
+  );
   // If any column dips below the acceptable minimum after proportional scaling,
   // signal the caller to fall back to vertical mode.
   if (proportional.some((w) => w < TABLE_MIN_ACCEPTABLE_COLUMN)) {
@@ -627,12 +652,23 @@ function renderTable(
         {table.rows.map((row, rowIndex) => (
           <Box key={`${keyPrefix}-vertical-${rowIndex}`} flexDirection="column" marginBottom={1}>
             {row.map((cell, cellIndex) => (
-              <Text key={`${keyPrefix}-vertical-${rowIndex}-${cellIndex}`}>
+              <Box key={`${keyPrefix}-vertical-${rowIndex}-${cellIndex}`} flexDirection="row">
                 <Text color={theme.muted} dimColor={dim}>
-                  {table.header[cellIndex]?.text ?? `#${cellIndex + 1}`}: {""}
+                  {table.header[cellIndex]?.text ?? `#${cellIndex + 1}`}:{" "}
                 </Text>
-                <InlineText value={cell.text} theme={theme} dim={dim} tone={tone} />
-              </Text>
+                <InlineRow
+                  value={cell.text}
+                  theme={theme}
+                  dim={dim}
+                  tone={tone}
+                  wrapWidth={Math.max(
+                    8,
+                    wrapWidth -
+                      displayWidth(table.header[cellIndex]?.text ?? `#${cellIndex + 1}`) -
+                      2,
+                  )}
+                />
+              </Box>
             ))}
           </Box>
         ))}
@@ -718,13 +754,16 @@ export function MessageMarkdown({
   if (isStreaming) {
     const lines = text.replace(/\r/g, "").split("\n");
     const color = baseColor(theme, dim, tone);
+    const effectiveWrapWidth = wrapWidth ?? 80;
     return (
       <Box flexDirection="column">
-        {lines.map((line, i) => (
-          <Text key={`s${i}`} color={color} dimColor={dim}>
-            {line}
-          </Text>
-        ))}
+        {lines.flatMap((line, i) =>
+          wrapText(line, effectiveWrapWidth).map((wrapped, wrappedIndex) => (
+            <Text key={`s${i}-${wrappedIndex}-${wrapped}`} color={color} dimColor={dim}>
+              {wrapped}
+            </Text>
+          )),
+        )}
       </Box>
     );
   }

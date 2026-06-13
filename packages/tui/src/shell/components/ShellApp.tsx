@@ -1,6 +1,6 @@
-import { Box, Text } from "@linghun/ink-runtime";
+import { Box, Static, Text } from "@linghun/ink-runtime";
 import type React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { resolveAlternateScreen } from "../ink-renderer.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { brandWordmark, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
@@ -57,7 +57,13 @@ export function ShellApp({
             {"─".repeat(cardWidth)}
           </Text>
         </Box>
-        <Box flexDirection="column" paddingTop={1} flexShrink={1} overflow="hidden" width={cardWidth}>
+        <Box
+          flexDirection="column"
+          paddingTop={1}
+          flexShrink={1}
+          overflow="hidden"
+          width={cardWidth}
+        >
           {panel}
         </Box>
         <Box flexShrink={0} width={cardWidth}>
@@ -154,7 +160,7 @@ function HomeLayout({
               key={block.id}
               block={block}
               theme={theme}
-              width={view.width}
+              width={cw}
               language={view.language}
             />
           ))}
@@ -211,6 +217,11 @@ function TaskLayout({
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
   const contentWidth = Math.max(8, view.width - 4);
+  const nativeTranscript = useNativeTranscriptWindow(view.blocks);
+  const expandedTranscriptBlock =
+    view.ctrlOExpand?.active && view.ctrlOExpand.blockId
+      ? view.blocks.find((block) => block.id === view.ctrlOExpand?.blockId)
+      : undefined;
 
   // Periodic re-render tick: when agent/workflow progress is visible, force
   // re-renders so eviction timers fire and completed items disappear.
@@ -223,153 +234,208 @@ function TaskLayout({
   }, [hasProgress]);
 
   return (
-    <Box flexDirection="column" width={view.width} height={view.height}>
-      {/* Main content area — one native terminal scrollback stream, with composer/footer pinned below. */}
-      <Box flexDirection="column" flexGrow={1} minHeight={0} justifyContent="flex-end">
-        <Box flexDirection="column" paddingX={2}>
-          {view.blocks.length > 0 ? (
-            <Box flexDirection="column">
-              {view.blocks.map((block) => (
+    <>
+      <Static
+        items={nativeTranscript.staticBlocks}
+      >
+        {(block) => (
+          <Box key={block.id} flexDirection="column" paddingX={2}>
+            <ProductBlock
+              block={block}
+              theme={theme}
+              width={contentWidth}
+              language={view.language}
+            />
+          </Box>
+        )}
+      </Static>
+      <Box
+        flexDirection="column"
+        width={view.width}
+        height={view.height}
+      >
+        {/* Dynamic live area only; committed transcript blocks are appended through Static/native scrollback. */}
+        <Box flexDirection="column" flexGrow={1} minHeight={0}>
+          <Box flexGrow={1} minHeight={0} />
+          <Box flexDirection="column" paddingX={2}>
+            {expandedTranscriptBlock ? (
+              <Box flexDirection="column" marginBottom={1}>
                 <ProductBlock
-                  key={block.id}
-                  block={block}
+                  block={{ ...expandedTranscriptBlock, ctrlOCollapsed: false }}
                   theme={theme}
                   width={contentWidth}
                   language={view.language}
                 />
-              ))}
-            </Box>
-          ) : null}
+              </Box>
+            ) : nativeTranscript.liveBlocks.length > 0 ? (
+              <Box flexDirection="column">
+                {nativeTranscript.liveBlocks.map((block) => (
+                  <ProductBlock
+                    key={block.id}
+                    block={block}
+                    theme={theme}
+                    width={contentWidth}
+                    language={view.language}
+                  />
+                ))}
+              </Box>
+            ) : null}
 
-          {view.streamingAssistantText ? (
-            <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
-              <StreamingMarkdown
-                text={view.streamingAssistantText}
-                theme={theme}
-                wrapWidth={contentWidth}
+            {view.streamingAssistantText ? (
+              <Box
+                marginTop={
+                  expandedTranscriptBlock || nativeTranscript.liveBlocks.length > 0 ? 1 : 0
+                }
+              >
+                <StreamingMarkdown
+                  text={view.streamingAssistantText}
+                  theme={theme}
+                  wrapWidth={contentWidth}
+                />
+              </Box>
+            ) : null}
+
+            {view.activity ? (
+              <Box
+                marginTop={
+                  expandedTranscriptBlock ||
+                  nativeTranscript.liveBlocks.length > 0 ||
+                  view.streamingAssistantText
+                    ? 1
+                    : 0
+                }
+              >
+                <ActivityIndicator
+                  activity={view.activity}
+                  theme={theme}
+                  tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
+                />
+              </Box>
+            ) : null}
+
+            {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
+              <TaskSuggestionBar
+                suggestions={view.taskSuggestions}
+                cursor={view.taskSuggestionCursor ?? 0}
+                width={view.width}
+                noColor={noColor}
               />
-            </Box>
-          ) : null}
+            ) : null}
 
-          {view.activity ? (
-            <Box marginTop={view.blocks.length > 0 || view.streamingAssistantText ? 1 : 0}>
-              <ActivityIndicator
-                activity={view.activity}
-                theme={theme}
-                tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
-              />
-            </Box>
+            {view.limitations.length > 0 ? (
+              <Box flexDirection="column" marginTop={1}>
+                {view.limitations.map((item) => (
+                  <Text key={item} color={theme.muted}>
+                    {item}
+                  </Text>
+                ))}
+              </Box>
+            ) : null}
+          </Box>
+          {view.unseenMessageCount && view.unseenMessageCount > 0 ? (
+            <UnseenMessagePill
+              count={view.unseenMessageCount}
+              language={view.language}
+              width={view.width}
+            />
           ) : null}
+        </Box>
 
-          {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
-            <TaskSuggestionBar
-              suggestions={view.taskSuggestions}
-              cursor={view.taskSuggestionCursor ?? 0}
+        {/* Composer band — pinned to terminal bottom */}
+        <Box flexShrink={0} flexDirection="column">
+          {view.backgroundTaskOverlay && !view.permission ? (
+            <BackgroundTaskOverlay
+              overlay={view.backgroundTaskOverlay}
+              width={contentWidth}
+              noColor={noColor}
+            />
+          ) : null}
+          {/* P1-7: ConfigPanel as overlay, preserving scroll ability */}
+          {view.configPanel ? (
+            <ConfigPanel
+              panel={view.configPanel}
+              controller={controller}
               width={view.width}
               noColor={noColor}
+              language={view.language}
             />
           ) : null}
-
-          {view.limitations.length > 0 ? (
-            <Box flexDirection="column" marginTop={1}>
-              {view.limitations.map((item) => (
-                <Text key={item} color={theme.muted}>
-                  {item}
-                </Text>
-              ))}
+          <NotificationStack notifications={view.notifications} theme={theme} />
+          {view.taskRuntimeSummary ? (
+            <Box width={cw} marginTop={1}>
+              <ProductBlock
+                block={view.taskRuntimeSummary}
+                theme={theme}
+                width={cw}
+                language={view.language}
+              />
             </Box>
           ) : null}
-        </Box>
-        {view.unseenMessageCount && view.unseenMessageCount > 0 ? (
-          <UnseenMessagePill
-            count={view.unseenMessageCount}
-            language={view.language}
-            width={view.width}
-          />
-        ) : null}
-      </Box>
 
-      {/* Composer band — pinned to terminal bottom */}
-      <Box flexShrink={0} flexDirection="column">
-        {view.backgroundTaskOverlay && !view.permission ? (
-          <BackgroundTaskOverlay
-            overlay={view.backgroundTaskOverlay}
-            width={contentWidth}
-            noColor={noColor}
-          />
-        ) : null}
-        {/* P1-7: ConfigPanel as overlay, preserving scroll ability */}
-        {view.configPanel ? (
-          <ConfigPanel
-            panel={view.configPanel}
-            controller={controller}
-            width={view.width}
-            noColor={noColor}
-            language={view.language}
-          />
-        ) : null}
-        <NotificationStack notifications={view.notifications} theme={theme} />
-        {view.taskRuntimeSummary ? (
-          <Box width={cw} marginTop={1}>
-            <ProductBlock
-              block={view.taskRuntimeSummary}
+          {view.taskListView ? (
+            <Box paddingX={2} marginBottom={1}>
+              <TaskListView
+                list={view.taskListView}
+                width={contentWidth}
+                noColor={noColor}
+                language={view.language}
+              />
+            </Box>
+          ) : null}
+
+          {view.agentProgressTree ? (
+            <Box width={view.width} paddingX={2}>
+              <AgentProgressTree
+                tree={view.agentProgressTree}
+                width={contentWidth}
+                noColor={noColor}
+                language={view.language}
+              />
+            </Box>
+          ) : null}
+
+          {view.workflowProgressView ? (
+            <Box width={view.width} paddingX={2}>
+              <WorkflowProgressView
+                workflow={view.workflowProgressView}
+                width={contentWidth}
+                noColor={noColor}
+                language={view.language}
+              />
+            </Box>
+          ) : null}
+
+          <Box flexDirection="column" width={cw} paddingTop={1}>
+            <Composer view={view} onInput={controller.onInput} capability={capability} />
+          </Box>
+
+          {view.taskFooter ? (
+            <StatusFooter
+              footer={view.taskFooter}
               theme={theme}
-              width={cw}
+              width={view.width}
               language={view.language}
+              modelDim={view.taskFooter.modelDim}
+              cacheTone={view.taskFooter.cacheTone}
             />
-          </Box>
-        ) : null}
-
-        {view.taskListView ? (
-          <Box paddingX={2} marginBottom={1}>
-            <TaskListView
-              list={view.taskListView}
-              width={contentWidth}
-              noColor={noColor}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
-        {view.agentProgressTree ? (
-          <Box width={view.width} paddingX={2}>
-            <AgentProgressTree
-              tree={view.agentProgressTree}
-              width={contentWidth}
-              noColor={noColor}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
-        {view.workflowProgressView ? (
-          <Box width={view.width} paddingX={2}>
-            <WorkflowProgressView
-              workflow={view.workflowProgressView}
-              width={contentWidth}
-              noColor={noColor}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
-        <Box flexDirection="column" width={cw} paddingTop={1}>
-          <Composer view={view} onInput={controller.onInput} capability={capability} />
+          ) : null}
         </Box>
-
-        {view.taskFooter ? (
-          <StatusFooter
-            footer={view.taskFooter}
-            theme={theme}
-            width={view.width}
-            language={view.language}
-            modelDim={view.taskFooter.modelDim}
-            cacheTone={view.taskFooter.cacheTone}
-          />
-        ) : null}
       </Box>
-    </Box>
+    </>
   );
+}
+
+const NATIVE_TRANSCRIPT_LIVE_BLOCKS = 6;
+
+function useNativeTranscriptWindow(blocks: ProductBlockViewModel[]): {
+  staticBlocks: ProductBlockViewModel[];
+  liveBlocks: ProductBlockViewModel[];
+} {
+  const liveStart = Math.max(0, blocks.length - NATIVE_TRANSCRIPT_LIVE_BLOCKS);
+  return {
+    staticBlocks: blocks.slice(0, liveStart),
+    liveBlocks: blocks.slice(liveStart),
+  };
 }
 
 // D.13Q-UX: 旧的 TaskFooter 组件已迁到 packages/tui/src/shell/components/StatusFooter.tsx。
@@ -492,15 +558,11 @@ function ActivityIndicator({
       <Box>
         {isToolHeader ? (
           <>
-            <Text color={theme.toolRunning ?? color}>
-              {marker}{" "}
-            </Text>
+            <Text color={theme.toolRunning ?? color}>{marker} </Text>
             <Text bold color={theme.toolRunning ?? color}>
               {activity.toolName}
             </Text>
-            {activity.toolTarget ? (
-              <Text color={theme.muted}>({activity.toolTarget})</Text>
-            ) : null}
+            {activity.toolTarget ? <Text color={theme.muted}>({activity.toolTarget})</Text> : null}
           </>
         ) : (
           <Text color={color} bold={activity.phase === "thinking" && frame % 10 < 5}>
@@ -569,7 +631,11 @@ function activityText(activity: TaskActivityView, tokenCount?: number): string {
 
 function slowActivityText(activity: TaskActivityView, tokenCount?: number): string | undefined {
   const isEn = activity.language === "en-US";
-  if (activity.phase === "permission_waiting" || activity.phase === "completed" || activity.phase === "error") {
+  if (
+    activity.phase === "permission_waiting" ||
+    activity.phase === "completed" ||
+    activity.phase === "error"
+  ) {
     return undefined;
   }
   if (activity.phase === "tool_running") {

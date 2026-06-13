@@ -1,6 +1,6 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
-import { wrapText } from "../text-utils.js";
+import { displayWidth, fitText, wrapText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 
 /**
@@ -94,7 +94,7 @@ export function StructuredDiff({
   const borderLine = borderChar.repeat(safeWrapWidth);
 
   return (
-    <Box flexDirection="column" marginLeft={1}>
+    <Box flexDirection="column">
       <Text color={theme.subtle ?? theme.dim ?? theme.muted} dimColor>
         {borderLine}
       </Text>
@@ -103,30 +103,32 @@ export function StructuredDiff({
           return (
             <Box key={`hunk-${idx}`}>
               <Text color={theme.muted} dimColor>
-                {"  ···"}
+                {padDisplay("  ···", safeWrapWidth)}
               </Text>
             </Box>
           );
         }
         if (line.type === "header") {
+          const header = fitText(`  ${line.content}`, safeWrapWidth);
           return (
             <Box key={`header-${idx}`}>
               <Text color={theme.muted} dimColor>
-                {"  "}{line.content}
+                {padDisplay(header, safeWrapWidth)}
               </Text>
             </Box>
           );
         }
 
         const marker = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
-        const lineNum = line.type === "add"
-          ? line.newNum
-          : line.type === "remove"
-            ? line.oldNum
-            : line.newNum;
-        const numStr = lineNum !== undefined
-          ? String(lineNum).padStart(String(gutterWidth - 5).length > 0 ? gutterWidth - 5 : 1, " ")
-          : " ";
+        const lineNum =
+          line.type === "add" ? line.newNum : line.type === "remove" ? line.oldNum : line.newNum;
+        const numStr =
+          lineNum !== undefined
+            ? String(lineNum).padStart(
+                String(gutterWidth - 5).length > 0 ? gutterWidth - 5 : 1,
+                " ",
+              )
+            : " ";
         const gutter = `${marker} ${numStr} │ `;
 
         const lineColor =
@@ -148,7 +150,7 @@ export function StructuredDiff({
         return (
           <Box key={`line-${idx}-${marker}-${lineNum}`} flexDirection="column">
             {wrapped.map((wrappedLine, wIdx) => {
-              const paddedLine = wrappedLine.padEnd(contentWidth, " ");
+              const paddedLine = padDisplay(wrappedLine, contentWidth);
               return (
                 <Box key={`${idx}-w${wIdx}`} flexDirection="row">
                   <Text color={theme.dim ?? theme.muted} dimColor>
@@ -172,4 +174,9 @@ export function StructuredDiff({
       </Text>
     </Box>
   );
+}
+
+function padDisplay(value: string, width: number): string {
+  const visible = displayWidth(value);
+  return `${value}${" ".repeat(Math.max(0, width - visible))}`;
 }

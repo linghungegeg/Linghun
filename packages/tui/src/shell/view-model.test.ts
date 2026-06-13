@@ -14,6 +14,7 @@ import {
   bufferInsert,
   bufferMoveDown,
   bufferMoveUp,
+  composerCursorAnchorRowOffset,
   createEditBuffer,
   formatComposerRenderLines,
   handleComposerInput,
@@ -450,7 +451,8 @@ describe("Ink shell selection", () => {
       throw new Error("stream closed");
     });
     vi.doMock("@linghun/ink-runtime", async () => {
-      const actual = await vi.importActual<typeof import("@linghun/ink-runtime")>("@linghun/ink-runtime");
+      const actual =
+        await vi.importActual<typeof import("@linghun/ink-runtime")>("@linghun/ink-runtime");
       return {
         ...actual,
         render: () => ({
@@ -1626,7 +1628,11 @@ describe("D.12B — P1-1: output blocks keep last 20", () => {
       messageKind: "assistant_text" as const,
     }));
     // height=200 ensures viewport virtualization doesn't clip blocks.
-    const view = createShellViewModel(createContext(), { width: 80, height: 200, outputBlocks: blocks });
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      height: 200,
+      outputBlocks: blocks,
+    });
     const outputIds = view.blocks.map((b) => b.id).filter((id) => id.startsWith("out-"));
     // maxEphemeral=20: oldest 2 pruned, 20 remain.
     expect(outputIds.length).toBe(20);
@@ -1647,7 +1653,11 @@ describe("D.12B — P1-1: output blocks keep last 20", () => {
       fullText: `unique block ${i}`,
       messageKind: "assistant_text" as const,
     }));
-    const view = createShellViewModel(createContext(), { width: 80, height: 200, outputBlocks: blocks });
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      height: 200,
+      outputBlocks: blocks,
+    });
     const outputIds = view.blocks.map((b) => b.id).filter((id) => id.startsWith("out-"));
     // Oldest 5 ephemeral pruned (25 - 20 = 5).
     expect(outputIds).not.toContain("out-0");
@@ -1794,7 +1804,9 @@ describe("D.12B — P3-1: home vision copy", () => {
   it("omits vision text in zh-CN and en-US", () => {
     expect(createShellViewModel(createContext(), { width: 40 }).homeVision).toBe("");
     expect(createShellViewModel(createContext(), { width: 80 }).homeVision).toBe("");
-    expect(createShellViewModel(createContext({ language: "en-US" }), { width: 40 }).homeVision).toBe("");
+    expect(
+      createShellViewModel(createContext({ language: "en-US" }), { width: 40 }).homeVision,
+    ).toBe("");
   });
 });
 
@@ -1896,6 +1908,18 @@ describe("D.12C — Composer cursor alignment closure", () => {
     expect(cursorRow).toBe(2);
     // "第三行" = 3*2 = 6
     expect(cursorCol).toBe(6);
+  });
+
+  it("Composer cursor row includes visible slash suggestion rows", () => {
+    expect(
+      composerCursorAnchorRowOffset({
+        permissionActive: false,
+        permissionActionCount: 0,
+        showSuggestions: true,
+        slashCandidateCount: 3,
+        cursorRow: 1,
+      }),
+    ).toBe(6);
   });
 
   it("no-color Composer render has no fake cursor characters", () => {
@@ -2017,6 +2041,16 @@ describe("D.12C — Composer cursor alignment closure", () => {
     const lastHide = output.text.lastIndexOf("\x1B[?25l");
     const lastShow = output.text.lastIndexOf("\x1B[?25h");
     expect(lastShow).toBeGreaterThan(lastHide);
+  });
+
+  it("ink-renderer resize does not clear normal-screen native scrollback", async () => {
+    const source = await readFile(join(SRC_ROOT, "shell/ink-renderer.tsx"), "utf8");
+    const resizeStart = source.indexOf("const onResize = () =>");
+    expect(resizeStart).toBeGreaterThan(0);
+    const resizeEnd = source.indexOf("};", resizeStart + 30);
+    const body = source.slice(resizeStart, resizeEnd);
+    expect(body).toContain("if (useAlternateScreen)");
+    expect(body).toContain("instance.clear()");
   });
 
   it("home brand/vision still renders, layout not switched to top bar", async () => {
@@ -4026,7 +4060,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
   it("D.13P-S toolErrorRetryHint promotes Ctrl+O over /details in zh-CN and en-US", async () => {
     const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
     expect(source).toContain("按 ${TOGGLE_DETAILS_KEYBIND} 查看最近一次失败输出（或 /details）");
-    expect(source).toContain("Press ${TOGGLE_DETAILS_KEYBIND} for the latest failure output (or /details)");
+    expect(source).toContain(
+      "Press ${TOGGLE_DETAILS_KEYBIND} for the latest failure output (or /details)",
+    );
   });
 
   it("ShellInputEvent type union includes cycle-permission-mode for Shift+Tab", async () => {
@@ -4081,12 +4117,17 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toContain("staticHistoryBlocks");
     expect(body).not.toContain("recentStaticBlocks");
     expect(body).not.toContain("currentBlocks");
-    expect(body).toContain("view.blocks.map");
-    expect(body).toContain('justifyContent="flex-end"');
+    expect(body).not.toContain("view.blocks.map");
+    expect(body).not.toContain('justifyContent="flex-end"');
+    expect(body).toContain("<Static");
+    expect(body).toContain("items={nativeTranscript.staticBlocks}");
+    expect(body).toContain("useNativeTranscriptWindow(view.blocks)");
+    expect(body).toContain("nativeTranscript.liveBlocks");
+    expect(body).toContain("NATIVE_TRANSCRIPT_LIVE_BLOCKS");
     expect(body).toContain("<UnseenMessagePill");
     expect(body).toContain("<ProductBlock");
     expect(body).toContain("<Composer view={view}");
-    expect(body).toContain('<Box flexDirection="column" width={view.width} height={view.height}>');
+    expect(body).toContain("height={view.height}");
     expect(body).toContain("flexGrow={1}");
     expect(body).toContain("minHeight={0}");
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
@@ -4184,7 +4225,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("<Composer view={view}"));
     expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
     expect(body.indexOf("<AgentProgressTree")).toBeLessThan(body.indexOf("<Composer view={view}"));
-    expect(body.indexOf("<WorkflowProgressView")).toBeLessThan(body.indexOf("<Composer view={view}"));
+    expect(body.indexOf("<WorkflowProgressView")).toBeLessThan(
+      body.indexOf("<Composer view={view}"),
+    );
     expect(body).not.toContain(
       "`${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`",
     );
@@ -4193,8 +4236,11 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
   it("D.14D-C2: ScrollViewport remains isolated from the normal task transcript", async () => {
     const { readFile } = await import("node:fs/promises");
     const shellSource = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
-    const viewportSource = await readFile(join(SRC_ROOT, "shell/components/ScrollViewport.tsx"), "utf8");
-    expect(shellSource).not.toContain("from \"./ScrollViewport.js\"");
+    const viewportSource = await readFile(
+      join(SRC_ROOT, "shell/components/ScrollViewport.tsx"),
+      "utf8",
+    );
+    expect(shellSource).not.toContain('from "./ScrollViewport.js"');
     expect(shellSource).not.toContain("<TranscriptViewport");
     expect(viewportSource).toContain("virtualRange?: TranscriptVirtualRangeView");
     expect(viewportSource).toContain('overflow="hidden"');
@@ -4420,7 +4466,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
   it("ShellApp renders streaming preview as a sibling after blocks and before activity", async () => {
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
-    const blocksIndex = source.indexOf("view.blocks.map");
+    const blocksIndex = source.indexOf("nativeTranscript.liveBlocks.map");
     const previewIndex = source.indexOf("view.streamingAssistantText");
     const activityIndex = source.indexOf("view.activity ?");
     expect(blocksIndex).toBeGreaterThan(0);
@@ -4806,8 +4852,14 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const source = await readFile(join(SRC_ROOT, "shell/components/ProductBlock.tsx"), "utf8");
     const userStart = source.indexOf('block.kind === "user"');
     const messageStart = source.indexOf("isMessageKind(block.messageKind)");
-    const userBranch = source.slice(userStart, source.indexOf('if (block.kind === "command")', userStart));
-    const messageBranch = source.slice(messageStart, source.indexOf('if (block.messageKind === "assistant_thinking")', messageStart));
+    const userBranch = source.slice(
+      userStart,
+      source.indexOf('if (block.kind === "command")', userStart),
+    );
+    const messageBranch = source.slice(
+      messageStart,
+      source.indexOf('if (block.messageKind === "assistant_thinking")', messageStart),
+    );
 
     // user_text: plain text, no Markdown, dim separator + wrapText + background fill
     expect(userBranch).toContain("marginBottom={1}");
@@ -5096,7 +5148,13 @@ describe("deriveBackgroundActivityFallback — request activity cleared but work
   it("running agent with lastModelRequest → activity shows agent waiting", () => {
     const ctx = createContext({
       agents: [
-        { id: "a1", displayName: "reviewer", status: "running", mailbox: [], startedAt: "2026-01-01T00:00:00.000Z" },
+        {
+          id: "a1",
+          displayName: "reviewer",
+          status: "running",
+          mailbox: [],
+          startedAt: "2026-01-01T00:00:00.000Z",
+        },
       ],
       backgroundTasks: [],
       lastModelRequest: fakeLastModelRequest,
@@ -5163,7 +5221,9 @@ describe("deriveBackgroundActivityFallback — request activity cleared but work
 
   it("all agents completed + lastModelRequest → no spurious activity", () => {
     const ctx = createContext({
-      agents: [{ id: "a1", status: "completed", mailbox: [], startedAt: "2026-01-01T00:00:00.000Z" }],
+      agents: [
+        { id: "a1", status: "completed", mailbox: [], startedAt: "2026-01-01T00:00:00.000Z" },
+      ],
       backgroundTasks: [{ status: "completed" }],
       lastModelRequest: fakeLastModelRequest,
     } as unknown as Partial<TuiContext>);
@@ -6473,15 +6533,17 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
 
     expect(source).not.toContain("Math.min(wrapWidth, 60)");
     expect(source).toContain("borderChar.repeat(safeWrapWidth)");
-    expect(source).toContain("padEnd(contentWidth");
+    expect(source).toContain("padDisplay(wrappedLine, contentWidth)");
+    expect(source).toContain("displayWidth(value)");
   });
 
   it("MessageMarkdown code rows pad to wrapWidth for whole-line visual consistency", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
 
-    expect(source).toContain("visibleWidth < wrapWidth");
-    expect(source).toContain("repeat(wrapWidth - visibleWidth)");
+    expect(source).toContain("padDisplay(wrapped, wrapWidth)");
+    expect(source).toContain("displayWidth(stripAnsi(value))");
+    expect(source).toContain("wrapText(line, effectiveWrapWidth)");
   });
 
   it("Phase R2: two adjacent read/search tool outputs stay separate", () => {
