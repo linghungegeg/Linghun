@@ -293,3 +293,42 @@ function getNoticeScopeKey(notice: AgentCompletionNotice): string {
 function formatAgentLabel(notice: AgentCompletionNotice): string {
   return notice.displayName ?? notice.agentType ?? notice.agentId;
 }
+
+export type AppendAgentCompletionEventInput = {
+  agentId: string;
+  label: string;
+  status: AgentCompletionStatus;
+  summary: string;
+  targetSession: string;
+  fallbackSession?: string;
+};
+
+export async function appendAgentCompletionSystemEvent(
+  context: TuiContext,
+  input: AppendAgentCompletionEventInput,
+): Promise<{ written: boolean; fallbackWarning?: string }> {
+  const level = input.status === "failed" || input.status === "cancelled" ? "warning" : "info";
+  const message = `agent_completion:${input.agentId}; status=${input.status}; label=${input.label}; summary=${truncateDisplay(input.summary, 120)}`;
+  try {
+    await context.store.appendEvent(input.targetSession, {
+      type: "system_event",
+      id: randomUUID(),
+      level,
+      message,
+      createdAt: new Date().toISOString(),
+    });
+    return { written: true };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const fallbackMessage = `agent_completion_write_failed:${input.agentId}; target=${input.targetSession}; error=${truncateDisplay(reason, 100)}`;
+    const fallbackTarget = input.fallbackSession ?? input.targetSession;
+    context.store.appendEvent(fallbackTarget, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "warning",
+      message: fallbackMessage,
+      createdAt: new Date().toISOString(),
+    }).catch(() => {});
+    return { written: false, fallbackWarning: fallbackMessage };
+  }
+}

@@ -15,6 +15,7 @@ import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import type { ToolName, ToolOutput, ToolRunResult } from "@linghun/tools";
 import { builtInTools, createToolContext, runTool } from "@linghun/tools";
 import {
+  appendAgentCompletionSystemEvent,
   collectPendingAgentCompletionNotices,
   enqueueAgentCompletionNotice,
   formatAgentCompletionDigest,
@@ -391,7 +392,7 @@ function mapAgentCompletionStatusFromRun(agent: AgentRun): AgentCompletionStatus
   return "blocked";
 }
 
-function enqueueAgentCompletionReturn(
+async function enqueueAgentCompletionReturn(
   context: TuiContext,
   agent: AgentRun,
   task: BackgroundTaskState | undefined,
@@ -400,7 +401,7 @@ function enqueueAgentCompletionReturn(
   evidenceRefs: string[] = [],
   parentSessionId?: string,
   workflowRunId?: string,
-): void {
+): Promise<void> {
   enqueueAgentCompletionNotice(context, {
     agent,
     task,
@@ -411,16 +412,16 @@ function enqueueAgentCompletionReturn(
     workflowRunId,
   });
   const targetSession = parentSessionId ?? agent.parentSessionId ?? context.sessionId;
-  if (targetSession) {
-    const label = agent.displayName ?? agent.type ?? agent.id;
-    context.store.appendEvent(targetSession, {
-      type: "system_event",
-      id: randomUUID(),
-      level: status === "failed" || status === "cancelled" ? "warning" : "info",
-      message: `agent_completion:${agent.id}; status=${status}; label=${label}; summary=${truncateDisplay(summary, 120)}`,
-      createdAt: new Date().toISOString(),
-    }).catch(() => {});
-  }
+  if (!targetSession) return;
+  const label = agent.displayName ?? agent.type ?? agent.id;
+  await appendAgentCompletionSystemEvent(context, {
+    agentId: agent.id,
+    label,
+    status,
+    summary,
+    targetSession,
+    fallbackSession: context.sessionId ?? undefined,
+  });
 }
 
 async function appendAgentLifecycleSystemEvent(
@@ -1436,7 +1437,7 @@ async function syncLinkedAgentRunsForJobTransition(
     agent.updatedAt = now;
     const background = context.backgroundTasks.find((task) => task.id === agent.id);
     if (background) syncBackgroundWithAgentStatus(background, agent);
-    enqueueAgentCompletionReturn(
+    await enqueueAgentCompletionReturn(
       context,
       agent,
       background,
@@ -2408,7 +2409,7 @@ export async function completeAgent(
     result = await runAgentWork(agent, context, output);
   } catch (error) {
     if (agent.status === "stale") {
-      enqueueAgentCompletionReturn(
+      await enqueueAgentCompletionReturn(
         context,
         agent,
         task,
@@ -2427,7 +2428,7 @@ export async function completeAgent(
   }
   if (agent.status === "cancelled" || agent.status === "stale") {
     if (agent.status === "stale") {
-      enqueueAgentCompletionReturn(
+      await enqueueAgentCompletionReturn(
         context,
         agent,
         task,
@@ -2499,7 +2500,7 @@ export async function completeAgent(
   if (agentEvidenceId) {
     result.evidenceRefs = Array.from(new Set([...result.evidenceRefs, agentEvidenceId]));
   }
-  enqueueAgentCompletionReturn(
+  await enqueueAgentCompletionReturn(
     context,
     agent,
     task,
@@ -2550,7 +2551,7 @@ async function failAgent(
     createdAt: now,
   });
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
-  enqueueAgentCompletionReturn(
+  await enqueueAgentCompletionReturn(
     context,
     agent,
     task,
@@ -3683,7 +3684,7 @@ export async function cancelAgent(
   if (background) {
     await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
   }
-  enqueueAgentCompletionReturn(
+  await enqueueAgentCompletionReturn(
     context,
     agent,
     background,

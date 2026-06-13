@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  appendAgentCompletionSystemEvent,
   collectPendingAgentCompletionNotices,
   createAgentCompletionState,
   enqueueAgentCompletionNotice,
@@ -91,5 +92,174 @@ describe("agent-completion-finalizer", () => {
     markAgentCompletionNoticeReported(context, notice.id, "2026-01-01T00:00:03.000Z");
     expect(collectPendingAgentCompletionNotices(context)).toHaveLength(0);
     expect(formatAgentCompletionDigest(context)).toBeNull();
+  });
+});
+
+describe("appendAgentCompletionSystemEvent — reliable parent transcript write", () => {
+  function createStoreContext(
+    appendEvent: TuiContext["store"]["appendEvent"],
+    sessionId?: string,
+  ): TuiContext {
+    return {
+      language: "zh-CN",
+      sessionId: sessionId ?? "main-session",
+      notifications: [],
+      agentCompletions: createAgentCompletionState(),
+      store: { appendEvent } as unknown as TuiContext["store"],
+    } as unknown as TuiContext;
+  }
+
+  it("writes agent_completion system_event to parent session on success", async () => {
+    const events: Array<{ sessionId: string; event: unknown }> = [];
+    const appendEvent = vi.fn(async (sessionId: string, event: unknown) => {
+      events.push({ sessionId, event });
+    });
+    const context = createStoreContext(appendEvent);
+
+    const result = await appendAgentCompletionSystemEvent(context, {
+      agentId: "agent-a",
+      label: "worker-a",
+      status: "completed",
+      summary: "finished task",
+      targetSession: "parent-session",
+    });
+
+    expect(result.written).toBe(true);
+    expect(result.fallbackWarning).toBeUndefined();
+    expect(appendEvent).toHaveBeenCalledTimes(1);
+    const written = events[0];
+    expect(written.sessionId).toBe("parent-session");
+    expect((written.event as { type: string }).type).toBe("system_event");
+    expect((written.event as { message: string }).message).toContain("agent_completion:agent-a");
+    expect((written.event as { message: string }).message).toContain("status=completed");
+    expect((written.event as { level: string }).level).toBe("info");
+  });
+
+  it("uses warning level for failed and cancelled statuses", async () => {
+    const events: Array<{ event: unknown }> = [];
+    const appendEvent = vi.fn(async (_s: string, event: unknown) => {
+      events.push({ event });
+    });
+    const context = createStoreContext(appendEvent);
+
+    await appendAgentCompletionSystemEvent(context, {
+      agentId: "agent-f",
+      label: "worker-f",
+      status: "failed",
+      summary: "provider error",
+      targetSession: "parent-session",
+    });
+    expect((events[0].event as { level: string }).level).toBe("warning");
+
+    await appendAgentCompletionSystemEvent(context, {
+      agentId: "agent-c",
+      label: "worker-c",
+      status: "cancelled",
+      summary: "user cancelled",
+      targetSession: "parent-session",
+    });
+    expect((events[1].event as { level: string }).level).toBe("warning");
+  });
+
+  it("records observable warning when appendEvent fails instead of silently swallowing", async () => {
+    const events: Array<{ sessionId: string; event: unknown }> = [];
+    let callCount = 0;
+    const appendEvent = vi.fn(async (sessionId: string, event: unknown) => {
+      callCount++;
+      if (callCount === 1) throw new Error("disk full");
+      events.push({ sessionId, event });
+      return Promise.resolve();
+    });
+    const context = createStoreContext(appendEvent, "main-session");
+
+    const result = await appendAgentCompletionSystemEvent(context, {
+      agentId: "agent-x",
+      label: "worker-x",
+      status: "blocked",
+      summary: "blocked on permission",
+      targetSession: "parent-session",
+      fallbackSession: "main-session",
+    });
+
+    expect(result.written).toBe(false);
+    expect(result.fallbackWarning).toContain("agent_completion_write_failed:agent-x");
+    expect(result.fallbackWarning).toContain("disk full");
+    expect(appendEvent).toHaveBeenCalledTimes(2);
+    expect(events[0].sessionId).toBe("main-session");
+    expect((events[0].event as { message: string }).message).toContain("agent_completion_write_failed");
+  });
+
+  it("writes separate system_events for multiple sequential agent completions", async () => {
+    const events: Array<{ sessionId: string; event: unknown }> = [];
+    const appendEvent = vi.fn(async (sessionId: string, event: unknown) => {
+      events.push({ sessionId, event });
+    });
+    const context = createStoreContext(appendEvent);
+
+    await appendAgentCompletionSystemEvent(context, {
+      agentId: "agent-1",
+      label: "reviewer",
+      status: "completed",
+      summary: "review done",
+      targetSession: "parent-session",
+    });
+    await appendAgentCompletionSystemEvent(context, {
+      agentId: "agent-2",
+      label: "builder",
+      status: "failed",
+      summary: "build failed",
+      targetSession: "parent-session",
+    });
+    await appendAgentCompletionSystemEvent(context, {
+      agentId: "agent-3",
+      label: "tester",
+      status: "blocked",
+      summary: "waiting approval",
+      targetSession: "parent-session",
+    });
+
+    expect(events).toHaveLength(3);
+    expect((events[0].event as { message: string }).message).toContain("agent-1");
+    expect((events[1].event as { message: string }).message).toContain("agent-2");
+    expect((events[2].event as { message: string }).message).toContain("agent-3");
+  });
+
+  it("multiple completions with digest still produces correct pending notices", async () => {
+    const appendEvent = vi.fn(async () => {});
+    const context = createStoreContext(appendEvent);
+
+    enqueueAgentCompletionNotice(context, {
+      agent: createAgent({ id: "a1", displayName: "reviewer" }),
+      status: "completed",
+      summary: "done",
+      evidenceRefs: ["ev-1"],
+      now: "2026-06-13T00:00:01.000Z",
+    });
+    await appendAgentCompletionSystemEvent(context, {
+      agentId: "a1",
+      label: "reviewer",
+      status: "completed",
+      summary: "done",
+      targetSession: "parent-session",
+    });
+
+    enqueueAgentCompletionNotice(context, {
+      agent: createAgent({ id: "a2", displayName: "builder" }),
+      status: "failed",
+      summary: "build error",
+      evidenceRefs: [],
+      now: "2026-06-13T00:00:02.000Z",
+    });
+    await appendAgentCompletionSystemEvent(context, {
+      agentId: "a2",
+      label: "builder",
+      status: "failed",
+      summary: "build error",
+      targetSession: "parent-session",
+    });
+
+    const digest = formatAgentCompletionDigest(context);
+    expect(digest).toContain("2 条待处理通知");
+    expect(collectPendingAgentCompletionNotices(context)).toHaveLength(2);
   });
 });
