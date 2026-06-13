@@ -284,6 +284,16 @@ function TaskLayout({
             noColor={noColor}
           />
         ) : null}
+        {/* P1-7: ConfigPanel as overlay, preserving scroll ability */}
+        {view.configPanel ? (
+          <ConfigPanel
+            panel={view.configPanel}
+            controller={controller}
+            width={view.width}
+            noColor={noColor}
+            language={view.language}
+          />
+        ) : null}
         <NotificationStack notifications={view.notifications} theme={theme} />
         {view.taskRuntimeSummary ? (
           <Box width={cw} marginTop={1}>
@@ -389,17 +399,7 @@ function resolvePanel(
       />
     );
   }
-  if (view.configPanel) {
-    return (
-      <ConfigPanel
-        panel={view.configPanel}
-        controller={controller}
-        width={width}
-        noColor={noColor}
-        language={view.language}
-      />
-    );
-  }
+  // P1-7: ConfigPanel moved to overlay mode, no longer fullscreen
   if (view.commandPanel) {
     return (
       <CommandPanel

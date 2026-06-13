@@ -190,7 +190,9 @@ function formatBashEndSummary(
       : undefined;
   const exitCode = data && typeof data.exitCode === "number" ? data.exitCode : undefined;
   if (exitCode === undefined) return undefined;
-  return language === "en-US" ? `Command exited ${exitCode}` : `命令已退出 ${exitCode}`;
+  // 只在失败时显示退出码（参考 CCB BashTool.tsx:837-841）
+  if (exitCode === 0) return undefined;
+  return language === "en-US" ? `Exit code ${exitCode}` : `退出码 ${exitCode}`;
 }
 
 /**
@@ -712,11 +714,9 @@ function createSummaryFirstPreview(
   if (count !== undefined) {
     stats.push(language === "en-US" ? `${count} match(es)` : `${count} 条结果`);
   }
-  if (name === "Bash" && exitCode !== undefined) {
-    stats.push(language === "en-US" ? `exit code ${exitCode}` : `退出码 ${exitCode}`);
-    if (looksLikeMojibake(text)) {
-      stats.push(language === "en-US" ? "possible encoding issue" : "疑似编码问题");
-    }
+  // 退出码已移至 end summary，只在失败时显示，避免重复
+  if (name === "Bash" && looksLikeMojibake(text)) {
+    stats.push(language === "en-US" ? "possible encoding issue" : "疑似编码问题");
   }
   if (isEditingTool(name)) {
     const addedLines = readNumber(metadata, "addedLines") ?? 0;

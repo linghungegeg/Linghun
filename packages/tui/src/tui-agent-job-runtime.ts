@@ -273,6 +273,30 @@ export function rememberBackgroundTask(context: TuiContext, task: BackgroundTask
   context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
 }
 
+// P1-6: 自动清理完成超过 5 秒的任务
+const AUTO_REMOVE_COMPLETED_TASKS_MS = 5_000;
+
+export function cleanupCompletedBackgroundTasks(context: TuiContext): void {
+  if (!context.dismissedBackgroundTaskIds) {
+    context.dismissedBackgroundTaskIds = new Set();
+  }
+
+  const now = Date.now();
+  for (const task of context.backgroundTasks) {
+    if (
+      task.status === "completed" &&
+      task.completedAt &&
+      !context.dismissedBackgroundTaskIds.has(task.id)
+    ) {
+      const completedTime = Date.parse(task.completedAt);
+      if (Number.isFinite(completedTime) && now - completedTime >= AUTO_REMOVE_COMPLETED_TASKS_MS) {
+        context.dismissedBackgroundTaskIds.add(task.id);
+      }
+    }
+  }
+}
+
+
 export function getBackgroundAbortControllers(context: TuiContext): Map<string, AbortController> {
   if (!context.backgroundAbortControllers) {
     context.backgroundAbortControllers = new Map();
@@ -369,6 +393,7 @@ export function createJobBackgroundTask(
     },
     startedAt: job.startedAt ?? job.createdAt,
     updatedAt: job.updatedAt,
+    completedAt: job.status === "completed" ? job.endedAt : undefined,
     heartbeatIntervalMs: 30_000,
     staleAfterMs: job.timeoutMs,
     logPath: job.logPath,

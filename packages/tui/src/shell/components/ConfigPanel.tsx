@@ -70,8 +70,15 @@ export function ConfigPanel({
     const summaryWidth = Math.max(16, innerWidth - titleWidth - 5);
 
     return (
-      <Box flexDirection="column" paddingX={3} marginTop={1} width={panelWidth}>
-        <Box>
+      <Box
+        flexDirection="column"
+        paddingX={1}
+        marginTop={1}
+        width={panelWidth}
+        borderStyle="round"
+        borderColor={theme.panel ?? theme.border}
+      >
+        <Box paddingX={2}>
           <Text color={theme.accent} bold>
             CONFIG
           </Text>
@@ -82,8 +89,10 @@ export function ConfigPanel({
             )}
           </Text>
         </Box>
-        <Text color={theme.muted}>{fitText(hint.list, innerWidth)}</Text>
-        <Box flexDirection="column" marginTop={1}>
+        <Box paddingX={2}>
+          <Text color={theme.muted}>{fitText(hint.list, innerWidth)}</Text>
+        </Box>
+        <Box flexDirection="column" marginTop={1} paddingX={2}>
           {visible.map((p, vi) => {
             const realIdx = scrollOffset + vi;
             const active = realIdx === panel.cursor;
@@ -116,8 +125,15 @@ export function ConfigPanel({
   const visibleEnd = Math.min(scrollOffset + MAX_VISIBLE, total);
 
   return (
-    <Box flexDirection="column" paddingX={3} marginTop={1} width={panelWidth}>
-      <Box>
+    <Box
+      flexDirection="column"
+      paddingX={1}
+      marginTop={1}
+      width={panelWidth}
+      borderStyle="round"
+      borderColor={theme.panel ?? theme.border}
+    >
+      <Box paddingX={2}>
         <Text color={theme.accent} bold>
           {fitText(panel.panel.title.toUpperCase(), Math.max(8, Math.floor(innerWidth * 0.45)))}
         </Text>
@@ -128,22 +144,24 @@ export function ConfigPanel({
           )}
         </Text>
       </Box>
-      <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="column" marginTop={1} paddingX={2}>
         {wrapText(panel.panel.summary, innerWidth).map((line, idx) => (
           <Text key={`summary-${idx}-${line}`} color={theme.muted}>
             {line}
           </Text>
         ))}
       </Box>
-      <Text color={theme.muted}>
-        {fitText(
-          [total > 0 ? hint.count(scrollOffset + 1, visibleEnd, total) : "", hint.detail]
-            .filter(Boolean)
-            .join(" · "),
-          innerWidth,
-        )}
-      </Text>
-      <Box flexDirection="column" marginTop={1}>
+      <Box paddingX={2}>
+        <Text color={theme.muted}>
+          {fitText(
+            [total > 0 ? hint.count(scrollOffset + 1, visibleEnd, total) : "", hint.detail]
+              .filter(Boolean)
+              .join(" · "),
+            innerWidth,
+          )}
+        </Text>
+      </Box>
+      <Box flexDirection="column" marginTop={1} paddingX={2}>
         {visible.map((a, vi) => {
           const realIdx = scrollOffset + vi;
           const active = realIdx === panel.actionCursor;

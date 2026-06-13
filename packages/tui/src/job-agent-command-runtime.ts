@@ -8,6 +8,7 @@ import {
   type ModelGateway,
   type ModelMessage,
   type ModelToolCall,
+  type ModelToolDefinition,
   resolveEffectiveEndpointProfile,
 } from "@linghun/providers";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
@@ -25,7 +26,7 @@ import type {
   ProviderPreflightCompactResult,
 } from "./compact-preflight-runtime.js";
 import { createSilentOutput } from "./details-status-runtime.js";
-import { appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
+import { appendSystemEvent, appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { createManagedWorktree } from "./git-operation-runtime.js";
 import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
@@ -59,7 +60,10 @@ import {
 import { getRoleRoute } from "./model-doctor-runtime.js";
 import { inferProviderForRouteModel } from "./model-doctor-runtime.js";
 import {
+  AGENT_CONTROL_DESCRIPTION,
+  AGENT_CONTROL_TOOL_NAME,
   type FinalAnswerClaimMatch,
+  createAgentControlInputSchema,
   createModelToolDefinitionsForTools,
   evaluateStructuredFinalAnswerClaims,
 } from "./model-loop-runtime.js";
@@ -1975,6 +1979,17 @@ export async function persistDurableJobProgress(
   await writeDurableJobReport(job);
   const background = upsertJobBackgroundTask(context, job);
   await deps().appendBackgroundTaskEvent(context, await deps().ensureSession(context), background);
+
+  // P1-5: 任务完成时主动汇报
+  if (job.status === "completed") {
+    const sessionId = await deps().ensureSession(context);
+    const jobLabel = formatJobPrimary(job, context);
+    const completionMessage =
+      context.language === "zh-CN"
+        ? `任务 ${jobLabel} 已完成。详见任务列表。`
+        : `Task ${jobLabel} completed. See task list for details.`;
+    await appendSystemEvent(context, sessionId, completionMessage, "info");
+  }
 }
 
 export function createDurableJobStepFacts(
@@ -2872,7 +2887,7 @@ export async function runModelBackedAgent(
           ...(currentRuntime.reasoningSent
             ? { reasoningLevel: currentRuntime.reasoningLevel }
             : {}),
-          tools: createModelToolDefinitionsForTools(getAgentAllowedTools(agent)),
+          tools: createAgentToolDefinitions(agent),
           toolChoice: "auto",
         },
         signal,
@@ -3536,6 +3551,20 @@ function getAgentAllowedTools(agent: AgentRun): (typeof builtInTools)[ToolName][
     ];
   }
   return [builtInTools.Read, builtInTools.Grep, builtInTools.Glob, builtInTools.Bash];
+}
+
+function createAgentToolDefinitions(agent: AgentRun): ModelToolDefinition[] {
+  const baseTools = createModelToolDefinitionsForTools(getAgentAllowedTools(agent));
+  // 默认类型（非 explorer/planner/worker）允许使用 AgentControl 启动其他 agent
+  // explorer/planner/worker 不允许启动 agent，避免无限递归
+  if (agent.type !== "explorer" && agent.type !== "planner" && agent.type !== "worker") {
+    baseTools.push({
+      name: AGENT_CONTROL_TOOL_NAME,
+      description: AGENT_CONTROL_DESCRIPTION,
+      inputSchema: createAgentControlInputSchema(),
+    });
+  }
+  return baseTools;
 }
 
 function normalizeRegistryAllowedTools(tools: string[] | undefined): ToolName[] | undefined {

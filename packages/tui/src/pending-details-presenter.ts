@@ -14,25 +14,20 @@ function getEffectiveWorkspaceTrustLevel(context: TuiContext): WorkspaceTrustLev
 
 export function formatWorkspaceTrustStatus(context: TuiContext): string {
   const level = getEffectiveWorkspaceTrustLevel(context);
-  const recorded = context.config.workspaceTrust.recorded ? "yes" : "no";
   const path =
     relative(context.projectPath, getProjectSettingsPath(context.projectPath)) ||
     ".linghun/settings.json";
+
+  // 简洁确认：只说明用户选择的状态，不列举所有可能性
+  if (level === "trusted") {
+    return context.language === "en-US"
+      ? `✓ Workspace set to trusted, saved to ${path}`
+      : `✓ 工作区已设为 trusted，已保存到 ${path}`;
+  }
+
   return context.language === "en-US"
-    ? [
-        `Workspace trust: ${level}`,
-        `- recorded: ${recorded}`,
-        `- persists in: ${path}`,
-        "- trusted: quiet startup; normal permission pipeline still applies.",
-        "- restricted/untrusted: read-only status and safe diagnostics remain; writes, Bash, extension enablement, remote channels, and long jobs are blocked or require trust first.",
-      ].join("\n")
-    : [
-        `工作区信任：${level}`,
-        `- 已记录：${recorded}`,
-        `- 持久化位置：${path}`,
-        "- trusted：启动时安静；仍保留权限管道。",
-        "- restricted/untrusted：只读状态和安全诊断可用；写文件、Bash、插件/skills/hooks 启用、远程通道和长任务会先受限。",
-      ].join("\n");
+    ? `✓ Workspace remains restricted, saved to ${path}. Writes and commands require approval.`
+    : `✓ 工作区保持 restricted，已保存到 ${path}。写入和命令需要额外确认。`;
 }
 
 export function formatPendingApprovalDetails(

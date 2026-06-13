@@ -1127,8 +1127,8 @@ export function writeWorkspaceTrustStartupNotice(output: Writable, context: TuiC
     writeLine(
       output,
       context.language === "en-US"
-        ? "Workspace trust is not recorded. Non-interactive input skips the trust prompt; use an interactive start to confirm this workspace. Start Gate, Plan approval, and the permission pipeline still apply."
-        : "工作区信任尚未记录。非交互输入不会弹出 trust 确认；请用交互式启动确认此工作区。Start Gate、Plan approval 和权限管道仍会生效。",
+        ? "Workspace trust not set. Use interactive mode to confirm trust on first run."
+        : "工作区信任未设置。首次启动时会提示确认。",
     );
     return;
   }
@@ -1139,8 +1139,8 @@ export function writeWorkspaceTrustStartupNotice(output: Writable, context: TuiC
   writeLine(
     output,
     context.language === "en-US"
-      ? `Workspace trust: ${level}. Read-only status and safe diagnostics are allowed; writes, Bash, extensions, remote channels, and long jobs stay blocked until you confirm trust or keep /trust restricted.`
-      : `工作区信任：${level}。只读状态和安全诊断可用；写文件、Bash、插件/skills/hooks、远程通道和长任务会受限。可确认信任，或用 /trust restricted 保持受限。`,
+      ? `Workspace: ${level}. Writes and commands require approval. Use /trust to change.`
+      : `工作区：${level}。写入和命令需要确认。可用 /trust 调整。`,
   );
 }
 

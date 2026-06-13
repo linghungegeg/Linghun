@@ -2748,14 +2748,17 @@ function installToolProgressHandler(
       output.write(`${truncateDisplay(visibleLines.join("\n"), 2_000)}\n`);
       visibleProgressLines += Math.min(lines.length, remainingLines);
     }
+    // 确保至少显示前 5 行才允许截断
+    const PROGRESS_PREVIEW_LINES = 5;
     if (
       (lines.length > remainingLines || visibleLines.some((line) => line.length > 2_000)) &&
+      visibleProgressLines >= PROGRESS_PREVIEW_LINES &&
       !progressSuppressed
     ) {
       output.write(
         context.language === "en-US"
-          ? "[stdout] ... streaming output hidden from main view; full log/transcript keeps the complete output.\n"
-          : "[stdout] ... 主屏已隐藏后续流式输出；完整输出保留在日志/transcript。\n",
+          ? "[stdout] ... more output hidden; press Ctrl+O to expand.\n"
+          : "[stdout] ... 更多输出已隐藏；按 Ctrl+O 展开。\n",
       );
       progressSuppressed = true;
     }

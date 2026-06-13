@@ -125,6 +125,7 @@ export type TranscriptEvent =
         progress?: { completed: number; total?: number; label?: string };
         startedAt: string;
         updatedAt: string;
+        completedAt?: string;
         lastOutputAt?: string;
         estimatedRemainingMs?: number;
         heartbeatIntervalMs: number;

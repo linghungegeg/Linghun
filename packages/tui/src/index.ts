@@ -1245,7 +1245,7 @@ export {
   summarizeProjectRules,
 } from "./tui-state-runtime.js";
 
-import { getDurableJobPaths } from "./tui-agent-job-runtime.js";
+import { cleanupCompletedBackgroundTasks, getDurableJobPaths } from "./tui-agent-job-runtime.js";
 import { containsSecret } from "./tui-memory-runtime.js";
 import { runMemoryEviction } from "./memory-eviction-runtime.js";
 import {
@@ -2734,6 +2734,9 @@ async function runInkShell(
       stderr: errorOutput,
     });
     activityTicker = setInterval(() => {
+      // P1-6: 清理完成超过 5 秒的后台任务
+      cleanupCompletedBackgroundTasks(context);
+
       const hasAgents = (context.agents ?? []).length > 0;
       const hasWorkflows =
         (context.workflows?.activeRuns ?? []).length > 0 || Boolean(context.workflows?.activeRun);
