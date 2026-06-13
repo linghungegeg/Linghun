@@ -10,6 +10,19 @@ That is the value of Linghun's anti-hallucination system. It is not merely about
 
 Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHITEPAPER.en.md).
 
+## Special Thanks
+
+<div>
+  <table>
+    <tr>
+      <td>
+        Thanks to <a href="https://www.geek2api.com/">geek2api</a> for supporting Linghun during development. geek2api provides one-stop access to mainstream AI services such as Claude, GPT, and Gemini without requiring users to manage multiple subscription accounts.<br /><br />
+        Thanks also to the geek2api community members for their ideas and thoughtful support. Community group: <code>1104150634</code>.
+      </td>
+    </tr>
+  </table>
+</div>
+
 ## What It Helps You Do
 
 Linghun is built for real development, not demo-style Q&A. You can ask it in natural language to:
