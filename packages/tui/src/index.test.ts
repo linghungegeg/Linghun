@@ -2522,9 +2522,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(unknownProvider?.status).toBe("unknown");
   });
 
-  it("shows Phase 15.5F Project Doctor, context picker, rollback coach, and cost preview Lite", async () => {
+  it("shows public-doc Project Doctor, context picker, rollback coach, and cost preview Lite", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-readiness-lite-"));
-    await mkdir(join(project, "docs", "delivery"), { recursive: true });
+    await mkdir(join(project, "docs", "developers"), { recursive: true });
     await mkdir(join(project, ".github", "workflows"), { recursive: true });
     await writeFile(
       join(project, "package.json"),
@@ -2545,34 +2545,24 @@ describe("Phase 06 TUI slash commands", () => {
     await writeFile(join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'", "utf8");
     await writeFile(join(project, ".github", "workflows", "ci.yml"), "name: ci", "utf8");
     await writeFile(join(project, "LINGHUN.md"), "project rules", "utf8");
-    await writeFile(join(project, "LINGHUN_PHASED_DELIVERY_BLUEPRINT.md"), "Phase 15.5F", "utf8");
-    await writeFile(join(project, "LINGHUN_IMPLEMENTATION_SPEC.md"), "ProjectFacts", "utf8");
     await writeFile(
-      join(project, "docs", "delivery", "pre-open-source-terminal-product-completion-gate.md"),
-      "Project Doctor Lite",
+      join(project, "README.md"),
+      "npm install -g @linghun/cli\nApp Bridge\n反幻觉\n验证",
       "utf8",
     );
-    for (const reportName of [
-      "phase-15-5a-performance-context.md",
-      "phase-15-5b-resource-task-lifecycle.md",
-      "phase-15-5c-editing-tool-ux.md",
-      "phase-15-5c-plus-log-artifact-runtime-lite.md",
-      "phase-15-5c-plus-plus-workspace-snapshot-lite.md",
-      "phase-15-5d-connect-lite.md",
-      "phase-15-5e-provider-freshness.md",
-    ]) {
-      await writeFile(join(project, "docs", "delivery", reportName), "done", "utf8");
-    }
+    await writeFile(join(project, "README.en.md"), "npm install -g @linghun/cli", "utf8");
+    await writeFile(join(project, "WHITEPAPER.md"), "反幻觉\nWindows", "utf8");
+    await writeFile(join(project, "WHITEPAPER.en.md"), "anti-hallucination\nWindows", "utf8");
+    await writeFile(join(project, "LICENSE"), "Apache-2.0", "utf8");
+    await writeFile(join(project, "APP_BRIDGE_MANIFEST.schema.json"), "{}", "utf8");
     await writeFile(
-      join(project, "docs", "delivery", "phase-15-5f-terminal-product-readiness.md"),
-      [
-        "Project Doctor Lite",
-        "Source-of-Truth Drift",
-        "未执行真实 full smoke",
-        "不代表 Beta PASS、smoke-ready 或 open-source-ready",
-        "未进入 Phase 16 / 17 / 18",
-        "未 commit",
-      ].join("\n"),
+      join(project, "docs", "developers", "capability-runtime-app-bridge.md"),
+      "App Bridge",
+      "utf8",
+    );
+    await writeFile(
+      join(project, "docs", "developers", "capability-runtime-app-bridge.en.md"),
+      "App Bridge",
       "utf8",
     );
     spawnSync("git", ["init"], { cwd: project, windowsHide: true });

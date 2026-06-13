@@ -573,7 +573,7 @@ describe("Meta scheduler runtime", () => {
         command: "typecheck",
       },
       {
-        userText: "更新 docs/delivery/README.md 的 markdown link 和 frontmatter",
+        userText: "更新 README.md 的 markdown link 和 frontmatter",
         domain: "documentation",
         command: "frontmatter",
       },
@@ -701,19 +701,12 @@ describe("Meta scheduler runtime", () => {
     );
   });
 
-  it("documents Phase 17A durable jobs as completed while Phase 7.11 is runtime closure", () => {
-    const readme = readFileSync(resolve(process.cwd(), "docs/delivery/README.md"), "utf8");
-    const phase711 = readme
-      .split("\n")
-      .find((line) => line.startsWith("| Phase 7.11 Task / Job Verification Routing Closure |"));
-    const phase17a = readme
-      .split("\n")
-      .find((line) => line.startsWith("| Phase 17A local durable jobs |"));
+  it("keeps public README install and verification value visible", () => {
+    const readme = readFileSync(resolve(process.cwd(), "README.md"), "utf8");
 
-    expect(phase711).toContain("done; focused/local validation only");
-    expect(phase711).not.toContain("docs-only");
-    expect(phase711).not.toContain("PENDING");
-    expect(phase17a).toContain("done; focused/local validation only");
+    expect(readme).toContain("npm install -g @linghun/cli");
+    expect(readme).toContain("反幻觉");
+    expect(readme).toContain("验证");
   });
 
   it("shows Windows-safe hint for Windows edit and verification requests", () => {

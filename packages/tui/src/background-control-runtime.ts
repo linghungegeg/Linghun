@@ -109,7 +109,7 @@ export function refreshBackgroundLifecycle(context: TuiContext): void {
 // - 此 guard 仅做 concurrency cap（前台模型请求互斥 + 后台任务上限），不做 access control。
 // - mutating access control 仍由 default / auto-review / plan / full-access 四档权限管道决策。
 // - 文案、报告、UI、smoke 全部应避免把 "resource guard" 称为 "permission mode" 或第五权限。
-// - 测试在 docs/delivery/phase-13V-* 与 D13T audit 已记录；此常量是源码级断言锚点。
+// - This constant is the source-level assertion anchor for resource guard wording.
 export const RESOURCE_GUARD_KIND = "concurrency-cap" as const;
 
 export function checkResourceGuard(

@@ -1,185 +1,77 @@
-# 全局工作规则
+# Linghun Agent Guide
 
-## 总纲
-- 只做最小必要改动；不要顺手修；不要新增抽象；不要跨文件扩散；高风险改动先报备。
-- Linghun 开发必须按阶段蓝图推进，不允许跳阶段堆功能；每个阶段必须闭环、验证、输出阶段交付文档。
+This file is public contributor guidance for coding agents working in this
+repository.
 
-## 核心原则
-- 默认只做完成用户明确要求所必需的最小改动。
-- 未经用户明确同意，不扩展任务范围，不顺手修无关问题。
-- 不主动添加新想法、新功能、新抽象、新清理动作或结构性改造，除非它们是完成当前任务所必需的。
-- 如果发现邻近问题、潜在问题或可以优化的地方，单独说明，不要混入当前改动中一起修。
-- 开发 Linghun 时，以 CCB 核心编码体验和 CCB Dev Boost 增强为核心参考；融合 OpenCode、Hermes、MCP 生态的成熟优点，但不得复制可疑源码或内部专有实现。
-- 所有新手友好设计只能隐藏复杂度，不能删除高级能力；默认简单，高级可展开。
-- 用户未明确要求开始执行时，必须保持讨论/分析状态；进入写文件、多文件修改、阶段开发、agent/job/workflow、联网安装、依赖变更、构建发布或数据迁移前，必须先通过 Start Gate 询问用户是否开始。
-- Start Gate 不替代权限审批。用户确认开始后，具体高风险工具调用仍必须走权限和风险管道。
+## Working Rules
 
-## Linghun 开发文档优先级
-- 开始任何 Linghun 开发任务前，必须先读取并遵守：
-  1. `F:\Linghun\LINGHUN_PHASED_DELIVERY_BLUEPRINT.md`
-  2. `F:\Linghun\LINGHUN_IMPLEMENTATION_SPEC.md`
-  3. `F:\Linghun\LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md`
-  4. `F:\Linghun\docs\delivery\README.md`
-  5. 已完成阶段的 `F:\Linghun\docs\delivery\phase-XX-*.md`
-- 蓝图负责阶段范围和验收，规格书负责接口、数据结构、命令、配置和测试。
-- 若用户要求与文档冲突，先指出冲突和影响，再按用户最新明确要求执行。
-- 若发现文档缺失，不要直接扩大实现范围；先补文档或向用户确认。
+- Keep changes minimal and focused on the requested task.
+- Do not bundle unrelated cleanup, refactors, dependency changes, or formatting.
+- Prefer existing project patterns over new abstractions.
+- Use `rg` / `rg --files` first when locating code.
+- Use `apply_patch` for manual file edits.
+- Do not delete, rename, or move files unless the task explicitly requires it.
+- Do not claim a fix is complete without running the most relevant verification.
+- If verification cannot be run, say why and describe the remaining risk.
 
-## 参考核对要求
-- 每个阶段必须根据蓝图中的“参考”部分，按需查看本地 `F:\ccb-source`、CCB Dev Boost 文档、CCB 审计报告或成熟社区方案。
-- 允许参考产品行为、交互体验、命令习惯、风险边界、验收思路、已知 bug 和修复方向。
-- 禁止复制可疑源码实现、反编译痕迹、内部 API、专有遥测或内部服务逻辑。
-- 不能为了贴近 CCB 而破坏 Linghun 的蓝图、规格书和 clean rewrite 原则。
-- Phase 15.5 / 16 / 17 实现阶段开工前必须先做 Source-Level Reality Check：优先用 codebase-memory 索引项目 `F-Linghun` 定位现有实现，再用 `rg` / 精读关键源码确认，输出 existing implementation / gaps / minimal touch points / forbidden duplicate systems。没有源码事实清单，不允许只按文档或审计报告直接实现。
-- 若发现参考源、历史 reconciliation、baseline 第 12/13 节中有本阶段相关细节遗漏，必须复制进阶段 scope 并裁决 DONE / DEFERRED / NOT-DO；terminal-scope 成熟度遗漏应尽量当轮最小补齐，避免最后审计集中还技术债。
-- 每个阶段交付文档必须新增或保留“参考核对”小节，写明：
-  - 本阶段实际读取了哪些 Linghun 文档。
-  - 本阶段实际参考了哪些本地 CCB / CCB Dev Boost / 社区项目文件或文档。
-  - 哪些内容只是行为参考，哪些内容进入 Linghun 自研实现。
-  - 明确说明未复制可疑源码实现。
+## Project Setup
 
-## 阶段开发规则
-- 只做当前阶段要求的内容，不提前实现后续阶段功能。
-- 每个阶段必须能独立运行、独立验证、独立说明使用方式。
-- 每个阶段必须满足成品化闸门：有用户可执行命令或 TUI 操作路径、有失败降级、有最小回归、有缓存/成本/权限/会话影响说明。
-- 只实现内部 API、没有交互路径或验证路径，不视为阶段完成。
-- 阶段内承诺的用户能力必须在本阶段闭环；“已知限制”只能描述阶段边界，不能把本阶段必做能力推迟到后续补丁。
-- 自动工作默认一次只推进一个阶段；阶段完成后必须停止，输出交付文档、验证结果和成品级结构化 handoff packet，是否进入下一阶段必须由用户确认。
-- 阶段完成后必须新增或更新 `docs/delivery/phase-XX-*.md`，记录：
-  - 阶段目标
-  - 已完成功能
-  - 使用方式
-  - 涉及模块
-  - 关键设计
-  - 配置项
-  - 命令
-  - 测试与验证
-  - 性能结果
-  - 已知问题
-  - 不在本阶段处理的内容
-  - 下一阶段衔接
-  - 开发者排查入口
-  - 参考核对
-  - 成品级结构化 handoff packet，必须包含下一阶段、禁止事项、证据引用、验证结果、索引状态、权限模式、模型/provider 和预算使用情况
-- 没有阶段交付文档，不视为阶段完成。
-- 阶段交付文档必须适合后续开源开发者接手和排查。
+Linghun is a pnpm monorepo. The public CLI package is `@linghun/cli`.
 
-## 启动命令与命名
-- 项目名使用 `Linghun`。
-- CLI 可执行名、包命令、文档示例默认使用小写 `linghun`。
-- Windows 下必须兼容 `Linghun` 大小写入口；如果技术上依赖文件名大小写，应提供同等别名或 shim。
-- 新增脚本、README、交付文档和错误提示中，优先写 `linghun`，仅在说明兼容性时写 `Linghun`。
-- Phase 01 起必须验证：
-  - `linghun --version`
-  - `linghun --help`
-  - Windows 下 `Linghun --version` 或等价别名。
+Common local commands:
 
-## 减少屎山
-- 优先做局部补丁，不做大范围重写。
-- 优先修改现有代码，不轻易新增文件、模块、层级、helper、wrapper 或中间抽象。
-- 不为了"看起来更优雅"而增加间接层。
-- 不创建一次性抽象；只有当重复明确存在且收益清晰时，才做最小必要提取。
-- 保持 diff 收敛，避免触碰与任务无关的文件和代码。
-
-## 重构边界
-- 只有在满足以下至少一项时，才允许重构：
-  1. 不重构就无法安全完成当前任务。
-  2. 当前结构已经造成直接的正确性风险、回归风险或明显维护障碍。
-  3. 用户明确要求重构、整理或清理代码。
-- 重构必须渐进、可验证、尽量保持行为不变。
-- 非任务必需时，不修改依赖、配置文件、环境变量或构建脚本。
-- 非任务必需时，不删除文件，不重命名文件。
-
-## 代码形态
-- 保持代码扁平、清晰、可读，避免深层嵌套；能通过提前返回、拆分局部逻辑、简化分支来降低复杂度时，优先这样做。
-- 函数应尽量保持单一职责，变量命名应语义清晰。
-- 避免真实重复逻辑；如果重复明确存在，优先用最小清晰改动消除重复。
-- 不使用花哨技巧替代直接、易读、可维护的实现。
-- 除非任务明确需要，否则不要改变现有架构方向、模块边界或接口形态。
-- 避免继续放大超长函数和超长文件；如确有必要调整，优先做与当前任务直接相关的最小拆分。
-- 避免引入新的深层嵌套、全局状态、静默失败和无意义异常包装。
-
-## 规范与质量
-- 优先遵循项目现有代码风格、目录结构、命名方式和实现模式。
-- 如果仓库已有 formatter、lint、type check 或测试工具，优先按现有工具校验本次改动涉及的范围。
-- 不在已有项目中发明新的风格或约定。
-- 如果项目没有明确规范，优先选择直白命名、浅层结构、低抽象、易维护的实现。
-- 错误处理必须显式，错误信息应清晰且可操作。
-- 不吞异常，不静默失败，不写无意义的 try/catch。
-- 不引入明显魔法数字；必要时提取为有语义的常量，前提是不增加无意义抽象。
-- 新增模块必须优先符合 `LINGHUN_IMPLEMENTATION_SPEC.md` 中的接口和数据结构；确需偏离时，先说明原因并同步更新规格书。
-- 优先使用成熟社区方案，不自研终端渲染器、代码图索引、技能市场、远程控制平台等非当前阶段核心能力。
-
-## 变更控制
-- 默认不修改公共接口、函数签名、返回结构或对外行为，除非任务明确要求或现有调用链必须同步调整。
-- 默认不做超过 3 个文件的扩散式改动；如果任务天然涉及多文件，只改完成任务所必需的范围。
-- 修复问题时优先定位直接原因，不接受仅掩盖症状的补丁，除非用户明确要求临时止血方案。
-- 不保留临时调试代码、无用日志、注释掉的旧实现或未使用分支。
-- 除非任务明确需要，否则不要主动改命名、移动代码位置、批量整理 import 或制造大面积无语义 diff。
-- 涉及服务器或生产环境时，默认只在本地仓库改动和验证，再给同步/部署命令；不得默认 SSH 到服务器直接改文件。用户明确要求远程执行时，先说明动作、路径、影响范围、回滚方式和本地 diff 状态，并继续走权限管道。
-- 当全局偏好与项目现有规范冲突时，优先遵循项目现有规范；当用户明确要求与全局偏好冲突时，优先遵循用户要求。
-- 涉及以下高风险改动时，先用一句话说明理由和范围，再执行：超过 3 个文件的改动、公共接口变更、依赖或配置变更、删除或重命名文件、明显重构、数据迁移、构建或发布流程变更。
-
-## 测试与验证
-- 对有实际逻辑风险、回归风险或边界行为变化的改动，补充有针对性的测试。
-- 不为了凑测试而写低价值、纯重复或维护成本高的测试。
-- 运行与改动区域最相关、最小必要的验证命令。
-- 不为了"顺便更干净"而扩大实现范围。
-- 如果无法运行验证，必须明确说明原因。
-- Linghun 开发必须优先建立并维护代码自检闭环：改动后根据项目类型运行最小必要验证，例如 typecheck、test、lint、build、pytest、go test、cargo test、语法检查等。
-- 阶段 8 以后，涉及代码改动的任务必须使用 Verification Runner 或 verifier agent 思路进行复检；无法自动验证时，必须在阶段交付文档中写明未验证项和剩余风险。
-
-## 技能与工具
-- 当任务明显匹配某个 skill 的用途时，主动调用相关 skill。
-- skill 用于提升执行质量和稳定性，不得借此扩大任务范围。
-- 优先使用仓库已有脚本、任务入口和文档化流程，而不是临时拼凑命令。
-- 仅在完成任务所必需时使用 shell、测试命令、构建命令或联网查询，不为无关目的额外执行。
-
-## 代码库索引（codebase-memory）
-
-### 使用原则
-1. 索引是优先辅助能力，不是每次代码探索的硬阻塞前置。本文件面向 Linghun 仓库开发，不代表 Linghun 产品运行时必须依赖外部 MCP server。
-2. 跨文件影响分析、调用链追踪、架构理解、相似实现搜索和大仓库定位，应优先使用可用索引缩小范围；若索引缺失、过期、不可用、查询慢、查询无结果或当前任务只是单文件/小范围精确定位，可以直接使用 `rg`、`rg --files`、Read 等本地工具。
-3. 不得为了“先查索引”而阻塞当前任务、触发慢重建、联网安装、自动全量刷新或强制用户安装外部 MCP。索引 refresh/rebuild/force 仍必须遵守 Start Gate 和权限边界。
-4. Batch 3.5 / Bundled codebase-memory Lite 之后，优先使用 Linghun 管理的 fast/local `/index status` 和 `/index doctor`；`/index status --fresh` 或 `/index check` 才允许触发较慢的变更检测。
-5. 索引结果只作为定位线索，结论仍需用源码、测试或文档事实确认；不得把索引摘要当作已验证代码事实。
-6. 本仓库在 codebase-memory 中的索引项目名为 `F-Linghun`；仅用于 Linghun 仓库自身开发。其他项目必须按 `/index status` 或当前工作区事实解析项目名，不得复用该名称。
-
-### 工具速查（外部 MCP 可用时的参考能力）
-
-| 简称 | 实际工具名 | 用途 |
-|------|-----------|------|
-| `trace_path` | `mcp__codebase-memory-mcp__trace_path` | 函数调用链追踪 |
-| `query_graph` | `mcp__codebase-memory-mcp__query_graph` | 图查询（CALLS/IMPORTS） |
-| `search_code` | `mcp__codebase-memory-mcp__search_code` | 代码模式搜索 |
-| `search_graph` | `mcp__codebase-memory-mcp__search_graph` | 相似实现/SIMILAR_TO |
-| `get_architecture` | `mcp__codebase-memory-mcp__get_architecture` | 项目架构概览 |
-| `get_code_snippet` | `mcp__codebase-memory-mcp__get_code_snippet` | 按路径/函数名取源码 |
-| `detect_changes` | `mcp__codebase-memory-mcp__detect_changes` | 检测未索引的变更 |
-| `index_status` | `mcp__codebase-memory-mcp__index_status` | 索引状态 |
-| `index_repository` | `mcp__codebase-memory-mcp__index_repository` | 重建/刷新索引 |
-
-**调用示例：**
-```
-1. SearchExtraTools("select:mcp__codebase-memory-mcp__trace_path")
-2. ExecuteExtraTool({"tool_name": "mcp__codebase-memory-mcp__trace_path", "params": {...}})
+```bash
+corepack pnpm install
+corepack pnpm -r build
+corepack pnpm test
+corepack pnpm typecheck
 ```
 
-### 触发规则
-- **跨文件分析**（多文件改动、调用链追踪、影响面查询）：优先查可用索引，再读必要源码确认。
-- **架构理解**（模块边界、依赖关系）：优先使用索引架构摘要；索引不可用时用 `rg --files` + 关键文档/入口文件渐进读取。
-- **新对话开局**：优先使用结构化 handoff、阶段交付文档、最近报告和索引短状态；不要一上来全量读文件，也不要因索引不可用而停工。
-- **索引不存在或明显过期**：先给用户可选命令或使用 fast/local 状态；不得静默执行重建、force 或慢检测。
-- **跨工具续接**：如果用户提到 Codex、Codex、Cursor 等其他工具的上文，优先通过 MCP/ai-sessions 检索当前项目相关会话，再读取必要源码确认；不要直接侵入其他工具私有数据。
-- **Token 控制**：优先用索引和 `rg` 缩小影响范围，只读取完成任务必需的文件；避免反复读取大 JSON、XML、SQL、min.js 或生成物。
+CLI smoke checks:
 
-## 沟通方式
-- 做较大结构调整前，先简短说明原因。
-- 需求不清楚时，先提简短澄清问题，不靠猜。
-- 明确说明假设、阻塞点、风险和验证结果。
+```bash
+node apps/cli/dist/main.js --version
+node apps/cli/dist/main.js --help
+```
 
-## 用户可见输出标准
-- 主屏和普通最终回复必须 summary-first、human-first、action-first：先说发生了什么、影响范围、验证结果、用户现在能做什么、详情在哪里。
-- 不把完整日志、完整聊天、完整索引、完整报告、raw tool_result、raw evidence、raw flags 或 gateId 粘到普通主屏。
-- Anti-Hallucination、Architecture Runtime、Source-Level Reality Check、Evidence、risk flag 等底层机制默认回归底层；只有用户需要决策、存在真实风险或显式查看详情时才摘要露出。
-- 避免 AI 话和空泛工程话；不要用“作为 AI”“全面深入分析”等句式替代具体事实、命令、路径、验证状态和下一步。
+## Packaging
+
+The CLI package is designed for one-command installation after publishing:
+
+```bash
+npm install -g @linghun/cli
+```
+
+Before publishing, build and pack locally:
+
+```bash
+corepack pnpm -r build
+corepack pnpm --filter @linghun/cli pack
+```
+
+Bundled runtime files are prepared by `scripts/bundle-cli-binaries.mjs` during
+CLI prepack.
+
+## Public Documentation
+
+Public entry points:
+
+- `README.md`
+- `README.en.md`
+- `WHITEPAPER.md`
+- `WHITEPAPER.en.md`
+- `docs/developers/capability-runtime-app-bridge.md`
+- `docs/developers/capability-runtime-app-bridge.en.md`
+- `APP_BRIDGE_MANIFEST.schema.json`
+- `app-bridge-examples/`
+
+Keep public docs understandable for new users. Detailed runtime or architecture
+claims should link to the whitepaper instead of duplicating long explanations.
+
+## Safety
+
+- Never commit secrets, local absolute paths, private audit notes, or machine
+  specific configuration.
+- Use synthetic paths in tests when Windows path behavior needs coverage.
+- Keep permission, provider, tool execution, and file editing behavior explicit
+  and observable.

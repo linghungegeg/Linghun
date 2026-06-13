@@ -296,61 +296,34 @@ function createProjectDoctorLite(context: TuiContext): TerminalReadinessView["pr
 
 function createSourceOfTruthDriftLite(context: TuiContext): TerminalReadinessView["sourceDrift"] {
   const requiredDocs = [
-    "docs/delivery/pre-open-source-terminal-product-completion-gate.md",
-    "LINGHUN_PHASED_DELIVERY_BLUEPRINT.md",
-    "LINGHUN_IMPLEMENTATION_SPEC.md",
-    "docs/delivery/phase-15-5a-performance-context.md",
-    "docs/delivery/phase-15-5b-resource-task-lifecycle.md",
-    "docs/delivery/phase-15-5c-editing-tool-ux.md",
-    "docs/delivery/phase-15-5c-plus-log-artifact-runtime-lite.md",
-    "docs/delivery/phase-15-5c-plus-plus-workspace-snapshot-lite.md",
-    "docs/delivery/phase-15-5d-connect-lite.md",
-    "docs/delivery/phase-15-5e-provider-freshness.md",
-    "docs/delivery/phase-15-5f-terminal-product-readiness.md",
+    "README.md",
+    "README.en.md",
+    "WHITEPAPER.md",
+    "WHITEPAPER.en.md",
+    "LICENSE",
+    "APP_BRIDGE_MANIFEST.schema.json",
+    "docs/developers/capability-runtime-app-bridge.md",
+    "docs/developers/capability-runtime-app-bridge.en.md",
   ];
   const checked = requiredDocs.filter((file) => existsSync(join(context.projectPath, file)));
   const issues = requiredDocs
     .filter((file) => !checked.includes(file))
     .map((file) => `missing:${file}`);
-  const report = readTextFileLite(
-    join(context.projectPath, "docs/delivery/phase-15-5f-terminal-product-readiness.md"),
-  );
-  if (report && !report.includes("Project Doctor Lite")) issues.push("report:project-doctor-lite");
-  if (report && !report.includes("Source-of-Truth Drift")) issues.push("report:drift-linter-lite");
-  if (report && !/未执行真实|未.*真实.*smoke|不代表真实全量 smoke/u.test(report)) {
-    issues.push("report:no-real-smoke-negative");
+  const readme = readTextFileLite(join(context.projectPath, "README.md"));
+  const whitepaper = readTextFileLite(join(context.projectPath, "WHITEPAPER.md"));
+  if (readme && !readme.includes("npm install -g @linghun/cli")) {
+    issues.push("readme:install-command");
   }
-  if (report && !/不代表 Beta PASS|不是 Beta PASS|不声明 Beta PASS/u.test(report)) {
-    issues.push("report:no-beta-ready-negative");
-  }
-  if (report && !/不代表.*smoke-ready|不是.*smoke-ready|不声明.*smoke-ready/u.test(report)) {
-    issues.push("report:no-smoke-ready-negative");
-  }
-  if (
-    report &&
-    !/不代表.*open-source-ready|不是.*open-source-ready|不声明.*open-source-ready/u.test(report)
-  ) {
-    issues.push("report:no-open-source-ready-negative");
-  }
-  if (
-    report &&
-    !/未进入 Phase 16 \/ 17 \/ 18|未进 16\/17\/18|不得自动进入真实全量 smoke、Phase 16\/17\/18/u.test(
-      report,
-    )
-  ) {
-    issues.push("report:no-phase-16-17-18-negative");
-  }
-  if (report && !/未 commit|未提交 commit|不提交 commit|no commit/u.test(report)) {
-    issues.push("report:no-commit-negative");
-  }
+  if (readme && !readme.includes("App Bridge")) issues.push("readme:app-bridge");
+  if (whitepaper && !whitepaper.includes("反幻觉")) issues.push("whitepaper:anti-hallucination");
+  if (whitepaper && !whitepaper.includes("Windows")) issues.push("whitepaper:windows");
   const status: TerminalReadinessView["sourceDrift"]["status"] =
     issues.length === 0 ? "pass" : checked.length > 0 ? "partial" : "unknown";
   return {
     status,
     checked,
     issues,
-    nextAction:
-      issues.length === 0 ? "/doctor report" : "sync Phase 15.5F report/source-of-truth notes",
+    nextAction: issues.length === 0 ? "/doctor report" : "sync public README/whitepaper docs",
   };
 }
 

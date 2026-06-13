@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join, relative } from "node:path";
 
-const ROOT = process.env.AUDIT_ROOT || "F:\\Linghun";
+const ROOT = process.env.AUDIT_ROOT || process.cwd();
 const SRC_DIRS = [
   "packages/config/src",
   "packages/core/src",

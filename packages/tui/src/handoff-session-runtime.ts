@@ -19,8 +19,9 @@ import { isRecord } from "./tui-state-runtime.js";
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
 const HANDOFF_KEY_FILE_LIMIT = 12;
 const DEFAULT_HANDOFF_KEY_FILES = [
-  "LINGHUN_DEVELOPMENT_ROADMAP.md",
-  "docs/delivery/README.md",
+  "README.md",
+  "WHITEPAPER.md",
+  "docs/developers/capability-runtime-app-bridge.md",
   "package.json",
   "tsconfig.json",
 ] as const;
