@@ -1,22 +1,28 @@
 {
   "name": "@linghun/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "linghun": "./dist/main.js",
     "Linghun": "./dist/main.js"
   },
-  "files": ["dist", "bundled", "scripts"],
+  "files": ["dist", "scripts"],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "build": "tsup src/main.ts --format esm --clean",
     "build:bundled-binaries": "node ../../scripts/bundle-cli-binaries.mjs --all-codebase-memory",
-    "prepack": "node ../../scripts/bundle-cli-binaries.mjs --all-codebase-memory",
     "postinstall": "node scripts/postinstall.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "optionalDependencies": {
+    "@linghun/codebase-memory-darwin-arm64": "0.1.0",
+    "@linghun/codebase-memory-darwin-x64": "0.1.0",
+    "@linghun/codebase-memory-linux-x64": "0.1.0",
+    "@linghun/codebase-memory-win32-x64": "0.1.0",
+    "@linghun/native-runner-win32-x64": "0.1.0"
   },
   "dependencies": {
     "@linghun/config": "workspace:*",
