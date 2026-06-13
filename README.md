@@ -8,12 +8,12 @@
 
 [English README](./README.en.md) · [中文白皮书](./WHITEPAPER.md) · [English Whitepaper](./WHITEPAPER.en.md) · [App Bridge](./docs/developers/capability-runtime-app-bridge.md)
 
+</div>
+
 ```bash
 npm install -g @linghun/cli
 linghun
 ```
-
-</div>
 
 ---
 
