@@ -7,3 +7,4 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.toml text eol=lf
+apps/cli/bundled/**/*.exe filter=lfs diff=lfs merge=lfs -text

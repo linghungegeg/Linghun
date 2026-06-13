@@ -9,6 +9,8 @@
   "files": ["dist", "bundled"],
   "scripts": {
     "build": "tsup src/main.ts --format esm --clean",
+    "build:bundled-binaries": "node ../../scripts/bundle-cli-binaries.mjs",
+    "prepack": "node ../../scripts/bundle-cli-binaries.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

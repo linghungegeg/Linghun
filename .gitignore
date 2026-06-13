@@ -1,5 +1,6 @@
 node_modules/
 dist/
+prototypes/native-runner/target/
 *.tsbuildinfo
 .env
 .env.local

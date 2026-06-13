@@ -21,6 +21,13 @@ When a real binary is vendored here, a LICENSE file must accompany it.
 
 ## Status
 
-No real binary is vendored in this repository.
-The resolution logic in `@linghun/tui` will gracefully fall back to managed/PATH/missing
-when no bundled binary is present.
+Windows x64 currently ships a real `codebase-memory-mcp` binary:
+
+```
+bundled/codebase-memory/win32-x64/codebase-memory-mcp.exe
+```
+
+Its license is included beside the binary. Other platforms still require their
+matching binary to be added before release. The resolution logic in `@linghun/tui`
+will gracefully fall back to managed/PATH/missing when no bundled binary is
+present for the current platform.

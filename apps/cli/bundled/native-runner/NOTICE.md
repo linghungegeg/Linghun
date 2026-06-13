@@ -17,10 +17,16 @@ Supported platform-arch combinations:
 ## License
 
 Bundled binaries are subject to their own license terms.
-When a real binary is vendored here, a LICENSE file must accompany it.
+Third-party binaries must include their license next to the binary.
 
 ## Status
 
-No real binary is vendored in this repository.
+Windows x64 currently ships a real Linghun native-runner binary:
+
+```
+bundled/native-runner/win32-x64/linghun-native-runner.exe
+```
+
+Other platforms still require their matching binary to be added before release.
 The resolution logic in `@linghun/tui` will gracefully fall back to Node/TUI
-when no bundled native-runner binary is present.
+when no bundled native-runner binary is present for the current platform.
