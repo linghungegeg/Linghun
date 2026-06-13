@@ -8,6 +8,9 @@
     "Linghun": "./dist/main.js"
   },
   "files": ["dist", "bundled", "scripts"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup src/main.ts --format esm --clean",
     "build:bundled-binaries": "node ../../scripts/bundle-cli-binaries.mjs --all-codebase-memory",

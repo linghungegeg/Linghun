@@ -11,6 +11,10 @@
       "import": "./dist/index.js"
     }
   },
+  "files": ["dist", "!dist/**/*.test.*", "!dist/**/tsconfig.tsbuildinfo"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "typecheck": "tsc -p tsconfig.json --noEmit"
