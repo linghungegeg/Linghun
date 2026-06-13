@@ -94,28 +94,27 @@ describe("agent-completion-finalizer", () => {
     expect(formatAgentCompletionDigest(context)).toBeNull();
   });
 
-  it("pushes a product block into the transcript for reviewable scrollback", () => {
+  it("does not push a pass ProductBlock into the main transcript by default", () => {
     const transcriptBlocks: Array<{ id: string; kind: string; status: string; title: string; summary: string }> = [];
     const context = createContext();
     (context as { pushTranscriptBlock?: (block: unknown) => void }).pushTranscriptBlock = (block) =>
       transcriptBlocks.push(block as (typeof transcriptBlocks)[0]);
 
-    enqueueAgentCompletionNotice(context, {
+    const notice = enqueueAgentCompletionNotice(context, {
       agent: createAgent({ id: "agent-block", displayName: "reviewer" }),
       status: "completed",
       summary: "code review done",
-      evidenceRefs: ["ev-1"],
+      evidenceRefs: [],
       now: "2026-06-13T00:00:01.000Z",
     });
 
-    expect(transcriptBlocks).toHaveLength(1);
-    expect(transcriptBlocks[0].kind).toBe("details");
-    expect(transcriptBlocks[0].status).toBe("pass");
-    expect(transcriptBlocks[0].title).toContain("reviewer");
-    expect(transcriptBlocks[0].summary).toContain("code review done");
+    expect(notice.status).toBe("completed");
+    expect(notice.validity).toBe("partial");
+    expect(transcriptBlocks).toHaveLength(0);
+    expect(formatAgentCompletionDigest(context)).toContain("不要把结果直接等同于全部通过");
   });
 
-  it("does not push duplicate transcript block when updating an existing notice", () => {
+  it("does not push transcript blocks when creating or updating an existing notice", () => {
     const transcriptBlocks: unknown[] = [];
     const context = createContext();
     (context as { pushTranscriptBlock?: (block: unknown) => void }).pushTranscriptBlock = (block) =>
@@ -137,7 +136,7 @@ describe("agent-completion-finalizer", () => {
       now: "2026-06-13T00:00:02.000Z",
     });
 
-    expect(transcriptBlocks).toHaveLength(1);
+    expect(transcriptBlocks).toHaveLength(0);
   });
 });
 

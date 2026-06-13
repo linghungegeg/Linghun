@@ -4077,9 +4077,11 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toContain("<TranscriptViewport");
     expect(body).not.toContain("virtualRange={view.transcriptVirtualRange}");
     expect(body).not.toContain('overflow="hidden"');
-    expect(body).toContain("TASK_RECENT_TAIL_BLOCKS");
-    expect(body).toContain("staticHistoryBlocks");
-    expect(body).toContain("recentStaticBlocks");
+    expect(source).not.toContain("TASK_RECENT_TAIL_BLOCKS");
+    expect(body).not.toContain("staticHistoryBlocks");
+    expect(body).not.toContain("recentStaticBlocks");
+    expect(body).not.toContain("currentBlocks");
+    expect(body).toContain("view.blocks.map");
     expect(body).toContain('justifyContent="flex-end"');
     expect(body).toContain("<UnseenMessagePill");
     expect(body).toContain("<ProductBlock");
@@ -5103,6 +5105,7 @@ describe("deriveBackgroundActivityFallback — request activity cleared but work
     expect(view.activity).toBeDefined();
     expect(view.activity!.text).toContain("reviewer");
     expect(view.activity!.phase).toBe("continuing");
+    expect(view.activity!.elapsed).toBeDefined();
   });
 
   it("multiple running agents → activity shows count", () => {
@@ -5134,13 +5137,17 @@ describe("deriveBackgroundActivityFallback — request activity cleared but work
   it("running background tasks → activity shows bg task count", () => {
     const ctx = createContext({
       agents: [],
-      backgroundTasks: [{ status: "running" }, { status: "running" }],
+      backgroundTasks: [
+        { status: "running", startedAt: "2026-01-01T00:00:00.000Z" },
+        { status: "running", startedAt: "2026-01-01T00:00:05.000Z" },
+      ],
       lastModelRequest: fakeLastModelRequest,
     } as unknown as Partial<TuiContext>);
     const view = createShellViewModel(ctx, { width: 80 });
     expect(view.activity).toBeDefined();
     expect(view.activity!.text).toContain("2");
     expect(view.activity!.text).toContain("后台任务");
+    expect(view.activity!.elapsed).toBeDefined();
   });
 
   it("no active items + no lastModelRequest → activity undefined, busy=false", () => {
@@ -6448,6 +6455,33 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     const primaryText = view.blocks.map((block) => `${block.title}\n${block.summary}`).join("\n");
     expect(primaryText).not.toContain("SearchExtraTools matched raw list");
     expect(view.blocks.some((block) => block.id === "assistant-after-tools")).toBe(true);
+  });
+
+  it("tool output blocks use tool_result_success semantics instead of assistant text", () => {
+    const readBlock = createOutputBlock("Read(package.json)\n- 12 行", "zh-CN", "read-tool");
+    const editBlock = createOutputBlock("Edit summary: patch +1 -1", "en-US", "edit-tool");
+    const assistantBlock = createOutputBlock("我会先看 package.json。", "zh-CN", "assistant");
+
+    expect(readBlock.messageKind).toBe("tool_result_success");
+    expect(editBlock.messageKind).toBe("tool_result_success");
+    expect(assistantBlock.messageKind).toBe("assistant_text");
+  });
+
+  it("StructuredDiff follows available wrap width and pads colored rows", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/StructuredDiff.tsx"), "utf8");
+
+    expect(source).not.toContain("Math.min(wrapWidth, 60)");
+    expect(source).toContain("borderChar.repeat(safeWrapWidth)");
+    expect(source).toContain("padEnd(contentWidth");
+  });
+
+  it("MessageMarkdown code rows pad to wrapWidth for whole-line visual consistency", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
+
+    expect(source).toContain("visibleWidth < wrapWidth");
+    expect(source).toContain("repeat(wrapWidth - visibleWidth)");
   });
 
   it("Phase R2: two adjacent read/search tool outputs stay separate", () => {

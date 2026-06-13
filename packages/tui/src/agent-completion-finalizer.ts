@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { truncateDisplay } from "./startup-runtime.js";
-import type { ProductBlockViewModel } from "./shell/types.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type {
   AgentCompletionBatchSummary,
@@ -76,9 +75,6 @@ export function enqueueAgentCompletionNotice(
   state.notices = state.notices.slice(0, MAX_AGENT_COMPLETION_NOTICES);
   refreshAgentCompletionBatchSummaries(context, now);
   pushAgentCompletionNotification(context, notice);
-  if (!existing) {
-    pushAgentCompletionTranscriptBlock(context, notice);
-  }
   return notice;
 }
 
@@ -212,34 +208,6 @@ function pushAgentCompletionNotification(context: TuiContext, notice: AgentCompl
     createdAt: now,
     tone: notice.validity === "invalid" ? "warning" : "success",
   });
-}
-
-function pushAgentCompletionTranscriptBlock(
-  context: TuiContext,
-  notice: AgentCompletionNotice,
-): void {
-  if (!context.pushTranscriptBlock) return;
-  const label = formatAgentLabel(notice);
-  const isEn = context.language === "en-US";
-  const statusMap: Record<AgentCompletionStatus, ProductBlockViewModel["status"]> = {
-    completed: "pass",
-    failed: "fail",
-    blocked: "blocked",
-    cancelled: "partial",
-    stale: "partial",
-  };
-  const title = isEn
-    ? `Agent ${label} — ${notice.status}`
-    : `子智能体 ${label} — ${notice.status === "completed" ? "已完成" : notice.status === "failed" ? "失败" : notice.status === "blocked" ? "被阻塞" : notice.status === "cancelled" ? "已取消" : "已结束"}`;
-  const block: ProductBlockViewModel = {
-    id: `agent-completion-${notice.agentId}-${Date.now()}`,
-    kind: "details",
-    status: statusMap[notice.status] ?? "info",
-    title,
-    summary: notice.summary || "",
-    keep: true,
-  };
-  context.pushTranscriptBlock(block);
 }
 
 function formatNotificationText(context: TuiContext, notice: AgentCompletionNotice): string {

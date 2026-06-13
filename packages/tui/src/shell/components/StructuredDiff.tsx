@@ -88,9 +88,10 @@ export function StructuredDiff({
 }): React.ReactNode {
   const lines = parseDiffLines(code);
   const gutterWidth = computeGutterWidth(lines);
-  const contentWidth = Math.max(8, wrapWidth - gutterWidth - 2);
+  const safeWrapWidth = Math.max(8, Math.floor(wrapWidth));
+  const contentWidth = Math.max(8, safeWrapWidth - gutterWidth - 2);
   const borderChar = "┈";
-  const borderLine = borderChar.repeat(Math.min(wrapWidth, 60));
+  const borderLine = borderChar.repeat(safeWrapWidth);
 
   return (
     <Box flexDirection="column" marginLeft={1}>
@@ -146,20 +147,23 @@ export function StructuredDiff({
 
         return (
           <Box key={`line-${idx}-${marker}-${lineNum}`} flexDirection="column">
-            {wrapped.map((wrappedLine, wIdx) => (
-              <Box key={`${idx}-w${wIdx}`} flexDirection="row">
-                <Text color={theme.dim ?? theme.muted} dimColor>
-                  {wIdx === 0 ? gutter : " ".repeat(gutter.length)}
-                </Text>
-                <Text
-                  color={lineColor}
-                  backgroundColor={lineBg}
-                  dimColor={dim || line.type === "context"}
-                >
-                  {wrappedLine}
-                </Text>
-              </Box>
-            ))}
+            {wrapped.map((wrappedLine, wIdx) => {
+              const paddedLine = wrappedLine.padEnd(contentWidth, " ");
+              return (
+                <Box key={`${idx}-w${wIdx}`} flexDirection="row">
+                  <Text color={theme.dim ?? theme.muted} dimColor>
+                    {wIdx === 0 ? gutter : " ".repeat(gutter.length)}
+                  </Text>
+                  <Text
+                    color={lineColor}
+                    backgroundColor={lineBg}
+                    dimColor={dim || line.type === "context"}
+                  >
+                    {paddedLine}
+                  </Text>
+                </Box>
+              );
+            })}
           </Box>
         );
       })}

@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type OwnerContext,
   type OwnerKeyShape,
@@ -18,6 +21,9 @@ import {
 } from "./transcript-selection-state.js";
 
 type ShellViewModelContext = Parameters<typeof import("../view-model.js").createShellViewModel>[0];
+
+const __testDirname = dirname(fileURLToPath(import.meta.url));
+const SRC_ROOT = join(__testDirname, "..", "..");
 
 type MinimalTuiContext = {
   language: "zh-CN";
@@ -516,5 +522,31 @@ describe("TUI Interaction Contract — 主屏降噪", () => {
     const layered = createLayeredToolOutput("Todo", { text: todoText }, "zh-CN");
     expect(layered.preview).not.toContain("主输出已隐藏");
     expect(layered.truncated).toBe(false);
+  });
+});
+
+describe("TUI Interaction Contract — 主链自然叙事边界", () => {
+  it("system prompt allows short progress narration only for long or multi-tool tasks", async () => {
+    const source = await readFile(join(SRC_ROOT, "model-prompt-runtime.ts"), "utf8");
+
+    expect(source).toContain("In long or multi-tool tasks");
+    expect(source).toContain("1-2 natural lines");
+    expect(source).toContain("For simple no-tool chat, stay concise");
+    expect(source).toContain("长任务或多工具任务中");
+    expect(source).toContain("简单无工具闲聊保持简洁");
+    expect(source).not.toContain("always explain before every tool");
+  });
+});
+
+describe("TUI Interaction Contract — diff/code width propagation", () => {
+  it("ProductBlock and MessageMarkdown preserve wrapWidth for tool diff rendering", async () => {
+    const productBlock = await readFile(join(SRC_ROOT, "shell/components/ProductBlock.tsx"), "utf8");
+    const markdown = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
+
+    expect(productBlock).toContain('block.messageKind === "tool_result_success"');
+    expect(productBlock).toContain("wrapWidth={Math.max(8, width - 4)}");
+    expect(productBlock).toContain("wrapWidth={Math.max(8, width)}");
+    expect(markdown).toContain("<StructuredDiff");
+    expect(markdown).toContain("wrapWidth={wrapWidth}");
   });
 });

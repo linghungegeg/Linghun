@@ -1112,16 +1112,12 @@ export function createOutputBlock(
     // /model doctor body with provider.env merge / endpointPath / providers)
     // are no longer truncated to the first line at this boundary.
     fullText: normalized,
-    // D.13Q-UX: 普通 writeLine 走 assistant_text，让 ProductBlock 的 messageKind
-    // 分支用 Markdown 渲染多行正文，而不是把多行文本压成 cyan/info dot 单行。
-    // 真正的工具错误由调用方走显式的 tool_result_error block / fail status，
-    // 不再由这里的关键词扫描决定。
-    messageKind: "assistant_text",
+    messageKind: toolResultLike ? "tool_result_success" : "assistant_text",
   };
 }
 
 function isToolResultLike(text: string): boolean {
-  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
+  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit)\(|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|Todo[:：]|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
     text.trim(),
   );
 }
@@ -1322,6 +1318,7 @@ function deriveBackgroundActivityFallback(
   const runningBgTasks = (context.backgroundTasks ?? []).filter((t) => t.status === "running");
 
   if (runningAgents.length > 0) {
+    const elapsed = formatElapsedForFirstTimestamp(runningAgents.map((agent) => agent.startedAt));
     const text =
       language === "en-US"
         ? runningAgents.length === 1
@@ -1330,9 +1327,13 @@ function deriveBackgroundActivityFallback(
         : runningAgents.length === 1
           ? `等待子智能体 ${runningAgents[0].displayName ?? runningAgents[0].addressableName ?? ""}…`
           : `${runningAgents.length} 个智能体仍在工作…`;
-    return { phase: "continuing", text, language };
+    return { phase: "continuing", text, language, elapsed };
   }
   if (runningWorkflows.length > 0 || (activeRun && activeRun.status === "running")) {
+    const elapsed = formatElapsedForFirstTimestamp([
+      ...runningWorkflows.map((run) => run.startedAt),
+      activeRun && activeRun.status === "running" ? activeRun.startedAt : undefined,
+    ]);
     const hasMultiAgent =
       runningWorkflows.some((r) => r.multiAgent === true) ||
       (activeRun && activeRun.status === "running" && activeRun.multiAgent === true);
@@ -1343,16 +1344,25 @@ function deriveBackgroundActivityFallback(
       : language === "en-US"
         ? "Workflow running…"
         : "工作流运行中…";
-    return { phase: "continuing", text, language };
+    return { phase: "continuing", text, language, elapsed };
   }
   if (runningBgTasks.length > 0) {
+    const elapsed = formatElapsedForFirstTimestamp(runningBgTasks.map((task) => task.startedAt));
     const text =
       language === "en-US"
         ? `${runningBgTasks.length} background task(s) running…`
         : `${runningBgTasks.length} 个后台任务运行中…`;
-    return { phase: "continuing", text, language };
+    return { phase: "continuing", text, language, elapsed };
   }
   return undefined;
+}
+
+function formatElapsedForFirstTimestamp(values: Array<string | undefined>): string | undefined {
+  const timestamps = values
+    .map((value) => (value ? Date.parse(value) : Number.NaN))
+    .filter((value) => Number.isFinite(value));
+  if (timestamps.length === 0) return undefined;
+  return formatElapsedSince(new Date(Math.min(...timestamps)).toISOString());
 }
 
 function deriveVisibleWorkState(context: TuiContext): VisibleWorkState {

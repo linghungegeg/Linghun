@@ -372,16 +372,20 @@ function CodeLine({
   return (
     <Box flexDirection="column">
       {wrapText(line.length === 0 ? " " : (highlightedLine ?? line), wrapWidth).map(
-        (wrapped, index) => (
-          <Text
-            key={`${index}-${stripAnsi(wrapped)}`}
-            color={selected ? "white" : highlightedLine && !isDiff ? undefined : color}
-            backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
-            dimColor={selected ? false : dimLine}
-          >
-            {wrapped}
-          </Text>
-        ),
+        (wrapped, index) => {
+          const visibleWidth = stripAnsi(wrapped).length;
+          const padded = visibleWidth < wrapWidth ? `${wrapped}${" ".repeat(wrapWidth - visibleWidth)}` : wrapped;
+          return (
+            <Text
+              key={`${index}-${stripAnsi(wrapped)}`}
+              color={selected ? "white" : highlightedLine && !isDiff ? undefined : color}
+              backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
+              dimColor={selected ? false : dimLine}
+            >
+              {padded}
+            </Text>
+          );
+        },
       )}
     </Box>
   );

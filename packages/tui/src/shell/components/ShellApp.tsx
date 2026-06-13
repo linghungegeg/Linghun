@@ -1,4 +1,4 @@
-import { Box, Static, Text } from "@linghun/ink-runtime";
+import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { resolveAlternateScreen } from "../ink-renderer.js";
@@ -24,8 +24,6 @@ import { TaskListView } from "./TaskListView.js";
 import { TaskSuggestionBar } from "./TaskSuggestionBar.js";
 import { UnseenMessagePill } from "./UnseenMessagePill.js";
 import { WorkflowProgressView } from "./WorkflowProgressView.js";
-
-const TASK_RECENT_TAIL_BLOCKS = 6;
 
 export function ShellApp({
   controller,
@@ -224,35 +222,14 @@ function TaskLayout({
     return () => clearInterval(timer);
   }, [hasProgress]);
 
-  const staticBlocks = view.blocks.filter((b) => b.status !== "running");
-  const dynamicBlocks = view.blocks.filter((b) => b.status === "running");
-  const staticHistoryBlocks = staticBlocks.slice(
-    0,
-    Math.max(0, staticBlocks.length - TASK_RECENT_TAIL_BLOCKS),
-  );
-  const recentStaticBlocks = staticBlocks.slice(-TASK_RECENT_TAIL_BLOCKS);
-  const currentBlocks = [...recentStaticBlocks, ...dynamicBlocks];
-
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
-      {/* Main content area — native terminal scrollback plus a current-screen tail near composer. */}
+      {/* Main content area — one native terminal scrollback stream, with composer/footer pinned below. */}
       <Box flexDirection="column" flexGrow={1} minHeight={0} justifyContent="flex-end">
-        <Static items={staticHistoryBlocks}>
-          {(block) => (
-            <Box key={block.id} paddingX={2}>
-              <ProductBlock
-                block={block}
-                theme={theme}
-                width={contentWidth}
-                language={view.language}
-              />
-            </Box>
-          )}
-        </Static>
         <Box flexDirection="column" paddingX={2}>
-          {currentBlocks.length > 0 ? (
+          {view.blocks.length > 0 ? (
             <Box flexDirection="column">
-              {currentBlocks.map((block) => (
+              {view.blocks.map((block) => (
                 <ProductBlock
                   key={block.id}
                   block={block}
@@ -265,7 +242,7 @@ function TaskLayout({
           ) : null}
 
           {view.streamingAssistantText ? (
-            <Box marginTop={currentBlocks.length > 0 ? 1 : 0}>
+            <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
               <StreamingMarkdown
                 text={view.streamingAssistantText}
                 theme={theme}
@@ -275,7 +252,7 @@ function TaskLayout({
           ) : null}
 
           {view.activity ? (
-            <Box marginTop={currentBlocks.length > 0 || view.streamingAssistantText ? 1 : 0}>
+            <Box marginTop={view.blocks.length > 0 || view.streamingAssistantText ? 1 : 0}>
               <ActivityIndicator
                 activity={view.activity}
                 theme={theme}
