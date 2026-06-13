@@ -1,109 +1,324 @@
 # Linghun
 
-Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
+Evidence-first, local-first AI coding terminal for real engineering workflows.
 
-核心方向：
+Linghun is not a thin terminal shell that simply forwards your prompt to a model.
+It connects models, tools, permissions, evidence, verification, context, cost,
+Git state, long-running tasks, memory, and local runtime supervision into one
+auditable engineering loop.
 
-- 以 CCB / Claude Code 级编码体验为核心。
-- 保留 CCB Dev Boost 的缓存、索引、成本、中文增强能力。
-- 融合 OpenCode 的多模型开放思路。
-- 融合 Hermes 的记忆、Skills、工作流沉淀思路。
-- 优先打通终端 TUI，后续预留桌面端。
-- 按阶段闭环开发，每个阶段必须有交付文档。
+The core idea is simple:
 
-## 当前进度
+> AI coding slows down when models give confident answers before reading facts,
+> running verification, or checking boundaries.
 
-- Phase 00-14 主闭环、Phase 14 hardening 与 Phase 15 preflight hardening：Natural Command Bridge 已完成；Natural Intent Contract 成品级手感硬化已收口。
-- Phase 15.5A-F、Phase 16、Phase 17A/B/C、Pre-Smoke TUI Polish A-D、Performance Gate 小范围修复、Closure A、Closure B 和 Closure C 已完成对应 local/focused/mock/synthetic validation 或本地口径收口，并已输出对应交付或审计文档；这些结论只代表本地、focused、mock、synthetic 或 scoped validation 已闭环。
-- 当前仍不是 Beta PASS，不是 smoke-ready，不是 open-source-ready；不得把历史 A-C、focused/mock/local/synthetic PASS、单阶段 PASS、Closure A/B/C 本地收口或局部 live text PASS 推断为整体 ready。
-- 当前最新状态以 [docs/archive/legacy-root/START_NEXT_CHAT.md](./docs/archive/legacy-root/START_NEXT_CHAT.md)、[docs/audit/pre-smoke-terminal-product-ultimate-audit.md](./docs/audit/pre-smoke-terminal-product-ultimate-audit.md)、[docs/delivery/pre-smoke-closure-a-p1-engineering-risk.md](./docs/delivery/pre-smoke-closure-a-p1-engineering-risk.md)、[docs/delivery/pre-smoke-closure-b-p2-product-truthfulness.md](./docs/delivery/pre-smoke-closure-b-p2-product-truthfulness.md) 和 [docs/delivery/pre-smoke-closure-c-provider-auth-config-center.md](./docs/delivery/pre-smoke-closure-c-provider-auth-config-center.md) 为准；Closure C 已完成 provider/auth config center 本地收口。
-- 下一步由用户确认是否进入“用户指定真实测试项目”的 Real Provider + Real Project Smoke；真实 smoke 可通过 shell env 或本机私有 provider.env 使用 provider key，且不得把真实 key 写入文档、报告、日志或项目 `.linghun/settings.json`，不得保存 raw provider request、完整 provider response 或完整日志。
-- Phase 14 已补齐本地 Skills、Workflows、Hooks doctor、Plugin manifest loader、启停、信任和权限边界，并完成稳定性与安全边界加固；不得写成已经实现插件市场、GitHub 安装、自动更新、长期任务或 Phase 15+ 功能。
-- Phase 15 preflight hardening 已让中文/英文自然语言可查询 memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions 等状态，并基于 Command Capability Catalog 做本地裁决；已补 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期/精确确认和旧权限边界。Pre-smoke 新基线要求用户可见权限模式统一为 `default` / `auto-review` / `plan` / `full-access`，旧 `acceptEdits` / `auto` / `bypass` / `dontAsk` 只作为 legacy alias 或历史证据；高风险命令不得自然语言直通。Architecture Runtime 是 smoke 前底层工程判断能力，不是第五个权限模式、不是 Plan Mode、不是 skill、不是 prompt-only 文案；v1 只做轻量工程判断 guard 和短 Architecture Card，涉及最新外部事实时必须按需走 Freshness/Web Evidence，未联网不得伪造当前结论。
-- Linghun 的低学习成本原则是渐进披露：默认首屏、状态栏、`/help` 和 `/doctor` 必须简洁；完整能力必须通过 `/help all|advanced|details`、`/features`、`/config advanced`、`/doctor all|details|checklist|project|report` 和自然语言用途询问可发现；隐藏高级入口不能降低功能完整性。
-- 自动工作默认只推进一个阶段，完成后必须输出交付文档、验证结果和 handoff packet。
-- 连续阶段模式是高级危险开关，默认关闭；只能由本地用户显式 opt-in，且每个阶段之间仍必须停在用户审核点，不能由模型、agent、workflow、job、hook、plugin 或远程通道自动开启。
-- 用户未明确开始执行时，必须先通过 Start Gate 确认，不得擅自进入写文件、agent、job、workflow 或依赖安装。
+Linghun starts from evidence. It can chat, read code, edit files, run commands,
+create stable points, split complex work, track cost, and report results, but
+important engineering claims must stay tied to what was actually observed.
 
-## 开发入口
+Read the full design in the [Chinese whitepaper](./WHITEPAPER.md) or
+[English whitepaper](./WHITEPAPER.en.md).
 
-说明：本节是继续开发 Linghun 仓库本身的入口。Linghun 产品面向任意项目运行时，项目规则主入口是项目根目录 `LINGHUN.md`；`AGENTS.md` / `CLAUDE.md` 只作为兼容导入或迁移来源。本仓库开发 Linghun 自身时，才需要额外读取 `CLAUDE.md`、蓝图、规格书和阶段交付文档。
+## Why Linghun
 
-新会话开始前，请先读取：
+Modern coding models are powerful, but real projects need more than generation.
+They need a runtime that knows:
 
-1. [CLAUDE.md](./CLAUDE.md)
-2. [LINGHUN_PHASED_DELIVERY_BLUEPRINT.md](./LINGHUN_PHASED_DELIVERY_BLUEPRINT.md)
-3. [LINGHUN_IMPLEMENTATION_SPEC.md](./LINGHUN_IMPLEMENTATION_SPEC.md)
-4. [LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md](./LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md)
-5. [docs/delivery/README.md](./docs/delivery/README.md)
-6. [docs/delivery/phase-10-mcp-index.md](./docs/delivery/phase-10-mcp-index.md)
-7. [docs/delivery/phase-11-sessions-memory.md](./docs/delivery/phase-11-sessions-memory.md)
-8. [docs/delivery/phase-12-agents.md](./docs/delivery/phase-12-agents.md)
-9. [docs/delivery/phase-13-multi-model.md](./docs/delivery/phase-13-multi-model.md)
-10. [docs/delivery/phase-14-skills-workflow.md](./docs/delivery/phase-14-skills-workflow.md)
-11. [docs/delivery/phase-15-natural-command-bridge.md](./docs/delivery/phase-15-natural-command-bridge.md)
-12. [docs/audit/phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md](./docs/audit/phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md)
-13. [docs/audit/phase-15-pre-smoke-a-c-combined-acceptance.md](./docs/audit/phase-15-pre-smoke-a-c-combined-acceptance.md)
-14. [docs/audit/pre-smoke-comprehensive-audit-2026-05-23.md](./docs/audit/pre-smoke-comprehensive-audit-2026-05-23.md)
-15. [docs/delivery/pre-smoke-p1-p2-remediation-closure.md](./docs/delivery/pre-smoke-p1-p2-remediation-closure.md)
-16. [docs/delivery/phase-17-pre-smoke-index-ts-split-plan.md](./docs/delivery/phase-17-pre-smoke-index-ts-split-plan.md)
-17. [docs/delivery/real-project-smoke-checklist.md](./docs/delivery/real-project-smoke-checklist.md)
+- which files were read;
+- which tools were executed;
+- which commands or tests were run;
+- whether the working tree is clean;
+- whether the codebase index is fresh;
+- whether a failure really happened;
+- whether a final answer is supported by evidence.
 
-后续撰写开源项目介绍、README 卖点或发布说明时，参考 [docs/open-source-positioning-notes.md](./docs/open-source-positioning-notes.md)，不要忘记 evidence-first coding 这一定位。
+Linghun turns these concerns into product behavior instead of relying only on
+prompt wording. The goal is fewer hallucinations, fewer repeated tokens, better
+cache reuse, safer local execution, clearer delivery boundaries, and less rework.
 
-Phase 15 preflight 之后的新对话应优先基于结构化 handoff、agent transcript 摘要、codebase-memory 索引、阶段交付文档和 transcript evidence 恢复上下文，避免一上来全量读取文件。
+See: [Evidence-first engineering loop](./WHITEPAPER.en.md#4-evidence-first-engineering-loop),
+[verification and readiness](./WHITEPAPER.en.md#15-verification-readiness-and-problems-panel), and
+[output-side anti-hallucination](./WHITEPAPER.en.md#6-output-side-anti-hallucination-system).
 
-## 命令约定
+## Quick Start
 
-- 项目名：`Linghun`
-- CLI 主命令：`linghun`
-- Windows 兼容入口：`Linghun`
-- 文档和脚本默认写 `linghun`，只在兼容说明中写 `Linghun`。
+Requirements:
 
-## 模型配置
+- Node.js 22 or newer
+- npm, pnpm, or another Node package manager
 
-新用户不需要手写 `providers` 或 `modelRoutes` JSON。首次运行发现当前模型配置不可用时，TUI 会提示这是本机一次配置，不是当前仓库配置；可以直接说“我要配置模型”“配置 API key”或 “configure provider”，也可以在提示状态按 Enter 开始。精确入口仍保留：
+Install:
+
+```bash
+npm install -g @linghun/cli
+```
+
+Start Linghun in a project:
+
+```bash
+linghun
+```
+
+Windows also supports the uppercase compatibility entry:
+
+```powershell
+Linghun
+```
+
+Check the installed version:
+
+```bash
+linghun --version
+```
+
+## Model Setup
+
+Run Linghun and use:
 
 ```text
 /model setup
 ```
 
-向导只要求填写 API 地址、API key、模型名称和推理等级。API key 会保存到本机用户目录下的私有 `provider.env`，默认路径为 `~/.linghun/provider.env`；设置 `LINGHUN_CONFIG_DIR` 时路径为 `$LINGHUN_CONFIG_DIR/provider.env`。该文件不应放入项目目录，也不应提交到 git；配置一次后，其他仓库默认复用同一个用户 `provider.env`。
+The setup flow asks for:
 
-配置优先级：shell env 变量最高，其次是用户私有 `provider.env`，最后才是既有 settings/default。支持的变量见 [.env.example](./.env.example)；示例文件不包含真实 key，复制不是必须的，`/model setup` 会自动创建带注释模板。
+- API base URL
+- API key
+- model name
+- reasoning level
 
-常用检查命令：
+API keys are stored in a private user-level `provider.env`, not in your project.
+Shell environment variables have the highest priority, then the private
+`provider.env`, then project/default settings.
+
+Check provider configuration with:
 
 ```text
 /model doctor
 ```
 
-`/model doctor` 会显示 API key 来源：`env`、`user-provider-env`、`project-settings-legacy` 或 `missing`，并只显示脱敏结果。若旧项目 `.linghun/settings.json` 含有 `apiKey`，doctor 会提示迁移到 shell env 或私有 `provider.env`。
+## A Typical Workflow
 
-## 文档结构
+You can describe engineering work in natural language:
 
 ```text
-.
-├── README.md
-├── WHITEPAPER.md
-├── WHITEPAPER.en.md
-├── AGENTS.md
-├── CLAUDE.md
-├── LINGHUN_CCB_MATURITY_COMPARISON_REPORT.md
-├── LINGHUN_PHASED_DELIVERY_BLUEPRINT.md
-├── LINGHUN_IMPLEMENTATION_SPEC.md
-├── LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md
-└── docs
-    ├── audit
-    ├── archive
-    ├── delivery
-    └── open-source-positioning-notes.md
+Check why this project fails to build, fix the issue, run the relevant tests,
+and create a stable point if everything passes.
 ```
 
-## 开发规则
+Linghun is designed to turn that into a controlled loop:
 
-- 严格按阶段推进。
-- 不跳阶段堆功能。
-- 每个阶段完成后，必须在 `docs/delivery/` 下输出阶段交付文档。
-- 没有阶段交付文档，不视为阶段完成。
-- 已知问题只能描述阶段边界，不能把本阶段承诺的能力推迟到后续补丁。
+1. inspect the repository and relevant files;
+2. form a short plan;
+3. request permission before risky writes or commands;
+4. edit files through the tool runtime;
+5. run focused verification;
+6. inspect Git state;
+7. summarize what changed, what was verified, and what remains uncertain.
+
+See: [staged engineering workflow](./WHITEPAPER.en.md#5-staged-engineering-workflow) and
+[Git stable points](./WHITEPAPER.en.md#13-git-stable-points-and-managed-worktree).
+
+## Capability Map
+
+### Evidence-first Answers
+
+Linghun separates model text from engineering facts. Claims about code,
+verification, Git operations, architecture boundaries, or release readiness are
+expected to be backed by observed evidence.
+
+See: [Evidence-first engineering loop](./WHITEPAPER.en.md#4-evidence-first-engineering-loop).
+
+### Architecture and Runtime Boundaries
+
+Linghun treats coding as a runtime problem, not only a prompting problem. Model
+generation is connected to provider runtime, tool runtime, permission runtime,
+evidence runtime, verification runtime, Git runtime, memory runtime, job
+runtime, and local process supervision.
+
+See: [architecture system](./WHITEPAPER.en.md#7-architecture-system).
+
+### Provider Runtime
+
+Provider configuration, model routing, reasoning level, API base URL, private
+keys, diagnostics, and failure handling are managed as runtime state. This lets
+Linghun support different providers without hard-coding one model path into the
+product.
+
+See: [provider runtime](./WHITEPAPER.en.md#9-provider-runtime).
+
+### Local Tools and Editing Safety
+
+Linghun includes file reading, writing, editing, search, Bash, Todo, Diff, Git,
+and verification paths. Editing is guarded by read-before-edit behavior, stale
+file checks, path boundaries, and change summaries.
+
+See: [tool execution and editing safety](./WHITEPAPER.en.md#10-tool-execution-and-editing-safety).
+
+### Permissions and Workspace Safety
+
+Local execution is permission-aware. Linghun classifies command risk, protects
+workspace paths, separates permission modes, and keeps remote approvals routed
+back through local permission boundaries.
+
+See: [permissions, safety, and resource boundaries](./WHITEPAPER.en.md#12-permissions-safety-and-resource-boundaries).
+
+### Verification-aware Delivery
+
+Linghun does not treat every successful local command as full project readiness.
+It tracks verification scope and distinguishes focused checks, partial results,
+failures, timeouts, cancelled work, and unverified conclusions.
+
+See: [verification, readiness, and problems panel](./WHITEPAPER.en.md#15-verification-readiness-and-problems-panel).
+
+### Codebase Index and Workspace Awareness
+
+The CLI package ships with bundled `codebase-memory-mcp` binaries for common
+desktop platforms. Linghun can use codebase index status, search, architecture
+evidence, workspace snapshots, and large-file safety checks to reduce repeated
+file reading and improve grounding.
+
+Bundled platforms:
+
+- Windows x64
+- Linux x64
+- macOS Apple Silicon
+- macOS Intel
+
+See: [index, cache, and workspace snapshot](./WHITEPAPER.en.md#14-index-cache-and-workspace-snapshot).
+
+### Cache and Cost Control
+
+Linghun tracks usage, prompt cache behavior, cache freshness, changed runtime
+inputs, and summary-first output boundaries. The aim is to reduce repeated
+tokens and avoid letting large logs or unstable tool lists break cache reuse.
+
+See: [cost and performance control](./WHITEPAPER.en.md#25-cost-and-performance-control) and
+[stable tool calls and cost reduction](./WHITEPAPER.en.md#11-stable-tool-calls-and-cost-reduction).
+
+### Git Stable Points
+
+Linghun can inspect Git state, help create stable points, and keep Git-related
+claims tied to actual repository state. This makes larger changes easier to
+roll back and easier to hand off.
+
+See: [Git stable points and managed worktree](./WHITEPAPER.en.md#13-git-stable-points-and-managed-worktree).
+
+### Long-running Jobs and Agents
+
+For complex work, Linghun has durable jobs, background tasks, agent transcripts,
+budgets, step limits, logs, reports, and handoff boundaries. The user should see
+state and progress rather than raw runtime noise.
+
+See: [Workflow Matrix and long-task hosting](./WHITEPAPER.en.md#18-workflow-matrix-and-long-task-hosting).
+
+### Multi-model Routing
+
+Different roles can use different model routes: planning, execution, review,
+verification, summarization, vision, and image tasks do not have to share one
+model configuration.
+
+See: [role-based multi-model routing](./WHITEPAPER.en.md#8-role-based-multi-model-routing).
+
+### Controlled Memory and Failure Learning
+
+Linghun supports project rules, handoff, controlled memory, candidate-first
+learning, and failure reflection. The goal is to reduce repeated explanations
+without silently injecting unsafe or unreviewed memory into every task.
+
+See: [long-term context, controlled memory, self-learning, and reflection](./WHITEPAPER.en.md#16-long-term-context-controlled-memory-self-learning-and-reflection).
+
+### Central Orchestration
+
+Linghun condenses signals from task type, permissions, evidence, memory,
+failures, provider status, workflow state, user state, context pressure,
+architecture boundaries, terminal capability, and verification needs into a
+structured policy for the current turn.
+
+The model reasons and generates. The runtime chooses routes, controls risk,
+keeps output low-noise, and decides when verification or clarification matters.
+
+See: [central orchestration](./WHITEPAPER.en.md#17-central-orchestration-from-prompt-injection-to-behavioral-routing).
+
+### Extensions and External Capabilities
+
+Linghun is designed to connect MCP servers, skills, plugins, hooks, capability
+connectors, and remote channels without bypassing local permissions or evidence
+boundaries.
+
+See: [extension ecosystem](./WHITEPAPER.en.md#21-extension-ecosystem-mcp-skills-plugins-hooks),
+[runtime capabilities vs skills](./WHITEPAPER.en.md#22-runtime-capabilities-vs-skills), and
+[remote channel boundary](./WHITEPAPER.en.md#23-remote-channel-boundary).
+
+### Terminal UX and Diagnostic Surfaces
+
+Linghun separates the main user-visible conversation from details, logs,
+diagnostics, tool output, and long-running task state. The public surface should
+stay readable, while deeper evidence remains available when a user asks for it.
+
+See: [TUI output and interaction layers](./WHITEPAPER.en.md#24-tui-output-and-interaction-layers).
+
+### Windows-first Practicality
+
+Linghun treats Windows, PowerShell, cmd.exe, Chinese paths, spaces in paths,
+terminal capability detection, and local process supervision as first-class
+engineering concerns.
+
+See: [Windows-grade supervision and native runner](./WHITEPAPER.en.md#19-windows-grade-supervision-and-native-runner) and
+[Windows compatibility enhancements](./WHITEPAPER.en.md#20-windows-compatibility-enhancements).
+
+### Self-developed Runtime and Open-source Value
+
+Linghun is intended to be useful beyond one provider or one closed workflow. Its
+open-source value is the reusable engineering runtime around models: evidence,
+tools, permissions, verification, context, cost, jobs, agents, and extension
+boundaries.
+
+See: [self-developed runtime and open-source value](./WHITEPAPER.en.md#26-self-developed-runtime-and-open-source-value) and
+[engineering exoskeleton for all large models](./WHITEPAPER.en.md#27-engineering-exoskeleton-for-all-large-models).
+
+## Local-first and Privacy
+
+Linghun is local-first:
+
+- code execution happens on your machine;
+- model provider keys are stored outside the project by default;
+- remote channels are optional and route back through local permission checks;
+- full logs and details are kept behind explicit diagnostic surfaces where possible;
+- bundled local binaries are used before falling back to external installs.
+
+See: [developer sovereignty, safety, and privacy](./WHITEPAPER.en.md#121-developer-sovereignty-safety-and-privacy).
+
+## Documentation
+
+- [Chinese Whitepaper](./WHITEPAPER.md)
+- [English Whitepaper](./WHITEPAPER.en.md)
+- [License](./LICENSE)
+
+Recommended whitepaper sections:
+
+- [Product positioning](./WHITEPAPER.en.md#1-product-positioning)
+- [Capability overview](./WHITEPAPER.en.md#3-capability-overview)
+- [Evidence-first engineering loop](./WHITEPAPER.en.md#4-evidence-first-engineering-loop)
+- [Permissions and safety](./WHITEPAPER.en.md#12-permissions-safety-and-resource-boundaries)
+- [Index and workspace awareness](./WHITEPAPER.en.md#14-index-cache-and-workspace-snapshot)
+- [Verification and readiness](./WHITEPAPER.en.md#15-verification-readiness-and-problems-panel)
+- [Central orchestration](./WHITEPAPER.en.md#17-central-orchestration-from-prompt-injection-to-behavioral-routing)
+- [Workflow Matrix and long tasks](./WHITEPAPER.en.md#18-workflow-matrix-and-long-task-hosting)
+- [Extension ecosystem](./WHITEPAPER.en.md#21-extension-ecosystem-mcp-skills-plugins-hooks)
+- [Applicable scenarios](./WHITEPAPER.en.md#29-applicable-scenarios)
+- [Explicit boundaries](./WHITEPAPER.en.md#31-explicit-boundaries)
+
+## Current Status
+
+Linghun is under active development. The CLI/TUI runtime, local tool execution,
+provider setup, evidence-oriented workflow, bundled codebase index runtime, and
+many engineering-control surfaces are already implemented. Some advanced
+surfaces, especially multi-platform native-runner packaging and remote-channel
+product polish, may continue to mature across releases.
+
+Use Linghun as a local engineering assistant with evidence and permission
+boundaries, not as an autonomous system that should be trusted blindly.
+
+## License
+
+Linghun is licensed under the [Apache License 2.0](./LICENSE).
