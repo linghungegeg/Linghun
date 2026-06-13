@@ -25,9 +25,16 @@ Linghun 可以理解成：给大模型装上一套工程化外骨骼。模型负
 
 ## 特别感谢
 
-感谢 [geek2api 中转站](https://www.geek2api.com/) 对 Linghun 开发过程中的支持。geek2api 提供一站式 AI 服务接入能力，无需管理多个订阅账号，即可接入 Claude、GPT、Gemini 等主流 AI 服务。
-
-也感谢 geek2api 中转站各位群友提供的相关思路和思想支持。交流群号：`1104150634`。
+<div>
+  <table>
+    <tr>
+      <td>
+        感谢 <a href="https://www.geek2api.com/">geek2api 中转站</a> 对 Linghun 开发过程中的支持。geek2api 提供一站式 AI 服务接入能力，无需管理多个订阅账号，即可接入 Claude、GPT、Gemini 等主流 AI 服务。<br /><br />
+        也感谢 geek2api 中转站各位群友提供的相关思路和思想支持。交流群号：<code>1104150634</code>。
+      </td>
+    </tr>
+  </table>
+</div>
 
 ## 它能帮你做什么
 
