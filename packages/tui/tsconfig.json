@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "references": [
+    { "path": "../shared" },
+    { "path": "../core" },
+    { "path": "../config" },
+    { "path": "../ink-runtime" },
+    { "path": "../providers" },
+    { "path": "../tools" }
+  ]
+}

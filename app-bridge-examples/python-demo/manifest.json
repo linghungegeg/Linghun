@@ -1,0 +1,28 @@
+{
+  "$schema": "../../APP_BRIDGE_MANIFEST.schema.json",
+  "appId": "demo.notes",
+  "name": "Demo Notes",
+  "version": "0.1.0",
+  "transport": "http",
+  "baseUrl": "http://127.0.0.1:47832",
+  "auth": { "type": "none" },
+  "capabilities": [
+    {
+      "id": "demo.notes.summarize",
+      "appId": "demo.notes",
+      "title": "Summarize Note",
+      "description": "Summarizes a local note.",
+      "category": "notes",
+      "intents": ["summarize note"],
+      "keywords": ["note", "summarize"],
+      "transport": "http",
+      "auth": "none",
+      "permission": "read",
+      "riskLevel": "low",
+      "inputSchema": { "type": "object", "required": ["text"] },
+      "outputSchema": { "type": "object", "required": ["summary"] },
+      "supportsRollback": false,
+      "supportsPreview": false
+    }
+  ]
+}

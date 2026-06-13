@@ -1,0 +1,26 @@
+{
+  "name": "@linghun/providers",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "!dist/**/*.test.*", "!dist/**/tsconfig.tsbuildinfo"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/provider-client-runtime.ts --format esm --no-splitting --clean && tsc -p tsconfig.json --emitDeclarationOnly --noEmit false --tsBuildInfoFile dist/tsconfig.tsbuildinfo",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@linghun/core": "workspace:*",
+    "@linghun/shared": "workspace:*"
+  }
+}

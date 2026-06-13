@@ -1,0 +1,28 @@
+{
+  "name": "@linghun/cli",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "linghun": "./dist/main.js",
+    "Linghun": "./dist/main.js"
+  },
+  "files": ["dist", "bundled", "scripts"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup src/main.ts --format esm --clean",
+    "build:bundled-binaries": "node ../../scripts/bundle-cli-binaries.mjs --all-codebase-memory",
+    "prepack": "node ../../scripts/bundle-cli-binaries.mjs --all-codebase-memory",
+    "postinstall": "node scripts/postinstall.cjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@linghun/config": "workspace:*",
+    "@linghun/core": "workspace:*",
+    "@linghun/providers": "workspace:*",
+    "@linghun/shared": "workspace:*",
+    "@linghun/tui": "workspace:*"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "linghun-monorepo",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "linghun": "./apps/cli/dist/main.js",
+    "Linghun": "./apps/cli/dist/main.js"
+  },
+  "packageManager": "pnpm@10.10.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "scripts": {
+    "build": "corepack pnpm -r build",
+    "check": "biome check .",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "smoke:live-provider": "node scripts/live-provider-smoke.mjs",
+    "smoke:tui-stdin": "printf '帮我分析一下这个项目怎么部署，并生成报告在根目录下\\n/exit\\n' | corepack pnpm exec linghun",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "typecheck": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@linghun/cli": "workspace:*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.15.19",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.3"
+  }
+}

@@ -1,0 +1,2 @@
+export const prompt =
+  "WebSearch searches the web via Bing and returns structured results (title, URL, snippet). Use it when you need current information beyond your knowledge cutoff. Results are organic search listings — no ads, no injected content. Each result shows the page title, URL, and a content snippet. You should cite sources (with URLs) in your response when you use search results. Use allowed_domains/blocked_domains to filter results by hostname. Default returns up to 8 results.";
