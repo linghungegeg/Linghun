@@ -171,5 +171,5 @@ function pickColor(
 ): string | undefined {
   if (tone === "warning") return theme.warning ?? theme.status.fail;
   if (tone === "dim") return theme.dim ?? theme.muted;
-  return undefined;
+  return theme.brand;
 }

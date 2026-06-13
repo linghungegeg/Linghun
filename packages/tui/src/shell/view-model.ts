@@ -243,7 +243,9 @@ export function createShellViewModel(
             new Date(options.submittedStartedAt ?? Date.now()).toISOString(),
           ),
         }
-      : undefined);
+      : context.lastModelRequest
+        ? deriveBackgroundActivityFallback(context, language)
+        : undefined);
 
   // setup-needed: only surface as setupHint in task/pending mode (not home first-screen).
   // While the model setup flow is actively running (pendingModelSetup), the
@@ -1431,6 +1433,47 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     totalBytes: (context as { requestActivityToolBytes?: number }).requestActivityToolBytes,
     thinkingLabel: thinkingLabels[phase],
   };
+}
+
+/**
+ * When no explicit request activity exists but background agents/workflows/tools
+ * are still active, synthesize a fallback activity indicator so the user sees
+ * continuous feedback instead of a blank screen.
+ */
+function deriveBackgroundActivityFallback(
+  context: TuiContext,
+  language: Language,
+): TaskActivityView | undefined {
+  const runningAgents = (context.agents ?? []).filter((a) => a.status === "running");
+  const runningWorkflows = (context.workflows?.activeRuns ?? []).filter(
+    (r) => r.status === "running",
+  );
+  const activeRun = context.workflows?.activeRun;
+  const runningBgTasks = (context.backgroundTasks ?? []).filter((t) => t.status === "running");
+
+  if (runningAgents.length > 0) {
+    const text =
+      language === "en-US"
+        ? runningAgents.length === 1
+          ? `Waiting for agent ${runningAgents[0].displayName ?? runningAgents[0].addressableName ?? ""}…`
+          : `${runningAgents.length} agents still working…`
+        : runningAgents.length === 1
+          ? `等待子智能体 ${runningAgents[0].displayName ?? runningAgents[0].addressableName ?? ""}…`
+          : `${runningAgents.length} 个智能体仍在工作…`;
+    return { phase: "continuing", text, language };
+  }
+  if (runningWorkflows.length > 0 || (activeRun && activeRun.status === "running")) {
+    const text = language === "en-US" ? "Workflow running…" : "工作流运行中…";
+    return { phase: "continuing", text, language };
+  }
+  if (runningBgTasks.length > 0) {
+    const text =
+      language === "en-US"
+        ? `${runningBgTasks.length} background task(s) running…`
+        : `${runningBgTasks.length} 个后台任务运行中…`;
+    return { phase: "continuing", text, language };
+  }
+  return undefined;
 }
 
 /**

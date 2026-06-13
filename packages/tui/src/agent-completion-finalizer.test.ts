@@ -71,7 +71,7 @@ describe("agent-completion-finalizer", () => {
       completed: 1,
       evidenceRefs: ["ev-source-1"],
     });
-    expect(context.notifications?.[0]?.text).toContain("已回流");
+    expect(context.notifications?.[0]?.text).toContain("已完成");
   });
 
   it("keeps failed returns invalid until reported and does not equate them with verification pass", () => {
@@ -86,12 +86,58 @@ describe("agent-completion-finalizer", () => {
 
     const digest = formatAgentCompletionDigest(context);
     expect(notice.validity).toBe("invalid");
-    expect(digest).toContain("Agent 结果已回流：1 条待处理通知");
-    expect(digest).toContain("不要把回流结果直接等同于全部通过");
+    expect(digest).toContain("智能体结果：1 条待处理通知");
+    expect(digest).toContain("不要把结果直接等同于全部通过");
 
     markAgentCompletionNoticeReported(context, notice.id, "2026-01-01T00:00:03.000Z");
     expect(collectPendingAgentCompletionNotices(context)).toHaveLength(0);
     expect(formatAgentCompletionDigest(context)).toBeNull();
+  });
+
+  it("pushes a product block into the transcript for reviewable scrollback", () => {
+    const transcriptBlocks: Array<{ id: string; kind: string; status: string; title: string; summary: string }> = [];
+    const context = createContext();
+    (context as { pushTranscriptBlock?: (block: unknown) => void }).pushTranscriptBlock = (block) =>
+      transcriptBlocks.push(block as (typeof transcriptBlocks)[0]);
+
+    enqueueAgentCompletionNotice(context, {
+      agent: createAgent({ id: "agent-block", displayName: "reviewer" }),
+      status: "completed",
+      summary: "code review done",
+      evidenceRefs: ["ev-1"],
+      now: "2026-06-13T00:00:01.000Z",
+    });
+
+    expect(transcriptBlocks).toHaveLength(1);
+    expect(transcriptBlocks[0].kind).toBe("details");
+    expect(transcriptBlocks[0].status).toBe("pass");
+    expect(transcriptBlocks[0].title).toContain("reviewer");
+    expect(transcriptBlocks[0].summary).toContain("code review done");
+  });
+
+  it("does not push duplicate transcript block when updating an existing notice", () => {
+    const transcriptBlocks: unknown[] = [];
+    const context = createContext();
+    (context as { pushTranscriptBlock?: (block: unknown) => void }).pushTranscriptBlock = (block) =>
+      transcriptBlocks.push(block);
+
+    const agent = createAgent({ id: "agent-dup", displayName: "builder" });
+    enqueueAgentCompletionNotice(context, {
+      agent,
+      status: "completed",
+      summary: "first pass",
+      evidenceRefs: [],
+      now: "2026-06-13T00:00:01.000Z",
+    });
+    enqueueAgentCompletionNotice(context, {
+      agent,
+      status: "completed",
+      summary: "updated pass",
+      evidenceRefs: ["ev-2"],
+      now: "2026-06-13T00:00:02.000Z",
+    });
+
+    expect(transcriptBlocks).toHaveLength(1);
   });
 });
 

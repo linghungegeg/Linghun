@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { truncateDisplay } from "./startup-runtime.js";
+import type { ProductBlockViewModel } from "./shell/types.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type {
   AgentCompletionBatchSummary,
@@ -75,6 +76,9 @@ export function enqueueAgentCompletionNotice(
   state.notices = state.notices.slice(0, MAX_AGENT_COMPLETION_NOTICES);
   refreshAgentCompletionBatchSummaries(context, now);
   pushAgentCompletionNotification(context, notice);
+  if (!existing) {
+    pushAgentCompletionTranscriptBlock(context, notice);
+  }
   return notice;
 }
 
@@ -108,7 +112,7 @@ export function formatAgentCompletionDigest(context: TuiContext): string | null 
   const lines = [
     isEn
       ? `Agent results returned: ${pending.length} pending notice(s).`
-      : `Agent 结果已回流：${pending.length} 条待处理通知。`,
+      : `智能体结果：${pending.length} 条待处理通知。`,
     isEn
       ? `Trust: ${counts.valid} valid, ${counts.partial} partial, ${counts.invalid} invalid; source evidence is tracked separately from verification.`
       : `可信度：${counts.valid} 个有效，${counts.partial} 个部分有效，${counts.invalid} 个无效；源码/执行证据与验证结论分开标记。`,
@@ -129,7 +133,7 @@ export function formatAgentCompletionDigest(context: TuiContext): string | null 
   lines.push(
     isEn
       ? "Next: inspect /agents or /background before claiming all work passed."
-      : "下一步：查看 /agents 或 /background；不要把回流结果直接等同于全部通过。",
+      : "下一步：查看 /agents 或 /background；不要把结果直接等同于全部通过。",
   );
   return lines.join("\n");
 }
@@ -210,12 +214,51 @@ function pushAgentCompletionNotification(context: TuiContext, notice: AgentCompl
   });
 }
 
+function pushAgentCompletionTranscriptBlock(
+  context: TuiContext,
+  notice: AgentCompletionNotice,
+): void {
+  if (!context.pushTranscriptBlock) return;
+  const label = formatAgentLabel(notice);
+  const isEn = context.language === "en-US";
+  const statusMap: Record<AgentCompletionStatus, ProductBlockViewModel["status"]> = {
+    completed: "pass",
+    failed: "fail",
+    blocked: "blocked",
+    cancelled: "partial",
+    stale: "partial",
+  };
+  const title = isEn
+    ? `Agent ${label} — ${notice.status}`
+    : `子智能体 ${label} — ${notice.status === "completed" ? "已完成" : notice.status === "failed" ? "失败" : notice.status === "blocked" ? "被阻塞" : notice.status === "cancelled" ? "已取消" : "已结束"}`;
+  const block: ProductBlockViewModel = {
+    id: `agent-completion-${notice.agentId}-${Date.now()}`,
+    kind: "details",
+    status: statusMap[notice.status] ?? "info",
+    title,
+    summary: notice.summary || "",
+    keep: true,
+  };
+  context.pushTranscriptBlock(block);
+}
+
 function formatNotificationText(context: TuiContext, notice: AgentCompletionNotice): string {
   const label = formatAgentLabel(notice);
+  const summary = notice.summary ? `: ${notice.summary}` : "";
   if (context.language === "en-US") {
-    return truncateDisplay(`${label} returned: ${notice.status}/${notice.validity}.`, 150);
+    const verb =
+      notice.status === "completed" ? "completed" :
+      notice.status === "failed" ? "failed" :
+      notice.status === "blocked" ? "is blocked" :
+      notice.status === "cancelled" ? "was cancelled" : "finished";
+    return truncateDisplay(`Agent ${label} ${verb}${summary}`, 150);
   }
-  return truncateDisplay(`${label} 已回流：${notice.status}/${notice.validity}。`, 150);
+  const verb =
+    notice.status === "completed" ? "已完成" :
+    notice.status === "failed" ? "失败" :
+    notice.status === "blocked" ? "被阻塞" :
+    notice.status === "cancelled" ? "已取消" : "已结束";
+  return truncateDisplay(`子智能体 ${label} ${verb}${summary}`, 150);
 }
 
 function createBatchSummary(

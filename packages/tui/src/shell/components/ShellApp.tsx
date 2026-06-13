@@ -211,22 +211,34 @@ function TaskLayout({
   const cw = taskComposerMaxWidth(view.width);
   const contentWidth = Math.max(8, view.width - 4);
 
+  // Periodic re-render tick: when agent/workflow progress is visible, force
+  // re-renders so eviction timers fire and completed items disappear.
+  const [, setTick] = useState(0);
+  const hasProgress = !!(view.agentProgressTree || view.workflowProgressView);
+  useEffect(() => {
+    if (!hasProgress) return;
+    const timer = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, [hasProgress]);
+
   const staticBlocks = view.blocks.filter((b) => b.status !== "running");
   const dynamicBlocks = view.blocks.filter((b) => b.status === "running");
 
   return (
-    <Box flexDirection="column" width={view.width}>
-      {/* Static zone — completed blocks commit to terminal scrollback. */}
-      <Static items={staticBlocks}>
-        {(block) => (
-          <Box key={block.id} paddingX={2}>
-            <ProductBlock block={block} theme={theme} width={contentWidth} language={view.language} />
-          </Box>
-        )}
-      </Static>
+    <Box flexDirection="column" width={view.width} height={view.height}>
+      {/* Main content area — flexGrow fills available space above composer */}
+      <Box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
+        {/* Static zone — completed blocks commit to terminal scrollback. */}
+        <Static items={staticBlocks}>
+          {(block) => (
+            <Box key={block.id} paddingX={2}>
+              <ProductBlock block={block} theme={theme} width={contentWidth} language={view.language} />
+            </Box>
+          )}
+        </Static>
 
-      {/* Dynamic zone — keep natural height so native scrollback stays visible above the composer. */}
-      <Box flexDirection="column" paddingX={2}>
+        {/* Dynamic zone — keep natural height so native scrollback stays visible above the composer. */}
+        <Box flexDirection="column" paddingX={2}>
         {dynamicBlocks.length > 0 ? (
           <Box flexDirection="column">
             {dynamicBlocks.map((block) => (
@@ -274,6 +286,7 @@ function TaskLayout({
           </Box>
         ) : null}
       </Box>
+      </Box>
 
       {/* Composer band — pinned to terminal bottom */}
       <Box flexShrink={0} flexDirection="column">
@@ -317,21 +330,6 @@ function TaskLayout({
           </Box>
         ) : null}
 
-        <Box flexDirection="column" width={cw} paddingTop={1}>
-          <Composer view={view} onInput={controller.onInput} capability={capability} />
-        </Box>
-
-        {view.taskFooter ? (
-          <StatusFooter
-            footer={view.taskFooter}
-            theme={theme}
-            width={view.width}
-            language={view.language}
-            modelDim={view.taskFooter.modelDim}
-            cacheTone={view.taskFooter.cacheTone}
-          />
-        ) : null}
-
         {view.agentProgressTree ? (
           <Box width={view.width} paddingX={2}>
             <AgentProgressTree
@@ -352,6 +350,21 @@ function TaskLayout({
               language={view.language}
             />
           </Box>
+        ) : null}
+
+        <Box flexDirection="column" width={cw} paddingTop={1}>
+          <Composer view={view} onInput={controller.onInput} capability={capability} />
+        </Box>
+
+        {view.taskFooter ? (
+          <StatusFooter
+            footer={view.taskFooter}
+            theme={theme}
+            width={view.width}
+            language={view.language}
+            modelDim={view.taskFooter.modelDim}
+            cacheTone={view.taskFooter.cacheTone}
+          />
         ) : null}
       </Box>
     </Box>

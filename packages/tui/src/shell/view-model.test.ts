@@ -4080,11 +4080,11 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).toContain("<Static items={staticBlocks}>");
     expect(body).toContain("<ProductBlock");
     expect(body).toContain("<Composer view={view}");
-    expect(body).toContain('<Box flexDirection="column" width={view.width}>');
+    expect(body).toContain('<Box flexDirection="column" width={view.width} height={view.height}>');
     expect(body).toContain('<Box flexDirection="column" paddingX={2}>');
-    expect(body).not.toContain(
-      '<Box flexDirection="column" width={view.width} height={view.height}>',
-    );
+    expect(body).toContain("flexGrow={1}");
+    expect(body).toContain("minHeight={0}");
+    expect(body).toContain('overflow="hidden"');
     expect(body).not.toContain('flexGrow={1} overflow="hidden" paddingX={2}');
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
@@ -4133,8 +4133,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).toContain("block={view.taskRuntimeSummary}");
     expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("<Composer view={view}"));
     expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
-    expect(body.indexOf("<AgentProgressTree")).toBeGreaterThan(body.indexOf("<StatusFooter"));
-    expect(body.indexOf("<WorkflowProgressView")).toBeGreaterThan(body.indexOf("<StatusFooter"));
+    expect(body.indexOf("<AgentProgressTree")).toBeLessThan(body.indexOf("<Composer view={view}"));
+    expect(body.indexOf("<WorkflowProgressView")).toBeLessThan(body.indexOf("<Composer view={view}"));
     expect(body).not.toContain(
       "`${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`",
     );
@@ -5038,6 +5038,83 @@ describe("D.13Q-UX Real Smoke Fix v2 — A. submitted thinking activity fallback
     });
     expect(view.activity?.phase).toBe("tool_running");
     expect(view.activity?.text).toBe("正在运行 Bash…");
+  });
+});
+
+describe("deriveBackgroundActivityFallback — request activity cleared but work still active", () => {
+  const fakeLastModelRequest = { phase: "idle", endedAt: "2026-01-01T00:00:00.000Z" };
+
+  it("running agent with lastModelRequest → activity shows agent waiting", () => {
+    const ctx = createContext({
+      agents: [
+        { id: "a1", displayName: "reviewer", status: "running", mailbox: [], startedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      backgroundTasks: [],
+      lastModelRequest: fakeLastModelRequest,
+    } as unknown as Partial<TuiContext>);
+    const view = createShellViewModel(ctx, { width: 80 });
+    expect(view.activity).toBeDefined();
+    expect(view.activity!.text).toContain("reviewer");
+    expect(view.activity!.phase).toBe("continuing");
+  });
+
+  it("multiple running agents → activity shows count", () => {
+    const ctx = createContext({
+      agents: [
+        { id: "a1", status: "running", mailbox: [], startedAt: "2026-01-01T00:00:00.000Z" },
+        { id: "a2", status: "running", mailbox: [], startedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      backgroundTasks: [],
+      lastModelRequest: fakeLastModelRequest,
+    } as unknown as Partial<TuiContext>);
+    const view = createShellViewModel(ctx, { width: 80 });
+    expect(view.activity).toBeDefined();
+    expect(view.activity!.text).toContain("2");
+  });
+
+  it("running workflow → activity shows workflow running", () => {
+    const ctx = createContext({
+      agents: [],
+      backgroundTasks: [],
+      workflows: { activeRuns: [{ id: "w1", status: "running", steps: [] }] },
+      lastModelRequest: fakeLastModelRequest,
+    } as unknown as Partial<TuiContext>);
+    const view = createShellViewModel(ctx, { width: 80 });
+    expect(view.activity).toBeDefined();
+    expect(view.activity!.text).toContain("工作流");
+  });
+
+  it("running background tasks → activity shows bg task count", () => {
+    const ctx = createContext({
+      agents: [],
+      backgroundTasks: [{ status: "running" }, { status: "running" }],
+      lastModelRequest: fakeLastModelRequest,
+    } as unknown as Partial<TuiContext>);
+    const view = createShellViewModel(ctx, { width: 80 });
+    expect(view.activity).toBeDefined();
+    expect(view.activity!.text).toContain("2");
+    expect(view.activity!.text).toContain("后台任务");
+  });
+
+  it("no active items + no lastModelRequest → activity undefined, busy=false", () => {
+    const ctx = createContext({
+      agents: [],
+      backgroundTasks: [],
+      lastModelRequest: undefined,
+    } as unknown as Partial<TuiContext>);
+    const view = createShellViewModel(ctx, { width: 80 });
+    expect(view.activity).toBeUndefined();
+    expect(view.composer.busy).toBe(false);
+  });
+
+  it("all agents completed + lastModelRequest → no spurious activity", () => {
+    const ctx = createContext({
+      agents: [{ id: "a1", status: "completed", mailbox: [], startedAt: "2026-01-01T00:00:00.000Z" }],
+      backgroundTasks: [{ status: "completed" }],
+      lastModelRequest: fakeLastModelRequest,
+    } as unknown as Partial<TuiContext>);
+    const view = createShellViewModel(ctx, { width: 80 });
+    expect(view.activity).toBeUndefined();
   });
 });
 
