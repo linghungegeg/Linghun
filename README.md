@@ -1,14 +1,27 @@
+<div align="center">
+
 # Linghun
 
-Linghun 是一个本地优先、证据优先的 AI 编程终端。
+**本地优先、证据优先的 AI 编程终端**
 
-你可以把它理解成：给大模型装上一套工程化外骨骼。模型负责理解、推理和生成；Linghun 负责把模型接到真实项目、真实工具、真实权限、真实验证和真实上下文里。
+把大模型接到真实项目、真实工具、真实权限、真实验证和真实上下文里。
+
+[English README](./README.en.md) · [中文白皮书](./WHITEPAPER.md) · [English Whitepaper](./WHITEPAPER.en.md) · [App Bridge](./docs/developers/capability-runtime-app-bridge.md)
+
+```bash
+npm install -g @linghun/cli
+linghun
+```
+
+</div>
+
+---
+
+Linghun 可以理解成：给大模型装上一套工程化外骨骼。模型负责理解、推理和生成；Linghun 负责把模型接到真实项目、真实工具、真实权限、真实验证和真实上下文里。
 
 普通聊天工具可以回答“应该怎么改”。Linghun 更关心另一件事：它有没有真的读过相关代码、有没有真的改对文件、有没有真的跑过验证、有没有把不确定的地方说清楚。
 
 这就是 Linghun 反幻觉系统的价值：不是让模型少说错话那么简单，而是把“读事实、看证据、区分验证范围、拒绝空口完成、说明不确定性”变成运行时约束。模型仍然会推理和生成，但关键工程结论不能只靠模型自信。
-
-完整设计见：[中文白皮书](./WHITEPAPER.md) / [English Whitepaper](./WHITEPAPER.en.md)。
 
 ## 它能帮你做什么
 
