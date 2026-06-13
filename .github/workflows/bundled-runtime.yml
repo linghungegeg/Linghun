@@ -1,0 +1,78 @@
+name: Bundled runtime binaries
+
+on:
+  workflow_dispatch:
+
+jobs:
+  native-runner:
+    name: native-runner ${{ matrix.platform_arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform_arch: win32-x64
+            binary: linghun-native-runner.exe
+          - os: ubuntu-latest
+            platform_arch: linux-x64
+            binary: linghun-native-runner
+          - os: macos-13
+            platform_arch: darwin-x64
+            binary: linghun-native-runner
+          - os: macos-14
+            platform_arch: darwin-arm64
+            binary: linghun-native-runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --manifest-path prototypes/native-runner/Cargo.toml
+      - shell: bash
+        run: |
+          mkdir -p "runtime-artifacts/native-runner/${{ matrix.platform_arch }}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp prototypes/native-runner/target/release/linghun-native-runner-prototype.exe "runtime-artifacts/native-runner/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+          else
+            cp prototypes/native-runner/target/release/linghun-native-runner-prototype "runtime-artifacts/native-runner/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+            chmod +x "runtime-artifacts/native-runner/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-runner-${{ matrix.platform_arch }}
+          path: runtime-artifacts/native-runner/${{ matrix.platform_arch }}
+
+  assemble:
+    name: assemble bundled runtime
+    runs-on: ubuntu-latest
+    needs: native-runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.10.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-runner-*
+          path: runtime-artifacts/native-runner
+      - shell: bash
+        run: |
+          set -euo pipefail
+          for dir in runtime-artifacts/native-runner/native-runner-*; do
+            platform_arch="${dir##*/native-runner-}"
+            mkdir -p "runtime-artifacts/native-runner/${platform_arch}"
+            find "$dir" -maxdepth 1 -type f -exec cp {} "runtime-artifacts/native-runner/${platform_arch}/" \;
+          done
+      - run: corepack pnpm install --frozen-lockfile
+      - run: node scripts/bundle-cli-binaries.mjs --skip-native-runner --native-runner-artifacts runtime-artifacts/native-runner --all-codebase-memory
+      - run: corepack pnpm --filter @linghun/cli build
+      - run: corepack pnpm --filter @linghun/cli typecheck
+      - run: corepack pnpm --filter @linghun/cli pack --pack-destination dist-pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linghun-cli-bundled-runtime
+          path: |
+            apps/cli/bundled
+            dist-pack/*.tgz

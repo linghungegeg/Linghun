@@ -21,13 +21,15 @@ When a real binary is vendored here, a LICENSE file must accompany it.
 
 ## Status
 
-Windows x64 currently ships a real `codebase-memory-mcp` binary:
+Linghun currently ships `codebase-memory-mcp` v0.8.1 binaries for:
 
 ```
+bundled/codebase-memory/darwin-arm64/codebase-memory-mcp
+bundled/codebase-memory/darwin-x64/codebase-memory-mcp
+bundled/codebase-memory/linux-x64/codebase-memory-mcp
 bundled/codebase-memory/win32-x64/codebase-memory-mcp.exe
 ```
 
-Its license is included beside the binary. Other platforms still require their
-matching binary to be added before release. The resolution logic in `@linghun/tui`
-will gracefully fall back to managed/PATH/missing when no bundled binary is
-present for the current platform.
+License and third-party notices are included beside each binary. The resolution
+logic in `@linghun/tui` will gracefully fall back to managed/PATH/missing when
+no bundled binary is present for the current platform.

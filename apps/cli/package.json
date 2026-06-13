@@ -6,11 +6,12 @@
     "linghun": "./dist/main.js",
     "Linghun": "./dist/main.js"
   },
-  "files": ["dist", "bundled"],
+  "files": ["dist", "bundled", "scripts"],
   "scripts": {
     "build": "tsup src/main.ts --format esm --clean",
-    "build:bundled-binaries": "node ../../scripts/bundle-cli-binaries.mjs",
-    "prepack": "node ../../scripts/bundle-cli-binaries.mjs",
+    "build:bundled-binaries": "node ../../scripts/bundle-cli-binaries.mjs --all-codebase-memory",
+    "prepack": "node ../../scripts/bundle-cli-binaries.mjs --all-codebase-memory",
+    "postinstall": "node scripts/postinstall.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

@@ -27,6 +27,7 @@ Windows x64 currently ships a real Linghun native-runner binary:
 bundled/native-runner/win32-x64/linghun-native-runner.exe
 ```
 
-Other platforms still require their matching binary to be added before release.
-The resolution logic in `@linghun/tui` will gracefully fall back to Node/TUI
-when no bundled native-runner binary is present for the current platform.
+Linux x64, Darwin arm64, and Darwin x64 native-runner binaries are built by the
+bundled-runtime CI workflow and copied into the same layout before publishing.
+The resolution logic in `@linghun/tui` will gracefully fall back to Node/TUI when
+no bundled native-runner binary is present for the current platform.
