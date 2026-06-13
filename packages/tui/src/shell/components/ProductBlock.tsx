@@ -85,40 +85,32 @@ export function ProductBlock({
   // P0-3：command 显式保持 marginBottom=0，紧贴下方 tool/output 块。
   // P2-3：command 行额外加 marginTop=1，与上方块拉开 1 行视觉间隔，
   // 不引入全局序号或时间戳（避免依赖外部状态 / 假数据）。
-  if (block.kind === "command") {
-    // D.13Q-UX Real Smoke Fix v2 — 用户普通消息（messageKind="user_text"）
-    // 与 slash command transcript 的 marker / 配色区分：
-    //   slash    → ❯ + accent 文本（命令意图）
-    //   user_text → › + 默认色文本（对话语义）
-    // 对齐 CCB：普通用户输入不走 Markdown，不把 `inline code` 或标点染成诊断色；
-    // slash command 仍走独立 command transcript 样式。
-    const isUserText = block.messageKind === "user_text";
-    if (isUserText) {
-      const body = (block.fullText ?? block.title ?? "").trim();
-      if (!body) return null;
-      return (
-        <Box marginTop={1} marginBottom={1} flexDirection="row">
-          <Text color={theme.inactive ?? theme.muted}>│ </Text>
-          <Box flexDirection="column">
-            {wrapText(body, Math.max(8, width - 2)).map((line, idx) => (
-              <Text
-                key={`${idx}-${line}`}
-                backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}
-              >
-                {line}
-              </Text>
-            ))}
-          </Box>
+  if (block.kind === "user" || (block.kind === "command" && block.messageKind === "user_text")) {
+    const body = (block.fullText ?? block.title ?? "").trim();
+    if (!body) return null;
+    return (
+      <Box marginTop={1} marginBottom={1} flexDirection="row">
+        <Text color={theme.inactive ?? theme.muted}>│ </Text>
+        <Box flexDirection="column">
+          {wrapText(body, Math.max(8, width - 2)).map((line, idx) => (
+            <Text
+              key={`${idx}-${line}`}
+              backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}
+            >
+              {line}
+            </Text>
+          ))}
         </Box>
-      );
-    }
-    const marker = isUserText ? "› " : "❯ ";
-    const textColor = isUserText ? undefined : theme.accent;
+      </Box>
+    );
+  }
+
+  if (block.kind === "command") {
     return (
       <Box marginTop={1} marginBottom={0}>
         <Text>
-          <Text color={theme.inactive ?? theme.muted}>{marker}</Text>
-          <Text color={textColor}>{fitText(block.title, Math.max(8, width - 2))}</Text>
+          <Text color={theme.inactive ?? theme.muted}>{"❯ "}</Text>
+          <Text color={theme.accent}>{fitText(block.title, Math.max(8, width - 2))}</Text>
         </Text>
       </Box>
     );

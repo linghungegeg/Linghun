@@ -4755,9 +4755,9 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
   it("ProductBlock keeps user_text and assistant_text visually layered", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ProductBlock.tsx"), "utf8");
-    const userStart = source.indexOf('block.messageKind === "user_text"');
+    const userStart = source.indexOf('block.kind === "user"');
     const messageStart = source.indexOf("isMessageKind(block.messageKind)");
-    const userBranch = source.slice(userStart, source.indexOf("const marker", userStart));
+    const userBranch = source.slice(userStart, source.indexOf('if (block.kind === "command")', userStart));
     const messageBranch = source.slice(messageStart, source.indexOf('if (block.messageKind === "assistant_thinking")', messageStart));
 
     // user_text: plain text, no Markdown, dim separator + wrapText + background fill
@@ -5159,7 +5159,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — C. user transcript block factory", () =
   it("createUserTextBlock 产出 messageKind=user_text 的 keep transcript 行", async () => {
     const presenterModule = await import("./models/command-transcript-presenter.js");
     const block = presenterModule.createUserTextBlock(7, "  请帮我看下当前阶段任务  ");
-    expect(block.kind).toBe("command");
+    expect(block.kind).toBe("user");
     expect(block.messageKind).toBe("user_text");
     expect(block.keep).toBe(true);
     expect(block.title).toBe("请帮我看下当前阶段任务");

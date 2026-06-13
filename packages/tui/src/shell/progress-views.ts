@@ -12,8 +12,8 @@ import type {
 
 const MAX_LIST_ITEMS = 8;
 const MAX_DETAIL_LINES = 12;
-/** Agent eviction delay: completed agents are removed from the tree immediately. */
-const AGENT_EVICTION_DELAY_MS = 0;
+/** Agent eviction delay: completed agents stay visible briefly (3s) then auto-dismiss. */
+const AGENT_EVICTION_DELAY_MS = 3_000;
 /** Workflow eviction delay: completed/failed workflows stay visible for 8s then auto-dismiss. */
 const WORKFLOW_EVICTION_DELAY_MS = 8_000;
 
@@ -81,7 +81,9 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
       id: agent.id,
       branch: index === visible.length - 1 ? "last" : "middle",
       name: agent.displayName ?? agent.addressableName ?? agent.id,
-      status: agent.status,
+      status: agent.lastTerminalStatus === "completed" && agent.status === "idle"
+        ? "completed"
+        : agent.status,
       activity: agent.activitySummary ?? agent.activeTask?.summary ?? agent.lastResultSummary,
       elapsed: typeof agent.startedAt === "string" ? formatElapsedSince(agent.startedAt, now) : undefined,
       toolUses: agent.mailbox.length,
@@ -95,7 +97,10 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
 }
 
 export function buildTaskListView(context: TuiContext): TaskListView | undefined {
-  const todos = smartSlice(context.tools?.todos ?? [], MAX_LIST_ITEMS, (todo) => todo.status === "in_progress");
+  const allTodos = context.tools?.todos ?? [];
+  const activeTodos = allTodos.filter((todo) => todo.status !== "completed");
+  if (activeTodos.length === 0) return undefined;
+  const todos = smartSlice(activeTodos, MAX_LIST_ITEMS, (todo) => todo.status === "in_progress");
   if (todos.visible.length === 0) return undefined;
   return {
     rows: todos.visible.map((todo) => ({

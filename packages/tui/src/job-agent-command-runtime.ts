@@ -410,6 +410,17 @@ function enqueueAgentCompletionReturn(
     parentSessionId,
     workflowRunId,
   });
+  const targetSession = parentSessionId ?? agent.parentSessionId ?? context.sessionId;
+  if (targetSession) {
+    const label = agent.displayName ?? agent.type ?? agent.id;
+    context.store.appendEvent(targetSession, {
+      type: "system_event",
+      id: randomUUID(),
+      level: status === "failed" || status === "cancelled" ? "warning" : "info",
+      message: `agent_completion:${agent.id}; status=${status}; label=${label}; summary=${truncateDisplay(summary, 120)}`,
+      createdAt: new Date().toISOString(),
+    }).catch(() => {});
+  }
 }
 
 async function appendAgentLifecycleSystemEvent(

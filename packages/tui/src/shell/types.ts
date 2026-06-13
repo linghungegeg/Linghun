@@ -15,7 +15,8 @@ export type ProductBlockKind =
   | "tool"
   | "error"
   | "details"
-  | "command";
+  | "command"
+  | "user";
 
 export type ProductBlockStatus = "info" | "running" | "pass" | "partial" | "fail" | "blocked";
 

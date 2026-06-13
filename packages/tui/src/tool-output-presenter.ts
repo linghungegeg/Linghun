@@ -757,9 +757,7 @@ function createSummaryFirstPreview(
           : `改动文件 ${changedFiles.length}`,
       );
     }
-    if (readGuard) {
-      stats.push(language === "en-US" ? "read protection enabled" : "读取保护已启用");
-    }
+    // readGuard status is shown in footer; omit from per-tool summary to reduce noise.
   }
   // Run 3 C — Ctrl+O 提示必须和真实可展开内容绑定。
   // 只有当原始输出确实有被隐藏的重要内容时才显示折叠提示。

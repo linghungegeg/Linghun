@@ -110,7 +110,7 @@ export function createUserTextBlock(sequence: number, text: string, timestamp?: 
   const firstLine = trimmed.split("\n").find((line) => line.trim()) ?? trimmed;
   return {
     id: buildUserTextBlockId(sequence, trimmed),
-    kind: "command",
+    kind: "user",
     status: "info",
     title: firstLine,
     summary: "",
