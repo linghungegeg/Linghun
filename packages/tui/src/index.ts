@@ -2677,6 +2677,9 @@ async function runInkShell(
       // P1-6: immediately enter pending state to prevent home flicker
       submittedPending = true;
       submittedPendingStartedAt = Date.now();
+      if (event.text.trim().length > 0) {
+        dismissCurrentFailureSuggestion(context, blocks);
+      }
       if (event.type === "submit" && !event.text.startsWith("/")) {
         context.commandPanelState = undefined;
         context.helpPanelState = undefined;
@@ -2775,6 +2778,18 @@ async function runInkShell(
   } finally {
     if (activityTicker) clearInterval(activityTicker);
   }
+}
+
+function dismissCurrentFailureSuggestion(
+  context: TuiContext,
+  blocks: ProductBlockViewModel[],
+): void {
+  const latestFailure = [...blocks]
+    .reverse()
+    .find((block) => block.status === "fail" || block.status === "blocked");
+  if (!latestFailure) return;
+  if (!context.handledTaskSuggestionIds) context.handledTaskSuggestionIds = new Set();
+  context.handledTaskSuggestionIds.add(`tool_error:details:${latestFailure.id}`);
 }
 
 async function processTuiLine(

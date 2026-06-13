@@ -62,6 +62,42 @@ describe("Phase 05 core tools", () => {
     );
   });
 
+  it("treats empty WebSearch domain filters as undefined", () => {
+    expect(
+      builtInTools.WebSearch.validateInput({
+        query: "linghun",
+        allowed_domains: [],
+        blocked_domains: [],
+      }),
+    ).toEqual({
+      query: "linghun",
+      num_results: 8,
+      allowed_domains: undefined,
+      blocked_domains: undefined,
+    });
+
+    expect(
+      builtInTools.WebSearch.validateInput({
+        query: "linghun",
+        allowed_domains: [],
+        blocked_domains: ["example.com"],
+      }),
+    ).toEqual({
+      query: "linghun",
+      num_results: 8,
+      allowed_domains: undefined,
+      blocked_domains: ["example.com"],
+    });
+
+    expect(() =>
+      builtInTools.WebSearch.validateInput({
+        query: "linghun",
+        allowed_domains: ["docs.example.com"],
+        blocked_domains: ["example.com"],
+      }),
+    ).toThrow("allowed_domains 和 blocked_domains 不能同时使用");
+  });
+
   it("reads, searches, edits, tracks todo, runs bash, and summarizes diff", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const filePath = join(project, "sample.txt");

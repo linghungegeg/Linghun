@@ -14874,8 +14874,8 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/grep needle src", context, output);
     await handleSlashCommand("/glob *.txt src", context, output);
 
-    expect(output.text).toContain("主输出已隐藏 2 条 Todo");
-    expect(output.text).toContain("输出已折叠，按 Ctrl+O 展开。");
+    expect(output.text).toContain("... 另有 10 项在详情中。");
+    expect(output.text).not.toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(output.text).toContain("120 行");
     expect(output.text).toContain("90 条结果");
     expect(output.text).not.toContain("详情：用 /details output <id>");
@@ -14908,11 +14908,10 @@ describe("Phase 06 TUI slash commands", () => {
       "ev-edit-1",
     );
 
-    expect(formatted).toContain("Edit：");
+    expect(formatted).toContain("Edit(**sample.txt**) +1 -1");
     expect(formatted).toContain("补丁 +1 -1");
-    expect(formatted).toContain("读取保护已启用");
     expect(formatted).not.toContain("expectedHash");
-    expect(formatted).toContain("输出已折叠，按 Ctrl+O 展开。");
+    expect(formatted).not.toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(formatted).not.toContain("细节省略");
     expect(formatted).not.toContain("operation: Edit");
     expect(formatted).not.toContain("ev-edit-1");
@@ -14932,11 +14931,9 @@ describe("Phase 06 TUI slash commands", () => {
       "ev-bash-1",
     );
 
-    expect(formatted).toContain("Command exited");
+    expect(formatted).toContain("Bash ✓");
     expect(formatted).toContain("50 line(s)");
-    expect(formatted).toContain("exit code 0");
-    expect(formatted).toContain("Output folded. Press Ctrl+O to expand.");
-    expect(formatted).toContain("Command exited 0");
+    expect(formatted).not.toContain("Output folded. Press Ctrl+O to expand.");
     expect(formatted).not.toContain("Primary output is summary-first");
     expect(formatted).not.toContain("Full log: .linghun/logs/tools/bash-test.log");
     expect(formatted).not.toContain("Evidence: ev-bash-1");
@@ -14958,7 +14955,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     expect(formatted).toContain("疑似编码问题");
-    expect(formatted).toContain("输出已折叠，按 Ctrl+O 展开。");
+    expect(formatted).not.toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(formatted).not.toContain("完整日志：.linghun/logs/tools/bash-mojibake.log");
     expect(formatted).not.toContain("Ã¤Â¸Â­Ã¦Â–Â‡");
   });
@@ -20090,7 +20087,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Write：");
     expect(await readFile(join(project, "report.md"), "utf8")).toBe("final");
     expect(output.text).toContain("命令已退出");
-    expect(output.text).toContain("输出已折叠，按 Ctrl+O 展开。");
+    expect(output.text).not.toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("Cache status");

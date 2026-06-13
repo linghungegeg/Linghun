@@ -633,8 +633,12 @@ function validateWebSearchInput(input: unknown): WebSearchInput {
   const record = validateRecord(input, "WebSearch");
   const query = readString(record, "query", "WebSearch");
   const num_results = readOptionalPositiveInteger(record, "num_results", "WebSearch") ?? 8;
-  const allowed_domains = readOptionalStringArray(record, "allowed_domains", "WebSearch");
-  const blocked_domains = readOptionalStringArray(record, "blocked_domains", "WebSearch");
+  const rawAllowedDomains = readOptionalStringArray(record, "allowed_domains", "WebSearch");
+  const rawBlockedDomains = readOptionalStringArray(record, "blocked_domains", "WebSearch");
+  const allowed_domains =
+    rawAllowedDomains && rawAllowedDomains.length > 0 ? rawAllowedDomains : undefined;
+  const blocked_domains =
+    rawBlockedDomains && rawBlockedDomains.length > 0 ? rawBlockedDomains : undefined;
   if (allowed_domains && blocked_domains) {
     throw new Error("WebSearch: allowed_domains 和 blocked_domains 不能同时使用。");
   }

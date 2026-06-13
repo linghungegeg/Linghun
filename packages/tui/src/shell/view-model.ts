@@ -1046,13 +1046,44 @@ function stripEmbeddedFoldHint(text: string): { text: string; stripped: boolean 
   let stripped = false;
   const kept = lines.filter((line) => {
     const trimmed = line.replace(/^[-\s]+/, "").trim();
-    if (EMBEDDED_FOLD_HINTS.includes(trimmed)) {
+    if (
+      EMBEDDED_FOLD_HINTS.includes(trimmed) ||
+      /^\[stdout\]\s*\.\.\.\s*(?:更多输出已隐藏；按 Ctrl\+O 展开。|more output hidden; press Ctrl\+O to expand\.)$/iu.test(
+        trimmed,
+      )
+    ) {
       stripped = true;
       return false;
     }
     return true;
   });
   return { text: kept.join("\n").trim(), stripped };
+}
+
+function hasPresenterHiddenSummary(text: string): boolean {
+  if (/^\s*\.\.\.\s*(?:另有 \d+ 项在详情中。|\d+ more item\(s\) in details\.)/mu.test(text)) {
+    return true;
+  }
+  const firstLine = text.split(/\r?\n/u).find((line) => line.trim().length > 0) ?? "";
+  if (/^(?:Read\(|Read\b|读取)/u.test(firstLine)) {
+    const readTotalMatch = text.match(/(?:总计|total)\s+(\d+)\s+(?:行|line(?:\(s\))?)/iu);
+    if (readTotalMatch) {
+      const readTotal = Number(readTotalMatch[1]);
+      return Number.isFinite(readTotal) && readTotal > 100;
+    }
+  }
+  const statMatch = text.match(
+    /^[-\s]*(?:(?:窗口|window)\s+(\d+)\/(\d+)\s+(?:行|line\(s\))|(\d+)\s+(?:行|line\(s\)))/mu,
+  );
+  if (!statMatch) return false;
+  const shown = Number(statMatch[1] ?? statMatch[3]);
+  const total = statMatch[2] ? Number(statMatch[2]) : shown;
+  if (!Number.isFinite(shown) || !Number.isFinite(total)) return false;
+  if (/^(?:Bash\(|Bash\b)/u.test(firstLine)) return total > 5;
+  if (/^(?:Read\(|Read\b|读取)/u.test(firstLine)) return total > 100 || shown < total;
+  if (/^(?:Grep\b|Glob\b|找到\b|Found\b)/u.test(firstLine)) return total > 0;
+  if (/^(?:Write|Edit|MultiEdit)(?:\(|\b)/u.test(firstLine)) return true;
+  return false;
 }
 
 export function createOutputBlock(
@@ -1094,6 +1125,7 @@ export function createOutputBlock(
   const toolResultLike = isToolResultLike(normalized);
   const hasMore =
     explicitFold ||
+    hasPresenterHiddenSummary(normalized) ||
     (toolResultLike &&
       normalized.length > 0 &&
       (nonEmptyLineCount >= 6 || normalized.length > summary.length + 16));

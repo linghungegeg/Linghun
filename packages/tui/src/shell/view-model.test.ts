@@ -19,7 +19,10 @@ import {
   formatComposerRenderLines,
   handleComposerInput,
 } from "./components/Composer.js";
-import { splitStreamingMarkdownForRender } from "./components/MessageMarkdown.js";
+import {
+  __testSplitRawDiffSections,
+  splitStreamingMarkdownForRender,
+} from "./components/MessageMarkdown.js";
 import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
 import { detectTerminalCapability, resetTerminalCapabilityCache } from "./terminal-capability.js";
@@ -1910,9 +1913,36 @@ describe("D.12C — Composer cursor alignment closure", () => {
     expect(cursorCol).toBe(6);
   });
 
+  it("Composer cursor row keeps home text anchor on the input row", () => {
+    expect(
+      composerCursorAnchorRowOffset({
+        textAnchorRowBase: 0,
+        permissionActive: false,
+        permissionActionCount: 0,
+        showSuggestions: false,
+        slashCandidateCount: 0,
+        cursorRow: 0,
+      }),
+    ).toBe(0);
+  });
+
+  it("Composer cursor row keeps task text anchor one row below the border", () => {
+    expect(
+      composerCursorAnchorRowOffset({
+        textAnchorRowBase: 1,
+        permissionActive: false,
+        permissionActionCount: 0,
+        showSuggestions: false,
+        slashCandidateCount: 0,
+        cursorRow: 0,
+      }),
+    ).toBe(1);
+  });
+
   it("Composer cursor row includes visible slash suggestion rows", () => {
     expect(
       composerCursorAnchorRowOffset({
+        textAnchorRowBase: 1,
         permissionActive: false,
         permissionActionCount: 0,
         showSuggestions: true,
@@ -5654,9 +5684,7 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     const output = __testCreateShellBlockOutput(ctx, blocks) as unknown as {
       writeLocalCommandOutputLine?: (text: string) => void;
     };
-    output.writeLocalCommandOutputLine?.(
-      "Tool Bash completed\n- 40 行\n- 输出已折叠，按 Ctrl+O 展开。",
-    );
+    output.writeLocalCommandOutputLine?.("Tool Bash completed\n- 40 行");
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.messageKind).toBe("local_command_output");
@@ -6546,6 +6574,27 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(source).toContain("wrapText(line, effectiveWrapWidth)");
   });
 
+  it("MessageMarkdown routes raw unfenced diffs to StructuredDiff and drops Git CRLF advisory noise", () => {
+    const segments = __testSplitRawDiffSections(
+      [
+        "下面是改动：",
+        "[stderr] warning: in the working copy of 'app.js', LF will be replaced by CRLF the next time Git touches it",
+        "new file mode 100644",
+        "--- /dev/null",
+        "+++ b/app.js",
+        "+function add(...values) {",
+        "+  return values.reduce((sum, value) => sum + value, 0);",
+        "+}",
+        "",
+        "以上是结果。",
+      ].join("\n"),
+    );
+
+    expect(segments.map((segment) => segment.kind)).toEqual(["markdown", "diff", "markdown"]);
+    expect(segments[1]?.text).toContain("+++ b/app.js");
+    expect(segments.map((segment) => segment.text).join("\n")).not.toContain("LF will be replaced");
+  });
+
   it("Phase R2: two adjacent read/search tool outputs stay separate", () => {
     const blocks: ProductBlockViewModel[] = [
       createOutputBlock("Read(src/a.ts)", "zh-CN", "read-a"),
@@ -6648,15 +6697,17 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
 
 describe("D.14D explicit details summary-first panel", () => {
   it("D.14D-R2 P3-2: end-to-end presenter→block 同一工具输出块只剩一次 Ctrl+O（回归锁定）", () => {
-    // CLOSED_BY_D14D_R 复核：真实 formatToolOutput 产出（含内嵌折叠提示）经
-    // createOutputBlock 装配后，ink 主屏渲染层（fullText + nextAction）只出现一次 Ctrl+O。
+    // CLOSED_BY_D14D_R 复核：真实 formatToolOutput 正文不再携带折叠提示；
+    // createOutputBlock 装配后，ink 主屏只通过 nextAction 出现一次 Ctrl+O。
+    const bashStdout = Array.from({ length: 8 }, (_, index) => `bash line ${index + 1}`).join(
+      "\n",
+    );
     const presenterBody = formatToolOutput(
-      "Read",
-      { text: "x\n".repeat(40), data: { lines: 40 }, truncated: true },
+      "Bash",
+      { text: bashStdout, data: { exitCode: 0, lines: 8 } },
       "zh-CN",
     );
-    // 源码事实：presenter 自身不再双重打印（同一字符串只出现一次）。
-    expect(presenterBody.match(/Ctrl\+O/g)?.length).toBe(1);
+    expect(presenterBody).not.toContain("Ctrl+O");
     const block = createOutputBlock(presenterBody, "zh-CN", "out-e2e");
     expect(block.fullText).not.toContain("输出已折叠");
     expect(block.nextAction).toContain("Ctrl+O");
@@ -6685,6 +6736,32 @@ describe("D.14D explicit details summary-first panel", () => {
     ].join("\n");
     const block = createOutputBlock(body, "en-US", "out-fold-en");
     expect(block.fullText).not.toContain("Output folded");
+    expect(block.nextAction).toContain("Ctrl+O");
+    const rendered = `${block.fullText ?? ""}\n${block.nextAction ?? ""}`;
+    expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);
+  });
+
+  it("legacy stdout hidden hint 被清洗，Ctrl+O 只由 nextAction 渲染", () => {
+    const body = [
+      "Tool Bash completed",
+      "- 40 行",
+      "[stdout] ... 更多输出已隐藏；按 Ctrl+O 展开。",
+    ].join("\n");
+    const block = createOutputBlock(body, "zh-CN", "out-stdout-hidden");
+    expect(block.fullText).not.toContain("更多输出已隐藏");
+    expect(block.nextAction).toContain("Ctrl+O");
+    const rendered = `${block.fullText ?? ""}\n${block.nextAction ?? ""}`;
+    expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);
+  });
+
+  it("Read summary-first 长输出正文不带 Ctrl+O，但 block 保留统一展开入口", () => {
+    const presenterBody = formatToolOutput(
+      "Read",
+      { text: "line\n".repeat(150), data: { lines: 150, totalLines: 150 } },
+      "zh-CN",
+    );
+    expect(presenterBody).not.toContain("Ctrl+O");
+    const block = createOutputBlock(presenterBody, "zh-CN", "read-long");
     expect(block.nextAction).toContain("Ctrl+O");
     const rendered = `${block.fullText ?? ""}\n${block.nextAction ?? ""}`;
     expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);

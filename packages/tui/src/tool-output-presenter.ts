@@ -1,4 +1,4 @@
-import { type Language, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
+import type { Language } from "@linghun/shared";
 import type { ToolName, ToolOutput } from "@linghun/tools";
 
 export type TuiOutputLayer = "primary" | "details" | "debug";
@@ -91,14 +91,6 @@ export function formatToolOutput(
   }
   if (layered.preview) {
     lines.push(layered.preview);
-  }
-  // P1-1 — summary-first preview 已自带一行折叠提示（createSummaryFirstPreview）。
-  // 这里只在 preview 尚未包含折叠提示时补一行，避免同一块出现两次 Ctrl+O 提示。
-  if (layered.details || layered.truncated) {
-    const hint = formatDetailsHint(language);
-    if (!layered.preview || !layered.preview.includes(hint)) {
-      lines.push(hint);
-    }
   }
   // D.13L Section 4 — Bash 单独再补一行人类可读终态：
   //   "Command exited 0" / "命令已退出 0"
@@ -481,13 +473,19 @@ function findRawToolPrefixAtEnd(text: string): number | undefined {
   return undefined;
 }
 
-function formatDetailsHint(language: Language): string {
-  // D.13L Section 1 — 主屏只暴露 Ctrl+O 折叠提示，不再泄漏
-  // `/details output <id>`。完整结果仍保存在 fullText / fullOutputPath 中，
-  // 由 /details 命令或 Ctrl+O 展开访问。
-  return language === "en-US"
-    ? `Output folded. Press ${TOGGLE_DETAILS_KEYBIND} to expand.`
-    : `输出已折叠，按 ${TOGGLE_DETAILS_KEYBIND} 展开。`;
+function stripLegacyFoldHints(text: string): string {
+  if (!text) return text;
+  const kept = text.split(/\r?\n/u).filter((line) => {
+    const trimmed = line.replace(/^[-\s]+/u, "").trim();
+    return !(
+      trimmed === "输出已折叠，按 Ctrl+O 展开。" ||
+      trimmed === "Output folded. Press Ctrl+O to expand." ||
+      /^\[stdout\]\s*\.\.\.\s*(?:更多输出已隐藏；按 Ctrl\+O 展开。|more output hidden; press Ctrl\+O to expand\.)$/iu.test(
+        trimmed,
+      )
+    );
+  });
+  return kept.join("\n").trim();
 }
 
 function createToolSummary(name: ToolName, output: ToolOutput, language: Language): string {
@@ -521,13 +519,14 @@ function createToolOutputPreview(
   language: Language,
   output?: ToolOutput,
 ): { text: string; truncated: boolean } {
+  const cleanedText = stripLegacyFoldHints(text);
   if (name === "Todo") {
     const structured = createTodoSurfacePreview(output, language);
     if (structured) return structured;
 
-    const lines = text.split(/\r?\n/u);
+    const lines = cleanedText.split(/\r?\n/u);
     if (lines.length <= TODO_OUTPUT_ITEM_LIMIT) {
-      return { text, truncated: false };
+      return { text: cleanedText, truncated: false };
     }
     const remaining = lines.length - TODO_OUTPUT_ITEM_LIMIT;
     return {
@@ -542,14 +541,14 @@ function createToolOutputPreview(
   }
 
   if (isSummaryFirstTool(name)) {
-    return createSummaryFirstPreview(name, text, language, output);
+    return createSummaryFirstPreview(name, cleanedText, language, output);
   }
 
   // Phase 18: try structured JSON unpack for MCP / non-built-in tool outputs.
-  const unwrapped = tryUnwrapStructuredText(text);
-  if (unwrapped) return { text: unwrapped, truncated: text.length > 2000 };
+  const unwrapped = tryUnwrapStructuredText(cleanedText);
+  if (unwrapped) return { text: unwrapped, truncated: cleanedText.length > 2000 };
 
-  return { text, truncated: false };
+  return { text: cleanedText, truncated: false };
 }
 
 /**
@@ -670,7 +669,6 @@ function createTodoSurfacePreview(
         ? `... ${hiddenCount} more item(s) in details.`
         : `... 另有 ${hiddenCount} 项在详情中。`,
     );
-    lines.push(formatDetailsHint(language));
   }
   return { text: lines.join("\n"), truncated: hiddenCount > 0 };
 }
@@ -768,15 +766,12 @@ function createSummaryFirstPreview(
     lines.length > 100 ||
     text.length > 10000;
   if (hasHiddenContent) {
-    const hint = formatDetailsHint(language);
     const tail = name === "Bash" && !looksLikeMojibake(text) ? formatBashTail(lines, language) : [];
     // Phase 3 — editing tools: inject compact diff fence from details so
     // MessageMarkdown → StructuredDiff renders a visual patch preview.
     const diffFence = isEditingTool(name) ? extractCompactDiffFence(output?.details) : "";
     return {
-      text: [`- ${stats.join("; ")}`, ...tail, diffFence, `- ${hint}`]
-        .filter(Boolean)
-        .join("\n"),
+      text: [`- ${stats.join("; ")}`, ...tail, diffFence].filter(Boolean).join("\n"),
       truncated: true,
     };
   }
@@ -791,7 +786,7 @@ function createSummaryFirstPreview(
       if (nonEmpty.length > PRIMARY_PREVIEW_LINE_CAP) {
         const capped = nonEmpty.slice(0, PRIMARY_PREVIEW_LINE_CAP).join("\n");
         return {
-          text: [`- ${stats.join("; ")}`, capped, `- ${formatDetailsHint(language)}`].join("\n"),
+          text: [`- ${stats.join("; ")}`, capped].join("\n"),
           truncated: true,
         };
       }

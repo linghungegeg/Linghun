@@ -55,6 +55,11 @@ const MARKDOWN_TOKEN_CACHE_LIMIT = 128;
 const markdownTokenCache = new Map<string, Token[]>();
 const codeHighlightCache = new Map<string, string[]>();
 
+type MarkdownRenderSegment = { kind: "markdown" | "diff"; text: string };
+
+const GIT_CRLF_WARNING_RE =
+  /^\[stderr\]\s*warning:\s+in the working copy of .+ LF will be replaced by CRLF\b.*$/iu;
+
 function getCachedMarkdownTokens(text: string): Token[] {
   const cached = markdownTokenCache.get(text);
   if (cached) {
@@ -88,6 +93,115 @@ function trimCache<T>(cache: Map<string, T>): void {
     if (!first) return;
     cache.delete(first);
   }
+}
+
+function stripLowValueDiagnosticNoise(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !GIT_CRLF_WARNING_RE.test(line.trim()))
+    .join("\n");
+}
+
+function isRawDiffStart(lines: string[], index: number): boolean {
+  const line = lines[index] ?? "";
+  const nextLines = lines.slice(index + 1, index + 5);
+  if (/^diff --git\s+/u.test(line)) return true;
+  if (/^@@\s+-\d/u.test(line)) return true;
+  if (/^---\s+\S/u.test(line)) {
+    return nextLines.some((next) => /^\+\+\+\s+\S/u.test(next));
+  }
+  if (/^(?:new file mode|deleted file mode)\s+\d+/u.test(line)) {
+    return nextLines.some((next) => /^---\s+\S/u.test(next) || /^\+\+\+\s+\S/u.test(next));
+  }
+  return false;
+}
+
+function isRawDiffLine(line: string): boolean {
+  return (
+    /^diff --git\s+/u.test(line) ||
+    /^(?:index|new file mode|deleted file mode|old mode|new mode)\b/u.test(line) ||
+    /^(?:copy from|copy to|rename from|rename to|similarity index|dissimilarity index)\b/u.test(
+      line,
+    ) ||
+    /^---\s+\S/u.test(line) ||
+    /^\+\+\+\s+\S/u.test(line) ||
+    /^@@\s+-\d/u.test(line) ||
+    /^[+-]/u.test(line) ||
+    /^ /u.test(line) ||
+    /^\\ No newline at end of file/u.test(line)
+  );
+}
+
+function isRawDiffBlock(lines: string[]): boolean {
+  const hasHeaderPair =
+    lines.some((line) => /^---\s+\S/u.test(line)) &&
+    lines.some((line) => /^\+\+\+\s+\S/u.test(line));
+  const hasHunk = lines.some((line) => /^@@\s+-\d/u.test(line));
+  const hasAdd = lines.some((line) => /^\+(?!\+\+)/u.test(line));
+  const hasRemove = lines.some((line) => /^-(?!--)/u.test(line));
+  return hasHeaderPair || hasHunk || (hasAdd && hasRemove);
+}
+
+function splitRawDiffSections(text: string): MarkdownRenderSegment[] {
+  const lines = text.split("\n");
+  const segments: MarkdownRenderSegment[] = [];
+  let markdownLines: string[] = [];
+  let inFence = false;
+  let index = 0;
+
+  const flushMarkdown = () => {
+    if (markdownLines.length === 0) return;
+    segments.push({ kind: "markdown", text: markdownLines.join("\n") });
+    markdownLines = [];
+  };
+
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    if (/^\s*```\s*[A-Za-z0-9_+-]*\s*$/u.test(line)) {
+      inFence = !inFence;
+      markdownLines.push(line);
+      index += 1;
+      continue;
+    }
+
+    if (!inFence && isRawDiffStart(lines, index)) {
+      const diffLines: string[] = [];
+      let cursor = index;
+      while (cursor < lines.length) {
+        const current = lines[cursor] ?? "";
+        if (current.trim().length === 0) {
+          const next = lines[cursor + 1] ?? "";
+          if (isRawDiffLine(next)) {
+            diffLines.push(current);
+            cursor += 1;
+            continue;
+          }
+          break;
+        }
+        if (!isRawDiffLine(current)) break;
+        diffLines.push(current);
+        cursor += 1;
+      }
+
+      if (isRawDiffBlock(diffLines)) {
+        flushMarkdown();
+        segments.push({ kind: "diff", text: diffLines.join("\n") });
+        index = cursor;
+        continue;
+      }
+    }
+
+    markdownLines.push(line);
+    index += 1;
+  }
+
+  flushMarkdown();
+  return segments;
+}
+
+export function __testSplitRawDiffSections(text: string): MarkdownRenderSegment[] {
+  const normalized = stripLowValueDiagnosticNoise(text.replace(/\r/g, ""));
+  return splitRawDiffSections(normalized);
 }
 
 function tokenizeInline(value: string): InlineToken[] {
@@ -586,6 +700,34 @@ function renderToken({
   }
 }
 
+function renderMarkdownTokens({
+  text,
+  theme,
+  dim,
+  tone,
+  wrapWidth,
+  keyPrefix,
+}: {
+  text: string;
+  theme: ShellTheme;
+  dim: boolean;
+  tone: MessageMarkdownProps["tone"];
+  wrapWidth: number;
+  keyPrefix: string;
+}): React.ReactNode[] {
+  const tokens = getCachedMarkdownTokens(text);
+  return tokens.map((token, index) =>
+    renderToken({
+      token,
+      theme,
+      dim,
+      tone,
+      wrapWidth,
+      keyPrefix: `${keyPrefix}-${index}-${token.type}-${token.raw.slice(0, 16)}`,
+    }),
+  );
+}
+
 function buildTableCell(text: string, width: number): TableCell {
   const lines = wrapText(text, Math.max(4, width));
   return { text, lines, width };
@@ -768,7 +910,37 @@ export function MessageMarkdown({
     );
   }
   const effectiveWrapWidth = wrapWidth ?? 80;
-  const tokens = getCachedMarkdownTokens(text.replace(/\r/g, ""));
+  const normalized = stripLowValueDiagnosticNoise(text.replace(/\r/g, ""));
+  const segments = splitRawDiffSections(normalized);
+  if (segments.some((segment) => segment.kind === "diff")) {
+    return (
+      <Box flexDirection="column">
+        {segments.map((segment, index) =>
+          segment.kind === "diff" ? (
+            <StructuredDiff
+              key={`raw-diff-${index}`}
+              code={segment.text}
+              theme={theme}
+              wrapWidth={effectiveWrapWidth}
+              dim={dim}
+            />
+          ) : (
+            <Box key={`markdown-${index}`} flexDirection="column">
+              {renderMarkdownTokens({
+                text: segment.text,
+                theme,
+                dim,
+                tone,
+                wrapWidth: effectiveWrapWidth,
+                keyPrefix: `markdown-${index}`,
+              })}
+            </Box>
+          )
+        )}
+      </Box>
+    );
+  }
+  const tokens = getCachedMarkdownTokens(normalized);
   return (
     <Box flexDirection="column">
       {tokens.map((token, index) =>

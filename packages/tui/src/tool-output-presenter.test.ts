@@ -152,14 +152,14 @@ describe("tool-output-presenter", () => {
       expect(text).toContain("2");
     });
 
-    it("长 Bash 输出主屏折叠为 5 行 + Ctrl+O 提示", () => {
+    it("长 Bash 输出主屏折叠为 5 行，但 formatted 正文不携带 Ctrl+O 提示", () => {
       const text = Array.from({ length: 8 }, (_, index) => `bash line ${index + 1}`).join("\n");
       const formatted = formatToolOutput("Bash", { text, data: { exitCode: 0 } }, "zh-CN");
 
       expect(formatted).toContain("bash line 1");
       expect(formatted).toContain("bash line 5");
       expect(formatted).not.toContain("bash line 6");
-      expect(formatted).toContain("Ctrl+O");
+      expect(formatted).not.toContain("Ctrl+O");
     });
 
     it("短 Read 输出没有隐藏内容时不显示 Ctrl+O", () => {
@@ -172,13 +172,13 @@ describe("tool-output-presenter", () => {
       expect(layered.truncated).toBe(false);
     });
 
-    it("Read 主屏走 summary-first：超 100 行才折叠，提示 Ctrl+O 展开", () => {
+    it("Read 主屏走 summary-first：超 100 行折叠但 preview 不带 Ctrl+O", () => {
       const layered = createLayeredToolOutput(
         "Read",
         { text: "line\n".repeat(150), data: { lines: 150 } },
         "zh-CN",
       );
-      expect(layered.preview).toContain("Ctrl+O");
+      expect(layered.preview).not.toContain("Ctrl+O");
       expect(layered.truncated).toBe(true);
     });
 
@@ -216,18 +216,40 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
       expect(layered.fullOutputPath).toBe("/tmp/full.log");
-      expect(layered.preview).toContain("Ctrl+O");
+      expect(layered.preview).not.toContain("Ctrl+O");
       expect(layered.truncated).toBe(true);
     });
 
-    it("英文也产出折叠提示（Press Ctrl+O to expand）", () => {
+    it("英文折叠 preview 和 formatted 都不携带 Ctrl+O 提示", () => {
       const layered = createLayeredToolOutput(
         "Read",
         { text: "line\n".repeat(120), data: { lines: 120 } },
         "en-US",
       );
-      expect(layered.preview).toContain("Ctrl+O");
-      expect(layered.preview.toLowerCase()).toContain("expand");
+      expect(layered.preview).not.toContain("Ctrl+O");
+      expect(layered.preview.toLowerCase()).not.toContain("expand");
+      const formatted = formatToolOutput(
+        "Read",
+        { text: "line\n".repeat(120), data: { lines: 120 } },
+        "en-US",
+      );
+      expect(formatted).not.toContain("Ctrl+O");
+    });
+
+    it("legacy stdout hidden hint is stripped from preview", () => {
+      const layered = createLayeredToolOutput(
+        "Bash",
+        {
+          text: "line 1\n[stdout] ... 更多输出已隐藏；按 Ctrl+O 展开。\nline 2",
+          data: { exitCode: 0, lines: 2 },
+        },
+        "zh-CN",
+      );
+
+      expect(layered.preview).toContain("line 1");
+      expect(layered.preview).toContain("line 2");
+      expect(layered.preview).not.toContain("更多输出已隐藏");
+      expect(layered.preview).not.toContain("Ctrl+O");
     });
 
     it("Edit/Write 摘要带 patch +N -M（诊断保留）", () => {

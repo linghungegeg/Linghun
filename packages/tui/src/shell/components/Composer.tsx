@@ -1508,6 +1508,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     !permissionActive && slashCandidates.length > 0 && slashSelection >= 0 && !slashHidden;
 
   const declaredRow = composerCursorAnchorRowOffset({
+    textAnchorRowBase: view.viewMode === "home" ? 0 : 1,
     permissionActive,
     permissionActionCount: permissionActions.length,
     showSuggestions,
@@ -1951,12 +1952,14 @@ export function splitLineAtDisplayCol(
 }
 
 export function composerCursorAnchorRowOffset({
+  textAnchorRowBase = 1,
   permissionActive,
   permissionActionCount,
   showSuggestions,
   slashCandidateCount,
   cursorRow,
 }: {
+  textAnchorRowBase?: number;
   permissionActive: boolean;
   permissionActionCount: number;
   showSuggestions: boolean;
@@ -1970,7 +1973,7 @@ export function composerCursorAnchorRowOffset({
   if (showSuggestions) {
     offset += Math.max(0, slashCandidateCount) + 1;
   }
-  return offset + 1 + Math.max(0, cursorRow);
+  return offset + Math.max(0, textAnchorRowBase) + Math.max(0, cursorRow);
 }
 
 function hasSelectableCommandPanelRows(panel: CommandPanelView | undefined): boolean {
