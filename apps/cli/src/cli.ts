@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EndpointProfile } from "@linghun/config";
@@ -102,6 +103,28 @@ function configureCliBundledRoot(): void {
     "..",
     "bundled",
   );
+  configurePlatformBundledRoot("codebase-memory", "LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR");
+  configurePlatformBundledRoot("native-runner", "LINGHUN_NATIVE_RUNNER_BUNDLED_DIR");
+}
+
+function configurePlatformBundledRoot(
+  kind: "codebase-memory" | "native-runner",
+  envName: string,
+): void {
+  if (process.env[envName]) {
+    return;
+  }
+  const packageName = `@linghun/${kind}-${process.platform}-${process.arch}`;
+  try {
+    const require = createRequire(import.meta.url);
+    process.env[envName] = join(
+      dirname(require.resolve(`${packageName}/package.json`)),
+      "bundled",
+      kind,
+    );
+  } catch {
+    // Optional platform packages may be absent; TUI runtime will use the existing fallback chain.
+  }
 }
 
 async function runModelCommand(argv: string[]): Promise<CliResult> {
