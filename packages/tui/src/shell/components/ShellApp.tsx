@@ -424,6 +424,18 @@ function ActivityIndicator({
   tokenCount?: number;
 }): React.ReactNode {
   const [frame, setFrame] = useState(0);
+  // Auto-hide completed/error terminal phases after 1.2s so the indicator
+  // doesn't linger once the answer is already visible in the transcript.
+  const [hidden, setHidden] = useState(false);
+  useEffect(() => {
+    if (activity.phase === "completed" || activity.phase === "error") {
+      const hideTimer = setTimeout(() => setHidden(true), 1200);
+      return () => clearTimeout(hideTimer);
+    }
+    setHidden(false);
+    return;
+  }, [activity.phase]);
+
   useEffect(() => {
     if (
       activity.phase === "completed" ||
@@ -435,6 +447,8 @@ function ActivityIndicator({
     const timer = setInterval(() => setFrame((current) => current + 1), 100);
     return () => clearInterval(timer);
   }, [activity.phase]);
+
+  if (hidden) return null;
 
   const colorMap: Record<TaskActivityView["phase"], string | undefined> = {
     thinking: theme.status.running,
@@ -448,13 +462,13 @@ function ActivityIndicator({
   const noColor = theme.mode === "no-color";
   const marker = activityMarker(activity.phase, frame, noColor);
   const seconds = parseElapsedSeconds(activity.elapsed);
-  const slow = seconds >= 8 && activity.phase !== "permission_waiting";
+  const slow = seconds >= 10 && activity.phase !== "permission_waiting";
   const showTokenCount =
     seconds >= 30 &&
     tokenCount !== undefined &&
     (activity.phase === "thinking" || activity.phase === "continuing");
   const text = activityText(activity, tokenCount);
-  const slowText = slowActivityText(activity, tokenCount);
+  const slowText = slow ? slowActivityText(activity, tokenCount) : undefined;
   const showStats =
     activity.phase === "tool_running" && (activity.totalLines || activity.totalBytes);
   // Phase 2: tool_running with toolName renders CCB-style "● Edit(router.ts)  3s"

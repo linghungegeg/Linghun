@@ -97,22 +97,17 @@ export function ProductBlock({
       const body = (block.fullText ?? block.title ?? "").trim();
       if (!body) return null;
       return (
-        <Box marginTop={1} marginBottom={1} flexDirection="column">
-          <Text color={theme.dim ?? theme.muted} dimColor>
-            {"─".repeat(Math.min(Math.max(8, width), 72))}
-          </Text>
-          <Box flexDirection="row">
-            <Text color={theme.inactive ?? theme.muted}>│ </Text>
-            <Box flexDirection="column">
-              {wrapText(body, Math.max(8, width - 2)).map((line, idx) => (
-                <Text
-                  key={`${idx}-${line}`}
-                  backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}
-                >
-                  {line}
-                </Text>
-              ))}
-            </Box>
+        <Box marginTop={1} marginBottom={1} flexDirection="row">
+          <Text color={theme.inactive ?? theme.muted}>│ </Text>
+          <Box flexDirection="column">
+            {wrapText(body, Math.max(8, width - 2)).map((line, idx) => (
+              <Text
+                key={`${idx}-${line}`}
+                backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}
+              >
+                {line}
+              </Text>
+            ))}
           </Box>
         </Box>
       );

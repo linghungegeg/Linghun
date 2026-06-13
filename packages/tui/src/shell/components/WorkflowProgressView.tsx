@@ -26,25 +26,37 @@ export function WorkflowProgressView({
       <Text color={theme.dim ?? theme.muted} dimColor>
         {text.r3WorkflowsTitle}
       </Text>
-      {workflow.runs.map((run) => (
-        <Box key={run.id} flexDirection="column">
-          <Text color={theme.dim ?? theme.muted} dimColor>
-            {fitText(
-              `${run.goal} · ${run.status}${run.elapsed ? ` · ${workLabel} ${run.elapsed}` : ""}`,
-              innerWidth,
-            )}
-          </Text>
-          {run.steps.map((step, index) => {
-            const branch = index === run.steps.length - 1 ? "└─" : "├─";
-            const marker = workflowMarker(step.status, noColor);
-            return (
-              <Text key={step.id} color={theme.dim ?? theme.muted} dimColor={!step.active}>
-                {fitText(`${branch} ${marker} ${step.title}`, innerWidth)}
-              </Text>
-            );
-          })}
-        </Box>
-      ))}
+      {workflow.runs.map((run) => {
+        const isCompleted = run.status === "completed" || run.status === "cancelled";
+        // Completed/cancelled workflows collapse to a single summary line
+        if (isCompleted) {
+          const completedText = `✓ ${run.goal} completed${run.elapsed ? ` · ${run.elapsed}` : ""}`;
+          return (
+            <Text key={run.id} color={theme.muted} dimColor>
+              {fitText(completedText, innerWidth)}
+            </Text>
+          );
+        }
+        return (
+          <Box key={run.id} flexDirection="column">
+            <Text color={theme.dim ?? theme.muted} dimColor>
+              {fitText(
+                `${run.goal} · ${run.status}${run.elapsed ? ` · ${workLabel} ${run.elapsed}` : ""}`,
+                innerWidth,
+              )}
+            </Text>
+            {run.steps.map((step, index) => {
+              const branch = index === run.steps.length - 1 ? "└─" : "├─";
+              const marker = workflowMarker(step.status, noColor);
+              return (
+                <Text key={step.id} color={theme.dim ?? theme.muted} dimColor={!step.active}>
+                  {fitText(`${branch} ${marker} ${step.title}`, innerWidth)}
+                </Text>
+              );
+            })}
+          </Box>
+        );
+      })}
       {workflow.hiddenPending > 0 ? (
         <Text color={theme.muted} dimColor>
           {`…+${workflow.hiddenPending} ${text.r3PendingHiddenSuffix}`}

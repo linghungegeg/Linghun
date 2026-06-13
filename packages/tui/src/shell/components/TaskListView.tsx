@@ -20,17 +20,36 @@ export function TaskListView({
   const theme = createShellTheme(noColor);
   const innerWidth = Math.max(20, width - 2);
   const text = messages[language];
+
+  // Filter: only show in_progress and blocked rows
+  const activeRows = list.rows.filter((r) => r.status === "in_progress" || r.status === "blocked");
+  const completedCount = list.rows.filter((r) => r.status === "completed").length;
+
+  // All completed: task area disappears (return null)
+  if (activeRows.length === 0 && completedCount === 0) return null;
+  if (activeRows.length === 0 && completedCount > 0) {
+    // Only completed items remain — show dim summary, no full list
+    const summaryText = language === "en-US"
+      ? `✓ ${completedCount} completed · Ctrl+O history`
+      : `✓ ${completedCount} 已完成 · Ctrl+O 历史`;
+    return (
+      <Box flexDirection="column" marginTop={1}>
+        <Text color={theme.muted} dimColor>
+          {fitText(summaryText, innerWidth)}
+        </Text>
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text color={theme.muted} bold>
         {text.r3TasksTitle}
       </Text>
-      {list.rows.map((row) => {
-        const completed = row.status === "completed";
+      {activeRows.map((row) => {
         const blocked = row.status === "blocked";
         const inProgress = row.status === "in_progress";
         const marker = taskMarker(row.status, noColor);
-        const dimmed = completed || blocked;
         const hasBlockers = blocked && row.blockedBy && row.blockedBy.length > 0;
         const blockedByLabel = language === "en-US" ? "blocked by" : "被阻塞";
         return (
@@ -40,8 +59,7 @@ export function TaskListView({
               <Text
                 color={inProgress ? theme.status.running : undefined}
                 bold={inProgress}
-                strikethrough={completed}
-                dimColor={dimmed}
+                dimColor={blocked}
               >
                 {marker} {fitText(row.subject, Math.max(8, innerWidth - 4 - (row.owner ? row.owner.length + 3 : 0)))}
               </Text>
@@ -67,6 +85,14 @@ export function TaskListView({
           </Box>
         );
       })}
+      {/* Hidden completed hint */}
+      {completedCount > 0 ? (
+        <Text color={theme.muted} dimColor>
+          {language === "en-US"
+            ? `✓ ${completedCount} completed · Ctrl+O history`
+            : `✓ ${completedCount} 已完成 · Ctrl+O 历史`}
+        </Text>
+      ) : null}
       {list.hiddenPending > 0 ? (
         <Text color={theme.muted} dimColor>
           {`… +${list.hiddenPending} ${text.r3PendingHiddenSuffix}`}

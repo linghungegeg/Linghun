@@ -23,11 +23,43 @@ export function AgentProgressTree({
   const text = messages[language];
   const workLabel = language === "en-US" ? "working" : "工作";
 
+  const runningRows = tree.rows.filter((r) => r.status === "running");
+  const completedRows = tree.rows.filter((r) => r.status === "completed");
+  const allCompleted = runningRows.length === 0 && completedRows.length > 0;
+
+  // All agents completed: collapse entire tree into a single summary line
+  if (allCompleted) {
+    const summaryText = language === "en-US"
+      ? `✓ ${completedRows.length} agents completed · Ctrl+O details`
+      : `✓ ${completedRows.length} 个 agent 已完成 · Ctrl+O 详情`;
+    return (
+      <Box flexDirection="column" marginTop={1}>
+        <Text color={theme.muted} dimColor>
+          {fitText(summaryText, innerWidth)}
+        </Text>
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" marginTop={1}>
       {tree.rows.map((row, index) => {
         const selected = tree.cursor === index;
         const expanded = tree.expandedId === row.id;
+        const completed = row.status === "completed";
+
+        // Completed agents: collapse to single-line summary
+        if (completed && !expanded) {
+          const completedText = `✓ ${row.name} · ${row.toolUses} tools${row.elapsed ? ` · ${row.elapsed}` : ""}`;
+          return (
+            <Box key={row.id}>
+              <Text color={theme.muted} dimColor>
+                {"  "}{fitText(completedText, innerWidth - 2)}
+              </Text>
+            </Box>
+          );
+        }
+
         // CCB: highlighted → ╞═/╘═, normal → ├─/└─
         const isLast = index === tree.rows.length - 1;
         const treeChar = selected
@@ -37,7 +69,6 @@ export function AgentProgressTree({
           : isLast
             ? "└─"
             : "├─";
-        const completed = row.status === "completed";
         const rowText = `${row.name}${row.activity ? `: ${row.activity}` : ""}${
           row.elapsed ? ` · ${workLabel} ${row.elapsed}` : ""
         }`;

@@ -16,6 +16,7 @@ export type LayeredToolOutput = {
 
 const TODO_OUTPUT_ITEM_LIMIT = 8;
 const BASH_TAIL_LINE_LIMIT = 0;
+const PRIMARY_PREVIEW_LINE_CAP = 5;
 const RAW_TOOL_USE_PATTERNS = [
   /<tool_use(?:_error)?\b[\s\S]*?<\/tool_use(?:_error)?>/giu,
   /<tool_use(?:_error)?\b[^>]*\/>/giu,
@@ -147,7 +148,7 @@ function formatPrimaryToolLead(
       const lineLabel = `**${totalLines ?? visibleLines}** lines`;
       return readFile ? `Read(${readFile}) ${lineLabel}.` : `Read ${lineLabel}.`;
     }
-    if (name === "Bash") return "";
+    if (name === "Bash") return formatBashLead(metadata, language);
     // Phase 17: WebSearch / WebFetch dedicated format.
     if (name === "WebSearch") return formatWebSearchLead(output, language);
     if (name === "WebFetch") return formatWebFetchLead(output, language);
@@ -163,7 +164,7 @@ function formatPrimaryToolLead(
     const lineLabel = `**${totalLines ?? visibleLines}** 行`;
     return readFile ? `Read(${readFile}) ${lineLabel}` : `读取 ${lineLabel}`;
   }
-  if (name === "Bash") return "";
+  if (name === "Bash") return formatBashLead(metadata, language);
   // Phase 17: WebSearch / WebFetch dedicated format.
   if (name === "WebSearch") return formatWebSearchLead(output, language);
   if (name === "WebFetch") return formatWebFetchLead(output, language);
@@ -178,6 +179,29 @@ function lineCount(value: string): number {
   return value.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
 }
 
+/**
+ * Bash lead line: short command summary + exit status indicator.
+ * Success: "Bash(git status) ✓"  Failure: "Bash(npm test) ✗ exit 1"
+ */
+function formatBashLead(
+  metadata: object | undefined,
+  language: Language,
+): string {
+  const command = readStringValue(metadata, "command") ?? "";
+  const exitCode = readNumber(metadata, "exitCode");
+  const shortCmd = command.length > 60 ? `${command.slice(0, 57)}...` : command;
+  const cmdPart = shortCmd ? `Bash(${shortCmd})` : "Bash";
+  if (exitCode === undefined) {
+    return cmdPart;
+  }
+  if (exitCode === 0) {
+    return `${cmdPart} ✓`;
+  }
+  return language === "en-US"
+    ? `${cmdPart} ✗ exit ${exitCode}`
+    : `${cmdPart} ✗ 退出 ${exitCode}`;
+}
+
 function formatBashEndSummary(
   name: ToolName,
   output: ToolOutput,
@@ -190,7 +214,7 @@ function formatBashEndSummary(
       : undefined;
   const exitCode = data && typeof data.exitCode === "number" ? data.exitCode : undefined;
   if (exitCode === undefined) return undefined;
-  // 只在失败时显示退出码（参考 CCB BashTool.tsx:837-841）
+  // 退出码已在 lead 中显示；end summary 只在失败时补充一行用于醒目提示
   if (exitCode === 0) return undefined;
   return language === "en-US" ? `Exit code ${exitCode}` : `退出码 ${exitCode}`;
 }
@@ -607,50 +631,48 @@ function createTodoSurfacePreview(
     completed: items.filter((item) => item.status === "completed").length,
     blocked: items.filter((item) => item.status === "blocked").length,
   };
-  const lead =
-    items.find((item) => item.status === "in_progress") ??
-    items.find((item) => item.status === "blocked") ??
-    items.find((item) => item.status === "pending");
+  // Main screen only shows in_progress and blocked items; completed goes to details.
+  const activeItems = items.filter(
+    (item) => item.status === "in_progress" || item.status === "blocked",
+  );
   const parts =
     language === "en-US"
       ? [
           `${counts.in_progress} in progress`,
-          `${counts.pending} pending`,
-          `${counts.completed} completed`,
           `${counts.blocked} blocked`,
+          `${counts.pending} pending`,
+          `${counts.completed} done`,
         ]
       : [
           `进行中 ${counts.in_progress}`,
+          `阻塞 ${counts.blocked}`,
           `待办 ${counts.pending}`,
           `完成 ${counts.completed}`,
-          `阻塞 ${counts.blocked}`,
         ];
   const lines = [
     language === "en-US" ? `Todo: ${parts.join(" · ")}` : `Todo：${parts.join(" · ")}`,
   ];
-  if (lead) {
+  // Show up to PRIMARY_PREVIEW_LINE_CAP - 1 active items (reserve 1 line for header).
+  const displayItems = activeItems.slice(0, PRIMARY_PREVIEW_LINE_CAP - 1);
+  for (const item of displayItems) {
     const label =
       language === "en-US"
-        ? lead.status.replace("_", " ")
-        : lead.status === "in_progress"
+        ? item.status.replace("_", " ")
+        : item.status === "in_progress"
           ? "进行中"
-          : lead.status === "blocked"
-            ? "阻塞"
-            : "待办";
-    lines.push(`${label}: ${lead.content}`);
+          : "阻塞";
+    lines.push(`  ${label}: ${item.content}`);
   }
-  if (items.length > 1) {
-    const remaining = items.length - (lead ? 1 : 0);
-    if (remaining > 0) {
-      lines.push(
-        language === "en-US"
-          ? `... ${remaining} more todo item(s) hidden from main output.`
-          : `... 主输出已隐藏 ${remaining} 条 Todo。`,
-      );
-    }
+  const hiddenCount = items.length - displayItems.length;
+  if (hiddenCount > 0) {
+    lines.push(
+      language === "en-US"
+        ? `... ${hiddenCount} more item(s) in details.`
+        : `... 另有 ${hiddenCount} 项在详情中。`,
+    );
     lines.push(formatDetailsHint(language));
   }
-  return { text: lines.join("\n"), truncated: items.length > 1 };
+  return { text: lines.join("\n"), truncated: hiddenCount > 0 };
 }
 
 type TodoSurfaceItem = {
@@ -765,8 +787,16 @@ function createSummaryFirstPreview(
     if (tail.length > 0) {
       return { text: [`- ${stats.join("; ")}`, ...tail].join("\n"), truncated: false };
     }
-    // BASH_TAIL_LINE_LIMIT = 0: no separate tail section — show full text inline.
+    // Cap inline Bash output to PRIMARY_PREVIEW_LINE_CAP lines; excess folds into details.
     if (text.trim().length > 0) {
+      const nonEmpty = lines.filter((l) => l.trim().length > 0);
+      if (nonEmpty.length > PRIMARY_PREVIEW_LINE_CAP) {
+        const capped = nonEmpty.slice(0, PRIMARY_PREVIEW_LINE_CAP).join("\n");
+        return {
+          text: [`- ${stats.join("; ")}`, capped, `- ${formatDetailsHint(language)}`].join("\n"),
+          truncated: true,
+        };
+      }
       return { text: [`- ${stats.join("; ")}`, text].join("\n"), truncated: false };
     }
   }

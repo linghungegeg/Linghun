@@ -3822,7 +3822,6 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(source.indexOf("footer.workspaceStatus")).toBeLessThan(
       source.indexOf("footer.runtimeStatus"),
     );
-    expect(source).toContain("marginTop={1}");
     expect(source).not.toContain("footer.task");
     expect(source).not.toContain("footer.elapsed");
   });

@@ -32,6 +32,10 @@ export type ShellTheme = {
   diffRemovedWord: string | undefined;
   /** Phase 1 output-maturity — tool execution state color. */
   toolRunning: string | undefined;
+  /** Permission mode semantic colors (#6/#8). */
+  permissionPlan: string | undefined;
+  permissionAuto: string | undefined;
+  permissionDanger: string | undefined;
 };
 
 export function createShellTheme(
@@ -74,6 +78,9 @@ export function createShellTheme(
       diffAddedWord: undefined,
       diffRemovedWord: undefined,
       toolRunning: undefined,
+      permissionPlan: undefined,
+      permissionAuto: undefined,
+      permissionDanger: undefined,
     };
   }
   if (mode === "light") {
@@ -112,6 +119,9 @@ export function createShellTheme(
       diffAddedWord: "#28a745",
       diffRemovedWord: "#dc3545",
       toolRunning: "#b8860b",
+      permissionPlan: "#0077cc",
+      permissionAuto: "#b8860b",
+      permissionDanger: "#d32f2f",
     };
   }
   return {
@@ -149,6 +159,9 @@ export function createShellTheme(
     diffAddedWord: "#2ea043",
     diffRemovedWord: "#f85149",
     toolRunning: "#d4a72c",
+    permissionPlan: "#00aaff",
+    permissionAuto: "#e0a020",
+    permissionDanger: "#ff4444",
   };
 }
 

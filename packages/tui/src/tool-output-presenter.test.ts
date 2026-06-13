@@ -140,25 +140,26 @@ describe("tool-output-presenter", () => {
       expect(layered.summary.length).toBeGreaterThan(0);
     });
 
-    it("Bash 有 exitCode 时 formatToolOutput 含 '命令已退出 N'", () => {
+    it("Bash 成功时 formatToolOutput 含 lead '✓'", () => {
       const text = formatToolOutput("Bash", { text: "done", data: { exitCode: 0 } }, "zh-CN");
-      expect(text).toContain("命令已退出 0");
+      expect(text).toContain("Bash");
+      expect(text).toContain("✓");
     });
 
     it("Bash 失败 exit 也写入退出码", () => {
       const text = formatToolOutput("Bash", { text: "boom", data: { exitCode: 2 } }, "zh-CN");
-      expect(text).toContain("命令已退出 2");
+      expect(text).toContain("退出");
+      expect(text).toContain("2");
     });
 
-    it("长 Bash 输出主屏全量显示，不再截断尾部或折叠", () => {
+    it("长 Bash 输出主屏折叠为 5 行 + Ctrl+O 提示", () => {
       const text = Array.from({ length: 8 }, (_, index) => `bash line ${index + 1}`).join("\n");
       const formatted = formatToolOutput("Bash", { text, data: { exitCode: 0 } }, "zh-CN");
 
-      expect(formatted).toContain("8 行");
       expect(formatted).toContain("bash line 1");
-      expect(formatted).toContain("bash line 8");
-      expect(formatted).not.toContain("输出已折叠");
-      expect(formatted).not.toContain("尾部：");
+      expect(formatted).toContain("bash line 5");
+      expect(formatted).not.toContain("bash line 6");
+      expect(formatted).toContain("Ctrl+O");
     });
 
     it("短 Read 输出没有隐藏内容时不显示 Ctrl+O", () => {
