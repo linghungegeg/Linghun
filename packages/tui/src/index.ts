@@ -2139,6 +2139,7 @@ async function runInkShell(
         context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
           type: "end",
         });
+        context.unseenMessageCount = 0;
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

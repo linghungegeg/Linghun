@@ -641,10 +641,11 @@ export function createWorkflowInterruptBackgroundTask(
 ): BackgroundTaskState {
   const now = new Date().toISOString();
   const runningStep = run.steps.find((step) => step.status === "running");
+  const titlePrefix = run.multiAgent ? "协作" : "Workflow";
   return {
     id: run.id,
     kind: "job",
-    title: `Workflow: ${truncateDisplay(run.goal, 50)}`,
+    title: `${titlePrefix}: ${truncateDisplay(run.goal, 50)}`,
     status: "running",
     currentStep: runningStep?.title ?? "workflow running",
     progress: {
@@ -715,8 +716,25 @@ export function formatWorkflowStartPrimary(input: {
   steps: number;
   currentPhase: string;
   background: boolean;
+  multiAgent?: boolean;
 }): string {
   const phase = formatWorkflowDisplayLabel(input.currentPhase, "workflow");
+  if (input.multiAgent) {
+    if (input.language === "en-US") {
+      return [
+        input.background ? "Background multi-agent collaboration started." : "Multi-agent collaboration started.",
+        `- agents: ${input.steps}`,
+        `- current phase: ${phase}`,
+        "- details: /workflows status or /background",
+      ].join("\n");
+    }
+    return [
+      input.background ? "后台多智能体协作已启动。" : "多智能体协作已启动。",
+      `- agents: ${input.steps}`,
+      `- 当前阶段：${phase}`,
+      "- 详情：/workflows status 或 /background",
+    ].join("\n");
+  }
   if (input.language === "en-US") {
     return [
       input.background ? "Background workflow started." : "Workflow started.",
@@ -738,8 +756,15 @@ function formatWorkflowBackgroundSummary(input: {
   steps: number;
   currentPhase: string;
   background: boolean;
+  multiAgent?: boolean;
 }): string {
   const phase = formatWorkflowDisplayLabel(input.currentPhase, "workflow");
+  if (input.multiAgent) {
+    if (input.language === "en-US") {
+      return `${input.background ? "Background multi-agent collaboration started" : "Multi-agent collaboration started"}; agents: ${input.steps}; current phase: ${phase}; details: /workflows status or /background.`;
+    }
+    return `${input.background ? "后台多智能体协作已启动" : "多智能体协作已启动"}；agents: ${input.steps}；当前阶段：${phase}；详情：/workflows status 或 /background。`;
+  }
   if (input.language === "en-US") {
     return `${input.background ? "Background workflow started" : "Workflow started"}; steps: ${input.steps}; current phase: ${phase}; details: /workflows status or /background.`;
   }
@@ -879,13 +904,15 @@ async function runWorkflowPlanSteps(
     independent: slice.independent === true,
     canRunInParallel: slice.canRunInParallel === true,
   }));
+  const isMultiAgent = options.multiAgent === true;
+  const taskTitlePrefix = isMultiAgent ? "协作" : "Workflow";
   const workflowTask: BackgroundTaskState = {
     id: runId,
     kind: "job",
-    title: `Workflow: ${truncateDisplay(goal, 50)}`,
+    title: `${taskTitlePrefix}: ${truncateDisplay(goal, 50)}`,
     status: "running",
-    currentStep: "workflow starting",
-    progress: { completed: 0, total: stepStates.length, label: "workflow" },
+    currentStep: isMultiAgent ? "agents starting" : "workflow starting",
+    progress: { completed: 0, total: stepStates.length, label: isMultiAgent ? "agents" : "workflow" },
     startedAt,
     updatedAt: startedAt,
     heartbeatIntervalMs: 30_000,
@@ -897,6 +924,7 @@ async function runWorkflowPlanSteps(
       steps: stepStates.length,
       currentPhase: phase.title || phase.id,
       background: false,
+      multiAgent: isMultiAgent,
     }),
     nextAction: "等待 step_result；失败时查看 /failures 和 transcript。",
   };
@@ -910,6 +938,7 @@ async function runWorkflowPlanSteps(
     result: "partial",
     phaseGateConfirmed: true,
     confirmedPhaseStopPoints,
+    multiAgent: options.multiAgent === true,
   });
   rememberBackgroundTask(context, workflowTask);
   await persistWorkflowRunState(context, workflowRun, workflowTask);
@@ -1191,6 +1220,7 @@ export async function runRegistryWorkflow(
       steps: stepStates.length,
       currentPhase: workflow.name,
       background: runInBackground || Boolean(workflow.runInBackground),
+      multiAgent: false,
     }),
     nextAction: "查看 /workflows registry、/background 或 /details background。",
   };

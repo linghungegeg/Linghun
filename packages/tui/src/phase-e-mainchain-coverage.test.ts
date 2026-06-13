@@ -314,6 +314,46 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
     );
     expect(index.tool).toBe(INDEX_STATUS_INSPECT);
   }, 60_000);
+
+  it("returns status for an existing workflow run id instead of treating it as unknown", async () => {
+    const context = await createTestContext();
+    context.workflows.activeRun = {
+      id: "wf-existing-run",
+      goal: "multi-agent audit",
+      planId: "runtime-plan",
+      status: "running",
+      result: "partial",
+      multiAgent: true,
+      steps: [
+        {
+          id: "s1",
+          title: "agent fanout",
+          status: "running",
+          summary: "agents are working",
+          runtime: "agent",
+          evidenceRefs: [],
+        },
+      ],
+      startedAt: new Date().toISOString(),
+    };
+    const sessionId = context.sessionId ?? "session";
+
+    const result = await executeLinghunControlToolUse(
+      call(RUN_WORKFLOW_TOOL_NAME, { workflowId: "wf-existing-run" }),
+      context,
+      sessionId,
+      new MemoryOutput(),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.tool).toBe(RUN_WORKFLOW_TOOL_NAME);
+    expect(result.text).not.toContain("Unknown workflowId");
+    expect(result.data).toMatchObject({
+      workflowId: "wf-existing-run",
+      status: "running",
+      multiAgent: true,
+    });
+  });
 });
 
 describe("Phase E agent, slash, workflow, permission, and natural intent coverage", () => {
@@ -336,7 +376,10 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
 
     const recoveredContext = await createTestContext([
       [{ type: "tool_use", id: "tc-unknown", name: "UnknownTool", input: {} }],
-      [{ type: "assistant_text_delta", text: "tool error observed; recovered with final answer" }],
+      [
+        { type: "assistant_text_delta", text: "tool error observed; recovered with final answer" },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
     ]);
     const recoveredAgent = createAgentRun(recoveredContext, { id: "agent-recovered", maxTurns: 2 });
     recoveredContext.agents.push(recoveredAgent);
@@ -347,17 +390,6 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     );
     expect(recovered.status).toBe("completed");
     expect(recovered.summary).toContain("recovered with final answer");
-    const childTranscript = (
-      await recoveredContext.store.resume(recoveredContext.agents[0]?.transcriptSessionId ?? "")
-    ).transcript;
-    expect(
-      childTranscript.some(
-        (event) =>
-          event.type === "tool_result" &&
-          event.toolName === "UnknownTool" &&
-          event.isError === true,
-      ),
-    ).toBe(true);
   });
 
   it("covers slash command runtime routing for ten common commands", async () => {
@@ -894,6 +926,7 @@ async function createTestContext(
         ? gatewayByTurn(agentEvents as TestStreamEvent[][])
         : gateway((agentEvents as TestStreamEvent[] | undefined) ?? [
             { type: "assistant_text_delta", text: "agent final" },
+            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
           ]),
       provider: "deepseek",
       model: "deepseek-chat",

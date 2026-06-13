@@ -22,7 +22,10 @@ import { StatusFooter } from "./StatusFooter.js";
 import { StatusTray } from "./StatusTray.js";
 import { TaskListView } from "./TaskListView.js";
 import { TaskSuggestionBar } from "./TaskSuggestionBar.js";
+import { UnseenMessagePill } from "./UnseenMessagePill.js";
 import { WorkflowProgressView } from "./WorkflowProgressView.js";
+
+const TASK_RECENT_TAIL_BLOCKS = 6;
 
 export function ShellApp({
   controller,
@@ -223,69 +226,90 @@ function TaskLayout({
 
   const staticBlocks = view.blocks.filter((b) => b.status !== "running");
   const dynamicBlocks = view.blocks.filter((b) => b.status === "running");
+  const staticHistoryBlocks = staticBlocks.slice(
+    0,
+    Math.max(0, staticBlocks.length - TASK_RECENT_TAIL_BLOCKS),
+  );
+  const recentStaticBlocks = staticBlocks.slice(-TASK_RECENT_TAIL_BLOCKS);
+  const currentBlocks = [...recentStaticBlocks, ...dynamicBlocks];
 
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
-      {/* Main content area — flexGrow fills available space above composer */}
-      <Box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
-        {/* Static zone — completed blocks commit to terminal scrollback. */}
-        <Static items={staticBlocks}>
+      {/* Main content area — native terminal scrollback plus a current-screen tail near composer. */}
+      <Box flexDirection="column" flexGrow={1} minHeight={0} justifyContent="flex-end">
+        <Static items={staticHistoryBlocks}>
           {(block) => (
             <Box key={block.id} paddingX={2}>
-              <ProductBlock block={block} theme={theme} width={contentWidth} language={view.language} />
+              <ProductBlock
+                block={block}
+                theme={theme}
+                width={contentWidth}
+                language={view.language}
+              />
             </Box>
           )}
         </Static>
-
-        {/* Dynamic zone — keep natural height so native scrollback stays visible above the composer. */}
         <Box flexDirection="column" paddingX={2}>
-        {dynamicBlocks.length > 0 ? (
-          <Box flexDirection="column">
-            {dynamicBlocks.map((block) => (
-              <ProductBlock key={block.id} block={block} theme={theme} width={contentWidth} language={view.language} />
-            ))}
-          </Box>
-        ) : null}
+          {currentBlocks.length > 0 ? (
+            <Box flexDirection="column">
+              {currentBlocks.map((block) => (
+                <ProductBlock
+                  key={block.id}
+                  block={block}
+                  theme={theme}
+                  width={contentWidth}
+                  language={view.language}
+                />
+              ))}
+            </Box>
+          ) : null}
 
-        {view.streamingAssistantText ? (
-          <Box marginTop={dynamicBlocks.length > 0 || staticBlocks.length > 0 ? 1 : 0}>
-            <StreamingMarkdown
-              text={view.streamingAssistantText}
-              theme={theme}
-              wrapWidth={contentWidth}
+          {view.streamingAssistantText ? (
+            <Box marginTop={currentBlocks.length > 0 ? 1 : 0}>
+              <StreamingMarkdown
+                text={view.streamingAssistantText}
+                theme={theme}
+                wrapWidth={contentWidth}
+              />
+            </Box>
+          ) : null}
+
+          {view.activity ? (
+            <Box marginTop={currentBlocks.length > 0 || view.streamingAssistantText ? 1 : 0}>
+              <ActivityIndicator
+                activity={view.activity}
+                theme={theme}
+                tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
+              />
+            </Box>
+          ) : null}
+
+          {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
+            <TaskSuggestionBar
+              suggestions={view.taskSuggestions}
+              cursor={view.taskSuggestionCursor ?? 0}
+              width={view.width}
+              noColor={noColor}
             />
-          </Box>
-        ) : null}
+          ) : null}
 
-        {view.activity ? (
-          <Box marginTop={dynamicBlocks.length > 0 || view.streamingAssistantText || staticBlocks.length > 0 ? 1 : 0}>
-            <ActivityIndicator
-              activity={view.activity}
-              theme={theme}
-              tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
-            />
-          </Box>
-        ) : null}
-
-        {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
-          <TaskSuggestionBar
-            suggestions={view.taskSuggestions}
-            cursor={view.taskSuggestionCursor ?? 0}
+          {view.limitations.length > 0 ? (
+            <Box flexDirection="column" marginTop={1}>
+              {view.limitations.map((item) => (
+                <Text key={item} color={theme.muted}>
+                  {item}
+                </Text>
+              ))}
+            </Box>
+          ) : null}
+        </Box>
+        {view.unseenMessageCount && view.unseenMessageCount > 0 ? (
+          <UnseenMessagePill
+            count={view.unseenMessageCount}
+            language={view.language}
             width={view.width}
-            noColor={noColor}
           />
         ) : null}
-
-        {view.limitations.length > 0 ? (
-          <Box flexDirection="column" marginTop={1}>
-            {view.limitations.map((item) => (
-              <Text key={item} color={theme.muted}>
-                {item}
-              </Text>
-            ))}
-          </Box>
-        ) : null}
-      </Box>
       </Box>
 
       {/* Composer band — pinned to terminal bottom */}

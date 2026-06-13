@@ -4067,28 +4067,76 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toMatch(/^\s*writeStatus\(output, context\);\s*$/m);
   });
 
-  it("ShellApp TaskLayout uses Static-based transcript without a full-height blank frame", async () => {
+  it("ShellApp TaskLayout uses native terminal scrollback — no TranscriptViewport in normal chat", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
-    // The TaskLayout outer Box must not center the whole region.
     const taskLayoutStart = source.indexOf("function TaskLayout(");
     expect(taskLayoutStart).toBeGreaterThan(0);
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
-    // Static-based layout: completed blocks commit to terminal scrollback,
-    // dynamic blocks stay in the rerender zone below.
-    expect(body).toContain("<Static items={staticBlocks}>");
+    expect(body).not.toContain("<TranscriptViewport");
+    expect(body).not.toContain("virtualRange={view.transcriptVirtualRange}");
+    expect(body).not.toContain('overflow="hidden"');
+    expect(body).toContain("TASK_RECENT_TAIL_BLOCKS");
+    expect(body).toContain("staticHistoryBlocks");
+    expect(body).toContain("recentStaticBlocks");
+    expect(body).toContain('justifyContent="flex-end"');
+    expect(body).toContain("<UnseenMessagePill");
     expect(body).toContain("<ProductBlock");
     expect(body).toContain("<Composer view={view}");
     expect(body).toContain('<Box flexDirection="column" width={view.width} height={view.height}>');
-    expect(body).toContain('<Box flexDirection="column" paddingX={2}>');
     expect(body).toContain("flexGrow={1}");
     expect(body).toContain("minHeight={0}");
-    expect(body).toContain('overflow="hidden"');
-    expect(body).not.toContain('flexGrow={1} overflow="hidden" paddingX={2}');
-    // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
     expect(outerWrapper).not.toContain('alignItems="center"');
+  });
+
+  it("multiAgent workflow does not show '工作流已完成' — uses collaboration terminology", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "model-tool-runtime.ts"), "utf8");
+    const fnStart = source.indexOf("function formatControlToolPrimaryText(");
+    expect(fnStart).toBeGreaterThan(0);
+    const fnEnd = source.indexOf("\nfunction ", fnStart + 30);
+    const body = source.slice(fnStart, fnEnd);
+    expect(body).toContain("record.multiAgent");
+    expect(body).toContain("多智能体协作已返回结果");
+    expect(body).toContain("Multi-agent collaboration returned results");
+    expect(body).toContain("多智能体协作返回了部分结果，主链继续整理");
+    expect(body).not.toMatch(/if \(status === "completed"\) return zh \? "工作流已完成/);
+  });
+
+  it("workflow result=partial must not be displayed as success/completed", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "model-tool-runtime.ts"), "utf8");
+    const fnStart = source.indexOf("function formatControlToolPrimaryText(");
+    const fnEnd = source.indexOf("\nfunction ", fnStart + 30);
+    const body = source.slice(fnStart, fnEnd);
+    expect(body).toContain('status === "partial"');
+    expect(body).toContain("部分完成");
+    expect(body).toContain("partially completed");
+  });
+
+  it("deriveBackgroundActivityFallback shows multiAgent collaboration text instead of workflow", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
+    const fnStart = source.indexOf("function deriveBackgroundActivityFallback(");
+    expect(fnStart).toBeGreaterThan(0);
+    const fnEnd = source.indexOf("\nfunction ", fnStart + 30);
+    const body = source.slice(fnStart, fnEnd);
+    expect(body).toContain("multiAgent");
+    expect(body).toContain("多智能体协作进行中");
+    expect(body).toContain("Multi-agent collaboration running");
+  });
+
+  it("classifyToolGroupingBlock recognizes multiAgent collaboration text as 'agent' grouping", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
+    const fnStart = source.indexOf("function classifyToolGroupingBlock(");
+    expect(fnStart).toBeGreaterThan(0);
+    const fnEnd = source.indexOf("\nfunction ", fnStart + 30);
+    const body = source.slice(fnStart, fnEnd);
+    expect(body).toContain("多智能体协作");
+    expect(body).toContain("Multi-agent collaboration");
   });
 
   it("Composer no longer carries SGR wheel handling in the input path", async () => {
@@ -4140,15 +4188,14 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
   });
 
-  it("D.14D-C2: TranscriptViewport owns the measured overflow=hidden culling", async () => {
+  it("D.14D-C2: ScrollViewport remains isolated from the normal task transcript", async () => {
     const { readFile } = await import("node:fs/promises");
-    const source = await readFile(join(SRC_ROOT, "shell/components/ScrollViewport.tsx"), "utf8");
-    expect(source).toContain("virtualRange?: TranscriptVirtualRangeView");
-    expect(source).toContain("virtualRange?.estimatedContentHeight");
-    expect(source).toContain("marginTop + virtualRange.topSpacer");
-    expect(source).toContain('overflow="hidden"');
-    expect(source).toContain("clampTranscriptScroll");
-    expect(source).toContain("getComputedHeight");
+    const shellSource = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    const viewportSource = await readFile(join(SRC_ROOT, "shell/components/ScrollViewport.tsx"), "utf8");
+    expect(shellSource).not.toContain("from \"./ScrollViewport.js\"");
+    expect(shellSource).not.toContain("<TranscriptViewport");
+    expect(viewportSource).toContain("virtualRange?: TranscriptVirtualRangeView");
+    expect(viewportSource).toContain('overflow="hidden"');
   });
 
   it("Phase 7.18 source: controller records measured block heights into the same cache", async () => {
@@ -6098,7 +6145,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(view.transcriptScroll?.stickToBottom).toBe(true);
   });
 
-  it("Phase 7.18: 1000+ transcript blocks only project the viewport window", () => {
+  it("native task transcript keeps full history instead of projecting a virtual window", () => {
     const blocks: ProductBlockViewModel[] = Array.from({ length: 1200 }, (_, index) => ({
       id: `block-${index}`,
       kind: "details",
@@ -6125,15 +6172,13 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
       outputBlocks: blocks,
     });
 
-    expect(view.transcriptVirtualRange?.totalBlockCount).toBe(1200);
-    expect(view.transcriptVirtualRange?.renderedBlockCount).toBeLessThan(80);
-    expect(view.blocks.length).toBe(view.transcriptVirtualRange?.renderedBlockCount);
-    expect(view.blocks.some((block) => block.id === "block-0")).toBe(false);
+    expect(view.transcriptVirtualRange).toBeUndefined();
+    expect(view.blocks).toHaveLength(1200);
+    expect(view.blocks.some((block) => block.id === "block-0")).toBe(true);
     expect(view.blocks.some((block) => block.id === "block-1199")).toBe(true);
-    expect(JSON.stringify(ctx.transcriptBlockHeightCache)).toContain("block-1199");
   });
 
-  it("Phase 7.18: user scrolled-up window stays detached from bottom", () => {
+  it("native task transcript keeps full history even when scroll state is detached", () => {
     const blocks: ProductBlockViewModel[] = Array.from({ length: 240 }, (_, index) => ({
       id: `scroll-block-${index}`,
       kind: "details",
@@ -6161,12 +6206,13 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     });
 
     expect(view.transcriptScroll?.stickToBottom).toBe(false);
-    expect(view.transcriptVirtualRange?.startIndex).toBeGreaterThan(0);
-    expect(view.transcriptVirtualRange?.endIndex).toBeLessThan(240);
-    expect(view.blocks.some((block) => block.id === "scroll-block-239")).toBe(false);
+    expect(view.transcriptVirtualRange).toBeUndefined();
+    expect(view.blocks).toHaveLength(240);
+    expect(view.blocks.some((block) => block.id === "scroll-block-0")).toBe(true);
+    expect(view.blocks.some((block) => block.id === "scroll-block-239")).toBe(true);
   });
 
-  it("Phase 7.18: streaming sibling dedupe uses full history, not the virtual window", () => {
+  it("native full history keeps finalized assistant block while deduping streaming preview", () => {
     const blocks: ProductBlockViewModel[] = Array.from({ length: 260 }, (_, index) => ({
       id: `history-${index}`,
       kind: "details",
@@ -6207,8 +6253,161 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
       outputBlocks: blocks,
     });
 
-    expect(view.blocks.some((block) => block.id === "assistant-final-dedupe-window")).toBe(false);
+    expect(view.transcriptVirtualRange).toBeUndefined();
+    expect(view.blocks.some((block) => block.id === "assistant-final-dedupe-window")).toBe(true);
     expect(view.streamingAssistantText).toBeUndefined();
+  });
+
+  it("unseen message pill state increments only while detached from bottom", () => {
+    const ctx = createContext({
+      transcriptScrollState: {
+        scrollOffset: 10,
+        stickToBottom: false,
+        viewportHeight: 10,
+        contentHeight: 40,
+      },
+    });
+    const firstBlocks: ProductBlockViewModel[] = [
+      {
+        id: "u-1",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "one",
+        fullText: "one",
+        messageKind: "assistant_text",
+        keep: true,
+      },
+    ];
+    const secondBlocks: ProductBlockViewModel[] = [
+      ...firstBlocks,
+      {
+        id: "u-2",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "two",
+        fullText: "two",
+        messageKind: "assistant_text",
+        keep: true,
+      },
+    ];
+
+    const first = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: firstBlocks,
+    });
+    const second = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: secondBlocks,
+    });
+
+    expect(first.unseenMessageCount).toBe(0);
+    expect(second.unseenMessageCount).toBe(1);
+    expect(second.visibleWorkState?.scrollDetached).toBe(true);
+    expect(second.visibleWorkState?.unseenCount).toBe(1);
+
+    ctx.transcriptScrollState = { scrollOffset: 0, stickToBottom: true };
+    const bottom = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: secondBlocks,
+    });
+    expect(bottom.unseenMessageCount).toBe(0);
+    expect(ctx.unseenMessageCount).toBe(0);
+  });
+
+  it("multi-agent wrapper workflow is hidden from the main workflow progress layer", () => {
+    const ctx = createContext({
+      agents: [
+        {
+          id: "agent-a",
+          status: "running",
+          displayName: "audit-a",
+          mailbox: [],
+          startedAt: new Date().toISOString(),
+        },
+      ],
+      workflows: {
+        enabled: true,
+        templates: [],
+        disabledIds: [],
+        activeRuns: [
+          {
+            id: "workflow-agent-wrapper",
+            goal: "multi-agent audit",
+            status: "running",
+            steps: [{ id: "s1", title: "agent fanout", status: "running" }],
+            multiAgent: true,
+          },
+        ],
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, { width: 100, viewMode: "task" });
+    expect(view.visibleWorkState?.multiAgentWorkflowRunning).toBe(true);
+    expect(view.visibleWorkState?.agentsRunning).toBe(1);
+    expect(view.agentProgressTree?.rows).toHaveLength(1);
+    expect(view.workflowProgressView).toBeUndefined();
+  });
+
+  it("multi-agent wrapper stays hidden even after agents leave running state", () => {
+    const ctx = createContext({
+      agents: [
+        {
+          id: "agent-a",
+          status: "idle",
+          lastTerminalStatus: "completed",
+          displayName: "audit-a",
+          mailbox: [],
+          startedAt: new Date().toISOString(),
+        },
+      ],
+      workflows: {
+        enabled: true,
+        templates: [],
+        disabledIds: [],
+        activeRuns: [
+          {
+            id: "workflow-agent-wrapper",
+            goal: "multi-agent audit",
+            status: "running",
+            steps: [{ id: "s1", title: "collect results", status: "running" }],
+            multiAgent: true,
+          },
+        ],
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, { width: 100, viewMode: "task" });
+    expect(view.visibleWorkState?.multiAgentWorkflowRunning).toBe(true);
+    expect(view.visibleWorkState?.agentsRunning).toBe(0);
+    expect(view.workflowProgressView).toBeUndefined();
+  });
+
+  it("explicit workflow remains visible as workflow progress", () => {
+    const ctx = createContext({
+      workflows: {
+        enabled: true,
+        templates: [],
+        disabledIds: [],
+        activeRuns: [
+          {
+            id: "workflow-explicit",
+            goal: "release workflow",
+            status: "running",
+            steps: [{ id: "s1", title: "verify", status: "running" }],
+            phaseGateConfirmed: true,
+          },
+        ],
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, { width: 100, viewMode: "task" });
+    expect(view.visibleWorkState?.explicitWorkflowRunning).toBe(true);
+    expect(view.workflowProgressView?.runs[0]?.id).toBe("workflow-explicit");
   });
 
   it("Phase 7.18: adjacent read/search/deferred tool outputs collapse into one low-noise block", () => {

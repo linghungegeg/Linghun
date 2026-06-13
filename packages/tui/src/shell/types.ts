@@ -572,6 +572,33 @@ export type ShellViewModel = {
    * R4 — Git branch name for footer display.
    */
   gitBranch?: string;
+  /**
+   * Unified visible work state — derived source of truth for active work.
+   * The view-model uses this to suppress duplicate progress layers and expose
+   * the concrete views that ShellApp renders.
+   */
+  visibleWorkState?: VisibleWorkState;
+};
+
+/**
+ * Unified visible work state derived from TuiContext. The view-model maps this
+ * into activity/spinner, progress tree, and workflow views so multiple
+ * subsystems do not compete for the main screen.
+ *
+ * Priority (highest → lowest):
+ *   mainStreaming > toolRunning > agentsRunning > explicitWorkflow > backgroundTasks > idle
+ */
+export type VisibleWorkState = {
+  mainRequestActive: boolean;
+  userInputPending: boolean;
+  toolsRunning: boolean;
+  agentsRunning: number;
+  backgroundTasksRunning: number;
+  explicitWorkflowRunning: boolean;
+  multiAgentWorkflowRunning: boolean;
+  pendingCompletionCount: number;
+  scrollDetached: boolean;
+  unseenCount: number;
 };
 
 /**

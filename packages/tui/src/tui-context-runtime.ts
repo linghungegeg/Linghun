@@ -388,6 +388,8 @@ export type TuiContext = {
   requestActivityToolName?: string;
   requestActivityToolLines?: number;
   requestActivityToolBytes?: number;
+  unseenMessageCount?: number;
+  lastTranscriptBlockCount?: number;
   lastModelRequest?: {
     phase: RequestActivityPhase;
     toolName?: string;

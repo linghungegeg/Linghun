@@ -29,7 +29,7 @@ import {
   buildTaskListView,
   buildWorkflowProgressView,
 } from "./progress-views.js";
-import { charWidth, displayWidth, truncateMiddle } from "./text-utils.js";
+import { charWidth, truncateMiddle } from "./text-utils.js";
 import type {
   BackgroundTaskSummary,
   CommandPanelView,
@@ -44,13 +44,8 @@ import type {
   TaskPermissionView,
   TaskSuggestion,
   TranscriptScrollView,
-  TranscriptVirtualRangeView,
+  VisibleWorkState,
 } from "./types.js";
-
-type TranscriptBlockHeightCache = Record<
-  string,
-  { height: number; width: number; textHash: string }
->;
 
 const shellText = {
   "zh-CN": {
@@ -455,14 +450,6 @@ export function createShellViewModel(
   // 只负责渲染 title/sections/actions/detailsText。空状态时 commandPanel 为 undefined。
   const commandPanel: CommandPanelView | undefined =
     (context as { commandPanelState?: CommandPanelView }).commandPanelState ?? undefined;
-  const agentProgressTree = buildAgentProgressTreeView(context);
-  const taskListView = buildTaskListView(context);
-  const workflowProgressView = buildWorkflowProgressView(context);
-  const backgroundTaskOverlay = buildBackgroundTaskOverlayView(
-    context,
-    options.backgroundSummaries ?? [],
-  );
-
   // Main transcript scroll：home 模式不暴露；task/pending 模式默认吸底。
   const transcriptScroll: TranscriptScrollView | undefined =
     effectiveViewMode === "home"
@@ -471,23 +458,23 @@ export function createShellViewModel(
           scrollOffset: 0,
           stickToBottom: true,
         });
-  const streamingAssistantText = selectStreamingAssistantText(context, fullFittedBlocks);
-  const tailHeight = estimateTranscriptTailHeight({
-    streamingAssistantText,
-    activity: effectiveActivity,
-    suggestions: taskSuggestions,
-    limitations: options.limitations ?? [],
-    width,
-  });
-  const virtualized = buildTranscriptVirtualWindow({
+  updateUnseenTranscriptCount(context, effectiveViewMode, transcriptScroll, fullFittedBlocks.length);
+  const agentProgressTree = buildAgentProgressTreeView(context);
+  const taskListView = buildTaskListView(context);
+  const visibleWorkState = deriveVisibleWorkState(context);
+  const workflowProgressView =
+    visibleWorkState.multiAgentWorkflowRunning
+      ? undefined
+      : buildWorkflowProgressView(context);
+  const backgroundTaskOverlay = buildBackgroundTaskOverlayView(
     context,
-    blocks: fullFittedBlocks,
-    width,
-    height,
-    scroll: transcriptScroll,
-    tailHeight,
-    enabled: effectiveViewMode !== "home",
-  });
+    options.backgroundSummaries ?? [],
+  );
+  const unseenMessageCount =
+    effectiveViewMode === "home" || !visibleWorkState.scrollDetached
+      ? 0
+      : visibleWorkState.unseenCount;
+  const streamingAssistantText = selectStreamingAssistantText(context, fullFittedBlocks);
 
   return {
     language,
@@ -542,8 +529,8 @@ export function createShellViewModel(
           : "正在处理上一条，按 Ctrl+C 可中断，稍后再发。"
         : undefined,
     },
-    blocks: virtualized.blocks,
-    transcriptVirtualRange: virtualized.range,
+    blocks: fullFittedBlocks,
+    transcriptVirtualRange: undefined,
     streamingAssistantText,
     ctrlOExpand: ctrlOExpandState?.active
       ? { active: true, ...(ctrlOExpandState.blockId ? { blockId: ctrlOExpandState.blockId } : {}) }
@@ -553,6 +540,7 @@ export function createShellViewModel(
     taskRuntimeSummary: taskRuntimeSummary ? fitBlockToWidth(taskRuntimeSummary, width) : undefined,
     agentProgressTree,
     taskListView,
+    visibleWorkState,
     workflowProgressView,
     backgroundTaskOverlay,
     taskSuggestions: taskSuggestions && taskSuggestions.length > 0 ? taskSuggestions : undefined,
@@ -563,6 +551,7 @@ export function createShellViewModel(
     transcriptViewportGeometry: (
       context as { transcriptViewportGeometry?: ShellViewModel["transcriptViewportGeometry"] }
     ).transcriptViewportGeometry,
+    unseenMessageCount,
     helpPanel: (() => {
       const state = (
         context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number; scrollOffset: number } }
@@ -671,7 +660,7 @@ function classifyToolGroupingBlock(block: ProductBlockViewModel): ToolGroupingKi
     return "agent";
   }
   if (
-    /(?:工作流已完成|已启动后台工作流|工作流结果已记录|Workflow completed|Started a background workflow|Recorded the workflow result)/iu.test(
+    /(?:工作流已完成|已启动后台工作流|工作流结果已记录|Workflow completed|Started a background workflow|Recorded the workflow result|多智能体协作|Multi-agent collaboration)/iu.test(
       text,
     )
   ) {
@@ -753,146 +742,27 @@ function formatToolGroupSummary(
   return `工具活动已分组：${parts.join("，") || `${fallbackCount} 项`}。`;
 }
 
-function estimateTranscriptTailHeight({
-  streamingAssistantText,
-  activity,
-  suggestions,
-  limitations,
-  width,
-}: {
-  streamingAssistantText?: string;
-  activity?: TaskActivityView;
-  suggestions?: TaskSuggestion[];
-  limitations: string[];
-  width: number;
-}): number {
-  let height = 0;
-  if (streamingAssistantText)
-    height += 1 + estimateWrappedTextHeight(streamingAssistantText, width);
-  if (activity) height += 2;
-  if (suggestions && suggestions.length > 0) height += 1;
-  if (limitations.length > 0) height += 1 + limitations.length;
-  return height;
-}
-
-function buildTranscriptVirtualWindow({
-  context,
-  blocks,
-  width,
-  height,
-  scroll,
-  tailHeight,
-  enabled,
-}: {
-  context: TuiContext;
-  blocks: ProductBlockViewModel[];
-  width: number;
-  height: number;
-  scroll: TranscriptScrollView | undefined;
-  tailHeight: number;
-  enabled: boolean;
-}): { blocks: ProductBlockViewModel[]; range?: TranscriptVirtualRangeView } {
-  if (!enabled || blocks.length === 0) {
-    return { blocks };
-  }
-
-  const cacheOwner = context as { transcriptBlockHeightCache?: TranscriptBlockHeightCache };
-  cacheOwner.transcriptBlockHeightCache ??= {};
-  const cache = cacheOwner.transcriptBlockHeightCache;
-  const heights = blocks.map((block) => estimateBlockHeight(block, width, cache));
-  const blockContentHeight = heights.reduce((sum, value) => sum + value, 0);
-  const estimatedContentHeight = blockContentHeight + tailHeight;
-  const viewportHeight = scroll?.viewportHeight ?? Math.max(1, height - 8);
-  const maxOffset = Math.max(0, estimatedContentHeight - viewportHeight);
-  const bottomOffset =
-    (scroll?.stickToBottom ?? true) ? 0 : Math.min(scroll?.scrollOffset ?? 0, maxOffset);
-  const topOffset = Math.max(0, maxOffset - bottomOffset);
-  const overscan = Math.max(8, Math.ceil(viewportHeight * 0.75));
-  const windowTop = Math.max(0, topOffset - overscan);
-  const windowBottom = Math.min(estimatedContentHeight, topOffset + viewportHeight + overscan);
-
-  let startIndex = 0;
-  let cursor = 0;
-  while (startIndex < blocks.length) {
-    const currentHeight = heights[startIndex] ?? 1;
-    if (cursor + currentHeight > windowTop) break;
-    cursor += currentHeight;
-    startIndex += 1;
-  }
-  let endIndex = startIndex;
-  let endCursor = cursor;
-  while (endIndex < blocks.length && endCursor < windowBottom) {
-    endCursor += heights[endIndex] ?? 1;
-    endIndex += 1;
-  }
-
-  if (startIndex >= blocks.length && blocks.length > 0) {
-    startIndex = Math.max(0, blocks.length - 1);
-    endIndex = blocks.length;
-    cursor = blockContentHeight - (heights[startIndex] ?? 1);
-    endCursor = blockContentHeight;
-  }
-
-  const rendered = blocks.slice(startIndex, endIndex);
-  const range: TranscriptVirtualRangeView = {
-    startIndex,
-    endIndex,
-    topSpacer: cursor,
-    bottomSpacer: Math.max(0, blockContentHeight - endCursor),
-    estimatedContentHeight,
-    renderedBlockCount: rendered.length,
-    totalBlockCount: blocks.length,
+function updateUnseenTranscriptCount(
+  context: TuiContext,
+  viewMode: "home" | "task" | "pending",
+  scroll: TranscriptScrollView | undefined,
+  blockCount: number,
+): void {
+  const state = context as {
+    unseenMessageCount?: number;
+    lastTranscriptBlockCount?: number;
   };
-  return { blocks: rendered, range };
-}
+  const previousCount = state.lastTranscriptBlockCount ?? blockCount;
+  const delta = Math.max(0, blockCount - previousCount);
+  const detached = viewMode !== "home" && scroll?.stickToBottom === false;
 
-function estimateBlockHeight(
-  block: ProductBlockViewModel,
-  width: number,
-  cache: TranscriptBlockHeightCache,
-): number {
-  const textHash = blockTextHash(block);
-  const cached = cache[block.id];
-  if (
-    cached &&
-    cached.width === width &&
-    (cached.textHash === textHash || cached.textHash === "measured")
-  ) {
-    return cached.height;
+  if (!detached) {
+    state.unseenMessageCount = 0;
+  } else if (delta > 0) {
+    state.unseenMessageCount = (state.unseenMessageCount ?? 0) + delta;
   }
-  const estimated = estimateBlockHeightUncached(block, width);
-  cache[block.id] = { height: estimated, width, textHash };
-  return estimated;
-}
 
-function estimateBlockHeightUncached(block: ProductBlockViewModel, width: number): number {
-  const contentWidth = Math.max(8, width - 4);
-  const body = (block.fullText ?? block.summary ?? block.title ?? "").trim();
-  let lines = estimateWrappedTextHeight(body || block.summary || block.title || "", contentWidth);
-  if (block.title && !body.includes(block.title)) lines += 1;
-  if (block.detail) lines += estimateWrappedTextHeight(block.detail, contentWidth);
-  if (block.nextAction) lines += 1;
-  if (block.kind === "command" || block.messageKind === "user_text") lines += 1;
-  if (block.messageKind === "assistant_text") lines += 1;
-  if (block.messageKind === "assistant_thinking") lines += 1;
-  if (block.kind === "permission" || block.kind === "error" || block.status === "fail") lines += 2;
-  return Math.max(1, lines);
-}
-
-function estimateWrappedTextHeight(text: string, width: number): number {
-  const normalized = text.replace(/\r/g, "").trim();
-  if (!normalized) return 1;
-  const wrapWidth = Math.max(8, width);
-  return normalized.split("\n").reduce((total, line) => {
-    const lineWidth = displayWidth(line || " ");
-    return total + Math.max(1, Math.ceil(lineWidth / wrapWidth));
-  }, 0);
-}
-
-function blockTextHash(block: ProductBlockViewModel): string {
-  const text = `${block.kind}\n${block.status}\n${block.messageKind ?? ""}\n${block.title}\n${block.summary}\n${block.detail ?? ""}\n${block.nextAction ?? ""}\n${block.fullText ?? ""}`;
-  if (text.length <= 160) return `${text.length}:${text}`;
-  return `${text.length}:${text.slice(0, 80)}:${text.slice(-80)}`;
+  state.lastTranscriptBlockCount = blockCount;
 }
 
 const CONFIG_PANELS = [
@@ -1463,7 +1333,16 @@ function deriveBackgroundActivityFallback(
     return { phase: "continuing", text, language };
   }
   if (runningWorkflows.length > 0 || (activeRun && activeRun.status === "running")) {
-    const text = language === "en-US" ? "Workflow running…" : "工作流运行中…";
+    const hasMultiAgent =
+      runningWorkflows.some((r) => r.multiAgent === true) ||
+      (activeRun && activeRun.status === "running" && activeRun.multiAgent === true);
+    const text = hasMultiAgent
+      ? language === "en-US"
+        ? "Multi-agent collaboration running…"
+        : "多智能体协作进行中…"
+      : language === "en-US"
+        ? "Workflow running…"
+        : "工作流运行中…";
     return { phase: "continuing", text, language };
   }
   if (runningBgTasks.length > 0) {
@@ -1474,6 +1353,49 @@ function deriveBackgroundActivityFallback(
     return { phase: "continuing", text, language };
   }
   return undefined;
+}
+
+function deriveVisibleWorkState(context: TuiContext): VisibleWorkState {
+  const requestPhase = (context as { requestActivityPhase?: string }).requestActivityPhase;
+  const activeAbort = (context as { activeAbortController?: { signal?: { aborted?: boolean } } })
+    .activeAbortController;
+  const hasActiveAbort = Boolean(activeAbort && activeAbort.signal?.aborted !== true);
+  const runningAgents = (context.agents ?? []).filter((a) => a.status === "running");
+  const runningBackgroundTasks = (context.backgroundTasks ?? []).filter((t) => t.status === "running");
+  const allActiveRuns = [
+    ...(context.workflows?.activeRuns ?? []),
+    ...(context.workflows?.activeRun ? [context.workflows.activeRun] : []),
+  ];
+  const runningWorkflows = allActiveRuns.filter((r) => r.status === "running");
+  const hasMultiAgentWorkflow =
+    runningWorkflows.some((r) => r.multiAgent === true) ||
+    (runningAgents.length > 0 && runningWorkflows.length > 0 && !runningWorkflows.some((r) => r.phaseGateConfirmed));
+  const hasExplicitWorkflow = runningWorkflows.some((r) => r.phaseGateConfirmed === true);
+  const mainChainActive =
+    hasActiveAbort ||
+    (requestPhase !== undefined &&
+      requestPhase !== "completed" &&
+      requestPhase !== "request_completed");
+  const pendingCompletionCount = (context.agentCompletions?.notices ?? []).filter(
+    (n) => !n.reportedAt,
+  ).length;
+  const scrollState = (context as { transcriptScrollState?: { stickToBottom?: boolean } })
+    .transcriptScrollState;
+  const scrollDetached = scrollState ? scrollState.stickToBottom === false : false;
+  const unseenCount = (context as { unseenMessageCount?: number }).unseenMessageCount ?? 0;
+  return {
+    mainRequestActive: mainChainActive,
+    userInputPending:
+      requestPhase === "request_started" || requestPhase === "waiting_first_delta",
+    toolsRunning: requestPhase === "tool_running",
+    agentsRunning: runningAgents.length,
+    backgroundTasksRunning: runningBackgroundTasks.length,
+    explicitWorkflowRunning: hasExplicitWorkflow,
+    multiAgentWorkflowRunning: hasMultiAgentWorkflow,
+    pendingCompletionCount,
+    scrollDetached,
+    unseenCount,
+  };
 }
 
 /**

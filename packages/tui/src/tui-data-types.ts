@@ -1052,6 +1052,8 @@ export type WorkflowRunState = {
   /** Set to true when the user explicitly invoked /workflows run. */
   phaseGateConfirmed?: boolean;
   confirmedPhaseStopPoints?: string[];
+  /** True when this workflow wraps a multi-agent collaboration request. */
+  multiAgent?: boolean;
 };
 
 export type WorkflowState = {

@@ -1182,7 +1182,12 @@ export async function executeLinghunControlToolUse(
       if (input.workflowId) {
         const registry = findRegistryWorkflow(context, input.workflowId);
         const registryAgent = findRegistryAgentWorkflow(context, input.workflowId);
-        if (!registry && !registryAgent) {
+        const existingRun =
+          context.workflows.activeRuns?.find((r) => r.id === input.workflowId) ??
+          (context.workflows.activeRun?.id === input.workflowId
+            ? context.workflows.activeRun
+            : undefined);
+        if (!registry && !registryAgent && !existingRun) {
           return await finishControlToolFailure(
             toolCall,
             context,
@@ -1190,6 +1195,24 @@ export async function executeLinghunControlToolUse(
             output,
             `Unknown workflowId: ${input.workflowId}`,
           );
+        }
+        if (existingRun && !registry && !registryAgent) {
+          const currentStep = selectWorkflowCurrentStepForToolResult(existingRun);
+          const text = formatWorkflowToolResultSummary(
+            context.language,
+            existingRun.status,
+            existingRun.steps.length,
+            currentStep?.summary ?? currentStep?.title ?? existingRun.goal,
+            false,
+            existingRun.multiAgent,
+            existingRun.result,
+          );
+          return await finishControlToolResult(toolCall, context, sessionId, output, text, false, {
+            workflowId: existingRun.id,
+            status: existingRun.status,
+            result: existingRun.result,
+            multiAgent: existingRun.multiAgent,
+          });
         }
         const workflowGoal = input.goal ?? (input.inputs ? JSON.stringify(input.inputs) : "");
         if (registry) {
@@ -1226,6 +1249,8 @@ export async function executeLinghunControlToolUse(
             run.steps.length,
             currentStep?.summary ?? currentStep?.title ?? "workflow",
             input.runInBackground && run.status === "running",
+            run.multiAgent ?? input.multiAgent,
+            run.result,
           )
         : "Workflow runtime did not start.";
       return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
@@ -1304,9 +1329,32 @@ function formatWorkflowToolResultSummary(
   steps: number,
   currentStep: string,
   background: boolean,
+  multiAgent?: boolean,
+  result?: string,
 ): string {
   if (status === "running") {
-    return formatWorkflowStartPrimary({ language, steps, currentPhase: currentStep, background });
+    return formatWorkflowStartPrimary({ language, steps, currentPhase: currentStep, background, multiAgent });
+  }
+  if (multiAgent) {
+    if (status === "completed") {
+      if (result === "partial") {
+        return language === "en-US"
+          ? "Multi-agent collaboration returned partial results; main chain continuing."
+          : "多智能体协作返回了部分结果，主链继续整理。";
+      }
+      return language === "en-US"
+        ? "Multi-agent collaboration returned results."
+        : "多智能体协作已返回结果。";
+    }
+    if (status === "partial") {
+      return language === "en-US"
+        ? "Multi-agent collaboration partially done; main chain continuing."
+        : "多智能体协作部分完成，主链继续处理。";
+    }
+    if (language === "en-US") {
+      return `Multi-agent collaboration stopped at step: ${currentStep}. Status: ${status}. Use /workflows status for details.`;
+    }
+    return `多智能体协作停在步骤：${currentStep}。状态：${status}。可用 /workflows status 查看详情。`;
   }
   if (language === "en-US") {
     return `Workflow started, then stopped at step: ${currentStep}. Status: ${status}. Use /workflows status for details.`;
@@ -1807,10 +1855,32 @@ function formatControlToolPrimaryText(
     return zh ? "智能体启动结果已记录。" : "Recorded the agent start result.";
   }
   if (toolName === RUN_WORKFLOW_TOOL_NAME) {
-    const status = isRecord(data) && typeof data.status === "string" ? data.status : "";
-    if (status === "running") return zh ? "已启动后台工作流。" : "Started a background workflow.";
-    if (status === "completed") return zh ? "工作流已完成。" : "Workflow completed.";
-    return zh ? "工作流结果已记录。" : "Recorded the workflow result.";
+    const record = isRecord(data) ? data : {};
+    const status = typeof record.status === "string" ? record.status : "";
+    const isMultiAgent = record.multiAgent === true;
+    if (status === "running") {
+      return isMultiAgent
+        ? zh ? "已启动多智能体协作。" : "Started multi-agent collaboration."
+        : zh ? "已启动后台工作流。" : "Started a background workflow.";
+    }
+    if (status === "completed") {
+      if (isMultiAgent && record.result === "partial") {
+        return zh
+          ? "多智能体协作返回了部分结果，主链继续整理。"
+          : "Multi-agent collaboration returned partial results; main chain continuing.";
+      }
+      return isMultiAgent
+        ? zh ? "多智能体协作已返回结果。" : "Multi-agent collaboration returned results."
+        : zh ? "工作流已完成。" : "Workflow completed.";
+    }
+    if (status === "partial") {
+      return isMultiAgent
+        ? zh ? "多智能体协作部分完成，主链继续处理。" : "Multi-agent collaboration partially done; main chain continuing."
+        : zh ? "工作流部分完成。" : "Workflow partially completed.";
+    }
+    return isMultiAgent
+      ? zh ? "多智能体协作结果已记录。" : "Recorded multi-agent collaboration result."
+      : zh ? "工作流结果已记录。" : "Recorded the workflow result.";
   }
   if (toolName === RUN_VERIFICATION_TOOL_NAME) {
     const status = isRecord(data) && typeof data.status === "string" ? data.status : "";

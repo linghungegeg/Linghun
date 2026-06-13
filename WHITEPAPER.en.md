@@ -1020,6 +1020,10 @@ Agent types include:
 
 Each agent has an independent transcript, role route, permission mode, cost record, and background task surface. The main session is not flooded by child-agent output; users can view, cancel, or expand details.
 
+More importantly, Linghun agents are not merely "extra model personas" sharing the same main workspace. The current execution layer supports named agents and teams, targeted `SendMessage`, true-background `/fork --background`, agent mailboxes, independent transcript sessions, `.linghun/agent-runs` state snapshots, and safe `cwd` / managed worktree isolation. A user can let a worker continue inside a specific workspace subpath or a managed worktree; tool execution is scoped to that agent working directory, while worktree creation still reuses Git runtime managed-worktree evidence instead of introducing a second workspace system. After a TUI restart, historical running agents are conservatively restored as `stale`; they are not falsely marked as completed.
+
+This makes multi-agent collaboration closer to real engineering division of labor: one agent can perform read-only exploration, another can try an implementation inside an isolated worktree, and a verifier can review based on evidence. Agent registry and workflow registry also let a project define lightweight roles and flows under `.linghun/agents` and `.linghun/workflows`, but these registries are only entry points into the existing agent/workflow/job mainline. They do not bypass permissions, verification, resource limits, or evidence boundaries.
+
 This agent capability is one execution foundation for Workflow Matrix. Workflow Plan does not bypass the mainline. Instead, it hands slices that benefit from parallel or role-specific handling to the existing agent/job system: exploration to explorer, plan decomposition to planner, concrete implementation to worker, verification and review to verifier. Each agent output enters aggregation first as context or status; it cannot directly become final PASS.
 
 This is different from letting a model open several conversations and run freely. Linghun agents have concurrency limits, independent transcripts, permission modes, failure learning, resource boundaries, and result summaries. Users see controlled background work, not several streams of long text flooding the main session.
@@ -1605,7 +1609,144 @@ Linghun is suitable for the following workflows:
 
 ---
 
-## 30. Explicit Boundaries
+## 30. Long-Term Preview Toward a Personal AI Butler
+
+Linghun currently serves developer engineering workflows first, but its underlying shape is not limited to code editing. In the longer term, it can be understood as an early engineering foundation for a Jarvis-like personal AI runtime: the model handles understanding, reasoning, conversation, planning, and personality expression; the runtime connects software, hardware, memory, permissions, evidence, verification, remote channels, long-running tasks, and capability ecosystems.
+
+This view does not assume that a single "all-knowing model" must arrive first. Relying only on an omniscient model is not the more realistic path to AGI productization. Even as models become stronger, they still need real-time facts, network information, software APIs, hardware devices, sensor state, user memory, permission boundaries, and action channels. A powerful brain without senses, a nervous system, a body, and actuators remains trapped at the conversation layer. Linghun's provider runtime, tool runtime, permission runtime, evidence runtime, memory runtime, job runtime, agent/workflow runtime, remote channel, and Capability Runtime / App Bridge are forming that nervous system and action substrate.
+
+### 30.1 The Foundation Already Present
+
+Based on code facts and delivery records, Linghun is no longer a single model shell. It is an interlocked trusted-action runtime. It already has these foundation pieces:
+
+- **Model brain**: provider runtime and role-based multi-model routing let planner, executor, reviewer, verifier, summarizer, and other roles use different models and capability boundaries.
+- **Tool body**: Read, Write, Edit, MultiEdit, Grep, Glob, Bash, Todo, Diff, Git, index, and verification enter one execution chain instead of living as loose prompt instructions.
+- **Universal-plug prototype**: Capability Runtime / App Bridge already abstracts external abilities into transport, auth, permission, riskLevel, inputSchema, outputSchema, and provider; external apps can expose capabilities through manifests and connectors.
+- **Permission nervous system**: default, auto-review, plan, and full-access modes, path safety, command semantics, workspace trust, resource caps, and Start Gate decide whether actions can execute.
+- **Evidence and readiness boundary**: tool results, capability execution, Git, verification, index, provider failures, and related runtime facts can be recorded as evidence; successful capability execution does not automatically become verification PASS.
+- **Memory and personality-continuity substrate**: session, handoff, controlled memory, failure learning, user-state routing, and cross-turn continuity keep the system from starting over every turn.
+- **Multi-agent and long-task runtime**: StartAgent, SendMessage, agent mailbox, independent transcript, background fork, cwd / managed worktree isolation, Workflow Matrix, durable job, and bounded worker loop support role-based, background, observable complex work.
+- **Remote entry points**: remote channels support tiered notification, approval, natural-language inbound, and mobile status viewing while routing remote input back to the local mainline.
+- **Cost and context control**: prompt cache, CacheFreshness, summary-first output, deferred tools, bounded logs, workspace snapshot, and accepted-only memory reduce repeated explanation and repeated spend.
+
+Together, these pieces already form the basic structure where the model is the brain and Linghun is the body and nervous system. The model does not need to directly control the world. It proposes intent, reads facts, generates plans, and calls capabilities. Connection, permission, execution, evidence, verification, memory, and recovery are handled by the runtime.
+
+### 30.2 From AI Coding Terminal to AI Butler
+
+If the tools and project capabilities in the current developer scenario are replaced or extended with life, office, home, and device capabilities, Linghun's runtime shape can naturally migrate into a personal AI butler. This migration does not require replacing the architecture:
+
+- `Read/Grep/Index` correspond to real-world state reading, device queries, sensor information, calendars, email, documents, knowledge bases, and web pages.
+- `Edit/Write/Bash/Git` correspond to software operations, automation scripts, device actions, configuration changes, ticket handling, and workflow progress.
+- `Verification` corresponds to post-action confirmation, such as whether a device acted, an order was created, a reminder was saved, or a ticket was updated.
+- `Evidence` corresponds to traceable records for critical actions.
+- `Permission` corresponds to user confirmation before physical-world or sensitive software actions.
+- `Memory` corresponds to user habits, home preferences, communication style, common devices, routines, long-term goals, and historical risks.
+- `Agent/Job/Workflow` corresponds to complex task decomposition, such as home automation setup, travel planning, office workflows, long-running monitoring, batch organization, and cross-app tasks.
+- `Remote` corresponds to notifications, approvals, and natural-language entry points on phones, watches, speakers, cars, or enterprise IM.
+
+In this shape, an AI butler is not just a voice-command translator for "turn on the lights," "set an alarm," or "check the weather." It can understand the user's current situation, remember preferences, inspect multiple system states, call the right capability, request confirmation when needed, record evidence after action, and degrade when uncertain or failed. For consumers, it can live in a watch, phone, speaker, desktop app, home hub, or car. For teams, it can be a privately deployed workflow assistant. For developers, it remains an engineering-grade AI coding terminal.
+
+The key is the "universal plug" shape. The AI butler does not need every device, every app, and every service hardcoded inside itself. It needs a unified ability description and invocation boundary. A calendar can expose capabilities such as "read schedule / create event / change time"; a speaker can expose "play / read aloud / listen"; a home system can expose "query state / perform action / run scene"; an enterprise system can expose "check ticket / submit approval / update knowledge base." The model only needs to understand user intent and select the capability; the runtime confirms input, checks permission, executes action, records evidence, and handles failure.
+
+Once this universal plug connects to the network and many APIs, it can evolve in practice into a cross-software, cross-device, cross-scenario personal operating layer. If the user says, "I will get home late tonight, help me arrange things," the AI butler can read calendar and location state, check traffic and weather, notify family or teammates, adjust smart-home scenes for late arrival, delay reminders, optionally book transport or food delivery, and isolate high-risk actions for explicit confirmation. If the user says, "I have a business trip tomorrow morning," it can check flights, weather, calendar conflicts, packing lists, taxi timing, meeting conflicts, home-device state, and route planning instead of returning only a suggestion paragraph.
+
+In work scenarios, the same substrate can connect email, calendar, documents, tickets, code repositories, meeting notes, knowledge bases, and enterprise IM. A request like "help me prepare tomorrow's review" can become reading related documents, summarizing changes, checking todos, generating meeting materials, reminding relevant people, marking unconfirmed risks, and preserving evidence. In home scenarios, it can connect speakers, cameras, locks, lights, air conditioning, sensors, robot vacuums, NAS, and family calendars into a conversational home-state layer. In personal scenarios, it can turn a watch, phone, earbuds, health data, schedule, reminders, maps, payments, and common apps into a portable AI butler.
+
+The point is not that "connecting every API automatically creates intelligence." The point is that every API enters the same trusted mainline: queries and actions have schemas, sensitive actions require permission, results produce receipts, critical claims carry evidence, long-term preferences remain reviewable, and failures can degrade. That is what turns it from a networked remote control into a personal AI runtime that can continuously work across real-world capabilities.
+
+### 30.3 Why This Is More Realistic Than Waiting for an Omniscient Model
+
+An omniscient model sounds direct, but even a model approaching general intelligence still needs networks, software, and hardware. It needs the internet for fresh facts, software APIs for action, sensors to understand environments, devices to affect the physical world, memory to understand long-term users, and permissions to avoid unsafe actions. The stronger the model becomes, the more it needs a trusted runtime to connect it to reality instead of making it guess.
+
+Therefore, AGI productization may not first appear as "a model that knows everything." It may first appear as an operating substrate that connects models to real-world capabilities. Linghun is closer to the latter path: use the model as the brain, capability as the universal plug, permissions and evidence for control, memory and failure learning for long-term continuity, and agent/job/workflow for complex goals.
+
+This path can also land incrementally. The model does not need to handle every task from day one. The runtime can first connect high-frequency, low-risk, verifiable actions, then expand to more complex software and hardware capabilities. Every connected capability should enter the same schema, permission, evidence, verification, memory, and failure boundary instead of bypassing the mainline.
+
+### 30.4 An AGI Productization View
+
+From a product perspective, AGI does not have to arrive first as a single model suddenly possessing every ability. It is more likely to appear first as system-level intelligence: compute supplies reasoning resources, models provide understanding and generation, software runtime provides tools, memory, permissions, orchestration, and verification, hardware and sensors provide real-world entry points, and networks plus external APIs provide fresh facts and action interfaces. It is not an isolated brain, but an agentic system composed of models, runtime, software, hardware, and ecosystem.
+
+The core capability of this system-level AGI is not "knowing everything." It is sustaining loops in an uncertain world:
+
+- Sense: read files, web pages, device state, sensors, calendars, messages, app data, and user input.
+- Understand: turn natural language, context, emotion, task goals, and risk into executable intent.
+- Act: execute through tools, connectors, APIs, scripts, device protocols, and agent/job/workflow.
+- Verify: confirm results after action, record evidence, and distinguish done, failed, partial, and unverified.
+- Remember: retain user-confirmed preferences, project rules, home habits, and real failure lessons.
+- Self-control: request confirmation or degrade before high-risk, low-certainty, privacy-sensitive, or physical-world actions.
+- Maintain personality continuity: preserve stable communication style, understand trust changes and long-term relationships, and avoid acting like a stranger every turn.
+
+This is also the difference between a Jarvis-like product and an ordinary assistant. An ordinary assistant is closer to a feature entry point. A Jarvis-like runtime is closer to a continuously present personal operating system. It does not need movie-level omniscience on day one, but it does need to put understanding, action, verification, memory, permission, personality, and ecosystem access into one system mainline.
+
+### 30.5 2026 Technology Conditions
+
+Under 2026 technology conditions, a prototype of this product shape is already realistic. Large models can already perform natural-language understanding, long-context reasoning, tool use, code and document processing, multi-turn dialogue, emotion recognition, image/voice/multimodal understanding, and role-based collaboration. Local small models and private-domain models are already sufficient for many low-risk, low-cost, low-latency tasks. Strong cloud models can handle complex reasoning and high-value tasks.
+
+On the software side, MCP, plugins, HTTP APIs, WebSocket, local services, browser automation, system shortcuts, enterprise open platforms, Home Assistant, Matter, smart-home gateways, and many app APIs already provide enough connection methods. On the hardware side, phones, watches, speakers, cameras, cars, IoT devices, home hubs, and edge boxes can all serve as entry points or actuators. What is missing is not a single "magic model," but a product substrate that unifies these capabilities into a controllable runtime.
+
+From this angle, the main bottleneck for building a Jarvis-like AI butler today is less "whether it can be done" and more "whether it can be made stable, low-cost, trustworthy, extensible, auditable, and understandable by ordinary users." The problems are product engineering problems, not science-fiction barriers:
+
+- How to abstract software and hardware abilities into unified capabilities.
+- How to let the model reliably choose the right capability instead of calling randomly.
+- How to route sensitive actions through permission confirmation.
+- How to make execution results verifiable and traceable.
+- How to keep long-term memory controllable, deletable, and auditable.
+- How to keep personality continuous without pretending divinity or fabricating facts.
+- How to control cost through layered model routing.
+- How to let third-party apps and hardware gradually join the ecosystem.
+
+Linghun's value is that it has already abstracted many of these problems into runtime structure instead of keeping them at the assistant interaction layer. Today it serves developer engineering scenarios. To migrate into AI-butler scenarios, the main replacements are capability types, user entry points, and device connectors, not the entire foundation.
+
+### 30.6 Cost and Accessibility Path
+
+A personal AI butler does not need to call the strongest model every time. Daily companionship, reminders, device control, simple Q&A, status queries, private-domain memory, fixed workflows, and home automation can be handled by local models, private-domain models, or low-cost models. Complex planning, code, review, multimodal analysis, high-value decisions, and cross-system orchestration can be routed to stronger models only when needed.
+
+This means it can reach ordinary users instead of serving only high-cost professional scenarios. A feasible cost layering is:
+
+- Local small models handle wake, simple intent, common Q&A, and some private dialogue.
+- Private-domain models handle long-term companionship, personal memory, home preferences, and low-latency daily responses.
+- Low-cost cloud models handle ordinary planning, summaries, lightweight reasoning, and cross-app instructions.
+- Strong models handle only high-complexity, high-value, high-risk tasks.
+- Cache, summary-first output, bounded artifacts, controlled memory, and tool-result reuse reduce repeated calls.
+
+Commercially, it can exist as software first and also enter hardware. Early forms can be an AI-butler app, desktop client, watch app, speaker/home-hub hardware, browser extension, enterprise IM bot, or home gateway. Hardware is not the only entry point; the reusable asset is the foundation.
+
+From a cost perspective, a personal Jarvis-like runtime does not have to be designed as "every user constantly occupying a frontier model." A more realistic structure keeps local or private-domain models resident for everyday low-risk tasks, and calls strong cloud models only for complex planning, code, long documents, multimodal tasks, or high-value decisions. For individual developers, an ordinary computer, phone, or low-cost edge box, plus a local model, a small amount of cloud API usage, and several common connectors, can already create a usable personal AI-butler prototype. For small teams, a privately deployed model service, an enterprise IM bot, internal API connectors, and document/ticket/calendar/code-repository integration can form the first version of an enterprise Jarvis.
+
+The value of this path is technological accessibility: ordinary users, individual developers, and small teams do not need to wait for expensive hardware, proprietary ecosystems, or an omniscient model before owning their own AI butler. Existing technology is already enough to build layered versions:
+
+- **Personal lightweight version**: local model + phone/desktop entry + calendar/reminder/file/browser/smart-home connectors for daily management, reminders, state queries, and simple automation.
+- **Personal enhanced version**: private-domain memory + low-cost cloud model + limited strong-model routing + multi-device entry, covering travel, home, learning, personal projects, and cross-app tasks.
+- **Home version**: home gateway or hub + Home Assistant / Matter-style device bridge + family calendar + voice entry + permission confirmation, forming a conversational home-state layer.
+- **Team version**: enterprise IM bot + private or hybrid models + internal knowledge base, tickets, approval, calendars, documents, and code-repository connectors, forming an auditable team workflow assistant.
+- **Developer version**: current Linghun engineering foundation + agent/job/workflow + App Bridge / MCP / plugins, using existing technology to quickly validate new capabilities and business scenarios.
+
+Cost differences across these versions mainly come from model routing, call frequency, context length, multimodal needs, and dedicated hardware. The more stable the foundation, the more strong-model usage can be concentrated where it is truly needed. The more mature capability, memory, cache, and verification become, the more repeated reasoning and invalid calls can be reduced. In other words, Jarvis-like products become accessible not only because models get cheaper, but also because the runtime uses models less, more accurately, and more safely.
+
+### 30.7 What Is Possible Now, and What Still Needs Productization
+
+Based on the current Linghun foundation, it is already possible today to:
+
+- Register external software abilities as capabilities through Local HTTP connectors and manifests.
+- Let the model discover, choose, and call capabilities through structured tools instead of only replying with suggestions.
+- Route capability execution through input schema, connection state, permission checks, risk level, and evidence recording.
+- Connect agent, job, workflow, verification, Git, index, memory, failure learning, and remote channels into one mainline.
+- Use independent transcripts, mailboxes, background tasks, and worktree isolation for agent collaboration that resembles real division of labor.
+- Use private provider configuration, multi-model routing, and cache mechanisms as a foundation for low-cost, controllable deployment.
+
+For a general AI butler, further productization is still needed:
+
+- Consumer-facing voice wake, TTS, mobile, watch, speaker, and home-hub experiences.
+- Smart-device connector templates, device capability schemas, action receipts, and physical-world safety policies.
+- Personality continuity, preference learning, privacy-memory review, and household multi-user boundaries.
+- Connector SDK, plugin marketplace, device certification, permission levels, and audit standards.
+- Local models, private-domain models, strong-model routing, offline degradation, and billing transparency for low-cost deployment.
+
+This section does not claim that Linghun has already completed a general AI butler or a hardware ecosystem. It describes the long-term product direction: AGI productization may not first appear as an omniscient model, but as a low-cost, extensible, auditable personal AI operating substrate that can connect software and hardware capabilities. Linghun already has the foundation shape in developer scenarios; the future work is to extend that foundation from the code world into more real-world capabilities.
+
+---
+
+## 31. Explicit Boundaries
 
 Linghun's capability boundaries are:
 
@@ -1621,5 +1762,9 @@ Linghun's capability boundaries are:
 - Index is a location aid, not the only source of truth.
 - Cache hit rates of 92%-96%, near 98%, and partial 100% describe targets and observed ranges under stable workflows. They do not represent guaranteed outcomes for any model, provider, or project.
 - Local index, parallel tools, or cache benefits do not equal a fixed overall development speedup. Actual gains depend on project, model, task, and usage data.
+- Jarvis-like personal AI runtime is a long-term product direction. It does not mean Linghun has already completed smart watch, smart speaker, smart home, car, camera, or general hardware-ecosystem integration.
+- External capabilities, device connectors, and private-domain models can enter the same foundation, but they must still pass through permissions, evidence, privacy, failure-degradation, and user-control boundaries. Device connectability must not imply automatic execution permission.
 
 These boundaries reflect Linghun's engineering stance: capability, evidence, verification, and applicability must remain aligned, avoiding the packaging of local capabilities as unconditional promises.
+
+The judgments above about the foundation, product evolution, and long-term direction are based on currently implemented capabilities, phased delivery facts, and personal projection. They represent personal views only and are not directed at any vendor, product, organization, or individual.
