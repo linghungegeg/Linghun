@@ -333,6 +333,58 @@ describe("Phase 05 core tools", () => {
     await rm(cancelSentinel, { force: true });
   });
 
+  it("terminates POSIX Bash process groups on timeout", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const scriptPath = join(project, "spawn-grandchild.cjs");
+    await writeFile(
+      scriptPath,
+      [
+        "const { spawn } = require('node:child_process');",
+        "const sentinel = process.argv[2];",
+        "spawn(process.execPath, ['-e', `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'alive'), 1200); setTimeout(() => {}, 5000);`], { stdio: 'ignore' });",
+        "setTimeout(() => {}, 5000);",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const sentinel = join(project, "posix-grandchild.txt");
+    const timeout = await runTool(
+      "Bash",
+      {
+        command: `node ${JSON.stringify(scriptPath)} ${JSON.stringify(sentinel)}`,
+        timeoutMs: 50,
+      },
+      createToolContext(project),
+    );
+
+    expect(timeout.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
+    await new Promise((resolve) => setTimeout(resolve, 1400));
+    await expect(readFile(sentinel, "utf8")).rejects.toThrow();
+  });
+
+  it("records Bash timeout tail in details and full output artifact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const result = await runTool(
+      "Bash",
+      {
+        command: "node -e \"for (let i=0;i<120;i++) console.log('line-' + i); setTimeout(()=>{}, 2000)\"",
+        timeoutMs: 50,
+      },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
+    expect(result.output.details).toContain("fullOutputPath:");
+    expect(result.output.details).toContain("命令超时");
+    expect(result.output.fullOutputPath).toBeTruthy();
+    const fullOutput = await readFile(String(result.output.fullOutputPath), "utf8");
+    expect(fullOutput).toContain("line-0");
+    expect(fullOutput).toContain("命令超时");
+  });
+
   it("rejects non-unique edits and workspace escape writes", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     await writeFile(join(project, "sample.txt"), "same\nsame\n", "utf8");

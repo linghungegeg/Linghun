@@ -101,6 +101,7 @@ import {
   recordModelUsage,
   runAutoLearningOnTurnEnd,
   runCommandCaptureForTest,
+  runHeadlessTask,
   runTui,
   runVerificationCommandForTest,
   sanitizeDiscoveredDeferredToolName,
@@ -1686,6 +1687,190 @@ async function waitForTestCondition(predicate: () => boolean, timeoutMs = 1_000)
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+describe("runHeadlessTask", () => {
+  it("auto-approves pending local approval while sendMessage is still running", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-approve-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const output = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    let approvedDuringSend = false;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: output,
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.pendingLocalApproval = {
+          kind: "break_cache_mutation",
+          sessionId: session.id,
+          action: "off",
+        };
+        await waitForTestCondition(() => context.pendingLocalApproval === undefined);
+        approvedDuringSend = true;
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(approvedDuringSend).toBe(true);
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(output.text).toContain("[headless] auto-approved break_cache_mutation");
+    expect(stderr.text).toBe("");
+  });
+
+  it("continues once after provider stream failure when workspace evidence exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.evidence.push({
+      id: "evidence-tool",
+      kind: "command_output",
+      summary: "Bash: exit code 0",
+      source: "tool:Bash",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+      createdAt: new Date().toISOString(),
+    });
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      maxContinuations: 1,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async (text) => {
+        prompts.push(text);
+        if (prompts.length === 1) {
+          context.lastProviderFailure = {
+            code: "PROVIDER_STREAM_ERROR",
+            kind: "transit",
+            provider: "deepseek",
+            model: "deepseek-v4-flash",
+            endpointProfile: "chat_completions",
+            summary: "provider failure: stream interrupted",
+            evidenceId: "provider-failure-1",
+            createdAt: new Date().toISOString(),
+          };
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("上一轮响应流中断");
+    expect(context.lastProviderFailure).toBeUndefined();
+  });
+
+  it("aborts with a clear error when real-time auto-approval exceeds maxApprovals", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-approval-limit-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      maxApprovals: 0,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.activeAbortController = new AbortController();
+        context.pendingLocalApproval = {
+          kind: "break_cache_mutation",
+          sessionId: session.id,
+          action: "off",
+        };
+        await waitForTestCondition(() => context.activeAbortController?.signal.aborted === true);
+      },
+    });
+
+    expect(exitCode).toBe(3);
+    expect(stderr.text).toContain("自动批准超过上限 0");
+  });
+
+  it("returns non-zero when provider continuation limit is exhausted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-limit-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.changedFiles.push("answer.txt");
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      maxContinuations: 1,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_ERROR",
+          kind: "transit",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          endpointProfile: "chat_completions",
+          summary: `provider failure attempt ${attempts}`,
+          evidenceId: `provider-failure-${attempts}`,
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(attempts).toBe(2);
+    expect(stderr.text).toContain("headless continuation 已达上限");
+  });
+
+  it("cleans request activity and active abort state before exiting", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-cleanup-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.activeAbortController = new AbortController();
+        context.tools.abortSignal = context.activeAbortController.signal;
+        context.requestActivity = { slowHintShown: false };
+        context.requestActivityPhase = "tool_running";
+        context.requestActivityToolName = "Bash";
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(context.activeAbortController).toBeUndefined();
+    expect(context.tools.abortSignal).toBeUndefined();
+    expect(context.requestActivity).toBeUndefined();
+    expect(context.requestActivityPhase).toBeUndefined();
+    expect(context.interrupt).toEqual({ type: "idle" });
+  });
+});
 
 describe("Phase 06 TUI slash commands", () => {
   // D.14C baseline closure — isolate model env so the real machine's

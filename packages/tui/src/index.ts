@@ -381,6 +381,7 @@ import {
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import {
   createProcessGuard,
+  getTrackedProcessSnapshot,
   installProcessGuardExitHandlers,
   requestTrackedProcessStop,
 } from "./process-guard.js";
@@ -765,6 +766,22 @@ export type RunTuiOptions = {
   projectPath?: string;
 };
 
+export type RunHeadlessOptions = {
+  prompt: string;
+  stdout?: Writable;
+  stderr?: Writable;
+  projectPath?: string;
+  mode?: PermissionMode;
+  autoApprove?: boolean;
+  maxApprovals?: number;
+  maxContinuations?: number;
+  __testGateway?: ModelGateway;
+  __testContext?: TuiContext;
+  __testStore?: SessionStore;
+  __testSkipHydration?: boolean;
+  __testSendMessage?: typeof sendMessage;
+};
+
 export type {
   PermissionRule,
   RecentPermissionRejection,
@@ -883,6 +900,7 @@ import {
 import { appendSystemEvent } from "./evidence-runtime.js";
 import {
   __testSendMessage,
+  clearRequestActivity,
   handleNaturalInput,
   handleRemoteInboundMessage,
   sendMessage,
@@ -1330,11 +1348,10 @@ function toggleCurrentCommandPanelDetails(context: TuiContext): boolean {
   return true;
 }
 
-export async function runTui(options: RunTuiOptions = {}): Promise<number> {
-  const input = options.stdin ?? defaultStdin;
-  const output = options.stdout ?? defaultStdout;
-  const errorOutput = options.stderr ?? defaultStderr;
-  const projectPath = options.projectPath ?? process.cwd();
+async function createTuiRuntimeContext(projectPath: string): Promise<{
+  context: TuiContext;
+  store: SessionStore;
+}> {
   const config = await loadConfig(projectPath);
   const storagePaths = resolveStoragePaths(config, projectPath);
   const store = new SessionStore({ sessionRootDir: storagePaths.sessions, projectPath });
@@ -1387,8 +1404,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     context.agentRegistry.agents.map(registryAgentToWorkflowTemplate),
     context.workflowRegistry.workflows.map(registryWorkflowToTemplate),
   );
-  installProcessGuardExitHandlers();
-  const startup = await prepareTuiStartup(input, output, context);
+  return { context, store };
+}
+
+async function hydrateRuntimeContext(context: TuiContext): Promise<void> {
   await refreshIndexStatus(context);
   await hydrateDurableJobBackgroundTasks(context);
   await hydratePersistentAgents(context);
@@ -1398,10 +1417,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     /* best-effort, don't block startup */
   });
   context.failureLearning.records = await loadFailureRecords(context.failureLearning);
-  const gateway = createModelGateway(context.config);
-  // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
-  context.modelGateway = gateway;
-  // R6 — Register provider retry hook so the TUI can show retry activity.
+}
+
+function attachProviderRuntimeHooks(context: TuiContext): void {
   registerProviderHooks({
     onRetry: (info) => {
       // Agent/workflow background retries must not overwrite main-screen status.
@@ -1415,8 +1433,24 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       };
     },
   });
-  // R6 — Initialize notification callback on context for circuit breaker and other runtimes.
   context.pushNotification = (text, tone) => pushTransientNotification(context, text, tone);
+}
+
+export async function runTui(options: RunTuiOptions = {}): Promise<number> {
+  const input = options.stdin ?? defaultStdin;
+  const output = options.stdout ?? defaultStdout;
+  const errorOutput = options.stderr ?? defaultStderr;
+  const projectPath = options.projectPath ?? process.cwd();
+  const { context, store } = await createTuiRuntimeContext(projectPath);
+  installProcessGuardExitHandlers();
+  const startup = await prepareTuiStartup(input, output, context);
+  await hydrateRuntimeContext(context);
+  const gateway = createModelGateway(context.config);
+  // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
+  context.modelGateway = gateway;
+  // R6 — Register provider retry hook so the TUI can show retry activity.
+  attachProviderRuntimeHooks(context);
+  // R6 — Initialize notification callback on context for circuit breaker and other runtimes.
   const sigintHandler = () => {
     requestTrackedProcessStop(false);
     void handleInterruptCommand([], context, output).catch((error: unknown) => {
@@ -1448,6 +1482,337 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   } finally {
     process.removeListener("SIGINT", sigintHandler);
   }
+}
+
+export async function runHeadlessTask(options: RunHeadlessOptions): Promise<number> {
+  const output = options.stdout ?? defaultStdout;
+  const errorOutput = options.stderr ?? defaultStderr;
+  const projectPath = options.projectPath ?? process.cwd();
+  const prompt = options.prompt.trim();
+  if (!prompt) {
+    writeLine(errorOutput, "错误：headless run prompt 不能为空。");
+    return 2;
+  }
+  const runtime =
+    options.__testContext && options.__testStore
+      ? { context: options.__testContext, store: options.__testStore }
+      : await createTuiRuntimeContext(projectPath);
+  const { context, store } = runtime;
+  context.permissionMode = options.mode ?? "full-access";
+  context.planAccepted = false;
+  installProcessGuardExitHandlers();
+  if (!options.__testSkipHydration) {
+    await hydrateRuntimeContext(context);
+  }
+  const gateway = options.__testGateway ?? createModelGateway(context.config);
+  const sendHeadlessMessage = options.__testSendMessage ?? sendMessage;
+  context.modelGateway = gateway;
+  attachProviderRuntimeHooks(context);
+  const maxApprovals = Math.max(0, Math.min(options.maxApprovals ?? 32, 200));
+  const autoApprove = options.autoApprove ?? true;
+  const maxContinuations = Math.max(0, Math.min(options.maxContinuations ?? 1, 2));
+
+  try {
+    let approvals = 0;
+    let continuations = 0;
+    const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
+      const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
+      const deferredApprovals: HeadlessDeferredApproval[] = [];
+      const messagePromise = sendHeadlessMessage(text, context, gateway, output);
+      const pump = createHeadlessApprovalPump({
+        context,
+        gateway,
+        output,
+        errorOutput,
+        autoApprove,
+        maxApprovals,
+        getApprovals: () => approvals,
+        setApprovals: (value) => {
+          approvals = value;
+        },
+        deferredApprovals,
+      });
+      const messageResult = await runWithHeadlessApprovalPump(messagePromise, pump);
+      if (messageResult.exitCode !== undefined) {
+        return { exitCode: messageResult.exitCode };
+      }
+      const approvalStatus = await pumpHeadlessApprovals({
+        context,
+        gateway,
+        output,
+        errorOutput,
+        autoApprove,
+        maxApprovals,
+        approvals,
+        deferredApprovals,
+      });
+      approvals = approvalStatus.approvals;
+      if (approvalStatus.exitCode !== undefined) {
+        return { exitCode: approvalStatus.exitCode };
+      }
+      const deferredStatus = await runDeferredHeadlessApprovals({
+        context,
+        gateway,
+        output,
+        errorOutput,
+        autoApprove,
+        maxApprovals,
+        approvals,
+        deferredApprovals,
+      });
+      approvals = deferredStatus.approvals;
+      if (deferredStatus.exitCode !== undefined) {
+        return { exitCode: deferredStatus.exitCode };
+      }
+      const providerFailure = context.lastProviderFailure;
+      const hasNewProviderFailure =
+        Boolean(providerFailure) && providerFailure?.evidenceId !== previousProviderFailureId;
+      return { providerFailure: hasNewProviderFailure };
+    };
+
+    let status = await runOneRequest(prompt);
+    while (
+      status.exitCode === undefined &&
+      status.providerFailure &&
+      continuations < maxContinuations &&
+      shouldRunHeadlessProviderContinuation(context)
+    ) {
+      continuations += 1;
+      const sessionId = await ensureSession(context);
+      const continuationPrompt = createHeadlessProviderContinuationPrompt(context);
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `headless_provider_stream_continuation: attempt=${continuations}; reason=${context.lastProviderFailure?.summary ?? "provider_failure"}`,
+        "warning",
+      );
+      writeLine(output, `[headless] provider stream failed; continuing attempt ${continuations}/${maxContinuations}`);
+      context.lastProviderFailure = undefined;
+      status = await runOneRequest(continuationPrompt);
+    }
+    if (continuations > 0 && !status.providerFailure) {
+      context.lastProviderFailure = undefined;
+    }
+    if (status.exitCode !== undefined) {
+      return status.exitCode;
+    }
+    if (status.providerFailure) {
+      writeLine(
+        errorOutput,
+        `错误：provider stream 失败，headless continuation 已达上限或缺少可恢复证据。${context.lastProviderFailure?.summary ?? ""}`.trim(),
+      );
+      return 1;
+    }
+    const cleanup = await finishHeadlessRuntime(context);
+    if (!cleanup.ok) {
+      writeLine(errorOutput, `错误：headless run 收尾失败：${cleanup.reason}`);
+      return 4;
+    }
+    if (context.sessionId && !context.sessionEnded) {
+      await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
+      context.sessionEnded = true;
+    }
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "headless run 执行失败。";
+    writeLine(errorOutput, `错误：${message}`);
+    return 1;
+  } finally {
+    await finishHeadlessRuntime(context);
+  }
+}
+
+type HeadlessTurnStatus = {
+  exitCode?: number;
+  providerFailure?: boolean;
+};
+
+type HeadlessApprovalPumpResult = {
+  approvals: number;
+  exitCode?: number;
+};
+
+type HeadlessDeferredApproval = NonNullable<TuiContext["pendingLocalApproval"]>;
+
+async function pumpHeadlessApprovals(input: {
+  context: TuiContext;
+  gateway: ModelGateway;
+  output: Writable;
+  errorOutput: Writable;
+  autoApprove: boolean;
+  maxApprovals: number;
+  approvals: number;
+  deferredApprovals?: HeadlessDeferredApproval[];
+}): Promise<HeadlessApprovalPumpResult> {
+  let approvals = input.approvals;
+  while (input.context.pendingLocalApproval) {
+    if (!input.autoApprove) {
+      input.context.activeAbortController?.abort();
+      writeLine(
+        input.errorOutput,
+        `错误：headless run 停在权限确认：${input.context.pendingLocalApproval.kind}。请开启 --auto-approve 或改用交互模式。`,
+      );
+      return { approvals, exitCode: 3 };
+    }
+    if (approvals >= input.maxApprovals) {
+      input.context.activeAbortController?.abort();
+      writeLine(
+        input.errorOutput,
+        `错误：headless run 自动批准超过上限 ${input.maxApprovals}，停在权限确认：${input.context.pendingLocalApproval.kind}。`,
+      );
+      return { approvals, exitCode: 3 };
+    }
+    const approval = input.context.pendingLocalApproval;
+    input.context.pendingLocalApproval = undefined;
+    approvals += 1;
+    writeLine(input.output, `[headless] auto-approved ${approval.kind}`);
+    if (input.deferredApprovals && hasModelContinuation(approval)) {
+      input.deferredApprovals.push(approval);
+      continue;
+    }
+    await executePermissionApprove(approval, input.context, input.gateway, input.output);
+  }
+  return { approvals };
+}
+
+async function runDeferredHeadlessApprovals(input: {
+  context: TuiContext;
+  gateway: ModelGateway;
+  output: Writable;
+  errorOutput: Writable;
+  autoApprove: boolean;
+  maxApprovals: number;
+  approvals: number;
+  deferredApprovals: HeadlessDeferredApproval[];
+}): Promise<HeadlessApprovalPumpResult> {
+  let approvals = input.approvals;
+  while (input.deferredApprovals.length > 0) {
+    const approval = input.deferredApprovals.shift();
+    if (!approval) continue;
+    await executePermissionApprove(approval, input.context, input.gateway, input.output);
+    const nested = await pumpHeadlessApprovals({
+      context: input.context,
+      gateway: input.gateway,
+      output: input.output,
+      errorOutput: input.errorOutput,
+      autoApprove: input.autoApprove,
+      maxApprovals: input.maxApprovals,
+      approvals,
+    });
+    approvals = nested.approvals;
+    if (nested.exitCode !== undefined) {
+      return { approvals, exitCode: nested.exitCode };
+    }
+  }
+  return { approvals };
+}
+
+function hasModelContinuation(approval: HeadlessDeferredApproval): boolean {
+  return "continuation" in approval && Boolean(approval.continuation);
+}
+
+function createHeadlessApprovalPump(input: {
+  context: TuiContext;
+  gateway: ModelGateway;
+  output: Writable;
+  errorOutput: Writable;
+  autoApprove: boolean;
+  maxApprovals: number;
+  getApprovals: () => number;
+  setApprovals: (value: number) => void;
+  deferredApprovals: HeadlessDeferredApproval[];
+}): () => Promise<HeadlessApprovalPumpResult> {
+  let running: Promise<HeadlessApprovalPumpResult> | undefined;
+  return async () => {
+    if (running) return running;
+    running = pumpHeadlessApprovals({
+      context: input.context,
+      gateway: input.gateway,
+      output: input.output,
+      errorOutput: input.errorOutput,
+      autoApprove: input.autoApprove,
+      maxApprovals: input.maxApprovals,
+      approvals: input.getApprovals(),
+      deferredApprovals: input.deferredApprovals,
+    }).then((result) => {
+      input.setApprovals(result.approvals);
+      return result;
+    });
+    try {
+      return await running;
+    } finally {
+      running = undefined;
+    }
+  };
+}
+
+async function runWithHeadlessApprovalPump(
+  messagePromise: Promise<void>,
+  pump: () => Promise<HeadlessApprovalPumpResult>,
+): Promise<{ exitCode?: number }> {
+  let settled = false;
+  let exitCode: number | undefined;
+  const loop = (async () => {
+    while (!settled && exitCode === undefined) {
+      const result = await pump();
+      exitCode = result.exitCode;
+      if (exitCode !== undefined) break;
+      await sleep(50);
+    }
+  })();
+  try {
+    await messagePromise;
+  } finally {
+    settled = true;
+    await loop;
+  }
+  return exitCode !== undefined ? { exitCode } : {};
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function shouldRunHeadlessProviderContinuation(context: TuiContext): boolean {
+  return (
+    context.evidence.some((record) => !record.supportsClaims.includes("provider_failure")) ||
+    context.tools.changedFiles.length > 0
+  );
+}
+
+function createHeadlessProviderContinuationPrompt(context: TuiContext): string {
+  return context.language === "en-US"
+    ? "The previous response stream was interrupted. Continue the original task based on the current workspace state, transcript, tool evidence, and any file changes already present. Do not restart from scratch unless needed."
+    : "上一轮响应流中断。请基于当前工作区状态、已有 transcript、工具证据和已经存在的文件改动继续完成原任务；除非必要，不要从头重做。";
+}
+
+async function finishHeadlessRuntime(context: TuiContext): Promise<{ ok: boolean; reason?: string }> {
+  if (context.pendingLocalApproval) {
+    return { ok: false, reason: `仍有权限确认未处理：${context.pendingLocalApproval.kind}` };
+  }
+  if (context.activeAbortController) {
+    context.activeAbortController.abort();
+  }
+  context.tools.abortSignal = undefined;
+  context.interrupt = { type: "idle" };
+  clearRequestActivity(context);
+  context.activeAbortController = undefined;
+  const stopResult = requestTrackedProcessStop(true);
+  await sleep(100);
+  const stillTracked = getTrackedProcessSnapshot();
+  if (stopResult.failures.length > 0) {
+    return {
+      ok: false,
+      reason: `清理本地子进程失败：${stopResult.failures.map((failure) => `${failure.pid}:${failure.message}`).join("; ")}`,
+    };
+  }
+  if (stillTracked.length > 0) {
+    return {
+      ok: false,
+      reason: `仍有本地子进程未退出：${stillTracked.map((entry) => `${entry.pid}${entry.label ? `(${entry.label})` : ""}`).join(", ")}`,
+    };
+  }
+  return { ok: true };
 }
 
 type TuiStartupState = {
