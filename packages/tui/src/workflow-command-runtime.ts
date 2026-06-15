@@ -41,6 +41,7 @@ import { WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT } from "./tui-context-runtime.j
 import type {
   BackgroundTaskState,
   DurableJobState,
+  EngineeringSignalSnapshot,
   EvidenceRecord,
   VerificationReport,
   WorkflowRunState,
@@ -411,6 +412,18 @@ type WorkflowRunCandidate = {
   background: BackgroundTaskState;
 };
 
+function snapshotEngineeringSignal(context: TuiContext): EngineeringSignalSnapshot | undefined {
+  const signal = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal;
+  if (!signal) return undefined;
+  return {
+    profile: signal.profile,
+    strategyHint: signal.strategyHint,
+    artifactTargets: signal.artifactTargets.slice(),
+    ...(signal.failureCategory ? { failureCategory: signal.failureCategory } : {}),
+    ...(signal.finalBoundaryHint ? { finalBoundaryHint: signal.finalBoundaryHint } : {}),
+  };
+}
+
 function syncSelectedWorkflowRun(context: TuiContext): void {
   const runs = context.workflows.activeRuns ?? [];
   if (runs.length === 0) {
@@ -596,6 +609,7 @@ function recoverWorkflowRunState(state: DurableWorkflowRunState): WorkflowRunSta
     startedAt: state.startedAt,
     endedAt: state.endedAt,
     result: status === "completed" ? "partial" : status === "stale" ? "stale" : state.result,
+    ...(state.engineeringSignal ? { engineeringSignal: state.engineeringSignal } : {}),
     phaseGateConfirmed: state.phaseGateConfirmed === true,
     confirmedPhaseStopPoints: Array.isArray(state.confirmedPhaseStopPoints)
       ? state.confirmedPhaseStopPoints.filter((item): item is string => typeof item === "string")
@@ -928,6 +942,7 @@ async function runWorkflowPlanSteps(
     }),
     nextAction: "等待 step_result；失败时查看 /failures 和 transcript。",
   };
+  const engineeringSignal = snapshotEngineeringSignal(context);
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
     goal,
@@ -936,6 +951,7 @@ async function runWorkflowPlanSteps(
     steps: stepStates,
     startedAt,
     result: "partial",
+    ...(engineeringSignal ? { engineeringSignal } : {}),
     phaseGateConfirmed: true,
     confirmedPhaseStopPoints,
     multiAgent: options.multiAgent === true,
@@ -1224,6 +1240,7 @@ export async function runRegistryWorkflow(
     }),
     nextAction: "查看 /workflows registry、/background 或 /details background。",
   };
+  const engineeringSignal = snapshotEngineeringSignal(context);
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
     goal: goal || workflow.description,
@@ -1232,6 +1249,7 @@ export async function runRegistryWorkflow(
     steps: stepStates,
     startedAt,
     result: "partial",
+    ...(engineeringSignal ? { engineeringSignal } : {}),
     phaseGateConfirmed: true,
     confirmedPhaseStopPoints: [workflow.id],
   });
@@ -1378,6 +1396,7 @@ async function executeRegistryWorkflowStep(
 }> {
   const beforeEvidence = context.evidence.map((item) => item.id);
   let handledKnownAction = false;
+  const run = workflowRunId ? getWorkflowRun(context, workflowRunId) : context.workflows.activeRun;
   try {
     // Mutating registry steps must first pass the workflow-level gate.
     // Readonly steps (details/index/verification) pass straight through.
@@ -1397,9 +1416,6 @@ async function executeRegistryWorkflowStep(
           evidenceRefs: [],
         };
       }
-      const run = workflowRunId
-        ? getWorkflowRun(context, workflowRunId)
-        : context.workflows.activeRun;
       if (!run?.confirmedPhaseStopPoints?.includes(workflow.id)) {
         return {
           status: "blocked",
@@ -1420,7 +1436,10 @@ async function executeRegistryWorkflowStep(
       const role = step.role ?? "worker";
       const task = step.task ?? (goal || workflow.description);
       const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand([role, task], context, output);
+      await handleForkCommand([role, task], context, output, {
+        ...(workflowRunId ? { workflowRunId } : {}),
+        ...(run?.engineeringSignal ? { engineeringSignal: run.engineeringSignal } : {}),
+      });
       const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
       if (!agent) {
         return {
@@ -1673,7 +1692,10 @@ async function executeWorkflowStep(
         };
       }
       const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand([req.role, req.task], context, output, { workflowRunId });
+      await handleForkCommand([req.role, req.task], context, output, {
+        workflowRunId,
+        ...(run?.engineeringSignal ? { engineeringSignal: run.engineeringSignal } : {}),
+      });
       const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
       const agentTask = agent
         ? context.backgroundTasks.find((task) => task.id === agent.id)

@@ -890,6 +890,45 @@ describe("Meta scheduler runtime", () => {
     expect(sanitized).not.toContain("Internal runtime context was omitted");
   });
 
+  it("injects engineering profile strategy as an internal scheduler signal", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "fix the C++ solution",
+      engineeringProfile: "polyglot_cpp",
+    });
+
+    expect(decision.policyDecision.engineeringSignal.profile).toBe("polyglot_cpp");
+    expect(decision.policyDecision.engineeringSignal.strategyHint).toContain("headers/tests");
+    expect(formatMetaSchedulerDirective(decision)).toContain("EngineeringTaskProfile");
+    expect(formatMetaSchedulerDirective(decision)).not.toContain("Terminal-Bench");
+  });
+
+  it("maps provider and timeout failures into engineering final-boundary hints", () => {
+    const provider = evaluateMetaScheduler({
+      ...baseInput(),
+      providerFailure: { provider: "openai-compatible", model: "gpt-5.5", message: "upstream" },
+    });
+    expect(provider.policyDecision.engineeringSignal.failureCategory).toBe("provider_error");
+    expect(provider.policyDecision.engineeringSignal.finalBoundaryHint).toContain("provider");
+
+    const timeout = evaluateMetaScheduler({
+      ...baseInput(),
+      engineeringProfile: "large_python_project",
+      lastVerificationStatus: "timeout",
+    });
+    expect(timeout.policyDecision.engineeringSignal.failureCategory).toBe("test_timeout");
+    expect(timeout.policyDecision.engineeringSignal.finalBoundaryHint).toContain("timeout");
+  });
+
+  it("sanitizes engineering strategy labels from main-screen echoes", () => {
+    const cleaned = sanitizeMainScreenLeakage(
+      "EngineeringTaskProfile: profile=polyglot_cpp; strategy=read headers/tests\nEngineeringStrategyHint=read tests first\nnormal answer",
+      "en-US",
+    );
+
+    expect(cleaned).toBe("normal answer");
+  });
+
   describe("verifyFailureLearningContract", () => {
     it("satisfied when capture was not required", () => {
       const decision = evaluateMetaScheduler(baseInput());

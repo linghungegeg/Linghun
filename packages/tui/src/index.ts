@@ -910,10 +910,12 @@ import { appendSystemEvent } from "./evidence-runtime.js";
 import {
   __testSendMessage,
   clearRequestActivity,
+  evaluateAggregatedFinalAnswerGate,
   handleNaturalInput,
   handleRemoteInboundMessage,
   sendMessage,
 } from "./model-stream-runtime.js";
+export { evaluateAggregatedFinalAnswerGate };
 import {
   __testFormatStartAgentDidNotStartMessage,
   __testParseRunWorkflowToolInput,
@@ -1653,6 +1655,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           failure,
           attempt: repairAttempt + 1,
           maxAttempts: benchConfig.maxRepairAttempts,
+          profile: benchConfig.profile,
           ...(benchPreflight ? { preflight: benchPreflight } : {}),
         });
         const repairStatus = await runOneRequest(repairPrompt);

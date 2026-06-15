@@ -17,6 +17,10 @@ import type { PermissionMode } from "@linghun/shared";
 import type { DiffSummary, TodoItem, ToolName } from "@linghun/tools";
 import type { ArchitectureCardSummary } from "./architecture-runtime.js";
 import type { CompactBoundary } from "./compact-context.js";
+import type {
+  EngineeringFailureCategory,
+  EngineeringTaskProfile,
+} from "./headless-bench-runtime.js";
 import type { IndexState } from "./index-runtime.js";
 import type { SolutionCompletenessStatus } from "./model-loop-runtime.js";
 import type { WorkspaceReferenceCache } from "./workspace-reference-cache.js";
@@ -500,6 +504,7 @@ export type AgentRun = {
   parentSessionId?: string;
   forkedFrom?: string;
   task: string;
+  engineeringSignal?: EngineeringSignalSnapshot;
   model: string;
   registryAgentId?: string;
   allowedTools?: ToolName[];
@@ -537,6 +542,14 @@ export type AgentRun = {
   };
   startedAt: string;
   updatedAt: string;
+};
+
+export type EngineeringSignalSnapshot = {
+  profile: EngineeringTaskProfile;
+  strategyHint?: string;
+  artifactTargets?: string[];
+  failureCategory?: EngineeringFailureCategory;
+  finalBoundaryHint?: string;
 };
 
 export type DurableJobStatus =
@@ -1049,6 +1062,7 @@ export type WorkflowRunState = {
   startedAt: string;
   endedAt?: string;
   result: "partial" | "failed" | "blocked" | "cancelled" | "stale";
+  engineeringSignal?: EngineeringSignalSnapshot;
   /** Set to true when the user explicitly invoked /workflows run. */
   phaseGateConfirmed?: boolean;
   confirmedPhaseStopPoints?: string[];

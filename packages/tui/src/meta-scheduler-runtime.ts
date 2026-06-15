@@ -33,6 +33,13 @@ import {
   LINGHUN_MAX_TODO_ONLY_VERIFICATION,
   LINGHUN_MAX_TODO_ONLY_WORKFLOW,
 } from "./runtime-budget.js";
+import {
+  detectEngineeringArtifactTargets,
+  type EngineeringFailureCategory,
+  type EngineeringTaskProfile,
+  formatEngineeringFailureBoundaryHint,
+  formatEngineeringProfileStrategyHint,
+} from "./headless-bench-runtime.js";
 
 type ActiveWorkflowRun = NonNullable<WorkflowState["activeRun"]>;
 
@@ -144,6 +151,8 @@ export type MetaSchedulerInput = {
   lastToolFailure?: { toolName: string; summary: string };
   providerFailure?: { provider: string; model: string; code?: string; message: string };
   providerCooldownBlocked?: boolean;
+  engineeringProfile?: EngineeringTaskProfile;
+  engineeringFailureCategory?: EngineeringFailureCategory;
   permissionMode?: PermissionMode;
   recentDeniedCount?: number;
   currentRole?: ModelRole;
@@ -257,6 +266,13 @@ export type PolicyDecision = {
     candidateIds: string[];
     permission: CapabilityPlan["permission"];
     riskLevel: CapabilityPlan["riskLevel"];
+  };
+  engineeringSignal: {
+    profile: EngineeringTaskProfile;
+    strategyHint: string;
+    artifactTargets: string[];
+    failureCategory?: EngineeringFailureCategory;
+    finalBoundaryHint?: string;
   };
   capabilityPlan: CapabilityPlan;
   userState: UserStateDecision;
@@ -443,6 +459,25 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     : providerFailure
       ? "fallbackCandidate"
       : "keepCurrent";
+  const engineeringProfile = input.engineeringProfile ?? "generic";
+  const inferredFailureCategory =
+    input.engineeringFailureCategory ??
+    inferEngineeringFailureCategory({
+      providerFailure,
+      lastVerificationStatus: input.lastVerificationStatus,
+      lastToolFailure: input.lastToolFailure,
+    });
+  const finalBoundaryHint = formatEngineeringFailureBoundaryHint({
+    profile: engineeringProfile,
+    failureCategory: inferredFailureCategory,
+  });
+  const engineeringSignal: PolicyDecision["engineeringSignal"] = {
+    profile: engineeringProfile,
+    strategyHint: formatEngineeringProfileStrategyHint(engineeringProfile),
+    artifactTargets: detectEngineeringArtifactTargets(input.userText),
+    ...(inferredFailureCategory ? { failureCategory: inferredFailureCategory } : {}),
+    ...(finalBoundaryHint ? { finalBoundaryHint } : {}),
+  };
 
   // 连续性信号驱动的决策增强
   const trustScore = input.trustScore ?? 50;
@@ -566,6 +601,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     userState: adjustedUserStateDecision,
     capabilityPlan,
     userStatePersistence,
+    engineeringSignal,
     permissionSignal: {
       permissionMode: input.permissionMode ?? "default",
       recentDenied: recentDeniedCount > 0,
@@ -720,6 +756,7 @@ export function formatMetaSchedulerDirective(decision: MetaSchedulerDecision): s
     "MetaSchedulerForModel:",
     ...decision.directives.map((item) => `- ${item}`),
     `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; budget ${decision.suggestedMaxTodoRounds} rounds; agent-max-turns ${decision.suggestedMaxAgentChildTurns}; agent-tool-rounds ${decision.suggestedMaxAgentToolRounds}; bg-concurrency ${decision.suggestedBackgroundConcurrency}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}; capability ${decision.policyDecision.capabilitySignal.active ? "candidate" : "none"}.`,
+    `- EngineeringTaskProfile: profile=${decision.policyDecision.engineeringSignal.profile}; strategy=${decision.policyDecision.engineeringSignal.strategyHint}; failure=${decision.policyDecision.engineeringSignal.failureCategory ?? "none"}; final-boundary=${decision.policyDecision.engineeringSignal.finalBoundaryHint ?? "normal"}.`,
     ...(decision.policyDecision.executionPlan.preferAgent || decision.policyDecision.executionPlan.preferWorkflow
       ? ["- Action: this is an agent/workflow-classified task. Delegate execution via StartAgent or RunWorkflow tools. Do not serial-Todo-plan every step yourself; use the extended planning budget to set up delegation, then call the tool."]
       : []),
@@ -1345,6 +1382,19 @@ function isRiskyVerificationStatus(status: MetaSchedulerInput["lastVerificationS
   );
 }
 
+function inferEngineeringFailureCategory(input: {
+  providerFailure: boolean;
+  lastVerificationStatus?: MetaSchedulerInput["lastVerificationStatus"];
+  lastToolFailure?: MetaSchedulerInput["lastToolFailure"];
+}): EngineeringFailureCategory | undefined {
+  if (input.providerFailure) return "provider_error";
+  if (input.lastVerificationStatus === "timeout") return "test_timeout";
+  if (input.lastToolFailure && /missing artifact|missing required artifact|no such file|not found/iu.test(input.lastToolFailure.summary)) {
+    return "missing_artifact";
+  }
+  return undefined;
+}
+
 function summarizeRuntimeSignal(
   input: {
     backgroundTasks: BackgroundTaskState[];
@@ -1543,6 +1593,7 @@ function createPolicyDecision(input: {
   budgetSignal: PolicyDecision["budgetSignal"];
   capabilityPlan: CapabilityPlan;
   runtimeSignal: PolicyDecision["runtimeSignal"];
+  engineeringSignal: PolicyDecision["engineeringSignal"];
 }): PolicyDecision {
   const hints: PolicyHint[] = [];
   if (
@@ -1750,6 +1801,7 @@ function createPolicyDecision(input: {
       permission: input.capabilityPlan.permission,
       riskLevel: input.capabilityPlan.riskLevel,
     },
+    engineeringSignal: input.engineeringSignal,
     capabilityPlan: input.capabilityPlan,
     runtimeSignal: input.runtimeSignal,
     userState: input.userState,
