@@ -1870,6 +1870,203 @@ describe("runHeadlessTask", () => {
     expect(context.requestActivityPhase).toBeUndefined();
     expect(context.interrupt).toEqual({ type: "idle" });
   });
+
+  it("bench mode repairs after official test failure and passes on the second validation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-repair-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const marker = join(project, "fixed.txt");
+    const postTestDir = join(project, "post-test");
+    const testScript = join(project, "bench-test.cjs");
+    await mkdir(postTestDir, { recursive: true });
+    await writeFile(join(postTestDir, "tests.log"), "official assertion: missing fixed.txt", "utf8");
+    await writeFile(
+      testScript,
+      [
+        "const fs = require('fs');",
+        "if (!fs.existsSync('fixed.txt')) {",
+        "  console.error('official tests failed');",
+        "  process.exit(1);",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project. Write fixed.txt when repaired.",
+      projectPath: project,
+      stdout: output,
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(testScript)}`,
+      },
+      __testSendMessage: async (text) => {
+        prompts.push(text);
+        if (prompts.length === 2) {
+          await writeFile(marker, "ok", "utf8");
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("Headless verification failed");
+    expect(prompts[1]).toContain("official assertion: missing fixed.txt");
+    expect(output.text).toContain("bench validation passed");
+    expect(stderr.text).toContain("bench validation failed");
+  });
+
+  it("bench mode returns a clear failure when repair attempts are exhausted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-limit-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `node -e "console.error('compile error: expected foo'); process.exit(1)"`,
+      },
+      __testSendMessage: async () => {
+        attempts += 1;
+      },
+    });
+
+    expect(exitCode).toBe(5);
+    expect(attempts).toBe(2);
+    expect(stderr.text).toContain("headless bench 修补已达上限 1");
+    expect(stderr.text).toContain("model_patch_failed");
+  });
+
+  it("bench mode treats missing required artifacts as repairable validation failures", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-artifact-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const artifact = join(project, "out.txt");
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Write the result to out.txt.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["out.txt"],
+      },
+      __testSendMessage: async (text) => {
+        prompts.push(text);
+        if (prompts.length === 2) {
+          await writeFile(artifact, "answer", "utf8");
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts[1]).toContain("missing_artifact");
+    expect(prompts[1]).toContain("Missing artifacts: out.txt");
+  });
+
+  it("bench mode classifies official test timeouts without hanging", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-timeout-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    const slowScript = join(project, "slow-test.cjs");
+    await writeFile(slowScript, "setTimeout(() => {}, 10000);\n", "utf8");
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testTimeoutMs: 100,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(slowScript)}`,
+      },
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(5);
+    expect(stderr.text).toContain("test_timeout");
+  });
+
+  it("bench mode redacts secret environment variables from official test logs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-env-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const leakScript = join(project, "leak-env.cjs");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-real-secret-forbidden");
+    vi.stubEnv("CUSTOM_TOKEN", "token-real-secret-forbidden");
+    await writeFile(
+      leakScript,
+      [
+        "console.error(`api=${process.env.LINGHUN_OPENAI_API_KEY || 'missing'}`);",
+        "console.error(`token=${process.env.CUSTOM_TOKEN || 'missing'}`);",
+        "process.exit(1);",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(leakScript)}`,
+      },
+      __testSendMessage: async () => {},
+    });
+
+    const log = await readFile(join(project, ".linghun", "headless", "official-test.log"), "utf8");
+    expect(exitCode).toBe(5);
+    expect(log).toContain("api=missing");
+    expect(log).toContain("token=missing");
+    expect(log).not.toContain("sk-real-secret-forbidden");
+    expect(log).not.toContain("token-real-secret-forbidden");
+  });
 });
 
 describe("Phase 06 TUI slash commands", () => {

@@ -751,6 +751,14 @@ import {
   validateHandoffPacket,
   writeHandoffPacket,
 } from "./handoff-session-runtime.js";
+import {
+  type HeadlessBenchOptions,
+  createHeadlessBenchInitialPrompt,
+  createHeadlessBenchRepairPrompt,
+  resolveHeadlessBenchConfig,
+  runHeadlessEnvironmentPreflight,
+  validateHeadlessBenchCompletion,
+} from "./headless-bench-runtime.js";
 
 export type { IndexState } from "./index-runtime.js";
 export { createIndexState } from "./index-runtime.js";
@@ -775,6 +783,7 @@ export type RunHeadlessOptions = {
   autoApprove?: boolean;
   maxApprovals?: number;
   maxContinuations?: number;
+  bench?: HeadlessBenchOptions;
   __testGateway?: ModelGateway;
   __testContext?: TuiContext;
   __testStore?: SessionStore;
@@ -1511,6 +1520,18 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   const maxApprovals = Math.max(0, Math.min(options.maxApprovals ?? 32, 200));
   const autoApprove = options.autoApprove ?? true;
   const maxContinuations = Math.max(0, Math.min(options.maxContinuations ?? 1, 2));
+  const benchConfig = await resolveHeadlessBenchConfig({
+    prompt,
+    projectPath,
+    ...(options.bench ? { options: options.bench } : {}),
+  });
+  const benchPreflight =
+    benchConfig.enabled && benchConfig.preflight
+      ? await runHeadlessEnvironmentPreflight(projectPath)
+      : undefined;
+  if (benchConfig.enabled && benchPreflight) {
+    writeLine(output, `[headless] bench preflight: ${benchPreflight.summary}`);
+  }
 
   try {
     let approvals = 0;
@@ -1570,7 +1591,12 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       return { providerFailure: hasNewProviderFailure };
     };
 
-    let status = await runOneRequest(prompt);
+    const initialPrompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: prompt,
+      config: benchConfig,
+      ...(benchPreflight ? { preflight: benchPreflight } : {}),
+    });
+    let status = await runOneRequest(initialPrompt);
     while (
       status.exitCode === undefined &&
       status.providerFailure &&
@@ -1602,6 +1628,42 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         `错误：provider stream 失败，headless continuation 已达上限或缺少可恢复证据。${context.lastProviderFailure?.summary ?? ""}`.trim(),
       );
       return 1;
+    }
+    if (benchConfig.enabled) {
+      for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
+        const validation = await validateHeadlessBenchCompletion({ projectPath, config: benchConfig });
+        if (validation.ok) {
+          writeLine(output, `[headless] bench validation passed: ${validation.summary}`);
+          break;
+        }
+        const failure = validation.failure;
+        writeLine(
+          errorOutput,
+          `[headless] bench validation failed: ${failure.category}; ${failure.summary.split(/\r?\n/u)[0]}`,
+        );
+        if (repairAttempt >= benchConfig.maxRepairAttempts) {
+          writeLine(
+            errorOutput,
+            `错误：headless bench 修补已达上限 ${benchConfig.maxRepairAttempts}，最后失败类别：${failure.category}`,
+          );
+          return 5;
+        }
+        const repairPrompt = createHeadlessBenchRepairPrompt({
+          originalPrompt: prompt,
+          failure,
+          attempt: repairAttempt + 1,
+          maxAttempts: benchConfig.maxRepairAttempts,
+          ...(benchPreflight ? { preflight: benchPreflight } : {}),
+        });
+        const repairStatus = await runOneRequest(repairPrompt);
+        if (repairStatus.exitCode !== undefined) {
+          return repairStatus.exitCode;
+        }
+        if (repairStatus.providerFailure) {
+          writeLine(errorOutput, "错误：headless bench 修补期间 provider stream 失败。");
+          return 1;
+        }
+      }
     }
     const cleanup = await finishHeadlessRuntime(context);
     if (!cleanup.ok) {
