@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -51,6 +52,13 @@ export type ToolProgressEvent = {
   text: string;
 };
 
+export type ToolChildProcessTrackOptions = {
+  detached?: boolean;
+  label?: string;
+  cwd?: string;
+  retainAfterExit?: boolean;
+};
+
 export type ReadSnapshot = {
   path: string;
   hash: string;
@@ -67,6 +75,10 @@ export type ToolContext = {
   patchSummaries?: Record<string, DiffSummary>;
   abortSignal?: AbortSignal;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
+  trackChildProcess?: (
+    child: Pick<ChildProcess, "kill" | "pid" | "exitCode" | "signalCode" | "once">,
+    options?: ToolChildProcessTrackOptions,
+  ) => boolean;
 };
 
 export type ToolName =
@@ -895,6 +907,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     timeoutMs,
     context.abortSignal,
     (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
+    context.trackChildProcess,
   );
   const adapterLines =
     adapted.command === input.command && adapted.adapter === "native"
@@ -917,8 +930,10 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   const preview = truncated
     ? `${fullText.slice(0, BASH_PREVIEW_LIMIT)}\n...（输出已截断，完整日志见 fullOutputPath）`
     : fullText;
+  const details = createBashDetails(fullOutputPath, fullText);
   return {
     text: preview,
+    details,
     data:
       adapted.adapter === "native"
         ? { exitCode: result.exitCode, outcome: result.outcome }
@@ -926,6 +941,21 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     truncated,
     fullOutputPath,
   };
+}
+
+function createBashDetails(fullOutputPath: string, fullText: string): string {
+  return [
+    `fullOutputPath: ${fullOutputPath}`,
+    "--- summary",
+    ...fullText.split(/\r?\n/u).slice(0, 8),
+    "--- tail",
+    ...tailLines(fullText, 80),
+  ].join("\n");
+}
+
+function tailLines(text: string, limit: number): string[] {
+  const lines = text.split(/\r?\n/u);
+  return lines.slice(Math.max(0, lines.length - limit));
 }
 
 type ShellCommandAdapter = {
@@ -1847,9 +1877,17 @@ function runShell(
   timeoutMs: number,
   signal?: AbortSignal,
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
+  trackChildProcess?: ToolContext["trackChildProcess"],
 ): Promise<{ exitCode: number; output: string; outcome: "completed" | "timeout" | "cancelled" }> {
   return new Promise((resolvePromise) => {
-    const child = spawn(command, { cwd, shell: true, windowsHide: true });
+    const detached = process.platform !== "win32";
+    const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
+    trackChildProcess?.(child, {
+      detached,
+      cwd,
+      label: `Bash:${command.slice(0, 80)}`,
+      retainAfterExit: detached,
+    });
     let output = "";
     let settled = false;
     let forcedKillTimer: NodeJS.Timeout | undefined;
@@ -1884,7 +1922,16 @@ function runShell(
         await stopWindowsProcessTree(child.pid, cwd);
         return;
       }
-      child.kill(force ? "SIGKILL" : "SIGTERM");
+      const signalName = force ? "SIGKILL" : "SIGTERM";
+      if (detached && child.pid) {
+        try {
+          process.kill(-child.pid, signalName);
+        } catch {
+          child.kill(signalName);
+        }
+      } else {
+        child.kill(signalName);
+      }
       if (force) {
         await waitForChildClose();
       }

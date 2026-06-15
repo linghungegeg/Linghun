@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { EndpointProfile } from "@linghun/config";
 import type { TranscriptEvent } from "@linghun/core";
@@ -14,6 +15,7 @@ export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
   ${LINGHUN_CLI_NAME}                                   进入交互式终端
   ${LINGHUN_CLI_NAME} --version                         显示版本号
   ${LINGHUN_CLI_NAME} --help                            显示帮助信息
+  ${LINGHUN_CLI_NAME} run --prompt 文本                  非交互执行一次任务
   ${LINGHUN_CLI_NAME} sessions list [--json]            列出当前项目会话
   ${LINGHUN_CLI_NAME} sessions create [--message 文本]  新建会话，可写入一条用户消息
   ${LINGHUN_CLI_NAME} sessions append <id> --message 文本  追加一条用户消息
@@ -80,6 +82,9 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   }
 
   const normalized = normalizeSlashCommand(argv);
+  if (normalized[0] === "run") {
+    return runHeadlessCommand(normalized.slice(1));
+  }
   if (normalized[0] === "sessions") {
     return runSessionsCommand(normalized.slice(1));
   }
@@ -364,6 +369,66 @@ function maskSecret(secret: string): string {
   return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
 }
 
+async function runHeadlessCommand(argv: string[]): Promise<CliResult> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    return {
+      stdout:
+        [
+          "用法：linghun run --prompt <文本> [--mode full-access] [--auto-approve]",
+          "",
+          "选项：",
+          "  --prompt, -p <文本>       本次任务说明",
+          "  --prompt-file <路径>      从文件读取任务说明",
+          "  --mode <模式>             default / auto-review / plan / full-access，默认 full-access",
+          "  --auto-approve            自动批准本次 headless 运行中的本地工具确认（默认）",
+          "  --no-auto-approve         遇到本地工具确认时停止",
+          "  --max-approvals <数量>    自动批准上限，默认 32",
+          "",
+          "未提供 --prompt 或 --prompt-file 时，会从 stdin 读取任务说明。",
+        ].join("\n") + "\n",
+      stderr: "",
+      exitCode: 0,
+    };
+  }
+
+  const mode = readOption(argv, "--mode") ?? "full-access";
+  if (!["default", "auto-review", "plan", "full-access"].includes(mode)) {
+    return usageError("用法：linghun run --mode default|auto-review|plan|full-access");
+  }
+  const prompt =
+    readOption(argv, "--prompt") ??
+    readOption(argv, "-p") ??
+    (await readPromptFile(argv)) ??
+    readPositionalPrompt(argv) ??
+    (await readStdinPrompt());
+  if (!prompt?.trim()) {
+    return usageError("用法：linghun run --prompt <文本>，或通过 stdin 输入任务说明。");
+  }
+  const maxApprovalsRaw = readOption(argv, "--max-approvals");
+  let maxApprovals: number | undefined;
+  if (maxApprovalsRaw !== undefined) {
+    const parsed = Number.parseInt(maxApprovalsRaw, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return usageError("用法：linghun run --max-approvals <非负整数>");
+    }
+    maxApprovals = parsed;
+  }
+
+  configureCliBundledRoot();
+  const stdout = new StringWritable();
+  const stderr = new StringWritable();
+  const { runHeadlessTask } = await import("@linghun/tui");
+  const exitCode = await runHeadlessTask({
+    prompt,
+    mode: mode as "default" | "auto-review" | "plan" | "full-access",
+    autoApprove: !argv.includes("--no-auto-approve"),
+    ...(maxApprovals !== undefined ? { maxApprovals } : {}),
+    stdout,
+    stderr,
+  });
+  return { stdout: stdout.toString(), stderr: stderr.toString(), exitCode };
+}
+
 async function runSessionsCommand(argv: string[]): Promise<CliResult> {
   const [subcommand = "list", ...rest] = argv;
   const [{ loadConfig, resolveStoragePaths }, { SessionStore }] = await Promise.all([
@@ -465,6 +530,39 @@ function normalizeSlashCommand(argv: string[]): string[] {
   return argv;
 }
 
+async function readPromptFile(argv: string[]): Promise<string | undefined> {
+  const path = readOption(argv, "--prompt-file");
+  if (!path) return undefined;
+  return readFile(path, "utf8");
+}
+
+function readPositionalPrompt(argv: string[]): string | undefined {
+  const values: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const value = argv[i];
+    if (!value) continue;
+    if (value.startsWith("-")) {
+      if (optionTakesValue(value)) i += 1;
+      continue;
+    }
+    values.push(value);
+  }
+  return values.length > 0 ? values.join(" ") : undefined;
+}
+
+async function readStdinPrompt(): Promise<string | undefined> {
+  if (process.stdin.isTTY) return undefined;
+  let text = "";
+  for await (const chunk of process.stdin) {
+    text += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+  }
+  return text;
+}
+
+function optionTakesValue(option: string): boolean {
+  return ["--prompt", "-p", "--prompt-file", "--mode", "--max-approvals"].includes(option);
+}
+
 function isSlashCommand(command: string | undefined, name: string): boolean {
   if (!command) {
     return false;
@@ -505,4 +603,21 @@ function formatDiagnostics(diagnostics: { line: number; message: string }[]): st
   return `${diagnostics
     .map((diagnostic) => `JSONL 第 ${diagnostic.line} 行已跳过：${diagnostic.message}`)
     .join("\n")}\n`;
+}
+
+class StringWritable extends Writable {
+  private readonly chunks: string[] = [];
+
+  override _write(
+    chunk: Buffer | string,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.chunks.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+    callback();
+  }
+
+  override toString(): string {
+    return this.chunks.join("");
+  }
 }

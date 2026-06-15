@@ -381,8 +381,10 @@ import {
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import {
   createProcessGuard,
+  getTrackedProcessSnapshot,
   installProcessGuardExitHandlers,
   requestTrackedProcessStop,
+  trackChildProcess,
 } from "./process-guard.js";
 export { isPotentiallyMutatingMcpTool } from "./mcp-stdio-runtime.js";
 import { startFeishuLongConnection } from "./feishu-long-connection-runtime.js";
@@ -750,6 +752,16 @@ import {
   validateHandoffPacket,
   writeHandoffPacket,
 } from "./handoff-session-runtime.js";
+import {
+  type HeadlessBenchOptions,
+  type HeadlessBenchValidationResult,
+  collectHeadlessArtifactChecklist,
+  createHeadlessBenchInitialPrompt,
+  createHeadlessBenchRepairPrompt,
+  resolveHeadlessBenchConfig,
+  runHeadlessEnvironmentPreflight,
+  validateHeadlessBenchCompletion,
+} from "./headless-bench-runtime.js";
 
 export type { IndexState } from "./index-runtime.js";
 export { createIndexState } from "./index-runtime.js";
@@ -764,6 +776,31 @@ export type RunTuiOptions = {
   stderr?: Writable;
   projectPath?: string;
 };
+
+export type RunHeadlessOptions = {
+  prompt: string;
+  stdout?: Writable;
+  stderr?: Writable;
+  projectPath?: string;
+  mode?: PermissionMode;
+  autoApprove?: boolean;
+  maxApprovals?: number;
+  maxContinuations?: number;
+  deadlineMs?: number;
+  deadlineAtMs?: number;
+  bench?: HeadlessBenchOptions;
+  __testGateway?: ModelGateway;
+  __testContext?: TuiContext;
+  __testStore?: SessionStore;
+  __testSkipHydration?: boolean;
+  __testSendMessage?: typeof sendMessage;
+};
+
+const DEFAULT_HEADLESS_MAX_CONTINUATIONS = 3;
+const MAX_HEADLESS_CONTINUATIONS = 3;
+const HEADLESS_CONTINUATION_BACKOFF_BASE_MS = 250;
+const HEADLESS_CLEANUP_SETTLE_MS = 500;
+const HEADLESS_DEADLINE_CLOSURE_WINDOW_MS = 60_000;
 
 export type {
   PermissionRule,
@@ -880,13 +917,16 @@ import {
   t,
   writeStatus,
 } from "./details-status-runtime.js";
-import { appendSystemEvent } from "./evidence-runtime.js";
+import { appendSystemEvent, createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
 import {
   __testSendMessage,
+  clearRequestActivity,
+  evaluateAggregatedFinalAnswerGate,
   handleNaturalInput,
   handleRemoteInboundMessage,
   sendMessage,
 } from "./model-stream-runtime.js";
+export { evaluateAggregatedFinalAnswerGate };
 import {
   __testFormatStartAgentDidNotStartMessage,
   __testParseRunWorkflowToolInput,
@@ -1330,11 +1370,10 @@ function toggleCurrentCommandPanelDetails(context: TuiContext): boolean {
   return true;
 }
 
-export async function runTui(options: RunTuiOptions = {}): Promise<number> {
-  const input = options.stdin ?? defaultStdin;
-  const output = options.stdout ?? defaultStdout;
-  const errorOutput = options.stderr ?? defaultStderr;
-  const projectPath = options.projectPath ?? process.cwd();
+async function createTuiRuntimeContext(projectPath: string): Promise<{
+  context: TuiContext;
+  store: SessionStore;
+}> {
   const config = await loadConfig(projectPath);
   const storagePaths = resolveStoragePaths(config, projectPath);
   const store = new SessionStore({ sessionRootDir: storagePaths.sessions, projectPath });
@@ -1380,6 +1419,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     backgroundAbortControllers: new Map(),
     discoveredDeferredToolNames: new Set<string>(),
   };
+  context.tools.trackChildProcess = (child, options) => trackChildProcess(child, options);
   context.turnContinuity = createInitialContinuityState();
   context.recentTaskKinds = [];
   context.workflows.templates = mergeWorkflowTemplates(
@@ -1387,8 +1427,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     context.agentRegistry.agents.map(registryAgentToWorkflowTemplate),
     context.workflowRegistry.workflows.map(registryWorkflowToTemplate),
   );
-  installProcessGuardExitHandlers();
-  const startup = await prepareTuiStartup(input, output, context);
+  return { context, store };
+}
+
+async function hydrateRuntimeContext(context: TuiContext): Promise<void> {
   await refreshIndexStatus(context);
   await hydrateDurableJobBackgroundTasks(context);
   await hydratePersistentAgents(context);
@@ -1398,10 +1440,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     /* best-effort, don't block startup */
   });
   context.failureLearning.records = await loadFailureRecords(context.failureLearning);
-  const gateway = createModelGateway(context.config);
-  // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
-  context.modelGateway = gateway;
-  // R6 — Register provider retry hook so the TUI can show retry activity.
+}
+
+function attachProviderRuntimeHooks(context: TuiContext): void {
   registerProviderHooks({
     onRetry: (info) => {
       // Agent/workflow background retries must not overwrite main-screen status.
@@ -1415,8 +1456,24 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       };
     },
   });
-  // R6 — Initialize notification callback on context for circuit breaker and other runtimes.
   context.pushNotification = (text, tone) => pushTransientNotification(context, text, tone);
+}
+
+export async function runTui(options: RunTuiOptions = {}): Promise<number> {
+  const input = options.stdin ?? defaultStdin;
+  const output = options.stdout ?? defaultStdout;
+  const errorOutput = options.stderr ?? defaultStderr;
+  const projectPath = options.projectPath ?? process.cwd();
+  const { context, store } = await createTuiRuntimeContext(projectPath);
+  installProcessGuardExitHandlers();
+  const startup = await prepareTuiStartup(input, output, context);
+  await hydrateRuntimeContext(context);
+  const gateway = createModelGateway(context.config);
+  // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
+  context.modelGateway = gateway;
+  // R6 — Register provider retry hook so the TUI can show retry activity.
+  attachProviderRuntimeHooks(context);
+  // R6 — Initialize notification callback on context for circuit breaker and other runtimes.
   const sigintHandler = () => {
     requestTrackedProcessStop(false);
     void handleInterruptCommand([], context, output).catch((error: unknown) => {
@@ -1448,6 +1505,509 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   } finally {
     process.removeListener("SIGINT", sigintHandler);
   }
+}
+
+export async function runHeadlessTask(options: RunHeadlessOptions): Promise<number> {
+  const output = options.stdout ?? defaultStdout;
+  const errorOutput = options.stderr ?? defaultStderr;
+  const projectPath = options.projectPath ?? process.cwd();
+  const prompt = options.prompt.trim();
+  if (!prompt) {
+    writeLine(errorOutput, "错误：headless run prompt 不能为空。");
+    return 2;
+  }
+  const runtime =
+    options.__testContext && options.__testStore
+      ? { context: options.__testContext, store: options.__testStore }
+      : await createTuiRuntimeContext(projectPath);
+  const { context, store } = runtime;
+  context.permissionMode = options.mode ?? "full-access";
+  context.planAccepted = false;
+  installProcessGuardExitHandlers();
+  if (!options.__testSkipHydration) {
+    await hydrateRuntimeContext(context);
+  }
+  const gateway = options.__testGateway ?? createModelGateway(context.config);
+  const sendHeadlessMessage = options.__testSendMessage ?? sendMessage;
+  context.modelGateway = gateway;
+  attachProviderRuntimeHooks(context);
+  const maxApprovals = Math.max(0, Math.min(options.maxApprovals ?? 32, 200));
+  const autoApprove = options.autoApprove ?? true;
+  const maxContinuations = Math.max(
+    0,
+    Math.min(options.maxContinuations ?? DEFAULT_HEADLESS_MAX_CONTINUATIONS, MAX_HEADLESS_CONTINUATIONS),
+  );
+  const deadlineAtMs = resolveHeadlessDeadlineAtMs(options);
+  const benchConfig = await resolveHeadlessBenchConfig({
+    prompt,
+    projectPath,
+    ...(options.bench ? { options: options.bench } : {}),
+  });
+  const benchPreflight =
+    benchConfig.enabled && benchConfig.preflight
+      ? await runHeadlessEnvironmentPreflight(projectPath)
+      : undefined;
+  if (benchConfig.enabled && benchPreflight) {
+    writeLine(output, `[headless] bench preflight: ${benchPreflight.summary}`);
+  }
+
+  try {
+    let approvals = 0;
+    let continuations = 0;
+    let requestAttempts = 0;
+    let benchValidationPassed = !benchConfig.enabled;
+    let lastValidation: HeadlessBenchValidationResult | undefined;
+    const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
+      requestAttempts += 1;
+      const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
+      const deferredApprovals: HeadlessDeferredApproval[] = [];
+      const messagePromise = sendHeadlessMessage(text, context, gateway, output);
+      const pump = createHeadlessApprovalPump({
+        context,
+        gateway,
+        output,
+        errorOutput,
+        autoApprove,
+        maxApprovals,
+        getApprovals: () => approvals,
+        setApprovals: (value) => {
+          approvals = value;
+        },
+        deferredApprovals,
+      });
+      const messageResult = await runWithHeadlessApprovalPump(messagePromise, pump);
+      if (messageResult.exitCode !== undefined) {
+        return { exitCode: messageResult.exitCode };
+      }
+      const approvalStatus = await pumpHeadlessApprovals({
+        context,
+        gateway,
+        output,
+        errorOutput,
+        autoApprove,
+        maxApprovals,
+        approvals,
+        deferredApprovals,
+      });
+      approvals = approvalStatus.approvals;
+      if (approvalStatus.exitCode !== undefined) {
+        return { exitCode: approvalStatus.exitCode };
+      }
+      const deferredStatus = await runDeferredHeadlessApprovals({
+        context,
+        gateway,
+        output,
+        errorOutput,
+        autoApprove,
+        maxApprovals,
+        approvals,
+        deferredApprovals,
+      });
+      approvals = deferredStatus.approvals;
+      if (deferredStatus.exitCode !== undefined) {
+        return { exitCode: deferredStatus.exitCode };
+      }
+      const providerFailure = context.lastProviderFailure;
+      const hasNewProviderFailure =
+        Boolean(providerFailure) && providerFailure?.evidenceId !== previousProviderFailureId;
+      return { providerFailure: hasNewProviderFailure };
+    };
+
+    const initialPrompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: prompt,
+      config: benchConfig,
+      ...(benchPreflight ? { preflight: benchPreflight } : {}),
+    });
+    let status = await runOneRequest(initialPrompt);
+    while (
+      status.exitCode === undefined &&
+      status.providerFailure &&
+      continuations < maxContinuations &&
+      shouldRunHeadlessProviderContinuation(context)
+    ) {
+      continuations += 1;
+      const sessionId = await ensureSession(context);
+      const continuationPrompt = createHeadlessProviderContinuationPrompt(context);
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `headless_provider_stream_continuation: attempt=${continuations}; reason=${context.lastProviderFailure?.summary ?? "provider_failure"}`,
+        "warning",
+      );
+      writeLine(output, `[headless] provider stream failed; continuing attempt ${continuations}/${maxContinuations}`);
+      context.lastProviderFailure = undefined;
+      await sleep(createHeadlessContinuationBackoffMs(continuations));
+      status = await runOneRequest(continuationPrompt);
+    }
+    if (continuations > 0 && !status.providerFailure) {
+      context.lastProviderFailure = undefined;
+    }
+    if (status.exitCode !== undefined) {
+      return status.exitCode;
+    }
+    if (status.providerFailure) {
+      writeLine(
+        errorOutput,
+        createHeadlessProviderFailureDiagnostic(context, {
+          requestAttempts,
+          continuations,
+          maxContinuations,
+        }),
+      );
+      return 1;
+    }
+    if (benchConfig.enabled) {
+      for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
+        const validation = await validateHeadlessBenchCompletion({ projectPath, config: benchConfig });
+        lastValidation = validation;
+        if (validation.ok) {
+          benchValidationPassed = true;
+          writeLine(output, `[headless] bench validation passed: ${validation.summary}`);
+          break;
+        }
+        const failure = validation.failure;
+        writeLine(
+          errorOutput,
+          `[headless] bench validation failed: ${failure.category}; ${failure.summary.split(/\r?\n/u)[0]}`,
+        );
+        if (repairAttempt >= benchConfig.maxRepairAttempts) {
+          writeLine(
+            errorOutput,
+            `错误：headless bench 修补已达上限 ${benchConfig.maxRepairAttempts}，最后失败类别：${failure.category}`,
+          );
+          return 5;
+        }
+        if (isHeadlessDeadlineApproaching(deadlineAtMs)) {
+          const remaining = formatHeadlessRemainingTime(deadlineAtMs);
+          writeLine(
+            errorOutput,
+            `[headless] deadline approaching (${remaining}); closure validation ran, skipping repair loop.`,
+          );
+          return 6;
+        }
+        const repairPrompt = createHeadlessBenchRepairPrompt({
+          originalPrompt: prompt,
+          failure,
+          attempt: repairAttempt + 1,
+          maxAttempts: benchConfig.maxRepairAttempts,
+          profile: benchConfig.profile,
+          ...(benchPreflight ? { preflight: benchPreflight } : {}),
+        });
+        const repairStatus = await runOneRequest(repairPrompt);
+        if (repairStatus.exitCode !== undefined) {
+          return repairStatus.exitCode;
+        }
+        if (repairStatus.providerFailure) {
+          writeLine(errorOutput, "错误：headless bench 修补期间 provider stream 失败。");
+          return 1;
+        }
+      }
+    }
+    if (context.sessionId) {
+      await recordHeadlessArtifactChecklist(context, context.sessionId, benchConfig, lastValidation);
+    }
+    const cleanup = await finishHeadlessRuntime(context);
+    if (!cleanup.ok) {
+      const cleanupMessage = `警告：headless run 收尾失败：${cleanup.reason}`;
+      writeLine(errorOutput, cleanupMessage);
+      if (context.sessionId) {
+        await appendSystemEvent(context, context.sessionId, cleanupMessage, "warning").catch(
+          () => undefined,
+        );
+      }
+      if (benchValidationPassed) {
+        writeLine(errorOutput, "警告：任务结果已完成但清理失败；这不是 agent 解题失败。");
+      } else {
+        return 4;
+      }
+    }
+    if (context.sessionId && !context.sessionEnded) {
+      await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
+      context.sessionEnded = true;
+    }
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "headless run 执行失败。";
+    writeLine(errorOutput, `错误：${message}`);
+    return 1;
+  } finally {
+    await finishHeadlessRuntime(context);
+  }
+}
+
+type HeadlessTurnStatus = {
+  exitCode?: number;
+  providerFailure?: boolean;
+};
+
+type HeadlessApprovalPumpResult = {
+  approvals: number;
+  exitCode?: number;
+};
+
+type HeadlessDeferredApproval = NonNullable<TuiContext["pendingLocalApproval"]>;
+
+async function pumpHeadlessApprovals(input: {
+  context: TuiContext;
+  gateway: ModelGateway;
+  output: Writable;
+  errorOutput: Writable;
+  autoApprove: boolean;
+  maxApprovals: number;
+  approvals: number;
+  deferredApprovals?: HeadlessDeferredApproval[];
+}): Promise<HeadlessApprovalPumpResult> {
+  let approvals = input.approvals;
+  while (input.context.pendingLocalApproval) {
+    if (!input.autoApprove) {
+      input.context.activeAbortController?.abort();
+      writeLine(
+        input.errorOutput,
+        `错误：headless run 停在权限确认：${input.context.pendingLocalApproval.kind}。请开启 --auto-approve 或改用交互模式。`,
+      );
+      return { approvals, exitCode: 3 };
+    }
+    if (approvals >= input.maxApprovals) {
+      input.context.activeAbortController?.abort();
+      writeLine(
+        input.errorOutput,
+        `错误：headless run 自动批准超过上限 ${input.maxApprovals}，停在权限确认：${input.context.pendingLocalApproval.kind}。`,
+      );
+      return { approvals, exitCode: 3 };
+    }
+    const approval = input.context.pendingLocalApproval;
+    input.context.pendingLocalApproval = undefined;
+    approvals += 1;
+    writeLine(input.output, `[headless] auto-approved ${approval.kind}`);
+    if (input.deferredApprovals && hasModelContinuation(approval)) {
+      input.deferredApprovals.push(approval);
+      continue;
+    }
+    await executePermissionApprove(approval, input.context, input.gateway, input.output);
+  }
+  return { approvals };
+}
+
+async function runDeferredHeadlessApprovals(input: {
+  context: TuiContext;
+  gateway: ModelGateway;
+  output: Writable;
+  errorOutput: Writable;
+  autoApprove: boolean;
+  maxApprovals: number;
+  approvals: number;
+  deferredApprovals: HeadlessDeferredApproval[];
+}): Promise<HeadlessApprovalPumpResult> {
+  let approvals = input.approvals;
+  while (input.deferredApprovals.length > 0) {
+    const approval = input.deferredApprovals.shift();
+    if (!approval) continue;
+    await executePermissionApprove(approval, input.context, input.gateway, input.output);
+    const nested = await pumpHeadlessApprovals({
+      context: input.context,
+      gateway: input.gateway,
+      output: input.output,
+      errorOutput: input.errorOutput,
+      autoApprove: input.autoApprove,
+      maxApprovals: input.maxApprovals,
+      approvals,
+    });
+    approvals = nested.approvals;
+    if (nested.exitCode !== undefined) {
+      return { approvals, exitCode: nested.exitCode };
+    }
+  }
+  return { approvals };
+}
+
+function hasModelContinuation(approval: HeadlessDeferredApproval): boolean {
+  return "continuation" in approval && Boolean(approval.continuation);
+}
+
+function createHeadlessApprovalPump(input: {
+  context: TuiContext;
+  gateway: ModelGateway;
+  output: Writable;
+  errorOutput: Writable;
+  autoApprove: boolean;
+  maxApprovals: number;
+  getApprovals: () => number;
+  setApprovals: (value: number) => void;
+  deferredApprovals: HeadlessDeferredApproval[];
+}): () => Promise<HeadlessApprovalPumpResult> {
+  let running: Promise<HeadlessApprovalPumpResult> | undefined;
+  return async () => {
+    if (running) return running;
+    running = pumpHeadlessApprovals({
+      context: input.context,
+      gateway: input.gateway,
+      output: input.output,
+      errorOutput: input.errorOutput,
+      autoApprove: input.autoApprove,
+      maxApprovals: input.maxApprovals,
+      approvals: input.getApprovals(),
+      deferredApprovals: input.deferredApprovals,
+    }).then((result) => {
+      input.setApprovals(result.approvals);
+      return result;
+    });
+    try {
+      return await running;
+    } finally {
+      running = undefined;
+    }
+  };
+}
+
+async function runWithHeadlessApprovalPump(
+  messagePromise: Promise<void>,
+  pump: () => Promise<HeadlessApprovalPumpResult>,
+): Promise<{ exitCode?: number }> {
+  let settled = false;
+  let exitCode: number | undefined;
+  const loop = (async () => {
+    while (!settled && exitCode === undefined) {
+      const result = await pump();
+      exitCode = result.exitCode;
+      if (exitCode !== undefined) break;
+      await sleep(50);
+    }
+  })();
+  try {
+    await messagePromise;
+  } finally {
+    settled = true;
+    await loop;
+  }
+  return exitCode !== undefined ? { exitCode } : {};
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function createHeadlessContinuationBackoffMs(attempt: number): number {
+  return Math.min(HEADLESS_CONTINUATION_BACKOFF_BASE_MS * 2 ** Math.max(0, attempt - 1), 1_500);
+}
+
+function resolveHeadlessDeadlineAtMs(options: RunHeadlessOptions): number | undefined {
+  if (typeof options.deadlineAtMs === "number" && Number.isFinite(options.deadlineAtMs)) {
+    return options.deadlineAtMs;
+  }
+  if (typeof options.deadlineMs === "number" && Number.isFinite(options.deadlineMs)) {
+    return Date.now() + Math.max(0, options.deadlineMs);
+  }
+  const envDeadlineAt = Number.parseInt(process.env.LINGHUN_HEADLESS_DEADLINE_AT_MS ?? "", 10);
+  if (Number.isFinite(envDeadlineAt) && envDeadlineAt > 0) {
+    return envDeadlineAt;
+  }
+  return undefined;
+}
+
+function isHeadlessDeadlineApproaching(deadlineAtMs: number | undefined): boolean {
+  return deadlineAtMs !== undefined && deadlineAtMs - Date.now() <= HEADLESS_DEADLINE_CLOSURE_WINDOW_MS;
+}
+
+function formatHeadlessRemainingTime(deadlineAtMs: number | undefined): string {
+  if (deadlineAtMs === undefined) return "unknown";
+  return `${Math.max(0, Math.ceil((deadlineAtMs - Date.now()) / 1000))}s remaining`;
+}
+
+function shouldRunHeadlessProviderContinuation(context: TuiContext): boolean {
+  return (
+    context.evidence.some((record) => !record.supportsClaims.includes("provider_failure")) ||
+    context.tools.changedFiles.length > 0
+  );
+}
+
+async function recordHeadlessArtifactChecklist(
+  context: TuiContext,
+  sessionId: string,
+  config: Awaited<ReturnType<typeof resolveHeadlessBenchConfig>>,
+  lastValidation: HeadlessBenchValidationResult | undefined,
+): Promise<void> {
+  const checklist = await collectHeadlessArtifactChecklist({
+    projectPath: context.projectPath,
+    config,
+    changedFiles: context.tools.changedFiles,
+    ...(lastValidation ? { lastValidation } : {}),
+  });
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `headless artifact checklist: ${checklist.summary}`,
+    "headless:artifact-checklist",
+    [
+      "headless_artifact_checklist",
+      checklist.verificationRan ? "verification_ran" : "verification_not_run",
+      checklist.changedFiles.length > 0 ? "file_written" : "no_file_changes",
+    ],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  await appendSystemEvent(context, sessionId, `headless artifact checklist: ${checklist.summary}`, "info");
+}
+
+export const __testHeadlessRuntime = {
+  isDeadlineApproaching: isHeadlessDeadlineApproaching,
+  formatRemainingTime: formatHeadlessRemainingTime,
+};
+
+function createHeadlessProviderFailureDiagnostic(
+  context: TuiContext,
+  input: { requestAttempts: number; continuations: number; maxContinuations: number },
+): string {
+  const failure = context.lastProviderFailure;
+  const lastEvidence = context.evidence.find(
+    (record) => !record.supportsClaims.includes("provider_failure"),
+  );
+  const changedFiles = context.tools.changedFiles.length;
+  return [
+    "错误：provider stream 失败，headless continuation 已达上限或缺少可恢复证据。",
+    `providerKind=${failure?.kind ?? "unknown"}`,
+    `providerCode=${failure?.code ?? "unknown"}`,
+    `attempts=${input.requestAttempts}`,
+    `continuations=${input.continuations}/${input.maxContinuations}`,
+    `lastSuccessfulTool=${lastEvidence?.source ?? "none"}`,
+    `fileChanges=${changedFiles > 0 ? `yes:${changedFiles}` : "no"}`,
+    failure?.summary ? `summary=${failure.summary}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function createHeadlessProviderContinuationPrompt(context: TuiContext): string {
+  return context.language === "en-US"
+    ? "The previous response stream was interrupted. Continue the original task based on the current workspace state, transcript, tool evidence, and any file changes already present. Do not restart from scratch unless needed."
+    : "上一轮响应流中断。请基于当前工作区状态、已有 transcript、工具证据和已经存在的文件改动继续完成原任务；除非必要，不要从头重做。";
+}
+
+async function finishHeadlessRuntime(context: TuiContext): Promise<{ ok: boolean; reason?: string }> {
+  if (context.pendingLocalApproval) {
+    return { ok: false, reason: `仍有权限确认未处理：${context.pendingLocalApproval.kind}` };
+  }
+  if (context.activeAbortController) {
+    context.activeAbortController.abort();
+  }
+  context.tools.abortSignal = undefined;
+  context.interrupt = { type: "idle" };
+  clearRequestActivity(context);
+  context.activeAbortController = undefined;
+  const stopResult = requestTrackedProcessStop(true);
+  await sleep(HEADLESS_CLEANUP_SETTLE_MS);
+  const stillTracked = getTrackedProcessSnapshot();
+  if (stopResult.failures.length > 0) {
+    return {
+      ok: false,
+      reason: `清理本地子进程失败：${stopResult.failures.map((failure) => `${failure.pid}:${failure.message}`).join("; ")}`,
+    };
+  }
+  if (stillTracked.length > 0) {
+    return {
+      ok: false,
+      reason: `仍有本地子进程未退出：${stillTracked.map((entry) => `${entry.pid}${entry.label ? `(${entry.label})` : ""}`).join(", ")}`,
+    };
+  }
+  return { ok: true };
 }
 
 type TuiStartupState = {

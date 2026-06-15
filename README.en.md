@@ -10,6 +10,8 @@ That is the value of Linghun's anti-hallucination system. It is not merely about
 
 Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHITEPAPER.en.md).
 
+> **Terminal-Bench 2.1 single full run**: Linghun completed the official 89-task dataset in a real local development environment, scoring **65/89 = 73.03%** in one trial per task. This is not an accepted official leaderboard ranking; the official submission path requires `k=5`, standard timeout/resource settings, and complete trajectories. See: [English report](./reports/terminal-bench-2.1-single-run.md) / [中文报告](./reports/terminal-bench-2.1-single-run.zh.md).
+
 ## Special Thanks
 
 <div>

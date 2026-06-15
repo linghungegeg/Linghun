@@ -10,6 +10,8 @@
 
 </div>
 
+> **Terminal-Bench 2.1 单次完整压测**：Linghun 在真实本地开发环境中完整跑过官方 89 题，单次结果 **65/89 = 73.03%**。这不是官方 leaderboard 已收录排名；官方提交要求 `k=5`、标准 timeout/resource 和完整 trajectory。详见：[中文报告](./reports/terminal-bench-2.1-single-run.zh.md) / [English report](./reports/terminal-bench-2.1-single-run.md)。
+
 ```bash
 npm install -g @linghun/cli
 linghun

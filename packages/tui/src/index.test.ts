@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
@@ -36,6 +36,16 @@ import {
   needsSolutionCompletenessReportClosure,
 } from "./final-answer-gate.js";
 import { createHandoffPacket, hydrateResumeContext } from "./handoff-session-runtime.js";
+import {
+  type EnvironmentSetupFailureClassification,
+  classifyEnvironmentSetupFailure,
+  classifyHeadlessFailure,
+  collectHeadlessArtifactChecklist,
+  createHeadlessBenchInitialPrompt,
+  createHeadlessBenchRepairPrompt,
+  detectHeadlessBenchTaskProfile,
+  detectEngineeringTaskProfile,
+} from "./headless-bench-runtime.js";
 import {
   type BackgroundTaskState,
   type DeferredToolDescriptor,
@@ -80,6 +90,7 @@ import {
   deferredToolListHashInput,
   dingtalkBridgeAdapter,
   dingtalkStreamFrameToBridgeEvent,
+  evaluateAggregatedFinalAnswerGate,
   executeExtraTool,
   executeSearchExtraTools,
   feishuBridgeAdapter,
@@ -101,6 +112,7 @@ import {
   recordModelUsage,
   runAutoLearningOnTurnEnd,
   runCommandCaptureForTest,
+  runHeadlessTask,
   runTui,
   runVerificationCommandForTest,
   sanitizeDiscoveredDeferredToolName,
@@ -132,7 +144,7 @@ import { evaluateMetaScheduler } from "./meta-scheduler-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
-import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
+import { consumeProcessGuardStopResultsForTest, trackChildProcess } from "./process-guard.js";
 import {
   BREAKER_CONSTANTS,
   checkProviderCooldown,
@@ -1686,6 +1698,700 @@ async function waitForTestCondition(predicate: () => boolean, timeoutMs = 1_000)
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+describe("runHeadlessTask", () => {
+  it("auto-approves pending local approval while sendMessage is still running", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-approve-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const output = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    let approvedDuringSend = false;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: output,
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.pendingLocalApproval = {
+          kind: "break_cache_mutation",
+          sessionId: session.id,
+          action: "off",
+        };
+        await waitForTestCondition(() => context.pendingLocalApproval === undefined);
+        approvedDuringSend = true;
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(approvedDuringSend).toBe(true);
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(output.text).toContain("[headless] auto-approved break_cache_mutation");
+    expect(stderr.text).toBe("");
+  });
+
+  it("continues once after provider stream failure when workspace evidence exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.evidence.push({
+      id: "evidence-tool",
+      kind: "command_output",
+      summary: "Bash: exit code 0",
+      source: "tool:Bash",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+      createdAt: new Date().toISOString(),
+    });
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      maxContinuations: 1,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async (text) => {
+        prompts.push(text);
+        if (prompts.length === 1) {
+          context.lastProviderFailure = {
+            code: "PROVIDER_STREAM_ERROR",
+            kind: "transit",
+            provider: "deepseek",
+            model: "deepseek-v4-flash",
+            endpointProfile: "chat_completions",
+            summary: "provider failure: stream interrupted",
+            evidenceId: "provider-failure-1",
+            createdAt: new Date().toISOString(),
+          };
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("上一轮响应流中断");
+    expect(context.lastProviderFailure).toBeUndefined();
+  });
+
+  it("continues multiple times after provider stream failures and reports final diagnostics", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-diag-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.changedFiles.push("answer.txt");
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      maxContinuations: 2,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_DECODE_ERROR",
+          kind: "transit",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: `provider failure attempt ${attempts}`,
+          evidenceId: `provider-failure-${attempts}`,
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(attempts).toBe(3);
+    expect(stderr.text).toContain("providerKind=transit");
+    expect(stderr.text).toContain("providerCode=PROVIDER_STREAM_DECODE_ERROR");
+    expect(stderr.text).toContain("attempts=3");
+    expect(stderr.text).toContain("fileChanges=yes:1");
+  });
+
+  it("aborts with a clear error when real-time auto-approval exceeds maxApprovals", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-approval-limit-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      maxApprovals: 0,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.activeAbortController = new AbortController();
+        context.pendingLocalApproval = {
+          kind: "break_cache_mutation",
+          sessionId: session.id,
+          action: "off",
+        };
+        await waitForTestCondition(() => context.activeAbortController?.signal.aborted === true);
+      },
+    });
+
+    expect(exitCode).toBe(3);
+    expect(stderr.text).toContain("自动批准超过上限 0");
+  });
+
+  it("returns non-zero when provider continuation limit is exhausted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-limit-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.changedFiles.push("answer.txt");
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      maxContinuations: 1,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_ERROR",
+          kind: "transit",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          endpointProfile: "chat_completions",
+          summary: `provider failure attempt ${attempts}`,
+          evidenceId: `provider-failure-${attempts}`,
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(attempts).toBe(2);
+    expect(stderr.text).toContain("headless continuation 已达上限");
+  });
+
+  it("cleans request activity and active abort state before exiting", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-cleanup-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.activeAbortController = new AbortController();
+        context.tools.abortSignal = context.activeAbortController.signal;
+        context.requestActivity = { slowHintShown: false };
+        context.requestActivityPhase = "tool_running";
+        context.requestActivityToolName = "Bash";
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(context.activeAbortController).toBeUndefined();
+    expect(context.tools.abortSignal).toBeUndefined();
+    expect(context.requestActivity).toBeUndefined();
+    expect(context.requestActivityPhase).toBeUndefined();
+    expect(context.interrupt).toEqual({ type: "idle" });
+  });
+
+  it("cleans tracked background child processes after final answer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-process-cleanup-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    consumeProcessGuardStopResultsForTest();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        const child = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 5000)"], {
+          stdio: "ignore",
+          windowsHide: true,
+          detached: process.platform !== "win32",
+        });
+        trackChildProcess(child, {
+          detached: process.platform !== "win32",
+          label: "headless-test-background",
+        });
+      },
+    });
+    const stopResults = consumeProcessGuardStopResultsForTest();
+
+    expect(exitCode).toBe(0);
+    expect(stopResults).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "force", force: true })]),
+    );
+  }, 10_000);
+
+  it("records a headless artifact checklist as evidence before cleanup", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-checklist-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.changedFiles.push("src/changed.ts");
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => undefined,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(
+      context.evidence.some((item) => item.supportsClaims.includes("headless_artifact_checklist")),
+    ).toBe(true);
+  });
+
+  it("bench mode repairs after official test failure and passes on the second validation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-repair-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const marker = join(project, "fixed.txt");
+    const postTestDir = join(project, "post-test");
+    const testScript = join(project, "bench-test.cjs");
+    await mkdir(postTestDir, { recursive: true });
+    await writeFile(join(postTestDir, "tests.log"), "official assertion: missing fixed.txt", "utf8");
+    await writeFile(
+      testScript,
+      [
+        "const fs = require('fs');",
+        "if (!fs.existsSync('fixed.txt')) {",
+        "  console.error('official tests failed');",
+        "  process.exit(1);",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project. Write fixed.txt when repaired.",
+      projectPath: project,
+      stdout: output,
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(testScript)}`,
+      },
+      __testSendMessage: async (text) => {
+        prompts.push(text);
+        if (prompts.length === 2) {
+          await writeFile(marker, "ok", "utf8");
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("Headless verification failed");
+    expect(prompts[1]).toContain("official assertion: missing fixed.txt");
+    expect(output.text).toContain("bench validation passed");
+    expect(stderr.text).toContain("bench validation failed");
+  });
+
+  it("runs closure validation and skips repair when the headless deadline is approaching", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let sends = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Create missing.txt",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineMs: 1,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["missing.txt"],
+      },
+      __testSendMessage: async () => {
+        sends += 1;
+      },
+    });
+
+    expect(exitCode).toBe(6);
+    expect(sends).toBe(1);
+    expect(stderr.text).toContain("deadline approaching");
+    expect(stderr.text).toContain("closure validation ran");
+  });
+
+  it("bench mode returns a clear failure when repair attempts are exhausted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-limit-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `node -e "console.error('compile error: expected foo'); process.exit(1)"`,
+      },
+      __testSendMessage: async () => {
+        attempts += 1;
+      },
+    });
+
+    expect(exitCode).toBe(5);
+    expect(attempts).toBe(2);
+    expect(stderr.text).toContain("headless bench 修补已达上限 1");
+    expect(stderr.text).toContain("model_patch_failed");
+  });
+
+  it("bench mode treats missing required artifacts as repairable validation failures", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-artifact-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const artifact = join(project, "out.txt");
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Write the result to out.txt.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["out.txt"],
+      },
+      __testSendMessage: async (text) => {
+        prompts.push(text);
+        if (prompts.length === 2) {
+          await writeFile(artifact, "answer", "utf8");
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts[1]).toContain("missing_artifact");
+    expect(prompts[1]).toContain("Missing artifacts: out.txt");
+  });
+
+  it("bench mode classifies official test timeouts without hanging", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-timeout-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    const slowScript = join(project, "slow-test.cjs");
+    await writeFile(slowScript, "setTimeout(() => {}, 10000);\n", "utf8");
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testTimeoutMs: 100,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(slowScript)}`,
+      },
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(5);
+    expect(stderr.text).toContain("test_timeout");
+  });
+
+  it("bench mode redacts secret environment variables from official test logs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-env-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const leakScript = join(project, "leak-env.cjs");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-real-secret-forbidden");
+    vi.stubEnv("CUSTOM_TOKEN", "token-real-secret-forbidden");
+    await writeFile(
+      leakScript,
+      [
+        "console.error(`api=${process.env.LINGHUN_OPENAI_API_KEY || 'missing'}`);",
+        "console.error(`token=${process.env.CUSTOM_TOKEN || 'missing'}`);",
+        "process.exit(1);",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(leakScript)}`,
+      },
+      __testSendMessage: async () => {},
+    });
+
+    const log = await readFile(join(project, ".linghun", "headless", "official-test.log"), "utf8");
+    expect(exitCode).toBe(5);
+    expect(log).toContain("api=missing");
+    expect(log).toContain("token=missing");
+    expect(log).not.toContain("sk-real-secret-forbidden");
+    expect(log).not.toContain("token-real-secret-forbidden");
+  });
+
+  it("bench profile detects C++ polyglot projects and injects signature/CMake strategy", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-profile-cpp-"));
+    await writeFile(join(project, "CMakeLists.txt"), "add_library(example example.cpp)\n", "utf8");
+    await writeFile(join(project, "example.hpp"), "int add(int, int);\n", "utf8");
+
+    const profile = await detectHeadlessBenchTaskProfile({
+      prompt: "Fix this C++ exercise implementation.",
+      projectPath: project,
+      testCommand: "bash /tests/run-tests.sh",
+    });
+    const prompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Fix this C++ exercise implementation.",
+      config: {
+        enabled: true,
+        profile,
+        testCommand: "bash /tests/run-tests.sh",
+        testTimeoutMs: 600_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 1,
+      },
+    });
+
+    expect(profile).toBe("polyglot_cpp");
+    expect(prompt).toContain("read headers and official tests first");
+    expect(prompt).toContain("match signatures exactly");
+    expect(prompt).toContain("official CMake/tests");
+  });
+
+  it("bench profile detects Python SWE projects and injects focused-test strategy", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-profile-python-"));
+    await mkdir(join(project, "tests"), { recursive: true });
+    await mkdir(join(project, "src", "sample"), { recursive: true });
+    await writeFile(join(project, "pyproject.toml"), "[project]\nname='sample'\n", "utf8");
+    await writeFile(join(project, "tests", "test_core.py"), "def test_core(): pass\n", "utf8");
+    await writeFile(join(project, "src", "sample", "core.py"), "VALUE = 1\n", "utf8");
+
+    const profile = await detectHeadlessBenchTaskProfile({
+      prompt: "Fix the Python package bug reported by tests.",
+      projectPath: project,
+      testCommand: "bash /tests/run-tests.sh",
+    });
+    const prompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Fix the Python package bug reported by tests.",
+      config: {
+        enabled: true,
+        profile,
+        testCommand: "bash /tests/run-tests.sh",
+        testTimeoutMs: 600_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 1,
+      },
+    });
+
+    expect(["swe_python", "large_python_project"]).toContain(profile);
+    expect(prompt).toContain("read relevant tests and target modules first");
+    expect(prompt).toContain("focused pytest/tests");
+  });
+
+  it("bench profile detects binary artifact tasks without changing non-bench headless prompts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-profile-artifact-"));
+    const profile = await detectHeadlessBenchTaskProfile({
+      prompt: "Analyze the provided binary and write the answer to /app/out.txt.",
+      projectPath: project,
+      requiredArtifacts: ["/app/out.txt"],
+    });
+    const benchPrompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Analyze the provided binary and write the answer to /app/out.txt.",
+      config: {
+        enabled: true,
+        profile,
+        testTimeoutMs: 600_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["/app/out.txt"],
+        preflight: false,
+        environmentSetupRetries: 1,
+      },
+    });
+    const normalPrompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "hello",
+      config: {
+        enabled: false,
+        profile,
+        testTimeoutMs: 600_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 1,
+      },
+    });
+
+    expect(profile).toBe("binary_or_artifact");
+    expect(benchPrompt).toContain("file/strings/hexdump/ldd/run mode");
+    expect(benchPrompt).toContain("Verify they exist and are readable before final");
+    expect(normalPrompt).toBe("hello");
+  });
+
+  it("bench repair prompt uses failure category and profile specific repair routes", () => {
+    const compilePrompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Fix C++",
+      failure: { category: "model_patch_failed", summary: "undefined reference" },
+      attempt: 1,
+      maxAttempts: 1,
+      profile: "polyglot_cpp",
+    });
+    const artifactPrompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Write out.txt",
+      failure: { category: "missing_artifact", summary: "Missing", missingArtifacts: ["out.txt"] },
+      attempt: 1,
+      maxAttempts: 1,
+      profile: "binary_or_artifact",
+    });
+    const timeoutPrompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Fix project",
+      failure: { category: "test_timeout", summary: "timeout" },
+      attempt: 1,
+      maxAttempts: 1,
+      profile: "large_python_project",
+    });
+
+    expect(compilePrompt).toContain("align header/test signatures");
+    expect(artifactPrompt).toContain("generate or write the required artifact");
+    expect(timeoutPrompt).toContain("narrow validation to focused tests");
+  });
+});
+
+describe("headless runtime failure classification", () => {
+  it("classifies transient Docker pull failures as retryable network_pull_error", () => {
+    const result: EnvironmentSetupFailureClassification = classifyEnvironmentSetupFailure(
+      "docker pull busybox:latest failed: unexpected EOF while reading from Docker Hub",
+    );
+
+    expect(result).toMatchObject({ category: "network_pull_error", retryable: true });
+    expect(
+      classifyHeadlessFailure({
+        output: "docker pull busybox:latest failed: unexpected EOF",
+        outcome: "completed",
+        exitCode: 1,
+      }),
+    ).toBe("network_pull_error");
+  });
+
+  it("classifies non-retryable Docker image setup failures as environment_error", () => {
+    const result = classifyEnvironmentSetupFailure(
+      "docker pull private/image:latest failed: pull access denied, repository does not exist",
+    );
+
+    expect(result).toMatchObject({ category: "environment_error", retryable: false });
+  });
+
+  it("collects artifact checklist without treating git unavailable as core failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-artifact-helper-"));
+    await writeFile(join(project, "answer.txt"), "ok", "utf8");
+
+    const checklist = await collectHeadlessArtifactChecklist({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 1000,
+        maxRepairAttempts: 0,
+        requiredArtifacts: ["answer.txt", "missing.txt"],
+        preflight: false,
+        environmentSetupRetries: 0,
+      },
+      changedFiles: ["answer.txt"],
+    });
+
+    expect(checklist.requiredArtifacts).toEqual([
+      { path: "answer.txt", present: true },
+      { path: "missing.txt", present: false },
+    ]);
+    expect(checklist.summary).toContain("changedFiles=1");
+    expect(["unknown", true, false]).toContain(checklist.gitAvailable);
+  });
+});
 
 describe("Phase 06 TUI slash commands", () => {
   // D.14C baseline closure — isolate model env so the real machine's
@@ -7810,6 +8516,44 @@ describe("Phase 06 TUI slash commands", () => {
     ]);
   });
 
+  it("registry workflow agent steps inherit workflow engineering signal", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-registry-workflow-engineering-"));
+    await mkdir(join(project, ".linghun", "workflows"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "workflows", "artifact.json"),
+      JSON.stringify({
+        id: "artifact",
+        name: "Artifact",
+        description: "Create an output artifact.",
+        steps: [{ id: "worker", action: "agent", role: "worker", task: "write /app/out.txt" }],
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "生成 /app/out.txt",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "binary_or_artifact",
+    });
+    mockOpenAiTextFetch("registry agent step completed");
+    const { loadWorkflowRegistry } = await import("./agent-workflow-registry.js");
+    const registry = await loadWorkflowRegistry(project);
+    context.workflowRegistry = { workflows: registry.items, errors: registry.errors };
+
+    await handleSlashCommand("/workflows run artifact", context, new MemoryOutput());
+
+    expect(context.workflows.activeRun?.engineeringSignal?.profile).toBe("binary_or_artifact");
+    expect(context.agents[0]?.engineeringSignal?.profile).toBe("binary_or_artifact");
+  });
+
   it("passes custom agent registry model to child provider stream", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-registry-agent-model-"));
     await mkdir(join(project, ".linghun", "agents"), { recursive: true });
@@ -13157,6 +13901,78 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("child-fallback-model");
     expect(output.text).toContain("/model doctor");
     expect(output.text).not.toContain("worker completed");
+  });
+
+  it("StartAgent child prompt inherits engineering profile strategy hint", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-engineering-profile-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "修复 C++ 签名问题",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "polyglot_cpp",
+    });
+    const requests = mockOpenAiStartAgentChildFallbackFetch({
+      primaryResponse: new Response(
+        `data: ${JSON.stringify({ id: "chatcmpl-child", choices: [{ delta: { content: "child final" } }] })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+
+    await handleSlashCommand("/fork worker 修复 C++ 签名问题", context, new MemoryOutput());
+
+    const childRequestText =
+      requests
+        .map((request) => JSON.stringify(request))
+        .find((text) => text.includes("child agent running in an isolated sidechain transcript")) ??
+      "";
+    expect(childRequestText).toContain("EngineeringTaskProfile");
+    expect(childRequestText).toContain("profile=polyglot_cpp");
+    expect(childRequestText).toContain("not validation evidence");
+  });
+
+  it("StartAgent bound engineering profile is stable after global scheduler changes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-engineering-stable-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "生成 /app/out.txt",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "binary_or_artifact",
+    });
+    await handleSlashCommand("/fork worker 生成 /app/out.txt", context, new MemoryOutput());
+    const agent = context.agents[0];
+    expect(agent?.engineeringSignal?.profile).toBe("binary_or_artifact");
+
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "修复 C++ 签名问题",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "polyglot_cpp",
+    });
+    expect(agent?.engineeringSignal?.profile).toBe("binary_or_artifact");
+    expect(context.lastMetaSchedulerDecision.policyDecision.engineeringSignal.profile).toBe(
+      "polyglot_cpp",
+    );
   });
 
   it.each([
@@ -25220,6 +26036,224 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(notifications).not.toContain("PolicyDecision");
     const transcript = (await store.resume(session.id)).transcript;
     expect(JSON.stringify(transcript)).toContain("verification=full");
+  });
+
+  it("Policy: ordinary task gets internal engineering profile without main-screen noise", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-engineering-profile-"));
+    await writeFile(join(project, "CMakeLists.txt"), "add_library(answer answer.cpp)\n", "utf8");
+    await writeFile(join(project, "answer.hpp"), "int answer();\n", "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    await __testSendMessage(
+      "修一下这个 C++ polyglot 题",
+      context,
+      createTextGateway("我会先看签名和测试。"),
+      new MemoryOutput(),
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).not.toContain("EngineeringTaskProfile");
+    expect(notifications).not.toContain("Terminal-Bench");
+    const requestSignal = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal;
+    expect(requestSignal?.profile).toBe("polyglot_cpp");
+    expect(requestSignal?.strategyHint).toContain("headers/tests");
+    const transcript = (await store.resume(session.id)).transcript;
+    const raw = JSON.stringify(transcript);
+    expect(raw).toContain("engineering_profile=polyglot_cpp");
+    expect(raw).not.toContain("Terminal-Bench");
+  });
+
+  it("Policy: non-engineering chat does not inherit project-file profile accidentally", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-engineering-chat-"));
+    await writeFile(join(project, "CMakeLists.txt"), "add_library(answer answer.cpp)\n", "utf8");
+
+    const profile = await detectEngineeringTaskProfile({
+      prompt: "解释一下递归的直觉",
+      projectPath: project,
+    });
+
+    expect(profile).toBe("generic");
+  });
+
+  it("Policy: final gate downgrades artifact completion without artifact evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-final-artifact-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "生成 /app/out.txt",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "binary_or_artifact",
+      engineeringFailureCategory: "missing_artifact",
+    });
+
+    const result = evaluateAggregatedFinalAnswerGate(context, "已完成，/app/out.txt 已生成。");
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status === "needs_disclaimer") {
+      expect(result.unsupportedKinds).toContain("engineering_missing_artifact");
+    }
+  });
+
+  it("Policy: final gate artifact evidence must match the claimed target", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-final-artifact-bound-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "生成 /app/out.txt",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "binary_or_artifact",
+    });
+    context.evidence.push({
+      id: "e-write-other",
+      kind: "command_output",
+      summary: "Write created docs/report.md",
+      source: "Write",
+      supportsClaims: ["file_change_claim"],
+      createdAt: new Date().toISOString(),
+    });
+
+    const unrelated = evaluateAggregatedFinalAnswerGate(context, "已完成，/app/out.txt 已生成。");
+    expect(unrelated.status).toBe("needs_disclaimer");
+
+    context.evidence.push({
+      id: "e-write-target",
+      kind: "command_output",
+      summary: "Write created non-empty artifact /app/out.txt",
+      source: "Write",
+      outputPath: "/app/out.txt",
+      supportsClaims: ["file_change_claim"],
+      createdAt: new Date().toISOString(),
+    });
+    const matched = evaluateAggregatedFinalAnswerGate(context, "已完成，/app/out.txt 已生成。");
+    expect(matched.status).toBe("passed");
+  });
+
+  it("Policy: final gate binds artifact evidence to the requested target even when final text omits it", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-final-artifact-request-target-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "生成 /app/out.txt",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "binary_or_artifact",
+    });
+    context.evidence.push({
+      id: "e-write-other",
+      kind: "command_output",
+      summary: "Write created non-empty artifact docs/report.md",
+      source: "Write",
+      outputPath: "docs/report.md",
+      supportsClaims: ["file_change_claim"],
+      createdAt: new Date().toISOString(),
+    });
+
+    const unrelated = evaluateAggregatedFinalAnswerGate(context, "已完成并验证通过。");
+    expect(unrelated.status).toBe("needs_disclaimer");
+
+    context.evidence.push({
+      id: "e-write-target",
+      kind: "command_output",
+      summary: "Write created non-empty artifact /app/out.txt",
+      source: "Write",
+      outputPath: "/app/out.txt",
+      supportsClaims: ["file_change_claim"],
+      createdAt: new Date().toISOString(),
+    });
+    const matched = evaluateAggregatedFinalAnswerGate(context, "已完成并验证通过。");
+    expect(matched.status).toBe("passed");
+  });
+
+  it("Policy: final gate downgrades timeout/provider failure completion claims", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-final-failure-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "跑完整测试",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "large_python_project",
+      engineeringFailureCategory: "test_timeout",
+    });
+
+    const timeout = evaluateAggregatedFinalAnswerGate(context, "全部测试通过，已经完成。");
+    expect(timeout.status).toBe("needs_disclaimer");
+    if (timeout.status === "needs_disclaimer") {
+      expect(timeout.unsupportedKinds).toContain("engineering_test_timeout");
+    }
+
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "继续修复",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringFailureCategory: "provider_error",
+    });
+    const provider = evaluateAggregatedFinalAnswerGate(context, "已修复并验证通过。");
+    expect(provider.status).toBe("needs_disclaimer");
+    if (provider.status === "needs_disclaimer") {
+      expect(provider.unsupportedKinds).toContain("engineering_provider_error");
+    }
+  });
+
+  it("Policy: service final gate requires concrete health or port verification evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-final-service-bound-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.lastMetaSchedulerDecision = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "验证服务端口",
+      index: context.index,
+      evidence: context.evidence,
+      failureLearning: context.failureLearning,
+      backgroundTasks: [],
+      engineeringProfile: "qemu_or_service",
+    });
+    context.evidence.push({
+      id: "e-service-generic",
+      kind: "command_output",
+      summary: "server service exists in config",
+      source: "Read",
+      supportsClaims: ["code_fact"],
+      createdAt: new Date().toISOString(),
+    });
+
+    const generic = evaluateAggregatedFinalAnswerGate(context, "服务端口已验证通过。");
+    expect(generic.status).toBe("needs_disclaimer");
+
+    context.evidence.push({
+      id: "e-service-health",
+      kind: "command_output",
+      summary: "curl localhost:8080/health status 200 ok",
+      source: "Bash",
+      supportsClaims: ["verification_passed"],
+      createdAt: new Date().toISOString(),
+    });
+    const verified = evaluateAggregatedFinalAnswerGate(context, "服务端口已验证通过。");
+    expect(verified.status).toBe("passed");
   });
 
   it("Policy: edit request keeps permission, Windows-safe, and verification hints out of the main screen", async () => {

@@ -32,6 +32,7 @@ import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { createManagedWorktree } from "./git-operation-runtime.js";
 import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
 import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
+import { formatEngineeringProfileStrategyHint } from "./headless-bench-runtime.js";
 import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
@@ -125,6 +126,7 @@ import type {
   DurableJobAgentStatus,
   DurableJobState,
   DurableJobStatus,
+  EngineeringSignalSnapshot,
   EvidenceRecord,
   RoleHandoff,
   RoleRouteDecision,
@@ -157,6 +159,23 @@ const AGENT_ASSIGNABLE_STATUSES = new Set<AgentRun["status"]>(["running", "idle"
 
 function getAgentRunsDir(context: TuiContext): string {
   return resolveStoragePaths(context.config, context.projectPath).agentRuns;
+}
+
+function snapshotEngineeringSignal(context: TuiContext): EngineeringSignalSnapshot {
+  const signal = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal;
+  if (!signal) {
+    return {
+      profile: "generic",
+      strategyHint: formatEngineeringProfileStrategyHint("generic"),
+    };
+  }
+  return {
+    profile: signal.profile,
+    strategyHint: signal.strategyHint,
+    artifactTargets: signal.artifactTargets.slice(),
+    ...(signal.failureCategory ? { failureCategory: signal.failureCategory } : {}),
+    ...(signal.finalBoundaryHint ? { finalBoundaryHint: signal.finalBoundaryHint } : {}),
+  };
 }
 
 function formatAgentCompletionSummary(agent: AgentRun, context: TuiContext): string {
@@ -1310,6 +1329,7 @@ async function startDurableJobAgentRun(
     parentSessionId,
     forkedFrom: packet.id,
     task,
+    engineeringSignal: snapshotEngineeringSignal(context),
     model: effectiveModel,
     permissionMode: getAgentPermissionMode(assignment.type, context.permissionMode),
     status: routeUsable ? "running" : "blocked",
@@ -2238,7 +2258,7 @@ export async function handleForkCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
-  runtimeOptions: { workflowRunId?: string } = {},
+  runtimeOptions: { workflowRunId?: string; engineeringSignal?: EngineeringSignalSnapshot } = {},
 ): Promise<void> {
   const options = parseForkCommandArgs(args);
   const registryAgent = resolveForkRegistryAgent(context, options.rawType);
@@ -2257,6 +2277,7 @@ export async function handleForkCommand(
   const workflowTaskId =
     runtimeOptions.workflowRunId ??
     getWorkflowRuns(context).find((run) => run.status === "running")?.id;
+  const engineeringSignal = runtimeOptions.engineeringSignal ?? snapshotEngineeringSignal(context);
   const guard = deps().checkBackgroundStartGuard(context, "agent", false, workflowTaskId);
   if (guard) {
     writeLine(output, guard);
@@ -2313,6 +2334,7 @@ export async function handleForkCommand(
     parentSessionId,
     forkedFrom: packet.id,
     task: effectiveTask,
+    engineeringSignal,
     model: effectiveModel,
     ...(registryAgent ? { registryAgentId: registryAgent.id } : {}),
     ...(registryAllowedTools ? { allowedTools: registryAllowedTools } : {}),
@@ -3463,6 +3485,14 @@ export async function denyAgentToolUse(
 
 function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): string {
   const readonlyAuditHint = createReadonlyAuditToolHint(agent);
+  const engineeringProfile =
+    agent.engineeringSignal?.profile ??
+    context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.profile ??
+    "generic";
+  const engineeringStrategy =
+    agent.engineeringSignal?.strategyHint ??
+    context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.strategyHint ??
+    formatEngineeringProfileStrategyHint(engineeringProfile);
   const roleHint =
     agent.type === "explorer"
       ? "Explore with read-only tools first. Return concise findings and evidence."
@@ -3483,6 +3513,7 @@ function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): stri
     "Use structured tools only; never write raw tool_use/tool_result protocol as text.",
     readonlyAuditHint,
     "Respect the actual OS/shell before Bash. On Windows/PowerShell, prefer PowerShell cmdlets or Node one-liners; avoid Unix-only find|sed|head pipelines unless verified available.",
+    `EngineeringTaskProfile: profile=${engineeringProfile}; strategy=${engineeringStrategy}; not validation evidence.`,
     "If a required tool is denied, asks for approval, or fails, report blocked instead of claiming completion.",
   ].join("\n");
 }

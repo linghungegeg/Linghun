@@ -62,6 +62,7 @@ describe("CLI", () => {
     const result = await runCli(["--help"]);
 
     expect(result.stdout).toContain("进入交互式终端");
+    expect(result.stdout).toContain("run --prompt");
     expect(result.stdout).toContain("linghun --version");
     expect(result.stdout).toContain("Linghun --version");
     expect(result.stdout).toContain("sessions list");
@@ -77,6 +78,15 @@ describe("CLI", () => {
     expect(result.stdout).toContain("/doctor hooks");
     expect(result.stdout).toContain("普通中英文输入默认进入模型/工具链路");
     expect(result.stdout).not.toContain("普通中英文输入先经 Command Capability Catalog");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("prints help for headless run", async () => {
+    const result = await runCli(["run", "--help"]);
+
+    expect(result.stdout).toContain("linghun run --prompt");
+    expect(result.stdout).toContain("--mode");
+    expect(result.stdout).toContain("--auto-approve");
     expect(result.exitCode).toBe(0);
   });
 
@@ -102,7 +112,7 @@ describe("CLI", () => {
       const doctor = await runCli(["/model", "doctor"]);
 
       expect(shown.stdout).toContain("DeepSeek Chat");
-      expect(shown.stdout).toContain("上下文窗口：128000");
+      expect(shown.stdout).toContain("上下文窗口：200000");
       expect(shown.stdout).toContain("base_url：present");
       expect(shown.stdout).not.toContain("https://api.deepseek.com");
       expect(switched.stdout).toContain("deepseek-reasoner");

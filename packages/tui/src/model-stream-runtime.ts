@@ -60,6 +60,7 @@ import {
   hasActiveProviderFailure,
   verifyFailureLearningContract,
 } from "./meta-scheduler-runtime.js";
+import { detectEngineeringTaskProfile } from "./headless-bench-runtime.js";
 import { startModelSetup } from "./model-command-runtime.js";
 import {
   buildDowngradedFinalAnswer,
@@ -172,6 +173,7 @@ type AggregatedFinalAnswerGateResult =
       status: "needs_disclaimer";
       claimVerdict?: FinalAnswerClaimVerdict;
       extendedVerdict?: FinalAnswerExtendedVerdict;
+      engineeringVerdict?: { unsupportedKinds: string[]; message: string };
       unsupportedKinds: string[];
     };
 
@@ -266,20 +268,148 @@ export function evaluateAggregatedFinalAnswerGate(
   const extended = runExtendedGate
     ? runArchitectureAndCompletenessFinalGate(context, assistantText)
     : { status: "passed" as const };
+  const engineeringVerdict = evaluateEngineeringFinalBoundary(context, assistantText);
   const needsClaim = claimVerdict.status === "needs_disclaimer";
   const needsExtended = extended.status === "needs_disclaimer";
-  if (!needsClaim && !needsExtended) {
+  const needsEngineering = engineeringVerdict.status === "needs_disclaimer";
+  if (!needsClaim && !needsExtended && !needsEngineering) {
     return { status: "passed" };
   }
   return {
     status: "needs_disclaimer",
     ...(needsClaim ? { claimVerdict } : {}),
     ...(needsExtended ? { extendedVerdict: extended.verdict } : {}),
+    ...(needsEngineering ? { engineeringVerdict } : {}),
     unsupportedKinds: [
       ...(needsClaim ? claimVerdict.unsupportedKinds : []),
       ...(needsExtended ? extended.verdict.unsupportedKinds : []),
+      ...(needsEngineering ? engineeringVerdict.unsupportedKinds : []),
     ],
   };
+}
+
+function evaluateEngineeringFinalBoundary(
+  context: TuiContext,
+  assistantText: string,
+): { status: "passed" } | { status: "needs_disclaimer"; unsupportedKinds: string[]; message: string } {
+  const signal = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal;
+  if (!signal) return { status: "passed" };
+  const highRiskFinal =
+    /(?:已完成|已修复|测试通过|全部通过|验证通过|pass(?:ed)?|completed|fixed|verified|tests? passed)/iu.test(
+      assistantText,
+    );
+  if (!highRiskFinal && !signal.failureCategory) return { status: "passed" };
+  if (signal.failureCategory === "missing_artifact" && !hasArtifactEvidence(context, assistantText)) {
+    return {
+      status: "needs_disclaimer",
+      unsupportedKinds: ["engineering_missing_artifact"],
+      message: signal.finalBoundaryHint ?? "missing artifact is not verified",
+    };
+  }
+  if (signal.failureCategory === "test_timeout") {
+    return {
+      status: "needs_disclaimer",
+      unsupportedKinds: ["engineering_test_timeout"],
+      message: signal.finalBoundaryHint ?? "verification timed out",
+    };
+  }
+  if (signal.failureCategory === "provider_error") {
+    return {
+      status: "needs_disclaimer",
+      unsupportedKinds: ["engineering_provider_error"],
+      message: signal.finalBoundaryHint ?? "provider output was interrupted",
+    };
+  }
+  if (signal.profile === "binary_or_artifact" && highRiskFinal && !hasArtifactEvidence(context, assistantText)) {
+    return {
+      status: "needs_disclaimer",
+      unsupportedKinds: ["engineering_artifact_unverified"],
+      message: signal.finalBoundaryHint ?? "artifact verification is missing",
+    };
+  }
+  if (
+    (signal.profile === "swe_python" || signal.profile === "large_python_project") &&
+    /\b(?:all|full|entire)\s+(?:tests?|suite)\s+pass(?:ed)?|全部测试|所有测试/iu.test(assistantText) &&
+    !hasFullVerificationEvidence(context)
+  ) {
+    return {
+      status: "needs_disclaimer",
+      unsupportedKinds: ["engineering_full_suite_unverified"],
+      message: signal.finalBoundaryHint ?? "full-suite verification is missing",
+    };
+  }
+  if (
+    (signal.profile === "qemu_or_service" || signal.profile === "security_or_network") &&
+    /(?:service|server|port|health|daemon|服务|端口|健康检查).{0,80}(?:verified|pass(?:ed)?|正常|通过)/iu.test(
+      assistantText,
+    ) &&
+    !hasServiceVerificationEvidence(context)
+  ) {
+    return {
+      status: "needs_disclaimer",
+      unsupportedKinds: ["engineering_service_unverified"],
+      message: signal.finalBoundaryHint ?? "service health verification is missing",
+    };
+  }
+  return { status: "passed" };
+}
+
+function hasArtifactEvidence(context: TuiContext, assistantText: string): boolean {
+  const signalTargets =
+    context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
+  const targets = uniqueArtifactTargets([...signalTargets, ...extractArtifactTargets(assistantText)]);
+  return context.evidence.some((item) => {
+    const text = [item.summary, item.source, item.outputPath, item.fullOutputPath, ...item.supportsClaims]
+      .filter(Boolean)
+      .join(" ");
+    if (!/(?:artifact|output file|out\.txt|write|created|non-empty|产物|输出文件|已写入|wrote|saved)/iu.test(text)) {
+      return false;
+    }
+    if (targets.length === 0) {
+      return /(?:artifact|output file|out\.txt|non-empty|产物|输出文件)/iu.test(text);
+    }
+    return targets.some((target) => text.toLowerCase().includes(target.toLowerCase()));
+  });
+}
+
+function hasFullVerificationEvidence(context: TuiContext): boolean {
+  return context.evidence.some((item) =>
+    /full(?: test)? suite|all tests|entire suite|test_passed|verification_passed|全部测试|所有测试/iu.test(
+      [item.summary, item.source, ...item.supportsClaims].join(" "),
+    ),
+  );
+}
+
+function hasServiceVerificationEvidence(context: TuiContext): boolean {
+  return context.evidence.some((item) =>
+    /health|healthcheck|curl|port\s+\d+|listen(?:ing)?|localhost:\d+|status\s*(?:200|ok|pass)|日志.*(?:正常|通过)|健康检查|端口.*(?:监听|通过|正常)/iu.test(
+      [item.summary, item.source, ...item.supportsClaims].join(" "),
+    ),
+  );
+}
+
+function extractArtifactTargets(text: string): string[] {
+  const targets = new Set<string>();
+  for (const match of text.matchAll(/(?:^|\s)(\/[A-Za-z0-9._/-]+\.[A-Za-z0-9._-]+)\b/gu)) {
+    targets.add(match[1]);
+    targets.add(match[1].split("/").filter(Boolean).at(-1) ?? match[1]);
+  }
+  for (const match of text.matchAll(/\b([A-Za-z0-9._-]+\.(?:txt|json|csv|bin|so|exe|out|patch|diff|md))\b/giu)) {
+    targets.add(match[1]);
+  }
+  return Array.from(targets).filter(Boolean);
+}
+
+function uniqueArtifactTargets(targets: string[]): string[] {
+  const out = new Set<string>();
+  for (const target of targets) {
+    const trimmed = target.trim();
+    if (!trimmed) continue;
+    out.add(trimmed);
+    const basename = trimmed.split(/[\\/]/u).filter(Boolean).at(-1);
+    if (basename) out.add(basename);
+  }
+  return Array.from(out);
 }
 
 function createAggregatedFinalAnswerReminder(
@@ -291,6 +421,7 @@ function createAggregatedFinalAnswerReminder(
     result.extendedVerdict
       ? createExtendedFinalAnswerReminder(result.extendedVerdict, language)
       : "",
+    result.engineeringVerdict ? createEngineeringFinalBoundaryReminder(result, language) : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -305,9 +436,30 @@ function buildAggregatedDowngradedFinalAnswer(
     result.extendedVerdict
       ? buildExtendedDowngradedFinalAnswer(result.extendedVerdict, language)
       : "",
+    result.engineeringVerdict ? buildEngineeringDowngradedFinalAnswer(result, language) : "",
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function createEngineeringFinalBoundaryReminder(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  language: Language,
+): string {
+  const message = result.engineeringVerdict?.message ?? "engineering verification boundary missing";
+  return language === "en-US"
+    ? `Engineering boundary: ${message}. Downgrade the final answer unless matching evidence is available.`
+    : `工程边界：${message}。除非已有匹配证据，否则最终回答必须降级说明。`;
+}
+
+function buildEngineeringDowngradedFinalAnswer(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  language: Language,
+): string {
+  const message = result.engineeringVerdict?.message ?? "engineering verification boundary missing";
+  return language === "en-US"
+    ? `I cannot honestly mark this as complete yet: ${message}.`
+    : `我不能把这轮诚实标记为已完成：${message}。`;
 }
 
 export function handleNaturalInput(
@@ -625,6 +777,9 @@ export async function sendMessage(
   });
   // D.14G — 最小 WorktreeContext（redacted，无 provider/baseUrl）；仅隔离 worktree 内注入。
   const worktreeContext = await computeWorktreeContext(context.projectPath);
+  const _tProfile0 = Date.now();
+  const engineeringProfile = await resolveEngineeringTaskProfile(text, context.projectPath);
+  perfEvents.push(`perf:engineering_profile_ms=${Date.now() - _tProfile0}`);
 
   // Verify previous turn's failure-learning contract before starting new evaluation.
   if (
@@ -697,6 +852,7 @@ export async function sendMessage(
   const metaSchedulerDecision = evaluateMetaScheduler({
     ..._msInput,
     userText: text,
+    engineeringProfile,
     messages: createPolicyContextPressureMessages(runtimeStatus, text),
     ...(context.lastToolFailure ? { lastToolFailure: context.lastToolFailure } : {}),
     ...(context.lastProviderFailure
@@ -1566,7 +1722,7 @@ async function appendPolicyDecisionEvent(
   await appendSystemEvent(
     context,
     sessionId,
-    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}; hints=${decision.hints.map((hint) => hint.id).join(",") || "none"}; role_suggestion=${decision.modelRouteSignal.suggestedRole ?? "none"}; verification=${decision.verificationSignal.recommendedLevel}; route_commands=${decision.verificationSignal.route.commands.join("+")}; permission_gate=${decision.permissionSignal.requireExplicitGate ? "yes" : "no"}; windows_safe=${decision.platformSignal.windowsSafeHint ? "yes" : "no"}; user_state=${decision.userState.kind}; detail=${decision.userState.detailPlan.style}; notification=${decision.userState.notificationPlan.quiet ? "quiet" : "normal"}; memory_candidate=${decision.userState.memoryCandidate.shouldCreate ? "candidate_only" : "none"}`,
+    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}; hints=${decision.hints.map((hint) => hint.id).join(",") || "none"}; role_suggestion=${decision.modelRouteSignal.suggestedRole ?? "none"}; verification=${decision.verificationSignal.recommendedLevel}; route_commands=${decision.verificationSignal.route.commands.join("+")}; permission_gate=${decision.permissionSignal.requireExplicitGate ? "yes" : "no"}; windows_safe=${decision.platformSignal.windowsSafeHint ? "yes" : "no"}; engineering_profile=${decision.engineeringSignal.profile}; engineering_failure=${decision.engineeringSignal.failureCategory ?? "none"}; user_state=${decision.userState.kind}; detail=${decision.userState.detailPlan.style}; notification=${decision.userState.notificationPlan.quiet ? "quiet" : "normal"}; memory_candidate=${decision.userState.memoryCandidate.shouldCreate ? "candidate_only" : "none"}`,
     decision.riskLevel === "high" || decision.providerPlan === "cooldownBlocked"
       ? "warning"
       : "info",
@@ -1583,14 +1739,27 @@ async function appendRuntimePolicyHint(
   },
 ): Promise<void> {
   const runtime = getSelectedModelRuntime(context);
+  const engineeringProfile = await resolveEngineeringTaskProfile(userText, context.projectPath);
   const decision = evaluateMetaScheduler({
     ...createMetaSchedulerInput(context, runtime, userText, Boolean(extra.providerCooldownBlocked)),
     userText,
+    engineeringProfile,
     messages: createPolicyContextPressureMessages(undefined, userText),
     ...extra,
   }).policyDecision;
   enqueuePolicyHints(context, decision);
   await appendPolicyDecisionEvent(context, sessionId, decision);
+}
+
+async function resolveEngineeringTaskProfile(
+  prompt: string,
+  projectPath: string,
+): Promise<MetaSchedulerInput["engineeringProfile"]> {
+  try {
+    return await detectEngineeringTaskProfile({ prompt, projectPath });
+  } catch {
+    return "generic";
+  }
 }
 
 // D.14E — 远程入站消息进入本地主链的唯一 glue。校验交给 processRemoteInbound（纯
