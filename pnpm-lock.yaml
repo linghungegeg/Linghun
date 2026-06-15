@@ -45,6 +45,22 @@ importers:
       '@linghun/tui':
         specifier: workspace:*
         version: link:../../packages/tui
+    optionalDependencies:
+      '@linghun/codebase-memory-darwin-arm64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-darwin-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-linux-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-win32-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/native-runner-win32-x64':
+        specifier: 0.1.0
+        version: 0.1.0
 
   packages/codebase-memory-darwin-arm64: {}
 
@@ -361,6 +377,31 @@ packages:
 
   '@larksuiteoapi/node-sdk@1.59.0':
     resolution: {integrity: sha512-sBpkruTvZDOxnVtoTbepWKRX0j1Y1ZElQYu0x7+v088sI9pcpbVp6ZzCGn62dhrKPatzNyCJyzYCPXPYQWccrA==}
+
+  '@linghun/codebase-memory-darwin-arm64@0.1.0':
+    resolution: {integrity: sha512-Rty1tya4ppz4mGGaK5s1ECubac4ohj0usOhFW8CDgfDvQTt5ZROjQl1hpJ9ymsjToC+68pAxK91gekTIvn7m8Q==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@linghun/codebase-memory-darwin-x64@0.1.0':
+    resolution: {integrity: sha512-Jgl4E99bXxSp0Lw8deOVMjTBmpvZU3HgzwVLOXONJC8l/ApAy4/UBcOdbFFJZwYkaow9gHQixU3Q7p6Nsr/vBg==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@linghun/codebase-memory-linux-x64@0.1.0':
+    resolution: {integrity: sha512-oYBg33tT6iAtLg5E3BXTio5AbZdN8rmvY64B5uhLHxScFAfjXQxz7mXvyztelp/Prp34qo+P4MtVh9M+Dir/gA==}
+    cpu: [x64]
+    os: [linux]
+
+  '@linghun/codebase-memory-win32-x64@0.1.0':
+    resolution: {integrity: sha512-QmI+ZatTsznyWChUedwl5BlKFasILw1OX9yLii8T4rewOSRWwdqTv5HW0oKp7+NrHrg7QM5fjy5VI5IHBgMAow==}
+    cpu: [x64]
+    os: [win32]
+
+  '@linghun/native-runner-win32-x64@0.1.0':
+    resolution: {integrity: sha512-8qm0o4/1xtGidJuj6CqUPuC+X+en5RLul37VoDQrvlGPMvdlseWglVyvuRDF4k16IWh4jB7lv7OO047Cx1+I8w==}
+    cpu: [x64]
+    os: [win32]
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -1467,6 +1508,21 @@ snapshots:
       - bufferutil
       - debug
       - utf-8-validate
+
+  '@linghun/codebase-memory-darwin-arm64@0.1.0':
+    optional: true
+
+  '@linghun/codebase-memory-darwin-x64@0.1.0':
+    optional: true
+
+  '@linghun/codebase-memory-linux-x64@0.1.0':
+    optional: true
+
+  '@linghun/codebase-memory-win32-x64@0.1.0':
+    optional: true
+
+  '@linghun/native-runner-win32-x64@0.1.0':
+    optional: true
 
   '@protobufjs/aspromise@1.1.2': {}
 
