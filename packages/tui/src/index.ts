@@ -384,6 +384,7 @@ import {
   getTrackedProcessSnapshot,
   installProcessGuardExitHandlers,
   requestTrackedProcessStop,
+  trackChildProcess,
 } from "./process-guard.js";
 export { isPotentiallyMutatingMcpTool } from "./mcp-stdio-runtime.js";
 import { startFeishuLongConnection } from "./feishu-long-connection-runtime.js";
@@ -753,6 +754,8 @@ import {
 } from "./handoff-session-runtime.js";
 import {
   type HeadlessBenchOptions,
+  type HeadlessBenchValidationResult,
+  collectHeadlessArtifactChecklist,
   createHeadlessBenchInitialPrompt,
   createHeadlessBenchRepairPrompt,
   resolveHeadlessBenchConfig,
@@ -783,6 +786,8 @@ export type RunHeadlessOptions = {
   autoApprove?: boolean;
   maxApprovals?: number;
   maxContinuations?: number;
+  deadlineMs?: number;
+  deadlineAtMs?: number;
   bench?: HeadlessBenchOptions;
   __testGateway?: ModelGateway;
   __testContext?: TuiContext;
@@ -790,6 +795,12 @@ export type RunHeadlessOptions = {
   __testSkipHydration?: boolean;
   __testSendMessage?: typeof sendMessage;
 };
+
+const DEFAULT_HEADLESS_MAX_CONTINUATIONS = 3;
+const MAX_HEADLESS_CONTINUATIONS = 3;
+const HEADLESS_CONTINUATION_BACKOFF_BASE_MS = 250;
+const HEADLESS_CLEANUP_SETTLE_MS = 500;
+const HEADLESS_DEADLINE_CLOSURE_WINDOW_MS = 60_000;
 
 export type {
   PermissionRule,
@@ -906,7 +917,7 @@ import {
   t,
   writeStatus,
 } from "./details-status-runtime.js";
-import { appendSystemEvent } from "./evidence-runtime.js";
+import { appendSystemEvent, createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
 import {
   __testSendMessage,
   clearRequestActivity,
@@ -1408,6 +1419,7 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
     backgroundAbortControllers: new Map(),
     discoveredDeferredToolNames: new Set<string>(),
   };
+  context.tools.trackChildProcess = (child, options) => trackChildProcess(child, options);
   context.turnContinuity = createInitialContinuityState();
   context.recentTaskKinds = [];
   context.workflows.templates = mergeWorkflowTemplates(
@@ -1521,7 +1533,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   attachProviderRuntimeHooks(context);
   const maxApprovals = Math.max(0, Math.min(options.maxApprovals ?? 32, 200));
   const autoApprove = options.autoApprove ?? true;
-  const maxContinuations = Math.max(0, Math.min(options.maxContinuations ?? 1, 2));
+  const maxContinuations = Math.max(
+    0,
+    Math.min(options.maxContinuations ?? DEFAULT_HEADLESS_MAX_CONTINUATIONS, MAX_HEADLESS_CONTINUATIONS),
+  );
+  const deadlineAtMs = resolveHeadlessDeadlineAtMs(options);
   const benchConfig = await resolveHeadlessBenchConfig({
     prompt,
     projectPath,
@@ -1538,7 +1554,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   try {
     let approvals = 0;
     let continuations = 0;
+    let requestAttempts = 0;
+    let benchValidationPassed = !benchConfig.enabled;
+    let lastValidation: HeadlessBenchValidationResult | undefined;
     const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
+      requestAttempts += 1;
       const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
       const deferredApprovals: HeadlessDeferredApproval[] = [];
       const messagePromise = sendHeadlessMessage(text, context, gateway, output);
@@ -1616,6 +1636,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       );
       writeLine(output, `[headless] provider stream failed; continuing attempt ${continuations}/${maxContinuations}`);
       context.lastProviderFailure = undefined;
+      await sleep(createHeadlessContinuationBackoffMs(continuations));
       status = await runOneRequest(continuationPrompt);
     }
     if (continuations > 0 && !status.providerFailure) {
@@ -1627,14 +1648,20 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     if (status.providerFailure) {
       writeLine(
         errorOutput,
-        `错误：provider stream 失败，headless continuation 已达上限或缺少可恢复证据。${context.lastProviderFailure?.summary ?? ""}`.trim(),
+        createHeadlessProviderFailureDiagnostic(context, {
+          requestAttempts,
+          continuations,
+          maxContinuations,
+        }),
       );
       return 1;
     }
     if (benchConfig.enabled) {
       for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
         const validation = await validateHeadlessBenchCompletion({ projectPath, config: benchConfig });
+        lastValidation = validation;
         if (validation.ok) {
+          benchValidationPassed = true;
           writeLine(output, `[headless] bench validation passed: ${validation.summary}`);
           break;
         }
@@ -1649,6 +1676,14 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
             `错误：headless bench 修补已达上限 ${benchConfig.maxRepairAttempts}，最后失败类别：${failure.category}`,
           );
           return 5;
+        }
+        if (isHeadlessDeadlineApproaching(deadlineAtMs)) {
+          const remaining = formatHeadlessRemainingTime(deadlineAtMs);
+          writeLine(
+            errorOutput,
+            `[headless] deadline approaching (${remaining}); closure validation ran, skipping repair loop.`,
+          );
+          return 6;
         }
         const repairPrompt = createHeadlessBenchRepairPrompt({
           originalPrompt: prompt,
@@ -1668,10 +1703,23 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         }
       }
     }
+    if (context.sessionId) {
+      await recordHeadlessArtifactChecklist(context, context.sessionId, benchConfig, lastValidation);
+    }
     const cleanup = await finishHeadlessRuntime(context);
     if (!cleanup.ok) {
-      writeLine(errorOutput, `错误：headless run 收尾失败：${cleanup.reason}`);
-      return 4;
+      const cleanupMessage = `警告：headless run 收尾失败：${cleanup.reason}`;
+      writeLine(errorOutput, cleanupMessage);
+      if (context.sessionId) {
+        await appendSystemEvent(context, context.sessionId, cleanupMessage, "warning").catch(
+          () => undefined,
+        );
+      }
+      if (benchValidationPassed) {
+        writeLine(errorOutput, "警告：任务结果已完成但清理失败；这不是 agent 解题失败。");
+      } else {
+        return 4;
+      }
     }
     if (context.sessionId && !context.sessionEnded) {
       await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
@@ -1838,11 +1886,93 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
+function createHeadlessContinuationBackoffMs(attempt: number): number {
+  return Math.min(HEADLESS_CONTINUATION_BACKOFF_BASE_MS * 2 ** Math.max(0, attempt - 1), 1_500);
+}
+
+function resolveHeadlessDeadlineAtMs(options: RunHeadlessOptions): number | undefined {
+  if (typeof options.deadlineAtMs === "number" && Number.isFinite(options.deadlineAtMs)) {
+    return options.deadlineAtMs;
+  }
+  if (typeof options.deadlineMs === "number" && Number.isFinite(options.deadlineMs)) {
+    return Date.now() + Math.max(0, options.deadlineMs);
+  }
+  const envDeadlineAt = Number.parseInt(process.env.LINGHUN_HEADLESS_DEADLINE_AT_MS ?? "", 10);
+  if (Number.isFinite(envDeadlineAt) && envDeadlineAt > 0) {
+    return envDeadlineAt;
+  }
+  return undefined;
+}
+
+function isHeadlessDeadlineApproaching(deadlineAtMs: number | undefined): boolean {
+  return deadlineAtMs !== undefined && deadlineAtMs - Date.now() <= HEADLESS_DEADLINE_CLOSURE_WINDOW_MS;
+}
+
+function formatHeadlessRemainingTime(deadlineAtMs: number | undefined): string {
+  if (deadlineAtMs === undefined) return "unknown";
+  return `${Math.max(0, Math.ceil((deadlineAtMs - Date.now()) / 1000))}s remaining`;
+}
+
 function shouldRunHeadlessProviderContinuation(context: TuiContext): boolean {
   return (
     context.evidence.some((record) => !record.supportsClaims.includes("provider_failure")) ||
     context.tools.changedFiles.length > 0
   );
+}
+
+async function recordHeadlessArtifactChecklist(
+  context: TuiContext,
+  sessionId: string,
+  config: Awaited<ReturnType<typeof resolveHeadlessBenchConfig>>,
+  lastValidation: HeadlessBenchValidationResult | undefined,
+): Promise<void> {
+  const checklist = await collectHeadlessArtifactChecklist({
+    projectPath: context.projectPath,
+    config,
+    changedFiles: context.tools.changedFiles,
+    ...(lastValidation ? { lastValidation } : {}),
+  });
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `headless artifact checklist: ${checklist.summary}`,
+    "headless:artifact-checklist",
+    [
+      "headless_artifact_checklist",
+      checklist.verificationRan ? "verification_ran" : "verification_not_run",
+      checklist.changedFiles.length > 0 ? "file_written" : "no_file_changes",
+    ],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  await appendSystemEvent(context, sessionId, `headless artifact checklist: ${checklist.summary}`, "info");
+}
+
+export const __testHeadlessRuntime = {
+  isDeadlineApproaching: isHeadlessDeadlineApproaching,
+  formatRemainingTime: formatHeadlessRemainingTime,
+};
+
+function createHeadlessProviderFailureDiagnostic(
+  context: TuiContext,
+  input: { requestAttempts: number; continuations: number; maxContinuations: number },
+): string {
+  const failure = context.lastProviderFailure;
+  const lastEvidence = context.evidence.find(
+    (record) => !record.supportsClaims.includes("provider_failure"),
+  );
+  const changedFiles = context.tools.changedFiles.length;
+  return [
+    "错误：provider stream 失败，headless continuation 已达上限或缺少可恢复证据。",
+    `providerKind=${failure?.kind ?? "unknown"}`,
+    `providerCode=${failure?.code ?? "unknown"}`,
+    `attempts=${input.requestAttempts}`,
+    `continuations=${input.continuations}/${input.maxContinuations}`,
+    `lastSuccessfulTool=${lastEvidence?.source ?? "none"}`,
+    `fileChanges=${changedFiles > 0 ? `yes:${changedFiles}` : "no"}`,
+    failure?.summary ? `summary=${failure.summary}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function createHeadlessProviderContinuationPrompt(context: TuiContext): string {
@@ -1863,7 +1993,7 @@ async function finishHeadlessRuntime(context: TuiContext): Promise<{ ok: boolean
   clearRequestActivity(context);
   context.activeAbortController = undefined;
   const stopResult = requestTrackedProcessStop(true);
-  await sleep(100);
+  await sleep(HEADLESS_CLEANUP_SETTLE_MS);
   const stillTracked = getTrackedProcessSnapshot();
   if (stopResult.failures.length > 0) {
     return {

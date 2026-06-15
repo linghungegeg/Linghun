@@ -44,6 +44,9 @@ export async function runCommandCapture(
     const stderr: Buffer[] = [];
     const timer = setTimeout(() => {
       guard.requestStop(false);
+      setTimeout(() => {
+        guard.requestStop(true);
+      }, 1_000).unref();
       resolvePromise({
         exitCode: 124,
         stdout: Buffer.concat(stdout).toString("utf8"),

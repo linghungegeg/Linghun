@@ -5,7 +5,9 @@ import { join, resolve } from "node:path";
 
 const DEFAULT_TEST_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_REPAIR_ATTEMPTS = 1;
+const DEFAULT_ENVIRONMENT_SETUP_RETRIES = 1;
 const MAX_REPAIR_ATTEMPTS = 2;
+const MAX_ENVIRONMENT_SETUP_RETRIES = 3;
 const OUTPUT_LIMIT = 24_000;
 const SUMMARY_LIMIT = 4_000;
 
@@ -18,6 +20,8 @@ export type HeadlessBenchFailureCategory =
   | "parse_or_harness_error"
   | "missing_artifact"
   | "environment_missing_tool"
+  | "environment_error"
+  | "network_pull_error"
   | "resource_exhausted";
 
 export type HeadlessBenchTaskProfile =
@@ -51,11 +55,21 @@ export type HeadlessBenchConfig = {
   maxRepairAttempts: number;
   requiredArtifacts: string[];
   preflight: boolean;
+  environmentSetupRetries: number;
 };
 
 export type HeadlessBenchValidationResult =
   | { ok: true; testRan: boolean; summary: string; logPath?: string }
   | { ok: false; failure: HeadlessBenchFailure };
+
+export type HeadlessArtifactChecklist = {
+  requiredArtifacts: Array<{ path: string; present: boolean }>;
+  changedFiles: string[];
+  verificationRan: boolean;
+  lastVerificationExitCode?: number;
+  gitAvailable: boolean | "unknown";
+  summary: string;
+};
 
 export type HeadlessEnvironmentPreflight = {
   checkedTools: string[];
@@ -64,7 +78,16 @@ export type HeadlessEnvironmentPreflight = {
 };
 
 export type HeadlessBenchOptions = Partial<
-  Pick<HeadlessBenchConfig, "enabled" | "testCommand" | "testTimeoutMs" | "maxRepairAttempts" | "requiredArtifacts" | "preflight">
+  Pick<
+    HeadlessBenchConfig,
+    | "enabled"
+    | "testCommand"
+    | "testTimeoutMs"
+    | "maxRepairAttempts"
+    | "requiredArtifacts"
+    | "preflight"
+    | "environmentSetupRetries"
+  >
 >;
 
 export async function resolveHeadlessBenchConfig(input: {
@@ -94,6 +117,13 @@ export async function resolveHeadlessBenchConfig(input: {
     0,
     MAX_REPAIR_ATTEMPTS,
   );
+  const environmentSetupRetries = clampPositiveInteger(
+    input.options?.environmentSetupRetries ??
+      parsePositiveInteger(env.LINGHUN_HEADLESS_ENV_SETUP_RETRIES),
+    DEFAULT_ENVIRONMENT_SETUP_RETRIES,
+    0,
+    MAX_ENVIRONMENT_SETUP_RETRIES,
+  );
   const configuredArtifacts = splitList(env.LINGHUN_HEADLESS_REQUIRED_ARTIFACTS);
   const requiredArtifacts = uniqueStrings([
     ...(input.options?.requiredArtifacts ?? []),
@@ -115,6 +145,7 @@ export async function resolveHeadlessBenchConfig(input: {
     maxRepairAttempts,
     requiredArtifacts,
     preflight: input.options?.preflight ?? parseBoolean(env.LINGHUN_HEADLESS_PREFLIGHT) ?? true,
+    environmentSetupRetries,
   };
 }
 
@@ -190,11 +221,29 @@ export async function validateHeadlessBenchCompletion(input: {
         : "no official test command or explicit artifact requirement detected",
     };
   }
-  const result = await runOfficialTestCommand({
-    projectPath: input.projectPath,
-    command: input.config.testCommand,
-    timeoutMs: input.config.testTimeoutMs,
-  });
+  let result: Awaited<ReturnType<typeof runOfficialTestCommand>> | undefined;
+  let setupRetry = 0;
+  while (setupRetry <= input.config.environmentSetupRetries) {
+    result = await runOfficialTestCommand({
+      projectPath: input.projectPath,
+      command: input.config.testCommand,
+      timeoutMs: input.config.testTimeoutMs,
+    });
+    const setupFailure = classifyEnvironmentSetupFailure(result.output);
+    if (
+      result.exitCode === 0 ||
+      result.outcome !== "completed" ||
+      !setupFailure.retryable ||
+      setupRetry >= input.config.environmentSetupRetries
+    ) {
+      break;
+    }
+    setupRetry += 1;
+    await sleep(Math.min(500 * 2 ** (setupRetry - 1), 2_000));
+  }
+  if (!result) {
+    throw new Error("headless validation did not run");
+  }
   if (result.exitCode === 0 && result.outcome === "completed") {
     return {
       ok: true,
@@ -218,6 +267,81 @@ export async function validateHeadlessBenchCompletion(input: {
       summary: summarizeFailureOutput(result.output, category),
     },
   };
+}
+
+export async function collectHeadlessArtifactChecklist(input: {
+  projectPath: string;
+  config: HeadlessBenchConfig;
+  changedFiles: string[];
+  lastValidation?: HeadlessBenchValidationResult;
+}): Promise<HeadlessArtifactChecklist> {
+  const requiredArtifacts: Array<{ path: string; present: boolean }> = [];
+  for (const artifact of input.config.requiredArtifacts) {
+    const target = artifact.startsWith("/") ? artifact : resolve(input.projectPath, artifact);
+    requiredArtifacts.push({ path: artifact, present: await canRead(target) });
+  }
+  const failedValidation =
+    input.lastValidation && !input.lastValidation.ok ? input.lastValidation.failure : undefined;
+  const gitAvailable = await isToolAvailable("git", input.projectPath).catch(() => "unknown" as const);
+  const verificationRan =
+    (input.lastValidation?.ok === true && input.lastValidation.testRan) ||
+    Boolean(failedValidation?.command);
+  const lastVerificationExitCode = failedValidation?.exitCode;
+  const summary = [
+    `artifacts=${requiredArtifacts.length}`,
+    `artifactsPresent=${requiredArtifacts.filter((item) => item.present).length}/${requiredArtifacts.length}`,
+    `changedFiles=${input.changedFiles.length}`,
+    `verificationRan=${verificationRan ? "yes" : "no"}`,
+    `lastVerificationExitCode=${lastVerificationExitCode ?? "none"}`,
+    `git=${gitAvailable}`,
+  ].join("; ");
+  return {
+    requiredArtifacts,
+    changedFiles: [...input.changedFiles],
+    verificationRan,
+    ...(lastVerificationExitCode === undefined ? {} : { lastVerificationExitCode }),
+    gitAvailable,
+    summary,
+  };
+}
+
+export type EnvironmentSetupFailureClassification = {
+  category: "environment_error" | "network_pull_error" | "none";
+  retryable: boolean;
+  reason: string;
+};
+
+export function classifyEnvironmentSetupFailure(output: string): EnvironmentSetupFailureClassification {
+  const text = output.toLowerCase();
+  if (!/docker|containerd|image|pull|registry|hub\.docker|manifest|unauthorized/u.test(text)) {
+    return { category: "none", retryable: false, reason: "no environment setup signature" };
+  }
+  if (
+    /unexpected eof|connection reset|connection refused|tls handshake timeout|i\/o timeout|net\/http|temporary failure|temporary name resolution|dial tcp|context deadline exceeded|service unavailable|gateway timeout|too many requests|toomanyrequests|rate limit/u.test(
+      text,
+    )
+  ) {
+    return {
+      category: "network_pull_error",
+      retryable: true,
+      reason: "transient docker pull or registry network failure",
+    };
+  }
+  if (/no space left|disk quota|cannot allocate memory|out of memory|oom/u.test(text)) {
+    return {
+      category: "environment_error",
+      retryable: false,
+      reason: "local environment resource failure",
+    };
+  }
+  if (/manifest unknown|not found|pull access denied|unauthorized|authentication required|repository does not exist/u.test(text)) {
+    return {
+      category: "environment_error",
+      retryable: false,
+      reason: "non-retryable docker image or registry access failure",
+    };
+  }
+  return { category: "environment_error", retryable: false, reason: "environment setup failure" };
 }
 
 export function createHeadlessBenchRepairPrompt(input: {
@@ -317,6 +441,10 @@ export function classifyHeadlessFailure(input: {
   if (input.outcome === "timeout" || /timed out|timeout after|test command timed out/u.test(text)) {
     return "test_timeout";
   }
+  const setupFailure = classifyEnvironmentSetupFailure(input.output);
+  if (setupFailure.category !== "none") {
+    return setupFailure.category;
+  }
   if (/rate limit|provider|api key|upstream|stream interrupted|connection reset|econnreset|fetch failed/u.test(text)) {
     return "provider_error";
   }
@@ -339,6 +467,10 @@ export function classifyHeadlessFailure(input: {
     return "unknown_agent_error";
   }
   return "model_patch_failed";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
 function formatInitialProfileStrategy(profile: HeadlessBenchTaskProfile): string {

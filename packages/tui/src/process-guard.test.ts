@@ -51,6 +51,62 @@ describe("ProcessGuard", () => {
     expect(child.killMock).not.toHaveBeenCalled();
   });
 
+  it("does not run Windows workspace sweep by default", () => {
+    const registry = new ProcessGuardRegistry();
+    const spawnMock = vi.fn(() => new EventEmitter());
+    const child = createFakeChild(2234);
+    const guard = createProcessGuard(registry, { platform: "win32", spawn: spawnMock as never });
+
+    guard.track(child, { cwd: "F:\\Linghun" });
+    expect(guard.requestStop(true)).toMatchObject({ attempted: 1, failures: [] });
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).toHaveBeenCalledWith("taskkill", ["/pid", "2234", "/t", "/f"], expect.any(Object));
+  });
+
+  it("runs Windows workspace sweep only when explicitly enabled", () => {
+    const registry = new ProcessGuardRegistry();
+    const spawned: Array<{ command: string; args: string[] }> = [];
+    const spawnMock = vi.fn((command: string, args: string[]) => {
+      spawned.push({ command, args });
+      return new EventEmitter();
+    });
+    const child = createFakeChild(2235);
+    const guard = createProcessGuard(registry, { platform: "win32", spawn: spawnMock as never });
+
+    guard.track(child, { cwd: "F:\\Linghun", workspaceSweep: true });
+    expect(guard.requestStop(true)).toMatchObject({ attempted: 1, failures: [] });
+
+    expect(spawned.map((item) => item.command)).toEqual(["taskkill", "powershell.exe"]);
+    expect(spawned[1]?.args).toContain("-NonInteractive");
+  });
+
+  it("runs Windows workspace sweep when the env flag is enabled", () => {
+    const previous = process.env.LINGHUN_PROCESS_GUARD_WORKSPACE_SWEEP;
+    process.env.LINGHUN_PROCESS_GUARD_WORKSPACE_SWEEP = "1";
+    try {
+      const registry = new ProcessGuardRegistry();
+      const spawned: Array<{ command: string; args: string[] }> = [];
+      const spawnMock = vi.fn((command: string, args: string[]) => {
+        spawned.push({ command, args });
+        return new EventEmitter();
+      });
+      const child = createFakeChild(2236);
+      const guard = createProcessGuard(registry, { platform: "win32", spawn: spawnMock as never });
+
+      guard.track(child, { cwd: "F:\\Linghun" });
+      expect(guard.requestStop(true)).toMatchObject({ attempted: 1, failures: [] });
+
+      expect(spawned.map((item) => item.command)).toEqual(["taskkill", "powershell.exe"]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.LINGHUN_PROCESS_GUARD_WORKSPACE_SWEEP;
+      } else {
+        process.env.LINGHUN_PROCESS_GUARD_WORKSPACE_SWEEP = previous;
+      }
+    }
+  });
+
   it("uses negative pid for Unix detached process-group children", () => {
     const registry = new ProcessGuardRegistry();
     const killMock = vi.fn();
@@ -116,6 +172,40 @@ describe("ProcessGuard", () => {
 
     child.emitExit();
 
+    expect(guard.snapshot()).toEqual([]);
+  });
+
+  it("retains exited detached process groups until forced cleanup", () => {
+    const registry = new ProcessGuardRegistry();
+    const killMock = vi.fn();
+    const child = createFakeChild(5005);
+    const guard = createProcessGuard(registry, { platform: "linux", kill: killMock as never });
+
+    guard.track(child, { detached: true, label: "bash-group", retainAfterExit: true });
+    child.emitExit();
+
+    expect(guard.snapshot()).toEqual([{ pid: 5005, detached: true, label: "bash-group" }]);
+    const result = guard.requestStop(true);
+
+    expect(result).toMatchObject({ attempted: 1, force: true, failures: [] });
+    expect(killMock).toHaveBeenCalledWith(-5005, "SIGKILL");
+    expect(guard.snapshot()).toEqual([]);
+  });
+
+  it("treats already-gone retained process groups as cleaned", () => {
+    const registry = new ProcessGuardRegistry();
+    const gone = Object.assign(new Error("gone"), { code: "ESRCH" });
+    const killMock = vi.fn(() => {
+      throw gone;
+    });
+    const child = createFakeChild(5006);
+    const guard = createProcessGuard(registry, { platform: "linux", kill: killMock as never });
+
+    guard.track(child, { detached: true, retainAfterExit: true });
+    child.emitExit();
+    const result = guard.requestStop(true);
+
+    expect(result.failures).toEqual([]);
     expect(guard.snapshot()).toEqual([]);
   });
 

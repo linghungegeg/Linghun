@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -51,6 +52,13 @@ export type ToolProgressEvent = {
   text: string;
 };
 
+export type ToolChildProcessTrackOptions = {
+  detached?: boolean;
+  label?: string;
+  cwd?: string;
+  retainAfterExit?: boolean;
+};
+
 export type ReadSnapshot = {
   path: string;
   hash: string;
@@ -67,6 +75,10 @@ export type ToolContext = {
   patchSummaries?: Record<string, DiffSummary>;
   abortSignal?: AbortSignal;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
+  trackChildProcess?: (
+    child: Pick<ChildProcess, "kill" | "pid" | "exitCode" | "signalCode" | "once">,
+    options?: ToolChildProcessTrackOptions,
+  ) => boolean;
 };
 
 export type ToolName =
@@ -895,6 +907,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     timeoutMs,
     context.abortSignal,
     (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
+    context.trackChildProcess,
   );
   const adapterLines =
     adapted.command === input.command && adapted.adapter === "native"
@@ -1864,10 +1877,17 @@ function runShell(
   timeoutMs: number,
   signal?: AbortSignal,
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
+  trackChildProcess?: ToolContext["trackChildProcess"],
 ): Promise<{ exitCode: number; output: string; outcome: "completed" | "timeout" | "cancelled" }> {
   return new Promise((resolvePromise) => {
     const detached = process.platform !== "win32";
     const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
+    trackChildProcess?.(child, {
+      detached,
+      cwd,
+      label: `Bash:${command.slice(0, 80)}`,
+      retainAfterExit: detached,
+    });
     let output = "";
     let settled = false;
     let forcedKillTimer: NodeJS.Timeout | undefined;

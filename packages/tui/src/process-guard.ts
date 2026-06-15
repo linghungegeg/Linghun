@@ -14,6 +14,9 @@ export type ProcessGuardTrackOptions = {
   /** True only for children spawned by this process with detached: true. */
   detached?: boolean;
   label?: string;
+  cwd?: string;
+  retainAfterExit?: boolean;
+  workspaceSweep?: boolean;
 };
 
 export type ProcessGuardStopFailure = {
@@ -34,6 +37,10 @@ type TrackedProcess = {
   pid: number;
   detached: boolean;
   label?: string;
+  cwd?: string;
+  retainAfterExit: boolean;
+  childExited: boolean;
+  workspaceSweep: boolean;
   stopState?: "graceful" | "force";
 };
 
@@ -62,8 +69,19 @@ export class ProcessGuardRegistry {
       pid,
       detached: options.detached === true,
       label: options.label,
+      cwd: options.cwd,
+      retainAfterExit: options.retainAfterExit === true,
+      childExited: false,
+      workspaceSweep: options.workspaceSweep === true,
     });
-    const cleanup = () => this.untrack(pid);
+    const cleanup = () => {
+      const entry = this.tracked.get(pid);
+      if (!entry) return;
+      entry.childExited = true;
+      if (!entry.retainAfterExit) {
+        this.untrack(pid);
+      }
+    };
     child.once("exit", cleanup);
     child.once("close", cleanup);
     return true;
@@ -98,11 +116,17 @@ export class ProcessGuardRegistry {
       skipped: 0,
       failures: [],
     };
+    const removePids: number[] = [];
     for (const entry of this.tracked.values()) {
       if (onlyPids && !onlyPids.has(entry.pid)) {
         continue;
       }
-      stopEntry(entry, force, deps, allowAsyncWindowsTreeKill, result);
+      if (stopEntry(entry, force, deps, allowAsyncWindowsTreeKill, result)) {
+        removePids.push(entry.pid);
+      }
+    }
+    for (const pid of removePids) {
+      this.untrack(pid);
     }
     return result;
   }
@@ -211,18 +235,18 @@ function stopEntry(
   deps: Required<ProcessGuardDeps>,
   allowAsyncWindowsTreeKill: boolean,
   result: ProcessGuardStopResult,
-): void {
+): boolean {
   if (entry.stopState === "force" || (entry.stopState === "graceful" && !force)) {
     result.skipped += 1;
-    return;
+    return false;
   }
   entry.stopState = force ? "force" : "graceful";
   result.attempted += 1;
   if (deps.platform === "win32" && allowAsyncWindowsTreeKill) {
     stopWindowsTree(entry, force, deps, result);
-    return;
+    return force;
   }
-  stopWithSignal(entry, force, deps, result);
+  return stopWithSignal(entry, force, deps, result);
 }
 
 function stopWindowsTree(
@@ -245,6 +269,9 @@ function stopWindowsTree(
     result.failures.push({ pid: entry.pid, message: formatError(error) });
     stopWithSignal(entry, force, deps, result);
   }
+  if (force && entry.cwd && shouldRunWindowsWorkspaceSweep(entry)) {
+    stopWindowsWorkspaceProcesses(entry.pid, entry.cwd, deps);
+  }
 }
 
 function stopWithSignal(
@@ -252,17 +279,92 @@ function stopWithSignal(
   force: boolean,
   deps: Required<ProcessGuardDeps>,
   result: ProcessGuardStopResult,
-): void {
+): boolean {
   const signal = force ? "SIGKILL" : "SIGTERM";
   try {
     if (deps.platform !== "win32" && entry.detached) {
       deps.kill(-entry.pid, signal);
-      return;
+      return force;
     }
     entry.child.kill(signal);
+    return force;
   } catch (error) {
+    if (isProcessGone(error)) {
+      return true;
+    }
     result.failures.push({ pid: entry.pid, message: formatError(error) });
+    return false;
   }
+}
+
+function stopWindowsWorkspaceProcesses(
+  rootPid: number,
+  cwd: string,
+  deps: Required<ProcessGuardDeps>,
+): void {
+  const script = `
+$rootPid = ${rootPid}
+$cwd = ${JSON.stringify(cwd)}
+$cwdLower = $cwd.ToLowerInvariant()
+$rows = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine)
+$byPid = @{}
+$children = @{}
+foreach ($row in $rows) {
+  $pidInt = [int]$row.ProcessId
+  $parentInt = [int]$row.ParentProcessId
+  $byPid[$pidInt] = $row
+  if (-not $children.ContainsKey($parentInt)) { $children[$parentInt] = @() }
+  $children[$parentInt] += $pidInt
+}
+$protected = New-Object 'System.Collections.Generic.HashSet[int]'
+$cursor = $PID
+while ($cursor -gt 0 -and $byPid.ContainsKey($cursor)) {
+  [void]$protected.Add($cursor)
+  $cursor = [int]$byPid[$cursor].ParentProcessId
+}
+$targets = New-Object 'System.Collections.Generic.HashSet[int]'
+$queue = New-Object 'System.Collections.Generic.Queue[int]'
+$queue.Enqueue($rootPid)
+while ($queue.Count -gt 0) {
+  $pid = $queue.Dequeue()
+  if (-not $targets.Add($pid)) { continue }
+  if ($children.ContainsKey($pid)) {
+    foreach ($childPid in $children[$pid]) { $queue.Enqueue($childPid) }
+  }
+}
+foreach ($row in $rows) {
+  $cmd = [string]$row.CommandLine
+  if ($cmd.ToLowerInvariant().Contains($cwdLower)) {
+    [void]$targets.Add([int]$row.ProcessId)
+  }
+}
+foreach ($targetPid in $targets) {
+  if ($targetPid -gt 0 -and -not $protected.Contains($targetPid)) {
+    Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
+  }
+}
+`;
+  try {
+    deps.spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+  } catch {
+    // taskkill remains the primary cleanup path; workspace sweep is best-effort.
+  }
+}
+
+function isProcessGone(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ESRCH"
+  );
+}
+
+function shouldRunWindowsWorkspaceSweep(entry: TrackedProcess): boolean {
+  return entry.workspaceSweep || process.env.LINGHUN_PROCESS_GUARD_WORKSPACE_SWEEP === "1";
 }
 
 function formatError(error: unknown): string {

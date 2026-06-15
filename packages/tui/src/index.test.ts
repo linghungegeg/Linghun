@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
@@ -37,6 +37,10 @@ import {
 } from "./final-answer-gate.js";
 import { createHandoffPacket, hydrateResumeContext } from "./handoff-session-runtime.js";
 import {
+  type EnvironmentSetupFailureClassification,
+  classifyEnvironmentSetupFailure,
+  classifyHeadlessFailure,
+  collectHeadlessArtifactChecklist,
   createHeadlessBenchInitialPrompt,
   createHeadlessBenchRepairPrompt,
   detectHeadlessBenchTaskProfile,
@@ -140,7 +144,7 @@ import { evaluateMetaScheduler } from "./meta-scheduler-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
-import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
+import { consumeProcessGuardStopResultsForTest, trackChildProcess } from "./process-guard.js";
 import {
   BREAKER_CONSTANTS,
   checkProviderCooldown,
@@ -1778,6 +1782,47 @@ describe("runHeadlessTask", () => {
     expect(context.lastProviderFailure).toBeUndefined();
   });
 
+  it("continues multiple times after provider stream failures and reports final diagnostics", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-diag-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.changedFiles.push("answer.txt");
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      maxContinuations: 2,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_DECODE_ERROR",
+          kind: "transit",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: `provider failure attempt ${attempts}`,
+          evidenceId: `provider-failure-${attempts}`,
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(attempts).toBe(3);
+    expect(stderr.text).toContain("providerKind=transit");
+    expect(stderr.text).toContain("providerCode=PROVIDER_STREAM_DECODE_ERROR");
+    expect(stderr.text).toContain("attempts=3");
+    expect(stderr.text).toContain("fileChanges=yes:1");
+  });
+
   it("aborts with a clear error when real-time auto-approval exceeds maxApprovals", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-approval-limit-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -1878,6 +1923,65 @@ describe("runHeadlessTask", () => {
     expect(context.interrupt).toEqual({ type: "idle" });
   });
 
+  it("cleans tracked background child processes after final answer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-process-cleanup-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    consumeProcessGuardStopResultsForTest();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        const child = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 5000)"], {
+          stdio: "ignore",
+          windowsHide: true,
+          detached: process.platform !== "win32",
+        });
+        trackChildProcess(child, {
+          detached: process.platform !== "win32",
+          label: "headless-test-background",
+        });
+      },
+    });
+    const stopResults = consumeProcessGuardStopResultsForTest();
+
+    expect(exitCode).toBe(0);
+    expect(stopResults).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "force", force: true })]),
+    );
+  }, 10_000);
+
+  it("records a headless artifact checklist as evidence before cleanup", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-checklist-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.changedFiles.push("src/changed.ts");
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => undefined,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(
+      context.evidence.some((item) => item.supportsClaims.includes("headless_artifact_checklist")),
+    ).toBe(true);
+  });
+
   it("bench mode repairs after official test failure and passes on the second validation", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-repair-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -1931,6 +2035,40 @@ describe("runHeadlessTask", () => {
     expect(prompts[1]).toContain("official assertion: missing fixed.txt");
     expect(output.text).toContain("bench validation passed");
     expect(stderr.text).toContain("bench validation failed");
+  });
+
+  it("runs closure validation and skips repair when the headless deadline is approaching", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let sends = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Create missing.txt",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineMs: 1,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["missing.txt"],
+      },
+      __testSendMessage: async () => {
+        sends += 1;
+      },
+    });
+
+    expect(exitCode).toBe(6);
+    expect(sends).toBe(1);
+    expect(stderr.text).toContain("deadline approaching");
+    expect(stderr.text).toContain("closure validation ran");
   });
 
   it("bench mode returns a clear failure when repair attempts are exhausted", async () => {
@@ -2095,6 +2233,7 @@ describe("runHeadlessTask", () => {
         maxRepairAttempts: 1,
         requiredArtifacts: [],
         preflight: false,
+        environmentSetupRetries: 1,
       },
     });
 
@@ -2127,6 +2266,7 @@ describe("runHeadlessTask", () => {
         maxRepairAttempts: 1,
         requiredArtifacts: [],
         preflight: false,
+        environmentSetupRetries: 1,
       },
     });
 
@@ -2151,6 +2291,7 @@ describe("runHeadlessTask", () => {
         maxRepairAttempts: 1,
         requiredArtifacts: ["/app/out.txt"],
         preflight: false,
+        environmentSetupRetries: 1,
       },
     });
     const normalPrompt = createHeadlessBenchInitialPrompt({
@@ -2162,6 +2303,7 @@ describe("runHeadlessTask", () => {
         maxRepairAttempts: 1,
         requiredArtifacts: [],
         preflight: false,
+        environmentSetupRetries: 1,
       },
     });
 
@@ -2197,6 +2339,57 @@ describe("runHeadlessTask", () => {
     expect(compilePrompt).toContain("align header/test signatures");
     expect(artifactPrompt).toContain("generate or write the required artifact");
     expect(timeoutPrompt).toContain("narrow validation to focused tests");
+  });
+});
+
+describe("headless runtime failure classification", () => {
+  it("classifies transient Docker pull failures as retryable network_pull_error", () => {
+    const result: EnvironmentSetupFailureClassification = classifyEnvironmentSetupFailure(
+      "docker pull busybox:latest failed: unexpected EOF while reading from Docker Hub",
+    );
+
+    expect(result).toMatchObject({ category: "network_pull_error", retryable: true });
+    expect(
+      classifyHeadlessFailure({
+        output: "docker pull busybox:latest failed: unexpected EOF",
+        outcome: "completed",
+        exitCode: 1,
+      }),
+    ).toBe("network_pull_error");
+  });
+
+  it("classifies non-retryable Docker image setup failures as environment_error", () => {
+    const result = classifyEnvironmentSetupFailure(
+      "docker pull private/image:latest failed: pull access denied, repository does not exist",
+    );
+
+    expect(result).toMatchObject({ category: "environment_error", retryable: false });
+  });
+
+  it("collects artifact checklist without treating git unavailable as core failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-artifact-helper-"));
+    await writeFile(join(project, "answer.txt"), "ok", "utf8");
+
+    const checklist = await collectHeadlessArtifactChecklist({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 1000,
+        maxRepairAttempts: 0,
+        requiredArtifacts: ["answer.txt", "missing.txt"],
+        preflight: false,
+        environmentSetupRetries: 0,
+      },
+      changedFiles: ["answer.txt"],
+    });
+
+    expect(checklist.requiredArtifacts).toEqual([
+      { path: "answer.txt", present: true },
+      { path: "missing.txt", present: false },
+    ]);
+    expect(checklist.summary).toContain("changedFiles=1");
+    expect(["unknown", true, false]).toContain(checklist.gitAvailable);
   });
 });
 
