@@ -351,11 +351,13 @@ describe("Ink shell selection", () => {
     expect(widths).toContain(40);
     expect(heights).toContain(24);
     expect(heights).toContain(15);
-    // Phase 7.10: ordinary main screen leaves terminal-native scrollback intact.
+    // Resize may clear the current viewport for reflow, but must not enter
+    // alt-screen or clear native scrollback.
     expect(output.text).not.toContain("\u001B[?1049h");
     expect(output.text).not.toContain("\u001B[?1049l");
     expect(resizeCallbacks).toBe(0);
-    expect(output.text).not.toContain("\x1b[2J\x1b[H");
+    expect(output.text).toContain("\x1b[2J\x1b[H");
+    expect(output.text).not.toContain("\x1b[3J");
   });
 
   it("enables extended keyboard protocols and restores them on exit", async () => {
@@ -925,7 +927,8 @@ describe("home → task view mode transition", () => {
     await shell.waitUntilExit();
 
     expect(output.text).not.toContain("技术普惠会越来越成熟");
-    expect(output.text).not.toContain("\x1b[2J\x1b[H");
+    expect(output.text).toContain("\x1b[2J");
+    expect(output.text).not.toContain("\x1b[3J");
   });
 
   it("resize in task mode stays stable without duplicating content", async () => {
@@ -960,8 +963,10 @@ describe("home → task view mode transition", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    // No manual clear-screen from ShellApp
-    expect(output.text).not.toContain("\x1b[2J\x1b[H");
+    // Resize clears the current viewport before reflowing the new width, but
+    // does not clear native scrollback.
+    expect(output.text).toContain("\x1b[2J");
+    expect(output.text).not.toContain("\x1b[3J");
     // Activity still visible after resize
     expect(output.text).toContain("正在思考…");
   });
@@ -1913,7 +1918,7 @@ describe("D.12C — Composer cursor alignment closure", () => {
     expect(cursorCol).toBe(6);
   });
 
-  it("Composer cursor row keeps home text anchor on the input row", () => {
+  it("Composer cursor row stays relative to the text anchor", () => {
     expect(
       composerCursorAnchorRowOffset({
         textAnchorRowBase: 0,
@@ -1926,30 +1931,53 @@ describe("D.12C — Composer cursor alignment closure", () => {
     ).toBe(0);
   });
 
-  it("Composer cursor row keeps task text anchor one row below the border", () => {
+  it("Composer cursor row follows soft-wrapped home input relative to the text anchor", () => {
+    const { cursorRow } = formatComposerRenderLines({
+      buffer: createEditBuffer(
+        "修复这个项目的 bug。最后告诉我你改了什么、跑了什么验证。如果没有真实跑通测试，不要说测试通过。",
+      ),
+      placeholder: "我能帮您做点什么？",
+      masking: false,
+      noColor: false,
+      maxWidth: 76,
+    });
+    expect(cursorRow).toBe(1);
     expect(
       composerCursorAnchorRowOffset({
-        textAnchorRowBase: 1,
+        textAnchorRowBase: 0,
+        permissionActive: false,
+        permissionActionCount: 0,
+        showSuggestions: false,
+        slashCandidateCount: 0,
+        cursorRow,
+      }),
+    ).toBe(1);
+  });
+
+  it("Composer cursor row keeps task text anchor relative to the same text column", () => {
+    expect(
+      composerCursorAnchorRowOffset({
+        textAnchorRowBase: 0,
         permissionActive: false,
         permissionActionCount: 0,
         showSuggestions: false,
         slashCandidateCount: 0,
         cursorRow: 0,
       }),
-    ).toBe(1);
+    ).toBe(0);
   });
 
-  it("Composer cursor row includes visible slash suggestion rows", () => {
+  it("Composer cursor row does not double-count visible slash suggestion layout", () => {
     expect(
       composerCursorAnchorRowOffset({
-        textAnchorRowBase: 1,
+        textAnchorRowBase: 0,
         permissionActive: false,
         permissionActionCount: 0,
         showSuggestions: true,
         slashCandidateCount: 3,
         cursorRow: 1,
       }),
-    ).toBe(6);
+    ).toBe(1);
   });
 
   it("no-color Composer render has no fake cursor characters", () => {
@@ -2073,14 +2101,14 @@ describe("D.12C — Composer cursor alignment closure", () => {
     expect(lastShow).toBeGreaterThan(lastHide);
   });
 
-  it("ink-renderer resize does not clear normal-screen native scrollback", async () => {
+  it("ink-renderer resize clears only the current viewport, not native scrollback", async () => {
     const source = await readFile(join(SRC_ROOT, "shell/ink-renderer.tsx"), "utf8");
     const resizeStart = source.indexOf("const onResize = () =>");
     expect(resizeStart).toBeGreaterThan(0);
     const resizeEnd = source.indexOf("};", resizeStart + 30);
     const body = source.slice(resizeStart, resizeEnd);
-    expect(body).toContain("if (useAlternateScreen)");
-    expect(body).toContain("instance.clear()");
+    expect(body).toContain('writeBestEffort(stdout, "\\x1B[2J\\x1B[H")');
+    expect(body).not.toContain("3J");
   });
 
   it("home brand/vision still renders, layout not switched to top bar", async () => {
@@ -2485,22 +2513,18 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(source).not.toMatch(/declared\s*&&\s*capability\.cursorPositioning\s*&&\s*hasMeasured/);
     // Still subscribes to useBoxMetrics for the resize re-run.
     expect(source).toContain("useBoxMetrics(anchorRef)");
-    expect(source).toMatch(/declared\s*&&\s*capability\.cursorPositioning/);
+    expect(source).toContain("!declared || !capability.cursorPositioning");
+    expect(source).toContain("useLayoutEffect(");
+    expect(source).toContain("resolveAnchoredCursorPosition");
   });
 
-  it("D13E-P3 #6: Composer keeps cursor ownership split explicit", async () => {
+  it("D13E-P3 #6: Composer renders one inline cursor and hides the native cursor", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
-    // Home/task/pending all declare the native anchored cursor; capability
-    // fallback hides it instead of drawing a reverse-video fake cursor.
-    expect(source).toMatch(
-      /useAnchoredCursor\(\s*permissionActive\s*\?\s*null\s*:\s*\{\s*row:\s*declaredRow,\s*col:\s*cursorCol\s*\}/,
-    );
-    expect(source).not.toContain("useInlineCursor");
-    expect(source).not.toContain("<Text inverse>{cursorChar}</Text>");
-    // anchorRef attaches to the outer Box synchronously in the same render —
-    // not via a deferred effect — so the parent-chain origin resolves on the
-    // very first commit.
+    expect(source).toContain("useAnchoredCursor(null, anchorRef, capability)");
+    expect(source).toContain("renderInlineComposerCursor");
+    expect(source).toContain("INLINE_CURSOR_BLINK_MS");
+    expect(source).toContain("<Text inverse>{cursorCell}</Text>");
     expect(source).toContain("ref={anchorRef}");
   });
 
@@ -3733,16 +3757,14 @@ describe("D.13D Final Closure — interaction shell", () => {
     expect(output.text).toContain("我能帮您做点什么？");
   });
 
-  it("useAnchoredCursor implementation file uses render-phase cursor write (no useEffect/useLayoutEffect)", async () => {
+  it("useAnchoredCursor recalculates after layout commits so parent-chain moves do not drift", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/useAnchoredCursor.ts"), "utf8");
-    // No effect-based write of the cursor — render phase only.
     expect(source).not.toContain("useEffect(");
-    expect(source).not.toContain("useLayoutEffect(");
     expect(source).not.toContain("useInsertionEffect(");
-    // No de-duplication ref left behind.
-    expect(source).not.toContain("lastWrittenRef");
-    // setCursorPosition is called from the hook body (render phase).
+    expect(source).toContain("useLayoutEffect(");
+    expect(source).toContain("setCommittedPosition");
+    expect(source).toContain("samePosition(previous, next)");
     expect(source).toContain("setCursorPosition(");
   });
 });
@@ -4104,10 +4126,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
   it("Composer hides anchored cursor while permission is active (permission is sole focus owner)", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
-    // The render path passes null to useAnchoredCursor when permissionActive,
-    // so the cursor is hidden while the permission selector owns focus.
-    expect(source).toMatch(/permissionActive\s*\?\s*null\s*:\s*\{\s*row/);
-    expect(source).not.toContain("useInlineCursor");
+    expect(source).toContain("useAnchoredCursor(null, anchorRef, capability)");
+    expect(source).toContain("const showInlineCursor = !permissionActive && index === cursorRow");
   });
 
   it("Composer Shift+Tab emits cycle-permission-mode (not raw escape sequences)", async () => {
@@ -4133,7 +4153,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toMatch(/^\s*writeStatus\(output, context\);\s*$/m);
   });
 
-  it("ShellApp TaskLayout uses native terminal scrollback — no TranscriptViewport in normal chat", async () => {
+  it("ShellApp TaskLayout uses one dynamic transcript surface in normal chat", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     const taskLayoutStart = source.indexOf("function TaskLayout(");
@@ -4142,18 +4162,18 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const body = source.slice(taskLayoutStart, nextFn);
     expect(body).not.toContain("<TranscriptViewport");
     expect(body).not.toContain("virtualRange={view.transcriptVirtualRange}");
-    expect(body).not.toContain('overflow="hidden"');
+    expect(body).toContain('overflow="hidden"');
     expect(source).not.toContain("TASK_RECENT_TAIL_BLOCKS");
     expect(body).not.toContain("staticHistoryBlocks");
     expect(body).not.toContain("recentStaticBlocks");
     expect(body).not.toContain("currentBlocks");
-    expect(body).not.toContain("view.blocks.map");
+    expect(body).toContain("view.blocks.map");
     expect(body).not.toContain('justifyContent="flex-end"');
-    expect(body).toContain("<Static");
-    expect(body).toContain("items={nativeTranscript.staticBlocks}");
-    expect(body).toContain("useNativeTranscriptWindow(view.blocks)");
-    expect(body).toContain("nativeTranscript.liveBlocks");
-    expect(body).toContain("NATIVE_TRANSCRIPT_LIVE_BLOCKS");
+    expect(body).not.toContain("<Static");
+    expect(body).not.toContain("items={nativeTranscript.staticBlocks}");
+    expect(source).not.toContain("useNativeTranscriptWindow");
+    expect(source).not.toContain("nativeTranscript.liveBlocks");
+    expect(source).not.toContain("NATIVE_TRANSCRIPT_LIVE_BLOCKS");
     expect(body).toContain("<UnseenMessagePill");
     expect(body).toContain("<ProductBlock");
     expect(body).toContain("<Composer view={view}");
@@ -4496,7 +4516,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
   it("ShellApp renders streaming preview as a sibling after blocks and before activity", async () => {
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
-    const blocksIndex = source.indexOf("nativeTranscript.liveBlocks.map");
+    const blocksIndex = source.indexOf("view.blocks.map");
     const previewIndex = source.indexOf("view.streamingAssistantText");
     const activityIndex = source.indexOf("view.activity ?");
     expect(blocksIndex).toBeGreaterThan(0);
@@ -6572,6 +6592,14 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(source).toContain("padDisplay(wrapped, wrapWidth)");
     expect(source).toContain("displayWidth(stripAnsi(value))");
     expect(source).toContain("wrapText(line, effectiveWrapWidth)");
+  });
+
+  it("MessageMarkdown selection rows still use effective wrap width", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
+
+    expect(source).toContain("function splitSelectionRows(");
+    expect(source).toContain("wrapWidth={effectiveWrapWidth}");
   });
 
   it("MessageMarkdown routes raw unfenced diffs to StructuredDiff and drops Git CRLF advisory noise", () => {

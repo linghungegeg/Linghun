@@ -221,7 +221,7 @@ export function SessionsPanel({
           <Text dimColor color={theme.muted}>
             {hint.search}
           </Text>
-          <Text>{query}</Text>
+          <Text>{fitText(query, Math.max(8, innerWidth - hint.search.length - 1))}</Text>
           <Text dimColor>█</Text>
         </Box>
       ) : (

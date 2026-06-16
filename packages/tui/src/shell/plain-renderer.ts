@@ -120,12 +120,18 @@ function messageBody(
 function renderPlainMarkdownLines(
   text: string,
   noColor: boolean,
-  options: { dimAll?: boolean; diagnostic?: boolean; error?: boolean } = {},
+  options: {
+    dimAll?: boolean;
+    diagnostic?: boolean;
+    error?: boolean;
+    wrapWidth?: number;
+  } = {},
 ): string[] {
   const lines = text.replace(/\r/g, "").split("\n");
   const out: string[] = [];
   let inCode = false;
   let codeLang: string | undefined;
+  const wrapWidth = Math.max(8, options.wrapWidth ?? 100);
   const applyTone = (line: string): string => {
     if (options.error) return colorRed(line, noColor);
     if (options.diagnostic) return colorCyan(line, noColor);
@@ -148,12 +154,12 @@ function renderPlainMarkdownLines(
       continue;
     }
     if (!inCode) {
-      out.push(...wrapText(raw, 100).map(applyTone));
+      out.push(...wrapText(raw, wrapWidth).map(applyTone));
       continue;
     }
 
     const isDiff = codeLang === "diff" || codeLang === "patch";
-    for (const wrapped of wrapText(raw.length === 0 ? " " : raw, 96)) {
+    for (const wrapped of wrapText(raw.length === 0 ? " " : raw, Math.max(8, wrapWidth - 4))) {
       const wrappedBody =
         isDiff && wrapped.startsWith("+") && !wrapped.startsWith("+++")
           ? colorGreen(wrapped, noColor)
@@ -391,6 +397,7 @@ function formatSingleBlock(
       const renderedMessage = renderPlainMarkdownLines(body, noColor, {
         dimAll,
         diagnostic: isDiagnostic,
+        wrapWidth: Math.max(8, view.width - 6),
       });
       const out: string[] = isLocalOutput || isToolSuccess
         ? renderedMessage.map((line) => `${dim("  \u23BF  ", noColor)}${line}`)
@@ -426,7 +433,10 @@ function formatSingleBlock(
         out.push(coloredFailMarker);
       }
       if (body) {
-        out.push(...renderPlainMarkdownLines(body, noColor, { error: true }));
+        out.push(...renderPlainMarkdownLines(body, noColor, {
+          error: true,
+          wrapWidth: Math.max(8, view.width - 6),
+        }));
       }
       if (nextAction) out.push(`  ${dim(nextAction, noColor)}`);
       // Phase 15: retry hint (前 3 次降噪，对齐 CCB)

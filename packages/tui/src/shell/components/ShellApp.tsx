@@ -1,4 +1,4 @@
-import { Box, Static, Text } from "@linghun/ink-runtime";
+import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { resolveAlternateScreen } from "../ink-renderer.js";
@@ -6,7 +6,6 @@ import type { TerminalCapability } from "../terminal-capability.js";
 import { brandWordmark, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
 import type { ShellController, ShellViewModel, TaskActivityView } from "../types.js";
-import type { ProductBlockViewModel } from "../types.js";
 import { AgentProgressTree } from "./AgentProgressTree.js";
 import { BackgroundTaskOverlay } from "./BackgroundTaskOverlay.js";
 import { BtwPanel } from "./BtwPanel.js";
@@ -216,8 +215,7 @@ function TaskLayout({
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
-  const contentWidth = Math.max(8, view.width - 4);
-  const nativeTranscript = useNativeTranscriptWindow(view.blocks);
+  const contentWidth = taskContentWidth(view.width);
   const expandedTranscriptBlock =
     view.ctrlOExpand?.active && view.ctrlOExpand.blockId
       ? view.blocks.find((block) => block.id === view.ctrlOExpand?.blockId)
@@ -234,208 +232,176 @@ function TaskLayout({
   }, [hasProgress]);
 
   return (
-    <>
-      <Static
-        items={nativeTranscript.staticBlocks}
-      >
-        {(block) => (
-          <Box key={block.id} flexDirection="column" paddingX={2}>
-            <ProductBlock
-              block={block}
-              theme={theme}
-              width={contentWidth}
-              language={view.language}
-            />
-          </Box>
-        )}
-      </Static>
-      <Box
-        flexDirection="column"
-        width={view.width}
-        height={view.height}
-      >
-        {/* Dynamic live area only; committed transcript blocks are appended through Static/native scrollback. */}
-        <Box flexDirection="column" flexGrow={1} minHeight={0}>
-          <Box flexGrow={1} minHeight={0} />
-          <Box flexDirection="column" paddingX={2}>
-            {expandedTranscriptBlock ? (
-              <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" width={view.width} height={view.height}>
+      {/* Single dynamic transcript surface: resize must reflow every visible block without replaying Static output. */}
+      <Box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
+        <Box flexGrow={1} minHeight={0} />
+        <Box flexDirection="column" paddingX={2} overflow="hidden">
+          {expandedTranscriptBlock ? (
+            <Box flexDirection="column" marginBottom={1}>
+              <ProductBlock
+                block={{ ...expandedTranscriptBlock, ctrlOCollapsed: false }}
+                theme={theme}
+                width={contentWidth}
+                language={view.language}
+              />
+            </Box>
+          ) : view.blocks.length > 0 ? (
+            <Box flexDirection="column">
+              {view.blocks.map((block) => (
                 <ProductBlock
-                  block={{ ...expandedTranscriptBlock, ctrlOCollapsed: false }}
+                  key={block.id}
+                  block={block}
                   theme={theme}
                   width={contentWidth}
                   language={view.language}
                 />
-              </Box>
-            ) : nativeTranscript.liveBlocks.length > 0 ? (
-              <Box flexDirection="column">
-                {nativeTranscript.liveBlocks.map((block) => (
-                  <ProductBlock
-                    key={block.id}
-                    block={block}
-                    theme={theme}
-                    width={contentWidth}
-                    language={view.language}
-                  />
-                ))}
-              </Box>
-            ) : null}
+              ))}
+            </Box>
+          ) : null}
 
-            {view.streamingAssistantText ? (
-              <Box
-                marginTop={
-                  expandedTranscriptBlock || nativeTranscript.liveBlocks.length > 0 ? 1 : 0
-                }
-              >
-                <StreamingMarkdown
-                  text={view.streamingAssistantText}
-                  theme={theme}
-                  wrapWidth={contentWidth}
-                />
-              </Box>
-            ) : null}
-
-            {view.activity ? (
-              <Box
-                marginTop={
-                  expandedTranscriptBlock ||
-                  nativeTranscript.liveBlocks.length > 0 ||
-                  view.streamingAssistantText
-                    ? 1
-                    : 0
-                }
-              >
-                <ActivityIndicator
-                  activity={view.activity}
-                  theme={theme}
-                  tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
-                />
-              </Box>
-            ) : null}
-
-            {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
-              <TaskSuggestionBar
-                suggestions={view.taskSuggestions}
-                cursor={view.taskSuggestionCursor ?? 0}
-                width={view.width}
-                noColor={noColor}
+          {view.streamingAssistantText ? (
+            <Box marginTop={expandedTranscriptBlock || view.blocks.length > 0 ? 1 : 0}>
+              <StreamingMarkdown
+                text={view.streamingAssistantText}
+                theme={theme}
+                wrapWidth={contentWidth}
               />
-            ) : null}
+            </Box>
+          ) : null}
 
-            {view.limitations.length > 0 ? (
-              <Box flexDirection="column" marginTop={1}>
-                {view.limitations.map((item) => (
-                  <Text key={item} color={theme.muted}>
-                    {item}
-                  </Text>
-                ))}
-              </Box>
-            ) : null}
-          </Box>
-          {view.unseenMessageCount && view.unseenMessageCount > 0 ? (
-            <UnseenMessagePill
-              count={view.unseenMessageCount}
-              language={view.language}
+          {view.activity ? (
+            <Box
+              marginTop={
+                expandedTranscriptBlock || view.blocks.length > 0 || view.streamingAssistantText
+                  ? 1
+                  : 0
+              }
+            >
+              <ActivityIndicator
+                activity={view.activity}
+                theme={theme}
+                tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
+              />
+            </Box>
+          ) : null}
+
+          {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
+            <TaskSuggestionBar
+              suggestions={view.taskSuggestions}
+              cursor={view.taskSuggestionCursor ?? 0}
               width={view.width}
+              noColor={noColor}
             />
           ) : null}
-        </Box>
 
-        {/* Composer band — pinned to terminal bottom */}
-        <Box flexShrink={0} flexDirection="column">
-          {view.backgroundTaskOverlay && !view.permission ? (
-            <BackgroundTaskOverlay
-              overlay={view.backgroundTaskOverlay}
+          {view.limitations.length > 0 ? (
+            <Box flexDirection="column" marginTop={1}>
+              {view.limitations.map((item) => (
+                <Text key={item} color={theme.muted}>
+                  {item}
+                </Text>
+              ))}
+            </Box>
+          ) : null}
+        </Box>
+        {view.unseenMessageCount && view.unseenMessageCount > 0 ? (
+          <UnseenMessagePill
+            count={view.unseenMessageCount}
+            language={view.language}
+            width={view.width}
+          />
+        ) : null}
+      </Box>
+
+      {/* Composer band — pinned to terminal bottom */}
+      <Box flexShrink={0} flexDirection="column">
+        {view.backgroundTaskOverlay && !view.permission ? (
+          <BackgroundTaskOverlay
+            overlay={view.backgroundTaskOverlay}
+            width={contentWidth}
+            noColor={noColor}
+          />
+        ) : null}
+        {/* P1-7: ConfigPanel as overlay, preserving scroll ability */}
+        {view.configPanel ? (
+          <ConfigPanel
+            panel={view.configPanel}
+            controller={controller}
+            width={view.width}
+            noColor={noColor}
+            language={view.language}
+          />
+        ) : null}
+        <NotificationStack notifications={view.notifications} theme={theme} />
+        {view.taskRuntimeSummary ? (
+          <Box width={cw} marginTop={1}>
+            <ProductBlock
+              block={view.taskRuntimeSummary}
+              theme={theme}
+              width={cw}
+              language={view.language}
+            />
+          </Box>
+        ) : null}
+
+        {view.taskListView ? (
+          <Box paddingX={2} marginBottom={1}>
+            <TaskListView
+              list={view.taskListView}
               width={contentWidth}
               noColor={noColor}
+              language={view.language}
             />
-          ) : null}
-          {/* P1-7: ConfigPanel as overlay, preserving scroll ability */}
-          {view.configPanel ? (
-            <ConfigPanel
-              panel={view.configPanel}
-              controller={controller}
-              width={view.width}
+          </Box>
+        ) : null}
+
+        {view.agentProgressTree ? (
+          <Box width={view.width} paddingX={2}>
+            <AgentProgressTree
+              tree={view.agentProgressTree}
+              width={contentWidth}
               noColor={noColor}
               language={view.language}
             />
-          ) : null}
-          <NotificationStack notifications={view.notifications} theme={theme} />
-          {view.taskRuntimeSummary ? (
-            <Box width={cw} marginTop={1}>
-              <ProductBlock
-                block={view.taskRuntimeSummary}
-                theme={theme}
-                width={cw}
-                language={view.language}
-              />
-            </Box>
-          ) : null}
-
-          {view.taskListView ? (
-            <Box paddingX={2} marginBottom={1}>
-              <TaskListView
-                list={view.taskListView}
-                width={contentWidth}
-                noColor={noColor}
-                language={view.language}
-              />
-            </Box>
-          ) : null}
-
-          {view.agentProgressTree ? (
-            <Box width={view.width} paddingX={2}>
-              <AgentProgressTree
-                tree={view.agentProgressTree}
-                width={contentWidth}
-                noColor={noColor}
-                language={view.language}
-              />
-            </Box>
-          ) : null}
-
-          {view.workflowProgressView ? (
-            <Box width={view.width} paddingX={2}>
-              <WorkflowProgressView
-                workflow={view.workflowProgressView}
-                width={contentWidth}
-                noColor={noColor}
-                language={view.language}
-              />
-            </Box>
-          ) : null}
-
-          <Box flexDirection="column" width={cw} paddingTop={1}>
-            <Composer view={view} onInput={controller.onInput} capability={capability} />
           </Box>
+        ) : null}
 
-          {view.taskFooter ? (
-            <StatusFooter
-              footer={view.taskFooter}
-              theme={theme}
-              width={view.width}
+        {view.workflowProgressView ? (
+          <Box width={view.width} paddingX={2}>
+            <WorkflowProgressView
+              workflow={view.workflowProgressView}
+              width={contentWidth}
+              noColor={noColor}
               language={view.language}
-              modelDim={view.taskFooter.modelDim}
-              cacheTone={view.taskFooter.cacheTone}
             />
-          ) : null}
+          </Box>
+        ) : null}
+
+        <Box flexDirection="column" width={cw} paddingTop={1}>
+          <Composer view={view} onInput={controller.onInput} capability={capability} />
         </Box>
+
+        {view.taskFooter ? (
+          <StatusFooter
+            footer={view.taskFooter}
+            theme={theme}
+            width={view.width}
+            language={view.language}
+            modelDim={view.taskFooter.modelDim}
+            cacheTone={view.taskFooter.cacheTone}
+          />
+        ) : null}
       </Box>
-    </>
+    </Box>
   );
 }
 
-const NATIVE_TRANSCRIPT_LIVE_BLOCKS = 6;
-
-function useNativeTranscriptWindow(blocks: ProductBlockViewModel[]): {
-  staticBlocks: ProductBlockViewModel[];
-  liveBlocks: ProductBlockViewModel[];
-} {
-  const liveStart = Math.max(0, blocks.length - NATIVE_TRANSCRIPT_LIVE_BLOCKS);
-  return {
-    staticBlocks: blocks.slice(0, liveStart),
-    liveBlocks: blocks.slice(liveStart),
-  };
+function taskContentWidth(viewWidth: number): number {
+  // paddingX=2 consumes four terminal cells. Keep a small right-edge reserve
+  // for Windows Terminal scrollbars / box rounding so wrapped text never lands
+  // exactly on the clipping boundary.
+  return Math.max(8, viewWidth - 6);
 }
 
 // D.13Q-UX: 旧的 TaskFooter 组件已迁到 packages/tui/src/shell/components/StatusFooter.tsx。

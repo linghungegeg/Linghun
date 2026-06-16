@@ -66,6 +66,10 @@ function messageBody(block: ProductBlockViewModel, nextAction: string | undefine
   return (block.fullText ?? block.summary ?? "").trim();
 }
 
+function messageResponseBodyWidth(width: number): number {
+  return Math.max(8, width - 5);
+}
+
 export function ProductBlock({
   block,
   theme,
@@ -146,7 +150,7 @@ export function ProductBlock({
               theme={theme}
               dim={dim}
               tone={tone}
-              wrapWidth={Math.max(8, width - 4)}
+              wrapWidth={messageResponseBodyWidth(width)}
               selectionLineIndexes={block.selectionLineIndexes}
               selectionLineRanges={block.selectionLineRanges}
             />
@@ -260,7 +264,7 @@ export function ProductBlock({
               text={body}
               theme={theme}
               tone="error"
-              wrapWidth={Math.max(8, width - 4)}
+              wrapWidth={messageResponseBodyWidth(width)}
               selectionLineIndexes={block.selectionLineIndexes}
               selectionLineRanges={block.selectionLineRanges}
             />
@@ -303,14 +307,19 @@ export function ProductBlock({
           <Text color={theme.status[block.status]}>
             {getStatusMarker(block.status, theme.mode === "no-color")}
           </Text>{" "}
-          {block.title}
+          {fitText(block.title, Math.max(8, innerWidth - 2))}
         </Text>
       ) : summaryAsMarker ? (
         <Text color={theme.status[block.status]}>
-          {getStatusMarker(block.status, theme.mode === "no-color")} {block.summary}
+          {getStatusMarker(block.status, theme.mode === "no-color")}{" "}
+          {fitText(block.summary, Math.max(8, innerWidth - 2))}
         </Text>
       ) : null}
-      {!summaryAsMarker && summaryTrimmed ? <Text>{block.summary}</Text> : null}
+      {!summaryAsMarker && summaryTrimmed
+        ? wrapText(block.summary, innerWidth).map((line, index) => (
+            <Text key={`${index}-${line}`}>{line}</Text>
+          ))
+        : null}
       {block.detail ? (
         <Text color={theme.inactive ?? theme.muted}>{fitText(block.detail, innerWidth)}</Text>
       ) : null}

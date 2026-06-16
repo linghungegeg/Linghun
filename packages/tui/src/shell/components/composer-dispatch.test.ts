@@ -27,6 +27,7 @@ import {
   isDoublePressWithin,
   isMultilineEnterSequence,
   sanitizeComposerInput,
+  sanitizeComposerPasteInput,
   shouldEnterPastePath,
   shouldUnstickSlashHidden,
   splitLineAtDisplayCol,
@@ -232,6 +233,20 @@ describe("Composer dispatcher behavior boundaries", () => {
     it("keeps real newlines and drops raw control bytes", () => {
       expect(sanitizeComposerInput("a\r\nb\x00\x7Fc")).toBe("a\nbc");
     });
+
+    it("normalizes pasted paragraphs without changing manual input sanitation", () => {
+      expect(sanitizeComposerPasteInput("第一段\n  第二段\r\n\n第三段")).toBe("第一段第二段第三段");
+      expect(sanitizeComposerPasteInput("run tests\n  then summarize")).toBe(
+        "run tests then summarize",
+      );
+      expect(sanitizeComposerInput("第一段\n  第二段")).toBe("第一段\n  第二段");
+    });
+
+    it("keeps mixed Chinese/ASCII paste spacing readable", () => {
+      expect(sanitizeComposerPasteInput("模型 gpt-5.5\n  推理 High")).toBe(
+        "模型 gpt-5.5 推理 High",
+      );
+    });
   });
 
   describe("History up/down with multiline boundary integration", () => {
@@ -382,6 +397,20 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(r.cursorRow).toBeLessThan(r.lines.length);
       expect(r.cursorCol).toBeGreaterThanOrEqual(0);
       expect(r.cursorCol).toBeLessThanOrEqual(18);
+    });
+
+    it("soft-wrapped visual rows only prefix the first row", () => {
+      const buf = bufferInsert(createEditBuffer(""), "abcdef".repeat(6));
+      const r = formatComposerRenderLines({
+        buffer: buf,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        maxWidth: 12,
+      });
+      expect(r.visualLines.length).toBeGreaterThan(1);
+      expect(r.visualLines[0]?.prefix).toBe("› ");
+      expect(r.visualLines.slice(1).every((line) => line.prefix === "")).toBe(true);
     });
   });
 

@@ -545,7 +545,8 @@ describe("TUI Interaction Contract — diff/code width propagation", () => {
 
     expect(productBlock).toContain('block.messageKind === "tool_result_success"');
     expect(productBlock).toContain("<MessageResponse width={width}>");
-    expect(productBlock).toContain("wrapWidth={Math.max(8, width - 4)}");
+    expect(productBlock).toContain("function messageResponseBodyWidth(width: number)");
+    expect(productBlock).toContain("wrapWidth={messageResponseBodyWidth(width)}");
     expect(productBlock).toContain("wrapWidth={Math.max(8, width)}");
     expect(markdown).toContain("<StructuredDiff");
     expect(markdown).toContain("wrapWidth={wrapWidth}");

@@ -1,4 +1,5 @@
 import { type DOMElement, useBoxMetrics, useCursor } from "@linghun/ink-runtime";
+import { useLayoutEffect, useState } from "react";
 import type { TerminalCapability } from "../terminal-capability.js";
 
 /**
@@ -39,20 +40,17 @@ function getAbsoluteOrigin(node: DOMElement | null): { x: number; y: number } | 
  * position via Ink's useCursor.
  *
  * Cursor write timing:
- *   - desiredPosition is computed in render phase from anchorRef.current,
- *     parent-chain yoga layout, and hasMeasured.
- *   - setCursorPosition(desiredPosition) is called directly in render phase.
- *     It is safe to do so because Ink's useCursor's setCursorPosition is
- *     a useCallback that only writes a ref; the actual commit happens inside
- *     useCursor's own useInsertionEffect at commit time. Writing during render
- *     ensures the latest desired position is committed without an effect lag.
+ *   - render passes the last committed post-layout position to Ink.
+ *   - useLayoutEffect recomputes the absolute parent-chain origin after Yoga
+ *     commits layout, then schedules a second render only when the position
+ *     changed. This catches parent movement from home centering, task bottom
+ *     pinning, soft wrapping, and terminal resize.
  *   - When the terminal cannot reliably position the cursor, when the layout
  *     has not been measured yet, or when the parent chain cannot resolve, we
  *     pass undefined (cursor hidden). No fake inverse-text cursor.
  *
  * useBoxMetrics is observed only to:
- *   - trigger re-runs when layout/resize/sibling content changes
- *   - gate first-frame readiness via hasMeasured
+ *   - trigger re-runs when anchor layout/resize changes
  * Its left/top values are never used as absolute coordinates.
  */
 export function useAnchoredCursor(
@@ -61,35 +59,47 @@ export function useAnchoredCursor(
   capability: TerminalCapability,
 ): void {
   const { setCursorPosition } = useCursor();
+  const [committedPosition, setCommittedPosition] = useState<
+    { x: number; y: number } | undefined
+  >(undefined);
   // Subscribe to layout/resize via useBoxMetrics. We do NOT use its left/top
-  // (parent-relative); we keep the subscription only for the implicit re-run
-  // on resize / sibling layout changes. hasMeasured is intentionally NOT used
-  // as a render gate: D13E-P3 cleanup #6 — the first-frame cursor was hidden
-  // because useBoxMetrics flips hasMeasured inside a useEffect, one frame
-  // after yoga has already committed layout. getAbsoluteOrigin's null-check
-  // is sufficient: if parent-chain layout is ready (the common case after
-  // first commit), we position the cursor immediately; if it isn't, the
-  // intrinsic null path keeps the cursor hidden — same behavior as before.
+  // (parent-relative); the absolute parent-chain origin is recomputed below.
   useBoxMetrics(anchorRef);
 
-  // Render-phase calculation. setCursorPosition is a ref-write callback in
-  // Ink, not a React state setter — calling it during render is safe.
-  // When `declared` is null the caller is yielding the cursor (e.g. permission
-  // selector owns focus); pass undefined so Ink hides the native cursor.
-  let desired: { x: number; y: number } | undefined;
-  if (declared && capability.cursorPositioning) {
-    let origin: { x: number; y: number } | null = null;
-    try {
-      origin = getAbsoluteOrigin(anchorRef.current);
-    } catch {
-      origin = null;
-    }
-    if (origin) {
-      desired = {
-        x: Math.max(0, Math.round(origin.x + declared.col)),
-        y: Math.max(0, Math.round(origin.y + declared.row)),
-      };
-    }
+  // Feed Ink the last post-layout cursor position during render; Ink commits
+  // it in its own insertion effect. We refresh this state in a layout effect
+  // below so parent-chain moves (home centering, task bottom pinning, resize)
+  // do not reuse stale render-phase Yoga coordinates.
+  setCursorPosition(committedPosition);
+
+  useLayoutEffect(() => {
+    const next = resolveAnchoredCursorPosition(declared, anchorRef, capability);
+    setCommittedPosition((previous) => (samePosition(previous, next) ? previous : next));
+  });
+}
+
+function resolveAnchoredCursorPosition(
+  declared: { row: number; col: number } | null,
+  anchorRef: React.RefObject<DOMElement | null>,
+  capability: TerminalCapability,
+): { x: number; y: number } | undefined {
+  if (!declared || !capability.cursorPositioning) return undefined;
+  let origin: { x: number; y: number } | null = null;
+  try {
+    origin = getAbsoluteOrigin(anchorRef.current);
+  } catch {
+    origin = null;
   }
-  setCursorPosition(desired);
+  if (!origin) return undefined;
+  return {
+    x: Math.max(0, Math.round(origin.x + declared.col)),
+    y: Math.max(0, Math.round(origin.y + declared.row)),
+  };
+}
+
+function samePosition(
+  left: { x: number; y: number } | undefined,
+  right: { x: number; y: number } | undefined,
+): boolean {
+  return left?.x === right?.x && left?.y === right?.y;
 }

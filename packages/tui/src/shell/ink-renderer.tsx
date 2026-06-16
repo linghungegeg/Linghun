@@ -21,6 +21,8 @@ export type InkShellInstance = {
   waitUntilRenderFlush: () => Promise<void>;
 };
 
+type InkStdout = NodeJS.WriteStream & { __linghunRawStdout?: NodeJS.WriteStream };
+
 export function shouldUseInkShell(input: Readable, output: Writable): boolean {
   if (process.env.LINGHUN_TUI_PLAIN === "1") return false;
   if (process.env.TERM === "dumb") return false;
@@ -40,6 +42,7 @@ export function renderInkShell(
   options: ShellRenderOptions = {},
 ): InkShellInstance {
   const stdout = options.stdout as NodeJS.WriteStream | undefined;
+  const inkStdout = createInkStdout(stdout);
   const capability = detectTerminalCapability();
   const useAlternateScreen = resolveAlternateScreen(capability);
   const terminalInteractionModes = resolveTerminalInteractionModes({
@@ -60,7 +63,7 @@ export function renderInkShell(
     terminalInteractionSession.enable();
     instance = render(<ShellApp controller={controller} capability={capability} />, {
       stdin: options.stdin as NodeJS.ReadStream | undefined,
-      stdout,
+      stdout: inkStdout,
       stderr: options.stderr as NodeJS.WriteStream | undefined,
       exitOnCtrlC: false,
       alternateScreen: useAlternateScreen,
@@ -137,13 +140,11 @@ export function renderInkShell(
     resizeTimer = setTimeout(() => {
       resizeTimer = undefined;
       if (unmounted) return;
-      try {
-        if (useAlternateScreen) {
-          instance.clear();
-        }
-      } catch {
-        // Ignore clear errors if stdout is closed
-      }
+      // Resize changes the terminal's physical wrap width. Clear only the
+      // current viewport before rerendering so normal-screen Task output does
+      // not leave old-width frames behind. Do not use Ink's clear() here: it
+      // also clears native scrollback in common terminals.
+      writeBestEffort(stdout, "\x1B[2J\x1B[H");
       terminalInteractionSession.reassert();
       rerender();
       // Note: Viewport clamp happens automatically in ScrollViewport's useEffect
@@ -188,6 +189,22 @@ export function resolveAlternateScreen(capability: TerminalCapability): boolean 
 
 function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {
   writeBestEffort(stdout, "\x1B[?25h");
+}
+
+function createInkStdout(stdout: NodeJS.WriteStream | undefined): NodeJS.WriteStream | undefined {
+  if (!stdout) return undefined;
+  const wrapped = Object.create(stdout) as InkStdout;
+  wrapped.__linghunRawStdout = stdout;
+  wrapped.write = ((chunk: unknown, ...args: unknown[]) => {
+    const next =
+      typeof chunk === "string"
+        ? chunk.replace(/\x1B\[3J/g, "")
+        : Buffer.isBuffer(chunk)
+          ? Buffer.from(chunk.toString().replace(/\x1B\[3J/g, ""))
+          : chunk;
+    return (stdout.write as (...writeArgs: unknown[]) => boolean).call(stdout, next, ...args);
+  }) as NodeJS.WriteStream["write"];
+  return wrapped;
 }
 
 export function isNoColorTerminal(): boolean {

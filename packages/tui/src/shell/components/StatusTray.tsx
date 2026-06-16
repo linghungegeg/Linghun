@@ -1,5 +1,6 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
+import { fitText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 import type { StatusTrayViewModel } from "../types.js";
 
@@ -18,7 +19,9 @@ export function StatusTray({
   const visible = width < 60 ? [items[0], items[1], items[2], items[4]] : items;
   return (
     <Box marginTop={0} marginBottom={0}>
-      <Text color={theme.subtle ?? theme.muted}>{visible.join("  ")}</Text>
+      <Text color={theme.subtle ?? theme.muted}>
+        {fitText(visible.join("  "), Math.max(8, width - 2))}
+      </Text>
     </Box>
   );
 }

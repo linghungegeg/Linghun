@@ -358,28 +358,71 @@ function InlineCellRangeRow({
   theme,
   dim,
   tone,
+  wrapWidth,
 }: {
   value: string;
   ranges: ProductBlockSelectionRange[];
   theme: ShellTheme;
   dim: boolean;
   tone: MessageMarkdownProps["tone"];
+  wrapWidth?: number;
 }): React.ReactNode {
-  const segments = splitLineBySelectionRanges(value, ranges);
+  const rows = splitSelectionRows(value, ranges, wrapWidth);
   return (
-    <Text>
-      {segments.map((segment, index) => (
-        <InlineText
-          key={`${index}-${segment.selected ? "selected" : "plain"}-${segment.text}`}
-          value={segment.text}
-          theme={theme}
-          dim={dim}
-          tone={tone}
-          selected={segment.selected}
-        />
+    <Box flexDirection="column">
+      {rows.map((row, rowIndex) => (
+        <Text key={`${rowIndex}-${row.value}`}>
+          {splitLineBySelectionRanges(row.value, row.ranges).map((segment, index) => (
+            <InlineText
+              key={`${index}-${segment.selected ? "selected" : "plain"}-${segment.text}`}
+              value={segment.text}
+              theme={theme}
+              dim={dim}
+              tone={tone}
+              selected={segment.selected}
+            />
+          ))}
+        </Text>
       ))}
-    </Text>
+    </Box>
   );
+}
+
+function splitSelectionRows(
+  value: string,
+  ranges: ProductBlockSelectionRange[],
+  wrapWidth?: number,
+): Array<{ value: string; ranges: ProductBlockSelectionRange[] }> {
+  if (!wrapWidth || wrapWidth <= 0) return [{ value, ranges }];
+  const rows: Array<{ value: string; startColumn: number; endColumn: number }> = [];
+  const chars = Array.from(value);
+  let start = 0;
+  let width = 0;
+  for (let index = 0; index < chars.length; index++) {
+    const next = charWidth(chars[index] ?? "");
+    if (index > start && width + next > wrapWidth) {
+      rows.push({ value: chars.slice(start, index).join(""), startColumn: start, endColumn: index });
+      start = index;
+      width = 0;
+    }
+    width += next;
+  }
+  rows.push({ value: chars.slice(start).join(""), startColumn: start, endColumn: chars.length });
+  return rows.map((row) => ({
+    value: row.value,
+    ranges: ranges
+      .map((range) => {
+        const startColumn = Math.max(range.startColumn, row.startColumn);
+        const endColumn = Math.min(range.endColumn, row.endColumn);
+        if (endColumn <= startColumn) return undefined;
+        return {
+          ...range,
+          startColumn: startColumn - row.startColumn,
+          endColumn: endColumn - row.startColumn,
+        };
+      })
+      .filter((range): range is ProductBlockSelectionRange => Boolean(range)),
+  }));
 }
 
 function splitLineBySelectionRanges(
@@ -1023,6 +1066,7 @@ function renderSelectablePlainMarkdown({
           theme={theme}
           dim={dim}
           tone={tone}
+          wrapWidth={effectiveWrapWidth}
         />,
       );
       continue;
@@ -1034,7 +1078,7 @@ function renderSelectablePlainMarkdown({
         theme={theme}
         dim={dim}
         tone={tone}
-        wrapWidth={wrapWidth}
+        wrapWidth={effectiveWrapWidth}
         selected={selectedLines.has(lineIndex)}
       />,
     );

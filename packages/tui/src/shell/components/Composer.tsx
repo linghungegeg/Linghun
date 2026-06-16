@@ -260,7 +260,7 @@ function buildVisualLines(buf: EditBuffer, maxWidth?: number): VisualLine[] {
     const isFirstRawLine = rawIndex === 0;
     let startChar = 0;
     while (startChar < chars.length || (chars.length === 0 && startChar === 0)) {
-      const prompt = isFirstRawLine && startChar === 0 ? PROMPT_MARKER : PROMPT_MARKER_CONTINUATION;
+      const prompt = isFirstRawLine && startChar === 0 ? PROMPT_MARKER : "";
       const promptWidth = displayWidthOf(prompt);
       const budget = Math.max(4, composerWidth - promptWidth);
       let width = 0;
@@ -297,6 +297,18 @@ function isWordBoundary(ch: string): boolean {
 
 export function sanitizeComposerInput(value: string): string {
   return sanitizeTerminalText(value);
+}
+
+export function sanitizeComposerPasteInput(value: string): string {
+  const sanitized = sanitizeComposerInput(value);
+  const hasLineBreak = sanitized.includes("\n");
+  const merged = hasLineBreak
+    ? sanitized.replace(/[ \t\f\v]*\n+[ \t\f\v]*/g, " ").replace(/[ \t\f\v]{2,}/g, " ").trim()
+    : sanitized;
+  return merged.replace(
+    /([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]) +([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])/gu,
+    "$1$2",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -490,7 +502,6 @@ export function isMultilineEnterSequence(input: string): boolean {
 
 const COMPOSER_MAX_VISIBLE_LINES = 5;
 const PROMPT_MARKER = "› ";
-const PROMPT_MARKER_CONTINUATION = " ".repeat(displayWidthOf(PROMPT_MARKER));
 
 const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
   "allow_once",
@@ -516,6 +527,7 @@ const PASTE_COMPLETION_TIMEOUT_MS = 100;
 // DOUBLE_PRESS_WINDOW_MS: 双击 Esc / Ctrl+C 的有效窗口（CCB ~1s）。
 const DOUBLE_PRESS_WINDOW_MS = 1000;
 const HINT_NOTICE_DECAY_MS = 1500;
+const INLINE_CURSOR_BLINK_MS = 530;
 
 export function Composer({ view, onInput, capability }: ComposerProps): React.ReactNode {
   const [buffer, setBuffer] = useState<EditBuffer>(createEditBuffer());
@@ -524,6 +536,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const [slashHidden, setSlashHidden] = useState(false);
   const [permissionFocus, setPermissionFocus] = useState<PermissionActionId>("allow_once");
   const [hintNotice, setHintNotice] = useState<string | undefined>(undefined);
+  const [cursorBlinkOn, setCursorBlinkOn] = useState(true);
   const historyRef = useRef<InputHistory>(createInputHistory());
   const pasteChunksRef = useRef<string[]>([]);
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -684,7 +697,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     }
     pastePendingRef.current = false;
     if (chunks.length === 0) return;
-    const joined = sanitizeComposerInput(chunks.join(""));
+    const joined = sanitizeComposerPasteInput(chunks.join(""));
     if (!joined) return;
     const next = bufferInsert(bufferRef.current, joined);
     bufferRef.current = next;
@@ -718,6 +731,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (permissionActive) return;
+    setCursorBlinkOn(true);
+    const timer = setInterval(() => {
+      setCursorBlinkOn((current) => !current);
+    }, INLINE_CURSOR_BLINK_MS);
+    return () => clearInterval(timer);
+  }, [permissionActive]);
 
   useInput(
     (input, key) => {
@@ -1481,7 +1503,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         : view.composer.placeholder;
 
   const composerInnerWidth = Math.max(8, maxWidth - 4);
-  const { lines, truncatedAbove, truncatedBelow, cursorCol, cursorRow } = useMemo(
+  const { visualLines, truncatedAbove, truncatedBelow, cursorCol, cursorRow } = useMemo(
     () =>
       formatComposerRenderLines({
         buffer,
@@ -1507,19 +1529,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const showSuggestions =
     !permissionActive && slashCandidates.length > 0 && slashSelection >= 0 && !slashHidden;
 
-  const declaredRow = composerCursorAnchorRowOffset({
-    textAnchorRowBase: view.viewMode === "home" ? 0 : 1,
-    permissionActive,
-    permissionActionCount: permissionActions.length,
-    showSuggestions,
-    slashCandidateCount: slashCandidates.length,
-    cursorRow,
-  });
-  useAnchoredCursor(
-    permissionActive ? null : { row: declaredRow, col: cursorCol },
-    anchorRef,
-    capability,
-  );
+  // Windows Terminal + normal-screen Ink output does not provide a stable
+  // native cursor anchor when the composer soft-wraps or moves between Home
+  // and Task layouts. Render the composer caret inline with the text instead;
+  // keep the native terminal cursor hidden so there is only one focus owner.
+  useAnchoredCursor(null, anchorRef, capability);
 
   const placeholderColor = noColor ? undefined : "gray";
   const color = text ? undefined : placeholderColor;
@@ -1569,28 +1583,27 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           }
         />
       ) : null}
-      <Box width="100%" flexDirection="row" alignItems="flex-start">
-        <Text color={theme.muted} dimColor={!text}>
-          {PROMPT_MARKER}
-        </Text>
-        <Box
-          ref={anchorRef}
-          flexDirection="column"
-          width={Math.max(4, composerInnerWidth - displayWidthOf(PROMPT_MARKER))}
-        >
-          {lines.map((line, index) => {
-            return (
-              <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-                {sliceWidth(line, Math.max(4, composerInnerWidth - displayWidthOf(PROMPT_MARKER)))}
-                {index === lines.length - 1 && ghostSuffix ? (
-                  <Text color="gray" dimColor>
-                    {ghostSuffix}
-                  </Text>
-                ) : null}
+      <Box ref={anchorRef} width="100%" flexDirection="column">
+        {visualLines.map((line, index) => {
+          const lineWidth = Math.max(4, composerInnerWidth - displayWidthOf(line.prefix));
+          const clippedLine = sliceWidth(line.text, lineWidth);
+          const showInlineCursor = !permissionActive && index === cursorRow;
+          return (
+            <Text key={`${index}-${line.prefix}-${line.text}`} color={color} bold={Boolean(text)}>
+              <Text color={theme.muted} dimColor={!text}>
+                {line.prefix}
               </Text>
-            );
-          })}
-        </Box>
+              {showInlineCursor
+                ? renderInlineComposerCursor(clippedLine, cursorCol, cursorBlinkOn)
+                : clippedLine}
+              {index === visualLines.length - 1 && ghostSuffix ? (
+                <Text color="gray" dimColor>
+                  {ghostSuffix}
+                </Text>
+              ) : null}
+            </Text>
+          );
+        })}
       </Box>
       {showUnknownHint ? (
         <Text color={theme.muted}>
@@ -1754,6 +1767,7 @@ function slashHead(value: string): string {
 
 export type ComposerRenderResult = {
   lines: string[];
+  visualLines: Array<{ prefix: string; text: string }>;
   truncatedAbove: number;
   truncatedBelow: number;
   cursorCol: number;
@@ -1780,6 +1794,7 @@ export function formatComposerRenderLines({
   if (!displayText) {
     return {
       lines: [placeholder],
+      visualLines: [{ prefix: PROMPT_MARKER, text: placeholder }],
       truncatedAbove: 0,
       truncatedBelow: 0,
       cursorCol: 0,
@@ -1793,6 +1808,7 @@ export function formatComposerRenderLines({
   const composerWidth = Math.max(8, maxWidth ?? 80);
   const softLines: Array<{
     text: string;
+    prefix: string;
     rawLineIndex: number;
     startChar: number;
     endChar: number;
@@ -1803,9 +1819,11 @@ export function formatComposerRenderLines({
   for (let rawIndex = 0; rawIndex < rawLines.length; rawIndex++) {
     const rawLine = rawLines[rawIndex] ?? "";
     const chars = Array.from(masking ? "*".repeat(Array.from(rawLine).length) : rawLine);
+    const isFirstRawLine = rawIndex === 0;
     let startChar = 0;
     while (startChar < chars.length || (chars.length === 0 && startChar === 0)) {
-      const budget = Math.max(4, composerWidth - displayWidthOf(PROMPT_MARKER));
+      const prefix = isFirstRawLine && startChar === 0 ? PROMPT_MARKER : "";
+      const budget = Math.max(4, composerWidth - displayWidthOf(prefix));
       let width = 0;
       let endChar = startChar;
       while (endChar < chars.length) {
@@ -1817,7 +1835,7 @@ export function formatComposerRenderLines({
       if (endChar === startChar && chars.length > 0) endChar++;
       const text = chars.slice(startChar, endChar).join("");
       const softIndex = softLines.length;
-      softLines.push({ text, rawLineIndex: rawIndex, startChar, endChar });
+      softLines.push({ text, prefix, rawLineIndex: rawIndex, startChar, endChar });
       if (rawIndex === cursorLineIndex && cursorCharCol >= startChar && cursorCharCol <= endChar) {
         cursorSoftIndex = softIndex;
         let cursorWidth = 0;
@@ -1843,7 +1861,8 @@ export function formatComposerRenderLines({
       startLine = Math.max(0, endLineExclusive - COMPOSER_MAX_VISIBLE_LINES);
     }
   }
-  const renderedLines = softLines.slice(startLine, endLineExclusive).map((line) => line.text);
+  const visibleSoftLines = softLines.slice(startLine, endLineExclusive);
+  const renderedLines = visibleSoftLines.map((line) => line.text);
   const truncatedAbove = startLine;
   const truncatedBelow = totalLines - endLineExclusive;
   const cursorVisibleRow = Math.max(
@@ -1853,6 +1872,7 @@ export function formatComposerRenderLines({
 
   return {
     lines: renderedLines,
+    visualLines: visibleSoftLines.map((line) => ({ prefix: line.prefix, text: line.text })),
     truncatedAbove,
     truncatedBelow,
     cursorCol: maxWidth && cursorOutCol > maxWidth ? maxWidth : cursorOutCol,
@@ -1871,6 +1891,18 @@ function sliceWidth(value: string, max: number): string {
     width = next;
   }
   return result;
+}
+
+function renderInlineComposerCursor(line: string, col: number, visible: boolean): React.ReactNode {
+  const { before, cursorChar, after } = splitLineAtDisplayCol(line, col);
+  const cursorCell = cursorChar || " ";
+  return (
+    <>
+      {before}
+      {visible ? <Text inverse>{cursorCell}</Text> : cursorCell}
+      {after}
+    </>
+  );
 }
 
 /** Slice a window starting at display column `start` for up to `width` columns. */
@@ -1952,7 +1984,7 @@ export function splitLineAtDisplayCol(
 }
 
 export function composerCursorAnchorRowOffset({
-  textAnchorRowBase = 1,
+  textAnchorRowBase = 0,
   permissionActive,
   permissionActionCount,
   showSuggestions,
@@ -1966,14 +1998,11 @@ export function composerCursorAnchorRowOffset({
   slashCandidateCount: number;
   cursorRow: number;
 }): number {
-  let offset = 0;
-  if (permissionActive) {
-    offset += 2 + Math.max(0, permissionActionCount) + 2;
-  }
-  if (showSuggestions) {
-    offset += Math.max(0, slashCandidateCount) + 1;
-  }
-  return offset + Math.max(0, textAnchorRowBase) + Math.max(0, cursorRow);
+  void permissionActive;
+  void permissionActionCount;
+  void showSuggestions;
+  void slashCandidateCount;
+  return Math.max(0, textAnchorRowBase) + Math.max(0, cursorRow);
 }
 
 function hasSelectableCommandPanelRows(panel: CommandPanelView | undefined): boolean {

@@ -70,7 +70,7 @@ export function HistorySearchPanel({
         <Text color={theme.accent} bold>
           {hint.prefix}
         </Text>
-        <Text>{query || ""}</Text>
+        <Text>{fitText(query || "", Math.max(8, innerWidth - hint.prefix.length))}</Text>
       </Text>
 
       {/* Results list */}
