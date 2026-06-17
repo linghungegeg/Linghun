@@ -2277,14 +2277,17 @@ async function runInkShell(
   const controller: ShellController = {
     getViewModel: () => {
       const runtime = getSelectedModelRuntime(context);
+      const width = readOutputColumns(output);
+      const height = readOutputRows(output);
+      const activity = mapRequestActivityToView(context);
       return createShellViewModel(context, {
-        width: readOutputColumns(output),
-        height: readOutputRows(output),
+        width,
+        height,
         noColor: isNoColorTerminal(),
         setupNeeded: startup.setupNeeded,
         projectRouteProblem: startup.projectRouteProblem,
         outputBlocks: blocks,
-        activity: mapRequestActivityToView(context),
+        activity,
         permission: mapPendingApprovalToPermission(context),
         submitted: submittedPending,
         submittedStartedAt: submittedPendingStartedAt,
@@ -3304,11 +3307,15 @@ async function runInkShell(
       const hasAgents = (context.agents ?? []).length > 0;
       const hasWorkflows =
         (context.workflows?.activeRuns ?? []).length > 0 || Boolean(context.workflows?.activeRun);
-      const hasBgTasks = (context.backgroundTasks ?? []).length > 0;
+      const hasBgTasks = (context.backgroundTasks ?? []).some((task) => task.status === "running");
+      const hasActiveAbort = Boolean(
+        context.activeAbortController &&
+          (context.activeAbortController.signal?.aborted !== true),
+      );
       if (
         !submittedPending &&
         !context.requestActivityPhase &&
-        !context.activeAbortController &&
+        !hasActiveAbort &&
         !hasAgents &&
         !hasWorkflows &&
         !hasBgTasks

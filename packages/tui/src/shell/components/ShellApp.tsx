@@ -10,12 +10,14 @@ import { AgentProgressTree } from "./AgentProgressTree.js";
 import { BackgroundTaskOverlay } from "./BackgroundTaskOverlay.js";
 import { BtwPanel } from "./BtwPanel.js";
 import { CommandPanel } from "./CommandPanel.js";
-import { Composer } from "./Composer.js";
+import { Composer, type ComposerLayout } from "./Composer.js";
 import { ConfigPanel } from "./ConfigPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
 import { StreamingMarkdown } from "./MessageMarkdown.js";
+import { MouseInputRouter } from "./MouseInputRouter.js";
 import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
+import { TranscriptViewport } from "./ScrollViewport.js";
 import { SessionsPanel } from "./SessionsPanel.js";
 import { StatusFooter } from "./StatusFooter.js";
 import { StatusTray } from "./StatusTray.js";
@@ -83,7 +85,12 @@ export function ShellApp({
         ) : null}
         {/* Headless Composer — keyboard routing only, zero visual footprint. */}
         <Box height={0} overflow="hidden">
-          <Composer view={view} onInput={controller.onInput} capability={capability} />
+          <Composer
+            view={view}
+            onInput={controller.onInput}
+            capability={capability}
+            layout={taskComposerLayout(view.width)}
+          />
         </Box>
       </Box>
     );
@@ -144,7 +151,12 @@ function HomeLayout({
 
       {/* Composer: single cursor owner */}
       <Box marginTop={1} flexDirection="column" width={cw}>
-        <Composer view={view} onInput={controller.onInput} capability={capability} />
+        <Composer
+          view={view}
+          onInput={controller.onInput}
+          capability={capability}
+          layout={homeComposerLayout(view.width)}
+        />
       </Box>
 
       {/* Status tray */}
@@ -216,6 +228,7 @@ function TaskLayout({
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
   const contentWidth = taskContentWidth(view.width);
+  const mouseRouterActive = resolveAlternateScreen(capability);
   const expandedTranscriptBlock =
     view.ctrlOExpand?.active && view.ctrlOExpand.blockId
       ? view.blocks.find((block) => block.id === view.ctrlOExpand?.blockId)
@@ -235,76 +248,92 @@ function TaskLayout({
     <Box flexDirection="column" width={view.width} height={view.height}>
       {/* Single dynamic transcript surface: resize must reflow every visible block without replaying Static output. */}
       <Box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
-        <Box flexGrow={1} minHeight={0} />
-        <Box flexDirection="column" paddingX={2} overflow="hidden">
-          {expandedTranscriptBlock ? (
-            <Box flexDirection="column" marginBottom={1}>
-              <ProductBlock
-                block={{ ...expandedTranscriptBlock, ctrlOCollapsed: false }}
-                theme={theme}
-                width={contentWidth}
-                language={view.language}
-              />
-            </Box>
-          ) : view.blocks.length > 0 ? (
-            <Box flexDirection="column">
-              {view.blocks.map((block) => (
+        <MouseInputRouter
+          active={mouseRouterActive}
+          scroll={view.transcriptScroll}
+          onInput={controller.onInput}
+        />
+        <TranscriptViewport
+          scroll={view.transcriptScroll}
+          virtualRange={view.transcriptVirtualRange}
+          onMeasure={({ viewportHeight, contentHeight }) =>
+            controller.onInput({ type: "transcript-scroll-measure", viewportHeight, contentHeight })
+          }
+          onGeometry={(geometry) =>
+            controller.onInput({ type: "transcript-viewport-geometry", geometry })
+          }
+        >
+          <Box flexDirection="column" paddingX={2}>
+            {expandedTranscriptBlock ? (
+              <Box flexDirection="column" marginBottom={1}>
                 <ProductBlock
-                  key={block.id}
-                  block={block}
+                  block={{ ...expandedTranscriptBlock, ctrlOCollapsed: false }}
                   theme={theme}
                   width={contentWidth}
                   language={view.language}
                 />
-              ))}
-            </Box>
-          ) : null}
+              </Box>
+            ) : view.blocks.length > 0 ? (
+              <Box flexDirection="column">
+                {view.blocks.map((block) => (
+                  <ProductBlock
+                    key={block.id}
+                    block={block}
+                    theme={theme}
+                    width={contentWidth}
+                    language={view.language}
+                  />
+                ))}
+              </Box>
+            ) : null}
 
-          {view.streamingAssistantText ? (
-            <Box marginTop={expandedTranscriptBlock || view.blocks.length > 0 ? 1 : 0}>
-              <StreamingMarkdown
-                text={view.streamingAssistantText}
-                theme={theme}
-                wrapWidth={contentWidth}
+            {view.streamingAssistantText ? (
+              <Box marginTop={expandedTranscriptBlock || view.blocks.length > 0 ? 1 : 0}>
+                <StreamingMarkdown
+                  text={view.streamingAssistantText}
+                  theme={theme}
+                  wrapWidth={contentWidth}
+                />
+              </Box>
+            ) : null}
+
+            {view.activity ? (
+              <Box
+                marginTop={
+                  expandedTranscriptBlock || view.blocks.length > 0 || view.streamingAssistantText
+                    ? 1
+                    : 0
+                }
+              >
+                <ActivityIndicator
+                  activity={view.activity}
+                  theme={theme}
+                  width={contentWidth}
+                  tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
+                />
+              </Box>
+            ) : null}
+
+            {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
+              <TaskSuggestionBar
+                suggestions={view.taskSuggestions}
+                cursor={view.taskSuggestionCursor ?? 0}
+                width={view.width}
+                noColor={noColor}
               />
-            </Box>
-          ) : null}
+            ) : null}
 
-          {view.activity ? (
-            <Box
-              marginTop={
-                expandedTranscriptBlock || view.blocks.length > 0 || view.streamingAssistantText
-                  ? 1
-                  : 0
-              }
-            >
-              <ActivityIndicator
-                activity={view.activity}
-                theme={theme}
-                tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
-              />
-            </Box>
-          ) : null}
-
-          {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
-            <TaskSuggestionBar
-              suggestions={view.taskSuggestions}
-              cursor={view.taskSuggestionCursor ?? 0}
-              width={view.width}
-              noColor={noColor}
-            />
-          ) : null}
-
-          {view.limitations.length > 0 ? (
-            <Box flexDirection="column" marginTop={1}>
-              {view.limitations.map((item) => (
-                <Text key={item} color={theme.muted}>
-                  {item}
-                </Text>
-              ))}
-            </Box>
-          ) : null}
-        </Box>
+            {view.limitations.length > 0 ? (
+              <Box flexDirection="column" marginTop={1}>
+                {view.limitations.map((item) => (
+                  <Text key={item} color={theme.muted}>
+                    {item}
+                  </Text>
+                ))}
+              </Box>
+            ) : null}
+          </Box>
+        </TranscriptViewport>
         {view.unseenMessageCount && view.unseenMessageCount > 0 ? (
           <UnseenMessagePill
             count={view.unseenMessageCount}
@@ -379,7 +408,12 @@ function TaskLayout({
         ) : null}
 
         <Box flexDirection="column" width={cw} paddingTop={1}>
-          <Composer view={view} onInput={controller.onInput} capability={capability} />
+          <Composer
+            view={view}
+            onInput={controller.onInput}
+            capability={capability}
+            layout={taskComposerLayout(view.width)}
+          />
         </Box>
 
         {view.taskFooter ? (
@@ -398,10 +432,30 @@ function TaskLayout({
 }
 
 function taskContentWidth(viewWidth: number): number {
-  // paddingX=2 consumes four terminal cells. Keep a small right-edge reserve
-  // for Windows Terminal scrollbars / box rounding so wrapped text never lands
-  // exactly on the clipping boundary.
-  return Math.max(8, viewWidth - 6);
+  // paddingX=2 consumes four terminal cells. Keep output width aligned with
+  // the actual content column so markdown/code/diff wrap once at the visible
+  // boundary instead of being squeezed by an extra hidden reserve.
+  return Math.max(8, viewWidth - 4);
+}
+
+function homeComposerLayout(viewWidth: number): ComposerLayout {
+  return {
+    width: composerMaxWidth(viewWidth),
+    paddingLeft: 2,
+    paddingRight: 2,
+    prefixWidth: 2,
+    minContentWidth: 4,
+  };
+}
+
+function taskComposerLayout(viewWidth: number): ComposerLayout {
+  return {
+    width: taskComposerMaxWidth(viewWidth),
+    paddingLeft: 2,
+    paddingRight: 2,
+    prefixWidth: 2,
+    minContentWidth: 4,
+  };
 }
 
 // D.13Q-UX: 旧的 TaskFooter 组件已迁到 packages/tui/src/shell/components/StatusFooter.tsx。
@@ -463,10 +517,12 @@ function resolvePanel(
 function ActivityIndicator({
   activity,
   theme,
+  width,
   tokenCount,
 }: {
   activity: TaskActivityView;
   theme: ReturnType<typeof createShellTheme>;
+  width: number;
   tokenCount?: number;
 }): React.ReactNode {
   const [frame, setFrame] = useState(0);
@@ -521,22 +577,29 @@ function ActivityIndicator({
   const isToolHeader = activity.phase === "tool_running" && activity.toolName;
   return (
     <Box flexDirection="column">
-      <Box>
+      <Box width={width}>
         {isToolHeader ? (
           <>
-            <Text color={theme.toolRunning ?? color}>{marker} </Text>
-            <Text bold color={theme.toolRunning ?? color}>
+            <Text wrap="wrap" color={theme.toolRunning ?? color}>
+              {marker}{" "}
+            </Text>
+            <Text wrap="wrap" bold color={theme.toolRunning ?? color}>
               {activity.toolName}
             </Text>
-            {activity.toolTarget ? <Text color={theme.muted}>({activity.toolTarget})</Text> : null}
+            {activity.toolTarget ? (
+              <Text wrap="wrap" color={theme.muted}>
+                ({activity.toolTarget})
+              </Text>
+            ) : null}
           </>
         ) : (
-          <Text color={color} bold={activity.phase === "thinking" && frame % 10 < 5}>
+          <Text wrap="wrap" color={color} bold={activity.phase === "thinking" && frame % 10 < 5}>
             {marker} {text}
           </Text>
         )}
         {activity.elapsed ? (
           <Text
+            wrap="wrap"
             color={slow ? (theme.warning ?? theme.status.partial) : theme.muted}
             dimColor={!slow}
           >
@@ -545,18 +608,18 @@ function ActivityIndicator({
           </Text>
         ) : null}
         {slowText ? (
-          <Text color={theme.muted} dimColor>
+          <Text wrap="wrap" color={theme.muted} dimColor>
             {slowText}
           </Text>
         ) : null}
         {showTokenCount ? (
-          <Text color={theme.muted} dimColor>
+          <Text wrap="wrap" color={theme.muted} dimColor>
             {activity.language === "en-US" ? ` · ${tokenCount} tokens` : ` · ${tokenCount} tokens`}
           </Text>
         ) : null}
       </Box>
       {showStats ? (
-        <Box>
+        <Box width={width}>
           <Text dimColor>
             {"   "}
             {activity.totalLines

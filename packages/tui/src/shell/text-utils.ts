@@ -56,6 +56,118 @@ export function displayWidth(value: string): number {
   return width;
 }
 
+export type WrappedInputStateInput = {
+  text: string;
+  cursorOffset: number;
+  width: number;
+  prefixWidth?: number;
+  paddingLeft?: number;
+  paddingRight?: number;
+  minContentWidth?: number;
+};
+
+export type WrappedInputState = {
+  lines: string[];
+  cursorRow: number;
+  cursorCol: number;
+  contentWidth: number;
+};
+
+export function computeWrappedInputState(input: WrappedInputStateInput): WrappedInputState {
+  const normalizedText = String(input.text ?? "").replace(/\r/g, "");
+  const chars = Array.from(normalizedText);
+  const cursorOffset = clamp(input.cursorOffset, 0, chars.length);
+  const safeWidth = Math.max(0, Math.floor(Number.isFinite(input.width) ? input.width : 0));
+  const safePrefixWidth = Math.max(0, Math.floor(input.prefixWidth ?? 0));
+  const safePaddingLeft = Math.max(0, Math.floor(input.paddingLeft ?? 0));
+  const safePaddingRight = Math.max(0, Math.floor(input.paddingRight ?? 0));
+  const safeMinContentWidth = Math.max(0, Math.floor(input.minContentWidth ?? 0));
+  const contentWidth = Math.max(
+    safeMinContentWidth,
+    safeWidth - safePaddingLeft - safePaddingRight,
+  );
+  const firstLineWidth = Math.max(1, contentWidth - safePrefixWidth);
+  const wrappedLines: string[] = [];
+  let cursorRow = 0;
+  let cursorCol = 0;
+  let cursorResolved = false;
+  const logicalLines = normalizedText.split("\n");
+  let logicalLineStart = 0;
+  let fallbackLineStart = 0;
+  let fallbackLineChars: string[] = [];
+
+  for (let logicalIndex = 0; logicalIndex < logicalLines.length; logicalIndex += 1) {
+    const lineText = logicalLines[logicalIndex] ?? "";
+    const lineChars = Array.from(lineText);
+    const lineStartOffset = logicalLineStart;
+    const lineEndOffset = lineStartOffset + lineChars.length;
+    const wrapWidth = logicalIndex === 0 ? firstLineWidth : Math.max(1, contentWidth);
+    const segments = wrapInputLine(lineChars, wrapWidth);
+
+    fallbackLineStart = lineStartOffset;
+    fallbackLineChars = lineChars;
+
+    for (const segment of segments) {
+      const segmentText = lineChars.slice(segment.start, segment.end).join("");
+      wrappedLines.push(segmentText);
+
+      if (!cursorResolved && cursorOffset >= lineStartOffset && cursorOffset <= lineEndOffset) {
+        const lineCursorOffset = cursorOffset - lineStartOffset;
+        if (lineCursorOffset >= segment.start && lineCursorOffset <= segment.end) {
+          cursorRow = wrappedLines.length - 1;
+          cursorCol = displayWidth(lineChars.slice(segment.start, lineCursorOffset).join(""));
+          cursorResolved = true;
+        }
+      }
+    }
+
+    logicalLineStart += lineChars.length + 1;
+  }
+
+  if (!cursorResolved) {
+    cursorRow = Math.max(0, wrappedLines.length - 1);
+    cursorCol = displayWidth(
+      fallbackLineChars
+        .slice(0, clamp(cursorOffset - fallbackLineStart, 0, fallbackLineChars.length))
+        .join(""),
+    );
+    if (chars.length === 0) cursorCol = 0;
+  }
+
+  return {
+    lines: wrappedLines.length > 0 ? wrappedLines : [""],
+    cursorRow,
+    cursorCol,
+    contentWidth,
+  };
+}
+
+function wrapInputLine(chars: string[], wrapWidth: number): Array<{ start: number; end: number }> {
+  const safeWrapWidth = Math.max(1, Math.floor(wrapWidth));
+  const segments: Array<{ start: number; end: number }> = [];
+  let start = 0;
+  while (start < chars.length || (chars.length === 0 && start === 0)) {
+    let end = start;
+    let width = 0;
+    while (end < chars.length) {
+      const nextWidth = charWidth(chars[end] ?? "");
+      if (width > 0 && width + nextWidth > safeWrapWidth) break;
+      width += nextWidth;
+      end += 1;
+    }
+    if (end === start && chars.length > 0) end += 1;
+    segments.push({ start, end });
+    if (chars.length === 0) break;
+    start = end;
+  }
+  return segments;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 export function truncateDisplay(value: string, max: number): string {
   const normalized = String(value || "")
     .replace(/\s+/gu, " ")

@@ -235,16 +235,18 @@ describe("Composer dispatcher behavior boundaries", () => {
     });
 
     it("normalizes pasted paragraphs without changing manual input sanitation", () => {
-      expect(sanitizeComposerPasteInput("第一段\n  第二段\r\n\n第三段")).toBe("第一段第二段第三段");
+      expect(sanitizeComposerPasteInput("第一段\n  第二段\r\n\n第三段")).toBe(
+        "第一段\n第二段\n\n第三段",
+      );
       expect(sanitizeComposerPasteInput("run tests\n  then summarize")).toBe(
-        "run tests then summarize",
+        "run tests\nthen summarize",
       );
       expect(sanitizeComposerInput("第一段\n  第二段")).toBe("第一段\n  第二段");
     });
 
     it("keeps mixed Chinese/ASCII paste spacing readable", () => {
       expect(sanitizeComposerPasteInput("模型 gpt-5.5\n  推理 High")).toBe(
-        "模型 gpt-5.5 推理 High",
+        "模型 gpt-5.5\n推理 High",
       );
     });
   });
@@ -400,17 +402,91 @@ describe("Composer dispatcher behavior boundaries", () => {
     });
 
     it("soft-wrapped visual rows only prefix the first row", () => {
-      const buf = bufferInsert(createEditBuffer(""), "abcdef".repeat(6));
+      const buf = bufferInsert(createEditBuffer(""), "abcdef");
       const r = formatComposerRenderLines({
         buffer: buf,
         placeholder: "",
         masking: false,
         noColor: true,
-        maxWidth: 12,
+        maxWidth: 8,
       });
       expect(r.visualLines.length).toBeGreaterThan(1);
       expect(r.visualLines[0]?.prefix).toBe("› ");
       expect(r.visualLines.slice(1).every((line) => line.prefix === "")).toBe(true);
+    });
+
+    it("Home and Task composer layout params produce stable but separate wrapping", () => {
+      const buf = bufferInsert(createEditBuffer(""), "abcdefghij");
+      const home = formatComposerRenderLines({
+        buffer: buf,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        layout: {
+          width: 10,
+          paddingLeft: 2,
+          paddingRight: 2,
+          prefixWidth: 2,
+          minContentWidth: 4,
+        },
+      });
+      const task = formatComposerRenderLines({
+        buffer: buf,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        layout: {
+          width: 16,
+          paddingLeft: 2,
+          paddingRight: 2,
+          prefixWidth: 2,
+          minContentWidth: 4,
+        },
+      });
+      const homeAgain = formatComposerRenderLines({
+        buffer: buf,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        layout: {
+          width: 10,
+          paddingLeft: 2,
+          paddingRight: 2,
+          prefixWidth: 2,
+          minContentWidth: 4,
+        },
+      });
+
+      expect(home.lines).toEqual(["abcd", "efgh", "ij"]);
+      expect(task.lines).toEqual(["abcdefghij"]);
+      expect(home.cursorRow).toBe(2);
+      expect(task.cursorRow).toBe(0);
+      expect(homeAgain).toEqual(home);
+    });
+
+    it("Task multiline and CJK cursor positions are driven by layout", () => {
+      const multiline: EditBuffer = { ...createEditBuffer("abc\ndef"), cursor: 6 };
+      const cjk = bufferInsert(createEditBuffer(""), "你好世界");
+      const taskMultiline = formatComposerRenderLines({
+        buffer: multiline,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        layout: { width: 18, paddingLeft: 2, paddingRight: 2, prefixWidth: 2, minContentWidth: 4 },
+      });
+      const taskCjk = formatComposerRenderLines({
+        buffer: cjk,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        layout: { width: 18, paddingLeft: 2, paddingRight: 2, prefixWidth: 2, minContentWidth: 4 },
+      });
+
+      expect(taskMultiline.lines).toEqual(["abc", "def"]);
+      expect(taskMultiline.cursorRow).toBe(1);
+      expect(taskMultiline.cursorCol).toBe(2);
+      expect(taskCjk.cursorRow).toBe(0);
+      expect(taskCjk.cursorCol).toBe(8);
     });
   });
 

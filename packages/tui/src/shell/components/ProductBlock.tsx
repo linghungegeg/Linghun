@@ -92,11 +92,12 @@ export function ProductBlock({
   if (block.kind === "user" || (block.kind === "command" && block.messageKind === "user_text")) {
     const body = (block.fullText ?? block.title ?? "").trim();
     if (!body) return null;
+    const bodyWidth = Math.max(8, width - 2);
     return (
       <Box marginTop={1} marginBottom={1} flexDirection="row">
         <Text color={theme.inactive ?? theme.muted}>│ </Text>
-        <Box flexDirection="column">
-          {wrapText(body, Math.max(8, width - 2)).map((line, idx) => (
+        <Box flexDirection="column" width={bodyWidth}>
+          {wrapText(body, bodyWidth).map((line, idx) => (
             <Text
               key={`${idx}-${line}`}
               backgroundColor={theme.mode === "no-color" ? undefined : theme.userBackground}

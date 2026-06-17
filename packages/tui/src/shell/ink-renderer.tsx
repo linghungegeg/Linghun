@@ -140,11 +140,13 @@ export function renderInkShell(
     resizeTimer = setTimeout(() => {
       resizeTimer = undefined;
       if (unmounted) return;
-      // Resize changes the terminal's physical wrap width. Clear only the
-      // current viewport before rerendering so normal-screen Task output does
-      // not leave old-width frames behind. Do not use Ink's clear() here: it
-      // also clears native scrollback in common terminals.
-      writeBestEffort(stdout, "\x1B[2J\x1B[H");
+      // Resize changes the terminal's physical wrap width. In app-owned
+      // alternate screen, reassert modes and let Ink redraw the frame in-place.
+      // Normal-screen fallback still clears the current viewport before
+      // rerendering so old-width frames do not remain visible.
+      if (!useAlternateScreen) {
+        writeBestEffort(stdout, "\x1B[2J\x1B[H");
+      }
       terminalInteractionSession.reassert();
       rerender();
       // Note: Viewport clamp happens automatically in ScrollViewport's useEffect
@@ -177,14 +179,13 @@ export function renderInkShell(
 }
 
 export function resolveAlternateScreen(capability: TerminalCapability): boolean {
-  // Task 区需要终端原生 scrollback（滚动/选择/复制），不进 alt-screen。
-  // 保留环境变量 LINGHUN_FULLSCREEN=1 作为强制全屏的 opt-in 通道。
-  if (process.env.LINGHUN_FULLSCREEN === "1") {
-    if (!capability.alternateScreen) return false;
-    if (process.env.TMUX_PANE || process.env.TERM_PROGRAM === "tmux") return false;
-    return true;
-  }
-  return false;
+  // Full-screen Ink shell owns the screen by default when the terminal can
+  // safely provide an alternate buffer. Plain/headless/pipe paths never reach
+  // this renderer, and LINGHUN_FULLSCREEN=0 keeps the normal-screen fallback.
+  if (process.env.LINGHUN_FULLSCREEN === "0") return false;
+  if (!capability.alternateScreen) return false;
+  if (process.env.TMUX_PANE || process.env.TERM_PROGRAM === "tmux") return false;
+  return true;
 }
 
 function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {

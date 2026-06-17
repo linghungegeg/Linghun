@@ -12,6 +12,8 @@ Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHIT
 
 > **Terminal-Bench 2.1 single full run**: Linghun completed the official 89-task dataset in a real local development environment, scoring **65/89 = 73.03%** in one trial per task. Compared against the currently published Terminal-Bench 2.1 leaderboard scores, this single-run result is roughly in the #6 score band; it is not an accepted official leaderboard ranking. The official submission path requires `k=5`, standard timeout/resource settings, and complete trajectories. See: [English report](./reports/terminal-bench-2.1-single-run.md) / [中文报告](./reports/terminal-bench-2.1-single-run.zh.md).
 
+> **June 17, 2026 update**: The terminal display layer was tightened around input/task wrapping and cursor stability, and the tool chain gained SourcePack / ReadSnippets to reduce repeated Grep/Read round trips and deliver relevant snippets faster.
+
 ## Special Thanks
 
 <div>

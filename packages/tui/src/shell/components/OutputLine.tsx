@@ -9,6 +9,8 @@ import { renderTruncatedContent, tryJsonFormatContent } from "../output-utils.js
 import { linkifyUrlsInText } from "../hyperlink-utils.js";
 import type { ShellTheme } from "../theme.js";
 
+const OUTPUT_LINE_PADDING_LEFT = 2;
+
 type OutputLineProps = {
   content: string;
   verbose: boolean;
@@ -30,6 +32,7 @@ export function OutputLine({
   terminalWidth,
   language = "zh-CN",
 }: OutputLineProps): React.ReactNode {
+  const contentWidth = Math.max(8, terminalWidth - OUTPUT_LINE_PADDING_LEFT);
   const formattedContent = useMemo(() => {
     // Try JSON formatting
     let formatted = tryJsonFormatContent(content);
@@ -41,11 +44,11 @@ export function OutputLine({
 
     // Apply truncation if not verbose
     if (!verbose) {
-      formatted = renderTruncatedContent(formatted, terminalWidth, language);
+      formatted = renderTruncatedContent(formatted, contentWidth, language);
     }
 
     return formatted;
-  }, [content, verbose, linkifyUrls, terminalWidth, language]);
+  }, [content, verbose, linkifyUrls, contentWidth, language]);
 
   const color = isError
     ? theme.error
@@ -54,7 +57,7 @@ export function OutputLine({
       : undefined;
 
   return (
-    <Box paddingLeft={2}>
+    <Box paddingLeft={OUTPUT_LINE_PADDING_LEFT}>
       <Text color={color}>{formattedContent}</Text>
     </Box>
   );

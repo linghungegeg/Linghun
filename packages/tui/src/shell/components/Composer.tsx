@@ -18,7 +18,7 @@ import {
 } from "../models/terminal-input-runtime.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
-import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
+import { charWidth, computeWrappedInputState, fitText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type {
   CommandPanelView,
@@ -34,6 +34,15 @@ type ComposerProps = {
   view: ShellViewModel;
   onInput: (event: ShellInputEvent) => void | Promise<void>;
   capability: TerminalCapability;
+  layout?: ComposerLayout;
+};
+
+export type ComposerLayout = {
+  width: number;
+  paddingLeft: number;
+  paddingRight: number;
+  prefixWidth: number;
+  minContentWidth: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -301,14 +310,12 @@ export function sanitizeComposerInput(value: string): string {
 
 export function sanitizeComposerPasteInput(value: string): string {
   const sanitized = sanitizeComposerInput(value);
-  const hasLineBreak = sanitized.includes("\n");
-  const merged = hasLineBreak
-    ? sanitized.replace(/[ \t\f\v]*\n+[ \t\f\v]*/g, " ").replace(/[ \t\f\v]{2,}/g, " ").trim()
-    : sanitized;
-  return merged.replace(
-    /([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]) +([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])/gu,
-    "$1$2",
-  );
+  return sanitized
+    .replace(/[ \t\f\v]+\n/g, "\n")
+    .replace(/\n[ \t\f\v]+/g, "\n")
+    .replace(/[ \t\f\v]{2,}/g, " ")
+    .replace(/[ \t\f\v]+\n[ \t\f\v]*/g, "\n")
+    .replace(/[ \t\f\v]+$/g, "");
 }
 
 // ---------------------------------------------------------------------------
@@ -529,7 +536,7 @@ const DOUBLE_PRESS_WINDOW_MS = 1000;
 const HINT_NOTICE_DECAY_MS = 1500;
 const INLINE_CURSOR_BLINK_MS = 530;
 
-export function Composer({ view, onInput, capability }: ComposerProps): React.ReactNode {
+export function Composer({ view, onInput, capability, layout }: ComposerProps): React.ReactNode {
   const [buffer, setBuffer] = useState<EditBuffer>(createEditBuffer());
   const bufferRef = useRef<EditBuffer>(buffer);
   const [slashSelection, setSlashSelection] = useState(0);
@@ -548,14 +555,18 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const chordBufferRef = useRef<string[]>([]);
   const undoRingRef = useRef<UndoRing>(createUndoRing());
   const stashRef = useRef(createPromptStash());
-  // D.13Q-UX Real Smoke Fix v2 — B. task/pending 模式必须用 taskComposerMaxWidth，
-  // 与 ShellApp.TaskLayout 的 cw 对齐；否则 useAnchoredCursor 的父链 Yoga 计算
-  // 出来的 cursor 锚是 80-col 居中容器，而真正的 Composer 容器是 view.width-4，
-  // 视觉上就会出现 cursor 漂移。
-  const maxWidth =
-    view.viewMode === "task" || view.viewMode === "pending"
-      ? taskComposerMaxWidth(view.width)
-      : composerMaxWidth(view.width);
+  const composerLayout = useMemo(
+    () =>
+      layout ?? {
+        width: Math.max(40, view.width - 6),
+        paddingLeft: 2,
+        paddingRight: 2,
+        prefixWidth: displayWidthOf(PROMPT_MARKER),
+        minContentWidth: 4,
+      },
+    [layout, view.width],
+  );
+  const maxWidth = composerLayout.width;
   const noColor = view.themeMode === "no-color";
   const theme = useMemo(() => createShellTheme(noColor), [noColor]);
   const anchorRef = useRef<DOMElement | null>(null);
@@ -1502,17 +1513,16 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         ? view.composer.taskPlaceholder
         : view.composer.placeholder;
 
-  const composerInnerWidth = Math.max(8, maxWidth - 4);
-  const { visualLines, truncatedAbove, truncatedBelow, cursorCol, cursorRow } = useMemo(
+  const { visualLines, cursorCol, cursorRow } = useMemo(
     () =>
       formatComposerRenderLines({
         buffer,
         placeholder: placeholderText,
         masking: view.composer.masking,
         noColor,
-        maxWidth: composerInnerWidth,
+        layout: composerLayout,
       }),
-    [buffer, placeholderText, view.composer.masking, noColor, composerInnerWidth],
+    [buffer, placeholderText, view.composer.masking, noColor, composerLayout],
   );
 
   // Position native cursor — anchored to Composer's outer Box via parent-chain
@@ -1524,8 +1534,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // focus owners. We pass null so useAnchoredCursor hides the cursor instead.
   // Task/pending now use the same native cursor declaration as home. If the
   // terminal cannot position it, useAnchoredCursor hides it via capability.
-  void truncatedAbove;
-  void truncatedBelow;
   const showSuggestions =
     !permissionActive && slashCandidates.length > 0 && slashSelection >= 0 && !slashHidden;
 
@@ -1565,7 +1573,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           actions={permissionActions}
           focused={permissionFocus}
           theme={theme}
-          width={composerInnerWidth}
+          width={composerContentWidth(composerLayout)}
           language={view.language}
         />
       ) : null}
@@ -1575,7 +1583,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           selectedIndex={slashSelectionClamped}
           theme={theme}
           language={view.language}
-          width={composerInnerWidth}
+          width={composerContentWidth(composerLayout)}
           hint={
             view.language === "en-US"
               ? "Tab accept · ↑↓ pick · Esc hide · Enter submit"
@@ -1585,8 +1593,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       ) : null}
       <Box ref={anchorRef} width="100%" flexDirection="column">
         {visualLines.map((line, index) => {
-          const lineWidth = Math.max(4, composerInnerWidth - displayWidthOf(line.prefix));
-          const clippedLine = sliceWidth(line.text, lineWidth);
+          const clippedLine = line.text;
           const showInlineCursor = !permissionActive && index === cursorRow;
           return (
             <Text key={`${index}-${line.prefix}-${line.text}`} color={color} bold={Boolean(text)}>
@@ -1607,11 +1614,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       </Box>
       {showUnknownHint ? (
         <Text color={theme.muted}>
-          {fitText(formatUnknownSlashCommand(text, view.language), composerInnerWidth)}
+          {fitText(formatUnknownSlashCommand(text, view.language), composerContentWidth(composerLayout))}
         </Text>
       ) : null}
       {hintNotice ? (
-        <Text color={theme.muted}>{fitText(hintNotice, composerInnerWidth)}</Text>
+        <Text color={theme.muted}>{fitText(hintNotice, composerContentWidth(composerLayout))}</Text>
       ) : null}
     </Box>
   );
@@ -1780,12 +1787,14 @@ export function formatComposerRenderLines({
   masking,
   noColor,
   maxWidth,
+  layout,
 }: {
   buffer: EditBuffer;
   placeholder: string;
   masking: boolean;
   noColor: boolean;
   maxWidth?: number;
+  layout?: ComposerLayout;
 }): ComposerRenderResult {
   void noColor;
   const text = bufferToString(buffer);
@@ -1802,95 +1811,56 @@ export function formatComposerRenderLines({
     };
   }
 
-  const rawLines = displayText.split("\n");
-  const { row: cursorLineIndex, col: cursorCharCol } = getCursorLinePosition(buffer);
+  const wrapped = computeWrappedInputState({
+    text: displayText,
+    cursorOffset: buffer.cursor,
+    width: layout?.width ?? maxWidth ?? 80,
+    prefixWidth: layout?.prefixWidth ?? displayWidthOf(PROMPT_MARKER),
+    paddingLeft: layout?.paddingLeft ?? 4,
+    paddingRight: layout?.paddingRight ?? 0,
+    minContentWidth: layout?.minContentWidth ?? 4,
+  });
 
-  const composerWidth = Math.max(8, maxWidth ?? 80);
-  const softLines: Array<{
-    text: string;
-    prefix: string;
-    rawLineIndex: number;
-    startChar: number;
-    endChar: number;
-  }> = [];
-  let cursorSoftIndex = 0;
-  let cursorOutCol = 0;
-
-  for (let rawIndex = 0; rawIndex < rawLines.length; rawIndex++) {
-    const rawLine = rawLines[rawIndex] ?? "";
-    const chars = Array.from(masking ? "*".repeat(Array.from(rawLine).length) : rawLine);
-    const isFirstRawLine = rawIndex === 0;
-    let startChar = 0;
-    while (startChar < chars.length || (chars.length === 0 && startChar === 0)) {
-      const prefix = isFirstRawLine && startChar === 0 ? PROMPT_MARKER : "";
-      const budget = Math.max(4, composerWidth - displayWidthOf(prefix));
-      let width = 0;
-      let endChar = startChar;
-      while (endChar < chars.length) {
-        const next = charWidth(chars[endChar] ?? "");
-        if (width > 0 && width + next > budget) break;
-        width += next;
-        endChar++;
-      }
-      if (endChar === startChar && chars.length > 0) endChar++;
-      const text = chars.slice(startChar, endChar).join("");
-      const softIndex = softLines.length;
-      softLines.push({ text, prefix, rawLineIndex: rawIndex, startChar, endChar });
-      if (rawIndex === cursorLineIndex && cursorCharCol >= startChar && cursorCharCol <= endChar) {
-        cursorSoftIndex = softIndex;
-        let cursorWidth = 0;
-        for (let i = startChar; i < cursorCharCol && i < chars.length; i++) {
-          cursorWidth += charWidth(chars[i] ?? "");
-        }
-        cursorOutCol = cursorWidth;
-      }
-      if (chars.length === 0) break;
-      startChar = endChar;
-    }
-  }
-
-  const totalLines = softLines.length;
+  const totalLines = wrapped.lines.length;
   let startLine = 0;
   let endLineExclusive = totalLines;
   if (totalLines > COMPOSER_MAX_VISIBLE_LINES) {
     const half = Math.floor(COMPOSER_MAX_VISIBLE_LINES / 2);
-    startLine = Math.max(0, cursorSoftIndex - half);
+    startLine = Math.max(0, wrapped.cursorRow - half);
     endLineExclusive = startLine + COMPOSER_MAX_VISIBLE_LINES;
     if (endLineExclusive > totalLines) {
       endLineExclusive = totalLines;
       startLine = Math.max(0, endLineExclusive - COMPOSER_MAX_VISIBLE_LINES);
     }
   }
-  const visibleSoftLines = softLines.slice(startLine, endLineExclusive);
-  const renderedLines = visibleSoftLines.map((line) => line.text);
+  const renderedLines = wrapped.lines.slice(startLine, endLineExclusive);
   const truncatedAbove = startLine;
   const truncatedBelow = totalLines - endLineExclusive;
-  const cursorVisibleRow = Math.max(
-    0,
-    Math.min(cursorSoftIndex - startLine, renderedLines.length - 1),
-  );
+  const cursorVisibleRow = Math.max(0, Math.min(wrapped.cursorRow - startLine, renderedLines.length - 1));
 
   return {
     lines: renderedLines,
-    visualLines: visibleSoftLines.map((line) => ({ prefix: line.prefix, text: line.text })),
+    visualLines: renderedLines.map((line, index) => ({
+      prefix: startLine + index === 0 ? PROMPT_MARKER : "",
+      text: line,
+    })),
     truncatedAbove,
     truncatedBelow,
-    cursorCol: maxWidth && cursorOutCol > maxWidth ? maxWidth : cursorOutCol,
+    cursorCol: Math.min(wrapped.cursorCol, Math.max(4, wrapped.contentWidth)),
     cursorRow: cursorVisibleRow,
   };
 }
 
-/** Slice the leading portion of `value` whose display width <= max. */
-function sliceWidth(value: string, max: number): string {
-  let width = 0;
-  let result = "";
-  for (const ch of value) {
-    const next = width + charWidth(ch);
-    if (next > max) break;
-    result += ch;
-    width = next;
-  }
-  return result;
+function composerContentWidth(layout: ComposerLayout): number {
+  return computeWrappedInputState({
+    text: "",
+    cursorOffset: 0,
+    width: layout.width,
+    prefixWidth: layout.prefixWidth,
+    paddingLeft: layout.paddingLeft,
+    paddingRight: layout.paddingRight,
+    minContentWidth: layout.minContentWidth,
+  }).contentWidth;
 }
 
 function renderInlineComposerCursor(line: string, col: number, visible: boolean): React.ReactNode {
@@ -1903,24 +1873,6 @@ function renderInlineComposerCursor(line: string, col: number, visible: boolean)
       {after}
     </>
   );
-}
-
-/** Slice a window starting at display column `start` for up to `width` columns. */
-function sliceWindow(value: string, start: number, width: number): string {
-  let consumed = 0;
-  let used = 0;
-  let result = "";
-  for (const ch of value) {
-    const w = charWidth(ch);
-    if (consumed < start) {
-      consumed += w;
-      continue;
-    }
-    if (used + w > width) break;
-    result += ch;
-    used += w;
-  }
-  return result;
 }
 
 /** Find which line and character column the cursor is on. */

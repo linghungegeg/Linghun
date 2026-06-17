@@ -21,11 +21,13 @@ import {
 } from "./components/Composer.js";
 import {
   __testSplitRawDiffSections,
+  __testWrapInlineMarkdownRows,
   splitStreamingMarkdownForRender,
 } from "./components/MessageMarkdown.js";
-import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
+import { renderInkShell, resolveAlternateScreen, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
 import { detectTerminalCapability, resetTerminalCapabilityCache } from "./terminal-capability.js";
+import { displayWidth } from "./text-utils.js";
 import type { ProductBlockViewModel } from "./types.js";
 import {
   createOutputBlock,
@@ -351,8 +353,7 @@ describe("Ink shell selection", () => {
     expect(widths).toContain(40);
     expect(heights).toContain(24);
     expect(heights).toContain(15);
-    // Resize may clear the current viewport for reflow, but must not enter
-    // alt-screen or clear native scrollback.
+    // Explicit fullscreen opt-out keeps this compatibility path out of alt-screen.
     expect(output.text).not.toContain("\u001B[?1049h");
     expect(output.text).not.toContain("\u001B[?1049l");
     expect(resizeCallbacks).toBe(0);
@@ -419,6 +420,30 @@ describe("Ink shell selection", () => {
     expect(output.text).not.toContain("\x1B[?1000l");
     expect(output.text).not.toContain("\x1B[?1002h");
     expect(output.text).not.toContain("\x1B[?1002l");
+  });
+
+  it("uses alternate screen by default on supported interactive terminals with explicit opt-out", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const capability = detectTerminalCapability();
+    expect(resolveAlternateScreen(capability)).toBe(true);
+    vi.stubEnv("LINGHUN_FULLSCREEN", "1");
+    expect(resolveAlternateScreen(capability)).toBe(true);
+    vi.stubEnv("LINGHUN_FULLSCREEN", "0");
+    expect(resolveAlternateScreen(capability)).toBe(false);
+  });
+
+  it("keeps unsupported terminals and tmux out of alternate screen", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    expect(resolveAlternateScreen(detectTerminalCapability())).toBe(false);
+
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    vi.stubEnv("TMUX_PANE", "%1");
+    expect(resolveAlternateScreen(detectTerminalCapability())).toBe(false);
   });
 
   it("does not add beforeExit listener when waiting after unmount", async () => {
@@ -927,7 +952,8 @@ describe("home → task view mode transition", () => {
     await shell.waitUntilExit();
 
     expect(output.text).not.toContain("技术普惠会越来越成熟");
-    expect(output.text).toContain("\x1b[2J");
+    expect(output.text).toContain("\x1b[?1049h");
+    expect(output.text).toContain("\x1b[?1049l");
     expect(output.text).not.toContain("\x1b[3J");
   });
 
@@ -963,9 +989,11 @@ describe("home → task view mode transition", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    // Resize clears the current viewport before reflowing the new width, but
-    // does not clear native scrollback.
-    expect(output.text).toContain("\x1b[2J");
+    // App-owned alternate screen is active; fallback viewport clearing is
+    // covered by the source guard test below because Ink itself may clear
+    // the alternate buffer while redrawing.
+    expect(output.text).toContain("\x1b[?1049h");
+    expect(output.text).toContain("\x1b[?1049l");
     expect(output.text).not.toContain("\x1b[3J");
     // Activity still visible after resize
     expect(output.text).toContain("正在思考…");
@@ -2101,12 +2129,13 @@ describe("D.12C — Composer cursor alignment closure", () => {
     expect(lastShow).toBeGreaterThan(lastHide);
   });
 
-  it("ink-renderer resize clears only the current viewport, not native scrollback", async () => {
+  it("ink-renderer resize only clears viewport in normal-screen fallback", async () => {
     const source = await readFile(join(SRC_ROOT, "shell/ink-renderer.tsx"), "utf8");
     const resizeStart = source.indexOf("const onResize = () =>");
     expect(resizeStart).toBeGreaterThan(0);
     const resizeEnd = source.indexOf("};", resizeStart + 30);
     const body = source.slice(resizeStart, resizeEnd);
+    expect(body).toContain("if (!useAlternateScreen)");
     expect(body).toContain('writeBestEffort(stdout, "\\x1B[2J\\x1B[H")');
     expect(body).not.toContain("3J");
   });
@@ -2427,7 +2456,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     // Two render branches: titleVisible → title row; summaryAsMarker → summary
     // gets the "● {summary}" treatment so "我不能讨论这个。" still has presence.
     expect(source).toContain("summaryAsMarker");
-    expect(source).toMatch(/getStatusMarker\([^)]+\)\}\s*\{block\.summary\}/);
+    expect(source).toContain('fitText(block.summary, Math.max(8, innerWidth - 2))');
   });
 
   it("D13E-P3 #3: ProductBlock returns null when title=unknown AND no visible body", async () => {
@@ -3232,7 +3261,8 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
 
   it("Composer renders multiline input on the editor surface", async () => {
     const source = await readFile(join(SRC_ROOT, "shell", "components", "Composer.tsx"), "utf8");
-    expect(source).toContain("sliceWidth(line");
+    expect(source).toContain("computeWrappedInputState");
+    expect(source).toContain("layout?: ComposerLayout");
     expect(source).not.toContain("{fitText(line, maxWidth)}");
 
     const buf = createEditBuffer("line1\nline2");
@@ -4153,15 +4183,18 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toMatch(/^\s*writeStatus\(output, context\);\s*$/m);
   });
 
-  it("ShellApp TaskLayout uses one dynamic transcript surface in normal chat", async () => {
+  it("ShellApp TaskLayout uses one dynamic transcript viewport in normal chat", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     const taskLayoutStart = source.indexOf("function TaskLayout(");
     expect(taskLayoutStart).toBeGreaterThan(0);
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
-    expect(body).not.toContain("<TranscriptViewport");
-    expect(body).not.toContain("virtualRange={view.transcriptVirtualRange}");
+    expect(body).toContain("<TranscriptViewport");
+    expect(body).toContain("virtualRange={view.transcriptVirtualRange}");
+    expect(body).toContain("<MouseInputRouter");
+    expect(body).toContain("transcript-scroll-measure");
+    expect(body).toContain("transcript-viewport-geometry");
     expect(body).toContain('overflow="hidden"');
     expect(source).not.toContain("TASK_RECENT_TAIL_BLOCKS");
     expect(body).not.toContain("staticHistoryBlocks");
@@ -4176,7 +4209,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(source).not.toContain("NATIVE_TRANSCRIPT_LIVE_BLOCKS");
     expect(body).toContain("<UnseenMessagePill");
     expect(body).toContain("<ProductBlock");
-    expect(body).toContain("<Composer view={view}");
+    expect(body).toContain("<Composer");
+    expect(body).toContain("layout={taskComposerLayout(view.width)}");
     expect(body).toContain("height={view.height}");
     expect(body).toContain("flexGrow={1}");
     expect(body).toContain("minHeight={0}");
@@ -4265,33 +4299,38 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
 
-    expect(body).toContain("<Composer view={view}");
+    expect(body).toContain("<Composer");
+    expect(body).toContain("layout={taskComposerLayout(view.width)}");
     expect(body).toContain('<Box flexDirection="column" width={cw} paddingTop={1}>');
     expect(body).not.toContain("const composerRule = lineChar(noColor, capability).repeat(cw)");
     expect(body).not.toContain("{composerRule}");
     expect(body).not.toContain("width={cw} paddingX={1}");
     expect(body).toContain("view.taskRuntimeSummary");
     expect(body).toContain("block={view.taskRuntimeSummary}");
-    expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("<Composer view={view}"));
-    expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
-    expect(body.indexOf("<AgentProgressTree")).toBeLessThan(body.indexOf("<Composer view={view}"));
+    expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("<Composer"));
+    expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer"));
+    expect(body.indexOf("<AgentProgressTree")).toBeLessThan(body.indexOf("<Composer"));
     expect(body.indexOf("<WorkflowProgressView")).toBeLessThan(
-      body.indexOf("<Composer view={view}"),
+      body.indexOf("<Composer"),
     );
     expect(body).not.toContain(
       "`${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`",
     );
   });
 
-  it("D.14D-C2: ScrollViewport remains isolated from the normal task transcript", async () => {
+  it("D.14D-C2: TaskLayout wires transcript viewport and mouse router", async () => {
     const { readFile } = await import("node:fs/promises");
     const shellSource = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     const viewportSource = await readFile(
       join(SRC_ROOT, "shell/components/ScrollViewport.tsx"),
       "utf8",
     );
-    expect(shellSource).not.toContain('from "./ScrollViewport.js"');
-    expect(shellSource).not.toContain("<TranscriptViewport");
+    expect(shellSource).toContain('from "./ScrollViewport.js"');
+    expect(shellSource).toContain('from "./MouseInputRouter.js"');
+    expect(shellSource).toContain("<TranscriptViewport");
+    expect(shellSource).toContain("<MouseInputRouter");
+    expect(shellSource).toContain('type: "transcript-scroll-measure"');
+    expect(shellSource).toContain('type: "transcript-viewport-geometry"');
     expect(viewportSource).toContain("virtualRange?: TranscriptVirtualRangeView");
     expect(viewportSource).toContain('overflow="hidden"');
   });
@@ -4914,6 +4953,9 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     // user_text: plain text, no Markdown, dim separator + wrapText + background fill
     expect(userBranch).toContain("marginBottom={1}");
     expect(userBranch).toContain("│ ");
+    expect(userBranch).toContain("const bodyWidth = Math.max(8, width - 2)");
+    expect(userBranch).toContain("width={bodyWidth}");
+    expect(userBranch).toContain("wrapText(body, bodyWidth)");
     expect(userBranch).toContain("wrapText");
     expect(userBranch).toContain("backgroundColor");
     expect(userBranch).not.toContain("MessageMarkdown");
@@ -5283,12 +5325,15 @@ describe("deriveBackgroundActivityFallback — request activity cleared but work
 });
 
 describe("D.13Q-UX Real Smoke Fix v2 — B. Composer task width", () => {
-  it("Composer 源码在 task/pending 模式必须用 taskComposerMaxWidth", async () => {
+  it("ShellApp separates Home and Task composer layout width sources", async () => {
     const fs = await import("node:fs");
+    const shellSource = fs.readFileSync(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
-    // 锚定源码规则：避免 ShellApp.TaskLayout 的 cw 与 Composer maxWidth 不一致导致 cursor drift。
-    expect(composerSource).toContain('view.viewMode === "task" || view.viewMode === "pending"');
-    expect(composerSource).toMatch(/taskComposerMaxWidth\(view\.width\)/);
+
+    expect(shellSource).toContain("layout={homeComposerLayout(view.width)}");
+    expect(shellSource).toContain("layout={taskComposerLayout(view.width)}");
+    expect(shellSource).toMatch(/function taskComposerLayout\(viewWidth: number\)[\s\S]*taskComposerMaxWidth\(viewWidth\)/);
+    expect(composerSource).toContain("layout?: ComposerLayout");
   });
 });
 
@@ -6575,6 +6620,60 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(assistantBlock.messageKind).toBe("assistant_text");
   });
 
+  it("web search and normal chat blocks keep full text for output-layer wrapping", () => {
+    const searchText =
+      "Search summary\nhttps://example.com/very/long/path/that/should/wrap/inside/the/task/output/content/column";
+    const chatText =
+      "This is a normal assistant paragraph that should stay intact so MessageMarkdown can wrap it at the current viewport width.";
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 42,
+      height: 18,
+      viewMode: "task",
+      outputBlocks: [
+        createOutputBlock(searchText, "en-US", "search-wrap"),
+        createOutputBlock(chatText, "en-US", "chat-wrap"),
+      ],
+    });
+
+    const search = view.blocks.find((block) => block.id === "search-wrap");
+    const chat = view.blocks.find((block) => block.id === "chat-wrap");
+
+    expect(search?.messageKind).toBe("tool_result_success");
+    expect(search?.fullText).toBe(searchText);
+    expect(search?.summary).toBe(searchText);
+    expect(chat?.messageKind).toBe("assistant_text");
+    expect(chat?.fullText).toBe(chatText);
+    expect(chat?.summary).toBe(chatText);
+  });
+
+  it("Task output uses real content width for blocks, streaming text, and status", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    const taskStart = source.indexOf("function TaskLayout(");
+    const taskEnd = source.indexOf("function taskContentWidth", taskStart);
+    const taskBody = source.slice(taskStart, taskEnd);
+    const widthFn = source.slice(taskEnd, source.indexOf("function homeComposerLayout", taskEnd));
+
+    expect(taskBody).toContain("const contentWidth = taskContentWidth(view.width)");
+    expect(taskBody).toContain("width={contentWidth}");
+    expect(taskBody).toContain("wrapWidth={contentWidth}");
+    expect(taskBody).toContain("<ActivityIndicator");
+    expect(taskBody).toContain("width={contentWidth}");
+    expect(taskBody).not.toContain('<Box flexGrow={1} minHeight={0} />');
+    expect(widthFn).toContain("return Math.max(8, viewWidth - 4)");
+    expect(widthFn).not.toContain("viewWidth - 6");
+  });
+
+  it("OutputLine truncation accounts for its left padding before wrapping", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/OutputLine.tsx"), "utf8");
+
+    expect(source).toContain("OUTPUT_LINE_PADDING_LEFT");
+    expect(source).toContain("terminalWidth - OUTPUT_LINE_PADDING_LEFT");
+    expect(source).toContain("renderTruncatedContent(formatted, contentWidth, language)");
+    expect(source).toContain("paddingLeft={OUTPUT_LINE_PADDING_LEFT}");
+  });
+
   it("StructuredDiff follows available wrap width and pads colored rows", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/StructuredDiff.tsx"), "utf8");
@@ -6600,6 +6699,37 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
 
     expect(source).toContain("function splitSelectionRows(");
     expect(source).toContain("wrapWidth={effectiveWrapWidth}");
+  });
+
+  it("MessageMarkdown hard-wraps URLs, HTML entities, web search rows, and no-space strings", () => {
+    const cases = [
+      "https://example.com/very/long/path/without/spaces?query=abcdef",
+      "Result 1 https://example.com/search/result/with/a/very/long/url&rank=1",
+      "alpha&amp;beta&amp;gamma&amp;delta&amp;epsilon&amp;zeta",
+      "averyveryveryverylongstringwithoutspaces",
+    ];
+
+    for (const value of cases) {
+      const rows = __testWrapInlineMarkdownRows(value, 12);
+      expect(rows.length).toBeGreaterThan(1);
+      for (const row of rows) {
+        const text = row.map((token) => token.value).join("");
+        expect(displayWidth(text)).toBeLessThanOrEqual(12);
+      }
+      expect(rows.flatMap((row) => row.map((token) => token.value)).join("")).toBe(value);
+    }
+  });
+
+  it("MessageMarkdown hard-wrap keeps inline style token kinds across rows", () => {
+    const rows = __testWrapInlineMarkdownRows(
+      "`abc` **abcdefghijklmnopqrstuvwxyz**",
+      10,
+    );
+    expect(rows.some((row) => row.some((token) => token.kind === "code"))).toBe(true);
+    expect(rows.some((row) => row.some((token) => token.kind === "bold"))).toBe(true);
+    for (const row of rows) {
+      expect(displayWidth(row.map((token) => token.value).join(""))).toBeLessThanOrEqual(10);
+    }
   });
 
   it("MessageMarkdown routes raw unfenced diffs to StructuredDiff and drops Git CRLF advisory noise", () => {

@@ -40,6 +40,7 @@ type InlineToken =
   | { kind: "bold"; value: string }
   | { kind: "italic"; value: string }
   | { kind: "link"; value: string; href: string };
+type WrappedInlineToken = InlineToken & { sourceStart: number; sourceEnd: number };
 
 type TableCell = { text: string; lines: string[]; width: number };
 
@@ -233,6 +234,63 @@ function tokenizeInline(value: string): InlineToken[] {
   return tokens;
 }
 
+function wrapInlineTokens(value: string, wrapWidth: number): WrappedInlineToken[][] {
+  const safeWrapWidth = Math.max(1, Math.floor(wrapWidth));
+  const rows: WrappedInlineToken[][] = [];
+  let row: WrappedInlineToken[] = [];
+  let rowWidth = 0;
+  let sourceColumn = 0;
+
+  const pushRow = () => {
+    rows.push(row);
+    row = [];
+    rowWidth = 0;
+  };
+
+  const pushPiece = (token: InlineToken, valuePart: string, start: number, end: number) => {
+    if (!valuePart) return;
+    row.push({ ...token, value: valuePart, sourceStart: start, sourceEnd: end });
+  };
+
+  for (const token of tokenizeInline(value)) {
+    let piece = "";
+    let pieceStart = sourceColumn;
+    let pieceWidth = 0;
+    for (const char of Array.from(token.value)) {
+      const nextWidth = Math.max(1, charWidth(char));
+      if (rowWidth + pieceWidth > 0 && rowWidth + pieceWidth + nextWidth > safeWrapWidth) {
+        pushPiece(token, piece, pieceStart, sourceColumn);
+        pushRow();
+        piece = "";
+        pieceStart = sourceColumn;
+        pieceWidth = 0;
+      }
+      piece += char;
+      pieceWidth += nextWidth;
+      sourceColumn += nextWidth;
+    }
+    pushPiece(token, piece, pieceStart, sourceColumn);
+    rowWidth += pieceWidth;
+  }
+
+  if (row.length > 0 || rows.length === 0) rows.push(row);
+  return rows;
+}
+
+export function __testWrapInlineMarkdownRows(
+  value: string,
+  wrapWidth: number,
+): Array<Array<{ kind: InlineToken["kind"]; value: string; sourceStart: number; sourceEnd: number }>> {
+  return wrapInlineTokens(value, wrapWidth).map((row) =>
+    row.map((token) => ({
+      kind: token.kind,
+      value: token.value,
+      sourceStart: token.sourceStart,
+      sourceEnd: token.sourceEnd,
+    })),
+  );
+}
+
 function baseColor(
   theme: ShellTheme,
   dim: boolean,
@@ -246,12 +304,14 @@ function baseColor(
 
 function InlineText({
   value,
+  tokens,
   theme,
   dim,
   tone,
   selected,
 }: {
   value: string;
+  tokens?: InlineToken[];
   theme: ShellTheme;
   dim: boolean;
   tone: MessageMarkdownProps["tone"];
@@ -259,14 +319,14 @@ function InlineText({
 }): React.ReactNode {
   const color = baseColor(theme, dim, tone);
   const codeColor = theme.inlineCode ?? theme.dim ?? theme.muted;
-  const tokens = tokenizeInline(value);
+  const inlineTokens = tokens ?? tokenizeInline(value);
   return (
     <Text
       color={selected ? "white" : color}
       backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
       dimColor={selected ? false : dim}
     >
-      {tokens.map((token, tokenIndex) => {
+      {inlineTokens.map((token, tokenIndex) => {
         const key = `${tokenIndex}-${token.kind}-${token.value}`;
         if (token.kind === "code") {
           return (
@@ -335,13 +395,15 @@ function InlineRow({
   wrapWidth?: number;
   selected?: boolean;
 }): React.ReactNode {
-  const rows = wrapWidth ? wrapText(value, wrapWidth) : [value];
+  const tokenRows = wrapWidth ? wrapInlineTokens(value, wrapWidth) : undefined;
+  const rows = tokenRows?.map((row) => row.map((token) => token.value).join("")) ?? [value];
   return (
     <Box flexDirection="column">
       {rows.map((row, rowIndex) => (
         <InlineText
           key={`${rowIndex}-${row}`}
           value={row}
+          tokens={tokenRows?.[rowIndex]}
           theme={theme}
           dim={dim}
           tone={tone}
