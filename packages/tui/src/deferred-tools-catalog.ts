@@ -378,7 +378,7 @@ export function formatDeferredToolsSystemReminder(
 ): string | undefined {
   if (snapshot.total === 0) return undefined;
   return language === "en-US"
-    ? "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool. Built-in tools (Read/Edit/Write/Bash/Grep/Glob/Todo) are still called directly."
+    ? "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool. Built-in tools (Read/ReadSnippets/SourcePack/Edit/Write/Bash/Grep/Glob/Todo) are still called directly."
     : "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool.";
 }
 

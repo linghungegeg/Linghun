@@ -82,6 +82,37 @@ export function createToolInputSchema(name: ToolName): unknown {
       required: ["path"],
     };
   }
+  if (name === "ReadSnippets") {
+    return {
+      ...base,
+      properties: {
+        ranges: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              start: { type: "number" },
+              end: { type: "number" },
+            },
+            required: ["path", "start", "end"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["ranges"],
+    };
+  }
+  if (name === "SourcePack") {
+    return {
+      ...base,
+      properties: {
+        query: { type: "string" },
+        limit: { type: "number" },
+      },
+      required: ["query"],
+    };
+  }
   if (name === "Write") {
     return {
       ...base,
@@ -226,7 +257,7 @@ export const SEARCH_EXTRA_TOOLS_DESCRIPTION =
   "Discover deferred tools provided by enabled MCP servers, trusted skills, trusted plugins, and codebase-memory. Returns name/kind/description/requiredArgs/executable/reason for each match. Pass a free-text query to filter; pass empty string to list all. Use ExecuteExtraTool to actually invoke a discovered tool.";
 
 export const EXECUTE_EXTRA_TOOL_DESCRIPTION =
-  "Invoke a deferred tool that was previously returned by SearchExtraTools with executable=true. Built-in tools (Read/Edit/Write/Bash/Grep/Glob/Todo) MUST be called directly, not via this wrapper. tool_name must match a discovered tool exactly; params must include all required args.";
+  "Invoke a deferred tool that was previously returned by SearchExtraTools with executable=true. Built-in tools (Read/ReadSnippets/SourcePack/Edit/Write/Bash/Grep/Glob/Todo) MUST be called directly, not via this wrapper. tool_name must match a discovered tool exactly; params must include all required args.";
 
 export const COMMAND_PROPOSAL_DESCRIPTION =
   "Fallback only: propose an explicit Linghun slash command when the requested capability cannot be executed by an available structured tool. Do not use this as the default path for agent, workflow, index, verification, or report-writing requests.";
@@ -1662,10 +1693,11 @@ export function deriveToolSupportsClaims(
   const claims = new Set<string>([name]);
   const inputObj = (input ?? {}) as Record<string, unknown>;
 
-  if (name === "Read") {
+  if (name === "Read" || name === "ReadSnippets" || name === "SourcePack") {
     claims.add("local_read");
     const filePath = typeof inputObj.file_path === "string" ? inputObj.file_path : undefined;
     if (filePath) claims.add(`file:${filePath}`);
+    if (name === "ReadSnippets" || name === "SourcePack") claims.add("source_snippet");
   }
   if (name === "Grep") {
     claims.add("local_read");

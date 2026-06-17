@@ -8,6 +8,7 @@ import {
   type ToolName,
   type ToolOutput,
   type ToolProgressEvent,
+  type SourcePackCandidate,
   builtInTools,
   runTool,
 } from "@linghun/tools";
@@ -685,7 +686,14 @@ export async function executeApprovedModelToolUse(
       result.output,
       toolCall.input,
     );
-    if (reportWriteGuard && (toolName === "Read" || toolName === "Glob" || toolName === "Grep")) {
+    if (
+      reportWriteGuard &&
+      (toolName === "Read" ||
+        toolName === "ReadSnippets" ||
+        toolName === "SourcePack" ||
+        toolName === "Glob" ||
+        toolName === "Grep")
+    ) {
       reportWriteGuard.evidenceRead = true;
     }
     rememberToolFiles(context, toolName, toolCall.input, result.output);
@@ -987,6 +995,7 @@ export async function executeDeferredDispatchToolUse(
       );
       return { ok: false, tool: dispatchName, text: result.text, evidenceId: evidence.id };
     }
+    rememberSourcePackCandidatesFromToolData(context, input.tool_name, result.data);
     const evidence = await recordToolEvidence(context, sessionId, "Read", {
       text: result.text,
       data: result.data,
@@ -2301,8 +2310,14 @@ export function rememberToolFiles(
       paths.push(path.replaceAll("\\", "/"));
     }
   }
+  if (name === "ReadSnippets" && typeof input === "object" && input !== null) {
+    paths.push(...extractPathsFromRanges((input as { ranges?: unknown }).ranges));
+  }
   if (Array.isArray(output.changedFiles)) {
     paths.push(...output.changedFiles);
+  }
+  if (name === "SourcePack" || name === "ReadSnippets") {
+    paths.push(...extractPathsFromToolData(output.data));
   }
   if (name === "Glob" || name === "Grep") {
     paths.push(...extractFileMentions(output.text));
@@ -2311,6 +2326,180 @@ export function rememberToolFiles(
     ...paths.filter(Boolean),
     ...context.recentlyMentionedFiles,
   ]).slice(0, 10);
+}
+
+export function rememberSourcePackCandidatesFromToolData(
+  context: TuiContext,
+  toolName: unknown,
+  data: unknown,
+): void {
+  if (!isSourcePackCandidateProducer(toolName)) {
+    return;
+  }
+  const candidates = extractSourcePackCandidates(data);
+  context.tools.sourcePackCandidates = candidates.length > 0 ? candidates : undefined;
+}
+
+function isSourcePackCandidateProducer(toolName: unknown): boolean {
+  if (typeof toolName !== "string") return false;
+  const name = toolName.includes(".") ? toolName.split(".").at(-1) : toolName;
+  return (
+    name === "search_code" ||
+    name === "search_graph" ||
+    name === "get_code_snippet" ||
+    name === "get_architecture"
+  );
+}
+
+function extractSourcePackCandidates(data: unknown): SourcePackCandidate[] {
+  const candidates: SourcePackCandidate[] = [];
+  const seen = new Set<string>();
+  visitSourcePackCandidateData(data, 0, (record) => {
+    const path = readCandidatePath(record);
+    if (!path) return;
+    const start = readCandidateStart(record);
+    const end = readCandidateEnd(record, start);
+    const key = `${path}:${start}:${end}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({
+      path,
+      start,
+      end,
+      reason: readCandidateReason(record),
+      confidence: readCandidateConfidence(record),
+    });
+  });
+  return candidates.slice(0, 12);
+}
+
+function visitSourcePackCandidateData(
+  value: unknown,
+  depth: number,
+  visit: (record: Record<string, unknown>) => void,
+): void {
+  if (depth > 5 || value === null || value === undefined) return;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 40)) {
+      visitSourcePackCandidateData(item, depth + 1, visit);
+    }
+    return;
+  }
+  if (typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  visit(record);
+  for (const item of Object.values(record).slice(0, 40)) {
+    visitSourcePackCandidateData(item, depth + 1, visit);
+  }
+}
+
+function readCandidatePath(record: Record<string, unknown>): string | undefined {
+  for (const key of ["path", "file", "file_path", "filepath", "source_path", "relative_path"]) {
+    const value = record[key];
+    if (typeof value !== "string") continue;
+    const normalized = value.replaceAll("\\", "/").replace(/^\.\//u, "").trim();
+    if (
+      normalized &&
+      normalized !== "unknown" &&
+      !normalized.includes("\n") &&
+      !/^https?:\/\//iu.test(normalized)
+    ) {
+      return normalized;
+    }
+  }
+  return undefined;
+}
+
+function readCandidateStart(record: Record<string, unknown>): number {
+  const direct = readPositiveNumberField(record, [
+    "start",
+    "line",
+    "line_number",
+    "lineNumber",
+    "start_line",
+    "startLine",
+    "lineno",
+  ]);
+  if (direct !== undefined) return direct;
+  const range = typeof record.range === "string" ? record.range.match(/(\d+)(?:\D+(\d+))?/u) : null;
+  if (range?.[1]) return Math.max(1, Number.parseInt(range[1], 10));
+  return 1;
+}
+
+function readCandidateEnd(record: Record<string, unknown>, start: number): number {
+  const direct = readPositiveNumberField(record, [
+    "end",
+    "end_line",
+    "endLine",
+    "line_end",
+    "lineEnd",
+  ]);
+  if (direct !== undefined) return Math.max(start, direct);
+  const range = typeof record.range === "string" ? record.range.match(/(\d+)(?:\D+(\d+))?/u) : null;
+  if (range?.[2]) return Math.max(start, Number.parseInt(range[2], 10));
+  return start + 24;
+}
+
+function readPositiveNumberField(
+  record: Record<string, unknown>,
+  keys: string[],
+): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 1) {
+      return Math.trunc(value);
+    }
+    if (typeof value === "string" && /^\d+$/u.test(value)) {
+      return Number.parseInt(value, 10);
+    }
+  }
+  return undefined;
+}
+
+function readCandidateReason(record: Record<string, unknown>): string | undefined {
+  const parts = ["symbol", "name", "qualified_name", "kind", "type", "label"]
+    .map((key) => record[key])
+    .filter((value): value is string | number => typeof value === "string" || typeof value === "number")
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+  return parts.length > 0 ? `index candidate: ${parts.slice(0, 3).join(" ")}` : "index candidate";
+}
+
+function readCandidateConfidence(record: Record<string, unknown>): number | undefined {
+  for (const key of ["confidence", "score", "similarity"]) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      if (value < 0) return undefined;
+      return value > 1 ? Math.min(0.95, value / 100) : Math.min(0.95, value);
+    }
+  }
+  return undefined;
+}
+
+function extractPathsFromRanges(ranges: unknown): string[] {
+  if (!Array.isArray(ranges)) return [];
+  return ranges
+    .map((item) =>
+      item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string"
+        ? (item as { path: string }).path.replaceAll("\\", "/")
+        : undefined,
+    )
+    .filter((item): item is string => Boolean(item));
+}
+
+function extractPathsFromToolData(data: unknown): string[] {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+  const record = data as Record<string, unknown>;
+  const candidatePaths = record.candidatePaths;
+  if (Array.isArray(candidatePaths)) {
+    return candidatePaths
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.replaceAll("\\", "/"));
+  }
+  return [
+    ...extractPathsFromRanges(record.ranges),
+    ...extractPathsFromRanges(record.snippets),
+  ];
 }
 
 type NaturalFileReadResult =

@@ -283,7 +283,7 @@ export async function recordToolEvidence(
   input?: unknown,
 ): Promise<EvidenceRecord | null> {
   const kind =
-    name === "Read"
+    name === "Read" || name === "ReadSnippets" || name === "SourcePack"
       ? "file_read"
       : name === "Grep" || name === "Glob"
         ? "grep_result"
@@ -293,7 +293,12 @@ export async function recordToolEvidence(
   if (!kind) {
     return null;
   }
-  const readOnlyEvidence = name === "Read" || name === "Grep" || name === "Glob";
+  const readOnlyEvidence =
+    name === "Read" ||
+    name === "ReadSnippets" ||
+    name === "SourcePack" ||
+    name === "Grep" ||
+    name === "Glob";
   const evidence = createEvidenceRecord(
     kind,
     readOnlyEvidence
@@ -318,10 +323,62 @@ function formatReadOnlyToolEvidenceSummary(
   output: ToolOutput,
   input: unknown,
 ): string {
-  const target = readToolEvidenceTarget(input);
+  const target =
+    name === "SourcePack"
+      ? sourcePackEvidenceTarget(input, output)
+      : name === "ReadSnippets"
+        ? readSnippetsEvidenceTarget(input)
+        : readToolEvidenceTarget(input);
   const artifact = output.fullOutputPath ? "artifact=yes" : "artifact=no";
   const bytes = output.text.length;
   return `${name}: ${target}; output_chars=${bytes}; ${artifact}`;
+}
+
+function sourcePackEvidenceTarget(input: unknown, output: ToolOutput): string {
+  const query = readStringField(input, "query");
+  const paths = extractOutputCandidatePaths(output.data);
+  const pathText = paths.length > 0 ? `; paths=${truncateDisplay(paths.slice(0, 4).join(","), 120)}` : "";
+  return `query=${truncateDisplay((query ?? "unspecified").replace(/\s+/g, " "), 90)}${pathText}`;
+}
+
+function readSnippetsEvidenceTarget(input: unknown): string {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return "ranges=unspecified";
+  const ranges = (input as Record<string, unknown>).ranges;
+  if (!Array.isArray(ranges)) return "ranges=unspecified";
+  const paths = ranges
+    .map((item) =>
+      item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string"
+        ? (item as { path: string }).path
+        : undefined,
+    )
+    .filter((item): item is string => Boolean(item));
+  return paths.length > 0
+    ? `ranges=${truncateDisplay(paths.slice(0, 4).join(","), 120)}`
+    : "ranges=unspecified";
+}
+
+function readStringField(input: unknown, key: string): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = (input as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function extractOutputCandidatePaths(data: unknown): string[] {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+  const record = data as Record<string, unknown>;
+  const candidatePaths = record.candidatePaths;
+  if (Array.isArray(candidatePaths)) {
+    return candidatePaths.filter((item): item is string => typeof item === "string");
+  }
+  const snippets = record.snippets;
+  if (!Array.isArray(snippets)) return [];
+  return snippets
+    .map((item) =>
+      item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string"
+        ? (item as { path: string }).path
+        : undefined,
+    )
+    .filter((item): item is string => Boolean(item));
 }
 
 function readToolEvidenceTarget(input: unknown): string {
@@ -338,6 +395,19 @@ function readToolEvidenceTarget(input: unknown): string {
     const values = paths.filter((item): item is string => typeof item === "string");
     if (values.length > 0) {
       return `paths=${truncateDisplay(values.slice(0, 3).join(","), 90)}`;
+    }
+  }
+  const ranges = record.ranges;
+  if (Array.isArray(ranges)) {
+    const values = ranges
+      .map((item) =>
+        item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string"
+          ? (item as { path: string }).path
+          : undefined,
+      )
+      .filter((item): item is string => Boolean(item));
+    if (values.length > 0) {
+      return `ranges=${truncateDisplay(values.slice(0, 3).join(","), 90)}`;
     }
   }
   return "target=unspecified";

@@ -44,6 +44,22 @@ describe("model-loop-runtime", () => {
       expect(schema.properties).toHaveProperty("limit");
     });
 
+    it("returns ReadSnippets and SourcePack schemas", () => {
+      const readSnippets = createToolInputSchema("ReadSnippets") as {
+        required: string[];
+        properties: Record<string, unknown>;
+      };
+      const sourcePack = createToolInputSchema("SourcePack") as {
+        required: string[];
+        properties: Record<string, unknown>;
+      };
+
+      expect(readSnippets.required).toContain("ranges");
+      expect(readSnippets.properties).toHaveProperty("ranges");
+      expect(sourcePack.required).toContain("query");
+      expect(sourcePack.properties).toHaveProperty("limit");
+    });
+
     it("returns Write schema with path and content required", () => {
       const schema = createToolInputSchema("Write") as {
         required: string[];
@@ -112,6 +128,8 @@ describe("model-loop-runtime", () => {
       const defs = createModelToolDefinitions();
       expect(defs.length).toBeGreaterThan(0);
       expect(defs.some((d) => d.name === "Read")).toBe(true);
+      expect(defs.some((d) => d.name === "ReadSnippets")).toBe(true);
+      expect(defs.some((d) => d.name === "SourcePack")).toBe(true);
       expect(defs.some((d) => d.name === "Write")).toBe(true);
       expect(defs.some((d) => d.name === "Bash")).toBe(true);
     });
@@ -124,6 +142,12 @@ describe("model-loop-runtime", () => {
         expect(def.inputSchema).toBeDefined();
       }
       expect(defs.find((def) => def.name === "Read")?.description).toContain("Use Read");
+      expect(defs.find((def) => def.name === "ReadSnippets")?.description).toContain(
+        "Use ReadSnippets",
+      );
+      expect(defs.find((def) => def.name === "SourcePack")?.description).toContain(
+        "Use SourcePack",
+      );
     });
 
     it("D.14G: exposes structured Git tools to the model (full-tool mode)", () => {
@@ -1205,6 +1229,16 @@ describe("model-loop-runtime", () => {
       expect(claims).toContain("Read");
       expect(claims).toContain("local_read");
       expect(claims).toContain("file:src/index.ts");
+    });
+
+    it("ReadSnippets and SourcePack derive source read claims but no pass evidence", () => {
+      const snippets = deriveToolSupportsClaims("ReadSnippets", {}, { text: "" });
+      const pack = deriveToolSupportsClaims("SourcePack", { query: "needle" }, { text: "" });
+
+      expect(snippets).toEqual(expect.arrayContaining(["ReadSnippets", "local_read", "source_snippet"]));
+      expect(pack).toEqual(expect.arrayContaining(["SourcePack", "local_read", "source_snippet"]));
+      expect([...snippets, ...pack]).not.toContain("test_passed");
+      expect([...snippets, ...pack]).not.toContain("build_passed");
     });
 
     it("Bash exit 0 vitest derives test_passed", () => {

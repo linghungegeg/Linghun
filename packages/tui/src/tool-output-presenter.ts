@@ -140,6 +140,8 @@ function formatPrimaryToolLead(
       const lineLabel = `**${totalLines ?? visibleLines}** lines`;
       return readFile ? `Read(${readFile}) ${lineLabel}.` : `Read ${lineLabel}.`;
     }
+    if (name === "ReadSnippets") return `ReadSnippets **${count ?? visibleLines}** ranges.`;
+    if (name === "SourcePack") return `SourcePack **${count ?? visibleLines}** snippets.`;
     if (name === "Bash") return formatBashLead(metadata, language);
     // Phase 17: WebSearch / WebFetch dedicated format.
     if (name === "WebSearch") return formatWebSearchLead(output, language);
@@ -156,6 +158,8 @@ function formatPrimaryToolLead(
     const lineLabel = `**${totalLines ?? visibleLines}** 行`;
     return readFile ? `Read(${readFile}) ${lineLabel}` : `读取 ${lineLabel}`;
   }
+  if (name === "ReadSnippets") return `ReadSnippets **${count ?? visibleLines}** 个范围`;
+  if (name === "SourcePack") return `SourcePack **${count ?? visibleLines}** 个片段`;
   if (name === "Bash") return formatBashLead(metadata, language);
   // Phase 17: WebSearch / WebFetch dedicated format.
   if (name === "WebSearch") return formatWebSearchLead(output, language);
@@ -346,6 +350,10 @@ export function formatToolStart(name: ToolName, input: unknown): string | undefi
     arg = str("command");
   } else if (name === "Read") {
     arg = str("path") ?? str("file_path");
+  } else if (name === "ReadSnippets") {
+    arg = "ranges";
+  } else if (name === "SourcePack") {
+    arg = str("query") ?? "query";
   } else if (name === "Write" || name === "Edit" || name === "MultiEdit") {
     arg = str("file_path") ?? str("path");
   } else if (name === "Grep") {
@@ -698,6 +706,8 @@ function readTodoItems(data: unknown): TodoSurfaceItem[] | undefined {
 function isSummaryFirstTool(name: ToolName): boolean {
   return (
     name === "Read" ||
+    name === "ReadSnippets" ||
+    name === "SourcePack" ||
     name === "Glob" ||
     name === "Grep" ||
     name === "Bash" ||

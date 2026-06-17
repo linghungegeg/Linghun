@@ -1684,7 +1684,15 @@ function buildPermissionExplanationLinesFromVerdict(
 function inferSemanticByToolName(toolName: string): PolicySemantic {
   if (toolName === "Bash") return "destructive";
   if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") return "mutating";
-  if (toolName === "Read" || toolName === "Glob" || toolName === "Grep") return "readonly";
+  if (
+    toolName === "Read" ||
+    toolName === "ReadSnippets" ||
+    toolName === "SourcePack" ||
+    toolName === "Glob" ||
+    toolName === "Grep"
+  ) {
+    return "readonly";
+  }
   if (toolName === "WebSearch" || toolName === "WebFetch") return "network";
   return "unknown";
 }
@@ -1742,9 +1750,11 @@ function buildPermissionActionSummary(
     const path = str("file_path") ?? str("path");
     if (path) return zh ? `修改文件：${path}` : `Edit file: ${path}`;
   }
-  if (toolName === "Read") {
+  if (toolName === "Read" || toolName === "ReadSnippets" || toolName === "SourcePack") {
     const path = str("path") ?? str("file_path");
     if (path) return zh ? `读取文件：${path}` : `Read file: ${path}`;
+    if (toolName === "ReadSnippets") return zh ? "读取代码片段" : "Read snippets";
+    if (toolName === "SourcePack") return zh ? "定位代码片段" : "Locate source snippets";
   }
   if (toolName === "Glob" || toolName === "Grep") {
     const target = str("pattern") ?? str("path");

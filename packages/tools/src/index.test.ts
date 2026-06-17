@@ -451,6 +451,238 @@ describe("Phase 05 core tools", () => {
     ).rejects.toThrow("自上次 Read 后被修改");
   });
 
+  it("ReadSnippets reads two ranges from two files and records edit snapshots", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "a.ts"), "one\ntwo\nthree\n", "utf8");
+    await writeFile(join(project, "b.ts"), "alpha\nbeta\ngamma\n", "utf8");
+    const context = createToolContext(project);
+
+    const result = await runTool(
+      "ReadSnippets",
+      {
+        ranges: [
+          { path: "a.ts", start: 2, end: 3 },
+          { path: "b.ts", start: 1, end: 2 },
+        ],
+      },
+      context,
+    );
+
+    expect(result.output.text).toContain("a.ts:2-3");
+    expect(result.output.text).toContain("2\ttwo");
+    expect(result.output.text).toContain("b.ts:1-2");
+    expect(result.output.text).toContain("1\talpha");
+    expect(result.output.data).toMatchObject({ count: 2, requestedRanges: 2 });
+
+    const edit = await runTool(
+      "Edit",
+      { path: "a.ts", oldText: "two", newText: "TWO" },
+      context,
+    );
+    expect(edit.output.changedFiles).toEqual(["a.ts"]);
+  });
+
+  it("ReadSnippets truncates ranges over the per-range line limit", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const content = Array.from({ length: 130 }, (_, index) => `line-${index + 1}`).join("\n");
+    const context = createToolContext(project);
+    await writeFile(join(project, "large.ts"), content, "utf8");
+    await writeFile(join(project, "next.ts"), "next-line\n", "utf8");
+
+    const result = await runTool(
+      "ReadSnippets",
+      {
+        ranges: [
+          { path: "large.ts", start: 1, end: 130 },
+          { path: "next.ts", start: 1, end: 1 },
+        ],
+      },
+      context,
+    );
+
+    const ranges = (result.output.data as { ranges: Array<{ end: number; truncated: boolean }> })
+      .ranges;
+    expect(ranges[0]).toMatchObject({ end: 120, truncated: true });
+    expect(ranges[1]).toMatchObject({ end: 1, truncated: false });
+    expect(result.output.text).toContain("该范围已截断");
+    expect(result.output.text).toContain("next-line");
+    expect(result.output.text).not.toMatch(/预算|字符数|40000|总输出预算|单范围上限/u);
+  });
+
+  it("ReadSnippets hides internal safety cap details in visible output", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const hugeLine = "x".repeat(5000);
+    const content = Array.from({ length: 100 }, (_, index) => `${index + 1}-${hugeLine}`).join(
+      "\n",
+    );
+    const context = createToolContext(project);
+    await writeFile(join(project, "huge.ts"), content, "utf8");
+
+    const result = await runTool(
+      "ReadSnippets",
+      { ranges: [{ path: "huge.ts", start: 1, end: 100 }] },
+      context,
+    );
+
+    expect(result.output.truncated).toBe(true);
+    expect(result.output.text).toContain("结果已截断");
+    expect(result.output.text).not.toMatch(/预算|字符数|40000|总输出预算|单范围上限/u);
+    expect(result.output.data).toMatchObject({ safetyTruncated: true });
+  });
+
+  it("ReadSnippets reports missing files without hiding valid ranges", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(join(project, "ok.ts"), "present\n", "utf8");
+
+    const result = await runTool(
+      "ReadSnippets",
+      {
+        ranges: [
+          { path: "missing.ts", start: 1, end: 2 },
+          { path: "ok.ts", start: 1, end: 1 },
+        ],
+      },
+      context,
+    );
+
+    expect(result.output.text).toContain("missing.ts:1-2");
+    expect(result.output.text).toContain("ERROR:");
+    expect(result.output.text).toContain("ok.ts:1-1");
+    expect(result.output.text).toContain("present");
+    expect(result.output.data).toMatchObject({ count: 1, requestedRanges: 2 });
+  });
+
+  it("SourcePack prefers simulated index candidates before local fallback", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    context.sourcePackCandidates = [
+      {
+        path: "indexed.ts",
+        start: 2,
+        end: 3,
+        reason: "index symbol hit: indexedNeedle",
+        confidence: 0.9,
+      },
+    ];
+    await writeFile(join(project, "indexed.ts"), "zero\none indexedNeedle\ntwo\n", "utf8");
+    await writeFile(join(project, "fallback.ts"), "indexedNeedle fallback\n", "utf8");
+
+    const result = await runTool("SourcePack", { query: "indexedNeedle", limit: 2 }, context);
+    const data = result.output.data as {
+      source: string;
+      fallback: boolean;
+      snippets: Array<{ path: string; source: string; confidence: number }>;
+    };
+
+    expect(data.source).toBe("index");
+    expect(data.fallback).toBe(false);
+    expect(data.snippets).toHaveLength(1);
+    expect(data.snippets[0]).toMatchObject({
+      path: "indexed.ts",
+      source: "index",
+      confidence: 0.9,
+    });
+  });
+
+  it("SourcePack returns rg query hits with reasons and empty results clearly", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(
+      join(project, "source.ts"),
+      "export function needleFunction() {\n  return 'needle';\n}\n",
+      "utf8",
+    );
+
+    const hit = await runTool("SourcePack", { query: "needleFunction", limit: 2 }, context);
+    const snippets = (
+      hit.output.data as {
+        source: string;
+        snippets: Array<{
+          path: string;
+          reason: string;
+          confidence: number;
+          content: string;
+          source: string;
+        }>;
+      }
+    ).snippets;
+    expect(snippets[0]?.path).toBe("source.ts");
+    expect(snippets[0]?.reason).toContain("needleFunction");
+    expect(snippets[0]?.source).toMatch(/rg|local_scan/);
+    expect(snippets[0]?.confidence).toBeGreaterThan(0);
+    expect(hit.output.text).toContain("needleFunction");
+    expect(hit.output.text).not.toMatch(/预算|字符数|40000|总输出预算|单范围上限/u);
+
+    const empty = await runTool("SourcePack", { query: "not-present-anywhere" }, context);
+    expect(empty.output.text).toContain("empty");
+    expect(empty.output.data).toMatchObject({ count: 0, empty: true });
+  });
+
+  it("SourcePack falls back to local scan when rg is unavailable", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "local-source.ts"), "export const localNeedle = 1;\n", "utf8");
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: () => {
+        const child = createMockChildProcess();
+        queueMicrotask(() => child.emit("error", new Error("rg missing")));
+        return child;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const result = await tools.runTool(
+        "SourcePack",
+        { query: "localNeedle", limit: 2 },
+        tools.createToolContext(project),
+      );
+      const data = result.output.data as {
+        source: string;
+        fallback: boolean;
+        snippets: Array<{ path: string; source: string; confidence: number }>;
+      };
+      expect(data.fallback).toBe(true);
+      expect(data.source).toBe("local_scan");
+      expect(data.snippets[0]).toMatchObject({ path: "local-source.ts", source: "local_scan" });
+      expect(data.snippets[0]?.confidence).toBeLessThan(0.6);
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("SourcePack can fall back to file name matches with low confidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(join(project, "WidgetPanel.test.ts"), "describe('panel', () => {});\n", "utf8");
+
+    const result = await runTool("SourcePack", { query: "WidgetPanel", limit: 1 }, context);
+    const data = result.output.data as {
+      fallback: boolean;
+      snippets: Array<{ path: string; source: string; confidence: number }>;
+    };
+
+    expect(data.fallback).toBe(true);
+    expect(data.snippets[0]).toMatchObject({ path: "WidgetPanel.test.ts", source: "file_name" });
+    expect(data.snippets[0]?.confidence).toBeLessThan(0.6);
+  });
+
+  it("SourcePack hides internal safety cap details in visible output", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const hugeLine = `safetyNeedle ${"x".repeat(30000)}`;
+    const content = Array.from({ length: 20 }, () => hugeLine).join("\n");
+    await writeFile(join(project, "huge-source.ts"), content, "utf8");
+
+    const result = await runTool("SourcePack", { query: "safetyNeedle", limit: 1 }, context);
+    expect(result.output.data).toMatchObject({ count: 1 });
+    expect(result.output.truncated).toBe(true);
+    expect(result.output.text).toContain("结果已截断");
+    expect(result.output.text).not.toMatch(/预算|字符数|40000|总输出预算|单范围上限/u);
+  });
+
   it("detects CRLF and mixed-newline source files without rewriting them", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const crlfPath = join(project, "crlf-source.ts");

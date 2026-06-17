@@ -66,12 +66,21 @@ export type ReadSnapshot = {
   size: number;
 };
 
+export type SourcePackCandidate = {
+  path: string;
+  start: number;
+  end: number;
+  reason?: string;
+  confidence?: number;
+};
+
 export type ToolContext = {
   workspaceRoot: string;
   logRoot?: string;
   changedFiles: string[];
   todos: TodoItem[];
   readSnapshots?: Record<string, ReadSnapshot>;
+  sourcePackCandidates?: SourcePackCandidate[];
   patchSummaries?: Record<string, DiffSummary>;
   abortSignal?: AbortSignal;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
@@ -81,8 +90,14 @@ export type ToolContext = {
   ) => boolean;
 };
 
+export type ToolContextOptions = {
+  sourcePackCandidates?: SourcePackCandidate[];
+};
+
 export type ToolName =
   | "Read"
+  | "ReadSnippets"
+  | "SourcePack"
   | "Write"
   | "Edit"
   | "MultiEdit"
@@ -112,6 +127,10 @@ export type DiffSummary = {
 };
 
 export type ReadInput = { path: string; offset?: number; limit?: number };
+export type ReadSnippetsInput = {
+  ranges: { path: string; start: number; end: number }[];
+};
+export type SourcePackInput = { query: string; limit?: number };
 export type WriteInput = { path: string; content: string; expectedHash?: string };
 export type EditInput = { path: string; oldText: string; newText: string; expectedHash?: string };
 export type MultiEditInput = {
@@ -142,6 +161,13 @@ export const toolRegistryStatus = "ready" as const;
 const DEFAULT_LIMIT = 200;
 const DEFAULT_SEARCH_LIMIT = 100;
 const DEFAULT_TOOL_TEXT_LIMIT = 50_000;
+const MAX_READ_SNIPPET_RANGES = 20;
+const MAX_READ_SNIPPET_LINES = 120;
+const MAX_READ_SNIPPET_OUTPUT_CHARS = 200_000;
+const SOURCE_PACK_DEFAULT_LIMIT = 6;
+const SOURCE_PACK_MAX_LIMIT = 12;
+const SOURCE_PACK_CONTEXT_LINES = 8;
+const SOURCE_PACK_MAX_TERMS = 6;
 const BASH_PREVIEW_LIMIT = 30_000;
 const BASH_TIMEOUT_MS = 120_000;
 const MAX_TODO_ITEMS = 100;
@@ -150,12 +176,16 @@ const SEARCH_EXCLUDED_PATH_PREFIXES = [".linghun/logs", ".linghun/agent-runs", "
 const SEARCH_EXCLUDED_FILE_SUFFIXES = [".tsbuildinfo"];
 const RG_TIMEOUT_MS = 30_000;
 
-export function createToolContext(workspaceRoot = process.cwd()): ToolContext {
+export function createToolContext(
+  workspaceRoot = process.cwd(),
+  options: ToolContextOptions = {},
+): ToolContext {
   return {
     workspaceRoot: resolve(workspaceRoot),
     changedFiles: [],
     todos: [],
     readSnapshots: {},
+    sourcePackCandidates: options.sourcePackCandidates,
     patchSummaries: {},
   };
 }
@@ -220,6 +250,52 @@ const toolDefinitions = {
     userFacingName: () => toolUserFacingNames.Read,
     getToolUseSummary: (input) => `Read ${input.path}`,
     getActivityDescription: (input) => `Reading ${input.path}`,
+  }),
+  ReadSnippets: defineTool<ReadSnippetsInput>({
+    name: "ReadSnippets",
+    title: "读取代码片段",
+    description: "一次读取多个工作区文件范围。",
+    permission: {
+      risk: "low",
+      scope: "workspace",
+      reason: "只读查看多个文件片段。",
+      phase06Mode: "metadata-only",
+    },
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    lifecycle: {
+      ...readOnlyLifecycle(),
+      maxResultSizeChars: MAX_READ_SNIPPET_OUTPUT_CHARS + 2_000,
+    },
+    validateInput: validateReadSnippetsInput,
+    call: readSnippetsTool,
+    prompt: () => toolPrompts.ReadSnippets,
+    userFacingName: () => toolUserFacingNames.ReadSnippets,
+    getToolUseSummary: (input) => `ReadSnippets ${input.ranges.length} ranges`,
+    getActivityDescription: (input) => `Reading ${input.ranges.length} snippets`,
+  }),
+  SourcePack: defineTool<SourcePackInput>({
+    name: "SourcePack",
+    title: "定位代码片段",
+    description: "按查询定位并返回候选代码片段。",
+    permission: {
+      risk: "low",
+      scope: "workspace",
+      reason: "只读搜索并返回候选代码片段。",
+      phase06Mode: "metadata-only",
+    },
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    lifecycle: {
+      ...readOnlyLifecycle(),
+      maxResultSizeChars: MAX_READ_SNIPPET_OUTPUT_CHARS + 2_000,
+    },
+    validateInput: validateSourcePackInput,
+    call: sourcePackTool,
+    prompt: () => toolPrompts.SourcePack,
+    userFacingName: () => toolUserFacingNames.SourcePack,
+    getToolUseSummary: (input) => `SourcePack ${input.query}`,
+    getActivityDescription: (input) => `Locating snippets for ${input.query}`,
   }),
   Write: defineTool<WriteInput>({
     name: "Write",
@@ -545,6 +621,53 @@ function validateReadInput(input: unknown): ReadInput {
   };
 }
 
+function validateReadSnippetsInput(input: unknown): ReadSnippetsInput {
+  const record = validateRecord(input, "ReadSnippets");
+  const ranges = record.ranges;
+  if (!Array.isArray(ranges) || ranges.length === 0) {
+    throw new Error("ReadSnippets.ranges 必须是非空数组。");
+  }
+  if (ranges.length > MAX_READ_SNIPPET_RANGES) {
+    throw new Error(`ReadSnippets.ranges 最多 ${MAX_READ_SNIPPET_RANGES} 个范围。`);
+  }
+  return {
+    ranges: ranges.map((item, index) => {
+      const range = validateRecord(item, "ReadSnippets");
+      const start = readPositiveLineNumber(range, "start", "ReadSnippets");
+      const end = readPositiveLineNumber(range, "end", "ReadSnippets");
+      if (end < start) {
+        throw new Error(`ReadSnippets.ranges[${index}].end 必须大于等于 start。`);
+      }
+      return {
+        path: readString(range, "path", "ReadSnippets"),
+        start,
+        end,
+      };
+    }),
+  };
+}
+
+function validateSourcePackInput(input: unknown): SourcePackInput {
+  const record = validateRecord(input, "SourcePack");
+  const limit = readOptionalPositiveInteger(record, "limit", "SourcePack");
+  return {
+    query: readString(record, "query", "SourcePack"),
+    limit: limit === undefined ? undefined : Math.min(Math.max(limit, 1), SOURCE_PACK_MAX_LIMIT),
+  };
+}
+
+function readPositiveLineNumber(
+  record: Record<string, unknown>,
+  key: string,
+  toolName: ToolName,
+): number {
+  const value = record[key];
+  if (!Number.isInteger(value) || (value as number) < 1) {
+    throw new Error(`${toolName}.${key} 必须是 1-based 正整数行号。`);
+  }
+  return value as number;
+}
+
 function validateWriteInput(input: unknown): WriteInput {
   const record = validateRecord(input, "Write");
   return {
@@ -706,6 +829,228 @@ async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOut
       newline: detectNewlineStyle(content),
     },
     truncated,
+  };
+}
+
+type SnippetRangeOutput = {
+  path: string;
+  start: number;
+  end: number;
+  content: string;
+  requestedStart: number;
+  requestedEnd: number;
+  totalLines?: number;
+  truncated: boolean;
+  error?: string;
+};
+
+async function readSnippetsTool(
+  input: ReadSnippetsInput,
+  context: ToolContext,
+): Promise<ToolOutput> {
+  const ranges: SnippetRangeOutput[] = [];
+  let remainingChars = MAX_READ_SNIPPET_OUTPUT_CHARS;
+  let safetyTruncated = false;
+
+  for (const range of input.ranges) {
+    const requestedEnd = range.end;
+    const boundedEnd = Math.min(range.end, range.start + MAX_READ_SNIPPET_LINES - 1);
+    const rangeLineTruncated = boundedEnd < requestedEnd;
+    try {
+      const filePath = resolveWorkspacePath(context.workspaceRoot, range.path);
+      const content = await readFile(filePath, "utf8");
+      const info = await stat(filePath);
+      rememberReadSnapshot(context, filePath, content, info);
+      const lines = splitContentLines(content);
+      const selected = lines.slice(range.start - 1, boundedEnd);
+      const actualEnd = selected.length > 0 ? range.start + selected.length - 1 : range.start - 1;
+      const numbered = selected.map((line, index) => `${range.start + index}\t${line}`).join("\n");
+      const capped = applySnippetSafetyCap(numbered, remainingChars);
+      remainingChars -= capped.usedChars;
+      safetyTruncated ||= capped.truncated;
+      ranges.push({
+        path: relativePath(context.workspaceRoot, filePath),
+        start: range.start,
+        end: actualEnd,
+        content: capped.content,
+        requestedStart: range.start,
+        requestedEnd,
+        totalLines: lines.length,
+        truncated: rangeLineTruncated || capped.truncated,
+      });
+      if (capped.truncated) {
+        remainingChars = 0;
+      }
+    } catch (error) {
+      ranges.push({
+        path: range.path,
+        start: range.start,
+        end: boundedEnd,
+        content: "",
+        requestedStart: range.start,
+        requestedEnd,
+        truncated: rangeLineTruncated,
+        error: formatDiagnosticError(error),
+      });
+    }
+  }
+
+  const text = formatReadSnippetsOutput(ranges, safetyTruncated);
+  const okCount = ranges.filter((range) => !range.error).length;
+  return {
+    text,
+    summary: `ReadSnippets: ${okCount}/${ranges.length} ranges`,
+    data: {
+      ranges,
+      count: okCount,
+      requestedRanges: input.ranges.length,
+      safetyTruncated,
+    },
+    truncated: ranges.some((range) => range.truncated) || safetyTruncated,
+  };
+}
+
+function applySnippetSafetyCap(content: string, remainingChars: number): {
+  content: string;
+  usedChars: number;
+  truncated: boolean;
+} {
+  if (remainingChars <= 0) {
+    return {
+      content: "...（结果已截断，后续内容省略；如需精读请指定更小范围。）",
+      usedChars: 0,
+      truncated: true,
+    };
+  }
+  if (content.length <= remainingChars) {
+    return { content, usedChars: content.length, truncated: false };
+  }
+  const suffix = "\n...（结果已截断，后续内容省略；如需精读请指定更小范围。）";
+  const sliceLength = Math.max(0, remainingChars - suffix.length);
+  return {
+    content: `${content.slice(0, sliceLength)}${suffix}`,
+    usedChars: remainingChars,
+    truncated: true,
+  };
+}
+
+function formatReadSnippetsOutput(ranges: SnippetRangeOutput[], safetyTruncated: boolean): string {
+  const lines: string[] = [];
+  for (const range of ranges) {
+    const header = `${range.path}:${range.start}-${range.end}`;
+    if (range.error) {
+      lines.push(`${header}\nERROR: ${range.error}`);
+      continue;
+    }
+    lines.push(`${header}\n${range.content}`);
+    if (range.truncated) {
+      lines.push("...（该范围已截断；可继续读取后续范围。）");
+    }
+  }
+  if (safetyTruncated) {
+    lines.push("...（结果已截断，后续内容省略；如需精读请指定更小范围。）");
+  }
+  return lines.join("\n\n");
+}
+
+type SourcePackMatch = {
+  path: string;
+  line: number;
+  text: string;
+  term: string;
+  source: "index" | "rg" | "local_scan" | "file_name";
+  start?: number;
+  end?: number;
+  confidence?: number;
+  reason?: string;
+};
+
+async function sourcePackTool(input: SourcePackInput, context: ToolContext): Promise<ToolOutput> {
+  const limit = input.limit ?? SOURCE_PACK_DEFAULT_LIMIT;
+  const terms = extractSourcePackTerms(input.query);
+  if (terms.length === 0) {
+    return {
+      text: "empty: query did not contain searchable terms.",
+      summary: "SourcePack: 0 snippets",
+      data: { query: input.query, snippets: [], count: 0, empty: true },
+    };
+  }
+
+  const matchResult = await findSourcePackMatches(input.query, terms, context, limit * 4);
+  const snippets: Array<
+    SnippetRangeOutput & {
+      reason: string;
+      confidence: number;
+      source: SourcePackMatch["source"];
+    }
+  > = [];
+  const seen = new Set<string>();
+  let remainingChars = MAX_READ_SNIPPET_OUTPUT_CHARS;
+  let safetyTruncated = false;
+
+  for (const match of matchResult.matches) {
+    if (snippets.length >= limit) break;
+    const start = match.start ?? Math.max(1, match.line - SOURCE_PACK_CONTEXT_LINES);
+    const end = match.end ?? match.line + SOURCE_PACK_CONTEXT_LINES;
+    const key = `${match.path}:${start}:${end}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const filePath = resolveWorkspacePath(context.workspaceRoot, match.path);
+      const content = await readFile(filePath, "utf8");
+      const info = await stat(filePath);
+      rememberReadSnapshot(context, filePath, content, info);
+      const lines = splitContentLines(content);
+      const boundedEnd = Math.min(end, lines.length);
+      const selected = lines.slice(start - 1, boundedEnd);
+      const numbered = selected.map((line, index) => `${start + index}\t${line}`).join("\n");
+      const capped = applySnippetSafetyCap(numbered, remainingChars);
+      remainingChars -= capped.usedChars;
+      safetyTruncated ||= capped.truncated;
+      snippets.push({
+        path: relativePath(context.workspaceRoot, filePath),
+        start,
+        end: boundedEnd,
+        content: capped.content,
+        requestedStart: start,
+        requestedEnd: end,
+        totalLines: lines.length,
+        truncated: capped.truncated,
+        reason: match.reason ?? `matched "${match.term}" at line ${match.line}`,
+        confidence: estimateSourcePackConfidence(input.query, match),
+        source: match.source,
+      });
+      if (capped.truncated) {
+        break;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (snippets.length === 0) {
+    return {
+      text: "empty: no matching source snippets found.",
+      summary: "SourcePack: 0 snippets",
+      data: { query: input.query, snippets: [], count: 0, empty: true },
+    };
+  }
+
+  const text = formatSourcePackOutput(snippets, safetyTruncated);
+  return {
+    text,
+    summary: `SourcePack: ${snippets.length} snippets`,
+    data: {
+      query: input.query,
+      snippets,
+      count: snippets.length,
+      searchedTerms: terms,
+      source: matchResult.source,
+      fallback: matchResult.source !== "index",
+      candidatePaths: unique(snippets.map((snippet) => snippet.path)),
+      safetyTruncated,
+    },
+    truncated: safetyTruncated || snippets.some((snippet) => snippet.truncated),
   };
 }
 
@@ -1728,6 +2073,174 @@ async function tryRipgrepFiles(
   });
   if (!result) return null;
   return { matches: result.lines.slice(0, limit), truncated: result.truncated };
+}
+
+async function findSourcePackMatches(
+  query: string,
+  terms: string[],
+  context: ToolContext,
+  limit: number,
+): Promise<{ source: SourcePackMatch["source"]; matches: SourcePackMatch[] }> {
+  const indexMatches = sourcePackMatchesFromCandidates(query, context.sourcePackCandidates, limit);
+  if (indexMatches.length > 0) {
+    return { source: "index", matches: indexMatches };
+  }
+  const rgMatches = await tryRipgrepSourcePack(terms, context, limit);
+  if (rgMatches && rgMatches.length > 0) {
+    return { source: "rg", matches: rgMatches };
+  }
+  const matches: SourcePackMatch[] = [];
+  for await (const filePath of listFiles(context.workspaceRoot, () => matches.length >= limit)) {
+    const content = await safeReadText(filePath, context);
+    if (content === null) continue;
+    const rel = relativePath(context.workspaceRoot, filePath);
+    const pathTerm = terms.find((item) => rel.toLowerCase().includes(item.toLowerCase()));
+    if (pathTerm) {
+      matches.push({
+        path: rel,
+        line: 1,
+        text: rel,
+        term: pathTerm,
+        source: "file_name",
+        confidence: 0.35,
+        reason: `fallback file name matched "${pathTerm}"`,
+      });
+      if (matches.length >= limit) break;
+    }
+    const lines = content.split(/\r?\n/u);
+    for (const [index, line] of lines.entries()) {
+      const lower = line.toLowerCase();
+      const term = terms.find((item) => lower.includes(item.toLowerCase()));
+      if (!term) continue;
+      matches.push({
+        path: rel,
+        line: index + 1,
+        text: line,
+        term,
+        source: "local_scan",
+        confidence: 0.4,
+        reason: `fallback local scan matched "${term}" at line ${index + 1}`,
+      });
+      if (matches.length >= limit) break;
+    }
+  }
+  return { source: matches[0]?.source ?? "local_scan", matches };
+}
+
+async function tryRipgrepSourcePack(
+  terms: string[],
+  context: ToolContext,
+  limit: number,
+): Promise<SourcePackMatch[] | null> {
+  const args = [
+    "--line-number",
+    "--no-heading",
+    "--color",
+    "never",
+    "--hidden",
+    "--no-ignore",
+    "--max-columns",
+    "500",
+    "-i",
+    "-F",
+    ...createRgExcludeArgs(context.workspaceRoot, context.workspaceRoot),
+  ];
+  for (const term of terms) {
+    args.push("-e", term);
+  }
+  args.push(".");
+  const result = await runRipgrep(args, context, limit, (line) =>
+    normalizeRgGrepLine(line, context.workspaceRoot),
+  );
+  if (!result) return null;
+  return result.lines.flatMap((line) => parseSourcePackRgLine(line, terms));
+}
+
+function parseSourcePackRgLine(line: string, terms: string[]): SourcePackMatch[] {
+  const firstColon = line.indexOf(":");
+  const secondColon = firstColon < 0 ? -1 : line.indexOf(":", firstColon + 1);
+  if (firstColon < 0 || secondColon < 0) return [];
+  const lineNumber = Number.parseInt(line.slice(firstColon + 1, secondColon), 10);
+  if (!Number.isInteger(lineNumber)) return [];
+  const text = line.slice(secondColon + 1).trim();
+  const lower = text.toLowerCase();
+  const term = terms.find((item) => lower.includes(item.toLowerCase())) ?? terms[0];
+  return [
+    {
+      path: line.slice(0, firstColon),
+      line: lineNumber,
+      text,
+      term,
+      source: "rg",
+      confidence: 0.6,
+      reason: `rg matched "${term}" at line ${lineNumber}`,
+    },
+  ];
+}
+
+function sourcePackMatchesFromCandidates(
+  query: string,
+  candidates: SourcePackCandidate[] | undefined,
+  limit: number,
+): SourcePackMatch[] {
+  if (!candidates || candidates.length === 0) return [];
+  const terms = extractSourcePackTerms(query);
+  return candidates.slice(0, limit).map((candidate) => {
+    const start = Math.max(1, candidate.start);
+    const end = Math.max(start, candidate.end);
+    const term = terms[0] ?? query;
+    return {
+      path: candidate.path,
+      line: start,
+      text: candidate.reason ?? candidate.path,
+      term,
+      source: "index",
+      start,
+      end,
+      confidence: candidate.confidence ?? 0.85,
+      reason: candidate.reason ?? `index candidate for "${query}"`,
+    };
+  });
+}
+
+function extractSourcePackTerms(query: string): string[] {
+  const terms = query
+    .split(/[^\p{L}\p{N}_.$/@-]+/u)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2 && !/^\d+$/u.test(term));
+  return unique(terms).slice(0, SOURCE_PACK_MAX_TERMS);
+}
+
+function estimateSourcePackConfidence(query: string, match: SourcePackMatch): number {
+  if (match.confidence !== undefined) return match.confidence;
+  const queryTerms = extractSourcePackTerms(query);
+  const haystack = `${match.path} ${match.text}`.toLowerCase();
+  const hitCount = queryTerms.filter((term) => haystack.includes(term.toLowerCase())).length;
+  const base = match.source === "index" ? 0.7 : match.source === "rg" ? 0.45 : 0.25;
+  const cap = match.source === "index" ? 0.95 : match.source === "rg" ? 0.75 : 0.55;
+  return Math.min(cap, base + hitCount * 0.15);
+}
+
+function formatSourcePackOutput(
+  snippets: Array<
+    SnippetRangeOutput & { reason: string; confidence: number; source: SourcePackMatch["source"] }
+  >,
+  safetyTruncated: boolean,
+): string {
+  const lines: string[] = [];
+  for (const snippet of snippets) {
+    lines.push(
+      [
+        `${snippet.path}:${snippet.start}-${snippet.end}`,
+        `source: ${snippet.source}; reason: ${snippet.reason}; confidence: ${snippet.confidence.toFixed(2)}`,
+        snippet.content,
+      ].join("\n"),
+    );
+  }
+  if (safetyTruncated) {
+    lines.push("...（结果已截断，后续内容省略；如需精读请指定更小范围。）");
+  }
+  return lines.join("\n\n");
 }
 
 function createRgExcludeArgs(root: string, workspaceRoot: string): string[] {

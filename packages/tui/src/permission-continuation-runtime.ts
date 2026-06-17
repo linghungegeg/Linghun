@@ -393,7 +393,13 @@ export function formatModelToolOutput(
   if (toolName === "Write") {
     return language === "en-US" ? "Report file write completed." : "报告文件写入已完成。";
   }
-  if (toolName === "Read" || toolName === "Glob" || toolName === "Grep") {
+  if (
+    toolName === "Read" ||
+    toolName === "ReadSnippets" ||
+    toolName === "SourcePack" ||
+    toolName === "Glob" ||
+    toolName === "Grep"
+  ) {
     return language === "en-US"
       ? `${toolName} completed; continuing the report analysis.`
       : `${toolName} 已完成，继续整理报告分析。`;
