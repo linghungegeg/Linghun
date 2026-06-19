@@ -1,0 +1,46 @@
+# Draft metadata for Terminal-Bench leaderboard submission.
+# Keep this file public-safe. Do not add API keys, local paths, or private provider configuration.
+
+agent_url: https://github.com/linghungegeg/Linghun
+agent_display_name: Linghun
+agent_org_display_name: Linghun
+
+models:
+  - model_name: gpt-5.5
+    model_provider: openai-compatible
+    model_display_name: GPT-5.5
+    model_org_display_name: OpenAI
+
+benchmark:
+  name: terminal-bench
+  version: "2.1"
+  dataset: terminal-bench/terminal-bench-2-1
+  run_mode: k=5
+  harbor_version: 0.13.2
+
+run:
+  commit: a92313e180a77db415046f707645b2f7e6c08558
+  job_name: linghun-tb21-k5-a92313e1-r12
+  n_attempts: 5
+  n_concurrent_trials: 4
+  timeout_multiplier: 1.0
+  endpoint_profile: responses
+  inference_level: High
+
+result:
+  task_any_pass: 68
+  task_total: 89
+  task_any_pass_rate: 76.40
+  trial_pass: 170
+  trial_fail: 249
+  trial_pass_rate: 40.57
+  harbor_completed_trials: 445
+  harbor_errored_trials: 144
+  harbor_running_trials: 0
+  harbor_pending_trials: 0
+  harbor_cancelled_trials: 0
+
+notes:
+  - "Draft only: official Terminal-Bench 2.1 submission channel should be confirmed before upload."
+  - "Do not publish raw config/job logs without checking for local environment values."
+  - "Raw job artifacts are retained locally under .bench/terminal-bench-2.1-official-k5/linghun-tb21-k5-a92313e1-r12."
