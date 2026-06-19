@@ -191,6 +191,7 @@ export function createHeadlessBenchInitialPrompt(input: {
     preflight,
     formatInitialProfileStrategy(input.config.profile),
     "If rg is unavailable, use grep/find/sed/awk fallbacks instead of failing the task.",
+    ...formatCommonBenchStabilityGuidance(),
     "Do not claim completion from a self-written smoke test when an official test entrypoint is available.",
   ]
     .filter(Boolean)
@@ -361,6 +362,7 @@ export function createHeadlessBenchRepairPrompt(input: {
     "Continue from the current workspace. Do not restart from scratch unless necessary.",
     "Use the official test failure and current files to make the smallest fix, then rerun the official test or artifact check.",
     formatRepairProfileStrategy(input.failure.category, input.profile ?? "generic"),
+    ...formatCommonBenchStabilityGuidance(),
     input.preflight?.missingTools.includes("rg")
       ? "rg is missing in this environment; use grep/find/sed/awk fallbacks."
       : "",
@@ -375,6 +377,16 @@ export function createHeadlessBenchRepairPrompt(input: {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function formatCommonBenchStabilityGuidance(): string[] {
+  return [
+    "Command environment: prefer python3 over bare python. If a command reports python not found, treat it as recoverable and retry with python3.",
+    "Python dependencies: before relying on optional imports, probe with python3 -c \"import X\"; install only when appropriate, otherwise use a stdlib fallback.",
+    "Services: after starting HTTP/gRPC/server processes, poll the port or health endpoint with a bounded timeout and inspect logs before final verification.",
+    "Time budget: build the smallest verifiable solution first, run focused checks early, and avoid long blind builds/training runs near the deadline.",
+    "Verifier alignment: read task-local tests/verifier expectations and confirm output path, filename, port, and answer format instead of only matching examples.",
+  ];
 }
 
 export async function detectHeadlessBenchTaskProfile(input: {

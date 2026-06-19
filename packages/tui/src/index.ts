@@ -1654,6 +1654,13 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           maxContinuations,
         }),
       );
+      if (benchConfig.enabled && hasHeadlessRecoverableProgress(context)) {
+        writeLine(
+          output,
+          "[headless] provider stream failed after continuations, but workspace progress exists; yielding to verifier instead of failing the wrapper.",
+        );
+        return 0;
+      }
       return 1;
     }
     if (benchConfig.enabled) {
@@ -1914,10 +1921,11 @@ function formatHeadlessRemainingTime(deadlineAtMs: number | undefined): string {
 }
 
 function shouldRunHeadlessProviderContinuation(context: TuiContext): boolean {
-  return (
-    context.evidence.some((record) => !record.supportsClaims.includes("provider_failure")) ||
-    context.tools.changedFiles.length > 0
-  );
+  return hasHeadlessRecoverableProgress(context);
+}
+
+function hasHeadlessRecoverableProgress(context: TuiContext): boolean {
+  return context.tools.changedFiles.length > 0;
 }
 
 async function recordHeadlessArtifactChecklist(
@@ -1977,8 +1985,8 @@ function createHeadlessProviderFailureDiagnostic(
 
 function createHeadlessProviderContinuationPrompt(context: TuiContext): string {
   return context.language === "en-US"
-    ? "The previous response stream was interrupted. Continue the original task based on the current workspace state, transcript, tool evidence, and any file changes already present. Do not restart from scratch unless needed."
-    : "上一轮响应流中断。请基于当前工作区状态、已有 transcript、工具证据和已经存在的文件改动继续完成原任务；除非必要，不要从头重做。";
+    ? "The previous response stream was interrupted by a provider/transit failure. Continue the original task in the same context using the current workspace state, transcript, tool evidence, and any file changes already present. Do not restart from scratch unless needed; preserve remaining time, repair the concrete failure, and run the smallest relevant verification before final."
+    : "上一轮响应流因 provider/传输失败中断。请在同一上下文中基于当前工作区状态、已有 transcript、工具证据和已经存在的文件改动继续完成原任务；除非必要，不要从头重做。注意剩余时间，修复具体失败点，并在 final 前运行最小相关验证。";
 }
 
 async function finishHeadlessRuntime(context: TuiContext): Promise<{ ok: boolean; reason?: string }> {

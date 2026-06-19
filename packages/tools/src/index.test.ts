@@ -281,6 +281,27 @@ describe("Phase 05 core tools", () => {
     expect(cancelled.output.text).toContain("工具调用已取消");
   });
 
+  it("adds recoverable hints for common bench command failures", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+
+    const result = await runTool(
+      "Bash",
+      {
+        command:
+          "node -e \"process.stderr.write('/bin/sh: 1: python: not found\\nModuleNotFoundError: No module named \\'pandas\\'\\nhealth check failed: Connection refused\\n'); process.exit(1);\"",
+      },
+      context,
+    );
+
+    expect(result.output.data).toMatchObject({ exitCode: 1, outcome: "completed" });
+    expect(result.output.text).toContain("Linghun recoverable command hints");
+    expect(result.output.text).toContain('bare "python" is unavailable');
+    expect(result.output.text).toContain("missing module(s) pandas");
+    expect(result.output.text).toContain("service readiness issue");
+    expect(result.output.text).toContain("python3 -m pip install");
+  });
+
   it("terminates child and grandchild Bash processes on timeout and cancellation", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const scriptPath = join(project, "spawn-grandchild.cjs");

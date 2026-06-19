@@ -1740,14 +1740,7 @@ describe("runHeadlessTask", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session, createTestModelConfig());
-    context.evidence.push({
-      id: "evidence-tool",
-      kind: "command_output",
-      summary: "Bash: exit code 0",
-      source: "tool:Bash",
-      supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
-      createdAt: new Date().toISOString(),
-    });
+    context.tools.changedFiles.push("answer.txt");
     const prompts: string[] = [];
 
     const exitCode = await runHeadlessTask({
@@ -1778,11 +1771,12 @@ describe("runHeadlessTask", () => {
 
     expect(exitCode).toBe(0);
     expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain("上一轮响应流中断");
+    expect(prompts[1]).toContain("provider/传输失败");
+    expect(prompts[1]).toContain("最小相关验证");
     expect(context.lastProviderFailure).toBeUndefined();
   });
 
-  it("continues multiple times after provider stream failures and reports final diagnostics", async () => {
+  it("bench mode yields to verifier after provider stream failures when files changed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-diag-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -1797,6 +1791,7 @@ describe("runHeadlessTask", () => {
       stdout: new MemoryOutput(),
       stderr,
       maxContinuations: 2,
+      bench: { enabled: true, maxRepairAttempts: 0 },
       __testContext: context,
       __testStore: store,
       __testSkipHydration: true,
@@ -1815,12 +1810,85 @@ describe("runHeadlessTask", () => {
       },
     });
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(0);
     expect(attempts).toBe(3);
     expect(stderr.text).toContain("providerKind=transit");
     expect(stderr.text).toContain("providerCode=PROVIDER_STREAM_DECODE_ERROR");
     expect(stderr.text).toContain("attempts=3");
     expect(stderr.text).toContain("fileChanges=yes:1");
+  });
+
+  it("non-bench mode fails after provider stream failures even when files changed", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-nonbench-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.changedFiles.push("answer.txt");
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      maxContinuations: 1,
+      bench: { enabled: false },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_DECODE_ERROR",
+          kind: "transit",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: "provider failure in non-bench mode",
+          evidenceId: `provider-failure-${Date.now()}`,
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.text).toContain("providerKind=transit");
+    expect(stderr.text).toContain("fileChanges=yes:1");
+  });
+
+  it("fails after provider stream failures when no recoverable progress exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-no-progress-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      maxContinuations: 1,
+      bench: { enabled: true, maxRepairAttempts: 0 },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_DECODE_ERROR",
+          kind: "transit",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: "provider failure with no progress",
+          evidenceId: `provider-failure-${Date.now()}`,
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stderr.text).toContain("providerKind=transit");
+    expect(stderr.text).toContain("fileChanges=no");
   });
 
   it("aborts with a clear error when real-time auto-approval exceeds maxApprovals", async () => {
@@ -2273,6 +2341,10 @@ describe("runHeadlessTask", () => {
     expect(["swe_python", "large_python_project"]).toContain(profile);
     expect(prompt).toContain("read relevant tests and target modules first");
     expect(prompt).toContain("focused pytest/tests");
+    expect(prompt).toContain("prefer python3 over bare python");
+    expect(prompt).toContain('probe with python3 -c "import X"');
+    expect(prompt).toContain("poll the port or health endpoint");
+    expect(prompt).toContain("confirm output path");
   });
 
   it("bench profile detects binary artifact tasks without changing non-bench headless prompts", async () => {
@@ -2339,6 +2411,7 @@ describe("runHeadlessTask", () => {
     expect(compilePrompt).toContain("align header/test signatures");
     expect(artifactPrompt).toContain("generate or write the required artifact");
     expect(timeoutPrompt).toContain("narrow validation to focused tests");
+    expect(timeoutPrompt).toContain("avoid long blind builds");
   });
 });
 

@@ -1262,7 +1262,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
           `original command ${summarizeOriginalShellCommand(input.command)}`,
         ];
   const commandForLog = adapted.logCommand ?? adapted.command;
-  const fullText = [
+  const rawFullText = [
     `$ ${sanitizeSecrets(commandForLog)}`,
     ...adapterLines,
     `exit code ${result.exitCode}`,
@@ -1270,6 +1270,16 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     "",
     sanitizeSecrets(result.output),
   ].join("\n");
+  const recoveryHints = createBashRecoveryHints(rawFullText, result.outcome);
+  const fullText =
+    recoveryHints.length === 0
+      ? rawFullText
+      : [
+          rawFullText,
+          "",
+          "Linghun recoverable command hints:",
+          ...recoveryHints.map((hint) => `- ${hint}`),
+        ].join("\n");
   await writeFile(fullOutputPath, fullText, "utf8");
   const truncated = fullText.length > BASH_PREVIEW_LIMIT;
   const preview = truncated
@@ -1296,6 +1306,38 @@ function createBashDetails(fullOutputPath: string, fullText: string): string {
     "--- tail",
     ...tailLines(fullText, 80),
   ].join("\n");
+}
+
+function createBashRecoveryHints(
+  fullText: string,
+  outcome: "completed" | "timeout" | "cancelled",
+): string[] {
+  const hints: string[] = [];
+  if (/\b(?:python: not found|python: command not found|\/bin\/sh:\s*1:\s*python:\s*not found)\b/iu.test(fullText)) {
+    hints.push(
+      'Recoverable Python command issue: bare "python" is unavailable. Retry with python3 and verify with `python3 --version`.',
+    );
+  }
+  const missingDeps = [
+    ...fullText.matchAll(/ModuleNotFoundError:\s*No module named ['"]([^'"]+)['"]/giu),
+  ].map((match) => match[1]).filter((name): name is string => Boolean(name));
+  if (missingDeps.length > 0) {
+    const deps = unique(missingDeps).join(", ");
+    hints.push(
+      `Recoverable Python dependency issue: missing module(s) ${deps}. Probe with \`python3 -c "import X"\`; if allowed, use \`python3 -m pip install ...\`, otherwise prefer a stdlib fallback.`,
+    );
+  }
+  if (/\b(?:connection refused|econnrefused|failed to connect|health check failed|server is not ready|connection reset)\b/iu.test(fullText)) {
+    hints.push(
+      "Recoverable service readiness issue: after starting a server, poll the port or health endpoint with a bounded timeout and inspect logs before handing off to verification.",
+    );
+  }
+  if (outcome === "timeout") {
+    hints.push(
+      "Recoverable timeout issue: preserve remaining time, run the smallest focused check first, and avoid repeating long blind builds or training runs.",
+    );
+  }
+  return hints;
 }
 
 function tailLines(text: string, limit: number): string[] {
