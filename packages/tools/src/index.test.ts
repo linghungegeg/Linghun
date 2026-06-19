@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -295,11 +296,552 @@ describe("Phase 05 core tools", () => {
     );
 
     expect(result.output.data).toMatchObject({ exitCode: 1, outcome: "completed" });
+    expect(result.output.data).toMatchObject({
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ type: "missing_command", severity: "recoverable" }),
+        expect.objectContaining({
+          type: "missing_python_module",
+          severity: "recoverable",
+          evidence: "ModuleNotFoundError: No module named 'pandas'",
+        }),
+        expect.objectContaining({ type: "service_readiness", severity: "recoverable" }),
+      ]),
+    });
     expect(result.output.text).toContain("Linghun recoverable command hints");
     expect(result.output.text).toContain('bare "python" is unavailable');
     expect(result.output.text).toContain("missing module(s) pandas");
     expect(result.output.text).toContain("service readiness issue");
     expect(result.output.text).toContain("python3 -m pip install");
+  });
+
+  it("adds Bash diagnostics for missing binary tools and artifact preservation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+
+    const result = await runTool(
+      "Bash",
+      {
+        command:
+          "node -e \"process.stderr.write('rg: command not found\\nfile: command not found\\nxxd: command not found\\ncurl: command not found\\nps: command not found\\nFilter modified 5 clean HTML files out of 12\\nprovider stream failed: gateway unstable\\n'); process.exit(1);\"",
+      },
+      context,
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "completed",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ type: "binary_tool_missing", evidence: "rg: command not found" }),
+        expect.objectContaining({
+          type: "binary_tool_missing",
+          evidence: "file: command not found",
+        }),
+        expect.objectContaining({
+          type: "binary_tool_missing",
+          evidence: "xxd: command not found",
+        }),
+        expect.objectContaining({
+          type: "binary_tool_missing",
+          evidence: "curl: command not found",
+        }),
+        expect.objectContaining({ type: "binary_tool_missing", evidence: "ps: command not found" }),
+        expect.objectContaining({
+          type: "artifact_preservation",
+          severity: "blocking",
+          evidence: "Filter modified 5 clean HTML files out of 12",
+        }),
+        expect.objectContaining({ type: "provider_or_network", severity: "recoverable" }),
+      ]),
+    });
+  });
+
+  it("adds Bash diagnostics for gRPC and HTTP connection refused output", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+
+    const result = await runTool(
+      "Bash",
+      {
+        command:
+          "node -e \"process.stderr.write('gRPC health check failed: connection refused\\nHTTP failed to connect to 127.0.0.1:3000\\n'); process.exit(1);\"",
+      },
+      context,
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "completed",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          type: "service_readiness",
+          severity: "recoverable",
+          evidence: "gRPC health check failed: connection refused",
+        }),
+      ]),
+    });
+  });
+
+  it("inspects a text file with Bash binary helper hexdump fallback", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "plain.txt"), "hello binary helper\n", "utf8");
+
+    const result = await runTool(
+      "Bash",
+      { binary: { path: "plain.txt", previewBytes: 8 } },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("Binary inspect plain.txt");
+    expect(result.output.text).toContain("magic unknown binary/text");
+    expect(result.output.text).toContain("hex 68 65 6c 6c 6f 20 62 69");
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "binary_inspected",
+      binary: {
+        size: 20,
+        previewBytes: 8,
+        hexPreview: "68 65 6c 6c 6f 20 62 69",
+        asciiPreview: "hello bi",
+        magic: { type: "unknown" },
+      },
+    });
+  });
+
+  it("inspects random binary data without file or xxd", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "random.bin"), Buffer.from([0, 1, 2, 0xff, 0x41, 0x42]));
+
+    const result = await runTool(
+      "Bash",
+      { binary: { path: "random.bin", previewBytes: 6 } },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("hex 00 01 02 ff 41 42");
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "binary_inspected",
+      binary: {
+        hexPreview: "00 01 02 ff 41 42",
+        asciiPreview: "....AB",
+        magic: { type: "unknown" },
+      },
+    });
+  });
+
+  it("inspects a large binary file with bounded preview bytes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "large.bin"), Buffer.alloc(1024 * 1024, 0x61));
+
+    const result = await runTool(
+      "Bash",
+      { binary: { path: "large.bin", previewBytes: 16 } },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "binary_inspected",
+      binary: {
+        size: 1024 * 1024,
+        previewBytes: 16,
+        hexPreview: "61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61",
+        asciiPreview: "aaaaaaaaaaaaaaaa",
+      },
+    });
+  });
+
+  it("parses a minimal ELF header with Bash binary helper", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const elf = Buffer.alloc(64);
+    elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
+    elf.writeUInt16LE(3, 16);
+    elf.writeUInt16LE(62, 18);
+    elf.writeBigUInt64LE(0x401000n, 24);
+    elf.writeBigUInt64LE(64n, 32);
+    elf.writeBigUInt64LE(512n, 40);
+    elf.writeUInt16LE(64, 52);
+    elf.writeUInt16LE(56, 54);
+    elf.writeUInt16LE(2, 56);
+    elf.writeUInt16LE(64, 58);
+    elf.writeUInt16LE(8, 60);
+    elf.writeUInt16LE(7, 62);
+    await writeFile(join(project, "sample.elf"), elf);
+
+    const result = await runTool(
+      "Bash",
+      { binary: { path: "sample.elf", previewBytes: 16 } },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("magic ELF executable/shared object");
+    expect(result.output.text).toContain("elf 64 little type=shared machine=x86-64 entry=0x401000");
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "binary_inspected",
+      binary: {
+        magic: { type: "elf" },
+        elf: {
+          class: "64",
+          endianness: "little",
+          type: "shared",
+          machine: "x86-64",
+          entry: "0x401000",
+          programHeaderCount: 2,
+          sectionHeaderCount: 8,
+        },
+      },
+    });
+  });
+
+  it("keeps truncated 64-bit ELF inspect successful with an ELF error", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const elf = Buffer.alloc(52);
+    elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
+    await writeFile(join(project, "truncated.elf"), elf);
+
+    const result = await runTool(
+      "Bash",
+      { binary: { path: "truncated.elf", previewBytes: 16 } },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("elf ELF header is truncated");
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "binary_inspected",
+      binary: {
+        magic: { type: "elf" },
+        elf: { error: "ELF header is truncated" },
+      },
+    });
+  });
+
+  it("returns Bash binary helper diagnostics when file is missing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      { binary: { path: "missing.bin" } },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("Binary inspect failed missing.bin");
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "binary_inspect_failed",
+      diagnostics: [
+        expect.objectContaining({
+          type: "artifact_preservation",
+          severity: "blocking",
+          evidence: expect.stringContaining("binary inspect failed for missing.bin"),
+          suggestion: expect.any(String),
+        }),
+      ],
+    });
+  });
+
+  it("checks an artifact file exists with size and sha256", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "artifact.txt"), "artifact-ok\n", "utf8");
+
+    const result = await runTool(
+      "Bash",
+      { artifact: { path: "artifact.txt" } },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("Artifact check artifact.txt");
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "artifact_checked",
+      artifact: {
+        path: "artifact.txt",
+        exists: true,
+        isFile: true,
+        isDirectory: false,
+        size: 12,
+        sha256: expect.any(String),
+      },
+      protectPaths: [],
+    });
+  });
+
+  it("checks artifact header match and mismatch", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "header.txt"), "MAGIC: body\n", "utf8");
+
+    const ok = await runTool(
+      "Bash",
+      { artifact: { path: "header.txt", expectHeader: "MAGIC:" } },
+      createToolContext(project),
+    );
+    const failed = await runTool(
+      "Bash",
+      { artifact: { path: "header.txt", expectHeader: "WRONG" } },
+      createToolContext(project),
+    );
+
+    expect(ok.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "artifact_checked",
+      artifact: { checks: { header: { ok: true } } },
+    });
+    expect(failed.output.text).toContain("header failed");
+    expect(failed.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "artifact_check_failed",
+      artifact: { checks: { header: { ok: false, expected: "WRONG" } } },
+      diagnostics: [
+        expect.objectContaining({
+          type: "artifact_preservation",
+          severity: "blocking",
+          evidence: expect.stringContaining("wrong header header.txt"),
+        }),
+      ],
+    });
+  });
+
+  it("checks valid and invalid JSON artifacts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "valid.json"), "{\"ok\":true}\n", "utf8");
+    await writeFile(join(project, "invalid.json"), "{\"ok\":\n", "utf8");
+
+    const valid = await runTool(
+      "Bash",
+      { artifact: { path: "valid.json", json: true } },
+      createToolContext(project),
+    );
+    const invalid = await runTool(
+      "Bash",
+      { artifact: { path: "invalid.json", json: true } },
+      createToolContext(project),
+    );
+
+    expect(valid.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "artifact_checked",
+      artifact: { checks: { json: { ok: true } } },
+    });
+    expect(invalid.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "artifact_check_failed",
+      artifact: { checks: { json: { ok: false } } },
+      diagnostics: [
+        expect.objectContaining({
+          type: "artifact_preservation",
+          evidence: "output format mismatch invalid.json: invalid JSON",
+        }),
+      ],
+    });
+  });
+
+  it("checks protected paths as clean when read snapshot still matches", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "input.txt"), "input\n", "utf8");
+    await writeFile(join(project, "output.txt"), "output\n", "utf8");
+    const context = createToolContext(project);
+
+    await runTool("Read", { path: "input.txt" }, context);
+    const result = await runTool(
+      "Bash",
+      { artifact: { path: "output.txt", protectPaths: ["input.txt"] } },
+      context,
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "artifact_checked",
+      protectPaths: [
+        expect.objectContaining({
+          path: "input.txt",
+          exists: true,
+          modified: false,
+          baseline: "readSnapshot",
+        }),
+      ],
+    });
+  });
+
+  it("returns artifact_preservation diagnostics when protected paths changed", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "input.txt"), "input\n", "utf8");
+    await writeFile(join(project, "output.txt"), "output\n", "utf8");
+    const context = createToolContext(project);
+
+    await runTool("Read", { path: "input.txt" }, context);
+    await writeFile(join(project, "input.txt"), "changed\n", "utf8");
+    const result = await runTool(
+      "Bash",
+      { artifact: { path: "output.txt", protectPaths: ["input.txt"] } },
+      context,
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "artifact_check_failed",
+      protectPaths: [expect.objectContaining({ path: "input.txt", modified: true })],
+      diagnostics: [
+        expect.objectContaining({
+          type: "artifact_preservation",
+          severity: "blocking",
+          evidence: "protected input modified input.txt",
+        }),
+      ],
+    });
+  });
+
+  it("returns artifact_preservation diagnostics when artifact is missing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      { artifact: { path: "missing.out" } },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("Artifact check missing.out");
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "artifact_check_failed",
+      artifact: { path: "missing.out", exists: false },
+      diagnostics: [
+        expect.objectContaining({
+          type: "artifact_preservation",
+          severity: "blocking",
+          evidence: expect.stringContaining("artifact missing or unreadable missing.out"),
+          suggestion: expect.any(String),
+        }),
+      ],
+    });
+  });
+
+  it("starts a Bash service and waits for TCP readiness", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const port = await getFreeTcpPort();
+
+    const result = await runTool(
+      "Bash",
+      {
+        command:
+          `node -e "const net=require('node:net'); const server=net.createServer((socket)=>socket.end('ok')); server.listen(${port}, '127.0.0.1'); setTimeout(()=>server.close(), 2500);"`,
+        service: { type: "tcp", host: "127.0.0.1", port, timeoutMs: 2_000, intervalMs: 50 },
+      },
+      context,
+    );
+
+    expect(result.output.text).toContain("Service started and ready");
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "service_ready",
+      service: {
+        cwd: project,
+        alive: true,
+        readiness: { ok: true },
+      },
+    });
+    expect(JSON.stringify(result.output.data)).not.toContain("diagnostics");
+    expect(result.output.fullOutputPath).toBeTruthy();
+    await stopServiceFromOutput(result.output.data);
+  });
+
+  it("starts a Bash service and waits for HTTP readiness", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const port = await getFreeTcpPort();
+
+    const result = await runTool(
+      "Bash",
+      {
+        command:
+          `node -e "const http=require('node:http'); const server=http.createServer((req,res)=>{res.end('ok')}); server.listen(${port}, '127.0.0.1'); setTimeout(()=>server.close(), 2500);"`,
+        service: { type: "http", url: `http://127.0.0.1:${port}/health`, timeoutMs: 2_000, intervalMs: 50 },
+      },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("Service started and ready");
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "service_ready",
+      service: { readiness: { ok: true, target: `http://127.0.0.1:${port}/health` } },
+    });
+    await stopServiceFromOutput(result.output.data);
+  });
+
+  it("ignores Bash service output after readiness closes the service log", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const port = await getFreeTcpPort();
+
+    const result = await runTool(
+      "Bash",
+      {
+        command:
+          `node -e "const net=require('node:net'); const server=net.createServer((socket)=>socket.end('ok')); server.listen(${port}, '127.0.0.1', ()=>{setTimeout(()=>process.stdout.write('after-ready\\\\n'), 50); setTimeout(()=>server.close(()=>process.exit(0)), 100);});"`,
+        service: { type: "tcp", host: "127.0.0.1", port, timeoutMs: 2_000, intervalMs: 50 },
+      },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({ exitCode: 0, outcome: "service_ready" });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const fullOutput = await readFile(String(result.output.fullOutputPath), "utf8");
+    expect(fullOutput).toContain("service cwd");
+  });
+
+  it("returns service_readiness diagnostics when a Bash service is not ready before timeout", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const port = await getFreeTcpPort();
+
+    const result = await runTool(
+      "Bash",
+      {
+        command: 'node -e "setTimeout(()=>{}, 2500)"',
+        service: { type: "tcp", host: "127.0.0.1", port, timeoutMs: 200, intervalMs: 50 },
+      },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("Service readiness failed");
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "service_not_ready",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          type: "service_readiness",
+          severity: "recoverable",
+        }),
+      ]),
+    });
+    await stopServiceFromOutput(result.output.data);
+  });
+
+  it("returns service_readiness diagnostics when a Bash service exits before readiness", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const port = await getFreeTcpPort();
+
+    const result = await runTool(
+      "Bash",
+      {
+        command: "node -e \"process.stderr.write('boot failed\\n'); process.exit(3);\"",
+        service: { type: "tcp", host: "127.0.0.1", port, timeoutMs: 1_000, intervalMs: 50 },
+      },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "service_exited",
+      service: { alive: false },
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          type: "service_readiness",
+          evidence: expect.stringContaining("service process exited before readiness"),
+        }),
+      ]),
+    });
+    const fullOutput = await readFile(String(result.output.fullOutputPath), "utf8");
+    expect(fullOutput).toContain("boot failed");
   });
 
   it("terminates child and grandchild Bash processes on timeout and cancellation", async () => {
@@ -1390,4 +1932,31 @@ function createMockChildProcess(): EventEmitter & {
   child.stderr = new PassThrough();
   child.kill = () => true;
   return child;
+}
+
+async function getFreeTcpPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  if (!address || typeof address === "string") {
+    throw new Error("failed to allocate test tcp port");
+  }
+  return address.port;
+}
+
+async function stopServiceFromOutput(data: unknown): Promise<void> {
+  const pid = (data as { service?: { pid?: unknown } } | undefined)?.service?.pid;
+  if (typeof pid !== "number" || pid <= 0) return;
+  try {
+    process.kill(pid);
+  } catch {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
 }

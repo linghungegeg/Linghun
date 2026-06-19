@@ -152,6 +152,59 @@ describe("tool-output-presenter", () => {
       expect(text).toContain("2");
     });
 
+    it("Bash diagnostics 会出现在模型工具结果文本里", () => {
+      const text = formatToolOutput(
+        "Bash",
+        {
+          text: "exit code 1",
+          data: {
+            exitCode: 1,
+            diagnostics: [
+              {
+                type: "service_readiness",
+                severity: "recoverable",
+                evidence: "connection refused",
+                suggestion: "poll health",
+              },
+              {
+                type: "artifact_preservation",
+                severity: "blocking",
+                evidence: "clean HTML modified",
+                suggestion: "inspect artifacts",
+              },
+              {
+                type: "timeout",
+                severity: "recoverable",
+                evidence: "timed out",
+                suggestion: "shorten check",
+              },
+              {
+                type: "provider_or_network",
+                severity: "recoverable",
+                evidence: "gateway unstable",
+                suggestion: "retry later",
+              },
+            ],
+          },
+        },
+        "zh-CN",
+      );
+
+      expect(text).toContain("Linghun diagnostics:");
+      expect(text).toContain("- service_readiness: connection refused");
+      expect(text).toContain("- artifact_preservation: clean HTML modified");
+      expect(text).toContain("- timeout: timed out");
+      expect(text).not.toContain("- provider_or_network: gateway unstable");
+    });
+
+    it("无 diagnostics 时 Bash 输出不变", () => {
+      const output = { text: "boom", data: { exitCode: 2 } };
+
+      expect(formatToolOutput("Bash", output, "zh-CN")).toBe(
+        formatToolOutput("Bash", { ...output, data: { exitCode: 2, diagnostics: [] } }, "zh-CN"),
+      );
+    });
+
     it("长 Bash 输出主屏折叠为 5 行，但 formatted 正文不携带 Ctrl+O 提示", () => {
       const text = Array.from({ length: 8 }, (_, index) => `bash line ${index + 1}`).join("\n");
       const formatted = formatToolOutput("Bash", { text, data: { exitCode: 0 } }, "zh-CN");

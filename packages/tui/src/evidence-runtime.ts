@@ -13,6 +13,7 @@ import {
   LINGHUN_MAX_TOOL_RESULT_BYTES,
 } from "./runtime-budget.js";
 import { truncateDisplay } from "./startup-runtime.js";
+import { formatToolDiagnosticsSummary } from "./tool-output-presenter.js";
 import {
   type ToolResultBudgetRecord,
   type ToolResultBudgetState,
@@ -35,6 +36,12 @@ export const TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS = 8_000;
 export const MAX_ROUND_ASSISTANT_CHARS_FOR_PROVIDER = 16_000;
 export const ROUND_ASSISTANT_HEAD_CHARS = 4_000;
 export const ROUND_ASSISTANT_TAIL_CHARS = 4_000;
+const RECENT_DIAGNOSTICS_LIMIT = 20;
+type CompactDiagnostic = {
+  type: string;
+  severity?: string;
+  evidence: string;
+};
 
 export function createEvidenceRecord(
   kind: EvidenceRecord["kind"],
@@ -574,8 +581,12 @@ export function createToolEndEvent(id: string, output: ToolOutput): TranscriptEv
 }
 
 function summarizeToolEndOutputForTranscript(output: ToolOutput): ToolOutput {
+  const diagnostics = formatToolDiagnosticsSummary(output);
   const text = compactToolEndTextForTranscript(
-    output.summary || output.preview || output.text || "tool call completed",
+    appendCompactDiagnostics(
+      output.summary || output.preview || output.text || "tool call completed",
+      diagnostics,
+    ),
     output.fullOutputPath,
   );
   return {
@@ -592,7 +603,13 @@ function summarizeToolEndOutputForTranscript(output: ToolOutput): ToolOutput {
     fullOutputPath: output.fullOutputPath,
     evidenceId: output.evidenceId,
     changedFiles: output.changedFiles,
+    data: compactDiagnosticsDataForTranscript(output.data),
   };
+}
+
+function appendCompactDiagnostics(text: string, diagnostics: string | undefined): string {
+  if (!diagnostics || text.includes("Linghun diagnostics:")) return text;
+  return `${diagnostics}\n${text}`;
 }
 
 function compactToolEndTextForTranscript(text: string, fullOutputPath?: string): string {
@@ -654,7 +671,37 @@ function compactToolOutputDataForTranscript(data: unknown): unknown {
     truncated: true,
     originalChars: serialized.length,
     preview: serialized.slice(0, TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS),
+    ...compactDiagnosticsDataForTranscript(data),
   };
+}
+
+function compactDiagnosticsDataForTranscript(data: unknown): { diagnostics: CompactDiagnostic[] } | undefined {
+  const diagnostics = readDiagnosticsForTranscript(data);
+  if (!diagnostics) return undefined;
+  return { diagnostics };
+}
+
+function readDiagnosticsForTranscript(data: unknown): CompactDiagnostic[] | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const diagnostics = (data as { diagnostics?: unknown }).diagnostics;
+  if (!Array.isArray(diagnostics) || diagnostics.length === 0) return undefined;
+  return diagnostics
+    .slice(0, 5)
+    .map(compactDiagnosticForTranscript)
+    .filter((diagnostic): diagnostic is CompactDiagnostic => Boolean(diagnostic));
+}
+
+function compactDiagnosticForTranscript(value: unknown): CompactDiagnostic | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : undefined;
+  const severity = typeof record.severity === "string" ? record.severity : undefined;
+  const evidence =
+    typeof record.evidence === "string"
+      ? truncateDisplay(record.evidence.replace(/\s+/g, " "), 160)
+      : undefined;
+  if (!type || !evidence) return undefined;
+  return { type, severity, evidence };
 }
 
 export function isToolOutputFailure(name: ToolName, output: ToolOutput): boolean {
@@ -731,11 +778,13 @@ export async function appendToolResultEvent(
   isError: boolean,
   evidenceId?: string,
 ): Promise<void> {
+  rememberRecentDiagnostics(context, toolName, content, toolUseId, evidenceId);
+  const contentWithDiagnostics = appendToolResultContentDiagnostics(content);
   const budgetedContent = await budgetToolResultTranscriptContent(
     context,
     sessionId,
     toolUseId,
-    content,
+    contentWithDiagnostics,
   );
   await context.store.appendEvent(sessionId, {
     type: "tool_result",
@@ -746,6 +795,44 @@ export async function appendToolResultEvent(
     evidenceId,
     createdAt: new Date().toISOString(),
   });
+}
+
+function rememberRecentDiagnostics(
+  context: TuiContext,
+  source: ToolName,
+  content: unknown,
+  toolUseId: string,
+  evidenceId?: string,
+): void {
+  const diagnostics = readDiagnosticsForTranscript((content as { data?: unknown } | undefined)?.data);
+  if (!diagnostics || diagnostics.length === 0) return;
+  const createdAt = new Date().toISOString();
+  const entries = diagnostics.map((diagnostic) => ({
+    source,
+    ...diagnostic,
+    createdAt,
+    toolUseId,
+    evidenceId,
+  }));
+  // newest-first: consumers can read index 0 as the latest diagnostic.
+  context.tools.recentDiagnostics = [
+    ...entries,
+    ...(context.tools.recentDiagnostics ?? []),
+  ].slice(0, RECENT_DIAGNOSTICS_LIMIT);
+}
+
+function appendToolResultContentDiagnostics(content: unknown): unknown {
+  if (!content || typeof content !== "object") return content;
+  const output = content as ToolOutput;
+  if (typeof output.text !== "string") return content;
+  const diagnostics = formatToolDiagnosticsSummary(output);
+  if (!diagnostics) return content;
+  const compactDiagnostics = compactDiagnosticsDataForTranscript(output.data);
+  return {
+    ...output,
+    data: compactDiagnostics ? { ...(output.data as object), ...compactDiagnostics } : output.data,
+    text: appendCompactDiagnostics(output.text, diagnostics),
+  };
 }
 
 export async function budgetToolResultTranscriptContent(

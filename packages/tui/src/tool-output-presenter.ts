@@ -17,6 +17,8 @@ export type LayeredToolOutput = {
 const TODO_OUTPUT_ITEM_LIMIT = 8;
 const BASH_TAIL_LINE_LIMIT = 0;
 const PRIMARY_PREVIEW_LINE_CAP = 5;
+const DIAGNOSTICS_SUMMARY_LIMIT = 3;
+const DIAGNOSTICS_EVIDENCE_LIMIT = 120;
 const RAW_TOOL_USE_PATTERNS = [
   /<tool_use(?:_error)?\b[\s\S]*?<\/tool_use(?:_error)?>/giu,
   /<tool_use(?:_error)?\b[^>]*\/>/giu,
@@ -92,6 +94,10 @@ export function formatToolOutput(
   if (layered.preview) {
     lines.push(layered.preview);
   }
+  const diagnostics = formatToolDiagnosticsSummary(output);
+  if (diagnostics) {
+    lines.push(diagnostics);
+  }
   // D.13L Section 4 — Bash 单独再补一行人类可读终态：
   //   "Command exited 0" / "命令已退出 0"
   // 与 CCB AssistantToolUseMessage 的 end-summary 模式对齐；只在能从
@@ -103,6 +109,34 @@ export function formatToolOutput(
     lines.push(bashEnd);
   }
   return lines.join("\n");
+}
+
+export function formatToolDiagnosticsSummary(output: ToolOutput): string | undefined {
+  const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
+  const diagnostics = Array.isArray((metadata as { diagnostics?: unknown } | undefined)?.diagnostics)
+    ? (metadata as { diagnostics: unknown[] }).diagnostics
+    : [];
+  const lines = diagnostics
+    .map(formatCompactDiagnosticLine)
+    .filter((line): line is string => Boolean(line))
+    .slice(0, DIAGNOSTICS_SUMMARY_LIMIT);
+  if (lines.length === 0) return undefined;
+  return ["Linghun diagnostics:", ...lines].join("\n");
+}
+
+function formatCompactDiagnosticLine(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type.trim() : "";
+  const evidence = typeof record.evidence === "string" ? record.evidence.trim() : "";
+  if (!type || !evidence) return undefined;
+  return `- ${type}: ${compactDiagnosticEvidence(evidence)}`;
+}
+
+function compactDiagnosticEvidence(value: string): string {
+  const singleLine = value.replace(/\s+/gu, " ").trim();
+  if (singleLine.length <= DIAGNOSTICS_EVIDENCE_LIMIT) return singleLine;
+  return `${singleLine.slice(0, DIAGNOSTICS_EVIDENCE_LIMIT - 3)}...`;
 }
 
 function formatPrimaryToolLead(

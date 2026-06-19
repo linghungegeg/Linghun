@@ -11,6 +11,12 @@ import {
 } from "./tool-runtime.js";
 import { toolPrompts } from "./tools/prompts.js";
 import { toolUserFacingNames } from "./tools/ui.js";
+import { checkArtifact } from "./tools/Bash/artifact-checker.js";
+import type { BashArtifactCheckInput } from "./tools/Bash/artifact-checker.js";
+import { inspectBinaryFile } from "./tools/Bash/binary-helper.js";
+import type { BashBinaryInspectInput } from "./tools/Bash/binary-helper.js";
+import { startBashService } from "./tools/Bash/service-kernel.js";
+import type { BashServiceReadiness } from "./tools/Bash/service-kernel.js";
 import { bingSearch, formatSearchOutput, applyDomainFilter } from "./tools/WebSearch/bing-scraper.js";
 import type { WebSearchInput, SearchResult } from "./tools/WebSearch/bing-scraper.js";
 import { webFetch, formatFetchOutput } from "./tools/WebFetch/web-fetch.js";
@@ -74,6 +80,16 @@ export type SourcePackCandidate = {
   confidence?: number;
 };
 
+export type RecentToolDiagnostic = {
+  source: ToolName;
+  type: string;
+  severity?: string;
+  evidence: string;
+  createdAt: string;
+  toolUseId?: string;
+  evidenceId?: string;
+};
+
 export type ToolContext = {
   workspaceRoot: string;
   logRoot?: string;
@@ -82,6 +98,7 @@ export type ToolContext = {
   readSnapshots?: Record<string, ReadSnapshot>;
   sourcePackCandidates?: SourcePackCandidate[];
   patchSummaries?: Record<string, DiffSummary>;
+  recentDiagnostics?: RecentToolDiagnostic[];
   abortSignal?: AbortSignal;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
   trackChildProcess?: (
@@ -140,7 +157,28 @@ export type MultiEditInput = {
 };
 export type GrepInput = { pattern: string; path?: string; limit?: number };
 export type GlobInput = { pattern: string; path?: string; limit?: number };
-export type BashInput = { command: string; timeoutMs?: number };
+export type BashInput = {
+  command?: string;
+  timeoutMs?: number;
+  service?: BashServiceReadiness;
+  binary?: BashBinaryInspectInput;
+  artifact?: BashArtifactCheckInput;
+};
+type BashDiagnosticType =
+  | "missing_command"
+  | "missing_python_module"
+  | "service_readiness"
+  | "artifact_preservation"
+  | "binary_tool_missing"
+  | "timeout"
+  | "provider_or_network";
+type BashDiagnosticSeverity = "info" | "recoverable" | "blocking";
+type BashDiagnostic = {
+  type: BashDiagnosticType;
+  severity: BashDiagnosticSeverity;
+  evidence: string;
+  suggestion: string;
+};
 export type TodoInput =
   | { action: "list" }
   | { action: "add"; content: string; id?: string }
@@ -187,6 +225,7 @@ export function createToolContext(
     readSnapshots: {},
     sourcePackCandidates: options.sourcePackCandidates,
     patchSummaries: {},
+    recentDiagnostics: [],
   };
 }
 
@@ -415,7 +454,12 @@ const toolDefinitions = {
     call: bashTool,
     prompt: () => toolPrompts.Bash,
     userFacingName: () => toolUserFacingNames.Bash,
-    getToolUseSummary: (input) => `Bash ${input.command}`,
+    getToolUseSummary: (input) =>
+      input.artifact
+        ? `Bash artifact ${input.artifact.path}`
+        : input.binary
+          ? `Bash binary ${input.binary.path}`
+          : `Bash ${input.command}`,
     getActivityDescription: () => "Running command",
   }),
   Todo: defineTool<TodoInput>({
@@ -726,10 +770,83 @@ function validateGlobInput(input: unknown): GlobInput {
 
 function validateBashInput(input: unknown): BashInput {
   const record = validateRecord(input, "Bash");
+  const command = readOptionalString(record, "command", "Bash");
+  const binary = validateOptionalBashBinaryInspect(record.binary);
+  const artifact = validateOptionalBashArtifactCheck(record.artifact);
+  if (command === undefined && binary === undefined && artifact === undefined) {
+    throw new Error("Bash.command、Bash.binary 或 Bash.artifact 必须提供一个。");
+  }
+  const modeCount = [command !== undefined, binary !== undefined, artifact !== undefined].filter(Boolean).length;
+  if (modeCount > 1 || ((binary !== undefined || artifact !== undefined) && record.service !== undefined)) {
+    throw new Error("Bash.command、Bash.binary、Bash.artifact 和 Bash.service 不能混用。");
+  }
   return {
-    command: readString(record, "command", "Bash"),
+    command,
     timeoutMs: readOptionalPositiveInteger(record, "timeoutMs", "Bash"),
+    service: validateOptionalBashServiceReadiness(record.service),
+    binary,
+    artifact,
   };
+}
+
+function validateOptionalBashBinaryInspect(input: unknown): BashBinaryInspectInput | undefined {
+  if (input === undefined) return undefined;
+  const record = validateRecord(input, "Bash");
+  return {
+    path: readString(record, "path", "Bash"),
+    previewBytes: readOptionalPositiveInteger(record, "previewBytes", "Bash"),
+  };
+}
+
+function validateOptionalBashArtifactCheck(input: unknown): BashArtifactCheckInput | undefined {
+  if (input === undefined) return undefined;
+  const record = validateRecord(input, "Bash");
+  return {
+    path: readString(record, "path", "Bash"),
+    expectHeader: readOptionalString(record, "expectHeader", "Bash"),
+    expectMagic: readOptionalString(record, "expectMagic", "Bash"),
+    json: readOptionalBoolean(record, "json", "Bash"),
+    executable: readOptionalBoolean(record, "executable", "Bash"),
+    protectPaths: readOptionalStringArray(record, "protectPaths", "Bash"),
+  };
+}
+
+function validateOptionalBashServiceReadiness(input: unknown): BashServiceReadiness | undefined {
+  if (input === undefined) return undefined;
+  const record = validateRecord(input, "Bash");
+  const type = readString(record, "type", "Bash");
+  const timeoutMs = readOptionalPositiveInteger(record, "timeoutMs", "Bash");
+  const intervalMs = readOptionalPositiveInteger(record, "intervalMs", "Bash");
+  if (type === "tcp") {
+    const rawPort = record.port;
+    if (!Number.isInteger(rawPort) || (rawPort as number) <= 0) {
+      throw new Error("Bash.service.port 必须是正整数。");
+    }
+    const port = rawPort as number;
+    if (port > 65_535) {
+      throw new Error("Bash.service.port 必须在 1-65535 范围内。");
+    }
+    return {
+      type,
+      port,
+      host: readOptionalString(record, "host", "Bash"),
+      timeoutMs,
+      intervalMs,
+    };
+  }
+  if (type === "http") {
+    const url = readString(record, "url", "Bash");
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error("protocol");
+      }
+    } catch {
+      throw new Error("Bash.service.url 必须是 http/https URL。");
+    }
+    return { type, url, timeoutMs, intervalMs };
+  }
+  throw new Error("Bash.service.type 必须是 tcp 或 http。");
 }
 
 function validateTodoInput(input: unknown): TodoInput {
@@ -796,6 +913,19 @@ function readOptionalStringArray(
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
     throw new Error(`${toolName}.${key} 必须是字符串数组或 undefined。`);
+  }
+  return value;
+}
+
+function readOptionalBoolean(
+  record: Record<string, unknown>,
+  key: string,
+  toolName: ToolName,
+): boolean | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new Error(`${toolName}.${key} 必须是 boolean 或 undefined。`);
   }
   return value;
 }
@@ -1241,11 +1371,38 @@ function sanitizeSecrets(text: string): string {
 }
 
 async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOutput> {
+  if (input.artifact) {
+    return checkArtifact({
+      input: input.artifact,
+      target: resolveArtifactPath(context, input.artifact.path),
+      protectPaths: (input.artifact.protectPaths ?? []).map((path) => resolveArtifactPath(context, path)),
+      context,
+    });
+  }
+  if (input.binary) {
+    return inspectBinaryFile(input.binary, resolveWorkspacePath(context.workspaceRoot, input.binary.path));
+  }
+  if (!input.command) {
+    throw new Error("Bash.command 或 Bash.binary 必须提供一个。");
+  }
   const logRoot = context.logRoot ?? join(context.workspaceRoot, ".linghun", "logs", "tools");
   await mkdir(logRoot, { recursive: true });
   const fullOutputPath = join(logRoot, `bash-${Date.now()}-${randomUUID()}.log`);
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
   const adapted = adaptShellCommand(input.command);
+  if (input.service) {
+    return startBashService({
+      command: adapted.command,
+      logCommand: adapted.logCommand ?? adapted.command,
+      cwd: context.workspaceRoot,
+      fullOutputPath,
+      readiness: input.service,
+      abortSignal: context.abortSignal,
+      onProgress: (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
+      trackChildProcess: context.trackChildProcess,
+      sanitizeText: sanitizeSecrets,
+    });
+  }
   const result = await runShell(
     adapted.command,
     context.workspaceRoot,
@@ -1271,6 +1428,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     sanitizeSecrets(result.output),
   ].join("\n");
   const recoveryHints = createBashRecoveryHints(rawFullText, result.outcome);
+  const diagnostics = createBashDiagnostics(rawFullText, result.outcome);
   const fullText =
     recoveryHints.length === 0
       ? rawFullText
@@ -1286,13 +1444,14 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     ? `${fullText.slice(0, BASH_PREVIEW_LIMIT)}\n...（输出已截断，完整日志见 fullOutputPath）`
     : fullText;
   const details = createBashDetails(fullOutputPath, fullText);
+  const data =
+    adapted.adapter === "native"
+      ? { exitCode: result.exitCode, outcome: result.outcome }
+      : { exitCode: result.exitCode, outcome: result.outcome, adapter: adapted.adapter };
   return {
     text: preview,
     details,
-    data:
-      adapted.adapter === "native"
-        ? { exitCode: result.exitCode, outcome: result.outcome }
-        : { exitCode: result.exitCode, outcome: result.outcome, adapter: adapted.adapter },
+    data: diagnostics.length === 0 ? data : { ...data, diagnostics },
     truncated,
     fullOutputPath,
   };
@@ -1338,6 +1497,149 @@ function createBashRecoveryHints(
     );
   }
   return hints;
+}
+
+function createBashDiagnostics(
+  fullText: string,
+  outcome: "completed" | "timeout" | "cancelled",
+): BashDiagnostic[] {
+  const diagnostics: BashDiagnostic[] = [];
+  const addDiagnostic = (
+    type: BashDiagnosticType,
+    severity: BashDiagnosticSeverity,
+    evidence: string,
+    suggestion: string,
+  ) => {
+    if (diagnostics.some((item) => item.type === type && item.evidence === evidence)) {
+      return;
+    }
+    diagnostics.push({ type, severity, evidence, suggestion });
+  };
+
+  const pythonEvidence = firstEvidenceLine(
+    fullText,
+    /\b(?:python: not found|python: command not found|\/bin\/sh:\s*1:\s*python:\s*not found)\b/iu,
+  );
+  if (pythonEvidence) {
+    addDiagnostic(
+      "missing_command",
+      "recoverable",
+      pythonEvidence,
+      'Bare "python" is unavailable; retry with python3 and verify with `python3 --version`.',
+    );
+  }
+
+  for (const toolName of ["rg", "file", "xxd", "curl", "ps"]) {
+    const escapedToolName = escapeRegExp(toolName);
+    const evidence = firstEvidenceLine(
+      fullText,
+      new RegExp(
+        `(?:\\b${escapedToolName}:\\s*(?:command\\s+)?not\\s+found\\b|/bin/sh:\\s*\\d+:\\s*${escapedToolName}:\\s*not\\s+found\\b|\\b${escapedToolName}:\\s*The term .+ is not recognized\\b|\\bThe term ['"]?${escapedToolName}['"]? is not recognized\\b)`,
+        "iu",
+      ),
+    );
+    if (!evidence) continue;
+    addDiagnostic(
+      "binary_tool_missing",
+      "recoverable",
+      evidence,
+      `Binary tool "${toolName}" is unavailable; use a built-in tool, Node/Python stdlib fallback, or another installed equivalent.`,
+    );
+  }
+
+  const missingDeps = [
+    ...fullText.matchAll(/ModuleNotFoundError:\s*No module named ['"]([^'"]+)['"]/giu),
+  ].map((match) => match[1]).filter((name): name is string => Boolean(name));
+  for (const dep of unique(missingDeps)) {
+    addDiagnostic(
+      "missing_python_module",
+      "recoverable",
+      `ModuleNotFoundError: No module named '${dep}'`,
+      `Python module "${dep}" is missing; probe with \`python3 -c "import ${dep}"\` and use pip only if allowed, otherwise prefer a stdlib fallback.`,
+    );
+  }
+
+  const serviceEvidence = firstEvidenceLine(
+    fullText,
+    /\b(?:connection refused|econnrefused|failed to connect|health check failed|server is not ready|connection reset)\b/iu,
+  );
+  if (serviceEvidence) {
+    addDiagnostic(
+      "service_readiness",
+      "recoverable",
+      serviceEvidence,
+      "Poll the service port or health endpoint with a bounded timeout and inspect logs before verification.",
+    );
+  }
+
+  const artifactEvidence = firstEvidenceLine(
+    fullText,
+    /\b(?:clean HTML modified|modified\s+\d+\s+clean HTML files?|modified clean files?|output format mismatch|wrong header|permission denied)\b/iu,
+  );
+  if (artifactEvidence) {
+    addDiagnostic(
+      "artifact_preservation",
+      "blocking",
+      artifactEvidence,
+      "Preserve verifier artifacts and expected output format; inspect the reported files before retrying.",
+    );
+  }
+
+  const timeoutEvidence =
+    outcome === "timeout"
+      ? "Bash outcome timeout"
+      : firstEvidenceLine(fullText, /\b(?:timeout|timed out)\b/iu);
+  if (timeoutEvidence) {
+    addDiagnostic(
+      "timeout",
+      "recoverable",
+      timeoutEvidence,
+      "Run the smallest focused check first and avoid repeating long blind commands.",
+    );
+  }
+
+  const providerEvidence = firstEvidenceLine(
+    fullText,
+    /\b(?:provider stream failed|upstream model service|gateway unstable)\b/iu,
+  );
+  if (providerEvidence) {
+    addDiagnostic(
+      "provider_or_network",
+      "recoverable",
+      providerEvidence,
+      "Treat this as provider or network instability; retry the smallest idempotent step after checking local logs.",
+    );
+  }
+
+  return diagnostics;
+}
+
+function firstEvidenceLine(text: string, pattern: RegExp): string | undefined {
+  let fallback: string | undefined;
+  for (const line of text.split(/\r?\n/u)) {
+    if (pattern.test(line)) {
+      const evidence = line.trim();
+      if (!isBashMetadataLine(evidence)) {
+        return evidence;
+      }
+      fallback ??= evidence;
+    }
+  }
+  return fallback;
+}
+
+function isBashMetadataLine(line: string): boolean {
+  return (
+    line.startsWith("$ ") ||
+    line.startsWith("adapter ") ||
+    line.startsWith("original command ") ||
+    line.startsWith("exit code ") ||
+    line.startsWith("outcome ")
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function tailLines(text: string, limit: number): string[] {
@@ -1793,6 +2095,19 @@ function resolveWorkspacePath(workspaceRoot: string, inputPath: string): string 
 
 function relativePath(workspaceRoot: string, filePath: string): string {
   return relative(workspaceRoot, filePath).replaceAll("\\", "/") || ".";
+}
+
+function resolveArtifactPath(context: ToolContext, inputPath: string): {
+  input: string;
+  absolute: string;
+  relative: string;
+} {
+  const absolute = resolveWorkspacePath(context.workspaceRoot, inputPath);
+  return {
+    input: inputPath,
+    absolute,
+    relative: relativePath(context.workspaceRoot, absolute),
+  };
 }
 
 function ensureUnique(content: string, oldText: string): void {

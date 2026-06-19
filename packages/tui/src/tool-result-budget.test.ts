@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createToolEndEvent } from "./evidence-runtime.js";
+import { appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
 import {
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
@@ -336,5 +336,178 @@ describe("tool_result budget", () => {
         tail,
       );
     }
+  });
+
+  it("preserves compact diagnostics in transcript tool_end output", () => {
+    const diagnostics = Array.from({ length: 6 }, (_, index) => ({
+      type: index === 0 ? "service_readiness" : `diagnostic_${index}`,
+      severity: index === 1 ? "blocking" : "recoverable",
+      evidence: index === 0 ? "connection refused" : `evidence ${index}`,
+      suggestion: `suggestion ${index}`,
+    }));
+    const toolEnd = createToolEndEvent("call-diagnostics", {
+      text: "x".repeat(100_000),
+      data: {
+        exitCode: 1,
+        diagnostics,
+      },
+      fullOutputPath: "/tmp/bash.log",
+    }) as Extract<ReturnType<typeof createToolEndEvent>, { type: "tool_call_end" }>;
+
+    expect(toolEnd.output.text).toContain("Linghun diagnostics:");
+    expect(toolEnd.output.text).toContain("- service_readiness: connection refused");
+    const compactDiagnostics = (toolEnd.output.data as { diagnostics?: unknown[] }).diagnostics;
+    expect(compactDiagnostics).toHaveLength(5);
+    expect(compactDiagnostics).toEqual([
+      { type: "service_readiness", severity: "recoverable", evidence: "connection refused" },
+      { type: "diagnostic_1", severity: "blocking", evidence: "evidence 1" },
+      { type: "diagnostic_2", severity: "recoverable", evidence: "evidence 2" },
+      { type: "diagnostic_3", severity: "recoverable", evidence: "evidence 3" },
+      { type: "diagnostic_4", severity: "recoverable", evidence: "evidence 4" },
+    ]);
+    expect(JSON.stringify(compactDiagnostics)).not.toContain("suggestion");
+    expect(JSON.stringify(compactDiagnostics)).not.toContain("diagnostic_5");
+  });
+
+  it("keeps diagnostics in transcript tool_result content for model-visible history", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const events: unknown[] = [];
+    const context = {
+      projectPath: project,
+      tools: { recentDiagnostics: [] },
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-diagnostics",
+      "call-diagnostics",
+      "Bash",
+      {
+        text: "exit code 1",
+        data: {
+          exitCode: 1,
+          diagnostics: Array.from({ length: 6 }, (_, index) => ({
+            type: index === 0 ? "service_readiness" : `diagnostic_${index}`,
+            severity: "recoverable",
+            evidence: index === 0 ? "connection refused" : `evidence ${index}`,
+            suggestion: `suggestion ${index}`,
+          })),
+        },
+      },
+      true,
+      "ev-diagnostics",
+    );
+
+    const event = events[0] as { content?: { text?: string; data?: unknown } };
+    expect(event.content?.text).toContain("Linghun diagnostics:");
+    expect(event.content?.text).toContain("- service_readiness: connection refused");
+    expect(JSON.stringify(event.content?.data)).not.toContain("suggestion");
+    expect(event.content?.data).toMatchObject({
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          type: "service_readiness",
+          severity: "recoverable",
+          evidence: "connection refused",
+        }),
+      ]),
+    });
+    expect((event.content?.data as { diagnostics?: unknown[] }).diagnostics).toHaveLength(5);
+    expect(JSON.stringify(event.content?.data)).not.toContain("diagnostic_5");
+    expect(context.tools.recentDiagnostics).toHaveLength(5);
+    expect(context.tools.recentDiagnostics[0]).toEqual({
+      source: "Bash",
+      type: "service_readiness",
+      severity: "recoverable",
+      evidence: "connection refused",
+      createdAt: expect.any(String),
+      toolUseId: "call-diagnostics",
+      evidenceId: "ev-diagnostics",
+    });
+    expect(JSON.stringify(context.tools.recentDiagnostics)).not.toContain("suggestion");
+    expect(JSON.stringify(context.tools.recentDiagnostics)).not.toContain("diagnostic_5");
+  });
+
+  it("keeps only the latest 20 recentDiagnostics entries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const context = {
+      projectPath: project,
+      tools: {
+        // recentDiagnostics is newest-first: old-0 is newest, old-19 is oldest.
+        recentDiagnostics: Array.from({ length: 20 }, (_, index) => ({
+          source: "Bash" as const,
+          type: "old",
+          severity: "recoverable",
+          evidence: `old-${index}`,
+          createdAt: `2026-01-01T00:00:${String(19 - index).padStart(2, "0")}.000Z`,
+        })),
+      },
+      store: { appendEvent: async () => undefined },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-diagnostics",
+      "call-new",
+      "Bash",
+      {
+        text: "exit code 1",
+        data: {
+          diagnostics: [
+            {
+              type: "service_readiness",
+              severity: "recoverable",
+              evidence: "new diagnostic",
+              suggestion: "do not store",
+            },
+          ],
+        },
+      },
+      true,
+    );
+
+    expect(context.tools.recentDiagnostics).toHaveLength(20);
+    expect(context.tools.recentDiagnostics[0]).toMatchObject({
+      source: "Bash",
+      type: "service_readiness",
+      evidence: "new diagnostic",
+      toolUseId: "call-new",
+    });
+    expect(context.tools.recentDiagnostics).not.toContainEqual(
+      expect.objectContaining({ evidence: "old-19" }),
+    );
+  });
+
+  it("does not change recentDiagnostics when tool result has no diagnostics", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const sentinel = [
+      {
+        source: "Bash" as const,
+        type: "service_readiness",
+        severity: "recoverable",
+        evidence: "existing",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    const context = {
+      projectPath: project,
+      tools: { recentDiagnostics: sentinel },
+      store: { appendEvent: async () => undefined },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-diagnostics",
+      "call-clean",
+      "Bash",
+      { text: "exit code 0", data: { exitCode: 0 } },
+      false,
+    );
+
+    expect(context.tools.recentDiagnostics).toBe(sentinel);
   });
 });
