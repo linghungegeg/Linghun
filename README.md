@@ -10,7 +10,7 @@
 
 </div>
 
-> **Terminal-Bench 2.1 单次完整压测**：Linghun 在真实本地开发环境中完整跑过官方 89 题，单次结果 **65/89 = 73.03%**。按 Terminal-Bench 2.1 当前公开 leaderboard 分数横向对比，这个单次分数约处在第 6 档位；但这不是官方 leaderboard 已收录排名，官方提交要求 `k=5`、标准 timeout/resource 和完整 trajectory。详见：[中文报告](./reports/terminal-bench-2.1-single-run.zh.md) / [English report](./reports/terminal-bench-2.1-single-run.md)。
+> **Terminal-Bench 2.1 官方格式 k=5 结果**：Linghun 已按 Terminal-Bench 2.1 (`terminal-bench/terminal-bench-2-1`) 官方格式完成本地 `k=5` 运行，结果 **68/89 = 76.40%**。提交材料已随本仓库公开推送，等待 Terminal-Bench 官方验证/收录；按 2026-06-19 当前公开 leaderboard 分数横向参考，这个分数介于第 5 档（78.2%）和第 6 档（74.6%）之间。详见：[中文报告](./reports/terminal-bench-2.1-k5-official-submission.zh.md) / [English report](./reports/terminal-bench-2.1-k5-official-submission.md)。
 
 > **2026-06-17 更新**：终端可见层继续收敛，输入区、任务区和换行/光标稳定性已加强；工具调用链新增 SourcePack / ReadSnippets，减少重复 Grep/Read 往返，让相关代码片段更快交付给模型。
 

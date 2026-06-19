@@ -10,7 +10,7 @@ That is the value of Linghun's anti-hallucination system. It is not merely about
 
 Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHITEPAPER.en.md).
 
-> **Terminal-Bench 2.1 single full run**: Linghun completed the official 89-task dataset in a real local development environment, scoring **65/89 = 73.03%** in one trial per task. Compared against the currently published Terminal-Bench 2.1 leaderboard scores, this single-run result is roughly in the #6 score band; it is not an accepted official leaderboard ranking. The official submission path requires `k=5`, standard timeout/resource settings, and complete trajectories. See: [English report](./reports/terminal-bench-2.1-single-run.md) / [中文报告](./reports/terminal-bench-2.1-single-run.zh.md).
+> **Terminal-Bench 2.1 official-format k=5 result**: Linghun completed a local official-format `k=5` run on Terminal-Bench 2.1 (`terminal-bench/terminal-bench-2-1`), scoring **68/89 = 76.40%**. The submission materials have been published in this repository and are awaiting Terminal-Bench official verification/listing; compared with the public leaderboard scores as of 2026-06-19, this result sits between the #5 score band (78.2%) and the #6 score band (74.6%). See: [English report](./reports/terminal-bench-2.1-k5-official-submission.md) / [中文报告](./reports/terminal-bench-2.1-k5-official-submission.zh.md).
 
 > **June 17, 2026 update**: The terminal display layer was tightened around input/task wrapping and cursor stability, and the tool chain gained SourcePack / ReadSnippets to reduce repeated Grep/Read round trips and deliver relevant snippets faster.
 

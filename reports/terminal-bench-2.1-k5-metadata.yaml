@@ -1,5 +1,4 @@
-# Draft metadata for Terminal-Bench leaderboard submission.
-# Keep this file public-safe. Do not add API keys, local paths, or private provider configuration.
+# Public metadata for Linghun's Terminal-Bench 2.1 k=5 run.
 
 agent_url: https://github.com/linghungegeg/Linghun
 agent_display_name: Linghun
@@ -41,6 +40,5 @@ result:
   harbor_cancelled_trials: 0
 
 notes:
-  - "Draft only: official Terminal-Bench 2.1 submission channel should be confirmed before upload."
-  - "Do not publish raw config/job logs without checking for local environment values."
-  - "Raw job artifacts are retained locally under .bench/terminal-bench-2.1-official-k5/linghun-tb21-k5-a92313e1-r12."
+  - "Public summary for Terminal-Bench official verification/listing."
+  - "Linghun did not modify Terminal-Bench tasks, tests, verifier logic, resources, or task timeouts for this run."
