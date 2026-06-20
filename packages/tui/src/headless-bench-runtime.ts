@@ -464,9 +464,26 @@ function formatValidationContractPromptLines(contract: ValidationContract | unde
     "Validation contract: before final, satisfy each item with the required explicit tool.",
     ...contract.items.map((item) => {
       const subject = item.path ?? item.target ?? item.id;
-      return `- ${item.kind}: ${subject}; required tool: ${item.requiredTool}`;
+      return `- ${item.kind}: ${subject}; required Bash input: ${formatValidationContractToolInput(item)}`;
     }),
   ];
+}
+
+function formatValidationContractToolInput(item: ValidationContractItem): string {
+  if (item.requiredTool === "Bash.service") {
+    const target = item.target ?? "http://127.0.0.1:PORT/";
+    const url = target.startsWith("http://") || target.startsWith("https://")
+      ? target
+      : `http://${target}`;
+    return `{ "service": { "action": "fetch", "url": ${JSON.stringify(url)}, "expectStatus": 200, "retry": 5 } }`;
+  }
+  if (item.requiredTool === "Bash.binary") {
+    return `{ "binary": { "path": ${JSON.stringify(item.path ?? "PATH")} } }`;
+  }
+  if (item.kind === "preservation") {
+    return `{ "artifact": { "path": ${JSON.stringify(item.path ?? "PATH")}, "preserve": { "mode": "compareNormalizedHtml", "expectedPath": "EXPECTED_PATH" } } }`;
+  }
+  return `{ "artifact": { "path": ${JSON.stringify(item.path ?? "PATH")} } }`;
 }
 
 function detectExplicitServiceTargets(prompt: string): string[] {

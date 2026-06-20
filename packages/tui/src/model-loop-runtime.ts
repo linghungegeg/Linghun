@@ -191,6 +191,12 @@ export function createToolInputSchema(name: ToolName): unknown {
         service: {
           type: "object",
           additionalProperties: false,
+          anyOf: [
+            { required: ["action", "url"] },
+            { required: ["action", "serviceId"] },
+            { required: ["type", "port"] },
+            { required: ["type", "url"] },
+          ],
           properties: {
             action: { type: "string", enum: ["status", "probe", "logs", "stop", "fetch"] },
             serviceId: { type: "string" },
@@ -214,6 +220,7 @@ export function createToolInputSchema(name: ToolName): unknown {
         artifact: {
           type: "object",
           additionalProperties: false,
+          required: ["path"],
           properties: {
             path: { type: "string" },
             expectHeader: { type: "string" },
@@ -249,6 +256,7 @@ export function createToolInputSchema(name: ToolName): unknown {
         binary: {
           type: "object",
           additionalProperties: false,
+          required: ["path"],
           properties: {
             path: { type: "string" },
             previewBytes: { type: "number" },

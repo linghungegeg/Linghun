@@ -142,6 +142,7 @@ import {
   resumeDurableJob,
   runDurableJobLiteTick,
 } from "./job-agent-command-runtime.js";
+import { createToolInputSchema } from "./model-loop-runtime.js";
 import { evaluateMetaScheduler } from "./meta-scheduler-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
@@ -2626,7 +2627,26 @@ describe("runHeadlessTask", () => {
       ]),
     );
     expect(prompt).toContain("Validation contract");
-    expect(prompt).toContain("Bash.service");
+    expect(prompt).toContain('"service": { "action": "fetch"');
+  });
+
+  it("Bash model schema requires concrete validation mode fields", () => {
+    const schema = createToolInputSchema("Bash") as {
+      properties?: {
+        service?: { anyOf?: unknown[] };
+        artifact?: { required?: string[] };
+        binary?: { required?: string[] };
+      };
+    };
+
+    expect(schema.properties?.service?.anyOf).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ required: ["action", "url"] }),
+        expect.objectContaining({ required: ["type", "port"] }),
+      ]),
+    );
+    expect(schema.properties?.artifact?.required).toEqual(["path"]);
+    expect(schema.properties?.binary?.required).toEqual(["path"]);
   });
 
   it("validation contract extracts explicit service ports only with service context", () => {
