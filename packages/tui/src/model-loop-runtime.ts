@@ -186,6 +186,7 @@ export function createToolInputSchema(name: ToolName): unknown {
       properties: {
         command: { type: "string" },
         timeoutMs: { type: "number" },
+        run_in_background: { type: "boolean" },
       },
       required: ["command"],
     };

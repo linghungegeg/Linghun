@@ -699,7 +699,14 @@ export async function executeApprovedModelToolUse(
     rememberToolFiles(context, toolName, toolCall.input, result.output);
     const isError = isToolOutputFailure(toolName, result.output);
     if (task) {
-      finishBackgroundTaskFromToolOutput(task, result.output, context);
+      const bgData = result.output.data as { backgroundTaskId?: string; outputPath?: string } | undefined;
+      if (bgData?.backgroundTaskId) {
+        // Background bash started — register correlation, don't finish yet
+        context.backgroundBashTaskMap?.set(bgData.backgroundTaskId, task.id);
+        task.outputPath = bgData.outputPath;
+      } else {
+        finishBackgroundTaskFromToolOutput(task, result.output, context);
+      }
       await appendBackgroundTaskEvent(context, sessionId, task);
     }
     await appendToolResultEvent(
@@ -730,7 +737,10 @@ export async function executeApprovedModelToolUse(
         "warning",
       );
     }
-    clearBackgroundAbortController(context, task?.id ?? "");
+    const bgStarted = !!(result.output.data as { backgroundTaskId?: string } | undefined)?.backgroundTaskId;
+    if (!bgStarted) {
+      clearBackgroundAbortController(context, task?.id ?? "");
+    }
     if (backgroundController) {
       context.tools.abortSignal = previousAbortSignal;
     }
@@ -2739,18 +2749,28 @@ export async function handleToolCommand(
     const progress = installToolProgressHandler(context, sessionId, callId, output, task);
     // R1: tool start banner suppressed by default (noise reduction).
     let result: Awaited<ReturnType<typeof runTool>>;
+    let bgStarted2 = false;
     try {
       result = await runTool(name, input, context.tools);
+      bgStarted2 = !!(result.output.data as { backgroundTaskId?: string } | undefined)?.backgroundTaskId;
     } finally {
       progress.restore();
       await Promise.all(progress.pending);
-      clearBackgroundAbortController(context, task?.id ?? "");
+      if (!bgStarted2) {
+        clearBackgroundAbortController(context, task?.id ?? "");
+      }
       if (backgroundController) {
         context.tools.abortSignal = previousAbortSignal;
       }
     }
     if (task) {
-      finishBackgroundTaskFromToolOutput(task, result.output, context);
+      const bgData = result.output.data as { backgroundTaskId?: string; outputPath?: string } | undefined;
+      if (bgData?.backgroundTaskId) {
+        context.backgroundBashTaskMap?.set(bgData.backgroundTaskId, task.id);
+        task.outputPath = bgData.outputPath ?? undefined;
+      } else {
+        finishBackgroundTaskFromToolOutput(task, result.output, context);
+      }
       await appendBackgroundTaskEvent(context, sessionId, task);
     }
     await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));

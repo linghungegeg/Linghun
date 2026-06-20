@@ -758,7 +758,9 @@ function readCompactDiagnosticTargetFields(record: Record<string, unknown>): Par
 
 export function isToolOutputFailure(name: ToolName, output: ToolOutput): boolean {
   if (name === "Bash") {
-    const exitCode = (output.data as { exitCode?: unknown } | undefined)?.exitCode;
+    const data = output.data as { exitCode?: unknown; isError?: unknown } | undefined;
+    if (data?.isError === false) return false;
+    const exitCode = data?.exitCode;
     return typeof exitCode === "number" && exitCode !== 0;
   }
   return false;

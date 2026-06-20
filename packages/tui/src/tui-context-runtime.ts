@@ -360,6 +360,8 @@ export type TuiContext = {
   workspaceTrustEnforced?: boolean;
   activeAbortController?: AbortController;
   backgroundAbortControllers?: Map<string, AbortController>;
+  /** tools-layer taskId → TUI BackgroundTaskState.id (for onBackgroundBashComplete correlation) */
+  backgroundBashTaskMap?: Map<string, string>;
   recentlyMentionedFiles: string[];
   lastProviderFailure?: ProviderFailureSummary;
   lastProviderFallbackAttempt?: ProviderFallbackAttemptSummary;

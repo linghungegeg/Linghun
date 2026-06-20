@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -15,6 +16,7 @@ import { checkArtifact } from "./tools/Bash/artifact-checker.js";
 import type { BashArtifactCheckInput } from "./tools/Bash/artifact-checker.js";
 import { inspectBinaryFile } from "./tools/Bash/binary-helper.js";
 import type { BashBinaryInspectInput } from "./tools/Bash/binary-helper.js";
+import { interpretCommandResult } from "./tools/Bash/command-semantics.js";
 import { runBashServiceLifecycleAction, startBashService } from "./tools/Bash/service-kernel.js";
 import type {
   BashManagedServiceRecord,
@@ -101,6 +103,14 @@ export type RecentToolDiagnostic = {
   targetPort?: number;
 };
 
+export type BashBackgroundResult = {
+  taskId: string;
+  exitCode: number;
+  outcome: "completed" | "timeout" | "cancelled";
+  outputPath: string;
+  command: string;
+};
+
 export type ToolContext = {
   workspaceRoot: string;
   logRoot?: string;
@@ -112,7 +122,9 @@ export type ToolContext = {
   recentDiagnostics?: RecentToolDiagnostic[];
   services?: BashManagedServiceRecord[];
   abortSignal?: AbortSignal;
+  isHeadlessBench?: boolean;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
+  onBackgroundBashComplete?: (result: BashBackgroundResult) => void;
   trackChildProcess?: (
     child: Pick<ChildProcess, "kill" | "pid" | "exitCode" | "signalCode" | "once">,
     options?: ToolChildProcessTrackOptions,
@@ -175,6 +187,7 @@ export type BashInput = {
   service?: BashServiceInput;
   binary?: BashBinaryInspectInput;
   artifact?: BashArtifactCheckInput;
+  runInBackground?: boolean;
 };
 type BashDiagnosticType =
   | "missing_command"
@@ -226,6 +239,7 @@ const SOURCE_PACK_CONTEXT_LINES = 8;
 const SOURCE_PACK_MAX_TERMS = 6;
 const BASH_PREVIEW_LIMIT = 30_000;
 const BASH_TIMEOUT_MS = 120_000;
+// Removed: headless auto-background is unsafe (foreground-to-background transition unreliable)
 const MAX_TODO_ITEMS = 100;
 const SEARCH_EXCLUDED_DIR_NAMES = ["node_modules", "dist", ".git", ".codebase-memory"];
 const SEARCH_EXCLUDED_PATH_PREFIXES = [".linghun/logs", ".linghun/agent-runs", ".linghun/failures"];
@@ -809,12 +823,15 @@ function validateBashInput(input: unknown): BashInput {
   if (service !== undefined && !serviceAction && command === undefined) {
     throw new Error("Bash.service readiness 必须和 Bash.command 一起使用。");
   }
+  const runInBackground =
+    record.runInBackground === true || record.run_in_background === true;
   return {
     command,
     timeoutMs: readOptionalPositiveInteger(record, "timeoutMs", "Bash"),
     service,
     binary,
     artifact,
+    ...(runInBackground ? { runInBackground: true } : {}),
   };
 }
 
@@ -1507,6 +1524,31 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
       sanitizeText: sanitizeSecrets,
     });
   }
+  // Background execution: only when explicitly requested via runInBackground=true
+  if (input.runInBackground === true) {
+    const taskId = randomUUID();
+    void runBackgroundBash({
+      taskId,
+      command: adapted.command,
+      originalCommand: input.command,
+      cwd: context.workspaceRoot,
+      timeoutMs,
+      fullOutputPath,
+      adapter: adapted.adapter,
+      logCommand: adapted.logCommand,
+      abortSignal: context.abortSignal,
+      trackChildProcess: context.trackChildProcess,
+      onComplete: context.onBackgroundBashComplete,
+    });
+    return {
+      text: `命令已在后台启动。\ntaskId: ${taskId}\noutputPath: ${fullOutputPath}`,
+      data: {
+        backgroundTaskId: taskId,
+        outputPath: fullOutputPath,
+        command: sanitizeSecrets(input.command),
+      },
+    };
+  }
   const result = await runShell(
     adapted.command,
     context.workspaceRoot,
@@ -1524,11 +1566,13 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
         ];
   const commandForLog = adapted.logCommand ?? adapted.command;
   const sanitizedShellOutput = sanitizeSecrets(result.output);
+  const cmdInterpretation = interpretCommandResult(input.command, result.exitCode);
   const rawFullText = [
     `$ ${sanitizeSecrets(commandForLog)}`,
     ...adapterLines,
     `exit code ${result.exitCode}`,
     `outcome ${result.outcome}`,
+    ...(cmdInterpretation.message ? [`returnCodeInterpretation: ${cmdInterpretation.message}`] : []),
     "",
     sanitizedShellOutput,
   ].join("\n");
@@ -1546,6 +1590,8 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
       : { exitCode: result.exitCode, outcome: result.outcome, adapter: adapted.adapter };
   const outputData = {
     ...data,
+    ...(cmdInterpretation.message ? { returnCodeInterpretation: cmdInterpretation.message } : {}),
+    ...(cmdInterpretation.isError === false && result.exitCode !== 0 ? { isError: false } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
   };
   return {
@@ -3442,6 +3488,187 @@ function runShell(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Background Bash execution — spawns and returns immediately; notifies via
+// onComplete callback when the process finishes.
+// ---------------------------------------------------------------------------
+
+const STALL_THRESHOLD_MS = 45_000;
+const PROMPT_PATTERNS = [
+  /\(y\/n\)\s*$/i,
+  /\[y\/n\]\s*$/i,
+  /\(yes\/no\)\s*$/i,
+  /Press Enter/i,
+  /Continue\?/i,
+  /Overwrite\?/i,
+  /password[:\s]*$/i,
+  /passphrase[:\s]*$/i,
+  /\?\s*$/,
+];
+
+function looksLikePrompt(tail: string): boolean {
+  const lastLine = tail.split(/\r?\n/).filter(Boolean).pop() ?? "";
+  return PROMPT_PATTERNS.some((re) => re.test(lastLine));
+}
+
+type RunBackgroundBashOptions = {
+  taskId: string;
+  command: string;
+  originalCommand: string;
+  cwd: string;
+  timeoutMs: number;
+  fullOutputPath: string;
+  adapter: string;
+  logCommand?: string;
+  abortSignal?: AbortSignal;
+  onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void;
+  trackChildProcess?: ToolContext["trackChildProcess"];
+  onComplete?: (result: BashBackgroundResult) => void;
+};
+
+async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> {
+  const {
+    taskId,
+    command,
+    originalCommand,
+    cwd,
+    timeoutMs,
+    fullOutputPath,
+    adapter,
+    logCommand,
+    abortSignal,
+    onProgress,
+    trackChildProcess,
+    onComplete,
+  } = opts;
+
+  await mkdir(dirname(fullOutputPath), { recursive: true }).catch(() => {});
+  const fileStream = createWriteStream(fullOutputPath, { encoding: "utf8" });
+
+  const commandForLog = logCommand ?? command;
+  const header = [
+    `$ ${sanitizeSecrets(commandForLog)}`,
+    ...(adapter !== "native" ? [`adapter ${adapter}`, `original command ${summarizeOriginalShellCommand(originalCommand)}`] : []),
+    "",
+  ].join("\n");
+  fileStream.write(header);
+
+  const detached = process.platform !== "win32";
+  const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
+  trackChildProcess?.(child, {
+    detached,
+    cwd,
+    label: `BashBg:${command.slice(0, 80)}`,
+    retainAfterExit: detached,
+  });
+
+  let tailBuffer = "";
+  let lastOutputTime = Date.now();
+  let stallTimer: NodeJS.Timeout | undefined;
+  let settled = false;
+  let outcome: "completed" | "timeout" | "cancelled" = "completed";
+
+  const resetStallTimer = () => {
+    lastOutputTime = Date.now();
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(checkStall, STALL_THRESHOLD_MS);
+  };
+
+  const checkStall = () => {
+    if (Date.now() - lastOutputTime >= STALL_THRESHOLD_MS && looksLikePrompt(tailBuffer)) {
+      const msg = "\n[stall watchdog] 检测到交互式提示，可能需要用户输入。\n";
+      fileStream.write(msg);
+      onProgress?.("system", msg);
+    }
+  };
+
+  const finish = (exitCode: number) => {
+    if (settled) return;
+    settled = true;
+    if (stallTimer) clearTimeout(stallTimer);
+    clearTimeout(timer);
+    abortSignal?.removeEventListener("abort", onAbort);
+
+    const footer = `\nexit code ${exitCode}\noutcome ${outcome}\n`;
+    fileStream.write(footer);
+    fileStream.end();
+
+    onComplete?.({
+      taskId,
+      exitCode,
+      outcome,
+      outputPath: fullOutputPath,
+      command: sanitizeSecrets(originalCommand),
+    });
+  };
+
+  const requestStop = async (force: boolean): Promise<void> => {
+    if (process.platform === "win32" && child.pid) {
+      await stopWindowsProcessTree(child.pid, cwd);
+      return;
+    }
+    const sig = force ? "SIGKILL" : "SIGTERM";
+    if (detached && child.pid) {
+      try { process.kill(-child.pid, sig); } catch { child.kill(sig); }
+    } else {
+      child.kill(sig);
+    }
+  };
+
+  const FORCE_KILL_WAIT_MS = 3000;
+
+  const waitForCloseOrForceKill = () => {
+    const forceTimer = setTimeout(() => {
+      void requestStop(true);
+      setTimeout(() => finish(1), 500);
+    }, FORCE_KILL_WAIT_MS);
+    child.once("close", () => { clearTimeout(forceTimer); });
+  };
+
+  const onAbort = () => {
+    if (settled) return;
+    outcome = "cancelled";
+    const msg = "\n[cancelled] 工具调用已取消，正在终止子进程。\n";
+    fileStream.write(msg);
+    onProgress?.("system", msg);
+    void requestStop(false);
+    waitForCloseOrForceKill();
+  };
+
+  const timer = setTimeout(() => {
+    if (settled) return;
+    outcome = "timeout";
+    const msg = `\n[timeout] 命令超时：超过 ${timeoutMs}ms，已终止。\n`;
+    fileStream.write(msg);
+    onProgress?.("system", msg);
+    void requestStop(false);
+    waitForCloseOrForceKill();
+  }, timeoutMs);
+
+  if (abortSignal?.aborted) { onAbort(); return; }
+  abortSignal?.addEventListener("abort", onAbort, { once: true });
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    const text = decodeShellChunk(chunk);
+    fileStream.write(text);
+    tailBuffer = (tailBuffer + text).slice(-2000);
+    resetStallTimer();
+    onProgress?.("stdout", text);
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    const text = decodeShellChunk(chunk);
+    fileStream.write(text);
+    tailBuffer = (tailBuffer + text).slice(-2000);
+    resetStallTimer();
+    onProgress?.("stderr", text);
+  });
+  child.on("close", (code) => { finish(code ?? 1); });
+  child.on("error", (err) => {
+    fileStream.write(`\n[error] ${err.message}\n`);
+    finish(1);
+  });
+}
+
 function decodeShellChunk(chunk: Buffer): string {
   const utf8 = chunk.toString("utf8");
   if (process.platform !== "win32") return utf8;
@@ -3588,3 +3815,5 @@ export const __testGlobToRegExp = globToRegExp;
 export const __testDecodeShellChunk = decodeShellChunk;
 export const __testParseBashCommandIntent = parseBashCommandIntent;
 export const __testCanSafelyAliasPythonCommand = canSafelyAliasPythonCommand;
+export { interpretCommandResult } from "./tools/Bash/command-semantics.js";
+export const __testRunBackgroundBash = runBackgroundBash;

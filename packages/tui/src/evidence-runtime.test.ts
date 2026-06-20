@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recordToolEvidence } from "./evidence-runtime.js";
+import { isToolOutputFailure, recordToolEvidence } from "./evidence-runtime.js";
 
 describe("evidence-runtime", () => {
   it("records read-only tool evidence with low-noise summaries", async () => {
@@ -66,5 +66,30 @@ describe("evidence-runtime", () => {
       expect.arrayContaining(["test_passed", "build_passed"]),
     );
     expect(events).toHaveLength(2);
+  });
+});
+
+describe("isToolOutputFailure", () => {
+  it("returns false when data.isError === false (grep exit 1 = no matches)", () => {
+    const output = {
+      text: "exit 1",
+      data: { exitCode: 1, isError: false, returnCodeInterpretation: "no matches found" },
+    };
+    expect(isToolOutputFailure("Bash", output)).toBe(false);
+  });
+
+  it("returns true for Bash exit code != 0 without isError field", () => {
+    const output = { text: "error", data: { exitCode: 1 } };
+    expect(isToolOutputFailure("Bash", output)).toBe(true);
+  });
+
+  it("returns false for Bash exit code 0", () => {
+    const output = { text: "ok", data: { exitCode: 0 } };
+    expect(isToolOutputFailure("Bash", output)).toBe(false);
+  });
+
+  it("returns false for non-Bash tools", () => {
+    const output = { text: "error", data: { exitCode: 127 } };
+    expect(isToolOutputFailure("Read", output)).toBe(false);
   });
 });

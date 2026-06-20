@@ -918,7 +918,8 @@ import {
   t,
   writeStatus,
 } from "./details-status-runtime.js";
-import { appendSystemEvent, createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
+import { appendBackgroundTaskEvent, appendSystemEvent, createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
+import { finishBackgroundTaskFromToolOutput } from "./background-control-runtime.js";
 import {
   __testSendMessage,
   clearRequestActivity,
@@ -1286,7 +1287,7 @@ export {
   summarizeProjectRules,
 } from "./tui-state-runtime.js";
 
-import { cleanupCompletedBackgroundTasks, getDurableJobPaths } from "./tui-agent-job-runtime.js";
+import { cleanupCompletedBackgroundTasks, clearBackgroundAbortController, getDurableJobPaths } from "./tui-agent-job-runtime.js";
 import { containsSecret } from "./tui-memory-runtime.js";
 import { runMemoryEviction } from "./memory-eviction-runtime.js";
 import {
@@ -1418,9 +1419,44 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
     providerBreaker: createProviderCircuitBreakerState(),
     solutionCompleteness: createSolutionCompletenessStatus(),
     backgroundAbortControllers: new Map(),
+    backgroundBashTaskMap: new Map(),
     discoveredDeferredToolNames: new Set<string>(),
   };
   context.tools.trackChildProcess = (child, options) => trackChildProcess(child, options);
+  context.tools.onBackgroundBashComplete = (result) => {
+    const tuiTaskId = context.backgroundBashTaskMap?.get(result.taskId);
+    if (!tuiTaskId) return;
+    // Always clean map + controller regardless of task status.
+    context.backgroundBashTaskMap?.delete(result.taskId);
+    clearBackgroundAbortController(context, tuiTaskId);
+    const task = context.backgroundTasks.find((t) => t.id === tuiTaskId);
+    if (!task) return;
+    if (task.status === "running") {
+      const fakeOutput = {
+        text: `exit ${result.exitCode} (${result.outcome})`,
+        data: { exitCode: result.exitCode, outcome: result.outcome },
+        fullOutputPath: result.outputPath,
+      };
+      finishBackgroundTaskFromToolOutput(task, fakeOutput as never, context);
+    } else {
+      // Task already cancelled/stale via /interrupt — backfill completion facts.
+      task.outputPath = task.outputPath ?? result.outputPath;
+      task.confirmedExitedAt = new Date().toISOString();
+      task.cancelState = "confirmed_exited";
+    }
+    const sessionId = context.sessionId;
+    if (sessionId) {
+      void appendBackgroundTaskEvent(context, sessionId, task).catch(() => {});
+      const evidence = createEvidenceRecord(
+        "command_output",
+        `Bash(background): ${result.command}; exit=${result.exitCode} ${result.outcome}`,
+        result.outputPath,
+        result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
+      );
+      rememberEvidence(context, evidence);
+      void context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence }).catch(() => {});
+    }
+  };
   context.turnContinuity = createInitialContinuityState();
   context.recentTaskKinds = [];
   context.workflows.templates = mergeWorkflowTemplates(
@@ -1551,6 +1587,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   headlessTools.headlessBench = {
     enabled: benchConfig.enabled,
   };
+  if (benchConfig.enabled) {
+    headlessTools.isHeadlessBench = true;
+  }
   if (benchConfig.enabled && benchConfig.validationContract) {
     headlessTools.validationContract = benchConfig.validationContract;
   }

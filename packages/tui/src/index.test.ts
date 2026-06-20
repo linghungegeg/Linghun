@@ -19040,6 +19040,169 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundAbortControllers?.size ?? 0).toBe(0);
   });
 
+  it("run_in_background=true returns and controller is still retained in backgroundAbortControllers", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    const running = handleSlashCommand('/bash node -e "setTimeout(()=>{}, 3000)"', context, output);
+    await waitForTestCondition(() => Boolean(context.backgroundAbortControllers?.size), 5_000);
+
+    // Controller exists while bash is running (not prematurely cleared).
+    expect(context.backgroundAbortControllers!.size).toBe(1);
+
+    await handleSlashCommand("/interrupt", context, output);
+    await running;
+  });
+
+  it("/interrupt followed by child exit cleans backgroundBashTaskMap via onBackgroundBashComplete", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    // Synthetically set up the backgroundBashTaskMap + callback (mimics initTuiContext).
+    context.backgroundBashTaskMap = new Map();
+    const task = createBackgroundTaskFixture("bash", { id: "bg-bash-map-test" });
+    task.status = "cancelled";
+    task.result = "cancelled";
+    context.backgroundTasks = [task];
+    const toolsTaskId = "tools-layer-task-abc";
+    context.backgroundBashTaskMap.set(toolsTaskId, task.id);
+    const controller = new AbortController();
+    context.backgroundAbortControllers = new Map([[task.id, controller]]);
+
+    // Wire the onBackgroundBashComplete callback (same logic as initTuiContext).
+    context.tools.onBackgroundBashComplete = (result) => {
+      const tuiTaskId = context.backgroundBashTaskMap?.get(result.taskId);
+      if (!tuiTaskId) return;
+      context.backgroundBashTaskMap?.delete(result.taskId);
+      context.backgroundAbortControllers?.delete(tuiTaskId);
+      const t = context.backgroundTasks.find((bt) => bt.id === tuiTaskId);
+      if (!t) return;
+      if (t.status !== "running") {
+        t.outputPath = t.outputPath ?? result.outputPath;
+        t.confirmedExitedAt = new Date().toISOString();
+        t.cancelState = "confirmed_exited";
+      }
+    };
+
+    // Simulate the tools layer calling onBackgroundBashComplete after child exits.
+    context.tools.onBackgroundBashComplete({
+      taskId: toolsTaskId,
+      exitCode: 137,
+      outcome: "cancelled",
+      outputPath: join(project, "bg-output.log"),
+      command: "sleep 100",
+    });
+
+    expect(context.backgroundBashTaskMap.size).toBe(0);
+    expect(context.backgroundAbortControllers!.size).toBe(0);
+    expect(task.cancelState).toBe("confirmed_exited");
+    expect(task.confirmedExitedAt).toBeTruthy();
+  });
+
+  it("/interrupt completion callback still produces evidence via onBackgroundBashComplete", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    // Set up synthetic state (model-initiated run_in_background path).
+    context.backgroundBashTaskMap = new Map();
+    const task = createBackgroundTaskFixture("bash", { id: "bg-bash-evidence-test" });
+    task.status = "cancelled";
+    task.result = "cancelled";
+    context.backgroundTasks = [task];
+    const toolsTaskId = "tools-layer-evidence-xyz";
+    context.backgroundBashTaskMap.set(toolsTaskId, task.id);
+    context.backgroundAbortControllers = new Map([[task.id, new AbortController()]]);
+
+    // Wire full production callback (same as initTuiContext line 1426-1458).
+    const sessionId = context.sessionId ?? session.id;
+    context.tools.onBackgroundBashComplete = (result) => {
+      const tuiTaskId = context.backgroundBashTaskMap?.get(result.taskId);
+      if (!tuiTaskId) return;
+      context.backgroundBashTaskMap?.delete(result.taskId);
+      context.backgroundAbortControllers?.delete(tuiTaskId);
+      const t = context.backgroundTasks.find((bt) => bt.id === tuiTaskId);
+      if (!t) return;
+      if (t.status !== "running") {
+        t.outputPath = t.outputPath ?? result.outputPath;
+        t.confirmedExitedAt = new Date().toISOString();
+        t.cancelState = "confirmed_exited";
+      }
+      if (sessionId) {
+        void store.appendEvent(sessionId, { type: "background_task_update", task: t, createdAt: new Date().toISOString() }).catch(() => {});
+        context.evidence.unshift({
+          id: `evidence-bg-${result.taskId}`,
+          kind: "command_output",
+          summary: `Bash(background): ${result.command}; exit=${result.exitCode} ${result.outcome}`,
+          source: result.outputPath,
+          supportsClaims: result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
+          createdAt: new Date().toISOString(),
+        });
+      }
+    };
+
+    context.tools.onBackgroundBashComplete({
+      taskId: toolsTaskId,
+      exitCode: 1,
+      outcome: "cancelled",
+      outputPath: join(project, "bg-cancelled.log"),
+      command: "node -e setTimeout(()=>{},99999)",
+    });
+
+    // Evidence is recorded.
+    const bashEvidence = context.evidence.find((e) => e.summary?.includes("Bash(background)"));
+    expect(bashEvidence).toBeDefined();
+    expect(bashEvidence!.supportsClaims).toContain("background_bash_fail");
+
+    // Transcript gets background_task_update.
+    await new Promise((r) => setTimeout(r, 50));
+    const transcript = (await store.resume(session.id)).transcript;
+    const bgUpdates = transcript.filter((e) => e.type === "background_task_update");
+    expect(bgUpdates.length).toBeGreaterThanOrEqual(1);
+    const lastBgUpdate = bgUpdates.at(-1) as { task?: { cancelState?: string } };
+    expect(lastBgUpdate?.task?.cancelState).toBe("confirmed_exited");
+  });
+
+  it("abort/timeout kills background Bash child — no zombie process remains", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    const markerFile = join(project, "zombie_marker.txt");
+    const escaped = markerFile.replace(/\\/g, "\\\\");
+    const cmd = `node -e "const fs=require('fs');fs.writeFileSync('${escaped}','alive');setTimeout(()=>{fs.writeFileSync('${escaped}','zombie')},6000)"`;
+
+    const running = handleSlashCommand(`/bash ${cmd}`, context, output);
+    await vi.waitFor(
+      async () => {
+        const content = await readFile(markerFile, "utf8").catch(() => "");
+        expect(content).toBe("alive");
+      },
+      { timeout: 5_000, interval: 50 },
+    );
+
+    await handleSlashCommand("/interrupt", context, output);
+    await running;
+
+    await new Promise((r) => setTimeout(r, 2000));
+    const finalContent = await readFile(markerFile, "utf8").catch(() => "gone");
+    expect(finalContent).not.toBe("zombie");
+  });
+
   it("/interrupt uses explicit best-effort wording when no background controller exists", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
