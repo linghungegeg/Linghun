@@ -649,7 +649,9 @@ export async function executeApprovedModelToolUse(
     }
   }
   const task =
-    toolName === "Bash" ? createBackgroundTask(toolName, toolCall.input, context) : undefined;
+    toolName === "Bash" && shouldTrackBashAsBackground(toolCall.input)
+      ? createBackgroundTask(toolName, toolCall.input, context)
+      : undefined;
   if (task) {
     rememberBackgroundTask(context, task);
     await appendBackgroundTaskEvent(context, sessionId, task);
@@ -2960,6 +2962,12 @@ function createBackgroundTask(
         ? "Wait for completion or use /interrupt."
         : "等待完成，或用 /interrupt 中断。",
   };
+}
+
+function shouldTrackBashAsBackground(input: unknown): boolean {
+  if (typeof input !== "object" || input === null) return false;
+  const record = input as { runInBackground?: unknown; run_in_background?: unknown };
+  return record.runInBackground === true || record.run_in_background === true;
 }
 
 async function appendProgressEventSafely(

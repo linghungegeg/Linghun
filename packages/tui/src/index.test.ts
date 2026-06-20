@@ -19058,6 +19058,32 @@ describe("Phase 06 TUI slash commands", () => {
     await running;
   });
 
+  it("model-facing foreground Bash does not occupy a background slot", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
+    const gateway = createModelGateway(config);
+    context.modelGateway = gateway;
+    const requests = mockOpenAiToolSequence(
+      [
+        { toolName: "Bash", input: { command: "node -e \"console.log('foreground-one')\"" } },
+        { toolName: "Bash", input: { command: "node -e \"console.log('foreground-two')\"" } },
+      ],
+      "foreground commands completed",
+    );
+
+    await __testSendMessage("连续运行两个前台 Bash", context, gateway, output);
+
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    expect(context.backgroundTasks).toHaveLength(0);
+    expect(context.backgroundAbortControllers?.size ?? 0).toBe(0);
+    expect(output.text).toContain("foreground commands completed");
+  });
+
   it("/interrupt followed by child exit cleans backgroundBashTaskMap via onBackgroundBashComplete", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
