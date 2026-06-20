@@ -166,10 +166,11 @@ export function getHardDenyReason(
   if (name === "Bash") {
     const command =
       typeof input === "object" && input !== null ? (input as { command?: unknown }).command : "";
-    if (typeof command !== "string" || !command.trim()) {
+    if ((typeof command !== "string" || !command.trim()) && !hasExplicitBashNonCommandMode(input)) {
       return "Bash 命令不能为空。";
     }
     if (
+      typeof command === "string" &&
       /(rm\s+-rf|curl\s+[^|]+\|\s*(sh|bash)|wget\s+[^|]+\|\s*(sh|bash)|mkfs|shutdown|reboot)/i.test(
         command,
       )
@@ -178,6 +179,21 @@ export function getHardDenyReason(
     }
   }
   return null;
+}
+
+function hasExplicitBashNonCommandMode(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const record = input as Record<string, unknown>;
+  return isRecord(record.artifact) || isRecord(record.binary) || isBashServiceAction(record.service);
+}
+
+function isBashServiceAction(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return typeof value.action === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 export function findPermissionRule(

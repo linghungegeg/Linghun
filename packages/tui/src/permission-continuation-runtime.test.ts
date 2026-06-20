@@ -153,6 +153,26 @@ describe("permission-continuation-runtime", () => {
       expect(result).toContain("不能为空");
     });
 
+    it("allows explicit Bash service validation without command", () => {
+      const result = getHardDenyReason(
+        "Bash",
+        { service: { action: "fetch", url: "http://127.0.0.1:8080", expectStatus: 200 } },
+        [],
+        "/workspace",
+      );
+      expect(result).toBeNull();
+    });
+
+    it("allows explicit Bash artifact validation without command", () => {
+      const result = getHardDenyReason("Bash", { artifact: { path: "/app/server.py" } }, [], "/workspace");
+      expect(result).toBeNull();
+    });
+
+    it("allows explicit Bash binary validation without command", () => {
+      const result = getHardDenyReason("Bash", { binary: { path: "/app/a.out" } }, [], "/workspace");
+      expect(result).toBeNull();
+    });
+
     it("denies rm -rf", () => {
       const result = getHardDenyReason("Bash", { command: "rm -rf /" }, [], "/workspace");
       expect(result).toContain("高风险");
