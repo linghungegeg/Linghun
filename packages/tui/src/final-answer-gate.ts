@@ -385,9 +385,24 @@ function validationEvidenceSubjectMatches(
   item: ValidationContractItem,
   evidence: ValidationEvidence,
 ): boolean {
-  if (item.path) return normalizeValidationPath(evidence.path) === normalizeValidationPath(item.path);
+  if (item.path) return validationPathsMatch(evidence.path, item.path);
   if (item.target) return normalizeValidationTarget(evidence.target) === normalizeValidationTarget(item.target);
   return false;
+}
+
+function validationPathsMatch(evidencePath: string | undefined, contractPath: string): boolean {
+  const evidence = normalizeValidationPath(evidencePath);
+  const contract = normalizeValidationPath(contractPath);
+  if (!evidence || !contract) return false;
+  if (evidence === contract) return true;
+  return stripKnownWorkspaceRoot(evidence) === stripKnownWorkspaceRoot(contract);
+}
+
+function stripKnownWorkspaceRoot(path: string): string {
+  for (const prefix of ["/app/", "/workspace/"]) {
+    if (path.startsWith(prefix)) return path.slice(prefix.length);
+  }
+  return path;
 }
 
 function normalizeValidationPath(path: string | undefined): string | undefined {

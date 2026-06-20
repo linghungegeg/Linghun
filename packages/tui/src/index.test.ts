@@ -2445,6 +2445,36 @@ describe("runHeadlessTask", () => {
     expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
   });
 
+  it("validation contract final gate treats workspace-relative artifact evidence as matching /app paths", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-artifact-relative-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    Object.assign(context.tools, {
+      headlessBench: { enabled: true },
+      validationContract: {
+        items: [
+          { id: "artifact:/app/out.txt", kind: "artifact", path: "/app/out.txt", requiredTool: "Bash.artifact" },
+        ],
+      },
+    });
+    context.evidence.push({
+      id: "artifact-relative-pass",
+      kind: "command_output",
+      source: "Bash",
+      summary: "artifact explicit check",
+      supportsClaims: ["Bash"],
+      createdAt: new Date().toISOString(),
+      data: {
+        validationEvidence: [
+          { kind: "artifact", path: "out.txt", tool: "Bash.artifact", ok: true },
+        ],
+      },
+    });
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
+  });
+
   it("validation contract final gate blocks service endpoint without Bash.service evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
