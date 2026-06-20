@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events";
-import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -303,7 +302,7 @@ describe("Phase 05 core tools", () => {
     expect(result.output.text).not.toContain("Linghun recoverable command hints");
   });
 
-  it("adds structured capability diagnostics before executing missing Bash commands", async () => {
+  it("does not run capability preflight for ordinary Bash commands", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
     const oldPath = process.env.PATH;
@@ -316,24 +315,12 @@ describe("Phase 05 core tools", () => {
       );
 
       expect(result.output.data).toMatchObject({
-        diagnostics: expect.arrayContaining([
-          expect.objectContaining({
-            type: "binary_tool_missing",
-            command: "file",
-            fallback: "Bash.binary",
-            evidence: "command not found before execution: file",
-          }),
-        ]),
-        commandCapabilities: expect.arrayContaining([
-          expect.objectContaining({
-            command: "file",
-            exists: false,
-            capability: "binary_helper",
-            fallback: "Bash.binary",
-          }),
-        ]),
+        exitCode: 1,
+        outcome: "completed",
       });
-      expect(result.output.text).toContain("commandCapability file missing");
+      expect(result.output.data).not.toHaveProperty("diagnostics");
+      expect(result.output.data).not.toHaveProperty("commandCapabilities");
+      expect(result.output.text).not.toContain("commandCapability file missing");
     } finally {
       process.env.PATH = oldPath;
     }
@@ -708,7 +695,7 @@ describe("Phase 05 core tools", () => {
     expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
-  it("adds Bash binary preflight evidence before running matching inspect commands", async () => {
+  it("does not add Bash binary preflight evidence for ordinary inspect commands", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     await writeFile(join(project, "preflight.bin"), Buffer.from([0, 1, 2, 3]));
 
@@ -718,15 +705,9 @@ describe("Phase 05 core tools", () => {
       createToolContext(project),
     );
 
-    expect(result.output.text).toContain("Linghun preflight evidence:");
-    expect(result.output.text).toContain("binaryPreflight");
-    expect(result.output.data).toMatchObject({
-      outcome: "completed",
-      binaryPreflight: {
-        path: expect.stringContaining("preflight.bin"),
-        size: 4,
-      },
-    });
+    expect(result.output.text).not.toContain("Linghun preflight evidence:");
+    expect(result.output.data).toMatchObject({ outcome: "completed" });
+    expect(result.output.data).not.toHaveProperty("binaryPreflight");
   });
 
   it("keeps ordinary Bash output data unchanged when capability preflight has no trigger", async () => {
@@ -740,6 +721,48 @@ describe("Phase 05 core tools", () => {
 
     expect(result.output.text).toContain("zero-disturbance");
     expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+  });
+
+  it("keeps ordinary Bash command text from injecting preflight or auto evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "a.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+
+    const inlineScript = await runTool(
+      "Bash",
+      { command: "node -e \"const value = 'let print stay script text'; console.log(value);\"" },
+      createToolContext(project),
+    );
+    expect(inlineScript.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+    expect(inlineScript.output.data).not.toHaveProperty("diagnostics");
+
+    const html = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('<html><h1>welcome</h1></html>')\"" },
+      createToolContext(project),
+    );
+    expect(html.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+    expect(JSON.stringify(html.output.data)).not.toMatch(/artifactHint|artifact_preservation|welcome|html/u);
+
+    const redirected = await runTool(
+      "Bash",
+      { command: "node -e \"process.stdout.write('{\\\"ok\\\":true}\\n')\" > out.json" },
+      createToolContext(project),
+    );
+    expect(redirected.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+    expect(redirected.output.data).not.toHaveProperty("artifactHint");
+
+    const binary = await runTool("Bash", { command: "file a.out" }, createToolContext(project));
+    expect(binary.output.data).toMatchObject({ outcome: "completed" });
+    expect(binary.output.data).not.toHaveProperty("binaryPreflight");
+    expect(binary.output.data).not.toHaveProperty("binaryHint");
+
+    const service = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('PORT=8080 python3 -m http.server')\"" },
+      createToolContext(project),
+    );
+    expect(service.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+    expect(service.output.data).not.toHaveProperty("serviceHint");
   });
 
   it("parses Bash command intent with command names, argv, redirections, and background intent", () => {
@@ -793,7 +816,7 @@ describe("Phase 05 core tools", () => {
     expect(__testCanSafelyAliasPythonCommand(__testParseBashCommandIntent("python -c \"print('ok')\" > out.txt"))).toBe(false);
   });
 
-  it("returns missing_command diagnostics with python3 fallback for bare python preflight", async () => {
+  it("does not alias python through capability preflight for ordinary Bash commands", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const binDir = join(project, "bin");
     await mkdir(binDir, { recursive: true });
@@ -818,19 +841,13 @@ describe("Phase 05 core tools", () => {
         createToolContext(project),
       );
 
-      expect(result.output.text).toContain("python3-alias-ok");
-      expect(result.output.text).toContain("pythonAlias python -> python3");
+      expect(result.output.text).not.toContain("python3-alias-ok");
+      expect(result.output.text).not.toContain("pythonAlias python -> python3");
       expect(result.output.data).toMatchObject({
-        exitCode: 0,
+        exitCode: 1,
         outcome: "completed",
-        diagnostics: expect.arrayContaining([
-          expect.objectContaining({
-            type: "missing_command",
-            command: "python",
-            fallback: "python3",
-          }),
-        ]),
       });
+      expect(result.output.data).not.toHaveProperty("diagnostics");
     } finally {
       process.env.PATH = oldPath;
     }
@@ -876,7 +893,7 @@ describe("Phase 05 core tools", () => {
     expect(result.output.data).not.toHaveProperty("diagnostics");
   });
 
-  it("adds binary auto evidence from intent candidate even when tool is missing", async () => {
+  it("does not add binary auto evidence from intent candidates in ordinary Bash", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const elf = Buffer.alloc(64);
     elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
@@ -891,27 +908,16 @@ describe("Phase 05 core tools", () => {
         createToolContext(project),
       );
 
-      expect(result.output.text).toContain("binaryHint");
-      expect(result.output.data).toMatchObject({
-        binaryHint: {
-          path: expect.stringContaining("sample.elf"),
-          magic: { type: "elf" },
-        },
-        diagnostics: expect.arrayContaining([
-          expect.objectContaining({
-            type: "binary_tool_missing",
-            command: "xxd",
-            fallback: "Bash.binary",
-            path: "sample.elf",
-          }),
-        ]),
-      });
+      expect(result.output.text).not.toContain("binaryHint");
+      expect(result.output.data).toMatchObject({ exitCode: 1, outcome: "completed" });
+      expect(result.output.data).not.toHaveProperty("binaryHint");
+      expect(result.output.data).not.toHaveProperty("diagnostics");
     } finally {
       process.env.PATH = oldPath;
     }
   });
 
-  it("prefers structured service intent over output fallback ports", async () => {
+  it("does not add serviceHint from ordinary Bash command text", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const port = await getFreeTcpPort();
     const server = createServer((socket) => {
@@ -929,12 +935,8 @@ describe("Phase 05 core tools", () => {
         createToolContext(project),
       );
 
-      expect(result.output.data).toMatchObject({
-        serviceHint: {
-          target: `127.0.0.1:${port}`,
-          ready: true,
-        },
-      });
+      expect(result.output.data).toMatchObject({ outcome: "completed" });
+      expect(result.output.data).not.toHaveProperty("serviceHint");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -964,7 +966,7 @@ describe("Phase 05 core tools", () => {
     expect(JSON.stringify(result.output.data)).not.toContain("serviceHint");
   });
 
-  it("creates service intent for python http.server ports", async () => {
+  it("does not create serviceHint for ordinary python http.server commands", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const port = await getFreeTcpPort();
     const server = createServer((socket) => {
@@ -979,15 +981,14 @@ describe("Phase 05 core tools", () => {
         createToolContext(project),
       );
 
-      expect(result.output.data).toMatchObject({
-        serviceHint: { target: `127.0.0.1:${port}`, ready: true },
-      });
+      expect(result.output.data).toMatchObject({ outcome: "completed" });
+      expect(result.output.data).not.toHaveProperty("serviceHint");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 
-  it("requires explicit package-script port for service intent", async () => {
+  it("does not infer package-script service intent from ordinary Bash", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const noPort = await runTool(
       "Bash",
@@ -1001,15 +1002,11 @@ describe("Phase 05 core tools", () => {
       { command: "PORT=9 npm start" },
       createToolContext(project),
     );
-    expect(result.output.data).toMatchObject({
-      serviceHint: {
-        target: "127.0.0.1:9",
-        ready: false,
-      },
-    });
+    expect(result.output.data).toMatchObject({ exitCode: 1, outcome: "completed" });
+    expect(result.output.data).not.toHaveProperty("serviceHint");
   });
 
-  it("requires explicit node port for service intent", async () => {
+  it("does not infer node service intent from ordinary Bash", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const noPort = await runTool(
       "Bash",
@@ -1030,15 +1027,14 @@ describe("Phase 05 core tools", () => {
         { command: `node server.js --port ${port}` },
         createToolContext(project),
       );
-      expect(result.output.data).toMatchObject({
-        serviceHint: { target: `127.0.0.1:${port}`, ready: true },
-      });
+      expect(result.output.data).toMatchObject({ outcome: "completed" });
+      expect(result.output.data).not.toHaveProperty("serviceHint");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 
-  it("uses bench extended service probe policy when readiness diagnostics already exist", async () => {
+  it("does not run implicit service probes even when readiness diagnostics already exist", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project) as ReturnType<typeof createToolContext> & {
       headlessBench?: { enabled: boolean };
@@ -1069,16 +1065,8 @@ describe("Phase 05 core tools", () => {
         context,
       );
 
-      expect(result.output.data).toMatchObject({
-        exitCode: 0,
-        outcome: "completed",
-        serviceHint: {
-          target: `127.0.0.1:${port}`,
-          ready: true,
-          attempts: 1,
-          policy: { kind: "bench-extended", attempts: 12, maxTotalMs: 15_000 },
-        },
-      });
+      expect(result.output.data).toMatchObject({ exitCode: 0, outcome: "completed" });
+      expect(result.output.data).not.toHaveProperty("serviceHint");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -1097,7 +1085,7 @@ describe("Phase 05 core tools", () => {
     expect(JSON.stringify(result.output.data)).not.toContain("artifactHint");
   });
 
-  it("prefers structured artifact intent over output fallback paths", async () => {
+  it("does not add artifactHint from ordinary redirection text", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     await writeFile(join(project, "intended.json"), "{\"ok\":true}\n", "utf8");
     await writeFile(join(project, "noise.json"), "{\"noise\":true}\n", "utf8");
@@ -1108,14 +1096,7 @@ describe("Phase 05 core tools", () => {
       createToolContext(project),
     );
 
-    expect(result.output.data).toMatchObject({
-      exitCode: 0,
-      outcome: "completed",
-      artifactHint: {
-        path: "intended.json",
-        exists: true,
-      },
-    });
+    expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
   it("does not treat ordinary input file suffixes as artifact intent", async () => {
@@ -1131,7 +1112,7 @@ describe("Phase 05 core tools", () => {
     expect(JSON.stringify(result.output.data)).not.toContain("artifactHint");
   });
 
-  it("extracts artifact intent from producing commands with common suffix arguments", async () => {
+  it("does not add artifactHint from ordinary producing command text", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
 
     const result = await runTool(
@@ -1140,40 +1121,23 @@ describe("Phase 05 core tools", () => {
       createToolContext(project),
     );
 
-    expect(result.output.data).toMatchObject({
-      exitCode: 0,
-      outcome: "completed",
-      artifactHint: {
-        path: "made.md",
-        exists: true,
-      },
-    });
+    expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
-  it("adds artifact auto evidence for common script and document suffixes with full sha256 prefix", async () => {
+  it("does not add artifact auto evidence for ordinary output flags", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const content = "print('ok')\n";
     await writeFile(join(project, "script.py"), content, "utf8");
-    const expectedPrefix = createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
-
     const result = await runTool(
       "Bash",
       { command: "node -e \"console.log('created script.py')\" -- --output script.py" },
       createToolContext(project),
     );
 
-    expect(result.output.data).toMatchObject({
-      exitCode: 0,
-      outcome: "completed",
-      artifactHint: {
-        path: "script.py",
-        exists: true,
-        sha256Prefix: expectedPrefix,
-      },
-    });
+    expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
-  it("returns artifact_preservation diagnostics for missing structured artifact candidates", async () => {
+  it("does not return artifact diagnostics for ordinary missing output flags", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
 
     const result = await runTool(
@@ -1182,20 +1146,7 @@ describe("Phase 05 core tools", () => {
       createToolContext(project),
     );
 
-    expect(result.output.data).toMatchObject({
-      exitCode: 0,
-      outcome: "completed",
-      artifactHint: {
-        path: "missing-result.json",
-        exists: false,
-      },
-      diagnostics: expect.arrayContaining([
-        expect.objectContaining({
-          type: "artifact_preservation",
-          path: "missing-result.json",
-        }),
-      ]),
-    });
+    expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
   it("starts a Bash service and waits for TCP readiness", async () => {

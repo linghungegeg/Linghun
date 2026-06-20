@@ -1,9 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, createReadStream } from "node:fs";
-import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { connect as connectTcp } from "node:net";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   type ToolDefinition,
@@ -1439,14 +1437,11 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   const fullOutputPath = join(logRoot, `bash-${Date.now()}-${randomUUID()}.log`);
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
   const adapted = adaptShellCommand(input.command);
-  const intent = parseBashCommandIntent(input.command, context);
-  const capabilityPreflight = await resolveBashCommandCapabilities(intent, context);
-  const commandAdapter = createBashCapabilityCommandAdapter(input.command, adapted, capabilityPreflight);
   if (input.service && !isBashServiceLifecycleAction(input.service)) {
     const readiness = withDefaultServiceReadiness(input.service, context);
     return startBashService({
-      command: commandAdapter.command,
-      logCommand: commandAdapter.logCommand,
+      command: adapted.command,
+      logCommand: adapted.logCommand ?? adapted.command,
       cwd: context.workspaceRoot,
       fullOutputPath,
       readiness,
@@ -1457,29 +1452,8 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
       sanitizeText: sanitizeSecrets,
     });
   }
-  const implicitReadiness = createImplicitServiceReadiness(intent, context);
-  if (implicitReadiness) {
-    return startBashService({
-      command: commandAdapter.command,
-      logCommand: commandAdapter.logCommand,
-      cwd: context.workspaceRoot,
-      fullOutputPath,
-      readiness: implicitReadiness,
-      context,
-      abortSignal: context.abortSignal,
-      onProgress: (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
-      trackChildProcess: context.trackChildProcess,
-      sanitizeText: sanitizeSecrets,
-    });
-  }
-  const preflightEvidence = await collectBashPreflightEvidence({
-    command: input.command,
-    intent,
-    context,
-    capabilityPreflight,
-  });
   const result = await runShell(
-    commandAdapter.command,
+    adapted.command,
     context.workspaceRoot,
     timeoutMs,
     context.abortSignal,
@@ -1487,13 +1461,13 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     context.trackChildProcess,
   );
   const adapterLines =
-    commandAdapter.command === input.command && adapted.adapter === "native"
+    adapted.command === input.command && adapted.adapter === "native"
       ? []
       : [
           `adapter ${adapted.adapter}`,
           `original command ${summarizeOriginalShellCommand(input.command)}`,
         ];
-  const commandForLog = commandAdapter.logCommand;
+  const commandForLog = adapted.logCommand ?? adapted.command;
   const sanitizedShellOutput = sanitizeSecrets(result.output);
   const rawFullText = [
     `$ ${sanitizeSecrets(commandForLog)}`,
@@ -1503,7 +1477,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     "",
     sanitizedShellOutput,
   ].join("\n");
-  const diagnostics = enrichBashDiagnostics(createBashOutcomeDiagnostics(result.outcome), intent);
+  const diagnostics = createBashOutcomeDiagnostics(result.outcome);
   const fullText = rawFullText;
   await writeFile(fullOutputPath, fullText, "utf8");
   const truncated = fullText.length > BASH_PREVIEW_LIMIT;
@@ -1515,47 +1489,13 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     adapted.adapter === "native"
       ? { exitCode: result.exitCode, outcome: result.outcome }
       : { exitCode: result.exitCode, outcome: result.outcome, adapter: adapted.adapter };
-  const autoEvidence = await collectBashAutoEvidence({
-    command: input.command,
-    intent,
-    diagnostics,
-    outcome: result.outcome,
-    exitCode: result.exitCode,
-    context,
-  });
-  const outputText =
-    preflightEvidence.lines.length === 0 && autoEvidence.lines.length === 0
-      ? preview
-      : [
-          preview,
-          ...(preflightEvidence.lines.length === 0
-            ? []
-            : ["", "Linghun preflight evidence:", ...preflightEvidence.lines.map((line) => `- ${line}`)]),
-          ...(autoEvidence.lines.length === 0
-            ? []
-            : ["", "Linghun auto evidence:", ...autoEvidence.lines.map((line) => `- ${line}`)]),
-        ].join("\n");
-  const outputDetails =
-    preflightEvidence.lines.length === 0 && autoEvidence.lines.length === 0
-      ? details
-      : [
-          details,
-          preflightEvidence.lines.length === 0 ? "" : `--- preflight evidence\n${preflightEvidence.lines.join("\n")}`,
-          autoEvidence.lines.length === 0 ? "" : `--- auto evidence\n${autoEvidence.lines.join("\n")}`,
-        ].filter(Boolean).join("\n");
-  const outputDiagnostics = mergeDiagnostics(
-    mergeDiagnostics(diagnostics, enrichBashDiagnostics(preflightEvidence.diagnostics, intent)),
-    autoEvidence.diagnostics,
-  );
   const outputData = {
     ...data,
-    ...preflightEvidence.data,
-    ...autoEvidence.data,
-    ...(outputDiagnostics.length > 0 ? { diagnostics: outputDiagnostics } : {}),
+    ...(diagnostics.length > 0 ? { diagnostics } : {}),
   };
   return {
-    text: outputText,
-    details: outputDetails,
+    text: preview,
+    details,
     data: outputData,
     truncated,
     fullOutputPath,
@@ -1572,35 +1512,11 @@ function createBashDetails(fullOutputPath: string, fullText: string): string {
   ].join("\n");
 }
 
-type BashAutoEvidenceInput = {
-  command: string;
-  intent: BashCommandIntent;
-  diagnostics: BashDiagnostic[];
-  outcome: "completed" | "timeout" | "cancelled";
-  exitCode: number | null;
-  context: ToolContext;
-};
-
-type BashAutoEvidence = {
-  lines: string[];
-  data: Record<string, unknown>;
-  diagnostics: BashDiagnostic[];
-};
-
-type BashPreflightEvidence = BashAutoEvidence;
-
 type BashCommandSegmentIntent = {
   commandName: string;
   argv: string[];
   background: boolean;
   redirections: Array<{ operator: ">" | ">>"; target: string }>;
-};
-
-type BashCapabilityPreflight = {
-  lines: string[];
-  data: Record<string, unknown>;
-  diagnostics: BashDiagnostic[];
-  pythonAlias?: { from: "python"; to: "python3" };
 };
 
 type ServiceIntent = {
@@ -1620,97 +1536,6 @@ type BashCommandIntent = {
   segments: BashCommandSegmentIntent[];
   hasShellControl: boolean;
 };
-
-async function collectBashPreflightEvidence(input: {
-  command: string;
-  intent: BashCommandIntent;
-  context: ToolContext;
-  capabilityPreflight: BashCapabilityPreflight;
-}): Promise<BashPreflightEvidence> {
-  const lines: string[] = [...input.capabilityPreflight.lines];
-  const data: Record<string, unknown> = { ...input.capabilityPreflight.data };
-  const diagnostics: BashDiagnostic[] = [...input.capabilityPreflight.diagnostics];
-  try {
-    const target = await findFirstExistingWorkspaceCandidate(input.context, input.intent.binaryCandidates);
-    if (!target) return { lines, data, diagnostics };
-    const binary = await inspectBinaryFile({ path: target.relative, previewBytes: 32 }, target.absolute);
-    const binaryData = binary.data as { binary?: unknown; diagnostics?: BashDiagnostic[] } | undefined;
-    if (binaryData?.binary) {
-      data.binaryPreflight = binaryData.binary;
-      lines.push(formatBinaryPreflight(binaryData.binary));
-    }
-    diagnostics.push(...(binaryData?.diagnostics ?? []));
-  } catch (error) {
-    diagnostics.push(createAutoEvidenceDiagnostic("binary preflight failed", error, "binary_tool_missing"));
-  }
-  return { lines, data, diagnostics };
-}
-
-async function collectBashAutoEvidence(input: BashAutoEvidenceInput): Promise<BashAutoEvidence> {
-  const lines: string[] = [];
-  const data: Record<string, unknown> = {};
-  const diagnostics: BashDiagnostic[] = [];
-
-  try {
-    const binaryTarget = await findFirstExistingWorkspaceCandidate(input.context, input.intent.binaryCandidates);
-    if (binaryTarget) {
-      const binary = await inspectBinaryFile({ path: binaryTarget.relative, previewBytes: 32 }, binaryTarget.absolute);
-      const binaryData = (binary.data as { binary?: unknown; diagnostics?: BashDiagnostic[] } | undefined);
-      if (binaryData?.binary) {
-        data.binaryHint = binaryData.binary;
-        lines.push(formatBinaryHint(binaryData.binary));
-      }
-      diagnostics.push(...(binaryData?.diagnostics ?? []));
-    }
-  } catch (error) {
-    diagnostics.push(createAutoEvidenceDiagnostic("binary hint failed", error));
-  }
-
-  try {
-    const serviceTarget = firstServiceCandidate(input.intent);
-    if (serviceTarget) {
-      const policy = createServiceProbePolicy(input.context, input.intent, input.diagnostics);
-      const serviceHint = await probeTcpBounded(serviceTarget.host, serviceTarget.port, policy);
-      data.serviceHint = serviceHint;
-      lines.push(`serviceHint tcp ${serviceTarget.host}:${serviceTarget.port} ${serviceHint.ready ? "ready" : "not-ready"} attempts=${serviceHint.attempts} (${serviceHint.evidence})`);
-      if (!serviceHint.ready) {
-        diagnostics.push({
-          type: "service_readiness",
-          severity: "recoverable",
-          evidence: serviceHint.evidence,
-          suggestion: "Service readiness probe did not pass; inspect service logs or start the service before retrying.",
-          target: serviceHint.target,
-          targetHost: serviceTarget.host,
-          targetPort: serviceTarget.port,
-        });
-      }
-    }
-  } catch (error) {
-    diagnostics.push(createAutoEvidenceDiagnostic("service hint failed", error, "service_readiness"));
-  }
-
-  try {
-    const artifactTarget = input.exitCode === 0
-      ? await findFirstWorkspaceCandidate(input.context, input.intent.artifactCandidates)
-      : undefined;
-    if (artifactTarget) {
-      const artifactCheck = await checkArtifactCandidate(input.context, artifactTarget);
-      diagnostics.push(...artifactCheck.diagnostics);
-      if (!artifactCheck.hint.exists) {
-        data.artifactHint = artifactCheck.hint;
-        lines.push(`artifactHint ${artifactCheck.hint.path} missing`);
-        return { lines, data, diagnostics };
-      }
-      const artifactHint = artifactCheck.hint;
-      data.artifactHint = artifactHint;
-      lines.push(`artifactHint ${artifactHint.path} exists size=${artifactHint.size} sha256=${artifactHint.sha256Prefix}`);
-    }
-  } catch (error) {
-    diagnostics.push(createAutoEvidenceDiagnostic("artifact hint failed", error));
-  }
-
-  return { lines, data, diagnostics };
-}
 
 const BINARY_HINT_EXTENSIONS = [
   ".bin",
@@ -1789,9 +1614,6 @@ function parseBashCommandIntent(command: string, _context?: ToolContext): BashCo
 }
 
 const BINARY_COMMAND_NAMES = new Set(["file", "xxd", "readelf", "objdump", "hexdump", "strings", "7z", "7za", "unzip", "tar"]);
-const BINARY_HELPER_COMMAND_NAMES = new Set(["file", "xxd", "readelf", "objdump", "hexdump"]);
-const SEARCH_COMMAND_NAMES = new Set(["rg", "grep", "find"]);
-const SERVICE_CAPABILITY_COMMAND_NAMES = new Set(["curl", "wget", "nc", "ss", "lsof", "ps"]);
 const SHELL_RESERVED_COMMAND_NAMES = new Set([
   "if",
   "then",
@@ -1855,121 +1677,6 @@ const SHELL_BUILTIN_COMMAND_NAMES = new Set([
 const ARTIFACT_PRODUCING_COMMAND_NAMES = new Set(["touch", "tee"]);
 const ARTIFACT_PRODUCING_TOKENS = new Set(["write", "wrote", "written", "create", "created", "generate", "generated", "build", "built", "output"]);
 
-async function resolveBashCommandCapabilities(
-  intent: BashCommandIntent,
-  context: ToolContext,
-): Promise<BashCapabilityPreflight> {
-  const lines: string[] = [];
-  const data: Record<string, unknown> = {};
-  const diagnostics: BashDiagnostic[] = [];
-  const commandCapabilities: Array<{
-    command: string;
-    exists: boolean;
-    fallback?: string;
-    capability?: "binary_helper" | "search" | "service_kernel" | "python_alias";
-  }> = [];
-
-  for (const commandName of intent.commandNames) {
-    if (shouldSkipCommandCapabilityPreflight(commandName)) {
-      continue;
-    }
-    const resolution = await resolveCommandName(commandName, context);
-    if (resolution.exists) {
-      continue;
-    }
-    const fallback = await resolveMissingCommandFallback(commandName, context);
-    commandCapabilities.push({
-      command: commandName,
-      exists: false,
-      fallback: fallback?.fallback,
-      capability: fallback?.capability,
-    });
-    diagnostics.push(createMissingCommandDiagnostic(commandName, fallback));
-    lines.push(formatCommandCapabilityLine(commandName, fallback));
-  }
-
-  if (commandCapabilities.length > 0) {
-    data.commandCapabilities = commandCapabilities;
-  }
-  const pythonAlias = commandCapabilities.some((item) =>
-    item.command === "python" && item.exists === false && item.fallback === "python3"
-  ) && canSafelyAliasPythonCommand(intent)
-    ? { from: "python" as const, to: "python3" as const }
-    : undefined;
-  if (pythonAlias) {
-    lines.push("pythonAlias python -> python3");
-  }
-  return {
-    lines,
-    data,
-    diagnostics,
-    ...(pythonAlias ? { pythonAlias } : {}),
-  };
-}
-
-function createBashCapabilityCommandAdapter(
-  originalCommand: string,
-  adapted: ShellCommandAdapter,
-  preflight: BashCapabilityPreflight,
-): { command: string; logCommand: string } {
-  if (!preflight.pythonAlias) {
-    return { command: adapted.command, logCommand: adapted.logCommand ?? adapted.command };
-  }
-  const rewritten = originalCommand.replace(/^(\s*)python(?=\s|$)/u, "$1python3");
-  const nextAdapted = adaptShellCommand(rewritten);
-  return {
-    command: nextAdapted.command,
-    logCommand: nextAdapted.logCommand ?? nextAdapted.command,
-  };
-}
-
-async function resolveMissingCommandFallback(
-  commandName: string,
-  context: ToolContext,
-): Promise<{ fallback?: string; capability?: "binary_helper" | "search" | "service_kernel" | "python_alias" } | undefined> {
-  if (BINARY_HELPER_COMMAND_NAMES.has(commandName)) {
-    return { capability: "binary_helper", fallback: "Bash.binary" };
-  }
-  if (SEARCH_COMMAND_NAMES.has(commandName)) {
-    return { capability: "search", fallback: commandName === "rg" ? "Grep/Glob local scan" : "Grep/Glob" };
-  }
-  if (SERVICE_CAPABILITY_COMMAND_NAMES.has(commandName)) {
-    return { capability: "service_kernel", fallback: "Bash.service lifecycle" };
-  }
-  if (commandName === "python" && (await resolveCommandName("python3", context)).exists) {
-    return { capability: "python_alias", fallback: "python3" };
-  }
-  return undefined;
-}
-
-function createMissingCommandDiagnostic(
-  commandName: string,
-  fallback: { fallback?: string; capability?: string } | undefined,
-): BashDiagnostic {
-  const isBinaryHelper = fallback?.capability === "binary_helper";
-  return {
-    type: isBinaryHelper ? "binary_tool_missing" : "missing_command",
-    severity: "recoverable",
-    evidence: `command not found before execution: ${commandName}`,
-    suggestion: fallback?.fallback
-      ? `Use structured fallback ${fallback.fallback}.`
-      : "Install the command or choose an available structured capability before retrying.",
-    command: commandName,
-    ...(fallback?.fallback ? { fallback: fallback.fallback } : {}),
-  };
-}
-
-function formatCommandCapabilityLine(
-  commandName: string,
-  fallback: { fallback?: string; capability?: string } | undefined,
-): string {
-  return [
-    `commandCapability ${commandName} missing`,
-    fallback?.capability ? `capability=${fallback.capability}` : "",
-    fallback?.fallback ? `fallback=${fallback.fallback}` : "",
-  ].filter(Boolean).join(" ");
-}
-
 function canSafelyAliasPythonCommand(intent: BashCommandIntent): boolean {
   const segment = intent.segments[0];
   return intent.segments.length === 1 &&
@@ -1977,51 +1684,6 @@ function canSafelyAliasPythonCommand(intent: BashCommandIntent): boolean {
     segment?.commandName === "python" &&
     !segment.background &&
     segment.redirections.length === 0;
-}
-
-async function resolveCommandName(
-  commandName: string,
-  context: ToolContext,
-): Promise<{ exists: boolean; path?: string }> {
-  if (!commandName) return { exists: false };
-  if (commandName.includes("/") || commandName.includes("\\")) {
-    const absolute = isAbsolute(commandName)
-      ? commandName
-      : resolveWorkspacePath(context.workspaceRoot, commandName);
-    return (await isExecutableFile(absolute)) ? { exists: true, path: absolute } : { exists: false };
-  }
-  const pathValue = process.env.PATH ?? "";
-  const pathExts = process.platform === "win32"
-    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
-    : [""];
-  for (const dir of pathValue.split(process.platform === "win32" ? ";" : ":")) {
-    if (!dir) continue;
-    for (const ext of pathExts) {
-      const candidate = join(dir, process.platform === "win32" ? appendWindowsExecutableExtension(commandName, ext) : commandName);
-      if (await isExecutableFile(candidate)) {
-        return { exists: true, path: candidate };
-      }
-    }
-  }
-  return { exists: false };
-}
-
-function appendWindowsExecutableExtension(commandName: string, extension: string): string {
-  return commandName.toLowerCase().endsWith(extension.toLowerCase())
-    ? commandName
-    : `${commandName}${extension}`;
-}
-
-async function isExecutableFile(path: string): Promise<boolean> {
-  try {
-    const info = await stat(path);
-    if (!info.isFile()) return false;
-    if (process.platform === "win32") return true;
-    await access(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function tokenizeShellLike(command: string): string[] {
@@ -2361,13 +2023,6 @@ function addPathCandidate(target: Set<string>, token: string): void {
   target.add(token.replaceAll("\\", "/"));
 }
 
-function shouldSkipCommandCapabilityPreflight(commandName: string): boolean {
-  const normalized = commandName.toLowerCase();
-  return SHELL_BUILTIN_COMMAND_NAMES.has(normalized) ||
-    SHELL_RESERVED_COMMAND_NAMES.has(normalized) ||
-    SHELL_SYNTAX_COMMAND_NAMES.has(normalized);
-}
-
 function isOptionToken(token: string): boolean {
   return token.startsWith("-") && !/^-?\d+$/u.test(token);
 }
@@ -2465,252 +2120,14 @@ function dedupeServiceCandidates(candidates: ServiceIntent[]): ServiceIntent[] {
   });
 }
 
-async function findFirstExistingWorkspaceCandidate(
-  context: ToolContext,
-  candidates: string[],
-): Promise<{ absolute: string; relative: string } | undefined> {
-  for (const candidate of candidates) {
-    try {
-      const absolute = resolveWorkspacePath(context.workspaceRoot, candidate);
-      const info = await stat(absolute);
-      if (info.isFile()) return { absolute, relative: relativePath(context.workspaceRoot, absolute) };
-    } catch {
-      continue;
-    }
-  }
-  return undefined;
-}
-
-async function findFirstWorkspaceCandidate(
-  context: ToolContext,
-  candidates: string[],
-): Promise<{ absolute: string; relative: string } | undefined> {
-  for (const candidate of candidates) {
-    try {
-      const absolute = resolveWorkspacePath(context.workspaceRoot, candidate);
-      return { absolute, relative: relativePath(context.workspaceRoot, absolute) };
-    } catch {
-      continue;
-    }
-  }
-  return undefined;
-}
-
-function firstServiceCandidate(intent: BashCommandIntent): { host: string; port: number } | undefined {
-  for (const candidate of intent.serviceCandidates) {
-    return {
-      host: candidate.host,
-      port: candidate.port,
-    };
-  }
-  return undefined;
-}
-
-function enrichBashDiagnostics(diagnostics: BashDiagnostic[], intent: BashCommandIntent): BashDiagnostic[] {
-  const binaryPath = intent.binaryCandidates[0];
-  const artifactPath = intent.artifactCandidates[0];
-  const service = intent.serviceCandidates[0];
-  return diagnostics.map((diagnostic) => {
-    if (diagnostic.type === "binary_tool_missing" && binaryPath) {
-      return { ...diagnostic, path: diagnostic.path ?? binaryPath };
-    }
-    if (diagnostic.type === "artifact_preservation" && artifactPath) {
-      return { ...diagnostic, path: diagnostic.path ?? artifactPath };
-    }
-    if ((diagnostic.type === "service_readiness" || diagnostic.type === "timeout") && service) {
-      return {
-        ...diagnostic,
-        target: diagnostic.target ?? `${service.host}:${service.port}`,
-        targetHost: diagnostic.targetHost ?? service.host,
-        targetPort: diagnostic.targetPort ?? service.port,
-      };
-    }
-    return diagnostic;
-  });
-}
-
 function normalizeHostPort(host: string, port: number): { host: string; port: number } | undefined {
   if (!Number.isInteger(port) || port <= 0 || port > 65_535) return undefined;
   return { host: host === "0.0.0.0" || host === "localhost" ? "127.0.0.1" : host.replace(/^\[(.*)\]$/u, "$1"), port };
 }
 
-type ServiceProbePolicy = {
-  kind: "normal" | "bench" | "bench-extended";
-  attempts: number;
-  maxTotalMs: number;
-};
-
-function createServiceProbePolicy(
-  context: ToolContext,
-  intent: BashCommandIntent,
-  diagnostics: BashDiagnostic[],
-): ServiceProbePolicy {
-  const bench = isHeadlessBenchContext(context);
-  const hasReadinessRisk =
-    diagnostics.some((diagnostic) => diagnostic.type === "service_readiness" || diagnostic.type === "timeout") ||
-    (context.recentDiagnostics ?? []).some((diagnostic) =>
-      diagnostic.type === "service_readiness" || diagnostic.type === "timeout"
-    );
-  if (bench && (intent.backgroundLikely || hasReadinessRisk)) {
-    return { kind: "bench-extended", attempts: 12, maxTotalMs: 15_000 };
-  }
-  if (bench) {
-    return { kind: "bench", attempts: 8, maxTotalMs: 8_000 };
-  }
-  return { kind: "normal", attempts: 3, maxTotalMs: 1_500 };
-}
-
 function isHeadlessBenchContext(context: ToolContext): boolean {
   const record = context as ToolContext & { headlessBench?: { enabled?: boolean } };
   return record.headlessBench?.enabled === true;
-}
-
-async function probeTcpBounded(
-  host: string,
-  port: number,
-  policy: ServiceProbePolicy,
-): Promise<{
-  target: string;
-  ready: boolean;
-  evidence: string;
-  attempts: number;
-  elapsedMs: number;
-  policy: ServiceProbePolicy;
-}> {
-  const startedAt = Date.now();
-  let lastEvidence = "";
-  for (let index = 0; index < policy.attempts; index += 1) {
-    const probe = await probeTcpOnce(host, port);
-    lastEvidence = probe.evidence;
-    if (probe.ready) {
-      return {
-        ...probe,
-        attempts: index + 1,
-        elapsedMs: Date.now() - startedAt,
-        policy,
-      };
-    }
-    const remaining = policy.maxTotalMs - (Date.now() - startedAt);
-    if (index === policy.attempts - 1 || remaining <= 0) break;
-    await delay(Math.min(createServiceProbeDelayMs(index), remaining));
-  }
-  return {
-    target: `${host}:${port}`,
-    ready: false,
-    evidence: lastEvidence || `tcp ${host}:${port} not ready`,
-    attempts: policy.attempts,
-    elapsedMs: Date.now() - startedAt,
-    policy,
-  };
-}
-
-function createServiceProbeDelayMs(attemptIndex: number): number {
-  return [300, 600, 1_000, 1_500][attemptIndex] ?? 2_000;
-}
-
-function probeTcpOnce(host: string, port: number): Promise<{ target: string; ready: boolean; evidence: string }> {
-  return new Promise((resolve) => {
-    const socket = connectTcp({ host, port });
-    const finish = (ready: boolean, evidence: string) => {
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve({ target: `${host}:${port}`, ready, evidence });
-    };
-    socket.setTimeout(350);
-    socket.once("connect", () => finish(true, `tcp ${host}:${port} accepted connection`));
-    socket.once("timeout", () => finish(false, `tcp ${host}:${port} timed out`));
-    socket.once("error", (error) => finish(false, `tcp ${host}:${port} failed: ${error.message}`));
-  });
-}
-
-async function createArtifactHint(target: { absolute: string; relative: string }): Promise<{
-  path: string;
-  exists: true;
-  size: number;
-  sha256Prefix: string;
-}> {
-  const info = await stat(target.absolute);
-  const sha256 = await hashFileSha256Prefix(target.absolute);
-  return { path: target.relative, exists: true, size: info.size, sha256Prefix: sha256.slice(0, 16) };
-}
-
-async function checkArtifactCandidate(
-  context: ToolContext,
-  target: { absolute: string; relative: string },
-): Promise<{
-  hint: { path: string; exists: false } | { path: string; exists: true; size: number; sha256Prefix: string };
-  diagnostics: BashDiagnostic[];
-}> {
-  const check = await checkArtifact({
-    input: {
-      path: target.relative,
-      ...(target.relative.toLowerCase().endsWith(".json") ? { json: true } : {}),
-    },
-    target: {
-      input: target.relative,
-      absolute: target.absolute,
-      relative: target.relative,
-    },
-    protectPaths: [],
-    context,
-  });
-  const data = check.data as { artifact?: { exists?: boolean }; diagnostics?: BashDiagnostic[] } | undefined;
-  if (data?.artifact?.exists === true) {
-    return {
-      hint: await createArtifactHint(target),
-      diagnostics: data.diagnostics ?? [],
-    };
-  }
-  return {
-    hint: { path: target.relative, exists: false },
-    diagnostics: data?.diagnostics ?? [{
-      type: "artifact_preservation",
-      severity: "blocking",
-      evidence: `artifact missing ${target.relative}`,
-      suggestion: "Preserve expected outputs before verification.",
-      path: target.relative,
-    }],
-  };
-}
-
-async function hashFileSha256Prefix(path: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) {
-    hash.update(chunk);
-  }
-  return hash.digest("hex");
-}
-
-function formatBinaryPreflight(value: unknown): string {
-  const binary = value as { path?: unknown; size?: unknown; magic?: { label?: unknown } };
-  return `binaryPreflight ${String(binary.path ?? "unknown")} size=${String(binary.size ?? "unknown")} magic=${String(binary.magic?.label ?? "unknown")}`;
-}
-
-function formatBinaryHint(value: unknown): string {
-  const binary = value as { path?: unknown; size?: unknown; magic?: { label?: unknown } };
-  return `binaryHint ${String(binary.path ?? "unknown")} size=${String(binary.size ?? "unknown")} magic=${String(binary.magic?.label ?? "unknown")}`;
-}
-
-function createAutoEvidenceDiagnostic(
-  prefix: string,
-  error: unknown,
-  type: BashDiagnosticType = "artifact_preservation",
-): BashDiagnostic {
-  return {
-    type,
-    severity: "recoverable",
-    evidence: `${prefix}: ${error instanceof Error ? error.message : String(error)}`,
-    suggestion: "Automatic evidence collection failed; continue with the original Bash result and inspect manually if needed.",
-  };
-}
-
-function mergeDiagnostics(primary: BashDiagnostic[], secondary: BashDiagnostic[]): BashDiagnostic[] {
-  const merged: BashDiagnostic[] = [];
-  for (const diagnostic of [...primary, ...secondary]) {
-    if (merged.some((item) => item.type === diagnostic.type && item.evidence === diagnostic.evidence)) continue;
-    merged.push(diagnostic);
-  }
-  return merged;
 }
 
 function withDefaultServiceReadiness(
@@ -2723,29 +2140,6 @@ function withDefaultServiceReadiness(
   );
   const timeoutMs = hasReadinessRisk ? 15_000 : isHeadlessBenchContext(context) ? 10_000 : 5_000;
   return { ...readiness, timeoutMs };
-}
-
-function createImplicitServiceReadiness(
-  intent: BashCommandIntent,
-  context: ToolContext,
-): BashServiceReadiness | undefined {
-  const service = intent.serviceCandidates[0];
-  if (!service || !intent.backgroundLikely || service.confidence !== "high" || intentHasHelpFlag(intent)) return undefined;
-  return withDefaultServiceReadiness({
-    type: "tcp",
-    host: service.host,
-    port: service.port,
-  }, context);
-}
-
-function intentHasHelpFlag(intent: BashCommandIntent): boolean {
-  return intent.segments.some((segment) =>
-    segment.argv.some((arg) => arg === "--help" || arg === "-h" || arg === "help")
-  );
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function createBashOutcomeDiagnostics(
