@@ -837,6 +837,7 @@ function validateBashInput(input: unknown): BashInput {
 
 function validateOptionalBashBinaryInspect(input: unknown): BashBinaryInspectInput | undefined {
   if (input === undefined) return undefined;
+  if (isEmptyOptionalObject(input)) return undefined;
   const record = validateRecord(input, "Bash");
   return {
     path: readString(record, "path", "Bash"),
@@ -846,6 +847,7 @@ function validateOptionalBashBinaryInspect(input: unknown): BashBinaryInspectInp
 
 function validateOptionalBashArtifactCheck(input: unknown): BashArtifactCheckInput | undefined {
   if (input === undefined) return undefined;
+  if (isEmptyOptionalObject(input)) return undefined;
   const record = validateRecord(input, "Bash");
   return {
     path: readString(record, "path", "Bash"),
@@ -861,6 +863,7 @@ function validateOptionalBashArtifactCheck(input: unknown): BashArtifactCheckInp
 
 function validateOptionalBashServiceInput(input: unknown): BashServiceInput | undefined {
   if (input === undefined) return undefined;
+  if (isEmptyOptionalObject(input)) return undefined;
   const record = validateRecord(input, "Bash");
   const action = readOptionalString(record, "action", "Bash");
   if (action !== undefined) {
@@ -912,6 +915,13 @@ function validateOptionalBashServiceInput(input: unknown): BashServiceInput | un
     return { type, url, timeoutMs, intervalMs };
   }
   throw new Error("Bash.service.type 必须是 tcp 或 http。");
+}
+
+function isEmptyOptionalObject(input: unknown): boolean {
+  return (
+    input === null ||
+    (typeof input === "object" && !Array.isArray(input) && Object.keys(input).length === 0)
+  );
 }
 
 function isBashServiceLifecycleAction(input: BashServiceInput | undefined): input is BashServiceLifecycleAction {

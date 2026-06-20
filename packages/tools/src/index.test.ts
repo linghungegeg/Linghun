@@ -327,6 +327,24 @@ describe("Phase 05 core tools", () => {
     }
   });
 
+  it("treats empty Bash validation mode objects as absent for command mode", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      {
+        command: "node -e \"process.stdout.write('empty-modes-ok')\"",
+        service: {},
+        artifact: {},
+        binary: {},
+      },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("empty-modes-ok");
+    expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+  });
+
   it("does not add service diagnostics from connection refused stderr text alone", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);

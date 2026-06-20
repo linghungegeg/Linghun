@@ -325,7 +325,7 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
   };
 }
 
-function createHeadlessBenchValidationContractRiskSummary(context: TuiContext): string | undefined {
+export function createHeadlessBenchValidationContractRiskSummary(context: TuiContext): string | undefined {
   const tools = context.tools as typeof context.tools & {
     headlessBench?: { enabled?: boolean };
     validationContract?: { items?: ValidationContractItem[] };

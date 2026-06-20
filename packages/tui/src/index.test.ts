@@ -2650,6 +2650,36 @@ describe("runHeadlessTask", () => {
     expect(withoutServiceContext.items).toEqual([]);
   });
 
+  it("bench mode requires explicit validation evidence for validation contracts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-contract-validation-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const output = new MemoryOutput();
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Start the HTTP server and listen on port 8000. The health endpoint should be ready.",
+      projectPath: project,
+      stdout: output,
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+      },
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(5);
+    expect(output.text).not.toContain("bench validation passed");
+    expect(stderr.text).toContain("validation_contract");
+    expect(stderr.text).toContain("Bash.service");
+  });
+
   it("bench mode repairs after official test failure and passes on the second validation", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-repair-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

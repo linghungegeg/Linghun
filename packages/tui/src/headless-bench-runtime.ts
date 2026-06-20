@@ -19,6 +19,7 @@ export type HeadlessBenchFailureCategory =
   | "unknown_agent_error"
   | "parse_or_harness_error"
   | "missing_artifact"
+  | "validation_contract"
   | "environment_missing_tool"
   | "environment_error"
   | "network_pull_error"
@@ -705,6 +706,9 @@ function formatRepairProfileStrategy(
 ): string {
   if (category === "missing_artifact") {
     return "Repair route: generate or write the required artifact now, then verify it exists, is readable, and is non-empty.";
+  }
+  if (category === "validation_contract") {
+    return "Repair route: run the required explicit validation tool for the contract item, then repair any failed evidence before final.";
   }
   if (category === "test_timeout") {
     return "Repair route: narrow validation to focused tests or logs first; avoid repeatedly launching full expensive runs.";

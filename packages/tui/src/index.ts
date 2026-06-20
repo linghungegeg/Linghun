@@ -148,6 +148,7 @@ import {
 } from "./deferred-tools-catalog.js";
 import {
   checkClaimSupport,
+  createHeadlessBenchValidationContractRiskSummary,
   createHandoffPendingItems,
   createHandoffRiskItems,
   createPhase15BetaVerdictScope,
@@ -1715,7 +1716,19 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     }
     if (benchConfig.enabled) {
       for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
-        const validation = await validateHeadlessBenchCompletion({ projectPath, config: benchConfig });
+        let validation = await validateHeadlessBenchCompletion({ projectPath, config: benchConfig });
+        if (validation.ok) {
+          const validationContractRisk = createHeadlessBenchValidationContractRiskSummary(context);
+          if (validationContractRisk) {
+            validation = {
+              ok: false,
+              failure: {
+                category: "validation_contract",
+                summary: validationContractRisk,
+              },
+            };
+          }
+        }
         lastValidation = validation;
         if (validation.ok) {
           benchValidationPassed = true;
