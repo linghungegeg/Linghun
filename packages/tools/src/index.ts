@@ -1792,6 +1792,36 @@ const BINARY_COMMAND_NAMES = new Set(["file", "xxd", "readelf", "objdump", "hexd
 const BINARY_HELPER_COMMAND_NAMES = new Set(["file", "xxd", "readelf", "objdump", "hexdump"]);
 const SEARCH_COMMAND_NAMES = new Set(["rg", "grep", "find"]);
 const SERVICE_CAPABILITY_COMMAND_NAMES = new Set(["curl", "wget", "nc", "ss", "lsof", "ps"]);
+const SHELL_RESERVED_COMMAND_NAMES = new Set([
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "for",
+  "while",
+  "until",
+  "do",
+  "done",
+  "case",
+  "esac",
+  "in",
+  "function",
+  "coproc",
+]);
+const SHELL_SYNTAX_COMMAND_NAMES = new Set([
+  "[",
+  "[[",
+  "test",
+  "{",
+  "}",
+  "(",
+  ")",
+  "!",
+  ":",
+  "true",
+  "false",
+]);
 const SHELL_BUILTIN_COMMAND_NAMES = new Set([
   "alias",
   "bg",
@@ -1815,7 +1845,6 @@ const SHELL_BUILTIN_COMMAND_NAMES = new Set([
   "read",
   "set",
   "shift",
-  "test",
   "trap",
   "type",
   "ulimit",
@@ -1841,7 +1870,7 @@ async function resolveBashCommandCapabilities(
   }> = [];
 
   for (const commandName of intent.commandNames) {
-    if (SHELL_BUILTIN_COMMAND_NAMES.has(commandName)) {
+    if (shouldSkipCommandCapabilityPreflight(commandName)) {
       continue;
     }
     const resolution = await resolveCommandName(commandName, context);
@@ -2028,6 +2057,40 @@ function tokenizeShellLike(command: string): string[] {
       push();
       continue;
     }
+    if (char === ">" && /^\d+$/u.test(current)) {
+      const prefix = current;
+      current = "";
+      let redirect = `${prefix}>`;
+      if (command[index + 1] === ">") {
+        redirect += ">";
+        index += 1;
+      }
+      if (command[index + 1] === "&") {
+        redirect += "&";
+        index += 1;
+        while (index + 1 < command.length && /[A-Za-z0-9_/-]/u.test(command[index + 1] ?? "")) {
+          redirect += command[index + 1];
+          index += 1;
+        }
+      }
+      tokens.push(redirect);
+      continue;
+    }
+    if (char === "(" && current.length === 0) {
+      push();
+      tokens.push(char);
+      continue;
+    }
+    if ((char === "{" || char === "}") && current.length === 0) {
+      push();
+      tokens.push(char);
+      continue;
+    }
+    if (char === ")" && !current.includes("$(")) {
+      push();
+      tokens.push(char);
+      continue;
+    }
     if (char === "|" || char === ";" || char === "&" || char === ">") {
       push();
       const next = command[index + 1];
@@ -2081,6 +2144,9 @@ function splitCommandSegments(tokens: string[]): CommandSegment[] {
 function parseCommandSegment(tokens: string[]): ParsedCommandSegment | undefined {
   const env = new Map<string, string>();
   let index = 0;
+  while (index < tokens.length && isShellGroupBoundaryToken(tokens[index] ?? "")) {
+    index += 1;
+  }
   while (index < tokens.length && isEnvironmentAssignment(tokens[index] ?? "")) {
     const [name, ...rest] = (tokens[index] ?? "").split("=");
     if (name) env.set(name.toUpperCase(), rest.join("="));
@@ -2088,14 +2154,20 @@ function parseCommandSegment(tokens: string[]): ParsedCommandSegment | undefined
   }
   if (index >= tokens.length) return undefined;
   let commandToken = tokens[index] ?? "";
-  if (commandToken === "nohup" || commandToken === "setsid") {
+  if (commandToken === "nohup" || commandToken === "setsid" || commandToken === "time") {
     index += 1;
     commandToken = tokens[index] ?? "";
   }
+  if (isShellReservedCommandToken(commandToken)) return undefined;
+  if (isShellSyntaxCommandToken(commandToken)) return undefined;
   if (!commandToken) return undefined;
+  const commandName = stripExecutableToken(commandToken);
+  if (!commandName || isShellReservedCommandToken(commandName) || isShellSyntaxCommandToken(commandName)) {
+    return undefined;
+  }
   return {
-    commandName: stripExecutableToken(commandToken),
-    argv: tokens.slice(index + 1),
+    commandName,
+    argv: tokens.slice(index + 1).filter((token) => !isShellGroupBoundaryToken(token)),
     env,
     background: tokens.includes("disown"),
   };
@@ -2277,12 +2349,23 @@ function isBackgroundLikely(segments: CommandSegment[], serviceCandidates: Servi
 }
 
 function stripExecutableToken(token: string): string {
-  return basename(token).replace(/\.(?:exe|cmd|bat)$/iu, "").toLowerCase();
+  const normalized = token.replace(/^\(+/u, "").replace(/\)+$/u, "");
+  if (normalized.includes("/") || normalized.includes("\\")) {
+    return normalized.replace(/\.(?:exe|cmd|bat)$/iu, "");
+  }
+  return basename(normalized).replace(/\.(?:exe|cmd|bat)$/iu, "").toLowerCase();
 }
 
 function addPathCandidate(target: Set<string>, token: string): void {
-  if (!token || isOptionToken(token) || token.includes("://")) return;
+  if (!isStaticPathCandidate(token)) return;
   target.add(token.replaceAll("\\", "/"));
+}
+
+function shouldSkipCommandCapabilityPreflight(commandName: string): boolean {
+  const normalized = commandName.toLowerCase();
+  return SHELL_BUILTIN_COMMAND_NAMES.has(normalized) ||
+    SHELL_RESERVED_COMMAND_NAMES.has(normalized) ||
+    SHELL_SYNTAX_COMMAND_NAMES.has(normalized);
 }
 
 function isOptionToken(token: string): boolean {
@@ -2295,6 +2378,29 @@ function isOutputFlag(token: string): boolean {
 
 function isEnvironmentAssignment(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=.*$/u.test(token);
+}
+
+function isShellReservedCommandToken(token: string): boolean {
+  return SHELL_RESERVED_COMMAND_NAMES.has(token.toLowerCase());
+}
+
+function isShellSyntaxCommandToken(token: string): boolean {
+  return SHELL_SYNTAX_COMMAND_NAMES.has(token.toLowerCase());
+}
+
+function isShellGroupBoundaryToken(token: string): boolean {
+  return token === "(" || token === ")" || token === "{" || token === "}";
+}
+
+function isStaticPathCandidate(token: string): boolean {
+  if (!token || isOptionToken(token) || token.includes("://")) return false;
+  if (token.includes("$") || token.includes("`")) return false;
+  if (/^(?:\d+)?>{1,2}(?:&\d+)?$/u.test(token)) return false;
+  if (token === "|" || token === ";" || token === "&" || token === "<") return false;
+  if (isShellGroupBoundaryToken(token) || isShellSyntaxCommandToken(token)) return false;
+  if (/^\d+$/u.test(token)) return false;
+  if (token === "/dev/null" || token === "/dev/stdout" || token === "/dev/stderr") return false;
+  return true;
 }
 
 function isBinarySuffix(token: string): boolean {

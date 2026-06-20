@@ -756,6 +756,36 @@ describe("Phase 05 core tools", () => {
     expect(intent.backgroundLikely).toBe(true);
   });
 
+  it("keeps Bash command intent conservative for shell syntax and variables", () => {
+    const conditional = __testParseBashCommandIntent("if command -v 7z >/dev/null 2>&1; then true; fi");
+    expect(conditional.commandNames).not.toEqual(expect.arrayContaining(["then", "1", "fi"]));
+    expect(conditional.artifactCandidates).not.toEqual(expect.arrayContaining(["/dev/null", "1"]));
+
+    const tempVar = __testParseBashCommandIntent("tmp=$(mktemp); python3 filter.py \"$tmp\"");
+    expect(tempVar.commandNames).toContain("python3");
+    expect(tempVar.artifactCandidates).not.toContain("$tmp");
+    expect(tempVar.artifactCandidates).not.toContain("${tmp}");
+
+    const service = __testParseBashCommandIntent("PORT=8080 python3 -m http.server");
+    expect(service.commandNames).toEqual(["python3"]);
+    expect(service.serviceCandidates).toEqual([
+      expect.objectContaining({ kind: "http-server", port: 8080 }),
+    ]);
+
+    const redirected = __testParseBashCommandIntent("python3 script.py > out.json");
+    expect(redirected.commandNames).toEqual(["python3"]);
+    expect(redirected.artifactCandidates).toEqual(["out.json"]);
+    expect(redirected.segments[0]?.redirections).toEqual([{ operator: ">", target: "out.json" }]);
+
+    const subshell = __testParseBashCommandIntent("(cd john/run && ./7z2john.pl /app/secrets.7z)");
+    expect(subshell.commandNames).toEqual(expect.arrayContaining(["cd", "./7z2john.pl"]));
+    expect(subshell.commandNames).not.toEqual(expect.arrayContaining(["(cd", "(command", "then", "1"]));
+
+    const testExpression = __testParseBashCommandIntent("[ -f file ] && echo ok");
+    expect(testExpression.commandNames).toEqual(["echo"]);
+    expect(testExpression.commandNames).not.toContain("[");
+  });
+
   it("only allows python alias fallback for simple exact python commands", () => {
     expect(__testCanSafelyAliasPythonCommand(__testParseBashCommandIntent("python -c \"print('ok')\""))).toBe(true);
     expect(__testCanSafelyAliasPythonCommand(__testParseBashCommandIntent("echo python -c test"))).toBe(false);
