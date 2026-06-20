@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -598,6 +599,166 @@ describe("Phase 05 core tools", () => {
           evidence: "output format mismatch invalid.json: invalid JSON",
         }),
       ],
+    });
+  });
+
+  it("checks Bash.artifact text lineSet expectations explicitly", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "move.txt"), "e2e4\n", "utf8");
+
+    const missing = await runTool(
+      "Bash",
+      { artifact: { path: "move.txt", text: { lineSet: ["e2e4", "g2g4"] } } },
+      createToolContext(project),
+    );
+    await writeFile(join(project, "move.txt"), "g2g4\ne2e4\n", "utf8");
+    const complete = await runTool(
+      "Bash",
+      { artifact: { path: "move.txt", text: { lineSet: ["e2e4", "g2g4"] } } },
+      createToolContext(project),
+    );
+
+    expect(missing.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "artifact_check_failed",
+      artifact: { checks: { text: { ok: false, lineSet: { missing: ["g2g4"] } } } },
+      diagnostics: [expect.objectContaining({ type: "artifact_preservation", path: "move.txt" })],
+    });
+    expect(complete.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "artifact_checked",
+      artifact: { checks: { text: { ok: true, lineSet: { ok: true, missing: [] } } } },
+    });
+  });
+
+  it("checks Bash.artifact raw and normalized HTML preservation explicitly", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const clean = "<!doctype html>\n<html><body><h1 class=\"title\" id=\"welcome\">Welcome &amp; hello</h1><br></body></html>\n";
+    await writeFile(join(project, "clean.html"), clean, "utf8");
+    await writeFile(
+      join(project, "changed.html"),
+      "<!doctype html>\n<html><body><h1 class=\"title\" id=\"welcome\">Welcome!</h1><br></body></html>\n",
+      "utf8",
+    );
+    await writeFile(
+      join(project, "formatted.html"),
+      "<!doctype html>\n<html>\n<body>\n<h1 id=\"welcome\" class=\"title\">Welcome & hello</h1>\n<br />\n</body>\n</html>\n",
+      "utf8",
+    );
+
+    const rawFailed = await runTool(
+      "Bash",
+      { artifact: { path: "changed.html", preserve: { mode: "rawPreserve", expectedText: clean } } },
+      createToolContext(project),
+    );
+    const normalizedFailed = await runTool(
+      "Bash",
+      { artifact: { path: "changed.html", preserve: { mode: "compareNormalizedHtml", expectedPath: "clean.html" } } },
+      createToolContext(project),
+    );
+    const normalizedOk = await runTool(
+      "Bash",
+      { artifact: { path: "formatted.html", preserve: { mode: "compareNormalizedHtml", expectedPath: "clean.html" } } },
+      createToolContext(project),
+    );
+
+    expect(rawFailed.output.data).toMatchObject({
+      exitCode: 1,
+      diagnostics: [expect.objectContaining({ type: "artifact_preservation", path: "changed.html" })],
+    });
+    expect(normalizedFailed.output.data).toMatchObject({
+      exitCode: 1,
+      artifact: { checks: { preserve: { ok: false, mode: "compareNormalizedHtml" } } },
+    });
+    expect(normalizedOk.output.data).toMatchObject({
+      exitCode: 0,
+      artifact: { checks: { preserve: { ok: true, mode: "compareNormalizedHtml" } } },
+    });
+  });
+
+  it("canonicalizes html preservation with attributes, entities, void elements, and structure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const clean = [
+      "<!doctype html>",
+      "<html><body>",
+      "<img src=\"x.png\" alt=\"Alpha &amp; Beta\">",
+      "<input disabled value=\"yes\">",
+      "<p>Alpha&nbsp;Beta &amp; safe</p>",
+      "<script>window.clean = true;</script>",
+      "</body></html>",
+    ].join("");
+    await writeFile(join(project, "clean.html"), clean, "utf8");
+    await writeFile(
+      join(project, "equivalent.html"),
+      [
+        "<img alt=\"Alpha & Beta\" src=\"x.png\" />",
+        "<input value=\"yes\" disabled=\"\" />",
+        "<p>Alpha Beta & safe</p>",
+        "<script>window.clean = true;</script>",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(project, "script-removed.html"),
+      "<img alt=\"Alpha & Beta\" src=\"x.png\"><input value=\"yes\" disabled><p>Alpha&nbsp;Beta &amp; safe</p>",
+      "utf8",
+    );
+    await writeFile(
+      join(project, "script-added.html"),
+      `${clean}<script>window.extra = true;</script>`,
+      "utf8",
+    );
+    await writeFile(
+      join(project, "script-whitespace-changed.html"),
+      clean.replace("window.clean = true;", "window.clean=true;"),
+      "utf8",
+    );
+
+    const equivalent = await runTool(
+      "Bash",
+      { artifact: { path: "equivalent.html", preserve: { mode: "compareNormalizedHtml", expectedPath: "clean.html" } } },
+      createToolContext(project),
+    );
+    const removed = await runTool(
+      "Bash",
+      { artifact: { path: "script-removed.html", preserve: { mode: "compareNormalizedHtml", expectedPath: "clean.html" } } },
+      createToolContext(project),
+    );
+    const added = await runTool(
+      "Bash",
+      { artifact: { path: "script-added.html", preserve: { mode: "compareNormalizedHtml", expectedPath: "clean.html" } } },
+      createToolContext(project),
+    );
+    const scriptWhitespaceChanged = await runTool(
+      "Bash",
+      {
+        artifact: {
+          path: "script-whitespace-changed.html",
+          preserve: { mode: "compareNormalizedHtml", expectedPath: "clean.html" },
+        },
+      },
+      createToolContext(project),
+    );
+
+    expect(equivalent.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "artifact_checked",
+      artifact: { checks: { preserve: { ok: true, mode: "compareNormalizedHtml" } } },
+    });
+    expect(removed.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "artifact_check_failed",
+      diagnostics: [expect.objectContaining({ type: "artifact_preservation", path: "script-removed.html" })],
+    });
+    expect(added.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "artifact_check_failed",
+      diagnostics: [expect.objectContaining({ type: "artifact_preservation", path: "script-added.html" })],
+    });
+    expect(scriptWhitespaceChanged.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "artifact_check_failed",
+      diagnostics: [expect.objectContaining({ type: "artifact_preservation", path: "script-whitespace-changed.html" })],
     });
   });
 
@@ -1418,6 +1579,68 @@ describe("Phase 05 core tools", () => {
       service: { readiness: { ok: true, target: `http://127.0.0.1:${port}/health` } },
     });
     await stopServiceFromOutput(result.output.data);
+  });
+
+  it("checks Bash.service fetch status and body contains explicitly", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const port = await getFreeTcpPort();
+    const server = createHttpServer((req, res) => {
+      if (req.url === "/simple/vectorops/") {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end("<html><a href='vectorops-0.1.0.tar.gz'>vectorops-0.1.0</a></html>");
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("missing");
+    });
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+    try {
+      const ok = await runTool(
+        "Bash",
+        {
+          service: {
+            action: "fetch",
+            url: `http://127.0.0.1:${port}/simple/vectorops/`,
+            expectStatus: 200,
+            bodyContains: "vectorops-0.1.0",
+          },
+        },
+        createToolContext(project),
+      );
+      const missing = await runTool(
+        "Bash",
+        {
+          service: {
+            action: "fetch",
+            url: `http://127.0.0.1:${port}/missing/`,
+            expectStatus: 200,
+            bodyContains: "vectorops-0.1.0",
+          },
+        },
+        createToolContext(project),
+      );
+
+      expect(ok.output.data).toMatchObject({
+        exitCode: 0,
+        outcome: "service_ready",
+        service: { ready: true, fetch: { status: 200, missingBody: [] } },
+      });
+      expect(missing.output.data).toMatchObject({
+        exitCode: 1,
+        outcome: "service_not_ready",
+        service: { ready: false, fetch: { status: 404, missingBody: ["vectorops-0.1.0"] } },
+        diagnostics: [
+          expect.objectContaining({
+            type: "service_readiness",
+            target: `http://127.0.0.1:${port}/missing/`,
+            targetHost: "127.0.0.1",
+            targetPort: port,
+          }),
+        ],
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("ignores Bash service output after readiness closes the service log", async () => {
@@ -2427,10 +2650,10 @@ describe("Phase 05 core tools", () => {
     expect(read.output.text).toContain("不是完整文件");
   });
 
-  it("validates tool input and preserves details when output is capped", async () => {
+  it("validates tool input and keeps details when output is capped", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
-    await writeFile(join(project, "large.txt"), "x".repeat(9_000), "utf8");
+    await writeFile(join(project, "large.txt"), Array.from({ length: 260 }, () => "x".repeat(120)).join("\n"), "utf8");
 
     await expect(runTool("Read", { path: 123 }, context)).rejects.toThrow("Read.path");
     const read = await runTool("Read", { path: "large.txt" }, context);

@@ -2080,6 +2080,43 @@ describe("runHeadlessTask", () => {
     expect(result.unsupportedClaims.join("\n")).toContain("service_readiness");
   });
 
+  it("final gate blocks headless bench verified completion on blocking artifact and service diagnostics only", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "artifact_preservation",
+        severity: "blocking",
+        evidence: "text expectation mismatch move.txt: missing g2g4",
+        path: "move.txt",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        source: "Bash",
+        type: "service_readiness",
+        severity: "blocking",
+        evidence: "http http://127.0.0.1:8080/simple/vectorops/ status 404",
+        target: "http://127.0.0.1:8080/simple/vectorops/",
+        targetHost: "127.0.0.1",
+        targetPort: 8080,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+
+    expect(checkClaimSupport("已验证完成", context).status).toBe("passed");
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+
+    const result = checkClaimSupport("已验证完成", context);
+    expect(result.status).toBe("needs_disclaimer");
+    expect(result.unsupportedClaims.join("\n")).toContain("artifact_preservation");
+    expect(result.unsupportedClaims.join("\n")).toContain("service_readiness");
+  });
+
   it("final gate reports missing command diagnostics with structured fallback", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

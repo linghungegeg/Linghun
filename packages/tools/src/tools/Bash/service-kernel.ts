@@ -27,7 +27,16 @@ export type BashServiceLifecycleAction =
   | { action: "status"; serviceId: string }
   | { action: "probe"; serviceId: string }
   | { action: "logs"; serviceId: string; tailBytes?: number }
-  | { action: "stop"; serviceId: string };
+  | { action: "stop"; serviceId: string }
+  | {
+      action: "fetch";
+      url: string;
+      expectStatus?: number;
+      bodyContains?: string | string[];
+      timeoutMs?: number;
+      retry?: number;
+      intervalMs?: number;
+    };
 
 export type BashServiceInput = BashServiceReadiness | BashServiceLifecycleAction;
 
@@ -93,6 +102,7 @@ type ServiceReadyResult = {
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 const DEFAULT_READY_INTERVAL_MS = 100;
 const CONNECT_ATTEMPT_TIMEOUT_MS = 500;
+const FETCH_BODY_LIMIT_BYTES = 64_000;
 const MAX_MANAGED_SERVICES = 20;
 const DEFAULT_LOG_TAIL_BYTES = 4_000;
 const STOP_TERM_WAIT_MS = 900;
@@ -272,6 +282,9 @@ export async function runBashServiceLifecycleAction(
   action: BashServiceLifecycleAction,
   context: ToolContext,
 ): Promise<ToolOutput> {
+  if (action.action === "fetch") {
+    return runServiceFetchCheck(action);
+  }
   const service = findManagedService(context, action.serviceId);
   if (!service) {
     return serviceActionOutput({
@@ -390,6 +403,135 @@ export async function runBashServiceLifecycleAction(
     ].join("\n"),
     service: serializeManagedService(service),
   });
+}
+
+async function runServiceFetchCheck(
+  action: Extract<BashServiceLifecycleAction, { action: "fetch" }>,
+): Promise<ToolOutput> {
+  const startedAt = Date.now();
+  const retry = Math.max(0, Math.min(action.retry ?? 0, 10));
+  const intervalMs = Math.max(0, Math.min(action.intervalMs ?? DEFAULT_READY_INTERVAL_MS, 5_000));
+  let result: HttpFetchResult = { ok: false, evidence: `http ${action.url} not attempted`, body: "" };
+  for (let attempt = 0; attempt <= retry; attempt += 1) {
+    result = await fetchHttp(action.url, action.timeoutMs ?? CONNECT_ATTEMPT_TIMEOUT_MS);
+    const statusOk = action.expectStatus === undefined
+      ? result.status !== undefined && result.status >= 200 && result.status < 400
+      : result.status === action.expectStatus;
+    const requiredBody = normalizeStringList(action.bodyContains);
+    const missingBody = requiredBody.filter((item) => !result.body.includes(item));
+    if (result.ok && statusOk && missingBody.length === 0) {
+      return serviceFetchOutput(action, result, [], Date.now() - startedAt, missingBody);
+    }
+    result = {
+      ...result,
+      ok: false,
+      evidence: [
+        result.evidence,
+        statusOk ? "" : `expected status ${action.expectStatus ?? "2xx/3xx"}`,
+        missingBody.length > 0 ? `missing body ${missingBody.join(", ")}` : "",
+      ].filter(Boolean).join("; "),
+    };
+    if (attempt < retry) await delay(intervalMs);
+  }
+  const target = readReadinessTargetFields({ type: "http", url: action.url });
+  return serviceFetchOutput(
+    action,
+    result,
+    [
+      createServiceReadinessDiagnostic(
+        result.evidence,
+        "Explicit service fetch check failed; inspect the registered service or served index before final verification.",
+        target,
+      ),
+    ],
+    Date.now() - startedAt,
+    normalizeStringList(action.bodyContains).filter((item) => !result.body.includes(item)),
+  );
+}
+
+type HttpFetchResult = {
+  ok: boolean;
+  evidence: string;
+  status?: number;
+  body: string;
+};
+
+function fetchHttp(url: string, timeoutMs: number): Promise<HttpFetchResult> {
+  return new Promise((resolve) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      resolve({ ok: false, evidence: `invalid fetch url: ${url}`, body: "" });
+      return;
+    }
+    const request = (parsed.protocol === "https:" ? httpsRequest : httpRequest)(
+      parsed,
+      { method: "GET", timeout: Math.max(1, timeoutMs) },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          if (size >= FETCH_BODY_LIMIT_BYTES) return;
+          const remaining = FETCH_BODY_LIMIT_BYTES - size;
+          chunks.push(chunk.subarray(0, remaining));
+          size += Math.min(chunk.length, remaining);
+        });
+        response.on("end", () => {
+          const status = response.statusCode ?? 0;
+          const body = Buffer.concat(chunks).toString("utf8");
+          resolve({
+            ok: status >= 200 && status < 400,
+            status,
+            body,
+            evidence: `http ${url} status ${status}`,
+          });
+        });
+      },
+    );
+    request.once("timeout", () => {
+      request.destroy();
+      resolve({ ok: false, evidence: `http ${url} timed out`, body: "" });
+    });
+    request.once("error", (error) => resolve({ ok: false, evidence: `http ${url} failed: ${error.message}`, body: "" }));
+    request.end();
+  });
+}
+
+function serviceFetchOutput(
+  action: Extract<BashServiceLifecycleAction, { action: "fetch" }>,
+  result: HttpFetchResult,
+  diagnostics: ServiceDiagnostic[],
+  elapsedMs: number,
+  missingBody: string[],
+): ToolOutput {
+  const target = readReadinessTargetFields({ type: "http", url: action.url });
+  return {
+    text: [
+      `Service fetch ${diagnostics.length === 0 ? "ready" : "not-ready"}.`,
+      `target ${action.url}`,
+      `status ${result.status ?? "unknown"}`,
+      `elapsedMs ${elapsedMs}`,
+      `evidence ${result.evidence}`,
+      missingBody.length > 0 ? `missingBody ${missingBody.join(", ")}` : "",
+    ].filter(Boolean).join("\n"),
+    data: {
+      exitCode: diagnostics.length === 0 ? 0 : 1,
+      outcome: diagnostics.length === 0 ? "service_ready" : "service_not_ready",
+      service: {
+        ...target,
+        ready: diagnostics.length === 0,
+        status: diagnostics.length === 0 ? "ready" : "not_ready",
+        fetch: {
+          status: result.status,
+          expectedStatus: action.expectStatus,
+          bodyContains: normalizeStringList(action.bodyContains),
+          missingBody,
+        },
+      },
+      ...(diagnostics.length > 0 ? { diagnostics } : {}),
+    },
+  };
 }
 
 async function waitForReadiness(
@@ -707,4 +849,9 @@ function taskkillWindowsPid(pid: number): Promise<void> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeStringList(value: string | string[] | undefined): string[] {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
 }

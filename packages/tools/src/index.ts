@@ -837,6 +837,8 @@ function validateOptionalBashArtifactCheck(input: unknown): BashArtifactCheckInp
     json: readOptionalBoolean(record, "json", "Bash"),
     executable: readOptionalBoolean(record, "executable", "Bash"),
     protectPaths: readOptionalStringArray(record, "protectPaths", "Bash"),
+    text: validateOptionalBashArtifactTextCheck(record.text),
+    preserve: validateOptionalBashArtifactPreserveCheck(record.preserve),
   };
 }
 
@@ -845,6 +847,19 @@ function validateOptionalBashServiceInput(input: unknown): BashServiceInput | un
   const record = validateRecord(input, "Bash");
   const action = readOptionalString(record, "action", "Bash");
   if (action !== undefined) {
+    if (action === "fetch") {
+      const url = readString(record, "url", "Bash");
+      validateHttpUrl(url);
+      return {
+        action,
+        url,
+        expectStatus: readOptionalPositiveInteger(record, "expectStatus", "Bash"),
+        bodyContains: readOptionalStringOrStringArray(record, "bodyContains", "Bash"),
+        timeoutMs: readOptionalPositiveInteger(record, "timeoutMs", "Bash"),
+        retry: readOptionalPositiveInteger(record, "retry", "Bash"),
+        intervalMs: readOptionalPositiveInteger(record, "intervalMs", "Bash"),
+      } as BashServiceLifecycleAction;
+    }
     if (action === "status" || action === "probe" || action === "logs" || action === "stop") {
       return {
         action,
@@ -852,7 +867,7 @@ function validateOptionalBashServiceInput(input: unknown): BashServiceInput | un
         ...(action === "logs" ? { tailBytes: readOptionalPositiveInteger(record, "tailBytes", "Bash") } : {}),
       } as BashServiceLifecycleAction;
     }
-    throw new Error("Bash.service.action 必须是 status/probe/logs/stop。");
+    throw new Error("Bash.service.action 必须是 status/probe/logs/stop/fetch。");
   }
   const type = readString(record, "type", "Bash");
   const timeoutMs = readOptionalPositiveInteger(record, "timeoutMs", "Bash");
@@ -876,14 +891,7 @@ function validateOptionalBashServiceInput(input: unknown): BashServiceInput | un
   }
   if (type === "http") {
     const url = readString(record, "url", "Bash");
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        throw new Error("protocol");
-      }
-    } catch {
-      throw new Error("Bash.service.url 必须是 http/https URL。");
-    }
+    validateHttpUrl(url);
     return { type, url, timeoutMs, intervalMs };
   }
   throw new Error("Bash.service.type 必须是 tcp 或 http。");
@@ -972,6 +980,53 @@ function readOptionalBoolean(
     throw new Error(`${toolName}.${key} 必须是 boolean 或 undefined。`);
   }
   return value;
+}
+
+function readOptionalStringOrStringArray(
+  record: Record<string, unknown>,
+  key: string,
+  toolName: ToolName,
+): string | string[] | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
+  throw new Error(`${toolName}.${key} 必须是字符串、字符串数组或 undefined。`);
+}
+
+function validateOptionalBashArtifactTextCheck(input: unknown): BashArtifactCheckInput["text"] {
+  if (input === undefined) return undefined;
+  const record = validateRecord(input, "Bash");
+  return {
+    exact: readOptionalString(record, "exact", "Bash"),
+    contains: readOptionalStringOrStringArray(record, "contains", "Bash"),
+    lineSet: readOptionalStringArray(record, "lineSet", "Bash"),
+  };
+}
+
+function validateOptionalBashArtifactPreserveCheck(input: unknown): BashArtifactCheckInput["preserve"] {
+  if (input === undefined) return undefined;
+  const record = validateRecord(input, "Bash");
+  const mode = readString(record, "mode", "Bash");
+  if (mode !== "rawPreserve" && mode !== "compareNormalizedHtml") {
+    throw new Error("Bash.artifact.preserve.mode 必须是 rawPreserve 或 compareNormalizedHtml。");
+  }
+  return {
+    mode,
+    expectedPath: readOptionalString(record, "expectedPath", "Bash"),
+    expectedText: readOptionalString(record, "expectedText", "Bash"),
+  };
+}
+
+function validateHttpUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("protocol");
+    }
+  } catch {
+    throw new Error("Bash.service.url 必须是 http/https URL。");
+  }
 }
 
 async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOutput> {
