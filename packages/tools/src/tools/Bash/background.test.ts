@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -193,4 +194,53 @@ describe("Bash background execution (Stage 7+8)", () => {
     expect(c.outputPath).toBeTruthy();
     expect(c.command).toContain("completion_fields_check");
   });
+
+  it("headless run_in_background retains a service process after returning", async () => {
+    const context = createToolContext(project);
+    context.isHeadlessBench = true;
+    const port = 45_000 + Math.floor(Math.random() * 1_000);
+    const pidFile = join(project, "service.pid");
+    const script = [
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));`,
+      "const http=require('http');",
+      `const server=http.createServer((req,res)=>res.end('ok'));`,
+      `server.listen(${port},'127.0.0.1');`,
+      "setInterval(()=>{},1000);",
+    ].join("");
+
+    const result = await runTool(
+      "Bash",
+      { command: `node -e ${JSON.stringify(script)}`, run_in_background: true },
+      context,
+    );
+
+    expect(result.output.data).toHaveProperty("backgroundTaskId");
+    await vi.waitFor(
+      async () => {
+        await expect(connectsToLocalPort(port)).resolves.toBe(true);
+      },
+      { timeout: 5_000, interval: 100 },
+    );
+    const pid = Number(await readFile(pidFile, "utf8"));
+    if (Number.isInteger(pid) && pid > 0) process.kill(pid, "SIGTERM");
+  });
 });
+
+function connectsToLocalPort(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve(false);
+    }, 500);
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      socket.end();
+      resolve(true);
+    });
+    socket.once("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}

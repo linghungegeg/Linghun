@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { closeSync, createWriteStream, openSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -1546,6 +1546,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
       fullOutputPath,
       adapter: adapted.adapter,
       logCommand: adapted.logCommand,
+      retainAfterReturn: isHeadlessBenchContext(context),
       abortSignal: context.abortSignal,
       trackChildProcess: context.trackChildProcess,
       onComplete: context.onBackgroundBashComplete,
@@ -3530,6 +3531,7 @@ type RunBackgroundBashOptions = {
   fullOutputPath: string;
   adapter: string;
   logCommand?: string;
+  retainAfterReturn?: boolean;
   abortSignal?: AbortSignal;
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void;
   trackChildProcess?: ToolContext["trackChildProcess"];
@@ -3546,6 +3548,7 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     fullOutputPath,
     adapter,
     logCommand,
+    retainAfterReturn,
     abortSignal,
     onProgress,
     trackChildProcess,
@@ -3564,6 +3567,29 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
   fileStream.write(header);
 
   const detached = process.platform !== "win32";
+  if (retainAfterReturn) {
+    fileStream.write("\n[background] retained process started\n");
+    await new Promise<void>((resolveEnd) => fileStream.end(resolveEnd));
+    const outFd = openSync(fullOutputPath, "a");
+    const errFd = openSync(fullOutputPath, "a");
+    const child = spawn(command, {
+      cwd,
+      shell: true,
+      windowsHide: true,
+      detached,
+      stdio: ["ignore", outFd, errFd],
+    });
+    closeSync(outFd);
+    closeSync(errFd);
+    child.unref();
+    trackChildProcess?.(child, {
+      detached,
+      cwd,
+      label: `BashBg:${command.slice(0, 80)}`,
+      retainAfterExit: true,
+    });
+    return;
+  }
   const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
   trackChildProcess?.(child, {
     detached,
