@@ -234,6 +234,7 @@ function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
 }
 
 export function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
+  const headlessRisk = createHeadlessBenchDiagnosticRiskSummary(context);
   // D.13U：只接受模型声明的结构化 claim 契约；不再维护自然语言短语表。
   const structuredClaims = extractStructuredFinalAnswerClaims(claim);
   if (structuredClaims.some((item) => item.kind === "beta_readiness")) {
@@ -252,6 +253,12 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     // 做最小匹配；普通低风险文本不误伤。
     const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
     if (nlCheck.status !== "passed") return nlCheck;
+    if (headlessRisk) {
+      return {
+        status: "needs_disclaimer",
+        unsupportedClaims: [headlessRisk],
+      };
+    }
     return { status: "passed", unsupportedClaims: [] };
   }
   if (
@@ -263,18 +270,114 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     if (extended.status === "needs_disclaimer") {
       return {
         status: "needs_disclaimer",
-        unsupportedClaims: extended.verdict.matchedClaims.map((item) => item.phrase),
+        unsupportedClaims: [
+          ...extended.verdict.matchedClaims.map((item) => item.phrase),
+          ...(headlessRisk ? [headlessRisk] : []),
+        ],
       };
     }
   }
   const verdict = evaluateFinalAnswerClaims(claim, context.evidence);
   if (verdict.status === "passed") {
+    if (headlessRisk) {
+      return {
+        status: "needs_disclaimer",
+        unsupportedClaims: [headlessRisk],
+      };
+    }
     return { status: "passed", unsupportedClaims: [] };
   }
   return {
     status: "needs_disclaimer",
-    unsupportedClaims: structuredClaims.map((item) => item.phrase),
+    unsupportedClaims: [
+      ...structuredClaims.map((item) => item.phrase),
+      ...(headlessRisk ? [headlessRisk] : []),
+    ],
   };
+}
+
+function createHeadlessBenchDiagnosticRiskSummary(context: TuiContext): string | undefined {
+  const tools = context.tools as typeof context.tools & {
+    headlessBench?: { enabled?: boolean };
+    recentDiagnostics?: Array<StructuredDiagnosticRisk>;
+  };
+  if (tools.headlessBench?.enabled !== true) return undefined;
+  const risky = (tools.recentDiagnostics ?? []).slice(0, 10).filter((diagnostic) =>
+    (diagnostic.severity === "recoverable" || diagnostic.severity === "blocking") &&
+    (
+      diagnostic.type === "service_readiness" ||
+      diagnostic.type === "artifact_preservation" ||
+      diagnostic.type === "binary_tool_missing" ||
+      diagnostic.type === "timeout"
+    ) &&
+    !isDiagnosticRiskResolved(diagnostic, context.evidence)
+  );
+  if (risky.length === 0) return undefined;
+  return `headless bench risk: ${risky
+    .slice(0, 3)
+    .map((diagnostic) => `${diagnostic.type}: ${diagnostic.evidence ?? ""}`.trim())
+    .join("; ")}`;
+}
+
+type StructuredDiagnosticRisk = {
+  type?: string;
+  severity?: string;
+  evidence?: string;
+  target?: string;
+  path?: string;
+  targetHost?: string;
+  targetPort?: number;
+};
+
+function isDiagnosticRiskResolved(
+  diagnostic: StructuredDiagnosticRisk,
+  evidence: EvidenceRecord[],
+): boolean {
+  if (diagnostic.type === "service_readiness" || diagnostic.type === "timeout") {
+    const target = readDiagnosticServiceTarget(diagnostic);
+    if (!target) return false;
+    return evidence.some((item) => {
+      const serviceHint = readEvidenceDataRecord(item, "serviceHint");
+      const service = readEvidenceDataRecord(item, "service");
+      return (
+        serviceHint?.ready === true && serviceHint.target === target
+      ) || (
+        service?.ready === true && service.target === target
+      );
+    });
+  }
+  if (diagnostic.type === "artifact_preservation") {
+    if (!diagnostic.path) return false;
+    return evidence.some((item) => {
+      const artifactHint = readEvidenceDataRecord(item, "artifactHint");
+      return artifactHint?.exists === true && artifactHint.path === diagnostic.path;
+    });
+  }
+  if (diagnostic.type === "binary_tool_missing") {
+    if (!diagnostic.path) return false;
+    return evidence.some((item) =>
+      readEvidenceDataRecord(item, "binaryHint")?.path === diagnostic.path ||
+      readEvidenceDataRecord(item, "binaryPreflight")?.path === diagnostic.path
+    );
+  }
+  return false;
+}
+
+function readDiagnosticServiceTarget(diagnostic: StructuredDiagnosticRisk): string | undefined {
+  if (diagnostic.target) return diagnostic.target;
+  if (diagnostic.targetHost && diagnostic.targetPort !== undefined) {
+    return `${diagnostic.targetHost}:${diagnostic.targetPort}`;
+  }
+  return undefined;
+}
+
+function readEvidenceDataRecord(
+  evidence: EvidenceRecord,
+  key: "service" | "serviceHint" | "artifactHint" | "binaryHint" | "binaryPreflight",
+): Record<string, unknown> | undefined {
+  if (!evidence.data || typeof evidence.data !== "object") return undefined;
+  const value = (evidence.data as Record<string, unknown>)[key];
+  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
 }
 
 // D.14H Phase 7.5-C：纯自然语言高风险 claim 最小兜底识别。

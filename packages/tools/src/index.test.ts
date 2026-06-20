@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -716,6 +717,371 @@ describe("Phase 05 core tools", () => {
     });
   });
 
+  it("keeps ordinary Bash output unchanged when auto evidence has no trigger", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('plain output')\"" },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("plain output");
+    expect(result.output.text).not.toContain("Linghun auto evidence:");
+    expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+  });
+
+  it("adds Bash binary preflight evidence before running matching inspect commands", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "preflight.bin"), Buffer.from([0, 1, 2, 3]));
+
+    const result = await runTool(
+      "Bash",
+      { command: "file preflight.bin" },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("Linghun preflight evidence:");
+    expect(result.output.text).toContain("binaryPreflight");
+    expect(result.output.data).toMatchObject({
+      outcome: "completed",
+      binaryPreflight: {
+        path: expect.stringContaining("preflight.bin"),
+        size: 4,
+      },
+    });
+  });
+
+  it("does not add binary auto evidence from missing-tool stderr path text alone", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const elf = Buffer.alloc(64);
+    elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
+    await writeFile(join(project, "sample.elf"), elf);
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"process.stderr.write('xxd: command not found sample.elf\\n'); process.exit(1);\"" },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).not.toContain("binaryHint");
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "completed",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ type: "binary_tool_missing" }),
+      ]),
+    });
+  });
+
+  it("does not add service auto evidence from connection refused stderr target text alone", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      {
+        command:
+          "node -e \"process.stderr.write('health check failed: connection refused http://127.0.0.1:9/health\\n'); process.exit(1);\"",
+      },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).not.toContain("serviceHint tcp 127.0.0.1:9");
+    expect(result.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "completed",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ type: "service_readiness", severity: "recoverable" }),
+      ]),
+    });
+  });
+
+  it("adds binary auto evidence from intent candidate even when tool is missing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const elf = Buffer.alloc(64);
+    elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
+    await writeFile(join(project, "sample.elf"), elf);
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"process.stderr.write('xxd: command not found\\n'); process.exit(1);\" sample.elf" },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("binaryHint");
+    expect(result.output.data).toMatchObject({
+      binaryHint: {
+        path: expect.stringContaining("sample.elf"),
+        magic: { type: "elf" },
+      },
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ type: "binary_tool_missing", path: "sample.elf" }),
+      ]),
+    });
+  });
+
+  it("prefers structured service intent over output fallback ports", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const port = await getFreeTcpPort();
+    const server = createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end("ok");
+    });
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+    try {
+      const result = await runTool(
+        "Bash",
+        {
+          command:
+            `node -e "console.log('noise http://127.0.0.1:9')" server --port ${port}`,
+        },
+        createToolContext(project),
+      );
+
+      expect(result.output.data).toMatchObject({
+        serviceHint: {
+          target: `127.0.0.1:${port}`,
+          ready: true,
+        },
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("does not treat plain numeric script arguments as service intent", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('arg only')\" 5432" },
+      createToolContext(project),
+    );
+
+    expect(JSON.stringify(result.output.data)).not.toContain("serviceHint");
+  });
+
+  it("does not create service intent from server words without a port", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('server text only')\" server listen serve" },
+      createToolContext(project),
+    );
+
+    expect(JSON.stringify(result.output.data)).not.toContain("serviceHint");
+  });
+
+  it("creates service intent for python http.server ports", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const port = await getFreeTcpPort();
+    const server = createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end("ok");
+    });
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+    try {
+      const result = await runTool(
+        "Bash",
+        { command: `python3 -m http.server ${port} --help` },
+        createToolContext(project),
+      );
+
+      expect(result.output.data).toMatchObject({
+        serviceHint: { target: `127.0.0.1:${port}`, ready: true },
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("requires explicit package-script port for service intent", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const noPort = await runTool(
+      "Bash",
+      { command: "npm start" },
+      createToolContext(project),
+    );
+    expect(JSON.stringify(noPort.output.data)).not.toContain("serviceHint");
+
+    const result = await runTool(
+      "Bash",
+      { command: "PORT=9 npm start" },
+      createToolContext(project),
+    );
+    expect(result.output.data).toMatchObject({
+      serviceHint: {
+        target: "127.0.0.1:9",
+        ready: false,
+      },
+    });
+  });
+
+  it("requires explicit node port for service intent", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const noPort = await runTool(
+      "Bash",
+      { command: "node server.js" },
+      createToolContext(project),
+    );
+    expect(JSON.stringify(noPort.output.data)).not.toContain("serviceHint");
+
+    const port = await getFreeTcpPort();
+    const server = createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end("ok");
+    });
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+    try {
+      const result = await runTool(
+        "Bash",
+        { command: `node server.js --port ${port}` },
+        createToolContext(project),
+      );
+      expect(result.output.data).toMatchObject({
+        serviceHint: { target: `127.0.0.1:${port}`, ready: true },
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("uses bench extended service probe policy when readiness diagnostics already exist", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project) as ReturnType<typeof createToolContext> & {
+      headlessBench?: { enabled: boolean };
+    };
+    context.headlessBench = { enabled: true };
+    context.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "service_readiness",
+        severity: "recoverable",
+        evidence: "previous service not ready",
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const port = await getFreeTcpPort();
+    const server = createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end("ok");
+    });
+    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+    try {
+      const result = await runTool(
+        "Bash",
+        {
+          command:
+            `node -e "console.log('service command')" -- --port ${port}`,
+        },
+        context,
+      );
+
+      expect(result.output.data).toMatchObject({
+        exitCode: 0,
+        outcome: "completed",
+        serviceHint: {
+          target: `127.0.0.1:${port}`,
+          ready: true,
+          attempts: 1,
+          policy: { kind: "bench-extended", attempts: 12, maxTotalMs: 15_000 },
+        },
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("does not add artifact auto evidence only from successful output text", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "result.json"), "{\"ok\":true}\n", "utf8");
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('wrote result.json')\"" },
+      createToolContext(project),
+    );
+
+    expect(JSON.stringify(result.output.data)).not.toContain("artifactHint");
+  });
+
+  it("prefers structured artifact intent over output fallback paths", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "intended.json"), "{\"ok\":true}\n", "utf8");
+    await writeFile(join(project, "noise.json"), "{\"noise\":true}\n", "utf8");
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('wrote noise.json')\" > intended.json" },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "completed",
+      artifactHint: {
+        path: "intended.json",
+        exists: true,
+      },
+    });
+  });
+
+  it("does not treat ordinary input file suffixes as artifact intent", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "input.json"), "{\"ok\":true}\n", "utf8");
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('read only')\" input.json" },
+      createToolContext(project),
+    );
+
+    expect(JSON.stringify(result.output.data)).not.toContain("artifactHint");
+  });
+
+  it("extracts artifact intent from producing commands with common suffix arguments", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"require('node:fs').writeFileSync('made.md', 'ok')\" created made.md" },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "completed",
+      artifactHint: {
+        path: "made.md",
+        exists: true,
+      },
+    });
+  });
+
+  it("adds artifact auto evidence for common script and document suffixes with full sha256 prefix", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const content = "print('ok')\n";
+    await writeFile(join(project, "script.py"), content, "utf8");
+    const expectedPrefix = createHash("sha256").update(content, "utf8").digest("hex").slice(0, 16);
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"console.log('created script.py')\" -- --output script.py" },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "completed",
+      artifactHint: {
+        path: "script.py",
+        exists: true,
+        sha256Prefix: expectedPrefix,
+      },
+    });
+  });
+
   it("starts a Bash service and waits for TCP readiness", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
@@ -736,14 +1102,232 @@ describe("Phase 05 core tools", () => {
       exitCode: 0,
       outcome: "service_ready",
       service: {
+        serviceId: expect.any(String),
         cwd: project,
+        status: "ready",
+        ready: true,
+        target: `127.0.0.1:${port}`,
+        targetHost: "127.0.0.1",
+        targetPort: port,
         alive: true,
         readiness: { ok: true },
       },
     });
+    expect(context.services?.[0]).toMatchObject({
+      serviceId: (result.output.data as { service: { serviceId: string } }).service.serviceId,
+      status: "ready",
+      targetPort: port,
+    });
     expect(JSON.stringify(result.output.data)).not.toContain("diagnostics");
     expect(result.output.fullOutputPath).toBeTruthy();
     await stopServiceFromOutput(result.output.data);
+  });
+
+  it("service lifecycle start ready then status reports ready", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const port = await getFreeTcpPort();
+
+    const started = await runTool(
+      "Bash",
+      {
+        command:
+          `node -e "const net=require('node:net'); const server=net.createServer((socket)=>socket.end('ok')); server.listen(${port}, '127.0.0.1'); setTimeout(()=>server.close(), 2500);"` ,
+        service: { type: "tcp", host: "127.0.0.1", port, timeoutMs: 2_000, intervalMs: 50 },
+      },
+      context,
+    );
+    const serviceId = (started.output.data as { service: { serviceId: string } }).service.serviceId;
+
+    const status = await runTool("Bash", { service: { action: "status", serviceId } }, context);
+
+    expect(status.output.text).toContain("Service status ready");
+    expect(status.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "service_ready",
+      service: {
+        serviceId,
+        status: "ready",
+        ready: true,
+        target: `127.0.0.1:${port}`,
+      },
+    });
+    await runTool("Bash", { service: { action: "stop", serviceId } }, context);
+  });
+
+  it("service lifecycle logs returns bounded tail", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const port = await getFreeTcpPort();
+
+    const started = await runTool(
+      "Bash",
+      {
+        command:
+          `node -e "const net=require('node:net'); console.log('lifecycle-log-start'); const server=net.createServer((socket)=>socket.end('ok')); server.listen(${port}, '127.0.0.1'); setTimeout(()=>server.close(), 2500);"` ,
+        service: { type: "tcp", host: "127.0.0.1", port, timeoutMs: 2_000, intervalMs: 50 },
+      },
+      context,
+    );
+    const serviceId = (started.output.data as { service: { serviceId: string } }).service.serviceId;
+
+    const logs = await runTool("Bash", { service: { action: "logs", serviceId, tailBytes: 200 } }, context);
+
+    expect(logs.output.text).toContain("Service logs tail");
+    expect(logs.output.text.length).toBeLessThan(1_000);
+    expect(logs.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "service_logs",
+      service: {
+        serviceId,
+        logTail: expect.stringContaining("lifecycle-log-start"),
+      },
+    });
+    await runTool("Bash", { service: { action: "stop", serviceId } }, context);
+  });
+
+  it("service lifecycle probe reports ready and not-ready with structured diagnostics", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const port = await getFreeTcpPort();
+
+    const started = await runTool(
+      "Bash",
+      {
+        command:
+          `node -e "const net=require('node:net'); const server=net.createServer((socket)=>socket.end('ok')); server.listen(${port}, '127.0.0.1'); setTimeout(()=>server.close(()=>process.exit(0)), 350);"` ,
+        service: { type: "tcp", host: "127.0.0.1", port, timeoutMs: 2_000, intervalMs: 50 },
+      },
+      context,
+    );
+    const serviceId = (started.output.data as { service: { serviceId: string } }).service.serviceId;
+
+    const readyProbe = await runTool("Bash", { service: { action: "probe", serviceId } }, context);
+    expect(readyProbe.output.data).toMatchObject({
+      outcome: "service_ready",
+      service: { serviceId, ready: true },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    const notReadyProbe = await runTool("Bash", { service: { action: "probe", serviceId } }, context);
+    expect(notReadyProbe.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "service_not_ready",
+      service: { serviceId, status: "exited", ready: false },
+      diagnostics: [
+        expect.objectContaining({
+          type: "service_readiness",
+          target: `127.0.0.1:${port}`,
+          targetHost: "127.0.0.1",
+          targetPort: port,
+        }),
+      ],
+    });
+  });
+
+  it("service lifecycle stop only stops registered services", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const port = await getFreeTcpPort();
+
+    const missing = await runTool("Bash", { service: { action: "stop", serviceId: "svc_missing" } }, context);
+    expect(missing.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "service_missing",
+      service: { serviceId: "svc_missing", status: "missing" },
+    });
+
+    const started = await runTool(
+      "Bash",
+      {
+        command:
+          `node -e "const net=require('node:net'); const server=net.createServer((socket)=>socket.end('ok')); server.listen(${port}, '127.0.0.1'); setTimeout(()=>server.close(), 5000);"` ,
+        service: { type: "tcp", host: "127.0.0.1", port, timeoutMs: 2_000, intervalMs: 50 },
+      },
+      context,
+    );
+    const serviceId = (started.output.data as { service: { serviceId: string } }).service.serviceId;
+
+    const stopped = await runTool("Bash", { service: { action: "stop", serviceId } }, context);
+    expect(stopped.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "service_stopped",
+      service: { serviceId, status: "stopped", ready: false },
+    });
+
+    const status = await runTool("Bash", { service: { action: "status", serviceId } }, context);
+    expect(status.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "service_stopped",
+      service: { serviceId, status: "stopped", ready: false },
+    });
+
+    const probe = await runTool("Bash", { service: { action: "probe", serviceId } }, context);
+    expect(probe.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "service_not_ready",
+      service: { serviceId, status: "stopped", ready: false },
+      diagnostics: [
+        expect.objectContaining({
+          type: "service_readiness",
+          target: `127.0.0.1:${port}`,
+          targetHost: "127.0.0.1",
+          targetPort: port,
+        }),
+      ],
+    });
+  });
+
+  it("service lifecycle stop returns diagnostic when exit cannot be confirmed", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const fakeProcess = {
+      pid: 123456,
+      exitCode: null,
+      signalCode: null,
+      kill: () => false,
+      once: () => fakeProcess,
+    };
+    context.services = [
+      {
+        serviceId: "svc_unstoppable",
+        pid: 123456,
+        cwd: project,
+        command: "fake service",
+        logPath: join(project, "fake.log"),
+        target: "127.0.0.1:9",
+        targetHost: "127.0.0.1",
+        targetPort: 9,
+        readiness: { type: "tcp", host: "127.0.0.1", port: 9 },
+        ready: true,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastOutputTail: "",
+        status: "ready",
+        process: fakeProcess as never,
+        detached: false,
+      },
+    ];
+
+    const stopped = await runTool(
+      "Bash",
+      { service: { action: "stop", serviceId: "svc_unstoppable" } },
+      context,
+    );
+
+    expect(stopped.output.data).toMatchObject({
+      exitCode: 1,
+      outcome: "service_stop_failed",
+      service: { serviceId: "svc_unstoppable", status: "not_ready", ready: false },
+      diagnostics: [
+        expect.objectContaining({
+          type: "service_readiness",
+          target: "127.0.0.1:9",
+          targetHost: "127.0.0.1",
+          targetPort: 9,
+        }),
+      ],
+    });
   });
 
   it("starts a Bash service and waits for HTTP readiness", async () => {
@@ -806,10 +1390,18 @@ describe("Phase 05 core tools", () => {
     expect(result.output.data).toMatchObject({
       exitCode: 1,
       outcome: "service_not_ready",
+      service: {
+        target: `127.0.0.1:${port}`,
+        targetHost: "127.0.0.1",
+        targetPort: port,
+      },
       diagnostics: expect.arrayContaining([
         expect.objectContaining({
           type: "service_readiness",
           severity: "recoverable",
+          target: `127.0.0.1:${port}`,
+          targetHost: "127.0.0.1",
+          targetPort: port,
         }),
       ]),
     });

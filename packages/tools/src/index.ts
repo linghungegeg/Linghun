@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { connect as connectTcp } from "node:net";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   type ToolDefinition,
@@ -15,8 +17,13 @@ import { checkArtifact } from "./tools/Bash/artifact-checker.js";
 import type { BashArtifactCheckInput } from "./tools/Bash/artifact-checker.js";
 import { inspectBinaryFile } from "./tools/Bash/binary-helper.js";
 import type { BashBinaryInspectInput } from "./tools/Bash/binary-helper.js";
-import { startBashService } from "./tools/Bash/service-kernel.js";
-import type { BashServiceReadiness } from "./tools/Bash/service-kernel.js";
+import { runBashServiceLifecycleAction, startBashService } from "./tools/Bash/service-kernel.js";
+import type {
+  BashManagedServiceRecord,
+  BashServiceInput,
+  BashServiceLifecycleAction,
+  BashServiceReadiness,
+} from "./tools/Bash/service-kernel.js";
 import { bingSearch, formatSearchOutput, applyDomainFilter } from "./tools/WebSearch/bing-scraper.js";
 import type { WebSearchInput, SearchResult } from "./tools/WebSearch/bing-scraper.js";
 import { webFetch, formatFetchOutput } from "./tools/WebFetch/web-fetch.js";
@@ -88,6 +95,10 @@ export type RecentToolDiagnostic = {
   createdAt: string;
   toolUseId?: string;
   evidenceId?: string;
+  target?: string;
+  path?: string;
+  targetHost?: string;
+  targetPort?: number;
 };
 
 export type ToolContext = {
@@ -99,6 +110,7 @@ export type ToolContext = {
   sourcePackCandidates?: SourcePackCandidate[];
   patchSummaries?: Record<string, DiffSummary>;
   recentDiagnostics?: RecentToolDiagnostic[];
+  services?: BashManagedServiceRecord[];
   abortSignal?: AbortSignal;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
   trackChildProcess?: (
@@ -160,7 +172,7 @@ export type GlobInput = { pattern: string; path?: string; limit?: number };
 export type BashInput = {
   command?: string;
   timeoutMs?: number;
-  service?: BashServiceReadiness;
+  service?: BashServiceInput;
   binary?: BashBinaryInspectInput;
   artifact?: BashArtifactCheckInput;
 };
@@ -178,6 +190,10 @@ type BashDiagnostic = {
   severity: BashDiagnosticSeverity;
   evidence: string;
   suggestion: string;
+  target?: string;
+  path?: string;
+  targetHost?: string;
+  targetPort?: number;
 };
 export type TodoInput =
   | { action: "list" }
@@ -226,6 +242,7 @@ export function createToolContext(
     sourcePackCandidates: options.sourcePackCandidates,
     patchSummaries: {},
     recentDiagnostics: [],
+    services: [],
   };
 }
 
@@ -773,17 +790,27 @@ function validateBashInput(input: unknown): BashInput {
   const command = readOptionalString(record, "command", "Bash");
   const binary = validateOptionalBashBinaryInspect(record.binary);
   const artifact = validateOptionalBashArtifactCheck(record.artifact);
-  if (command === undefined && binary === undefined && artifact === undefined) {
-    throw new Error("Bash.command、Bash.binary 或 Bash.artifact 必须提供一个。");
+  const service = validateOptionalBashServiceInput(record.service);
+  const serviceAction = isBashServiceLifecycleAction(service);
+  if (command === undefined && binary === undefined && artifact === undefined && !serviceAction) {
+    throw new Error("Bash.command、Bash.binary、Bash.artifact 或 Bash.service action 必须提供一个。");
   }
-  const modeCount = [command !== undefined, binary !== undefined, artifact !== undefined].filter(Boolean).length;
-  if (modeCount > 1 || ((binary !== undefined || artifact !== undefined) && record.service !== undefined)) {
+  const modeCount = [
+    command !== undefined,
+    binary !== undefined,
+    artifact !== undefined,
+    serviceAction,
+  ].filter(Boolean).length;
+  if (modeCount > 1 || ((binary !== undefined || artifact !== undefined) && service !== undefined)) {
     throw new Error("Bash.command、Bash.binary、Bash.artifact 和 Bash.service 不能混用。");
+  }
+  if (service !== undefined && !serviceAction && command === undefined) {
+    throw new Error("Bash.service readiness 必须和 Bash.command 一起使用。");
   }
   return {
     command,
     timeoutMs: readOptionalPositiveInteger(record, "timeoutMs", "Bash"),
-    service: validateOptionalBashServiceReadiness(record.service),
+    service,
     binary,
     artifact,
   };
@@ -811,9 +838,20 @@ function validateOptionalBashArtifactCheck(input: unknown): BashArtifactCheckInp
   };
 }
 
-function validateOptionalBashServiceReadiness(input: unknown): BashServiceReadiness | undefined {
+function validateOptionalBashServiceInput(input: unknown): BashServiceInput | undefined {
   if (input === undefined) return undefined;
   const record = validateRecord(input, "Bash");
+  const action = readOptionalString(record, "action", "Bash");
+  if (action !== undefined) {
+    if (action === "status" || action === "probe" || action === "logs" || action === "stop") {
+      return {
+        action,
+        serviceId: readString(record, "serviceId", "Bash"),
+        ...(action === "logs" ? { tailBytes: readOptionalPositiveInteger(record, "tailBytes", "Bash") } : {}),
+      } as BashServiceLifecycleAction;
+    }
+    throw new Error("Bash.service.action 必须是 status/probe/logs/stop。");
+  }
   const type = readString(record, "type", "Bash");
   const timeoutMs = readOptionalPositiveInteger(record, "timeoutMs", "Bash");
   const intervalMs = readOptionalPositiveInteger(record, "intervalMs", "Bash");
@@ -847,6 +885,10 @@ function validateOptionalBashServiceReadiness(input: unknown): BashServiceReadin
     return { type, url, timeoutMs, intervalMs };
   }
   throw new Error("Bash.service.type 必须是 tcp 或 http。");
+}
+
+function isBashServiceLifecycleAction(input: BashServiceInput | undefined): input is BashServiceLifecycleAction {
+  return Boolean(input && "action" in input);
 }
 
 function validateTodoInput(input: unknown): TodoInput {
@@ -1383,26 +1425,37 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     return inspectBinaryFile(input.binary, resolveWorkspacePath(context.workspaceRoot, input.binary.path));
   }
   if (!input.command) {
-    throw new Error("Bash.command 或 Bash.binary 必须提供一个。");
+    if (isBashServiceLifecycleAction(input.service)) {
+      return runBashServiceLifecycleAction(input.service, context);
+    }
+    throw new Error("Bash.command、Bash.binary 或 Bash.service action 必须提供一个。");
   }
   const logRoot = context.logRoot ?? join(context.workspaceRoot, ".linghun", "logs", "tools");
   await mkdir(logRoot, { recursive: true });
   const fullOutputPath = join(logRoot, `bash-${Date.now()}-${randomUUID()}.log`);
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
   const adapted = adaptShellCommand(input.command);
-  if (input.service) {
+  const intent = parseBashCommandIntent(input.command, context);
+  if (input.service && !isBashServiceLifecycleAction(input.service)) {
+    const readiness = withDefaultServiceReadiness(input.service, context);
     return startBashService({
       command: adapted.command,
       logCommand: adapted.logCommand ?? adapted.command,
       cwd: context.workspaceRoot,
       fullOutputPath,
-      readiness: input.service,
+      readiness,
+      context,
       abortSignal: context.abortSignal,
       onProgress: (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
       trackChildProcess: context.trackChildProcess,
       sanitizeText: sanitizeSecrets,
     });
   }
+  const preflightEvidence = await collectBashPreflightEvidence({
+    command: input.command,
+    intent,
+    context,
+  });
   const result = await runShell(
     adapted.command,
     context.workspaceRoot,
@@ -1419,16 +1472,17 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
           `original command ${summarizeOriginalShellCommand(input.command)}`,
         ];
   const commandForLog = adapted.logCommand ?? adapted.command;
+  const sanitizedShellOutput = sanitizeSecrets(result.output);
   const rawFullText = [
     `$ ${sanitizeSecrets(commandForLog)}`,
     ...adapterLines,
     `exit code ${result.exitCode}`,
     `outcome ${result.outcome}`,
     "",
-    sanitizeSecrets(result.output),
+    sanitizedShellOutput,
   ].join("\n");
   const recoveryHints = createBashRecoveryHints(rawFullText, result.outcome);
-  const diagnostics = createBashDiagnostics(rawFullText, result.outcome);
+  const diagnostics = enrichBashDiagnostics(createBashDiagnostics(rawFullText, result.outcome), intent);
   const fullText =
     recoveryHints.length === 0
       ? rawFullText
@@ -1448,10 +1502,48 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     adapted.adapter === "native"
       ? { exitCode: result.exitCode, outcome: result.outcome }
       : { exitCode: result.exitCode, outcome: result.outcome, adapter: adapted.adapter };
+  const autoEvidence = await collectBashAutoEvidence({
+    command: input.command,
+    intent,
+    diagnostics,
+    outcome: result.outcome,
+    exitCode: result.exitCode,
+    context,
+  });
+  const outputText =
+    preflightEvidence.lines.length === 0 && autoEvidence.lines.length === 0
+      ? preview
+      : [
+          preview,
+          ...(preflightEvidence.lines.length === 0
+            ? []
+            : ["", "Linghun preflight evidence:", ...preflightEvidence.lines.map((line) => `- ${line}`)]),
+          ...(autoEvidence.lines.length === 0
+            ? []
+            : ["", "Linghun auto evidence:", ...autoEvidence.lines.map((line) => `- ${line}`)]),
+        ].join("\n");
+  const outputDetails =
+    preflightEvidence.lines.length === 0 && autoEvidence.lines.length === 0
+      ? details
+      : [
+          details,
+          preflightEvidence.lines.length === 0 ? "" : `--- preflight evidence\n${preflightEvidence.lines.join("\n")}`,
+          autoEvidence.lines.length === 0 ? "" : `--- auto evidence\n${autoEvidence.lines.join("\n")}`,
+        ].filter(Boolean).join("\n");
+  const outputDiagnostics = mergeDiagnostics(
+    mergeDiagnostics(diagnostics, preflightEvidence.diagnostics),
+    autoEvidence.diagnostics,
+  );
+  const outputData = {
+    ...data,
+    ...preflightEvidence.data,
+    ...autoEvidence.data,
+    ...(outputDiagnostics.length > 0 ? { diagnostics: outputDiagnostics } : {}),
+  };
   return {
-    text: preview,
-    details,
-    data: diagnostics.length === 0 ? data : { ...data, diagnostics },
+    text: outputText,
+    details: outputDetails,
+    data: outputData,
     truncated,
     fullOutputPath,
   };
@@ -1465,6 +1557,778 @@ function createBashDetails(fullOutputPath: string, fullText: string): string {
     "--- tail",
     ...tailLines(fullText, 80),
   ].join("\n");
+}
+
+type BashAutoEvidenceInput = {
+  command: string;
+  intent: BashCommandIntent;
+  diagnostics: BashDiagnostic[];
+  outcome: "completed" | "timeout" | "cancelled";
+  exitCode: number | null;
+  context: ToolContext;
+};
+
+type BashAutoEvidence = {
+  lines: string[];
+  data: Record<string, unknown>;
+  diagnostics: BashDiagnostic[];
+};
+
+type BashPreflightEvidence = BashAutoEvidence;
+
+type ServiceIntent = {
+  kind: "explicit-port" | "http-server" | "framework-server" | "package-script" | "background-process";
+  host: "127.0.0.1";
+  port: number;
+  confidence: "high" | "medium";
+  evidence: string;
+};
+
+type BashCommandIntent = {
+  binaryCandidates: string[];
+  serviceCandidates: ServiceIntent[];
+  artifactCandidates: string[];
+  backgroundLikely: boolean;
+  commandNames: string[];
+};
+
+async function collectBashPreflightEvidence(input: {
+  command: string;
+  intent: BashCommandIntent;
+  context: ToolContext;
+}): Promise<BashPreflightEvidence> {
+  const lines: string[] = [];
+  const data: Record<string, unknown> = {};
+  const diagnostics: BashDiagnostic[] = [];
+  try {
+    const target = await findFirstExistingWorkspaceCandidate(input.context, input.intent.binaryCandidates);
+    if (!target) return { lines, data, diagnostics };
+    const binary = await inspectBinaryFile({ path: target.relative, previewBytes: 32 }, target.absolute);
+    const binaryData = binary.data as { binary?: unknown; diagnostics?: BashDiagnostic[] } | undefined;
+    if (binaryData?.binary) {
+      data.binaryPreflight = binaryData.binary;
+      lines.push(formatBinaryPreflight(binaryData.binary));
+    }
+    diagnostics.push(...(binaryData?.diagnostics ?? []));
+  } catch (error) {
+    diagnostics.push(createAutoEvidenceDiagnostic("binary preflight failed", error, "binary_tool_missing"));
+  }
+  return { lines, data, diagnostics };
+}
+
+async function collectBashAutoEvidence(input: BashAutoEvidenceInput): Promise<BashAutoEvidence> {
+  const lines: string[] = [];
+  const data: Record<string, unknown> = {};
+  const diagnostics: BashDiagnostic[] = [];
+
+  try {
+    const binaryTarget = await findFirstExistingWorkspaceCandidate(input.context, input.intent.binaryCandidates)
+      ?? await findFirstExistingWorkspaceCandidate(input.context, readDiagnosticPaths(input.diagnostics, "binary_tool_missing"));
+    if (binaryTarget) {
+      const binary = await inspectBinaryFile({ path: binaryTarget.relative, previewBytes: 32 }, binaryTarget.absolute);
+      const binaryData = (binary.data as { binary?: unknown; diagnostics?: BashDiagnostic[] } | undefined);
+      if (binaryData?.binary) {
+        data.binaryHint = binaryData.binary;
+        lines.push(formatBinaryHint(binaryData.binary));
+      }
+      diagnostics.push(...(binaryData?.diagnostics ?? []));
+    }
+  } catch (error) {
+    diagnostics.push(createAutoEvidenceDiagnostic("binary hint failed", error));
+  }
+
+  try {
+    const serviceTarget = firstServiceCandidate(input.intent) ?? firstDiagnosticServiceTarget(input.diagnostics);
+    if (serviceTarget) {
+      const policy = createServiceProbePolicy(input.context, input.intent, input.diagnostics);
+      const serviceHint = await probeTcpBounded(serviceTarget.host, serviceTarget.port, policy);
+      data.serviceHint = serviceHint;
+      lines.push(`serviceHint tcp ${serviceTarget.host}:${serviceTarget.port} ${serviceHint.ready ? "ready" : "not-ready"} attempts=${serviceHint.attempts} (${serviceHint.evidence})`);
+      if (!serviceHint.ready) {
+        diagnostics.push({
+          type: "service_readiness",
+          severity: "recoverable",
+          evidence: serviceHint.evidence,
+          suggestion: "Service readiness probe did not pass; inspect service logs or start the service before retrying.",
+          target: serviceHint.target,
+          targetHost: serviceTarget.host,
+          targetPort: serviceTarget.port,
+        });
+      }
+    }
+  } catch (error) {
+    diagnostics.push(createAutoEvidenceDiagnostic("service hint failed", error, "service_readiness"));
+  }
+
+  try {
+    const artifactTarget = input.exitCode === 0
+      ? await findFirstExistingWorkspaceCandidate(input.context, input.intent.artifactCandidates)
+        ?? await findFirstExistingWorkspaceCandidate(input.context, readDiagnosticPaths(input.diagnostics, "artifact_preservation"))
+      : undefined;
+    if (artifactTarget) {
+      const artifactHint = await createArtifactHint(artifactTarget);
+      data.artifactHint = artifactHint;
+      lines.push(`artifactHint ${artifactHint.path} exists size=${artifactHint.size} sha256=${artifactHint.sha256Prefix}`);
+    }
+  } catch (error) {
+    diagnostics.push(createAutoEvidenceDiagnostic("artifact hint failed", error));
+  }
+
+  return { lines, data, diagnostics };
+}
+
+const BINARY_HINT_EXTENSIONS = [
+  ".bin",
+  ".elf",
+  ".o",
+  ".so",
+  ".a",
+  ".exe",
+  ".dll",
+  ".7z",
+  ".zip",
+  ".gz",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".pdf",
+  ".sqlite",
+  ".db",
+];
+const ARTIFACT_HINT_EXTENSIONS = [
+  ".txt",
+  ".json",
+  ".out",
+  ".log",
+  ".py",
+  ".html",
+  ".htm",
+  ".csv",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".md",
+  ".sh",
+  ".bin",
+  ".elf",
+  ".zip",
+  ".7z",
+  ".png",
+  ".pdf",
+  ".sqlite",
+  ".db",
+];
+
+function parseBashCommandIntent(command: string, _context?: ToolContext): BashCommandIntent {
+  const tokens = tokenizeShellLike(command);
+  const segments = splitCommandSegments(tokens);
+  const commandNames: string[] = [];
+  const binaryCandidates = new Set<string>();
+  const artifactCandidates = new Set<string>();
+  const serviceCandidates: ServiceIntent[] = [];
+
+  for (const segment of segments) {
+    const parsed = parseCommandSegment(segment.tokens);
+    if (!parsed) continue;
+    commandNames.push(parsed.commandName);
+    collectSegmentBinaryCandidates(parsed, binaryCandidates);
+    collectSegmentArtifactCandidates(parsed, artifactCandidates);
+    serviceCandidates.push(...collectSegmentServiceCandidates(parsed));
+  }
+  return {
+    binaryCandidates: [...binaryCandidates],
+    serviceCandidates: dedupeServiceCandidates(serviceCandidates),
+    artifactCandidates: [...artifactCandidates],
+    backgroundLikely: isBackgroundLikely(segments, serviceCandidates),
+    commandNames: unique(commandNames.filter(Boolean)),
+  };
+}
+
+const BINARY_COMMAND_NAMES = new Set(["file", "xxd", "readelf", "objdump", "hexdump", "strings", "7z", "7za", "unzip", "tar"]);
+const ARTIFACT_PRODUCING_COMMAND_NAMES = new Set(["touch", "tee"]);
+const ARTIFACT_PRODUCING_TOKENS = new Set(["write", "wrote", "written", "create", "created", "generate", "generated", "build", "built", "output"]);
+
+function tokenizeShellLike(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  const push = () => {
+    if (current.length > 0) tokens.push(current);
+    current = "";
+  };
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index] ?? "";
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = undefined;
+      else current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (/\s/u.test(char)) {
+      push();
+      continue;
+    }
+    if (char === "|" || char === ";" || char === "&" || char === ">") {
+      push();
+      const next = command[index + 1];
+      if ((char === "&" && next === "&") || (char === ">" && next === ">")) {
+        tokens.push(`${char}${next}`);
+        index += 1;
+      } else {
+        tokens.push(char);
+      }
+      continue;
+    }
+    current += char;
+  }
+  push();
+  return tokens;
+}
+
+function isCommandSeparator(token: string): boolean {
+  return token === "|" || token === "&&" || token === ";" || token === "&";
+}
+
+type CommandSegment = {
+  tokens: string[];
+  background: boolean;
+};
+
+type ParsedCommandSegment = {
+  commandName: string;
+  argv: string[];
+  env: Map<string, string>;
+  background: boolean;
+};
+
+function splitCommandSegments(tokens: string[]): CommandSegment[] {
+  const segments: CommandSegment[] = [];
+  let current: string[] = [];
+  for (const token of tokens) {
+    if (!isCommandSeparator(token)) {
+      current.push(token);
+      continue;
+    }
+    if (current.length > 0) {
+      segments.push({ tokens: current, background: token === "&" });
+      current = [];
+    }
+  }
+  if (current.length > 0) segments.push({ tokens: current, background: false });
+  return segments;
+}
+
+function parseCommandSegment(tokens: string[]): ParsedCommandSegment | undefined {
+  const env = new Map<string, string>();
+  let index = 0;
+  while (index < tokens.length && isEnvironmentAssignment(tokens[index] ?? "")) {
+    const [name, ...rest] = (tokens[index] ?? "").split("=");
+    if (name) env.set(name.toUpperCase(), rest.join("="));
+    index += 1;
+  }
+  if (index >= tokens.length) return undefined;
+  let commandToken = tokens[index] ?? "";
+  if (commandToken === "nohup" || commandToken === "setsid") {
+    index += 1;
+    commandToken = tokens[index] ?? "";
+  }
+  if (!commandToken) return undefined;
+  return {
+    commandName: stripExecutableToken(commandToken),
+    argv: tokens.slice(index + 1),
+    env,
+    background: tokens.includes("disown"),
+  };
+}
+
+function collectSegmentBinaryCandidates(segment: ParsedCommandSegment, target: Set<string>): void {
+  if (BINARY_COMMAND_NAMES.has(segment.commandName)) {
+    for (const token of segment.argv) {
+      if (!isOptionToken(token)) addPathCandidate(target, token);
+    }
+  }
+  for (const token of segment.argv) {
+    if (isBinarySuffix(token)) addPathCandidate(target, token);
+  }
+}
+
+function collectSegmentArtifactCandidates(segment: ParsedCommandSegment, target: Set<string>): void {
+  for (let index = 0; index < segment.argv.length; index += 1) {
+    const token = segment.argv[index] ?? "";
+    if (token === ">" || token === ">>") {
+      addPathCandidate(target, segment.argv[index + 1] ?? "");
+      index += 1;
+      continue;
+    }
+    if (isOutputFlag(token)) {
+      addPathCandidate(target, segment.argv[index + 1] ?? "");
+      index += 1;
+      continue;
+    }
+    if (isArtifactSuffix(token) && isArtifactProducingCommand(segment.commandName, segment.argv)) {
+      addPathCandidate(target, token);
+    }
+  }
+}
+
+function collectSegmentServiceCandidates(segment: ParsedCommandSegment): ServiceIntent[] {
+  const candidates: ServiceIntent[] = [];
+  const envPort = parsePort(segment.env.get("PORT"));
+  const explicit = findExplicitServiceTarget(segment.argv, envPort);
+  if (isPythonHttpServer(segment)) {
+    const port = findFirstPortToken(segment.argv) ?? envPort ?? 8000;
+    candidates.push(createServiceIntent("http-server", port, "high", "python -m http.server"));
+    return candidates;
+  }
+  if (segment.commandName === "uvicorn") {
+    if (explicit) candidates.push(createServiceIntent("framework-server", explicit.port, "high", explicit.evidence, explicit.host));
+    return candidates;
+  }
+  if (segment.commandName === "flask" && segment.argv[0]?.toLowerCase() === "run") {
+    if (explicit) candidates.push(createServiceIntent("framework-server", explicit.port, "high", explicit.evidence, explicit.host));
+    return candidates;
+  }
+  if (segment.commandName === "gunicorn") {
+    const bind = findGunicornBindTarget(segment.argv);
+    if (bind) candidates.push(createServiceIntent("framework-server", bind.port, "high", bind.evidence, bind.host));
+    return candidates;
+  }
+  if (isPackageScriptCommand(segment)) {
+    if (explicit) candidates.push(createServiceIntent("package-script", explicit.port, "medium", explicit.evidence, explicit.host));
+    return candidates;
+  }
+  if (isJsRuntimeCommand(segment.commandName)) {
+    if (explicit) candidates.push(createServiceIntent("explicit-port", explicit.port, "medium", explicit.evidence, explicit.host));
+    return candidates;
+  }
+  if (explicit && isKnownServiceCommand(segment.commandName)) {
+    candidates.push(createServiceIntent("explicit-port", explicit.port, "medium", explicit.evidence, explicit.host));
+  }
+  return candidates;
+}
+
+function createServiceIntent(
+  kind: ServiceIntent["kind"],
+  port: number,
+  confidence: ServiceIntent["confidence"],
+  evidence: string,
+  host = "127.0.0.1",
+): ServiceIntent {
+  return { kind, host: normalizeServiceHost(host), port, confidence, evidence };
+}
+
+function isPythonHttpServer(segment: ParsedCommandSegment): boolean {
+  return (segment.commandName === "python" || segment.commandName === "python3") &&
+    hasAdjacentTokens(segment.argv, "-m", "http.server");
+}
+
+function findExplicitServiceTarget(
+  argv: string[],
+  envPort?: number,
+): { host: string; port: number; evidence: string } | undefined {
+  let host = "127.0.0.1";
+  if (envPort) return { host, port: envPort, evidence: "PORT=" };
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] ?? "";
+    if (token === "--host") host = normalizeServiceHost(argv[index + 1] ?? host);
+    if (token === "--port" || token === "-p") {
+      const port = parsePort(argv[index + 1]);
+      if (port) return { host, port, evidence: token };
+    }
+    const inlinePort = parseInlineOptionPort(token);
+    if (inlinePort) return { host, port: inlinePort, evidence: token.split("=")[0] ?? token };
+    const target = parseHostPortToken(token);
+    if (target?.port) return { host: target.host ?? host, port: target.port, evidence: "host:port" };
+  }
+  return undefined;
+}
+
+function findGunicornBindTarget(argv: string[]): { host: string; port: number; evidence: string } | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] ?? "";
+    if (token !== "-b" && token !== "--bind") continue;
+    const target = parseHostPortToken(argv[index + 1] ?? "");
+    if (target?.port) return { host: target.host ?? "127.0.0.1", port: target.port, evidence: token };
+  }
+  return undefined;
+}
+
+function findFirstPortToken(argv: string[]): number | undefined {
+  for (const token of argv) {
+    const port = parsePort(token);
+    if (port) return port;
+  }
+  return undefined;
+}
+
+function parseInlineOptionPort(token: string): number | undefined {
+  if (!token.startsWith("--port=") && !token.startsWith("-p=")) return undefined;
+  return parsePort(token.slice(token.indexOf("=") + 1));
+}
+
+function parsePort(value: string | undefined): number | undefined {
+  if (!value || !/^\d{1,5}$/u.test(value)) return undefined;
+  return normalizePort(Number(value));
+}
+
+function isPackageScriptCommand(segment: ParsedCommandSegment): boolean {
+  if (segment.commandName !== "npm" && segment.commandName !== "pnpm" && segment.commandName !== "yarn") return false;
+  const command = segment.argv[0]?.toLowerCase();
+  const script = segment.argv[1]?.toLowerCase();
+  return command === "start" || command === "dev" || command === "test-server" ||
+    (command === "run" && (script === "start" || script === "dev" || script === "test-server"));
+}
+
+function isJsRuntimeCommand(commandName: string): boolean {
+  return commandName === "node" || commandName === "deno" || commandName === "bun";
+}
+
+function isKnownServiceCommand(commandName: string): boolean {
+  return commandName === "grpc";
+}
+
+function normalizeServiceHost(host: string): "127.0.0.1" {
+  return "127.0.0.1";
+}
+
+function isBackgroundLikely(segments: CommandSegment[], serviceCandidates: ServiceIntent[]): boolean {
+  return segments.some((segment) =>
+    segment.background ||
+    segment.tokens[0] === "nohup" ||
+    segment.tokens[0] === "setsid" ||
+    segment.tokens.includes("disown")
+  ) || serviceCandidates.some((candidate) =>
+    candidate.kind === "http-server" ||
+    candidate.kind === "framework-server" ||
+    candidate.kind === "package-script"
+  );
+}
+
+function stripExecutableToken(token: string): string {
+  return basename(token).replace(/\.(?:exe|cmd|bat)$/iu, "").toLowerCase();
+}
+
+function addPathCandidate(target: Set<string>, token: string): void {
+  if (!token || isOptionToken(token) || token.includes("://")) return;
+  target.add(token.replaceAll("\\", "/"));
+}
+
+function isOptionToken(token: string): boolean {
+  return token.startsWith("-") && !/^-?\d+$/u.test(token);
+}
+
+function isOutputFlag(token: string): boolean {
+  return token === "-o" || token === "--output" || token === "--out" || token === "--dest" || token === "--file";
+}
+
+function isEnvironmentAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=.*$/u.test(token);
+}
+
+function isBinarySuffix(token: string): boolean {
+  return BINARY_HINT_EXTENSIONS.some((extension) => token.toLowerCase().endsWith(extension));
+}
+
+function isArtifactSuffix(token: string): boolean {
+  return ARTIFACT_HINT_EXTENSIONS.some((extension) => token.toLowerCase().endsWith(extension));
+}
+
+function isArtifactProducingCommand(commandName: string | undefined, tokens: string[]): boolean {
+  if (!commandName) return false;
+  if (ARTIFACT_PRODUCING_COMMAND_NAMES.has(commandName)) return true;
+  return tokens.some((token) => ARTIFACT_PRODUCING_TOKENS.has(token.toLowerCase()));
+}
+
+function parseHostPortToken(token: string): { host?: string; port?: number } | undefined {
+  const url = tryParseLocalUrl(token);
+  if (url) return url;
+  const separator = token.lastIndexOf(":");
+  if (separator <= 0) return undefined;
+  const host = token.slice(0, separator).replace(/^\[(.*)\]$/u, "$1");
+  const port = normalizePort(Number(token.slice(separator + 1)));
+  if (!port || !isLocalHost(host)) return undefined;
+  return normalizeHostPort(host, port);
+}
+
+function tryParseLocalUrl(token: string): { host?: string; port?: number } | undefined {
+  try {
+    const url = new URL(token);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    if (!isLocalHost(url.hostname)) return undefined;
+    const port = normalizePort(Number(url.port));
+    if (!port) return undefined;
+    return normalizeHostPort(url.hostname, port);
+  } catch {
+    return undefined;
+  }
+}
+
+function isLocalHost(host: string): boolean {
+  return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1";
+}
+
+function hasAdjacentTokens(tokens: string[], first: string, second: string): boolean {
+  return tokens.some((token, index) =>
+    token.toLowerCase() === first && tokens[index + 1]?.toLowerCase() === second
+  );
+}
+
+function normalizePort(value: number): number | undefined {
+  return Number.isInteger(value) && value > 0 && value <= 65_535 ? value : undefined;
+}
+
+function dedupeServiceCandidates(candidates: ServiceIntent[]): ServiceIntent[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = `${candidate.host}:${candidate.port}:${candidate.kind}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function findFirstExistingWorkspaceCandidate(
+  context: ToolContext,
+  candidates: string[],
+): Promise<{ absolute: string; relative: string } | undefined> {
+  for (const candidate of candidates) {
+    try {
+      const absolute = resolveWorkspacePath(context.workspaceRoot, candidate);
+      const info = await stat(absolute);
+      if (info.isFile()) return { absolute, relative: relativePath(context.workspaceRoot, absolute) };
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function firstServiceCandidate(intent: BashCommandIntent): { host: string; port: number } | undefined {
+  for (const candidate of intent.serviceCandidates) {
+    return {
+      host: candidate.host,
+      port: candidate.port,
+    };
+  }
+  return undefined;
+}
+
+function readDiagnosticPaths(diagnostics: BashDiagnostic[], type: BashDiagnosticType): string[] {
+  return unique(diagnostics
+    .filter((diagnostic) => diagnostic.type === type)
+    .map((diagnostic) => diagnostic.path)
+    .filter((value): value is string => typeof value === "string" && value.length > 0));
+}
+
+function firstDiagnosticServiceTarget(diagnostics: BashDiagnostic[]): { host: string; port: number } | undefined {
+  for (const diagnostic of diagnostics) {
+    if (diagnostic.type !== "service_readiness" && diagnostic.type !== "timeout") continue;
+    if (diagnostic.targetHost && diagnostic.targetPort) {
+      return { host: diagnostic.targetHost, port: diagnostic.targetPort };
+    }
+    if (diagnostic.target) {
+      const target = parseHostPortToken(diagnostic.target);
+      if (target?.port) return { host: target.host ?? "127.0.0.1", port: target.port };
+    }
+  }
+  return undefined;
+}
+
+function enrichBashDiagnostics(diagnostics: BashDiagnostic[], intent: BashCommandIntent): BashDiagnostic[] {
+  const binaryPath = intent.binaryCandidates[0];
+  const artifactPath = intent.artifactCandidates[0];
+  const service = intent.serviceCandidates[0];
+  return diagnostics.map((diagnostic) => {
+    if (diagnostic.type === "binary_tool_missing" && binaryPath) {
+      return { ...diagnostic, path: diagnostic.path ?? binaryPath };
+    }
+    if (diagnostic.type === "artifact_preservation" && artifactPath) {
+      return { ...diagnostic, path: diagnostic.path ?? artifactPath };
+    }
+    if ((diagnostic.type === "service_readiness" || diagnostic.type === "timeout") && service) {
+      return {
+        ...diagnostic,
+        target: diagnostic.target ?? `${service.host}:${service.port}`,
+        targetHost: diagnostic.targetHost ?? service.host,
+        targetPort: diagnostic.targetPort ?? service.port,
+      };
+    }
+    return diagnostic;
+  });
+}
+
+function normalizeHostPort(host: string, port: number): { host: string; port: number } | undefined {
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) return undefined;
+  return { host: host === "0.0.0.0" || host === "localhost" ? "127.0.0.1" : host.replace(/^\[(.*)\]$/u, "$1"), port };
+}
+
+type ServiceProbePolicy = {
+  kind: "normal" | "bench" | "bench-extended";
+  attempts: number;
+  maxTotalMs: number;
+};
+
+function createServiceProbePolicy(
+  context: ToolContext,
+  intent: BashCommandIntent,
+  diagnostics: BashDiagnostic[],
+): ServiceProbePolicy {
+  const bench = isHeadlessBenchContext(context);
+  const hasReadinessRisk =
+    diagnostics.some((diagnostic) => diagnostic.type === "service_readiness" || diagnostic.type === "timeout") ||
+    (context.recentDiagnostics ?? []).some((diagnostic) =>
+      diagnostic.type === "service_readiness" || diagnostic.type === "timeout"
+    );
+  if (bench && (intent.backgroundLikely || hasReadinessRisk)) {
+    return { kind: "bench-extended", attempts: 12, maxTotalMs: 15_000 };
+  }
+  if (bench) {
+    return { kind: "bench", attempts: 8, maxTotalMs: 8_000 };
+  }
+  return { kind: "normal", attempts: 3, maxTotalMs: 1_500 };
+}
+
+function isHeadlessBenchContext(context: ToolContext): boolean {
+  const record = context as ToolContext & { headlessBench?: { enabled?: boolean } };
+  return record.headlessBench?.enabled === true;
+}
+
+async function probeTcpBounded(
+  host: string,
+  port: number,
+  policy: ServiceProbePolicy,
+): Promise<{
+  target: string;
+  ready: boolean;
+  evidence: string;
+  attempts: number;
+  elapsedMs: number;
+  policy: ServiceProbePolicy;
+}> {
+  const startedAt = Date.now();
+  let lastEvidence = "";
+  for (let index = 0; index < policy.attempts; index += 1) {
+    const probe = await probeTcpOnce(host, port);
+    lastEvidence = probe.evidence;
+    if (probe.ready) {
+      return {
+        ...probe,
+        attempts: index + 1,
+        elapsedMs: Date.now() - startedAt,
+        policy,
+      };
+    }
+    const remaining = policy.maxTotalMs - (Date.now() - startedAt);
+    if (index === policy.attempts - 1 || remaining <= 0) break;
+    await delay(Math.min(createServiceProbeDelayMs(index), remaining));
+  }
+  return {
+    target: `${host}:${port}`,
+    ready: false,
+    evidence: lastEvidence || `tcp ${host}:${port} not ready`,
+    attempts: policy.attempts,
+    elapsedMs: Date.now() - startedAt,
+    policy,
+  };
+}
+
+function createServiceProbeDelayMs(attemptIndex: number): number {
+  return [300, 600, 1_000, 1_500][attemptIndex] ?? 2_000;
+}
+
+function probeTcpOnce(host: string, port: number): Promise<{ target: string; ready: boolean; evidence: string }> {
+  return new Promise((resolve) => {
+    const socket = connectTcp({ host, port });
+    const finish = (ready: boolean, evidence: string) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve({ target: `${host}:${port}`, ready, evidence });
+    };
+    socket.setTimeout(350);
+    socket.once("connect", () => finish(true, `tcp ${host}:${port} accepted connection`));
+    socket.once("timeout", () => finish(false, `tcp ${host}:${port} timed out`));
+    socket.once("error", (error) => finish(false, `tcp ${host}:${port} failed: ${error.message}`));
+  });
+}
+
+async function createArtifactHint(target: { absolute: string; relative: string }): Promise<{
+  path: string;
+  exists: true;
+  size: number;
+  sha256Prefix: string;
+}> {
+  const info = await stat(target.absolute);
+  const sha256 = await hashFileSha256Prefix(target.absolute);
+  return { path: target.relative, exists: true, size: info.size, sha256Prefix: sha256.slice(0, 16) };
+}
+
+async function hashFileSha256Prefix(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
+}
+
+function formatBinaryPreflight(value: unknown): string {
+  const binary = value as { path?: unknown; size?: unknown; magic?: { label?: unknown } };
+  return `binaryPreflight ${String(binary.path ?? "unknown")} size=${String(binary.size ?? "unknown")} magic=${String(binary.magic?.label ?? "unknown")}`;
+}
+
+function formatBinaryHint(value: unknown): string {
+  const binary = value as { path?: unknown; size?: unknown; magic?: { label?: unknown } };
+  return `binaryHint ${String(binary.path ?? "unknown")} size=${String(binary.size ?? "unknown")} magic=${String(binary.magic?.label ?? "unknown")}`;
+}
+
+function createAutoEvidenceDiagnostic(
+  prefix: string,
+  error: unknown,
+  type: BashDiagnosticType = "artifact_preservation",
+): BashDiagnostic {
+  return {
+    type,
+    severity: "recoverable",
+    evidence: `${prefix}: ${error instanceof Error ? error.message : String(error)}`,
+    suggestion: "Automatic evidence collection failed; continue with the original Bash result and inspect manually if needed.",
+  };
+}
+
+function mergeDiagnostics(primary: BashDiagnostic[], secondary: BashDiagnostic[]): BashDiagnostic[] {
+  const merged: BashDiagnostic[] = [];
+  for (const diagnostic of [...primary, ...secondary]) {
+    if (merged.some((item) => item.type === diagnostic.type && item.evidence === diagnostic.evidence)) continue;
+    merged.push(diagnostic);
+  }
+  return merged;
+}
+
+function withDefaultServiceReadiness(
+  readiness: BashServiceReadiness,
+  context: ToolContext,
+): BashServiceReadiness {
+  if (readiness.timeoutMs !== undefined) return readiness;
+  const hasReadinessRisk = (context.recentDiagnostics ?? []).some((diagnostic) =>
+    diagnostic.type === "service_readiness" || diagnostic.type === "timeout"
+  );
+  const timeoutMs = hasReadinessRisk ? 15_000 : isHeadlessBenchContext(context) ? 10_000 : 5_000;
+  return { ...readiness, timeoutMs };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function createBashRecoveryHints(

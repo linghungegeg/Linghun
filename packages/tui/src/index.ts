@@ -1543,6 +1543,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     projectPath,
     ...(options.bench ? { options: options.bench } : {}),
   });
+  (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+    enabled: benchConfig.enabled,
+  };
   const benchPreflight =
     benchConfig.enabled && benchConfig.preflight
       ? await runHeadlessEnvironmentPreflight(projectPath)

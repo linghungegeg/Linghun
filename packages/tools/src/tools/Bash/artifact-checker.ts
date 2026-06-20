@@ -17,6 +17,7 @@ type ArtifactDiagnostic = {
   severity: "recoverable" | "blocking";
   evidence: string;
   suggestion: string;
+  path?: string;
 };
 
 type ResolvedArtifactPath = {
@@ -70,6 +71,7 @@ export async function checkArtifact(input: ArtifactCheckOptions): Promise<ToolOu
       "blocking",
       `artifact missing or unreadable ${input.target.relative}: ${message}`,
       "Verify the artifact path and preserve expected outputs before retrying.",
+      input.target.relative,
     );
     artifact = {
       path: input.target.relative,
@@ -88,6 +90,7 @@ export async function checkArtifact(input: ArtifactCheckOptions): Promise<ToolOu
         "blocking",
         `protected input modified ${result.path}`,
         "Restore or intentionally account for protected input files before continuing.",
+        result.path,
       );
     }
   }
@@ -193,6 +196,7 @@ function addCheckDiagnostics(
       "blocking",
       `wrong header ${path}: expected ${checks.header.expected}`,
       "Preserve the expected artifact format and regenerate only the output if needed.",
+      path,
     );
   }
   if (checks.json && !checks.json.ok) {
@@ -202,6 +206,7 @@ function addCheckDiagnostics(
       "blocking",
       `output format mismatch ${path}: invalid JSON`,
       "Fix the artifact format before verification.",
+      path,
     );
   }
   if (checks.executable && !checks.executable.ok) {
@@ -211,6 +216,7 @@ function addCheckDiagnostics(
       "blocking",
       `permission denied ${path}: executable bit is not set`,
       "Set executable permission when the artifact is expected to run.",
+      path,
     );
   }
 }
@@ -221,8 +227,9 @@ function addDiagnostic(
   severity: ArtifactDiagnostic["severity"],
   evidence: string,
   suggestion: string,
+  path?: string,
 ): void {
-  diagnostics.push({ type, severity, evidence, suggestion });
+  diagnostics.push({ type, severity, evidence, suggestion, ...(path ? { path } : {}) });
 }
 
 function formatCheckSummary(name: string, check: { ok: boolean } | undefined): string {

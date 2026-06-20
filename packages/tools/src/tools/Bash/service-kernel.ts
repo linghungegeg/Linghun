@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createWriteStream } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { connect as connectTcp } from "node:net";
+import { randomUUID } from "node:crypto";
 import type { ToolChildProcessTrackOptions, ToolContext, ToolOutput } from "../../index.js";
 
 export type BashServiceReadiness =
@@ -21,12 +23,51 @@ export type BashServiceReadiness =
       intervalMs?: number;
     };
 
+export type BashServiceLifecycleAction =
+  | { action: "status"; serviceId: string }
+  | { action: "probe"; serviceId: string }
+  | { action: "logs"; serviceId: string; tailBytes?: number }
+  | { action: "stop"; serviceId: string };
+
+export type BashServiceInput = BashServiceReadiness | BashServiceLifecycleAction;
+
+export type BashManagedServiceStatus =
+  | "starting"
+  | "ready"
+  | "not_ready"
+  | "exited"
+  | "stopped"
+  | "error";
+
+export type BashManagedServiceRecord = {
+  serviceId: string;
+  pid?: number;
+  cwd: string;
+  command: string;
+  logPath: string;
+  target?: string;
+  targetHost?: string;
+  targetPort?: number;
+  readiness: BashServiceReadiness;
+  ready: boolean;
+  startedAt: string;
+  updatedAt: string;
+  lastProbeAt?: string;
+  lastOutputTail: string;
+  status: BashManagedServiceStatus;
+  exitCode?: number | null;
+  signalCode?: NodeJS.Signals | null;
+  process?: ChildProcess;
+  detached?: boolean;
+};
+
 type BashServiceStartInput = {
   command: string;
   logCommand: string;
   cwd: string;
   fullOutputPath: string;
   readiness: BashServiceReadiness;
+  context: ToolContext;
   abortSignal?: AbortSignal;
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void;
   trackChildProcess?: ToolContext["trackChildProcess"];
@@ -38,6 +79,9 @@ type ServiceDiagnostic = {
   severity: "recoverable" | "blocking";
   evidence: string;
   suggestion: string;
+  target?: string;
+  targetHost?: string;
+  targetPort?: number;
 };
 
 type ServiceReadyResult = {
@@ -49,9 +93,15 @@ type ServiceReadyResult = {
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 const DEFAULT_READY_INTERVAL_MS = 100;
 const CONNECT_ATTEMPT_TIMEOUT_MS = 500;
+const MAX_MANAGED_SERVICES = 20;
+const DEFAULT_LOG_TAIL_BYTES = 4_000;
+const STOP_TERM_WAIT_MS = 900;
+const STOP_KILL_WAIT_MS = 500;
 
 export async function startBashService(input: BashServiceStartInput): Promise<ToolOutput> {
   const startedAt = Date.now();
+  const startedAtIso = new Date(startedAt).toISOString();
+  const serviceId = `svc_${randomUUID()}`;
   const detached = process.platform !== "win32";
   const child = spawn(input.command, {
     cwd: input.cwd,
@@ -65,10 +115,31 @@ export async function startBashService(input: BashServiceStartInput): Promise<To
   let signalCode: NodeJS.Signals | null = null;
   let lastOutput = "";
   let logClosed = false;
+  const targetFields = readReadinessTargetFields(input.readiness);
+  const serviceRecord: BashManagedServiceRecord = {
+    serviceId,
+    pid: child.pid,
+    cwd: input.cwd,
+    command: input.logCommand,
+    logPath: input.fullOutputPath,
+    ...targetFields,
+    readiness: input.readiness,
+    ready: false,
+    startedAt: startedAtIso,
+    updatedAt: startedAtIso,
+    lastOutputTail: "",
+    status: "starting",
+    process: child,
+    detached,
+  };
+  rememberManagedService(input.context, serviceRecord);
 
   const writeLog = (stream: "stdout" | "stderr" | "system", text: string) => {
     const sanitized = input.sanitizeText(text);
     lastOutput = `${lastOutput}${sanitized}`.slice(-2_000);
+    updateManagedService(serviceRecord, {
+      lastOutputTail: lastOutput,
+    });
     if (!logClosed) {
       log.write(`[${stream}] ${sanitized}`);
       input.onProgress?.(stream, text);
@@ -83,6 +154,12 @@ export async function startBashService(input: BashServiceStartInput): Promise<To
     closed = true;
     exitCode = code;
     signalCode = signal;
+    updateManagedService(serviceRecord, {
+      ready: false,
+      status: serviceRecord.status === "stopped" ? "stopped" : "exited",
+      exitCode: code,
+      signalCode: signal,
+    });
     if (!logClosed) {
       log.write(`\nservice process closed exitCode=${code ?? "null"} signal=${signal ?? "null"}\n`);
     }
@@ -90,6 +167,7 @@ export async function startBashService(input: BashServiceStartInput): Promise<To
   child.on("error", (error) => {
     closed = true;
     exitCode = 1;
+    updateManagedService(serviceRecord, { ready: false, status: "error", exitCode: 1 });
     writeLog("system", `service spawn error: ${error.message}\n`);
   });
 
@@ -122,6 +200,11 @@ export async function startBashService(input: BashServiceStartInput): Promise<To
   const pid = child.pid;
   const alive = isChildAlive(child, closed);
   const readinessTarget = formatReadinessTarget(input.readiness);
+  updateManagedService(serviceRecord, {
+    ready: ready.ok,
+    status: ready.ok ? "ready" : alive ? "not_ready" : "exited",
+    lastProbeAt: new Date().toISOString(),
+  });
   const diagnostics = ready.ok
     ? []
     : [
@@ -130,10 +213,12 @@ export async function startBashService(input: BashServiceStartInput): Promise<To
           alive
             ? "Service process is running but readiness did not pass; inspect the log and retry bounded readiness checks."
             : "Service process exited before readiness; inspect the log before retrying.",
+          targetFields,
         ),
       ];
   const text = [
     ready.ok ? "Service started and ready." : "Service readiness failed.",
+    `serviceId ${serviceId}`,
     `pid ${pid ?? "unknown"}`,
     `cwd ${input.cwd}`,
     `ready ${readinessTarget}`,
@@ -148,6 +233,7 @@ export async function startBashService(input: BashServiceStartInput): Promise<To
     details: [
       `fullOutputPath: ${input.fullOutputPath}`,
       `command: ${input.sanitizeText(input.logCommand)}`,
+      `serviceId: ${serviceId}`,
       `pid: ${pid ?? "unknown"}`,
       `cwd: ${input.cwd}`,
       `ready: ${readinessTarget}`,
@@ -158,10 +244,16 @@ export async function startBashService(input: BashServiceStartInput): Promise<To
       exitCode: ready.ok ? 0 : 1,
       outcome: ready.ok ? "service_ready" : alive ? "service_not_ready" : "service_exited",
       service: {
+        serviceId,
         pid,
         command: input.logCommand,
         cwd: input.cwd,
         logPath: input.fullOutputPath,
+        status: ready.ok ? "ready" : alive ? "not_ready" : "exited",
+        ready: ready.ok,
+        target: targetFields.target,
+        targetHost: targetFields.targetHost,
+        targetPort: targetFields.targetPort,
         alive,
         readiness: {
           ok: ready.ok,
@@ -174,6 +266,130 @@ export async function startBashService(input: BashServiceStartInput): Promise<To
     },
     fullOutputPath: input.fullOutputPath,
   };
+}
+
+export async function runBashServiceLifecycleAction(
+  action: BashServiceLifecycleAction,
+  context: ToolContext,
+): Promise<ToolOutput> {
+  const service = findManagedService(context, action.serviceId);
+  if (!service) {
+    return serviceActionOutput({
+      action: action.action,
+      serviceId: action.serviceId,
+      outcome: "service_missing",
+      text: `Service ${action.serviceId} is not registered by Linghun.`,
+      service: { serviceId: action.serviceId, status: "missing", ready: false },
+    });
+  }
+
+  if (action.action === "status") {
+    refreshManagedServiceStatus(service);
+    return serviceActionOutput({
+      action: action.action,
+      serviceId: service.serviceId,
+      outcome: service.status === "ready" ? "service_ready" : `service_${service.status}`,
+      text: formatServiceStatusText(service),
+      service: serializeManagedService(service),
+    });
+  }
+
+  if (action.action === "probe") {
+    refreshManagedServiceStatus(service);
+    const probe = service.status === "exited" || service.status === "stopped"
+      ? { ok: false, evidence: `service ${service.serviceId} is ${service.status}` }
+      : await probeReadiness(service.readiness);
+    updateManagedService(service, {
+      ready: probe.ok,
+      status: probe.ok ? "ready" : service.status === "exited" || service.status === "stopped" ? service.status : "not_ready",
+      lastProbeAt: new Date().toISOString(),
+    });
+    const diagnostics = probe.ok
+      ? []
+      : [
+          createServiceReadinessDiagnostic(
+            probe.evidence,
+            "Service lifecycle probe did not pass; inspect logs or stop/restart the registered service.",
+            service,
+          ),
+        ];
+    return serviceActionOutput({
+      action: action.action,
+      serviceId: service.serviceId,
+      outcome: probe.ok ? "service_ready" : "service_not_ready",
+      text: [
+        `Service probe ${probe.ok ? "ready" : "not-ready"}.`,
+        `serviceId ${service.serviceId}`,
+        `target ${service.target ?? formatReadinessTarget(service.readiness)}`,
+        `evidence ${probe.evidence}`,
+      ].join("\n"),
+      service: { ...serializeManagedService(service), evidence: probe.evidence },
+      diagnostics,
+    });
+  }
+
+  if (action.action === "logs") {
+    const tail = await readServiceTail(service, action.tailBytes ?? DEFAULT_LOG_TAIL_BYTES);
+    return serviceActionOutput({
+      action: action.action,
+      serviceId: service.serviceId,
+      outcome: "service_logs",
+      text: [
+        `Service logs tail.`,
+        `serviceId ${service.serviceId}`,
+        `status ${service.status}`,
+        tail ? `tail\n${tail}` : "tail <empty>",
+      ].join("\n"),
+      service: { ...serializeManagedService(service), logTail: tail },
+    });
+  }
+
+  refreshManagedServiceStatus(service);
+  if (service.status === "exited" || service.status === "stopped") {
+    return serviceActionOutput({
+      action: action.action,
+      serviceId: service.serviceId,
+      outcome: `service_${service.status}`,
+      text: `Service ${service.serviceId} is already ${service.status}.`,
+      service: serializeManagedService(service),
+    });
+  }
+  const stop = await stopManagedService(service);
+  refreshManagedServiceStatus(service);
+  if (!stop.stopped) {
+    updateManagedService(service, { ready: false, status: "not_ready" });
+    return serviceActionOutput({
+      action: action.action,
+      serviceId: service.serviceId,
+      outcome: "service_stop_failed",
+      text: [
+        "Service stop failed.",
+        `serviceId ${service.serviceId}`,
+        `pid ${service.pid ?? "unknown"}`,
+        `evidence ${stop.evidence}`,
+      ].join("\n"),
+      service: { ...serializeManagedService(service), evidence: stop.evidence },
+      diagnostics: [
+        createServiceReadinessDiagnostic(
+          stop.evidence,
+          "Linghun could not confirm that the registered service stopped; inspect the process before retrying.",
+          service,
+        ),
+      ],
+    });
+  }
+  updateManagedService(service, { ready: false, status: "stopped" });
+  return serviceActionOutput({
+    action: action.action,
+    serviceId: service.serviceId,
+    outcome: "service_stopped",
+    text: [
+      "Service stopped.",
+      `serviceId ${service.serviceId}`,
+      `pid ${service.pid ?? "unknown"}`,
+    ].join("\n"),
+    service: serializeManagedService(service),
+  });
 }
 
 async function waitForReadiness(
@@ -263,16 +479,29 @@ function probeHttp(url: string): Promise<{ ok: boolean; evidence: string }> {
   });
 }
 
+function probeReadiness(readiness: BashServiceReadiness): Promise<{ ok: boolean; evidence: string }> {
+  return readiness.type === "tcp"
+    ? probeTcp(readiness.host ?? "127.0.0.1", readiness.port)
+    : probeHttp(readiness.url);
+}
+
 function isChildAlive(child: ChildProcess, closed: boolean): boolean {
   return !closed && child.exitCode === null && child.signalCode === null;
 }
 
-function createServiceReadinessDiagnostic(evidence: string, suggestion: string): ServiceDiagnostic {
+function createServiceReadinessDiagnostic(
+  evidence: string,
+  suggestion: string,
+  target?: Partial<Pick<BashManagedServiceRecord, "target" | "targetHost" | "targetPort">>,
+): ServiceDiagnostic {
   return {
     type: "service_readiness",
     severity: "recoverable",
     evidence,
     suggestion,
+    ...(target?.target ? { target: target.target } : {}),
+    ...(target?.targetHost ? { targetHost: target.targetHost } : {}),
+    ...(target?.targetPort !== undefined ? { targetPort: target.targetPort } : {}),
   };
 }
 
@@ -281,6 +510,199 @@ function formatReadinessTarget(readiness: BashServiceReadiness): string {
     return `tcp://${readiness.host ?? "127.0.0.1"}:${readiness.port}`;
   }
   return readiness.url;
+}
+
+function readReadinessTargetFields(
+  readiness: BashServiceReadiness,
+): Partial<Pick<BashManagedServiceRecord, "target" | "targetHost" | "targetPort">> {
+  if (readiness.type === "tcp") {
+    const host = readiness.host ?? "127.0.0.1";
+    return {
+      target: `${host}:${readiness.port}`,
+      targetHost: host,
+      targetPort: readiness.port,
+    };
+  }
+  try {
+    const url = new URL(readiness.url);
+    const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+    return {
+      target: readiness.url,
+      targetHost: url.hostname,
+      targetPort: Number.isInteger(port) ? port : undefined,
+    };
+  } catch {
+    return { target: readiness.url };
+  }
+}
+
+function rememberManagedService(context: ToolContext, record: BashManagedServiceRecord): void {
+  context.services = [
+    record,
+    ...(context.services ?? []).filter((item) => item.serviceId !== record.serviceId),
+  ].slice(0, MAX_MANAGED_SERVICES);
+}
+
+function findManagedService(context: ToolContext, serviceId: string): BashManagedServiceRecord | undefined {
+  return (context.services ?? []).find((service) => service.serviceId === serviceId);
+}
+
+function updateManagedService(
+  service: BashManagedServiceRecord,
+  patch: Partial<BashManagedServiceRecord>,
+): void {
+  Object.assign(service, patch, { updatedAt: new Date().toISOString() });
+}
+
+function refreshManagedServiceStatus(service: BashManagedServiceRecord): void {
+  if (service.status === "stopped") return;
+  if (service.process && !isChildAlive(service.process, service.status === "exited")) {
+    updateManagedService(service, {
+      ready: false,
+      status: "exited",
+      exitCode: service.process.exitCode,
+      signalCode: service.process.signalCode,
+    });
+  }
+}
+
+function serializeManagedService(service: BashManagedServiceRecord): Record<string, unknown> {
+  const alive = service.process ? isChildAlive(service.process, service.status === "exited") : false;
+  return {
+    serviceId: service.serviceId,
+    pid: service.pid,
+    cwd: service.cwd,
+    command: service.command,
+    logPath: service.logPath,
+    target: service.target,
+    targetHost: service.targetHost,
+    targetPort: service.targetPort,
+    readiness: {
+      type: service.readiness.type,
+      target: formatReadinessTarget(service.readiness),
+    },
+    ready: service.ready,
+    alive,
+    status: service.status,
+    startedAt: service.startedAt,
+    updatedAt: service.updatedAt,
+    lastProbeAt: service.lastProbeAt,
+    lastOutputTail: service.lastOutputTail,
+    exitCode: service.exitCode,
+    signalCode: service.signalCode,
+  };
+}
+
+function formatServiceStatusText(service: BashManagedServiceRecord): string {
+  return [
+    `Service status ${service.status}.`,
+    `serviceId ${service.serviceId}`,
+    `pid ${service.pid ?? "unknown"}`,
+    `ready ${service.ready ? "yes" : "no"}`,
+    `target ${service.target ?? formatReadinessTarget(service.readiness)}`,
+    `log ${service.logPath}`,
+  ].join("\n");
+}
+
+function serviceActionOutput(input: {
+  action: string;
+  serviceId: string;
+  outcome: string;
+  text: string;
+  service: Record<string, unknown>;
+  diagnostics?: ServiceDiagnostic[];
+}): ToolOutput {
+  return {
+    text: input.text,
+    details: input.text,
+    data: {
+      exitCode: input.diagnostics && input.diagnostics.length > 0 ? 1 : 0,
+      outcome: input.outcome,
+      service: input.service,
+      ...(input.diagnostics && input.diagnostics.length > 0 ? { diagnostics: input.diagnostics } : {}),
+    },
+  };
+}
+
+async function readServiceTail(service: BashManagedServiceRecord, tailBytes: number): Promise<string> {
+  const boundedBytes = Math.max(1, Math.min(tailBytes, 16_000));
+  let diskTail = "";
+  try {
+    const text = await readFile(service.logPath, "utf8");
+    diskTail = text.slice(-boundedBytes);
+  } catch {
+    diskTail = "";
+  }
+  const combined = `${diskTail}${service.lastOutputTail ? `\n${service.lastOutputTail}` : ""}`;
+  return combined.replace(/\0/g, "").slice(-boundedBytes);
+}
+
+async function stopManagedService(service: BashManagedServiceRecord): Promise<{ stopped: boolean; evidence: string }> {
+  if (process.platform === "win32" && service.pid) {
+    await taskkillWindowsPid(service.pid);
+    const stopped = await waitForServiceExit(service, STOP_KILL_WAIT_MS);
+    return {
+      stopped,
+      evidence: stopped ? `taskkill confirmed service ${service.serviceId} stopped` : `taskkill did not confirm service ${service.serviceId} stopped`,
+    };
+  }
+  if (service.detached && service.pid) {
+    try {
+      process.kill(-service.pid, "SIGTERM");
+      if (await waitForServiceExit(service, STOP_TERM_WAIT_MS)) {
+        return { stopped: true, evidence: `SIGTERM process group ${service.pid} confirmed stopped` };
+      }
+    } catch {
+      // fall through to direct child termination
+    }
+  } else {
+    service.process?.kill("SIGTERM");
+    if (await waitForServiceExit(service, STOP_TERM_WAIT_MS)) {
+      return { stopped: true, evidence: `SIGTERM pid ${service.pid ?? "unknown"} confirmed stopped` };
+    }
+  }
+  if (service.detached && service.pid) {
+    try {
+      process.kill(-service.pid, "SIGKILL");
+    } catch {
+      service.process?.kill("SIGKILL");
+    }
+  } else {
+    service.process?.kill("SIGKILL");
+  }
+  if (await waitForServiceExit(service, STOP_KILL_WAIT_MS)) {
+    return { stopped: true, evidence: `SIGKILL pid ${service.pid ?? "unknown"} confirmed stopped` };
+  }
+  return { stopped: false, evidence: `service ${service.serviceId} still appears alive after SIGTERM/SIGKILL` };
+}
+
+async function waitForServiceExit(service: BashManagedServiceRecord, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    refreshManagedServiceStatus(service);
+    if (service.status === "exited" || service.status === "stopped") return true;
+    if (!service.process || !isChildAlive(service.process, false)) return true;
+    await delay(50);
+  }
+  refreshManagedServiceStatus(service);
+  return service.status === "exited" || service.status === "stopped" ||
+    !service.process || !isChildAlive(service.process, false);
+}
+
+function taskkillWindowsPid(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true });
+    const timeout = setTimeout(() => {
+      killer.kill("SIGKILL");
+      resolve();
+    }, 1_000);
+    const finish = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+    killer.once("error", finish);
+    killer.once("close", finish);
+  });
 }
 
 function delay(ms: number): Promise<void> {

@@ -13,6 +13,7 @@ type BinaryDiagnostic = {
   severity: "recoverable" | "blocking";
   evidence: string;
   suggestion: string;
+  path?: string;
 };
 
 const DEFAULT_PREVIEW_BYTES = 64;
@@ -69,6 +70,7 @@ export async function inspectBinaryFile(
       severity: "blocking",
       evidence: `binary inspect failed for ${input.path}: ${message}`,
       suggestion: "Verify the file path and preserve expected input artifacts before retrying.",
+      path: input.path,
     };
     return {
       text: [

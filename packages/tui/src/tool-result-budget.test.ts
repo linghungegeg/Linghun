@@ -344,6 +344,7 @@ describe("tool_result budget", () => {
       severity: index === 1 ? "blocking" : "recoverable",
       evidence: index === 0 ? "connection refused" : `evidence ${index}`,
       suggestion: `suggestion ${index}`,
+      ...(index === 0 ? { target: "127.0.0.1:3000", targetHost: "127.0.0.1", targetPort: 3000 } : {}),
     }));
     const toolEnd = createToolEndEvent("call-diagnostics", {
       text: "x".repeat(100_000),
@@ -359,7 +360,14 @@ describe("tool_result budget", () => {
     const compactDiagnostics = (toolEnd.output.data as { diagnostics?: unknown[] }).diagnostics;
     expect(compactDiagnostics).toHaveLength(5);
     expect(compactDiagnostics).toEqual([
-      { type: "service_readiness", severity: "recoverable", evidence: "connection refused" },
+      {
+        type: "service_readiness",
+        severity: "recoverable",
+        evidence: "connection refused",
+        target: "127.0.0.1:3000",
+        targetHost: "127.0.0.1",
+        targetPort: 3000,
+      },
       { type: "diagnostic_1", severity: "blocking", evidence: "evidence 1" },
       { type: "diagnostic_2", severity: "recoverable", evidence: "evidence 2" },
       { type: "diagnostic_3", severity: "recoverable", evidence: "evidence 3" },
@@ -396,6 +404,7 @@ describe("tool_result budget", () => {
             severity: "recoverable",
             evidence: index === 0 ? "connection refused" : `evidence ${index}`,
             suggestion: `suggestion ${index}`,
+            ...(index === 0 ? { target: "127.0.0.1:3000", targetHost: "127.0.0.1", targetPort: 3000 } : {}),
           })),
         },
       },
@@ -413,6 +422,9 @@ describe("tool_result budget", () => {
           type: "service_readiness",
           severity: "recoverable",
           evidence: "connection refused",
+          target: "127.0.0.1:3000",
+          targetHost: "127.0.0.1",
+          targetPort: 3000,
         }),
       ]),
     });
@@ -424,6 +436,9 @@ describe("tool_result budget", () => {
       type: "service_readiness",
       severity: "recoverable",
       evidence: "connection refused",
+      target: "127.0.0.1:3000",
+      targetHost: "127.0.0.1",
+      targetPort: 3000,
       createdAt: expect.any(String),
       toolUseId: "call-diagnostics",
       evidenceId: "ev-diagnostics",
@@ -480,6 +495,84 @@ describe("tool_result budget", () => {
     expect(context.tools.recentDiagnostics).not.toContainEqual(
       expect.objectContaining({ evidence: "old-19" }),
     );
+  });
+
+  it("attaches compact tool hint data to matching evidence records", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const context = {
+      projectPath: project,
+      evidence: [
+        {
+          id: "ev-hint",
+          kind: "command_output",
+          source: "Bash",
+          summary: "bash output",
+          supportsClaims: ["Bash"],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      tools: { recentDiagnostics: [] },
+      store: { appendEvent: async () => undefined },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-hint",
+      "call-hint",
+      "Bash",
+      {
+        text: "exit code 0",
+        data: {
+          exitCode: 0,
+          serviceHint: { target: "127.0.0.1:3000", ready: true },
+        },
+      },
+      false,
+      "ev-hint",
+    );
+
+    expect(context.evidence[0]).toMatchObject({
+      data: { serviceHint: { target: "127.0.0.1:3000", ready: true } },
+    });
+  });
+
+  it("attaches compact service lifecycle data to matching evidence records", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const context = {
+      projectPath: project,
+      evidence: [
+        {
+          id: "ev-service",
+          kind: "command_output",
+          source: "Bash",
+          summary: "service lifecycle output",
+          supportsClaims: ["Bash"],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      tools: { recentDiagnostics: [] },
+      store: { appendEvent: async () => undefined },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-service",
+      "call-service",
+      "Bash",
+      {
+        text: "Service status ready.",
+        data: {
+          exitCode: 0,
+          service: { serviceId: "svc_1", target: "127.0.0.1:3000", ready: true, status: "ready" },
+        },
+      },
+      false,
+      "ev-service",
+    );
+
+    expect(context.evidence[0]).toMatchObject({
+      data: { service: { serviceId: "svc_1", target: "127.0.0.1:3000", ready: true } },
+    });
   });
 
   it("does not change recentDiagnostics when tool result has no diagnostics", async () => {

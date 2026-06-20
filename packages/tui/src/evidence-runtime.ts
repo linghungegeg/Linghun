@@ -41,6 +41,10 @@ type CompactDiagnostic = {
   type: string;
   severity?: string;
   evidence: string;
+  target?: string;
+  path?: string;
+  targetHost?: string;
+  targetPort?: number;
 };
 
 export function createEvidenceRecord(
@@ -701,7 +705,25 @@ function compactDiagnosticForTranscript(value: unknown): CompactDiagnostic | und
       ? truncateDisplay(record.evidence.replace(/\s+/g, " "), 160)
       : undefined;
   if (!type || !evidence) return undefined;
-  return { type, severity, evidence };
+  return {
+    type,
+    severity,
+    evidence,
+    ...readCompactDiagnosticTargetFields(record),
+  };
+}
+
+function readCompactDiagnosticTargetFields(record: Record<string, unknown>): Partial<CompactDiagnostic> {
+  const target = typeof record.target === "string" ? record.target : undefined;
+  const path = typeof record.path === "string" ? record.path : undefined;
+  const targetHost = typeof record.targetHost === "string" ? record.targetHost : undefined;
+  const targetPort = typeof record.targetPort === "number" ? record.targetPort : undefined;
+  return {
+    ...(target ? { target } : {}),
+    ...(path ? { path } : {}),
+    ...(targetHost ? { targetHost } : {}),
+    ...(targetPort !== undefined ? { targetPort } : {}),
+  };
 }
 
 export function isToolOutputFailure(name: ToolName, output: ToolOutput): boolean {
@@ -779,6 +801,7 @@ export async function appendToolResultEvent(
   evidenceId?: string,
 ): Promise<void> {
   rememberRecentDiagnostics(context, toolName, content, toolUseId, evidenceId);
+  rememberToolEvidenceData(context, evidenceId, content);
   const contentWithDiagnostics = appendToolResultContentDiagnostics(content);
   const budgetedContent = await budgetToolResultTranscriptContent(
     context,
@@ -795,6 +818,28 @@ export async function appendToolResultEvent(
     evidenceId,
     createdAt: new Date().toISOString(),
   });
+}
+
+function rememberToolEvidenceData(context: TuiContext, evidenceId: string | undefined, content: unknown): void {
+  if (!evidenceId || !content || typeof content !== "object") return;
+  if (!Array.isArray(context.evidence)) return;
+  const output = content as ToolOutput;
+  const compact = compactToolEvidenceData(output.data);
+  if (!compact) return;
+  const evidence = context.evidence.find((item) => item.id === evidenceId);
+  if (evidence) {
+    evidence.data = { ...(typeof evidence.data === "object" && evidence.data ? evidence.data : {}), ...compact };
+  }
+}
+
+function compactToolEvidenceData(data: unknown): Record<string, unknown> | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const record = data as Record<string, unknown>;
+  const compact: Record<string, unknown> = {};
+  for (const key of ["service", "serviceHint", "artifactHint", "binaryHint", "binaryPreflight"]) {
+    if (record[key] !== undefined) compact[key] = record[key];
+  }
+  return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
 function rememberRecentDiagnostics(

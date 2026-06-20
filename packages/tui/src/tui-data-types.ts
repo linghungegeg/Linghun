@@ -121,6 +121,7 @@ export type EvidenceRecord = {
   logPath?: string;
   supportsClaims: string[];
   createdAt: string;
+  data?: unknown;
 };
 
 export type VerificationStepKind = "test" | "typecheck" | "build" | "lint" | "smoke";

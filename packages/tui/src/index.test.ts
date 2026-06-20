@@ -31,6 +31,7 @@ import {
   mergeFailureRecord,
 } from "./failure-learning-runtime.js";
 import {
+  checkClaimSupport,
   createPhase15BetaVerdictScope,
   formatSolutionCompletenessReportBlock,
   needsSolutionCompletenessReportClosure,
@@ -2048,6 +2049,231 @@ describe("runHeadlessTask", () => {
     expect(
       context.evidence.some((item) => item.supportsClaims.includes("headless_artifact_checklist")),
     ).toBe(true);
+  });
+
+  it("final gate reports recentDiagnostics risk only for headless bench", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "service_readiness",
+        severity: "recoverable",
+        evidence: "tcp 127.0.0.1:3000 failed",
+        target: "127.0.0.1:3000",
+        targetHost: "127.0.0.1",
+        targetPort: 3000,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+
+    const result = checkClaimSupport("ordinary final text", context);
+    expect(result.status).toBe("needs_disclaimer");
+    expect(result.unsupportedClaims.join("\n")).toContain("headless bench risk");
+    expect(result.unsupportedClaims.join("\n")).toContain("service_readiness");
+  });
+
+  it("final gate resolves recentDiagnostics risk after matching service evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+    context.tools.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "service_readiness",
+        severity: "recoverable",
+        evidence: "tcp 127.0.0.1:3000 failed",
+        target: "127.0.0.1:3000",
+        targetHost: "127.0.0.1",
+        targetPort: 3000,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    context.evidence.push({
+      id: "service-ready",
+      kind: "command_output",
+      source: "Bash",
+      summary: "serviceHint tcp 127.0.0.1:3000 ready attempts=1",
+      supportsClaims: ["Bash", "command_ran"],
+      createdAt: new Date().toISOString(),
+      data: { serviceHint: { target: "127.0.0.1:3000", ready: true } },
+    });
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
+  });
+
+  it("final gate resolves recentDiagnostics risk after matching service lifecycle evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+    context.tools.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "service_readiness",
+        severity: "recoverable",
+        evidence: "tcp 127.0.0.1:3000 failed",
+        target: "127.0.0.1:3000",
+        targetHost: "127.0.0.1",
+        targetPort: 3000,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    context.evidence.push({
+      id: "service-lifecycle-ready",
+      kind: "command_output",
+      source: "Bash",
+      summary: "Service status ready.",
+      supportsClaims: ["Bash", "command_ran"],
+      createdAt: new Date().toISOString(),
+      data: { service: { serviceId: "svc_1", target: "127.0.0.1:3000", ready: true, status: "ready" } },
+    });
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
+  });
+
+  it("final gate does not resolve recentDiagnostics risk from summary text alone", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+    context.tools.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "service_readiness",
+        severity: "recoverable",
+        evidence: "tcp 127.0.0.1:3000 failed",
+        target: "127.0.0.1:3000",
+        targetHost: "127.0.0.1",
+        targetPort: 3000,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    context.evidence.push({
+      id: "service-ready-summary-only",
+      kind: "command_output",
+      source: "Bash",
+      summary: "serviceHint tcp 127.0.0.1:3000 ready attempts=1",
+      supportsClaims: ["Bash", "command_ran"],
+      createdAt: new Date().toISOString(),
+    });
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("needs_disclaimer");
+  });
+
+  it("final gate resolves artifact and binary risks from structured evidence data", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+    context.tools.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "artifact_preservation",
+        severity: "blocking",
+        evidence: "artifact missing",
+        path: "out.json",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        source: "Bash",
+        type: "binary_tool_missing",
+        severity: "recoverable",
+        evidence: "xxd missing",
+        path: "sample.elf",
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    context.evidence.push(
+      {
+        id: "artifact-ready",
+        kind: "command_output",
+        source: "Bash",
+        summary: "artifact evidence",
+        supportsClaims: ["Bash"],
+        createdAt: new Date().toISOString(),
+        data: { artifactHint: { path: "out.json", exists: true } },
+      },
+      {
+        id: "binary-ready",
+        kind: "command_output",
+        source: "Bash",
+        summary: "binary evidence",
+        supportsClaims: ["Bash"],
+        createdAt: new Date().toISOString(),
+        data: { binaryPreflight: { path: "sample.elf" } },
+      },
+    );
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
+  });
+
+  it("final gate does not resolve artifact or binary risks from summary text alone", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+    context.tools.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "artifact_preservation",
+        severity: "blocking",
+        evidence: "artifact missing",
+        path: "out.json",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        source: "Bash",
+        type: "binary_tool_missing",
+        severity: "recoverable",
+        evidence: "xxd missing",
+        path: "sample.elf",
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    context.evidence.push(
+      {
+        id: "artifact-summary-only",
+        kind: "command_output",
+        source: "Bash",
+        summary: "artifactHint out.json exists",
+        supportsClaims: ["Bash"],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "binary-summary-only",
+        kind: "command_output",
+        source: "Bash",
+        summary: "binaryPreflight sample.elf",
+        supportsClaims: ["Bash"],
+        createdAt: new Date().toISOString(),
+      },
+    );
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("needs_disclaimer");
   });
 
   it("bench mode repairs after official test failure and passes on the second validation", async () => {
