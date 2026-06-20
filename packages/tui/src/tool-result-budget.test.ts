@@ -400,11 +400,12 @@ describe("tool_result budget", () => {
         data: {
           exitCode: 1,
           diagnostics: Array.from({ length: 6 }, (_, index) => ({
-            type: index === 0 ? "service_readiness" : `diagnostic_${index}`,
+            type: index === 0 ? "service_readiness" : index === 1 ? "missing_command" : `diagnostic_${index}`,
             severity: "recoverable",
             evidence: index === 0 ? "connection refused" : `evidence ${index}`,
             suggestion: `suggestion ${index}`,
             ...(index === 0 ? { target: "127.0.0.1:3000", targetHost: "127.0.0.1", targetPort: 3000 } : {}),
+            ...(index === 1 ? { command: "python", fallback: "python3" } : {}),
           })),
         },
       },
@@ -442,6 +443,12 @@ describe("tool_result budget", () => {
       createdAt: expect.any(String),
       toolUseId: "call-diagnostics",
       evidenceId: "ev-diagnostics",
+    });
+    expect(context.tools.recentDiagnostics[1]).toMatchObject({
+      source: "Bash",
+      type: "missing_command",
+      command: "python",
+      fallback: "python3",
     });
     expect(JSON.stringify(context.tools.recentDiagnostics)).not.toContain("suggestion");
     expect(JSON.stringify(context.tools.recentDiagnostics)).not.toContain("diagnostic_5");

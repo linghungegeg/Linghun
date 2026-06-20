@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,9 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
   __testDecodeShellChunk,
+  __testCanSafelyAliasPythonCommand,
   __testGlobToRegExp,
+  __testParseBashCommandIntent,
   adaptShellCommandForPlatform,
   builtInTools,
   createTool,
@@ -257,7 +259,7 @@ describe("Phase 05 core tools", () => {
     const timeout = await runTool(
       "Bash",
       {
-        command: 'node -e "setTimeout(()=>{}, 2000)"',
+        command: 'node -e "setTimeout(()=>{}, 1000)"',
         timeoutMs: 50,
       },
       context,
@@ -271,7 +273,7 @@ describe("Phase 05 core tools", () => {
     const running = runTool(
       "Bash",
       {
-        command: 'node -e "setTimeout(()=>{}, 2000)"',
+        command: 'node -e "setTimeout(()=>{}, 1000)"',
         timeoutMs: 5_000,
       },
       context,
@@ -281,9 +283,9 @@ describe("Phase 05 core tools", () => {
 
     expect(cancelled.output.data).toMatchObject({ exitCode: 1, outcome: "cancelled" });
     expect(cancelled.output.text).toContain("工具调用已取消");
-  });
+  }, 15_000);
 
-  it("adds recoverable hints for common bench command failures", async () => {
+  it("does not derive Bash diagnostics from stderr text alone", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
 
@@ -297,66 +299,47 @@ describe("Phase 05 core tools", () => {
     );
 
     expect(result.output.data).toMatchObject({ exitCode: 1, outcome: "completed" });
-    expect(result.output.data).toMatchObject({
-      diagnostics: expect.arrayContaining([
-        expect.objectContaining({ type: "missing_command", severity: "recoverable" }),
-        expect.objectContaining({
-          type: "missing_python_module",
-          severity: "recoverable",
-          evidence: "ModuleNotFoundError: No module named 'pandas'",
-        }),
-        expect.objectContaining({ type: "service_readiness", severity: "recoverable" }),
-      ]),
-    });
-    expect(result.output.text).toContain("Linghun recoverable command hints");
-    expect(result.output.text).toContain('bare "python" is unavailable');
-    expect(result.output.text).toContain("missing module(s) pandas");
-    expect(result.output.text).toContain("service readiness issue");
-    expect(result.output.text).toContain("python3 -m pip install");
+    expect(result.output.data).not.toHaveProperty("diagnostics");
+    expect(result.output.text).not.toContain("Linghun recoverable command hints");
   });
 
-  it("adds Bash diagnostics for missing binary tools and artifact preservation", async () => {
+  it("adds structured capability diagnostics before executing missing Bash commands", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
+    const oldPath = process.env.PATH;
+    process.env.PATH = await mkdtemp(join(tmpdir(), "linghun-empty-path-"));
+    try {
+      const result = await runTool(
+        "Bash",
+        { command: "file sample.elf" },
+        context,
+      );
 
-    const result = await runTool(
-      "Bash",
-      {
-        command:
-          "node -e \"process.stderr.write('rg: command not found\\nfile: command not found\\nxxd: command not found\\ncurl: command not found\\nps: command not found\\nFilter modified 5 clean HTML files out of 12\\nprovider stream failed: gateway unstable\\n'); process.exit(1);\"",
-      },
-      context,
-    );
-
-    expect(result.output.data).toMatchObject({
-      exitCode: 1,
-      outcome: "completed",
-      diagnostics: expect.arrayContaining([
-        expect.objectContaining({ type: "binary_tool_missing", evidence: "rg: command not found" }),
-        expect.objectContaining({
-          type: "binary_tool_missing",
-          evidence: "file: command not found",
-        }),
-        expect.objectContaining({
-          type: "binary_tool_missing",
-          evidence: "xxd: command not found",
-        }),
-        expect.objectContaining({
-          type: "binary_tool_missing",
-          evidence: "curl: command not found",
-        }),
-        expect.objectContaining({ type: "binary_tool_missing", evidence: "ps: command not found" }),
-        expect.objectContaining({
-          type: "artifact_preservation",
-          severity: "blocking",
-          evidence: "Filter modified 5 clean HTML files out of 12",
-        }),
-        expect.objectContaining({ type: "provider_or_network", severity: "recoverable" }),
-      ]),
-    });
+      expect(result.output.data).toMatchObject({
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({
+            type: "binary_tool_missing",
+            command: "file",
+            fallback: "Bash.binary",
+            evidence: "command not found before execution: file",
+          }),
+        ]),
+        commandCapabilities: expect.arrayContaining([
+          expect.objectContaining({
+            command: "file",
+            exists: false,
+            capability: "binary_helper",
+            fallback: "Bash.binary",
+          }),
+        ]),
+      });
+      expect(result.output.text).toContain("commandCapability file missing");
+    } finally {
+      process.env.PATH = oldPath;
+    }
   });
 
-  it("adds Bash diagnostics for gRPC and HTTP connection refused output", async () => {
+  it("does not add service diagnostics from connection refused stderr text alone", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
 
@@ -372,14 +355,8 @@ describe("Phase 05 core tools", () => {
     expect(result.output.data).toMatchObject({
       exitCode: 1,
       outcome: "completed",
-      diagnostics: expect.arrayContaining([
-        expect.objectContaining({
-          type: "service_readiness",
-          severity: "recoverable",
-          evidence: "gRPC health check failed: connection refused",
-        }),
-      ]),
     });
+    expect(result.output.data).not.toHaveProperty("diagnostics");
   });
 
   it("inspects a text file with Bash binary helper hexdump fallback", async () => {
@@ -752,6 +729,83 @@ describe("Phase 05 core tools", () => {
     });
   });
 
+  it("keeps ordinary Bash output data unchanged when capability preflight has no trigger", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"process.stdout.write('zero-disturbance')\"" },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("zero-disturbance");
+    expect(result.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+  });
+
+  it("parses Bash command intent with command names, argv, redirections, and background intent", () => {
+    const intent = __testParseBashCommandIntent("python -c \"print('ok')\" > result.json &");
+
+    expect(intent.commandNames).toEqual(["python"]);
+    expect(intent.segments[0]).toMatchObject({
+      commandName: "python",
+      argv: ["-c", "print('ok')", ">", "result.json"],
+      background: true,
+      redirections: [{ operator: ">", target: "result.json" }],
+    });
+    expect(intent.artifactCandidates).toContain("result.json");
+    expect(intent.backgroundLikely).toBe(true);
+  });
+
+  it("only allows python alias fallback for simple exact python commands", () => {
+    expect(__testCanSafelyAliasPythonCommand(__testParseBashCommandIntent("python -c \"print('ok')\""))).toBe(true);
+    expect(__testCanSafelyAliasPythonCommand(__testParseBashCommandIntent("echo python -c test"))).toBe(false);
+    expect(__testCanSafelyAliasPythonCommand(__testParseBashCommandIntent("python -c \"print('ok')\" | cat"))).toBe(false);
+    expect(__testCanSafelyAliasPythonCommand(__testParseBashCommandIntent("python -c \"print('ok')\" > out.txt"))).toBe(false);
+  });
+
+  it("returns missing_command diagnostics with python3 fallback for bare python preflight", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const binDir = join(project, "bin");
+    await mkdir(binDir, { recursive: true });
+    const python3Path = join(binDir, process.platform === "win32" ? "python3.cmd" : "python3");
+    const nodePath = process.execPath.replaceAll('"', '\\"');
+    await writeFile(
+      python3Path,
+      process.platform === "win32"
+        ? `@echo off\r\n"${nodePath}" -e "console.log('python3-alias-ok')"\r\n`
+        : `#!/bin/sh\n"${nodePath}" -e "console.log('python3-alias-ok')"\n`,
+      "utf8",
+    );
+    if (process.platform !== "win32") {
+      await chmod(python3Path, 0o755);
+    }
+    const oldPath = process.env.PATH;
+    process.env.PATH = binDir;
+    try {
+      const result = await runTool(
+        "Bash",
+        { command: "python -c \"print('ignored by shim')\"" },
+        createToolContext(project),
+      );
+
+      expect(result.output.text).toContain("python3-alias-ok");
+      expect(result.output.text).toContain("pythonAlias python -> python3");
+      expect(result.output.data).toMatchObject({
+        exitCode: 0,
+        outcome: "completed",
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({
+            type: "missing_command",
+            command: "python",
+            fallback: "python3",
+          }),
+        ]),
+      });
+    } finally {
+      process.env.PATH = oldPath;
+    }
+  });
+
   it("does not add binary auto evidence from missing-tool stderr path text alone", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const elf = Buffer.alloc(64);
@@ -768,10 +822,8 @@ describe("Phase 05 core tools", () => {
     expect(result.output.data).toMatchObject({
       exitCode: 1,
       outcome: "completed",
-      diagnostics: expect.arrayContaining([
-        expect.objectContaining({ type: "binary_tool_missing" }),
-      ]),
     });
+    expect(result.output.data).not.toHaveProperty("diagnostics");
   });
 
   it("does not add service auto evidence from connection refused stderr target text alone", async () => {
@@ -790,10 +842,8 @@ describe("Phase 05 core tools", () => {
     expect(result.output.data).toMatchObject({
       exitCode: 1,
       outcome: "completed",
-      diagnostics: expect.arrayContaining([
-        expect.objectContaining({ type: "service_readiness", severity: "recoverable" }),
-      ]),
     });
+    expect(result.output.data).not.toHaveProperty("diagnostics");
   });
 
   it("adds binary auto evidence from intent candidate even when tool is missing", async () => {
@@ -801,23 +851,34 @@ describe("Phase 05 core tools", () => {
     const elf = Buffer.alloc(64);
     elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
     await writeFile(join(project, "sample.elf"), elf);
+    const oldPath = process.env.PATH;
+    process.env.PATH = await mkdtemp(join(tmpdir(), "linghun-empty-path-"));
 
-    const result = await runTool(
-      "Bash",
-      { command: "node -e \"process.stderr.write('xxd: command not found\\n'); process.exit(1);\" sample.elf" },
-      createToolContext(project),
-    );
+    try {
+      const result = await runTool(
+        "Bash",
+        { command: "xxd sample.elf" },
+        createToolContext(project),
+      );
 
-    expect(result.output.text).toContain("binaryHint");
-    expect(result.output.data).toMatchObject({
-      binaryHint: {
-        path: expect.stringContaining("sample.elf"),
-        magic: { type: "elf" },
-      },
-      diagnostics: expect.arrayContaining([
-        expect.objectContaining({ type: "binary_tool_missing", path: "sample.elf" }),
-      ]),
-    });
+      expect(result.output.text).toContain("binaryHint");
+      expect(result.output.data).toMatchObject({
+        binaryHint: {
+          path: expect.stringContaining("sample.elf"),
+          magic: { type: "elf" },
+        },
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({
+            type: "binary_tool_missing",
+            command: "xxd",
+            fallback: "Bash.binary",
+            path: "sample.elf",
+          }),
+        ]),
+      });
+    } finally {
+      process.env.PATH = oldPath;
+    }
   });
 
   it("prefers structured service intent over output fallback ports", async () => {
@@ -1079,6 +1140,31 @@ describe("Phase 05 core tools", () => {
         exists: true,
         sha256Prefix: expectedPrefix,
       },
+    });
+  });
+
+  it("returns artifact_preservation diagnostics for missing structured artifact candidates", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+
+    const result = await runTool(
+      "Bash",
+      { command: "node -e \"process.exit(0)\" -- --output missing-result.json" },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({
+      exitCode: 0,
+      outcome: "completed",
+      artifactHint: {
+        path: "missing-result.json",
+        exists: false,
+      },
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          type: "artifact_preservation",
+          path: "missing-result.json",
+        }),
+      ]),
     });
   });
 

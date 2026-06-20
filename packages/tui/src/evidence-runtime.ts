@@ -716,9 +716,13 @@ function compactDiagnosticForTranscript(value: unknown): CompactDiagnostic | und
 function readCompactDiagnosticTargetFields(record: Record<string, unknown>): Partial<CompactDiagnostic> {
   const target = typeof record.target === "string" ? record.target : undefined;
   const path = typeof record.path === "string" ? record.path : undefined;
+  const command = typeof record.command === "string" ? record.command : undefined;
+  const fallback = typeof record.fallback === "string" ? record.fallback : undefined;
   const targetHost = typeof record.targetHost === "string" ? record.targetHost : undefined;
   const targetPort = typeof record.targetPort === "number" ? record.targetPort : undefined;
   return {
+    ...(command ? { command } : {}),
+    ...(fallback ? { fallback } : {}),
     ...(target ? { target } : {}),
     ...(path ? { path } : {}),
     ...(targetHost ? { targetHost } : {}),

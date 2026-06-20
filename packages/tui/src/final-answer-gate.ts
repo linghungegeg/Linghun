@@ -308,7 +308,9 @@ function createHeadlessBenchDiagnosticRiskSummary(context: TuiContext): string |
       diagnostic.type === "service_readiness" ||
       diagnostic.type === "artifact_preservation" ||
       diagnostic.type === "binary_tool_missing" ||
-      diagnostic.type === "timeout"
+      diagnostic.type === "missing_command" ||
+      diagnostic.type === "timeout" ||
+      diagnostic.type === "provider_or_network"
     ) &&
     !isDiagnosticRiskResolved(diagnostic, context.evidence)
   );

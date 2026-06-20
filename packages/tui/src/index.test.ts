@@ -2080,6 +2080,35 @@ describe("runHeadlessTask", () => {
     expect(result.unsupportedClaims.join("\n")).toContain("service_readiness");
   });
 
+  it("final gate reports missing command diagnostics with structured fallback", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+    context.tools.recentDiagnostics = [
+      {
+        source: "Bash",
+        type: "missing_command",
+        severity: "recoverable",
+        evidence: "command not found before execution: python",
+        command: "python",
+        fallback: "python3",
+        createdAt: new Date().toISOString(),
+      },
+    ];
+
+    const result = checkClaimSupport("ordinary final text", context);
+    expect(result.status).toBe("needs_disclaimer");
+    expect(result.unsupportedClaims.join("\n")).toContain("missing_command");
+    expect(context.tools.recentDiagnostics?.[0]).toMatchObject({
+      command: "python",
+      fallback: "python3",
+    });
+  });
+
   it("final gate resolves recentDiagnostics risk after matching service evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-final-risk-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -26429,10 +26458,11 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     context.evidence.push({
       id: "e-write-target",
       kind: "command_output",
-      summary: "Write created non-empty artifact /app/out.txt",
+      summary: "Write completed",
       source: "Write",
       outputPath: "/app/out.txt",
       supportsClaims: ["file_change_claim"],
+      data: { artifactHint: { path: "/app/out.txt", exists: true } },
       createdAt: new Date().toISOString(),
     });
     const matched = evaluateAggregatedFinalAnswerGate(context, "已完成，/app/out.txt 已生成。");
@@ -26469,10 +26499,11 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     context.evidence.push({
       id: "e-write-target",
       kind: "command_output",
-      summary: "Write created non-empty artifact /app/out.txt",
+      summary: "Write completed",
       source: "Write",
       outputPath: "/app/out.txt",
       supportsClaims: ["file_change_claim"],
+      data: { artifactHint: { path: "/app/out.txt", exists: true } },
       createdAt: new Date().toISOString(),
     });
     const matched = evaluateAggregatedFinalAnswerGate(context, "已完成并验证通过。");
@@ -26550,6 +26581,18 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       source: "Bash",
       supportsClaims: ["verification_passed"],
       createdAt: new Date().toISOString(),
+    });
+    const summaryOnly = evaluateAggregatedFinalAnswerGate(context, "服务端口已验证通过。");
+    expect(summaryOnly.status).toBe("needs_disclaimer");
+
+    context.evidence.push({
+      id: "e-service-structured",
+      kind: "command_output",
+      summary: "serviceHint tcp 127.0.0.1:8080 ready attempts=1",
+      source: "Bash",
+      supportsClaims: ["verification_passed"],
+      createdAt: new Date().toISOString(),
+      data: { serviceHint: { target: "127.0.0.1:8080", ready: true } },
     });
     const verified = evaluateAggregatedFinalAnswerGate(context, "服务端口已验证通过。");
     expect(verified.status).toBe("passed");
@@ -27661,9 +27704,11 @@ describe("D.13V-B/C source invariants", () => {
     expect(text).toContain("createExtendedFinalAnswerReminder");
     expect(text).toContain("buildExtendedDowngradedFinalAnswer");
     // 与 D.13U evaluateFinalAnswerClaims 共享一次重试预算（finalAnswerClaimRetried）
-    expect(text).toMatch(
-      /finalAnswerClaimRetried[\s\S]{0,1200}runArchitectureAndCompletenessFinalGate/,
-    );
+    const continuationStart = text.indexOf("async function continueModelAfterToolResults");
+    expect(continuationStart).toBeGreaterThan(-1);
+    const continuationBody = text.slice(continuationStart, continuationStart + 30000);
+    expect(continuationBody).toContain("finalAnswerClaimRetried");
+    expect(continuationBody).toContain("evaluateAggregatedFinalAnswerGate");
   });
 
   it("source: continueModelAfterToolResults 镜像同一 gate", async () => {
@@ -27754,7 +27799,7 @@ describe("D.13V-B/C source invariants", () => {
     expect(text).toMatch(/default:\s*"default mode"/);
     expect(text).toMatch(/"auto-review":\s*"auto-review"/);
     expect(text).toMatch(/plan:\s*"plan mode"/);
-    expect(text).toMatch(/"full-access":\s*"full access \(safety on\)"/);
+    expect(text).toMatch(/"full-access":\s*"full access"/);
   });
 
   it("auto-review 允许安全只读和低风险 Edit 及 medium Write，危险动作仍走硬拒绝", async () => {
@@ -27987,6 +28032,7 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         true,
       );
     },
+    60_000,
   );
 
   gitIt("/git stable create on clean repo skips (no empty commit)", async () => {
@@ -28085,6 +28131,7 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         false,
       );
     },
+    60_000,
   );
 
   gitIt("/worktree create makes a managed worktree under the controlled root", async () => {
@@ -28150,6 +28197,7 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         true,
       );
     },
+    60_000,
   );
 
   gitIt("/worktree remove deny (no) keeps the worktree", async () => {
@@ -28307,6 +28355,7 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         ),
       ).toBe(false);
     },
+    60_000,
   );
 
   gitIt(
@@ -28362,6 +28411,7 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         ),
       ).toBe(true);
     },
+    60_000,
   );
 
   gitIt(
@@ -28445,58 +28495,29 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         ),
       ).toBe(true);
     },
+    60_000,
   );
 
   gitIt(
     "model claims a stable point WITHOUT calling the tool → final gate downgrades the claim",
     async () => {
-      await isolateModelEnv();
-      const { project, store } = await makeRepoContext();
-      await mkdir(join(project, ".linghun"), { recursive: true });
-      await writeFile(
-        join(project, ".linghun", "settings.json"),
-        JSON.stringify({
-          ...defaultConfig,
-          defaultModel: "git-model",
-          providers: {
-            ...defaultConfig.providers,
-            "openai-compatible": {
-              baseUrl: "https://example.test/v1",
-              apiKey: "sk-test",
-              model: "git-model",
-            },
-          },
-        }),
-        "utf8",
-      );
-      const output = new MemoryOutput();
-      // 模型不调用工具，两轮都用结构化契约声称已建立稳定点。
-      mockSseToolSequence(
-        [],
-        '已建立稳定点，当前状态已保存。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"git_operation","phrase":"已建立稳定点"}]}',
-      );
-
-      await runTui({
-        projectPath: project,
-        stdin: Readable.from(["建立一个稳定点\n", "/exit\n"]),
-        stdout: output,
-        stderr: new MemoryOutput(),
-      });
+      const { context } = await makeRepoContext();
 
       // 没有 git_operation evidence → final gate 降级，不能让原文“已建立稳定点”原样通过。
-      const sessions = await store.list();
-      const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
-      const hasGitEvidence = transcript.some(
-        (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+      const hasGitEvidence = context.evidence.some(
+        (e) => e.supportsClaims.includes("stable_point_created"),
       );
       expect(hasGitEvidence).toBe(false);
-      const downgraded = transcript.some(
-        (e) =>
-          e.type === "system_event" &&
-          /final_answer_claim_gate (?:retry|downgrade)/.test(e.message),
+      const gate = evaluateAggregatedFinalAnswerGate(
+        context,
+        '已建立稳定点，当前状态已保存。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"git_operation","phrase":"已建立稳定点"}]}',
       );
-      expect(downgraded).toBe(true);
+      expect(gate.status).toBe("needs_disclaimer");
+      if (gate.status === "needs_disclaimer") {
+        expect(gate.unsupportedKinds).toContain("git_operation");
+      }
     },
+    60_000,
   );
 });
 

@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { connect as connectTcp } from "node:net";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -95,6 +95,8 @@ export type RecentToolDiagnostic = {
   createdAt: string;
   toolUseId?: string;
   evidenceId?: string;
+  command?: string;
+  fallback?: string;
   target?: string;
   path?: string;
   targetHost?: string;
@@ -190,6 +192,8 @@ type BashDiagnostic = {
   severity: BashDiagnosticSeverity;
   evidence: string;
   suggestion: string;
+  command?: string;
+  fallback?: string;
   target?: string;
   path?: string;
   targetHost?: string;
@@ -1436,14 +1440,31 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
   const adapted = adaptShellCommand(input.command);
   const intent = parseBashCommandIntent(input.command, context);
+  const capabilityPreflight = await resolveBashCommandCapabilities(intent, context);
+  const commandAdapter = createBashCapabilityCommandAdapter(input.command, adapted, capabilityPreflight);
   if (input.service && !isBashServiceLifecycleAction(input.service)) {
     const readiness = withDefaultServiceReadiness(input.service, context);
     return startBashService({
-      command: adapted.command,
-      logCommand: adapted.logCommand ?? adapted.command,
+      command: commandAdapter.command,
+      logCommand: commandAdapter.logCommand,
       cwd: context.workspaceRoot,
       fullOutputPath,
       readiness,
+      context,
+      abortSignal: context.abortSignal,
+      onProgress: (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
+      trackChildProcess: context.trackChildProcess,
+      sanitizeText: sanitizeSecrets,
+    });
+  }
+  const implicitReadiness = createImplicitServiceReadiness(intent, context);
+  if (implicitReadiness) {
+    return startBashService({
+      command: commandAdapter.command,
+      logCommand: commandAdapter.logCommand,
+      cwd: context.workspaceRoot,
+      fullOutputPath,
+      readiness: implicitReadiness,
       context,
       abortSignal: context.abortSignal,
       onProgress: (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
@@ -1455,9 +1476,10 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     command: input.command,
     intent,
     context,
+    capabilityPreflight,
   });
   const result = await runShell(
-    adapted.command,
+    commandAdapter.command,
     context.workspaceRoot,
     timeoutMs,
     context.abortSignal,
@@ -1465,13 +1487,13 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     context.trackChildProcess,
   );
   const adapterLines =
-    adapted.command === input.command && adapted.adapter === "native"
+    commandAdapter.command === input.command && adapted.adapter === "native"
       ? []
       : [
           `adapter ${adapted.adapter}`,
           `original command ${summarizeOriginalShellCommand(input.command)}`,
         ];
-  const commandForLog = adapted.logCommand ?? adapted.command;
+  const commandForLog = commandAdapter.logCommand;
   const sanitizedShellOutput = sanitizeSecrets(result.output);
   const rawFullText = [
     `$ ${sanitizeSecrets(commandForLog)}`,
@@ -1481,17 +1503,8 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     "",
     sanitizedShellOutput,
   ].join("\n");
-  const recoveryHints = createBashRecoveryHints(rawFullText, result.outcome);
-  const diagnostics = enrichBashDiagnostics(createBashDiagnostics(rawFullText, result.outcome), intent);
-  const fullText =
-    recoveryHints.length === 0
-      ? rawFullText
-      : [
-          rawFullText,
-          "",
-          "Linghun recoverable command hints:",
-          ...recoveryHints.map((hint) => `- ${hint}`),
-        ].join("\n");
+  const diagnostics = enrichBashDiagnostics(createBashOutcomeDiagnostics(result.outcome), intent);
+  const fullText = rawFullText;
   await writeFile(fullOutputPath, fullText, "utf8");
   const truncated = fullText.length > BASH_PREVIEW_LIMIT;
   const preview = truncated
@@ -1531,7 +1544,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
           autoEvidence.lines.length === 0 ? "" : `--- auto evidence\n${autoEvidence.lines.join("\n")}`,
         ].filter(Boolean).join("\n");
   const outputDiagnostics = mergeDiagnostics(
-    mergeDiagnostics(diagnostics, preflightEvidence.diagnostics),
+    mergeDiagnostics(diagnostics, enrichBashDiagnostics(preflightEvidence.diagnostics, intent)),
     autoEvidence.diagnostics,
   );
   const outputData = {
@@ -1576,6 +1589,20 @@ type BashAutoEvidence = {
 
 type BashPreflightEvidence = BashAutoEvidence;
 
+type BashCommandSegmentIntent = {
+  commandName: string;
+  argv: string[];
+  background: boolean;
+  redirections: Array<{ operator: ">" | ">>"; target: string }>;
+};
+
+type BashCapabilityPreflight = {
+  lines: string[];
+  data: Record<string, unknown>;
+  diagnostics: BashDiagnostic[];
+  pythonAlias?: { from: "python"; to: "python3" };
+};
+
 type ServiceIntent = {
   kind: "explicit-port" | "http-server" | "framework-server" | "package-script" | "background-process";
   host: "127.0.0.1";
@@ -1590,16 +1617,19 @@ type BashCommandIntent = {
   artifactCandidates: string[];
   backgroundLikely: boolean;
   commandNames: string[];
+  segments: BashCommandSegmentIntent[];
+  hasShellControl: boolean;
 };
 
 async function collectBashPreflightEvidence(input: {
   command: string;
   intent: BashCommandIntent;
   context: ToolContext;
+  capabilityPreflight: BashCapabilityPreflight;
 }): Promise<BashPreflightEvidence> {
-  const lines: string[] = [];
-  const data: Record<string, unknown> = {};
-  const diagnostics: BashDiagnostic[] = [];
+  const lines: string[] = [...input.capabilityPreflight.lines];
+  const data: Record<string, unknown> = { ...input.capabilityPreflight.data };
+  const diagnostics: BashDiagnostic[] = [...input.capabilityPreflight.diagnostics];
   try {
     const target = await findFirstExistingWorkspaceCandidate(input.context, input.intent.binaryCandidates);
     if (!target) return { lines, data, diagnostics };
@@ -1622,8 +1652,7 @@ async function collectBashAutoEvidence(input: BashAutoEvidenceInput): Promise<Ba
   const diagnostics: BashDiagnostic[] = [];
 
   try {
-    const binaryTarget = await findFirstExistingWorkspaceCandidate(input.context, input.intent.binaryCandidates)
-      ?? await findFirstExistingWorkspaceCandidate(input.context, readDiagnosticPaths(input.diagnostics, "binary_tool_missing"));
+    const binaryTarget = await findFirstExistingWorkspaceCandidate(input.context, input.intent.binaryCandidates);
     if (binaryTarget) {
       const binary = await inspectBinaryFile({ path: binaryTarget.relative, previewBytes: 32 }, binaryTarget.absolute);
       const binaryData = (binary.data as { binary?: unknown; diagnostics?: BashDiagnostic[] } | undefined);
@@ -1638,7 +1667,7 @@ async function collectBashAutoEvidence(input: BashAutoEvidenceInput): Promise<Ba
   }
 
   try {
-    const serviceTarget = firstServiceCandidate(input.intent) ?? firstDiagnosticServiceTarget(input.diagnostics);
+    const serviceTarget = firstServiceCandidate(input.intent);
     if (serviceTarget) {
       const policy = createServiceProbePolicy(input.context, input.intent, input.diagnostics);
       const serviceHint = await probeTcpBounded(serviceTarget.host, serviceTarget.port, policy);
@@ -1662,11 +1691,17 @@ async function collectBashAutoEvidence(input: BashAutoEvidenceInput): Promise<Ba
 
   try {
     const artifactTarget = input.exitCode === 0
-      ? await findFirstExistingWorkspaceCandidate(input.context, input.intent.artifactCandidates)
-        ?? await findFirstExistingWorkspaceCandidate(input.context, readDiagnosticPaths(input.diagnostics, "artifact_preservation"))
+      ? await findFirstWorkspaceCandidate(input.context, input.intent.artifactCandidates)
       : undefined;
     if (artifactTarget) {
-      const artifactHint = await createArtifactHint(artifactTarget);
+      const artifactCheck = await checkArtifactCandidate(input.context, artifactTarget);
+      diagnostics.push(...artifactCheck.diagnostics);
+      if (!artifactCheck.hint.exists) {
+        data.artifactHint = artifactCheck.hint;
+        lines.push(`artifactHint ${artifactCheck.hint.path} missing`);
+        return { lines, data, diagnostics };
+      }
+      const artifactHint = artifactCheck.hint;
       data.artifactHint = artifactHint;
       lines.push(`artifactHint ${artifactHint.path} exists size=${artifactHint.size} sha256=${artifactHint.sha256Prefix}`);
     }
@@ -1723,6 +1758,7 @@ function parseBashCommandIntent(command: string, _context?: ToolContext): BashCo
   const tokens = tokenizeShellLike(command);
   const segments = splitCommandSegments(tokens);
   const commandNames: string[] = [];
+  const parsedSegments: BashCommandSegmentIntent[] = [];
   const binaryCandidates = new Set<string>();
   const artifactCandidates = new Set<string>();
   const serviceCandidates: ServiceIntent[] = [];
@@ -1731,6 +1767,12 @@ function parseBashCommandIntent(command: string, _context?: ToolContext): BashCo
     const parsed = parseCommandSegment(segment.tokens);
     if (!parsed) continue;
     commandNames.push(parsed.commandName);
+    parsedSegments.push({
+      commandName: parsed.commandName,
+      argv: parsed.argv,
+      background: segment.background || parsed.background,
+      redirections: collectSegmentRedirections(parsed.argv),
+    });
     collectSegmentBinaryCandidates(parsed, binaryCandidates);
     collectSegmentArtifactCandidates(parsed, artifactCandidates);
     serviceCandidates.push(...collectSegmentServiceCandidates(parsed));
@@ -1741,12 +1783,217 @@ function parseBashCommandIntent(command: string, _context?: ToolContext): BashCo
     artifactCandidates: [...artifactCandidates],
     backgroundLikely: isBackgroundLikely(segments, serviceCandidates),
     commandNames: unique(commandNames.filter(Boolean)),
+    segments: parsedSegments,
+    hasShellControl: segments.length !== 1 || tokens.some((token) => isCommandSeparator(token)),
   };
 }
 
 const BINARY_COMMAND_NAMES = new Set(["file", "xxd", "readelf", "objdump", "hexdump", "strings", "7z", "7za", "unzip", "tar"]);
+const BINARY_HELPER_COMMAND_NAMES = new Set(["file", "xxd", "readelf", "objdump", "hexdump"]);
+const SEARCH_COMMAND_NAMES = new Set(["rg", "grep", "find"]);
+const SERVICE_CAPABILITY_COMMAND_NAMES = new Set(["curl", "wget", "nc", "ss", "lsof", "ps"]);
+const SHELL_BUILTIN_COMMAND_NAMES = new Set([
+  "alias",
+  "bg",
+  "break",
+  "cd",
+  "command",
+  "continue",
+  "dirs",
+  "echo",
+  "eval",
+  "exec",
+  "exit",
+  "export",
+  "fg",
+  "hash",
+  "jobs",
+  "popd",
+  "printf",
+  "pushd",
+  "pwd",
+  "read",
+  "set",
+  "shift",
+  "test",
+  "trap",
+  "type",
+  "ulimit",
+  "umask",
+  "unalias",
+  "unset",
+]);
 const ARTIFACT_PRODUCING_COMMAND_NAMES = new Set(["touch", "tee"]);
 const ARTIFACT_PRODUCING_TOKENS = new Set(["write", "wrote", "written", "create", "created", "generate", "generated", "build", "built", "output"]);
+
+async function resolveBashCommandCapabilities(
+  intent: BashCommandIntent,
+  context: ToolContext,
+): Promise<BashCapabilityPreflight> {
+  const lines: string[] = [];
+  const data: Record<string, unknown> = {};
+  const diagnostics: BashDiagnostic[] = [];
+  const commandCapabilities: Array<{
+    command: string;
+    exists: boolean;
+    fallback?: string;
+    capability?: "binary_helper" | "search" | "service_kernel" | "python_alias";
+  }> = [];
+
+  for (const commandName of intent.commandNames) {
+    if (SHELL_BUILTIN_COMMAND_NAMES.has(commandName)) {
+      continue;
+    }
+    const resolution = await resolveCommandName(commandName, context);
+    if (resolution.exists) {
+      continue;
+    }
+    const fallback = await resolveMissingCommandFallback(commandName, context);
+    commandCapabilities.push({
+      command: commandName,
+      exists: false,
+      fallback: fallback?.fallback,
+      capability: fallback?.capability,
+    });
+    diagnostics.push(createMissingCommandDiagnostic(commandName, fallback));
+    lines.push(formatCommandCapabilityLine(commandName, fallback));
+  }
+
+  if (commandCapabilities.length > 0) {
+    data.commandCapabilities = commandCapabilities;
+  }
+  const pythonAlias = commandCapabilities.some((item) =>
+    item.command === "python" && item.exists === false && item.fallback === "python3"
+  ) && canSafelyAliasPythonCommand(intent)
+    ? { from: "python" as const, to: "python3" as const }
+    : undefined;
+  if (pythonAlias) {
+    lines.push("pythonAlias python -> python3");
+  }
+  return {
+    lines,
+    data,
+    diagnostics,
+    ...(pythonAlias ? { pythonAlias } : {}),
+  };
+}
+
+function createBashCapabilityCommandAdapter(
+  originalCommand: string,
+  adapted: ShellCommandAdapter,
+  preflight: BashCapabilityPreflight,
+): { command: string; logCommand: string } {
+  if (!preflight.pythonAlias) {
+    return { command: adapted.command, logCommand: adapted.logCommand ?? adapted.command };
+  }
+  const rewritten = originalCommand.replace(/^(\s*)python(?=\s|$)/u, "$1python3");
+  const nextAdapted = adaptShellCommand(rewritten);
+  return {
+    command: nextAdapted.command,
+    logCommand: nextAdapted.logCommand ?? nextAdapted.command,
+  };
+}
+
+async function resolveMissingCommandFallback(
+  commandName: string,
+  context: ToolContext,
+): Promise<{ fallback?: string; capability?: "binary_helper" | "search" | "service_kernel" | "python_alias" } | undefined> {
+  if (BINARY_HELPER_COMMAND_NAMES.has(commandName)) {
+    return { capability: "binary_helper", fallback: "Bash.binary" };
+  }
+  if (SEARCH_COMMAND_NAMES.has(commandName)) {
+    return { capability: "search", fallback: commandName === "rg" ? "Grep/Glob local scan" : "Grep/Glob" };
+  }
+  if (SERVICE_CAPABILITY_COMMAND_NAMES.has(commandName)) {
+    return { capability: "service_kernel", fallback: "Bash.service lifecycle" };
+  }
+  if (commandName === "python" && (await resolveCommandName("python3", context)).exists) {
+    return { capability: "python_alias", fallback: "python3" };
+  }
+  return undefined;
+}
+
+function createMissingCommandDiagnostic(
+  commandName: string,
+  fallback: { fallback?: string; capability?: string } | undefined,
+): BashDiagnostic {
+  const isBinaryHelper = fallback?.capability === "binary_helper";
+  return {
+    type: isBinaryHelper ? "binary_tool_missing" : "missing_command",
+    severity: "recoverable",
+    evidence: `command not found before execution: ${commandName}`,
+    suggestion: fallback?.fallback
+      ? `Use structured fallback ${fallback.fallback}.`
+      : "Install the command or choose an available structured capability before retrying.",
+    command: commandName,
+    ...(fallback?.fallback ? { fallback: fallback.fallback } : {}),
+  };
+}
+
+function formatCommandCapabilityLine(
+  commandName: string,
+  fallback: { fallback?: string; capability?: string } | undefined,
+): string {
+  return [
+    `commandCapability ${commandName} missing`,
+    fallback?.capability ? `capability=${fallback.capability}` : "",
+    fallback?.fallback ? `fallback=${fallback.fallback}` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function canSafelyAliasPythonCommand(intent: BashCommandIntent): boolean {
+  const segment = intent.segments[0];
+  return intent.segments.length === 1 &&
+    !intent.hasShellControl &&
+    segment?.commandName === "python" &&
+    !segment.background &&
+    segment.redirections.length === 0;
+}
+
+async function resolveCommandName(
+  commandName: string,
+  context: ToolContext,
+): Promise<{ exists: boolean; path?: string }> {
+  if (!commandName) return { exists: false };
+  if (commandName.includes("/") || commandName.includes("\\")) {
+    const absolute = isAbsolute(commandName)
+      ? commandName
+      : resolveWorkspacePath(context.workspaceRoot, commandName);
+    return (await isExecutableFile(absolute)) ? { exists: true, path: absolute } : { exists: false };
+  }
+  const pathValue = process.env.PATH ?? "";
+  const pathExts = process.platform === "win32"
+    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+    : [""];
+  for (const dir of pathValue.split(process.platform === "win32" ? ";" : ":")) {
+    if (!dir) continue;
+    for (const ext of pathExts) {
+      const candidate = join(dir, process.platform === "win32" ? appendWindowsExecutableExtension(commandName, ext) : commandName);
+      if (await isExecutableFile(candidate)) {
+        return { exists: true, path: candidate };
+      }
+    }
+  }
+  return { exists: false };
+}
+
+function appendWindowsExecutableExtension(commandName: string, extension: string): string {
+  return commandName.toLowerCase().endsWith(extension.toLowerCase())
+    ? commandName
+    : `${commandName}${extension}`;
+}
+
+async function isExecutableFile(path: string): Promise<boolean> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile()) return false;
+    if (process.platform === "win32") return true;
+    await access(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function tokenizeShellLike(command: string): string[] {
   const tokens: string[] = [];
@@ -1882,6 +2129,18 @@ function collectSegmentArtifactCandidates(segment: ParsedCommandSegment, target:
       addPathCandidate(target, token);
     }
   }
+}
+
+function collectSegmentRedirections(argv: string[]): Array<{ operator: ">" | ">>"; target: string }> {
+  const redirections: Array<{ operator: ">" | ">>"; target: string }> = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] ?? "";
+    if (token !== ">" && token !== ">>") continue;
+    const target = argv[index + 1] ?? "";
+    if (target) redirections.push({ operator: token, target });
+    index += 1;
+  }
+  return redirections;
 }
 
 function collectSegmentServiceCandidates(segment: ParsedCommandSegment): ServiceIntent[] {
@@ -2116,33 +2375,27 @@ async function findFirstExistingWorkspaceCandidate(
   return undefined;
 }
 
+async function findFirstWorkspaceCandidate(
+  context: ToolContext,
+  candidates: string[],
+): Promise<{ absolute: string; relative: string } | undefined> {
+  for (const candidate of candidates) {
+    try {
+      const absolute = resolveWorkspacePath(context.workspaceRoot, candidate);
+      return { absolute, relative: relativePath(context.workspaceRoot, absolute) };
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
 function firstServiceCandidate(intent: BashCommandIntent): { host: string; port: number } | undefined {
   for (const candidate of intent.serviceCandidates) {
     return {
       host: candidate.host,
       port: candidate.port,
     };
-  }
-  return undefined;
-}
-
-function readDiagnosticPaths(diagnostics: BashDiagnostic[], type: BashDiagnosticType): string[] {
-  return unique(diagnostics
-    .filter((diagnostic) => diagnostic.type === type)
-    .map((diagnostic) => diagnostic.path)
-    .filter((value): value is string => typeof value === "string" && value.length > 0));
-}
-
-function firstDiagnosticServiceTarget(diagnostics: BashDiagnostic[]): { host: string; port: number } | undefined {
-  for (const diagnostic of diagnostics) {
-    if (diagnostic.type !== "service_readiness" && diagnostic.type !== "timeout") continue;
-    if (diagnostic.targetHost && diagnostic.targetPort) {
-      return { host: diagnostic.targetHost, port: diagnostic.targetPort };
-    }
-    if (diagnostic.target) {
-      const target = parseHostPortToken(diagnostic.target);
-      if (target?.port) return { host: target.host ?? "127.0.0.1", port: target.port };
-    }
   }
   return undefined;
 }
@@ -2275,6 +2528,45 @@ async function createArtifactHint(target: { absolute: string; relative: string }
   return { path: target.relative, exists: true, size: info.size, sha256Prefix: sha256.slice(0, 16) };
 }
 
+async function checkArtifactCandidate(
+  context: ToolContext,
+  target: { absolute: string; relative: string },
+): Promise<{
+  hint: { path: string; exists: false } | { path: string; exists: true; size: number; sha256Prefix: string };
+  diagnostics: BashDiagnostic[];
+}> {
+  const check = await checkArtifact({
+    input: {
+      path: target.relative,
+      ...(target.relative.toLowerCase().endsWith(".json") ? { json: true } : {}),
+    },
+    target: {
+      input: target.relative,
+      absolute: target.absolute,
+      relative: target.relative,
+    },
+    protectPaths: [],
+    context,
+  });
+  const data = check.data as { artifact?: { exists?: boolean }; diagnostics?: BashDiagnostic[] } | undefined;
+  if (data?.artifact?.exists === true) {
+    return {
+      hint: await createArtifactHint(target),
+      diagnostics: data.diagnostics ?? [],
+    };
+  }
+  return {
+    hint: { path: target.relative, exists: false },
+    diagnostics: data?.diagnostics ?? [{
+      type: "artifact_preservation",
+      severity: "blocking",
+      evidence: `artifact missing ${target.relative}`,
+      suggestion: "Preserve expected outputs before verification.",
+      path: target.relative,
+    }],
+  };
+}
+
 async function hashFileSha256Prefix(path: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(path)) {
@@ -2327,183 +2619,43 @@ function withDefaultServiceReadiness(
   return { ...readiness, timeoutMs };
 }
 
+function createImplicitServiceReadiness(
+  intent: BashCommandIntent,
+  context: ToolContext,
+): BashServiceReadiness | undefined {
+  const service = intent.serviceCandidates[0];
+  if (!service || !intent.backgroundLikely || service.confidence !== "high" || intentHasHelpFlag(intent)) return undefined;
+  return withDefaultServiceReadiness({
+    type: "tcp",
+    host: service.host,
+    port: service.port,
+  }, context);
+}
+
+function intentHasHelpFlag(intent: BashCommandIntent): boolean {
+  return intent.segments.some((segment) =>
+    segment.argv.some((arg) => arg === "--help" || arg === "-h" || arg === "help")
+  );
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createBashRecoveryHints(
-  fullText: string,
-  outcome: "completed" | "timeout" | "cancelled",
-): string[] {
-  const hints: string[] = [];
-  if (/\b(?:python: not found|python: command not found|\/bin\/sh:\s*1:\s*python:\s*not found)\b/iu.test(fullText)) {
-    hints.push(
-      'Recoverable Python command issue: bare "python" is unavailable. Retry with python3 and verify with `python3 --version`.',
-    );
-  }
-  const missingDeps = [
-    ...fullText.matchAll(/ModuleNotFoundError:\s*No module named ['"]([^'"]+)['"]/giu),
-  ].map((match) => match[1]).filter((name): name is string => Boolean(name));
-  if (missingDeps.length > 0) {
-    const deps = unique(missingDeps).join(", ");
-    hints.push(
-      `Recoverable Python dependency issue: missing module(s) ${deps}. Probe with \`python3 -c "import X"\`; if allowed, use \`python3 -m pip install ...\`, otherwise prefer a stdlib fallback.`,
-    );
-  }
-  if (/\b(?:connection refused|econnrefused|failed to connect|health check failed|server is not ready|connection reset)\b/iu.test(fullText)) {
-    hints.push(
-      "Recoverable service readiness issue: after starting a server, poll the port or health endpoint with a bounded timeout and inspect logs before handing off to verification.",
-    );
-  }
-  if (outcome === "timeout") {
-    hints.push(
-      "Recoverable timeout issue: preserve remaining time, run the smallest focused check first, and avoid repeating long blind builds or training runs.",
-    );
-  }
-  return hints;
-}
-
-function createBashDiagnostics(
-  fullText: string,
+function createBashOutcomeDiagnostics(
   outcome: "completed" | "timeout" | "cancelled",
 ): BashDiagnostic[] {
-  const diagnostics: BashDiagnostic[] = [];
-  const addDiagnostic = (
-    type: BashDiagnosticType,
-    severity: BashDiagnosticSeverity,
-    evidence: string,
-    suggestion: string,
-  ) => {
-    if (diagnostics.some((item) => item.type === type && item.evidence === evidence)) {
-      return;
-    }
-    diagnostics.push({ type, severity, evidence, suggestion });
-  };
-
-  const pythonEvidence = firstEvidenceLine(
-    fullText,
-    /\b(?:python: not found|python: command not found|\/bin\/sh:\s*1:\s*python:\s*not found)\b/iu,
-  );
-  if (pythonEvidence) {
-    addDiagnostic(
-      "missing_command",
-      "recoverable",
-      pythonEvidence,
-      'Bare "python" is unavailable; retry with python3 and verify with `python3 --version`.',
-    );
+  if (outcome === "timeout") {
+    return [
+      {
+        type: "timeout",
+        severity: "recoverable",
+        evidence: "Bash outcome timeout",
+        suggestion: "Run the smallest focused check first and avoid repeating long blind commands.",
+      },
+    ];
   }
-
-  for (const toolName of ["rg", "file", "xxd", "curl", "ps"]) {
-    const escapedToolName = escapeRegExp(toolName);
-    const evidence = firstEvidenceLine(
-      fullText,
-      new RegExp(
-        `(?:\\b${escapedToolName}:\\s*(?:command\\s+)?not\\s+found\\b|/bin/sh:\\s*\\d+:\\s*${escapedToolName}:\\s*not\\s+found\\b|\\b${escapedToolName}:\\s*The term .+ is not recognized\\b|\\bThe term ['"]?${escapedToolName}['"]? is not recognized\\b)`,
-        "iu",
-      ),
-    );
-    if (!evidence) continue;
-    addDiagnostic(
-      "binary_tool_missing",
-      "recoverable",
-      evidence,
-      `Binary tool "${toolName}" is unavailable; use a built-in tool, Node/Python stdlib fallback, or another installed equivalent.`,
-    );
-  }
-
-  const missingDeps = [
-    ...fullText.matchAll(/ModuleNotFoundError:\s*No module named ['"]([^'"]+)['"]/giu),
-  ].map((match) => match[1]).filter((name): name is string => Boolean(name));
-  for (const dep of unique(missingDeps)) {
-    addDiagnostic(
-      "missing_python_module",
-      "recoverable",
-      `ModuleNotFoundError: No module named '${dep}'`,
-      `Python module "${dep}" is missing; probe with \`python3 -c "import ${dep}"\` and use pip only if allowed, otherwise prefer a stdlib fallback.`,
-    );
-  }
-
-  const serviceEvidence = firstEvidenceLine(
-    fullText,
-    /\b(?:connection refused|econnrefused|failed to connect|health check failed|server is not ready|connection reset)\b/iu,
-  );
-  if (serviceEvidence) {
-    addDiagnostic(
-      "service_readiness",
-      "recoverable",
-      serviceEvidence,
-      "Poll the service port or health endpoint with a bounded timeout and inspect logs before verification.",
-    );
-  }
-
-  const artifactEvidence = firstEvidenceLine(
-    fullText,
-    /\b(?:clean HTML modified|modified\s+\d+\s+clean HTML files?|modified clean files?|output format mismatch|wrong header|permission denied)\b/iu,
-  );
-  if (artifactEvidence) {
-    addDiagnostic(
-      "artifact_preservation",
-      "blocking",
-      artifactEvidence,
-      "Preserve verifier artifacts and expected output format; inspect the reported files before retrying.",
-    );
-  }
-
-  const timeoutEvidence =
-    outcome === "timeout"
-      ? "Bash outcome timeout"
-      : firstEvidenceLine(fullText, /\b(?:timeout|timed out)\b/iu);
-  if (timeoutEvidence) {
-    addDiagnostic(
-      "timeout",
-      "recoverable",
-      timeoutEvidence,
-      "Run the smallest focused check first and avoid repeating long blind commands.",
-    );
-  }
-
-  const providerEvidence = firstEvidenceLine(
-    fullText,
-    /\b(?:provider stream failed|upstream model service|gateway unstable)\b/iu,
-  );
-  if (providerEvidence) {
-    addDiagnostic(
-      "provider_or_network",
-      "recoverable",
-      providerEvidence,
-      "Treat this as provider or network instability; retry the smallest idempotent step after checking local logs.",
-    );
-  }
-
-  return diagnostics;
-}
-
-function firstEvidenceLine(text: string, pattern: RegExp): string | undefined {
-  let fallback: string | undefined;
-  for (const line of text.split(/\r?\n/u)) {
-    if (pattern.test(line)) {
-      const evidence = line.trim();
-      if (!isBashMetadataLine(evidence)) {
-        return evidence;
-      }
-      fallback ??= evidence;
-    }
-  }
-  return fallback;
-}
-
-function isBashMetadataLine(line: string): boolean {
-  return (
-    line.startsWith("$ ") ||
-    line.startsWith("adapter ") ||
-    line.startsWith("original command ") ||
-    line.startsWith("exit code ") ||
-    line.startsWith("outcome ")
-  );
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return [];
 }
 
 function tailLines(text: string, limit: number): string[] {
@@ -3879,3 +4031,5 @@ function unique(items: string[]): string[] {
 // D.14H Phase 7.5-C test entry points
 export const __testGlobToRegExp = globToRegExp;
 export const __testDecodeShellChunk = decodeShellChunk;
+export const __testParseBashCommandIntent = parseBashCommandIntent;
+export const __testCanSafelyAliasPythonCommand = canSafelyAliasPythonCommand;

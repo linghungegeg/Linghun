@@ -299,7 +299,7 @@ function evaluateEngineeringFinalBoundary(
       assistantText,
     );
   if (!highRiskFinal && !signal.failureCategory) return { status: "passed" };
-  if (signal.failureCategory === "missing_artifact" && !hasArtifactEvidence(context, assistantText)) {
+  if (signal.failureCategory === "missing_artifact" && !hasArtifactEvidence(context)) {
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_missing_artifact"],
@@ -320,7 +320,7 @@ function evaluateEngineeringFinalBoundary(
       message: signal.finalBoundaryHint ?? "provider output was interrupted",
     };
   }
-  if (signal.profile === "binary_or_artifact" && highRiskFinal && !hasArtifactEvidence(context, assistantText)) {
+  if (signal.profile === "binary_or_artifact" && highRiskFinal && !hasArtifactEvidence(context)) {
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_artifact_unverified"],
@@ -354,21 +354,15 @@ function evaluateEngineeringFinalBoundary(
   return { status: "passed" };
 }
 
-function hasArtifactEvidence(context: TuiContext, assistantText: string): boolean {
+function hasArtifactEvidence(context: TuiContext): boolean {
   const signalTargets =
     context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
-  const targets = uniqueArtifactTargets([...signalTargets, ...extractArtifactTargets(assistantText)]);
+  const targets = uniqueArtifactTargets(signalTargets);
   return context.evidence.some((item) => {
-    const text = [item.summary, item.source, item.outputPath, item.fullOutputPath, ...item.supportsClaims]
-      .filter(Boolean)
-      .join(" ");
-    if (!/(?:artifact|output file|out\.txt|write|created|non-empty|产物|输出文件|已写入|wrote|saved)/iu.test(text)) {
-      return false;
-    }
-    if (targets.length === 0) {
-      return /(?:artifact|output file|out\.txt|non-empty|产物|输出文件)/iu.test(text);
-    }
-    return targets.some((target) => text.toLowerCase().includes(target.toLowerCase()));
+    const artifactHint = readEvidenceDataRecord(item, "artifactHint");
+    if (artifactHint?.exists !== true || typeof artifactHint.path !== "string") return false;
+    if (targets.length === 0) return true;
+    return targets.some((target) => pathsReferToSameArtifact(artifactHint.path as string, target));
   });
 }
 
@@ -381,23 +375,35 @@ function hasFullVerificationEvidence(context: TuiContext): boolean {
 }
 
 function hasServiceVerificationEvidence(context: TuiContext): boolean {
-  return context.evidence.some((item) =>
-    /health|healthcheck|curl|port\s+\d+|listen(?:ing)?|localhost:\d+|status\s*(?:200|ok|pass)|日志.*(?:正常|通过)|健康检查|端口.*(?:监听|通过|正常)/iu.test(
-      [item.summary, item.source, ...item.supportsClaims].join(" "),
-    ),
-  );
+  return context.evidence.some((item) => {
+    const service = readEvidenceDataRecord(item, "service");
+    const serviceHint = readEvidenceDataRecord(item, "serviceHint");
+    return service?.ready === true || serviceHint?.ready === true;
+  });
 }
 
-function extractArtifactTargets(text: string): string[] {
-  const targets = new Set<string>();
-  for (const match of text.matchAll(/(?:^|\s)(\/[A-Za-z0-9._/-]+\.[A-Za-z0-9._-]+)\b/gu)) {
-    targets.add(match[1]);
-    targets.add(match[1].split("/").filter(Boolean).at(-1) ?? match[1]);
-  }
-  for (const match of text.matchAll(/\b([A-Za-z0-9._-]+\.(?:txt|json|csv|bin|so|exe|out|patch|diff|md))\b/giu)) {
-    targets.add(match[1]);
-  }
-  return Array.from(targets).filter(Boolean);
+function readEvidenceDataRecord(
+  evidence: { data?: unknown },
+  key: "service" | "serviceHint" | "artifactHint",
+): Record<string, unknown> | undefined {
+  if (!evidence.data || typeof evidence.data !== "object") return undefined;
+  const value = (evidence.data as Record<string, unknown>)[key];
+  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
+
+function pathsReferToSameArtifact(actual: string, target: string): boolean {
+  const normalizedActual = normalizeArtifactEvidencePath(actual);
+  const normalizedTarget = normalizeArtifactEvidencePath(target);
+  return normalizedActual === normalizedTarget ||
+    basenameLike(normalizedActual) === basenameLike(normalizedTarget);
+}
+
+function normalizeArtifactEvidencePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+}
+
+function basenameLike(path: string): string {
+  return path.split("/").filter(Boolean).at(-1) ?? path;
 }
 
 function uniqueArtifactTargets(targets: string[]): string[] {
