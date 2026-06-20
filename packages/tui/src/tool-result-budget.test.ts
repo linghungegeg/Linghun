@@ -640,6 +640,79 @@ describe("tool_result budget", () => {
     expect(checkClaimSupport("ordinary final text", context as unknown as Parameters<typeof checkClaimSupport>[1]).status).toBe("passed");
   });
 
+  it("does not satisfy headless service contract from ordinary background Bash evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const context = {
+      projectPath: project,
+      evidence: [
+        {
+          id: "ev-background",
+          kind: "command_output",
+          source: "Bash",
+          summary: "ordinary background command started",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+          createdAt: new Date().toISOString(),
+          data: {
+            backgroundTaskId: "bg_1",
+            outputPath: "/tmp/bg_1.log",
+          },
+        },
+        {
+          id: "ev-service",
+          kind: "command_output",
+          source: "Bash",
+          summary: "service validation",
+          supportsClaims: ["Bash"],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      tools: {
+        headlessBench: { enabled: true },
+        validationContract: {
+          items: [
+            {
+              id: "service:127.0.0.1:8080",
+              kind: "service",
+              target: "127.0.0.1:8080",
+              requiredTool: "Bash.service",
+            },
+          ],
+        },
+        recentDiagnostics: [],
+      },
+      store: { appendEvent: async () => undefined },
+    };
+
+    const blocked = checkClaimSupport(
+      "ordinary final text",
+      context as unknown as Parameters<typeof checkClaimSupport>[1],
+    );
+    expect(blocked.status).toBe("needs_disclaimer");
+    expect(blocked.unsupportedClaims.join("\n")).toContain("missing explicit Bash.service");
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-validation-service-contract",
+      "call-validation-service-contract",
+      "Bash",
+      {
+        text: "service ok",
+        data: {
+          exitCode: 0,
+          service: {
+            target: "127.0.0.1:8080",
+            ready: true,
+            readiness: { ok: true, target: "127.0.0.1:8080" },
+          },
+        },
+      },
+      false,
+      "ev-service",
+    );
+
+    expect(checkClaimSupport("ordinary final text", context as unknown as Parameters<typeof checkClaimSupport>[1]).status).toBe("passed");
+  });
+
   it("keeps validation evidence in transcript tool_result content without diagnostics", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
     const events: unknown[] = [];

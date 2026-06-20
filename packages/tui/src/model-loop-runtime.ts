@@ -186,9 +186,75 @@ export function createToolInputSchema(name: ToolName): unknown {
       properties: {
         command: { type: "string" },
         timeoutMs: { type: "number" },
+        runInBackground: { type: "boolean" },
         run_in_background: { type: "boolean" },
+        service: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            action: { type: "string", enum: ["status", "probe", "logs", "stop", "fetch"] },
+            serviceId: { type: "string" },
+            type: { type: "string", enum: ["tcp", "http"] },
+            host: { type: "string" },
+            port: { type: "number" },
+            url: { type: "string" },
+            expectStatus: { type: "number" },
+            bodyContains: {
+              anyOf: [
+                { type: "string" },
+                { type: "array", items: { type: "string" } },
+              ],
+            },
+            timeoutMs: { type: "number" },
+            intervalMs: { type: "number" },
+            retry: { type: "number" },
+            tailBytes: { type: "number" },
+          },
+        },
+        artifact: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: { type: "string" },
+            expectHeader: { type: "string" },
+            expectMagic: { type: "string" },
+            json: { type: "boolean" },
+            executable: { type: "boolean" },
+            protectPaths: { type: "array", items: { type: "string" } },
+            text: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                exact: { type: "string" },
+                contains: {
+                  anyOf: [
+                    { type: "string" },
+                    { type: "array", items: { type: "string" } },
+                  ],
+                },
+                lineSet: { type: "array", items: { type: "string" } },
+              },
+            },
+            preserve: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                mode: { type: "string", enum: ["rawPreserve", "compareNormalizedHtml"] },
+                expectedPath: { type: "string" },
+                expectedText: { type: "string" },
+              },
+            },
+          },
+        },
+        binary: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: { type: "string" },
+            previewBytes: { type: "number" },
+          },
+        },
       },
-      required: ["command"],
     };
   }
   if (name === "Todo") {
