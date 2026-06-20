@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { checkClaimSupport } from "./final-answer-gate.js";
 import { appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
 import {
   type ToolResultBudgetState,
@@ -580,6 +581,173 @@ describe("tool_result budget", () => {
     expect(context.evidence[0]).toMatchObject({
       data: { service: { serviceId: "svc_1", target: "127.0.0.1:3000", ready: true } },
     });
+  });
+
+  it("attaches compact validation evidence to matching evidence records and unlocks final gate", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const context = {
+      projectPath: project,
+      evidence: [
+        {
+          id: "ev-validation",
+          kind: "command_output",
+          source: "Bash",
+          summary: "validation evidence",
+          supportsClaims: ["Bash"],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      tools: {
+        headlessBench: { enabled: true },
+        validationContract: {
+          items: [
+            { id: "artifact:out.txt", kind: "artifact", path: "out.txt", requiredTool: "Bash.artifact" },
+          ],
+        },
+        recentDiagnostics: [],
+      },
+      store: { appendEvent: async () => undefined },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-validation",
+      "call-validation",
+      "Bash",
+      {
+        text: "exit code 0",
+        data: {
+          exitCode: 0,
+          artifact: {
+            path: "out.txt",
+            exists: true,
+            checks: { text: { ok: true } },
+          },
+        },
+      },
+      false,
+      "ev-validation",
+    );
+
+    expect((context.evidence[0] as { data?: { validationEvidence?: unknown[] } }).data?.validationEvidence).toEqual([
+      expect.objectContaining({
+        kind: "artifact",
+        path: "out.txt",
+        tool: "Bash.artifact",
+        ok: true,
+      }),
+    ]);
+    expect(checkClaimSupport("ordinary final text", context as unknown as Parameters<typeof checkClaimSupport>[1]).status).toBe("passed");
+  });
+
+  it("keeps validation evidence in transcript tool_result content without diagnostics", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const events: unknown[] = [];
+    const context = {
+      projectPath: project,
+      tools: { recentDiagnostics: [] },
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-validation-artifact",
+      "call-validation-artifact",
+      "Bash",
+      {
+        text: "artifact ok",
+        data: {
+          exitCode: 0,
+          artifact: {
+            path: "out.txt",
+            exists: true,
+            raw: "ARTIFACT_RAW_SHOULD_NOT_REACH_TRANSCRIPT",
+            checks: { text: { ok: true, raw: "TEXT_RAW_SHOULD_NOT_REACH_TRANSCRIPT" } },
+          },
+        },
+      },
+      false,
+    );
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-validation-service",
+      "call-validation-service",
+      "Bash",
+      {
+        text: "service ok",
+        data: {
+          exitCode: 0,
+          service: {
+            target: "127.0.0.1:8000",
+            ready: true,
+            raw: "SERVICE_RAW_SHOULD_NOT_REACH_TRANSCRIPT",
+            fetch: { ok: true, status: 200, body: "BODY_SHOULD_NOT_REACH_TRANSCRIPT" },
+          },
+        },
+      },
+      false,
+    );
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-validation-binary",
+      "call-validation-binary",
+      "Bash",
+      {
+        text: "binary ok",
+        data: {
+          exitCode: 0,
+          binary: {
+            path: "a.out",
+            magic: "ELF",
+            raw: "BINARY_RAW_SHOULD_NOT_REACH_TRANSCRIPT",
+          },
+        },
+      },
+      false,
+    );
+
+    const data = events.map((event) => (event as { content?: { data?: unknown } }).content?.data);
+    expect(data).toEqual([
+      {
+        validationEvidence: [
+          expect.objectContaining({
+            kind: "artifact",
+            path: "out.txt",
+            tool: "Bash.artifact",
+            ok: true,
+            checks: { text: { ok: true } },
+          }),
+        ],
+      },
+      {
+        validationEvidence: [
+          expect.objectContaining({
+            kind: "service",
+            target: "127.0.0.1:8000",
+            tool: "Bash.service",
+            ok: true,
+            checks: { fetch: { ok: true, status: 200 } },
+          }),
+        ],
+      },
+      {
+        validationEvidence: [
+          expect.objectContaining({
+            kind: "binary",
+            path: "a.out",
+            tool: "Bash.binary",
+            ok: true,
+            checks: { magic: "ELF" },
+          }),
+        ],
+      },
+    ]);
+    expect(JSON.stringify(data)).not.toContain("SHOULD_NOT_REACH_TRANSCRIPT");
+    expect(context.tools.recentDiagnostics).toEqual([]);
   });
 
   it("does not change recentDiagnostics when tool result has no diagnostics", async () => {

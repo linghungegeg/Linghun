@@ -54,8 +54,21 @@ export type HeadlessBenchConfig = {
   testTimeoutMs: number;
   maxRepairAttempts: number;
   requiredArtifacts: string[];
+  validationContract?: ValidationContract;
   preflight: boolean;
   environmentSetupRetries: number;
+};
+
+export type ValidationContractItem = {
+  id: string;
+  kind: "artifact" | "service" | "preservation" | "binary";
+  path?: string;
+  target?: string;
+  requiredTool: "Bash.artifact" | "Bash.service" | "Bash.binary";
+};
+
+export type ValidationContract = {
+  items: ValidationContractItem[];
 };
 
 export type HeadlessBenchValidationResult =
@@ -144,6 +157,10 @@ export async function resolveHeadlessBenchConfig(input: {
     testTimeoutMs,
     maxRepairAttempts,
     requiredArtifacts,
+    validationContract: createValidationContract({
+      prompt: input.prompt,
+      requiredArtifacts,
+    }),
     preflight: input.options?.preflight ?? parseBoolean(env.LINGHUN_HEADLESS_PREFLIGHT) ?? true,
     environmentSetupRetries,
   };
@@ -178,6 +195,7 @@ export function createHeadlessBenchInitialPrompt(input: {
   const required = input.config.requiredArtifacts.length
     ? `Required artifacts detected: ${input.config.requiredArtifacts.join(", ")}. Verify they exist and are readable before final.`
     : "No explicit output artifact path was detected; still verify observable task completion.";
+  const contract = formatValidationContractPromptLines(input.config.validationContract);
   const test = input.config.testCommand
     ? `Official test command available: ${input.config.testCommand}. Prefer it over ad-hoc smoke tests before final.`
     : "No official test command was detected; use the strongest task-local verification available.";
@@ -188,6 +206,7 @@ export function createHeadlessBenchInitialPrompt(input: {
     "[Linghun headless bench guard]",
     test,
     required,
+    ...contract,
     preflight,
     formatInitialProfileStrategy(input.config.profile),
     "If rg is unavailable, use grep/find/sed/awk fallbacks instead of failing the task.",
@@ -352,6 +371,7 @@ export function createHeadlessBenchRepairPrompt(input: {
   maxAttempts: number;
   profile?: HeadlessBenchTaskProfile;
   preflight?: HeadlessEnvironmentPreflight;
+  validationContract?: ValidationContract;
 }): string {
   const artifactLine = input.failure.missingArtifacts?.length
     ? `Missing artifacts: ${input.failure.missingArtifacts.join(", ")}`
@@ -366,6 +386,7 @@ export function createHeadlessBenchRepairPrompt(input: {
     input.preflight?.missingTools.includes("rg")
       ? "rg is missing in this environment; use grep/find/sed/awk fallbacks."
       : "",
+    ...formatValidationContractPromptLines(input.validationContract),
     artifactLine,
     logLine,
     "",
@@ -377,6 +398,132 @@ export function createHeadlessBenchRepairPrompt(input: {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+export function createValidationContract(input: {
+  prompt: string;
+  requiredArtifacts: string[];
+}): ValidationContract {
+  const items: ValidationContractItem[] = [];
+  for (const path of input.requiredArtifacts) {
+    pushValidationContractItem(items, {
+      id: `artifact:${path}`,
+      kind: "artifact",
+      path,
+      requiredTool: "Bash.artifact",
+    });
+  }
+  for (const target of detectExplicitServiceTargets(input.prompt)) {
+    pushValidationContractItem(items, {
+      id: `service:${target}`,
+      kind: "service",
+      target,
+      requiredTool: "Bash.service",
+    });
+  }
+  if (hasPreservationRequirement(input.prompt)) {
+    for (const path of detectEngineeringArtifactTargets(input.prompt)) {
+      pushValidationContractItem(items, {
+        id: `preservation:${path}`,
+        kind: "preservation",
+        path,
+        requiredTool: "Bash.artifact",
+      });
+    }
+  }
+  for (const path of uniqueStrings([
+    ...input.requiredArtifacts.filter(isBinaryLikePath),
+    ...detectEngineeringArtifactTargets(input.prompt).filter((path) =>
+      isBinaryLikePath(path) || hasBinaryRequirementNearPath(input.prompt, path),
+    ),
+  ])) {
+    pushValidationContractItem(items, {
+      id: `binary:${path}`,
+      kind: "binary",
+      path,
+      requiredTool: "Bash.binary",
+    });
+  }
+  return { items };
+}
+
+function pushValidationContractItem(
+  items: ValidationContractItem[],
+  item: ValidationContractItem,
+): void {
+  if (items.some((existing) => existing.kind === item.kind && existing.path === item.path && existing.target === item.target)) {
+    return;
+  }
+  items.push(item);
+}
+
+function formatValidationContractPromptLines(contract: ValidationContract | undefined): string[] {
+  if (!contract?.items.length) return [];
+  return [
+    "Validation contract: before final, satisfy each item with the required explicit tool.",
+    ...contract.items.map((item) => {
+      const subject = item.path ?? item.target ?? item.id;
+      return `- ${item.kind}: ${subject}; required tool: ${item.requiredTool}`;
+    }),
+  ];
+}
+
+function detectExplicitServiceTargets(prompt: string): string[] {
+  const targets: string[] = [];
+  const urlPattern = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?:\/[^\s`"')\]}<>]*)?/giu;
+  for (const match of prompt.matchAll(urlPattern)) {
+    targets.push(normalizeServiceTarget(match[0]));
+  }
+  const hostPortPattern = /\b(?:localhost|127\.0\.0\.1):\d{1,5}\b/giu;
+  for (const match of prompt.matchAll(hostPortPattern)) {
+    targets.push(normalizeServiceTarget(match[0]));
+  }
+  if (hasExplicitServicePortContext(prompt)) {
+    const portPattern =
+      /\b(?:port\s+(\d{1,5})|listen(?:ing)?(?:\s+on)?\s+(?:port\s+)?(\d{1,5})|localhost\s+port\s+(\d{1,5})|127\.0\.0\.1\s+port\s+(\d{1,5}))\b/giu;
+    for (const match of prompt.matchAll(portPattern)) {
+      const port = match[1] ?? match[2] ?? match[3] ?? match[4];
+      if (port) targets.push(`127.0.0.1:${port}`);
+    }
+  }
+  return uniqueStrings(targets).filter(hasValidServicePort);
+}
+
+function hasExplicitServicePortContext(prompt: string): boolean {
+  return /\b(?:service|server|serve|listen|http|endpoint|health|localhost|127\.0\.0\.1)\b/iu.test(prompt);
+}
+
+function normalizeServiceTarget(value: string): string {
+  return value.replace(/[),.;!?]+$/u, "");
+}
+
+function hasValidServicePort(target: string): boolean {
+  try {
+    const url = target.startsWith("http://") || target.startsWith("https://")
+      ? new URL(target)
+      : new URL(`http://${target}`);
+    const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+    return Number.isInteger(port) && port > 0 && port <= 65_535;
+  } catch {
+    return false;
+  }
+}
+
+function hasPreservationRequirement(prompt: string): boolean {
+  return /(?:\bpreserve\b|\bclean\b|\boriginal\b|\bunchanged\b|don't modify|do not modify|不要修改|保持原样|保留原始)/iu.test(
+    prompt,
+  );
+}
+
+function isBinaryLikePath(path: string): boolean {
+  return /\.(?:bin|elf|so|dll|dylib|exe|o|a|class|wasm|7z|zip|tar|gz|xz|bz2)$/iu.test(path);
+}
+
+function hasBinaryRequirementNearPath(prompt: string, path: string): boolean {
+  const index = prompt.indexOf(path);
+  if (index < 0) return false;
+  const window = prompt.slice(Math.max(0, index - 80), Math.min(prompt.length, index + path.length + 80));
+  return /(?:\bbinary\b|\bELF\b|二进制)/iu.test(window);
 }
 
 function formatCommonBenchStabilityGuidance(): string[] {

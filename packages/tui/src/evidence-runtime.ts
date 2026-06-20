@@ -47,6 +47,15 @@ type CompactDiagnostic = {
   targetPort?: number;
 };
 
+type CompactValidationEvidence = {
+  kind: "artifact" | "service" | "preservation" | "binary";
+  path?: string;
+  target?: string;
+  tool: "Bash.artifact" | "Bash.service" | "Bash.binary";
+  ok: boolean;
+  checks?: Record<string, unknown>;
+};
+
 export function createEvidenceRecord(
   kind: EvidenceRecord["kind"],
   summary: string,
@@ -607,7 +616,7 @@ function summarizeToolEndOutputForTranscript(output: ToolOutput): ToolOutput {
     fullOutputPath: output.fullOutputPath,
     evidenceId: output.evidenceId,
     changedFiles: output.changedFiles,
-    data: compactDiagnosticsDataForTranscript(output.data),
+    data: compactToolStructuredDataForTranscript(output.data),
   };
 }
 
@@ -675,14 +684,31 @@ function compactToolOutputDataForTranscript(data: unknown): unknown {
     truncated: true,
     originalChars: serialized.length,
     preview: serialized.slice(0, TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS),
-    ...compactDiagnosticsDataForTranscript(data),
+    ...compactToolStructuredDataForTranscript(data),
   };
+}
+
+function compactToolStructuredDataForTranscript(data: unknown): Record<string, unknown> | undefined {
+  const compact: Record<string, unknown> = {};
+  const diagnostics = compactDiagnosticsDataForTranscript(data);
+  const validationEvidence = compactValidationEvidenceDataForTranscript(data);
+  if (diagnostics) Object.assign(compact, diagnostics);
+  if (validationEvidence) Object.assign(compact, validationEvidence);
+  return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
 function compactDiagnosticsDataForTranscript(data: unknown): { diagnostics: CompactDiagnostic[] } | undefined {
   const diagnostics = readDiagnosticsForTranscript(data);
   if (!diagnostics) return undefined;
   return { diagnostics };
+}
+
+function compactValidationEvidenceDataForTranscript(
+  data: unknown,
+): { validationEvidence: CompactValidationEvidence[] } | undefined {
+  const validationEvidence = readValidationEvidenceForTranscript(data);
+  if (!validationEvidence) return undefined;
+  return { validationEvidence };
 }
 
 function readDiagnosticsForTranscript(data: unknown): CompactDiagnostic[] | undefined {
@@ -843,6 +869,8 @@ function compactToolEvidenceData(data: unknown): Record<string, unknown> | undef
   for (const key of ["service", "serviceHint", "artifactHint", "binaryHint", "binaryPreflight"]) {
     if (record[key] !== undefined) compact[key] = record[key];
   }
+  const validationEvidence = readValidationEvidenceForTranscript(data);
+  if (validationEvidence) compact.validationEvidence = validationEvidence;
   return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
@@ -875,13 +903,127 @@ function appendToolResultContentDiagnostics(content: unknown): unknown {
   const output = content as ToolOutput;
   if (typeof output.text !== "string") return content;
   const diagnostics = formatToolDiagnosticsSummary(output);
-  if (!diagnostics) return content;
-  const compactDiagnostics = compactDiagnosticsDataForTranscript(output.data);
+  const compactData = compactToolStructuredDataForTranscript(output.data);
+  if (!diagnostics && !compactData) return content;
   return {
     ...output,
-    data: compactDiagnostics ? { ...(output.data as object), ...compactDiagnostics } : output.data,
-    text: appendCompactDiagnostics(output.text, diagnostics),
+    data: compactData,
+    text: diagnostics ? appendCompactDiagnostics(output.text, diagnostics) : output.text,
   };
+}
+
+function readValidationEvidenceForTranscript(data: unknown): CompactValidationEvidence[] | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const record = data as Record<string, unknown>;
+  const entries = [
+    readArtifactValidationEvidence(record),
+    readPreservationValidationEvidence(record),
+    readServiceValidationEvidence(record),
+    readBinaryValidationEvidence(record),
+  ].filter((item): item is CompactValidationEvidence => Boolean(item));
+  return entries.length > 0 ? entries : undefined;
+}
+
+function readArtifactValidationEvidence(record: Record<string, unknown>): CompactValidationEvidence | undefined {
+  const artifact = readRecord(record.artifact);
+  if (!artifact) return undefined;
+  const path = readString(artifact.path);
+  if (!path) return undefined;
+  return {
+    kind: "artifact",
+    path,
+    tool: "Bash.artifact",
+    ok: record.exitCode === 0 && artifact.exists === true && checksOk(readRecord(artifact.checks)),
+    ...(artifact.checks && typeof artifact.checks === "object" ? { checks: compactArtifactChecks(artifact.checks) } : {}),
+  };
+}
+
+function readPreservationValidationEvidence(record: Record<string, unknown>): CompactValidationEvidence | undefined {
+  const artifact = readRecord(record.artifact);
+  const checks = readRecord(artifact?.checks);
+  const preserve = readRecord(checks?.preserve);
+  const path = readString(artifact?.path);
+  if (!artifact || !checks || !preserve || !path) return undefined;
+  return {
+    kind: "preservation",
+    path,
+    tool: "Bash.artifact",
+    ok: record.exitCode === 0 && preserve.ok === true,
+    checks: { preserve: compactCheckRecord(preserve) },
+  };
+}
+
+function readServiceValidationEvidence(record: Record<string, unknown>): CompactValidationEvidence | undefined {
+  const service = readRecord(record.service);
+  if (!service) return undefined;
+  const target = readString(service.target) ?? readServiceTargetFromHostPort(service);
+  if (!target) return undefined;
+  const readiness = readRecord(service.readiness);
+  const fetch = readRecord(service.fetch);
+  return {
+    kind: "service",
+    target,
+    tool: "Bash.service",
+    ok: record.exitCode === 0 && (service.ready === true || readiness?.ok === true),
+    ...((readiness || fetch) ? { checks: { ...(readiness ? { readiness: compactCheckRecord(readiness) } : {}), ...(fetch ? { fetch: compactCheckRecord(fetch) } : {}) } } : {}),
+  };
+}
+
+function readBinaryValidationEvidence(record: Record<string, unknown>): CompactValidationEvidence | undefined {
+  const binary = readRecord(record.binary);
+  if (!binary) return undefined;
+  const path = readString(binary.path);
+  if (!path) return undefined;
+  return {
+    kind: "binary",
+    path,
+    tool: "Bash.binary",
+    ok: record.exitCode === 0,
+    checks: compactCheckRecord(binary),
+  };
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function readServiceTargetFromHostPort(service: Record<string, unknown>): string | undefined {
+  const host = readString(service.targetHost);
+  const port = typeof service.targetPort === "number" ? service.targetPort : undefined;
+  return host && port !== undefined ? `${host}:${port}` : undefined;
+}
+
+function checksOk(checks: Record<string, unknown> | undefined): boolean {
+  if (!checks) return true;
+  return Object.values(checks).every((value) => {
+    const check = readRecord(value);
+    return !check || check.ok !== false;
+  });
+}
+
+function compactArtifactChecks(value: unknown): Record<string, unknown> {
+  const checks = readRecord(value);
+  if (!checks) return {};
+  const compact: Record<string, unknown> = {};
+  for (const key of ["header", "json", "executable", "text", "preserve"]) {
+    const check = readRecord(checks[key]);
+    if (check) compact[key] = compactCheckRecord(check);
+  }
+  return compact;
+}
+
+function compactCheckRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const compact: Record<string, unknown> = {};
+  for (const key of ["ok", "mode", "status", "expectedStatus", "missingBody", "contains", "lineSet", "exact", "magic", "size"]) {
+    if (record[key] !== undefined) compact[key] = record[key];
+  }
+  return compact;
 }
 
 export async function budgetToolResultTranscriptContent(

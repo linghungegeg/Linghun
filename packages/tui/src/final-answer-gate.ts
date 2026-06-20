@@ -10,6 +10,7 @@ import {
   hasArchitectureEvidenceForClaims,
 } from "./model-loop-runtime.js";
 import type { EvidenceRecord, VerdictEvidenceScope } from "./tui-data-types.js";
+import type { ValidationContractItem } from "./headless-bench-runtime.js";
 
 export function needsSolutionCompletenessReportClosure(
   context: TuiContext,
@@ -235,14 +236,19 @@ function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
 
 export function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
   const headlessRisk = createHeadlessBenchDiagnosticRiskSummary(context);
+  const validationContractRisk = createHeadlessBenchValidationContractRiskSummary(context);
   // D.13U：只接受模型声明的结构化 claim 契约；不再维护自然语言短语表。
   const structuredClaims = extractStructuredFinalAnswerClaims(claim);
   if (structuredClaims.some((item) => item.kind === "beta_readiness")) {
     return {
       status: "needs_disclaimer",
-      unsupportedClaims: structuredClaims
-        .filter((item) => item.kind === "beta_readiness")
-        .map((item) => item.phrase),
+      unsupportedClaims: [
+        ...structuredClaims
+          .filter((item) => item.kind === "beta_readiness")
+          .map((item) => item.phrase),
+        ...(validationContractRisk ? [validationContractRisk] : []),
+        ...(headlessRisk ? [headlessRisk] : []),
+      ],
       verdict: createPhase15BetaVerdictScope(context.evidence),
     };
   }
@@ -252,7 +258,22 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     // 无结构化 claim 时，对"测试通过 / PASS / 已完成"等无证据高风险表述
     // 做最小匹配；普通低风险文本不误伤。
     const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
-    if (nlCheck.status !== "passed") return nlCheck;
+    if (nlCheck.status !== "passed") {
+      return {
+        ...nlCheck,
+        unsupportedClaims: [
+          ...nlCheck.unsupportedClaims,
+          ...(validationContractRisk ? [validationContractRisk] : []),
+          ...(headlessRisk ? [headlessRisk] : []),
+        ],
+      };
+    }
+    if (validationContractRisk) {
+      return {
+        status: "needs_disclaimer",
+        unsupportedClaims: [validationContractRisk],
+      };
+    }
     if (headlessRisk) {
       return {
         status: "needs_disclaimer",
@@ -272,6 +293,7 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
         status: "needs_disclaimer",
         unsupportedClaims: [
           ...extended.verdict.matchedClaims.map((item) => item.phrase),
+          ...(validationContractRisk ? [validationContractRisk] : []),
           ...(headlessRisk ? [headlessRisk] : []),
         ],
       };
@@ -279,6 +301,12 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
   }
   const verdict = evaluateFinalAnswerClaims(claim, context.evidence);
   if (verdict.status === "passed") {
+    if (validationContractRisk) {
+      return {
+        status: "needs_disclaimer",
+        unsupportedClaims: [validationContractRisk],
+      };
+    }
     if (headlessRisk) {
       return {
         status: "needs_disclaimer",
@@ -291,9 +319,94 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     status: "needs_disclaimer",
     unsupportedClaims: [
       ...structuredClaims.map((item) => item.phrase),
+      ...(validationContractRisk ? [validationContractRisk] : []),
       ...(headlessRisk ? [headlessRisk] : []),
     ],
   };
+}
+
+function createHeadlessBenchValidationContractRiskSummary(context: TuiContext): string | undefined {
+  const tools = context.tools as typeof context.tools & {
+    headlessBench?: { enabled?: boolean };
+    validationContract?: { items?: ValidationContractItem[] };
+  };
+  if (tools.headlessBench?.enabled !== true) return undefined;
+  const items = tools.validationContract?.items ?? [];
+  if (items.length === 0) return undefined;
+  const risks = items
+    .map((item) => summarizeValidationContractItemRisk(item, context.evidence))
+    .filter((risk): risk is string => Boolean(risk));
+  if (risks.length === 0) return undefined;
+  return `validation contract needs validation: ${risks.slice(0, 4).join("; ")}`;
+}
+
+function summarizeValidationContractItemRisk(
+  item: ValidationContractItem,
+  evidence: EvidenceRecord[],
+): string | undefined {
+  const matching = collectMatchingValidationEvidence(item, evidence);
+  if (matching.some((entry) => entry.ok === true)) return undefined;
+  const subject = item.path ?? item.target ?? item.id;
+  if (matching.some((entry) => entry.ok === false)) {
+    return `${item.kind} ${subject} failed explicit ${item.requiredTool}; needs_repair before final`;
+  }
+  return `${item.kind} ${subject} missing explicit ${item.requiredTool}`;
+}
+
+type ValidationEvidence = {
+  kind?: string;
+  path?: string;
+  target?: string;
+  tool?: string;
+  ok?: boolean;
+};
+
+function collectMatchingValidationEvidence(
+  item: ValidationContractItem,
+  evidence: EvidenceRecord[],
+): ValidationEvidence[] {
+  return evidence.flatMap((record) => readValidationEvidence(record)).filter((entry) =>
+    entry.kind === item.kind &&
+    entry.tool === item.requiredTool &&
+    validationEvidenceSubjectMatches(item, entry)
+  );
+}
+
+function readValidationEvidence(evidence: EvidenceRecord): ValidationEvidence[] {
+  if (!evidence.data || typeof evidence.data !== "object") return [];
+  const value = (evidence.data as Record<string, unknown>).validationEvidence;
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => entry && typeof entry === "object" ? entry as ValidationEvidence : undefined)
+    .filter((entry): entry is ValidationEvidence => Boolean(entry));
+}
+
+function validationEvidenceSubjectMatches(
+  item: ValidationContractItem,
+  evidence: ValidationEvidence,
+): boolean {
+  if (item.path) return normalizeValidationPath(evidence.path) === normalizeValidationPath(item.path);
+  if (item.target) return normalizeValidationTarget(evidence.target) === normalizeValidationTarget(item.target);
+  return false;
+}
+
+function normalizeValidationPath(path: string | undefined): string | undefined {
+  if (!path) return undefined;
+  return path.replace(/\\/gu, "/").replace(/\/$/u, "");
+}
+
+function normalizeValidationTarget(target: string | undefined): string | undefined {
+  if (!target) return undefined;
+  try {
+    const url = target.startsWith("http://") || target.startsWith("https://")
+      ? new URL(target)
+      : new URL(`http://${target}`);
+    const port = url.port || (url.protocol === "https:" ? "443" : "80");
+    const path = target.startsWith("http://") || target.startsWith("https://") ? url.pathname.replace(/\/$/u, "") : "";
+    return `${url.hostname}:${port}${path}`;
+  } catch {
+    return target.replace(/\/$/u, "");
+  }
 }
 
 function createHeadlessBenchDiagnosticRiskSummary(context: TuiContext): string | undefined {

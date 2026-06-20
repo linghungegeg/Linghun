@@ -755,6 +755,7 @@ import {
 import {
   type HeadlessBenchOptions,
   type HeadlessBenchValidationResult,
+  type ValidationContract,
   collectHeadlessArtifactChecklist,
   createHeadlessBenchInitialPrompt,
   createHeadlessBenchRepairPrompt,
@@ -1543,9 +1544,16 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     projectPath,
     ...(options.bench ? { options: options.bench } : {}),
   });
-  (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+  const headlessTools = context.tools as typeof context.tools & {
+    headlessBench?: { enabled: boolean };
+    validationContract?: ValidationContract;
+  };
+  headlessTools.headlessBench = {
     enabled: benchConfig.enabled,
   };
+  if (benchConfig.enabled && benchConfig.validationContract) {
+    headlessTools.validationContract = benchConfig.validationContract;
+  }
   const benchPreflight =
     benchConfig.enabled && benchConfig.preflight
       ? await runHeadlessEnvironmentPreflight(projectPath)
@@ -1702,6 +1710,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           maxAttempts: benchConfig.maxRepairAttempts,
           profile: benchConfig.profile,
           ...(benchPreflight ? { preflight: benchPreflight } : {}),
+          ...(benchConfig.validationContract ? { validationContract: benchConfig.validationContract } : {}),
         });
         const repairStatus = await runOneRequest(repairPrompt);
         if (repairStatus.exitCode !== undefined) {
