@@ -610,6 +610,8 @@ function formatCommonBenchStabilityGuidance(): string[] {
     "Services: after starting HTTP/gRPC/server processes, poll the port or health endpoint with a bounded timeout and inspect logs before final verification.",
     "Time budget: build the smallest verifiable solution first, run focused checks early, and avoid long blind builds/training runs near the deadline.",
     "Verifier alignment: read task-local tests/verifier expectations and confirm output path, filename, port, and answer format instead of only matching examples.",
+    "Preservation tasks: when unchanged/clean/original content must survive, avoid parser/serializer round-trips unless tests allow reformatting; make targeted edits and compare preserved regions.",
+    "Answer extraction: inspect tests/expected files for required count, ordering, and multi-line answers; do not stop at the first plausible value when the verifier expects multiple outputs.",
   ];
 }
 

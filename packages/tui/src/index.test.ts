@@ -2813,6 +2813,7 @@ describe("runHeadlessTask", () => {
     );
     expect(prompt).toContain("Validation contract");
     expect(prompt).toContain('"service": { "action": "fetch"');
+    expect(prompt).toContain("avoid parser/serializer round-trips");
   });
 
   it("Bash model schema requires concrete validation mode fields", () => {
@@ -3237,6 +3238,7 @@ describe("runHeadlessTask", () => {
     expect(profile).toBe("binary_or_artifact");
     expect(benchPrompt).toContain("file/strings/hexdump/ldd/run mode");
     expect(benchPrompt).toContain("Verify they exist and are readable before final");
+    expect(benchPrompt).toContain("required count, ordering, and multi-line answers");
     expect(normalPrompt).toBe("hello");
   });
 
