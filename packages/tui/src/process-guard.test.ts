@@ -224,6 +224,25 @@ describe("ProcessGuard", () => {
     expect(guard.snapshot()).toEqual([{ pid: 5007, detached: true }]);
   });
 
+  it("excludes retained process groups from active snapshots", () => {
+    const registry = new ProcessGuardRegistry();
+    const retained = createFakeChild(5008);
+    const active = createFakeChild(5009);
+    const guard = createProcessGuard(registry, { platform: "linux" });
+
+    guard.track(retained, { detached: true, retainAfterExit: true, label: "retained-service" });
+    guard.track(active, { detached: true, label: "active-child" });
+    retained.emitExit();
+
+    expect(registry.activeSnapshot()).toEqual([{ pid: 5009, detached: true, label: "active-child" }]);
+    expect(guard.snapshot()).toEqual(
+      expect.arrayContaining([
+        { pid: 5008, detached: true, label: "retained-service" },
+        { pid: 5009, detached: true, label: "active-child" },
+      ]),
+    );
+  });
+
   it("documents exit cleanup as synchronous best-effort only", () => {
     const registry = new ProcessGuardRegistry();
     const child = createFakeChild(5004);

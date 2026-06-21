@@ -381,8 +381,9 @@ import {
 } from "./mcp-stdio-runtime.js";
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import {
+  cleanupTrackedProcessesForExit,
   createProcessGuard,
-  getTrackedProcessSnapshot,
+  getActiveTrackedProcessSnapshot,
   installProcessGuardExitHandlers,
   requestTrackedProcessStop,
   trackChildProcess,
@@ -2064,9 +2065,9 @@ async function finishHeadlessRuntime(context: TuiContext): Promise<{ ok: boolean
   context.interrupt = { type: "idle" };
   clearRequestActivity(context);
   context.activeAbortController = undefined;
-  const stopResult = requestTrackedProcessStop(true);
+  const stopResult = cleanupTrackedProcessesForExit();
   await sleep(HEADLESS_CLEANUP_SETTLE_MS);
-  const stillTracked = getTrackedProcessSnapshot();
+  const stillTracked = getActiveTrackedProcessSnapshot();
   if (stopResult.failures.length > 0) {
     return {
       ok: false,

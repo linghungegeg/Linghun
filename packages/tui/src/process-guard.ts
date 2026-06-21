@@ -102,6 +102,16 @@ export class ProcessGuardRegistry {
     }));
   }
 
+  activeSnapshot(): ReturnType<ProcessGuardRegistry["snapshot"]> {
+    return Array.from(this.tracked.values())
+      .filter((entry) => !entry.retainAfterExit)
+      .map((entry) => ({
+        pid: entry.pid,
+        detached: entry.detached,
+        label: entry.label,
+      }));
+  }
+
   stopAll(
     kind: ProcessGuardStopKind,
     force: boolean,
@@ -209,6 +219,10 @@ export function consumeProcessGuardStopResultsForTest(): ProcessGuardStopResult[
 
 export function getTrackedProcessSnapshot(): ReturnType<ProcessGuardRegistry["snapshot"]> {
   return defaultRegistry.snapshot();
+}
+
+export function getActiveTrackedProcessSnapshot(): ReturnType<ProcessGuardRegistry["snapshot"]> {
+  return defaultRegistry.activeSnapshot();
 }
 
 export function installProcessGuardExitHandlers(): void {
