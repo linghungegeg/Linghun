@@ -2815,6 +2815,8 @@ describe("runHeadlessTask", () => {
     expect(prompt).toContain('"service": { "action": "fetch"');
     expect(prompt).toContain("match validation commands to the artifact language or file type");
     expect(prompt).toContain("avoid parser/serializer round-trips");
+    expect(prompt).toContain("negative clean-sample checks");
+    expect(prompt).toContain("multiple equally optimal or valid answers");
   });
 
   it("Bash model schema requires concrete validation mode fields", () => {

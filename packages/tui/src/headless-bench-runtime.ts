@@ -612,7 +612,9 @@ function formatCommonBenchStabilityGuidance(): string[] {
     "Verifier alignment: read task-local tests/verifier expectations and confirm output path, filename, port, and answer format instead of only matching examples.",
     "Artifact checks: match validation commands to the artifact language or file type; do not run shell syntax checks on Python/JS/C++ source files.",
     "Preservation tasks: when unchanged/clean/original content must survive, avoid parser/serializer round-trips unless tests allow reformatting; make targeted edits and compare preserved regions.",
+    "Sanitizer/filter tasks: run negative clean-sample checks that compare parser-normalized or whitespace-stripped output against the original; unsafe-case smoke tests alone are not enough.",
     "Answer extraction: inspect tests/expected files for required count, ordering, and multi-line answers; do not stop at the first plausible value when the verifier expects multiple outputs.",
+    "Puzzle answer tasks: if multiple equally optimal or valid answers can exist and the output format allows a list, enumerate all required answers rather than a single example.",
   ];
 }
 
