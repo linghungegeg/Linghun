@@ -632,7 +632,7 @@ export async function executeApprovedModelToolUse(
   if (preflight) {
     writeLine(output, preflight);
   }
-  if (toolName === "Bash") {
+  if (toolName === "Bash" && shouldTrackBashAsBackground(toolCall.input)) {
     const guard = checkBackgroundStartGuard(context, "bash", true);
     if (guard) {
       const evidence = await recordToolFailureEvidence(context, sessionId, toolName, guard);

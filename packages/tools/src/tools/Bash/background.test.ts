@@ -198,6 +198,8 @@ describe("Bash background execution (Stage 7+8)", () => {
   it("headless run_in_background retains a service process after returning", async () => {
     const context = createToolContext(project);
     context.isHeadlessBench = true;
+    const completions: BashBackgroundResult[] = [];
+    context.onBackgroundBashComplete = (r) => completions.push(r);
     const port = 45_000 + Math.floor(Math.random() * 1_000);
     const pidFile = join(project, "service.pid");
     const script = [
@@ -215,6 +217,17 @@ describe("Bash background execution (Stage 7+8)", () => {
     );
 
     expect(result.output.data).toHaveProperty("backgroundTaskId");
+    await vi.waitFor(
+      async () => {
+        expect(completions).toHaveLength(1);
+      },
+      { timeout: 5_000, interval: 50 },
+    );
+    expect(completions[0]).toMatchObject({
+      exitCode: 0,
+      outcome: "completed",
+      outputPath: (result.output.data as { outputPath: string }).outputPath,
+    });
     await vi.waitFor(
       async () => {
         await expect(connectsToLocalPort(port)).resolves.toBe(true);

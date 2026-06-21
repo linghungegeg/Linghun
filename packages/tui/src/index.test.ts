@@ -22,9 +22,11 @@ import { computePromptCacheHitRate } from "@linghun/core";
 import type { ModelMessage } from "@linghun/providers";
 import { type ToolOutput, createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { finishBackgroundTaskFromToolOutput } from "./background-control-runtime.js";
 import { formatCompactStatus } from "./cache-command-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
 import { createDeepCompactPacket, formatDeepCompactPromptSummary } from "./deep-compact-runtime.js";
+import { createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
 import {
   buildFailureLearningSummaryForPrompt,
   loadFailureRecords,
@@ -19164,6 +19166,37 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("foreground commands completed");
   });
 
+  it("model-facing foreground Bash can run while a retained background Bash service is active", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
+    context.modelGateway = createModelGateway(config);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("bash", {
+        id: "retained-service",
+        title: "Bash: python3 -m http.server 8080",
+      }),
+    ];
+    const gateway = context.modelGateway;
+    const requests = mockOpenAiToolSequence(
+      [
+        { toolName: "Bash", input: { command: "node -e \"console.log('validation-ok')\"" } },
+      ],
+      "foreground validation completed",
+    );
+
+    await __testSendMessage("验证已有后台服务", context, gateway, output);
+
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(output.text).toContain("validation-ok");
+    expect(output.text).toContain("foreground validation completed");
+    expect(output.text).not.toContain("并发上限");
+  });
+
   it("/interrupt followed by child exit cleans backgroundBashTaskMap via onBackgroundBashComplete", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -19278,6 +19311,58 @@ describe("Phase 06 TUI slash commands", () => {
     expect(bgUpdates.length).toBeGreaterThanOrEqual(1);
     const lastBgUpdate = bgUpdates.at(-1) as { task?: { cancelState?: string } };
     expect(lastBgUpdate?.task?.cancelState).toBe("confirmed_exited");
+  });
+
+  it("retained background Bash completion releases the TUI background slot", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.backgroundBashTaskMap = new Map();
+    const task = createBackgroundTaskFixture("bash", { id: "retained-bash-release" });
+    context.backgroundTasks = [task];
+    const toolsTaskId = "tools-layer-retained-service";
+    context.backgroundBashTaskMap.set(toolsTaskId, task.id);
+    context.backgroundAbortControllers = new Map([[task.id, new AbortController()]]);
+
+    context.tools.onBackgroundBashComplete = (result) => {
+      const tuiTaskId = context.backgroundBashTaskMap?.get(result.taskId);
+      if (!tuiTaskId) return;
+      context.backgroundBashTaskMap?.delete(result.taskId);
+      context.backgroundAbortControllers?.delete(tuiTaskId);
+      const t = context.backgroundTasks.find((bt) => bt.id === tuiTaskId);
+      if (!t) return;
+      if (t.status === "running") {
+        const fakeOutput = {
+          text: `exit ${result.exitCode} (${result.outcome})`,
+          data: { exitCode: result.exitCode, outcome: result.outcome },
+          fullOutputPath: result.outputPath,
+        };
+        finishBackgroundTaskFromToolOutput(t, fakeOutput as never, context);
+      }
+      const evidence = createEvidenceRecord(
+        "command_output",
+        `Bash(background): ${result.command}; exit=${result.exitCode} ${result.outcome}`,
+        result.outputPath,
+        result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
+      );
+      rememberEvidence(context, evidence);
+    };
+
+    context.tools.onBackgroundBashComplete({
+      taskId: toolsTaskId,
+      exitCode: 0,
+      outcome: "completed",
+      outputPath: join(project, "retained-service.log"),
+      command: "python3 -m http.server 8080",
+    });
+
+    expect(task.status).toBe("completed");
+    expect(task.result).toBe("pass");
+    expect(context.backgroundBashTaskMap.size).toBe(0);
+    expect(context.backgroundAbortControllers!.size).toBe(0);
+    expect(context.evidence[0]?.supportsClaims).toContain("background_bash_pass");
   });
 
   it("abort/timeout kills background Bash child — no zombie process remains", async () => {

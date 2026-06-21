@@ -2239,7 +2239,7 @@ function normalizeHostPort(host: string, port: number): { host: string; port: nu
 
 function isHeadlessBenchContext(context: ToolContext): boolean {
   const record = context as ToolContext & { headlessBench?: { enabled?: boolean } };
-  return record.headlessBench?.enabled === true;
+  return record.headlessBench?.enabled === true || record.isHeadlessBench === true;
 }
 
 function withDefaultServiceReadiness(
@@ -3587,6 +3587,13 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
       cwd,
       label: `BashBg:${command.slice(0, 80)}`,
       retainAfterExit: true,
+    });
+    onComplete?.({
+      taskId,
+      exitCode: 0,
+      outcome: "completed",
+      outputPath: fullOutputPath,
+      command: sanitizeSecrets(originalCommand),
     });
     return;
   }
