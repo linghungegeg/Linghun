@@ -2813,6 +2813,7 @@ describe("runHeadlessTask", () => {
     );
     expect(prompt).toContain("Validation contract");
     expect(prompt).toContain('"service": { "action": "fetch"');
+    expect(prompt).toContain("match validation commands to the artifact language or file type");
     expect(prompt).toContain("avoid parser/serializer round-trips");
   });
 
