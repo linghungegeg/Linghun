@@ -455,7 +455,9 @@ function commandOrVerificationEvidenceHasSemanticProbe(record: EvidenceRecord, t
   if (record.kind === "test_result" && record.supportsClaims.includes("verification_passed")) return true;
   if (record.kind !== "command_output") return false;
   if (!record.supportsClaims.includes("bash_exit_0")) return false;
-  const haystack = `${record.summary}\n${record.source}`.toLowerCase();
+  const semanticProbe = readRecord(readEvidenceDataRecord(record, "semanticProbe"));
+  const semanticProbeTokens = readStringList(semanticProbe?.tokens);
+  const haystack = `${record.summary}\n${record.source}\n${semanticProbeTokens.join("\n")}`.toLowerCase();
   const matchedTokens = tokens.filter((token) => haystack.includes(token.toLowerCase()));
   return matchedTokens.length >= Math.min(2, tokens.length);
 }
@@ -551,7 +553,7 @@ function readDiagnosticServiceTarget(diagnostic: StructuredDiagnosticRisk): stri
 
 function readEvidenceDataRecord(
   evidence: EvidenceRecord,
-  key: "service" | "serviceHint" | "artifactHint" | "binaryHint" | "binaryPreflight",
+  key: "service" | "serviceHint" | "artifactHint" | "binaryHint" | "binaryPreflight" | "semanticProbe",
 ): Record<string, unknown> | undefined {
   if (!evidence.data || typeof evidence.data !== "object") return undefined;
   const value = (evidence.data as Record<string, unknown>)[key];

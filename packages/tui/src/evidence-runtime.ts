@@ -56,6 +56,10 @@ type CompactValidationEvidence = {
   checks?: Record<string, unknown>;
 };
 
+type CompactSemanticProbeEvidence = {
+  tokens: string[];
+};
+
 export function createEvidenceRecord(
   kind: EvidenceRecord["kind"],
   summary: string,
@@ -319,17 +323,24 @@ export async function recordToolEvidence(
     name === "SourcePack" ||
     name === "Grep" ||
     name === "Glob";
+  const supportsClaims = [
+    ...deriveToolSupportsClaims(name, input, output),
+    ...(readOnlyEvidence ? ["readonly_low_noise_evidence"] : []),
+  ];
   const evidence = createEvidenceRecord(
     kind,
     readOnlyEvidence
       ? formatReadOnlyToolEvidenceSummary(name, output, input)
       : `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
     output.fullOutputPath ?? name,
-    [
-      ...deriveToolSupportsClaims(name, input, output),
-      ...(readOnlyEvidence ? ["readonly_low_noise_evidence"] : []),
-    ],
+    supportsClaims,
   );
+  const semanticProbe = supportsClaims.includes("bash_exit_0")
+    ? compactSemanticProbeEvidence(context, output, input)
+    : undefined;
+  if (semanticProbe) {
+    evidence.data = { ...(typeof evidence.data === "object" && evidence.data ? evidence.data : {}), semanticProbe };
+  }
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
@@ -874,6 +885,56 @@ function compactToolEvidenceData(data: unknown): Record<string, unknown> | undef
   const validationEvidence = readValidationEvidenceForTranscript(data);
   if (validationEvidence) compact.validationEvidence = validationEvidence;
   return Object.keys(compact).length > 0 ? compact : undefined;
+}
+
+function compactSemanticProbeEvidence(
+  context: TuiContext,
+  output: ToolOutput,
+  input: unknown,
+): CompactSemanticProbeEvidence | undefined {
+  const tokens = collectSemanticContractTokens(context);
+  if (tokens.length === 0) return undefined;
+  if (!looksLikeServiceProbeCommand(input)) return undefined;
+  const haystack = [output.text, output.summary, output.preview]
+    .filter((item): item is string => typeof item === "string" && item.length > 0)
+    .join("\n")
+    .toLowerCase();
+  if (!haystack) return undefined;
+  const matched = tokens.filter((token) => haystack.includes(token.toLowerCase()));
+  const required = Math.min(2, tokens.length);
+  if (matched.length < required) return undefined;
+  return { tokens: matched.slice(0, 12) };
+}
+
+function looksLikeServiceProbeCommand(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const command = (input as Record<string, unknown>).command;
+  if (typeof command !== "string") return false;
+  return /\b(?:curl|wget|http|httpie|python|python3|node|deno|ruby|perl|php)\b|(?:requests|fetch|urllib|http\.client|axios|localhost|127\.0\.0\.1)/iu.test(
+    command,
+  );
+}
+
+function collectSemanticContractTokens(context: TuiContext): string[] {
+  const tools = context.tools as typeof context.tools & {
+    headlessBench?: { enabled?: boolean };
+    validationContract?: {
+      items?: Array<{ kind?: unknown; validation?: unknown; semanticTokens?: unknown }>;
+    };
+  };
+  if (tools.headlessBench?.enabled !== true) return [];
+  const tokens = new Set<string>();
+  for (const item of tools.validationContract?.items ?? []) {
+    if (item.kind !== "service" || item.validation !== "semantic" || !Array.isArray(item.semanticTokens)) {
+      continue;
+    }
+    for (const token of item.semanticTokens) {
+      if (typeof token === "string" && token.trim()) {
+        tokens.add(token.trim());
+      }
+    }
+  }
+  return [...tokens];
 }
 
 function rememberRecentDiagnostics(

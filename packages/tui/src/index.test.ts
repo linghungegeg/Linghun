@@ -2640,6 +2640,62 @@ describe("runHeadlessTask", () => {
     expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
   });
 
+  it("validation contract final gate allows semantic service with compact probe evidence data", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-semantic-data-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    Object.assign(context.tools, {
+      headlessBench: { enabled: true },
+      validationContract: {
+        items: [
+          {
+            id: "service:http://127.0.0.1:5000/sentiment",
+            kind: "service",
+            target: "http://127.0.0.1:5000/sentiment",
+            validation: "semantic",
+            semanticTokens: ["sentiment", "confidence", "positive", "negative"],
+            requiredTool: "Bash.service",
+          },
+        ],
+      },
+    });
+    context.evidence.push({
+      id: "service-readiness-pass",
+      kind: "command_output",
+      source: "Bash",
+      summary: "service explicit fetch",
+      supportsClaims: ["Bash"],
+      createdAt: new Date().toISOString(),
+      data: {
+        validationEvidence: [
+          {
+            kind: "service",
+            target: "http://127.0.0.1:5000/sentiment",
+            tool: "Bash.service",
+            ok: true,
+            checks: { fetch: { status: 200 } },
+          },
+        ],
+      },
+    });
+    context.evidence.push({
+      id: "semantic-probe-pass",
+      kind: "command_output",
+      source: "Bash",
+      summary: "Bash: exit code 0; long output stored compactly",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+      createdAt: new Date().toISOString(),
+      data: {
+        semanticProbe: {
+          tokens: ["sentiment", "confidence", "positive", "negative"],
+        },
+      },
+    });
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
+  });
+
   it("validation contract final gate blocks preservation without explicit preserve evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-preserve-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

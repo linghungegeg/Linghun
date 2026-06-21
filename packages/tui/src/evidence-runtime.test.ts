@@ -67,6 +67,80 @@ describe("evidence-runtime", () => {
     );
     expect(events).toHaveLength(2);
   });
+
+  it("records compact semantic probe tokens for headless semantic service Bash output", async () => {
+    const context = {
+      evidence: [],
+      tools: {
+        headlessBench: { enabled: true },
+        validationContract: {
+          items: [
+            {
+              kind: "service",
+              validation: "semantic",
+              semanticTokens: ["sentiment", "confidence", "positive", "negative"],
+            },
+          ],
+        },
+      },
+      store: {
+        appendEvent: async () => undefined,
+      },
+    } as never;
+
+    const evidence = await recordToolEvidence(
+      context,
+      "session-1",
+      "Bash",
+      {
+        text: [
+          "exit code 0",
+          "positive: {'confidence': {'negative': 0.01, 'positive': 0.99}, 'sentiment': 'positive'}",
+          "negative: {'confidence': {'negative': 0.98, 'positive': 0.02}, 'sentiment': 'negative'}",
+        ].join("\n"),
+        data: { exitCode: 0 },
+      },
+      { command: "python probe.py" },
+    );
+
+    expect((evidence?.data as { semanticProbe?: { tokens?: string[] } } | undefined)?.semanticProbe?.tokens).toEqual(
+      expect.arrayContaining(["sentiment", "confidence", "positive", "negative"]),
+    );
+  });
+
+  it("does not record semantic probe tokens from non-probe Bash commands", async () => {
+    const context = {
+      evidence: [],
+      tools: {
+        headlessBench: { enabled: true },
+        validationContract: {
+          items: [
+            {
+              kind: "service",
+              validation: "semantic",
+              semanticTokens: ["sentiment", "confidence", "positive", "negative"],
+            },
+          ],
+        },
+      },
+      store: {
+        appendEvent: async () => undefined,
+      },
+    } as never;
+
+    const evidence = await recordToolEvidence(
+      context,
+      "session-1",
+      "Bash",
+      {
+        text: "exit code 0\nsource contains sentiment confidence positive negative",
+        data: { exitCode: 0 },
+      },
+      { command: "cat app.py" },
+    );
+
+    expect((evidence?.data as { semanticProbe?: unknown } | undefined)?.semanticProbe).toBeUndefined();
+  });
 });
 
 describe("isToolOutputFailure", () => {
