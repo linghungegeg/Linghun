@@ -209,6 +209,21 @@ describe("ProcessGuard", () => {
     expect(guard.snapshot()).toEqual([]);
   });
 
+  it("skips retained process groups during exit cleanup", () => {
+    const registry = new ProcessGuardRegistry();
+    const killMock = vi.fn();
+    const child = createFakeChild(5007);
+    const guard = createProcessGuard(registry, { platform: "linux", kill: killMock as never });
+
+    guard.track(child, { detached: true, retainAfterExit: true });
+    child.emitExit();
+    const result = guard.cleanupForExit();
+
+    expect(result).toMatchObject({ kind: "exit-cleanup", attempted: 0, skipped: 1 });
+    expect(killMock).not.toHaveBeenCalled();
+    expect(guard.snapshot()).toEqual([{ pid: 5007, detached: true }]);
+  });
+
   it("documents exit cleanup as synchronous best-effort only", () => {
     const registry = new ProcessGuardRegistry();
     const child = createFakeChild(5004);
@@ -298,7 +313,7 @@ describe("ProcessGuard", () => {
       listeners.get("exit")?.();
 
       expect(guardModule.consumeProcessGuardStopResultsForTest()).toEqual([
-        expect.objectContaining({ kind: "graceful", force: false }),
+        expect.objectContaining({ kind: "exit-cleanup", force: false }),
         expect.objectContaining({ kind: "exit-cleanup", force: true }),
       ]);
       expect(PROCESS_GUARD_EXIT_CLEANUP_NOTE).toContain("synchronous best-effort");

@@ -121,6 +121,10 @@ export class ProcessGuardRegistry {
       if (onlyPids && !onlyPids.has(entry.pid)) {
         continue;
       }
+      if (kind === "exit-cleanup" && entry.retainAfterExit) {
+        result.skipped += 1;
+        continue;
+      }
       if (stopEntry(entry, force, deps, allowAsyncWindowsTreeKill, result)) {
         removePids.push(entry.pid);
       }
@@ -195,6 +199,10 @@ export function cleanupTrackedProcessesForExit(): ProcessGuardStopResult {
   return recordStopResult(defaultRegistry.stopAll("exit-cleanup", true, resolveDeps(), false));
 }
 
+export function cleanupTrackedProcessesBeforeExit(): ProcessGuardStopResult {
+  return recordStopResult(defaultRegistry.stopAll("exit-cleanup", false, resolveDeps(), false));
+}
+
 export function consumeProcessGuardStopResultsForTest(): ProcessGuardStopResult[] {
   return recentStopResults.splice(0, recentStopResults.length);
 }
@@ -209,7 +217,7 @@ export function installProcessGuardExitHandlers(): void {
   }
   hooksInstalled = true;
   process.once("beforeExit", () => {
-    requestTrackedProcessStop(false);
+    cleanupTrackedProcessesBeforeExit();
   });
   process.once("exit", () => {
     cleanupTrackedProcessesForExit();
