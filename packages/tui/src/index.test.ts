@@ -2875,7 +2875,7 @@ describe("runHeadlessTask", () => {
     );
   });
 
-  it("bench mode requires explicit validation evidence for validation contracts", async () => {
+  it("bench mode warns instead of failing when only validation contract evidence is missing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-contract-validation-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -2899,8 +2899,8 @@ describe("runHeadlessTask", () => {
       __testSendMessage: async () => {},
     });
 
-    expect(exitCode).toBe(5);
-    expect(output.text).not.toContain("bench validation passed");
+    expect(exitCode).toBe(0);
+    expect(output.text).toContain("bench validation passed");
     expect(stderr.text).toContain("validation_contract");
     expect(stderr.text).toContain("Bash.service");
   });

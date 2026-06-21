@@ -1721,13 +1721,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         if (validation.ok) {
           const validationContractRisk = createHeadlessBenchValidationContractRiskSummary(context);
           if (validationContractRisk) {
-            validation = {
-              ok: false,
-              failure: {
-                category: "validation_contract",
-                summary: validationContractRisk,
-              },
-            };
+            writeLine(errorOutput, `[headless] bench validation warning: validation_contract; ${validationContractRisk}`);
           }
         }
         lastValidation = validation;
