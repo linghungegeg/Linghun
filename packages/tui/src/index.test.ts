@@ -2543,6 +2543,103 @@ describe("runHeadlessTask", () => {
     expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
   });
 
+  it("validation contract final gate blocks semantic service when only readiness passed", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-semantic-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    Object.assign(context.tools, {
+      headlessBench: { enabled: true },
+      validationContract: {
+        items: [
+          {
+            id: "service:http://127.0.0.1:5000/sentiment",
+            kind: "service",
+            target: "http://127.0.0.1:5000/sentiment",
+            validation: "semantic",
+            semanticTokens: ["sentiment", "confidence", "positive", "negative"],
+            requiredTool: "Bash.service",
+          },
+        ],
+      },
+    });
+    context.evidence.push({
+      id: "service-readiness-pass",
+      kind: "command_output",
+      source: "Bash",
+      summary: "service explicit fetch",
+      supportsClaims: ["Bash"],
+      createdAt: new Date().toISOString(),
+      data: {
+        validationEvidence: [
+          {
+            kind: "service",
+            target: "http://127.0.0.1:5000/sentiment",
+            tool: "Bash.service",
+            ok: true,
+            checks: { fetch: { status: 200 } },
+          },
+        ],
+      },
+    });
+
+    const result = checkClaimSupport("ordinary final text", context);
+
+    expect(result.status).toBe("needs_disclaimer");
+    expect(result.unsupportedClaims.join("\n")).toContain("semantic response probe evidence");
+  });
+
+  it("validation contract final gate allows semantic service with response probe evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-semantic-pass-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    Object.assign(context.tools, {
+      headlessBench: { enabled: true },
+      validationContract: {
+        items: [
+          {
+            id: "service:http://127.0.0.1:5000/sentiment",
+            kind: "service",
+            target: "http://127.0.0.1:5000/sentiment",
+            validation: "semantic",
+            semanticTokens: ["sentiment", "confidence", "positive", "negative"],
+            requiredTool: "Bash.service",
+          },
+        ],
+      },
+    });
+    context.evidence.push({
+      id: "service-readiness-pass",
+      kind: "command_output",
+      source: "Bash",
+      summary: "service explicit fetch",
+      supportsClaims: ["Bash"],
+      createdAt: new Date().toISOString(),
+      data: {
+        validationEvidence: [
+          {
+            kind: "service",
+            target: "http://127.0.0.1:5000/sentiment",
+            tool: "Bash.service",
+            ok: true,
+            checks: { fetch: { status: 200 } },
+          },
+        ],
+      },
+    });
+    context.evidence.push({
+      id: "semantic-probe-pass",
+      kind: "command_output",
+      source: "Bash",
+      summary: "Bash: exit code 0; POST /sentiment returned sentiment=negative confidence positive=0.21 negative=0.79",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+      createdAt: new Date().toISOString(),
+    });
+
+    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
+  });
+
   it("validation contract final gate blocks preservation without explicit preserve evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-preserve-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -2696,10 +2793,30 @@ describe("runHeadlessTask", () => {
         id: "service:127.0.0.1:8000",
         kind: "service",
         target: "127.0.0.1:8000",
+        validation: "readiness",
         requiredTool: "Bash.service",
       },
     ]);
     expect(withoutServiceContext.items).toEqual([]);
+  });
+
+  it("validation contract marks response-schema services as semantic", () => {
+    const contract = createValidationContract({
+      prompt:
+        'Expose http://127.0.0.1:5000/sentiment. Endpoint: POST /sentiment. It accepts {"text": "sample"} and returns {"sentiment": "positive", "confidence": {"positive": 0.9, "negative": 0.1}} as JSON.',
+      requiredArtifacts: [],
+    });
+
+    expect(contract.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "service",
+          target: "http://127.0.0.1:5000",
+          validation: "semantic",
+          semanticTokens: expect.arrayContaining(["sentiment", "confidence", "positive", "negative"]),
+        }),
+      ]),
+    );
   });
 
   it("bench mode requires explicit validation evidence for validation contracts", async () => {

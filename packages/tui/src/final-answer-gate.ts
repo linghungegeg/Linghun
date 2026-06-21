@@ -345,7 +345,13 @@ function summarizeValidationContractItemRisk(
   evidence: EvidenceRecord[],
 ): string | undefined {
   const matching = collectMatchingValidationEvidence(item, evidence);
-  if (matching.some((entry) => entry.ok === true)) return undefined;
+  if (matching.some((entry) => entry.ok === true)) {
+    if (item.kind === "service" && item.validation === "semantic" && !hasSemanticServiceEvidence(item, matching, evidence)) {
+      const subject = item.path ?? item.target ?? item.id;
+      return `${item.kind} ${subject} missing semantic response probe evidence; status/readiness alone is not enough`;
+    }
+    return undefined;
+  }
   const subject = item.path ?? item.target ?? item.id;
   if (matching.some((entry) => entry.ok === false)) {
     return `${item.kind} ${subject} failed explicit ${item.requiredTool}; needs_repair before final`;
@@ -359,6 +365,7 @@ type ValidationEvidence = {
   target?: string;
   tool?: string;
   ok?: boolean;
+  checks?: Record<string, unknown>;
 };
 
 function collectMatchingValidationEvidence(
@@ -422,6 +429,47 @@ function normalizeValidationTarget(target: string | undefined): string | undefin
   } catch {
     return target.replace(/\/$/u, "");
   }
+}
+
+function hasSemanticServiceEvidence(
+  item: ValidationContractItem,
+  matching: ValidationEvidence[],
+  evidence: EvidenceRecord[],
+): boolean {
+  const tokens = item.semanticTokens ?? [];
+  if (matching.some((entry) => serviceFetchEvidenceHasSemanticChecks(entry, tokens))) return true;
+  return evidence.some((record) => commandOrVerificationEvidenceHasSemanticProbe(record, tokens));
+}
+
+function serviceFetchEvidenceHasSemanticChecks(entry: ValidationEvidence, tokens: string[]): boolean {
+  if (entry.ok !== true) return false;
+  const fetch = readRecord(entry.checks?.fetch);
+  const bodyContains = readStringList(fetch?.bodyContains);
+  if (bodyContains.length === 0) return false;
+  if (tokens.length === 0) return true;
+  const haystack = bodyContains.join("\n").toLowerCase();
+  return tokens.some((token) => haystack.includes(token.toLowerCase()));
+}
+
+function commandOrVerificationEvidenceHasSemanticProbe(record: EvidenceRecord, tokens: string[]): boolean {
+  if (record.kind === "test_result" && record.supportsClaims.includes("verification_passed")) return true;
+  if (record.kind !== "command_output") return false;
+  if (!record.supportsClaims.includes("bash_exit_0")) return false;
+  const haystack = `${record.summary}\n${record.source}`.toLowerCase();
+  const matchedTokens = tokens.filter((token) => haystack.includes(token.toLowerCase()));
+  return matchedTokens.length >= Math.min(2, tokens.length);
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function readStringList(value: unknown): string[] {
+  if (typeof value === "string" && value.trim()) return [value];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
 function createHeadlessBenchDiagnosticRiskSummary(context: TuiContext): string | undefined {

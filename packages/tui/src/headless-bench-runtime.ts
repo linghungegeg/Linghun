@@ -65,6 +65,8 @@ export type ValidationContractItem = {
   kind: "artifact" | "service" | "preservation" | "binary";
   path?: string;
   target?: string;
+  validation?: "readiness" | "semantic";
+  semanticTokens?: string[];
   requiredTool: "Bash.artifact" | "Bash.service" | "Bash.binary";
 };
 
@@ -415,10 +417,15 @@ export function createValidationContract(input: {
     });
   }
   for (const target of detectExplicitServiceTargets(input.prompt)) {
+    const semanticTokens = detectServiceSemanticTokens(input.prompt);
+    const semantic = semanticTokens.length >= 2 && hasSemanticServiceExpectation(input.prompt);
+    const validationTarget = semantic ? normalizeServiceReadinessTarget(target) : target;
     pushValidationContractItem(items, {
-      id: `service:${target}`,
+      id: `service:${validationTarget}`,
       kind: "service",
-      target,
+      target: validationTarget,
+      validation: semantic ? "semantic" : "readiness",
+      ...(semantic ? { semanticTokens } : {}),
       requiredTool: "Bash.service",
     });
   }
@@ -452,7 +459,11 @@ function pushValidationContractItem(
   items: ValidationContractItem[],
   item: ValidationContractItem,
 ): void {
-  if (items.some((existing) => existing.kind === item.kind && existing.path === item.path && existing.target === item.target)) {
+  if (items.some((existing) =>
+    existing.kind === item.kind &&
+    existing.path === item.path &&
+    normalizeContractTarget(existing.target) === normalizeContractTarget(item.target)
+  )) {
     return;
   }
   items.push(item);
@@ -464,7 +475,11 @@ function formatValidationContractPromptLines(contract: ValidationContract | unde
     "Validation contract: before final, satisfy each item with the required explicit tool.",
     ...contract.items.map((item) => {
       const subject = item.path ?? item.target ?? item.id;
-      return `- ${item.kind}: ${subject}; required Bash input: ${formatValidationContractToolInput(item)}`;
+      const semantic =
+        item.kind === "service" && item.validation === "semantic"
+          ? `; also run semantic request/response probes for expected fields/values (${(item.semanticTokens ?? []).join(", ")}) including representative and adversarial cases`
+          : "";
+      return `- ${item.kind}: ${subject}; required Bash input: ${formatValidationContractToolInput(item)}${semantic}`;
     }),
   ];
 }
@@ -511,8 +526,52 @@ function hasExplicitServicePortContext(prompt: string): boolean {
   return /\b(?:service|server|serve|listen|http|endpoint|health|localhost|127\.0\.0\.1)\b/iu.test(prompt);
 }
 
+function hasSemanticServiceExpectation(prompt: string): boolean {
+  return /\b(?:api|endpoint|json|response|respond|return|schema|field|classification|sentiment|confidence|prediction|inference|request)\b|接口|响应|返回|字段|分类|预测/iu.test(
+    prompt,
+  );
+}
+
+function detectServiceSemanticTokens(prompt: string): string[] {
+  const tokens: string[] = [];
+  for (const match of prompt.matchAll(/["']([A-Za-z][A-Za-z0-9_-]{1,39})["']\s*:/gu)) {
+    tokens.push(match[1]);
+  }
+  for (const match of prompt.matchAll(/\b(?:positive|negative|true|false|pass|fail|success|error|valid|invalid)\b/giu)) {
+    tokens.push(match[0].toLowerCase());
+  }
+  return uniqueStrings(tokens).slice(0, 8);
+}
+
 function normalizeServiceTarget(value: string): string {
   return value.replace(/[),.;!?]+$/u, "");
+}
+
+function normalizeServiceReadinessTarget(target: string): string {
+  try {
+    const url = target.startsWith("http://") || target.startsWith("https://")
+      ? new URL(target)
+      : new URL(`http://${target}`);
+    return target.startsWith("http://") || target.startsWith("https://")
+      ? url.origin
+      : `${url.hostname}:${url.port || (url.protocol === "https:" ? "443" : "80")}`;
+  } catch {
+    return target;
+  }
+}
+
+function normalizeContractTarget(target: string | undefined): string | undefined {
+  if (!target) return undefined;
+  try {
+    const url = target.startsWith("http://") || target.startsWith("https://")
+      ? new URL(target)
+      : new URL(`http://${target}`);
+    const port = url.port || (url.protocol === "https:" ? "443" : "80");
+    const path = url.pathname.replace(/\/$/u, "");
+    return `${url.hostname}:${port}${path}`;
+  } catch {
+    return target.replace(/\/$/u, "");
+  }
 }
 
 function hasValidServicePort(target: string): boolean {
