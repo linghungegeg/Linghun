@@ -2671,12 +2671,12 @@ describe("Phase 05 core tools", () => {
   it("validates tool input and keeps details when output is capped", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
-    await writeFile(join(project, "large.txt"), Array.from({ length: 260 }, () => "x".repeat(120)).join("\n"), "utf8");
+    await writeFile(join(project, "large.txt"), Array.from({ length: 1200 }, () => "x".repeat(240)).join("\n"), "utf8");
 
     await expect(runTool("Read", { path: 123 }, context)).rejects.toThrow("Read.path");
-    const read = await runTool("Read", { path: "large.txt" }, context);
+    const read = await runTool("Read", { path: "large.txt", limit: 1200 }, context);
 
-    expect(read.input).toEqual({ path: "large.txt", offset: undefined, limit: undefined });
+    expect(read.input).toEqual({ path: "large.txt", offset: undefined, limit: 1200 });
     expect(read.output.truncated).toBe(true);
     expect(read.output.text.length).toBeLessThan(read.output.details?.length ?? 0);
     expect(read.output.details).toContain("x".repeat(100));
