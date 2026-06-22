@@ -28,7 +28,7 @@ describe("DeepSeek model capabilities", () => {
     const reasoner = deepSeekModels.find((model) => model.id === "deepseek-reasoner");
 
     expect(chat?.displayName).toBe("DeepSeek Chat");
-    expect(chat?.contextWindow).toBe(128_000);
+    expect(chat?.contextWindow).toBe(200_000);
     expect(chat?.maxOutputTokens).toBe(8_192);
     expect(reasoner?.displayName).toBe("DeepSeek Reasoner");
     expect(reasoner?.contextWindow).toBe(64_000);

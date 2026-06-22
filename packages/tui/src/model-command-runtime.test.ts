@@ -188,7 +188,7 @@ describe("/model set command", () => {
   it("shows context window and alias hints in the default model panel", async () => {
     await handleModelCommand([], context, output);
 
-    expect(output.lines.join("\n")).toContain("contextWindow 128000");
+    expect(output.lines.join("\n")).toContain("contextWindow 200000");
     expect(output.lines.join("\n")).toContain("deepseek-v4-flash -> deepseek-chat");
   });
 });
