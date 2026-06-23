@@ -79,6 +79,10 @@ import {
   COMMAND_PROPOSAL_TOOL_NAME,
   EXECUTE_EXTRA_TOOL_NAME,
   INDEX_OPERATION_TOOL_NAME,
+  PRE_CONTEXT_TOOL_NAME,
+  PRE_IMPACT_TOOL_NAME,
+  PRE_PLAN_TOOL_NAME,
+  PRE_VERIFY_TOOL_NAME,
   RUN_VERIFICATION_TOOL_NAME,
   RUN_WORKFLOW_TOOL_NAME,
   SEARCH_EXTRA_TOOLS_NAME,
@@ -91,6 +95,7 @@ import {
   extractNaturalReadPath,
   formatFileCandidates,
   hasModelSynthesisIntent,
+  isPreEngineToolName,
   isNaturalReadFileRequest,
   looksLikeFilePath,
   matchesFileKeywords,
@@ -271,6 +276,9 @@ export async function executeModelToolUse(
     toolCall.name === COMMAND_PROPOSAL_TOOL_NAME
   ) {
     return executeDeferredDispatchToolUse(toolCall, context, sessionId, output);
+  }
+  if (isPreEngineToolName(toolCall.name)) {
+    return executePreEngineToolUse(toolCall, context, sessionId, output);
   }
   // D.14G — 结构化 Git 能力不走 builtInTools / runTool / 四档 permission；由
   // git-tool-dispatch-runtime 真实执行（status 只读；create safe-create；remove 走确认）。
@@ -1055,6 +1063,102 @@ export async function executeDeferredDispatchToolUse(
       evidence.id,
     );
     return { ok: false, tool: dispatchName, text, evidenceId: evidence.id };
+  }
+}
+
+export async function executePreEngineToolUse(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+): Promise<{
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+}> {
+  const toolName = toolCall.name;
+  startRequestActivity(output, context, "tool_running", {
+    toolName,
+    toolTarget: extractToolTarget(toolName, toolCall.input),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "tool_call_start",
+    id: toolCall.id,
+    name: toolName,
+    input: toolCall.input,
+    createdAt: new Date().toISOString(),
+  });
+  try {
+    context.discoveredDeferredToolNames.add(toolName);
+    const params =
+      toolCall.input && typeof toolCall.input === "object" && !Array.isArray(toolCall.input)
+        ? (toolCall.input as Record<string, unknown>)
+        : {};
+    const result = await executeExtraTool({ tool_name: toolName, params }, context);
+    if (!result.ok) {
+      const evidence = await recordToolFailureEvidence(
+        context,
+        sessionId,
+        "Read",
+        `${toolName}: ${result.text}`,
+      );
+      await appendDeferredToolResultEvent(
+        context,
+        sessionId,
+        toolCall.id,
+        toolName,
+        result.text,
+        true,
+        evidence.id,
+      );
+      clearRequestActivity(context);
+      writeLine(output, `pre-engine ${toolName} failed.`);
+      return { ok: false, tool: toolName, text: result.text, evidenceId: evidence.id };
+    }
+    rememberSourcePackCandidatesFromToolData(context, toolName, result.data);
+    const evidence = await recordToolEvidence(context, sessionId, "Read", {
+      text: result.text,
+      data: result.data,
+    } as ToolOutput);
+    await appendDeferredToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      toolName,
+      { text: result.text, data: result.data },
+      false,
+      evidence?.id,
+    );
+    clearRequestActivity(context);
+    writeLine(output, `pre-engine ${toolName} finished.`);
+    return {
+      ok: true,
+      tool: toolName,
+      text: result.text,
+      data: result.data,
+      evidenceId: evidence?.id,
+    };
+  } catch (error) {
+    clearRequestActivity(context);
+    const text = formatError(error, context.language);
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Read",
+      `${toolName}: ${text}`,
+    );
+    await appendDeferredToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      toolName,
+      text,
+      true,
+      evidence.id,
+    );
+    return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
 }
 

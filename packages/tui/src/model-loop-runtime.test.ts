@@ -210,6 +210,62 @@ describe("model-loop-runtime", () => {
       expect(workflowSchema.properties?.inputs?.additionalProperties).toBe(true);
     });
 
+    it("describes repository analysis affordance on SearchExtraTools", () => {
+      const searchExtraTools = createModelToolDefinitions().find(
+        (d) => d.name === "SearchExtraTools",
+      );
+
+      expect(searchExtraTools?.description).toContain("pre-engine repository analysis");
+      expect(searchExtraTools?.description).toContain("repository code understanding");
+      expect(searchExtraTools?.description).toContain("impact analysis");
+      expect(searchExtraTools?.description).toContain("edit planning");
+      expect(searchExtraTools?.description).toContain("quick verification");
+      expect(searchExtraTools?.description).toContain("codebase-memory index is ready");
+      expect(searchExtraTools?.description).toContain("index-backed search/graph/architecture");
+      expect(searchExtraTools?.description).toContain("pre-engine for AST precision");
+    });
+
+    it("exposes pre-engine repository tools as first-class model tools", () => {
+      const defs = createModelToolDefinitions();
+      const names = defs.map((d) => d.name);
+      const preContext = defs.find((d) => d.name === "pre_context");
+      const preImpact = defs.find((d) => d.name === "pre_impact");
+      const prePlan = defs.find((d) => d.name === "pre_plan");
+      const preVerify = defs.find((d) => d.name === "pre_verify");
+
+      expect(names).toContain("pre_context");
+      expect(names).toContain("pre_impact");
+      expect(names).toContain("pre_plan");
+      expect(names).toContain("pre_verify");
+      expect(names.indexOf("SearchExtraTools")).toBeLessThan(names.indexOf("Grep"));
+      expect(names.indexOf("pre_context")).toBeLessThan(names.indexOf("Grep"));
+      expect(names.indexOf("pre_context")).toBeLessThan(names.indexOf("CommandProposal"));
+      expect(preContext?.description).toContain("AST-based definition");
+      expect(preContext?.description).toContain("answer_pack");
+      expect(preContext?.description).toContain("suggested minimal line-window reads");
+      expect(preContext?.description).toContain("after index-backed search/graph tools");
+      expect(preContext?.description).toContain("index is missing, stale, or insufficient");
+      expect(preContext?.description).toContain("use ReadSnippets");
+      expect(preContext?.description).toContain("instead of broad Grep/full-file Read");
+      expect(preContext?.description).toContain("abstract architecture or impact questions");
+      expect(preContext?.description).toContain("anchor symbols");
+      expect(preImpact?.description).toContain("impact analysis");
+      expect(preImpact?.description).toContain("planned changes");
+      expect(preImpact?.description).toContain("call pre_context on anchor symbols first");
+      expect(prePlan?.description).toContain("edit planning");
+      expect(prePlan?.description).toContain("answer_pack");
+      expect(prePlan?.description).toContain("no concrete target symbol");
+      expect(prePlan?.description).toContain("prefer pre_context");
+      expect(prePlan?.description).toContain("discovery mode");
+      expect(preVerify?.description).toContain("verification");
+      expect((preContext?.inputSchema as { required?: string[] }).required).toEqual(["symbol"]);
+      expect((preImpact?.inputSchema as { required?: string[] }).required).toEqual(["changes"]);
+      expect((prePlan?.inputSchema as { required?: string[] }).required).toEqual(["task"]);
+      expect((preVerify?.inputSchema as { required?: string[] }).required).toEqual([
+        "changed_files",
+      ]);
+    });
+
     it("exposes RunWorkflow multi-agent fields explicitly", () => {
       const workflowSchema = createModelToolDefinitions().find((d) => d.name === "RunWorkflow")
         ?.inputSchema as {

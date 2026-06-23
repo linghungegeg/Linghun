@@ -1,5 +1,6 @@
 import {
   formatDeferredToolsSystemReminder,
+  registerPreEngineDeferredToolsForRuntime,
   snapshotDeferredTools,
 } from "./deferred-tools-catalog.js";
 import type { TuiContext } from "./index.js";
@@ -30,14 +31,31 @@ export function createModelSystemPrompt(
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
   // 工具继续直接调用；不暴露 raw schema/secret/参数，仅提示发现-执行两步约束。
-  const deferredReminder = formatDeferredToolsSystemReminder(
-    context.language,
-    snapshotDeferredTools(context),
-  );
-  const worktreeContextLine =
+  const deferredSnapshot = snapshotDeferredTools(context);
+  const deferredReminder = formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
+  const preEngineToolNames = registerPreEngineDeferredToolsForRuntime(context, deferredSnapshot);
+  const preEngineToolsLine =
+    preEngineToolNames.length > 0
+      ? `\nPreEngineRepositoryTools=${JSON.stringify({
+          discovered: true,
+          tools: preEngineToolNames,
+          invocation:
+            "These pre-engine tools are first-class readonly model tools; call them directly when useful. ExecuteExtraTool remains available for deferred-tool dispatch.",
+          indexCoordination:
+            "If codebase-memory index is ready, use index-backed tools for broad repository discovery first, then pre-engine for AST precision; if the index is missing or stale, use pre-engine as the fast repository-analysis entry.",
+          useFor: [
+            "repository code understanding",
+            "impact analysis",
+            "edit planning",
+            "quick verification",
+          ],
+        })}\nRepositoryAnalysisWorkflow=Before broad Grep/Read exploration for repository analysis work, get structured evidence first: use codebase-memory index tools when ready, then pre-engine for AST precision. If the task names a concrete function, class, method, command, or file-level anchor, call pre_context on that anchor first; use pre_plan first only when no concrete anchor is known. When a pre-engine result includes answer_pack with high/medium confidence and little missing_evidence, use it as the primary evidence map; suggested_minimal_reads are line-window hints, so prefer ReadSnippets for those ranges and avoid broad Grep/full-file Read unless explicit evidence is missing.`
+      : "";
+  const worktreeContextLine = `${preEngineToolsLine}${
     worktreeContextSummary && worktreeContextSummary.isWorktree === true
       ? `\nWorktreeContext=${JSON.stringify(worktreeContextSummary)}`
-      : "";
+      : ""
+  }`;
   // D.14B — FailureLearningSummary 是历史风险提示，不是已发生/已修复事实，不构成 completion evidence。
   const failureLearningLine =
     failureLearningSummary && failureLearningSummary.count > 0
@@ -182,6 +200,8 @@ const INTERNAL_PROMPT_TOKENS = [
   "raw tool_result",
   "internal scheduler labels",
   "meta_scheduler",
+  "PreEngineRepositoryTools",
+  "RepositoryAnalysisWorkflow",
   "WorktreeContext",
   "DeferredToolsReminder",
   "OutputStyle",

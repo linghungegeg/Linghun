@@ -123,10 +123,18 @@ const CODEBASE_MEMORY_DESCRIPTIONS: Record<string, string> = {
 };
 
 const PRE_ENGINE_DESCRIPTIONS: Record<string, string> = {
-  pre_context: "Provide structured code facts (AST-based) for the current task context.",
-  pre_impact: "Analyze impact scope of a planned change via AST cross-references.",
-  pre_plan: "Generate structured implementation hints from AST analysis.",
-  pre_verify: "Verify code change correctness via AST structural checks.",
+  pre_context:
+    "Repository analysis: provide structured code facts (AST-based) for the current task context.",
+  pre_impact: "Repository impact analysis: analyze planned change scope via AST cross-references.",
+  pre_plan: "Repository edit planning: generate structured implementation hints from AST analysis.",
+  pre_verify: "Repository analysis verification: verify code change correctness via AST structural checks.",
+};
+
+const PRE_ENGINE_REQUIRED_ARGS: Record<string, string[]> = {
+  pre_context: ["symbol"],
+  pre_impact: ["changes"],
+  pre_plan: ["task"],
+  pre_verify: ["changed_files"],
 };
 
 function listPreEngineDeferredTools(): DeferredToolDescriptor[] {
@@ -136,7 +144,7 @@ function listPreEngineDeferredTools(): DeferredToolDescriptor[] {
       name,
       kind: "pre-engine" as const,
       description: PRE_ENGINE_DESCRIPTIONS[name] ?? `pre-engine tool: ${name}`,
-      requiredArgs: ["path"],
+      requiredArgs: PRE_ENGINE_REQUIRED_ARGS[name] ?? [],
       executable: true,
       reason: "pre-engine static whitelist; readonly AST query, no mutation.",
     }));
@@ -321,6 +329,20 @@ export function snapshotDeferredToolsSummary(context: TuiContext): {
   };
 }
 
+export function registerPreEngineDeferredToolsForRuntime(
+  context: TuiContext,
+  snapshot: DeferredToolDiscoverySnapshot,
+): string[] {
+  const names = snapshot.tools
+    .filter((tool) => tool.kind === "pre-engine" && tool.executable)
+    .map((tool) => tool.name)
+    .sort((a, b) => a.localeCompare(b));
+  for (const name of names) {
+    context.discoveredDeferredToolNames.add(name);
+  }
+  return names;
+}
+
 // D.13J Block 2：D.13I session-scoped discovered Set 的 doctor 摘要。
 // `executeSearchExtraTools` 把匹配上的 deferred 工具名写入 `context.discoveredDeferredToolNames`，
 // `executeExtraTool` 必须先看 Set 才放行。出于排查 ExecuteExtraTool 拒绝的需要，doctor 必须能看见
@@ -368,9 +390,13 @@ export function searchDeferredTools(
 ): DeferredToolDescriptor[] {
   const trimmed = query.trim().toLowerCase();
   if (trimmed === "") return tools;
+  const tokens = trimmed.split(/[^a-z0-9_:.-]+/u).filter((token) => token.length >= 3);
   return tools.filter((tool) => {
     const haystack = `${tool.name} ${tool.description} ${tool.kind}`.toLowerCase();
-    return haystack.includes(trimmed);
+    if (haystack.includes(trimmed)) return true;
+    if (tokens.length === 0) return false;
+    const hits = tokens.filter((token) => haystack.includes(token)).length;
+    return hits >= Math.min(2, tokens.length);
   });
 }
 
@@ -400,8 +426,8 @@ export function formatDeferredToolsSystemReminder(
 ): string | undefined {
   if (snapshot.total === 0) return undefined;
   return language === "en-US"
-    ? "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool. Built-in tools (Read/ReadSnippets/SourcePack/Edit/Write/Bash/Grep/Glob/Todo) are still called directly."
-    : "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool.";
+    ? "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool. For repository code understanding, impact analysis, edit planning, or quick verification, discover specialized repository tools before broad manual exploration. If codebase-memory index is ready, prefer index-backed search/graph/architecture tools for broad repository discovery, then use pre-engine for AST precision; if the index is missing or stale, use pre-engine as the fast repository-analysis entry. Built-in tools (Read/ReadSnippets/SourcePack/Edit/Write/Bash/Grep/Glob/Todo) are still called directly."
+    : "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool. For repository code understanding, impact analysis, edit planning, or quick verification, discover specialized repository tools before broad manual exploration. If codebase-memory index is ready, prefer index-backed search/graph/architecture tools for broad repository discovery, then use pre-engine for AST precision; if the index is missing or stale, use pre-engine as the fast repository-analysis entry.";
 }
 
 export function isCodebaseMemoryToolName(name: string): boolean {

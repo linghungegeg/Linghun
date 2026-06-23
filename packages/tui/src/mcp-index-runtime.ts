@@ -1435,20 +1435,76 @@ export function executeSearchExtraTools(
 ): {
   ok: boolean;
   text: string;
-  data: { matches: ReturnType<typeof summarizeDeferredToolMatch>[]; total: number };
+  data: {
+    matches: ReturnType<typeof summarizeDeferredToolMatch>[];
+    total: number;
+    recommendedNext?: DeferredToolRecommendation;
+  };
 } {
   const all = listDeferredTools(context);
   const filtered = searchDeferredTools(query, all);
+  const recommendedNext = recommendDeferredToolCall(query, context, filtered);
   // D.13I tail fix — 仅把"匹配上的"工具名记入本 session 已发现集合。
   // ExecuteExtraTool 需要这个证据来证明模型确实通过 SearchExtraTools 发现过该工具。
   for (const tool of filtered) {
     context.discoveredDeferredToolNames.add(tool.name);
   }
+  const recommendationText = recommendedNext
+    ? ` Recommended next: ExecuteExtraTool(${recommendedNext.tool_name}, ${JSON.stringify({
+        params: recommendedNext.params,
+      })}) because ${recommendedNext.reason}.`
+    : "";
   return {
     ok: true,
-    text: `SearchExtraTools matched ${filtered.length}/${all.length} deferred tools (query=${JSON.stringify(query)}).`,
-    data: { matches: filtered.map(summarizeDeferredToolMatch), total: filtered.length },
+    text: `SearchExtraTools matched ${filtered.length}/${all.length} deferred tools (query=${JSON.stringify(query)}).${recommendationText}`,
+    data: { matches: filtered.map(summarizeDeferredToolMatch), total: filtered.length, recommendedNext },
   };
+}
+
+type DeferredToolRecommendation = {
+  tool_name: string;
+  params: Record<string, unknown>;
+  reason: string;
+};
+
+function recommendDeferredToolCall(
+  query: string,
+  context: TuiContext,
+  matches: ReturnType<typeof listDeferredTools>,
+): DeferredToolRecommendation | undefined {
+  const has = (name: string) => matches.some((tool) => tool.name === name && tool.executable);
+  const task = query.trim();
+  if (context.index.status === "ready" && context.index.projectName) {
+    if (has("get_architecture")) {
+      return {
+        tool_name: "get_architecture",
+        params: { project: context.index.projectName },
+        reason: "codebase-memory index is ready, so index-backed architecture is the broad repository discovery step",
+      };
+    }
+    if (task && has("search_code")) {
+      return {
+        tool_name: "search_code",
+        params: { project: context.index.projectName, pattern: task },
+        reason: "codebase-memory index is ready, so indexed search should narrow the repository scope before AST precision",
+      };
+    }
+    if (task && has("search_graph")) {
+      return {
+        tool_name: "search_graph",
+        params: { project: context.index.projectName, query: task },
+        reason: "codebase-memory index is ready, so graph search should narrow related symbols before AST precision",
+      };
+    }
+  }
+  if (task && has("pre_plan")) {
+    return {
+      tool_name: "pre_plan",
+      params: { task },
+      reason: "the codebase index is not ready, so pre-engine should provide the first structured repository-analysis pass",
+    };
+  }
+  return undefined;
 }
 
 export async function executeExtraTool(

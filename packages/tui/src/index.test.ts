@@ -24395,6 +24395,16 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     const all = executeSearchExtraTools("", context);
     expect(all.ok).toBe(true);
     expect(all.data.total).toBeGreaterThanOrEqual(snapshot.byKind["codebase-memory"]);
+    expect(all.data.matches.find((m) => m.name === "pre_context")?.requiredArgs).toEqual([
+      "symbol",
+    ]);
+    expect(all.data.matches.find((m) => m.name === "pre_impact")?.requiredArgs).toEqual([
+      "changes",
+    ]);
+    expect(all.data.matches.find((m) => m.name === "pre_plan")?.requiredArgs).toEqual(["task"]);
+    expect(all.data.matches.find((m) => m.name === "pre_verify")?.requiredArgs).toEqual([
+      "changed_files",
+    ]);
 
     const filtered = executeSearchExtraTools("trace_path", context);
     expect(filtered.ok).toBe(true);
@@ -24512,6 +24522,7 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     const noMatch = executeSearchExtraTools("absolutely-nope-no-such-tool", context);
     expect(noMatch.ok).toBe(true);
     expect(noMatch.data.total).toBe(0);
+    expect(noMatch.data.recommendedNext).toBeUndefined();
     expect(context.discoveredDeferredToolNames.has("list_projects")).toBe(false);
 
     const blocked = await executeExtraTool({ tool_name: "list_projects", params: {} }, context);
@@ -25027,6 +25038,10 @@ console.log(JSON.stringify({ ok: true }));
     expect(reminder).toBeDefined();
     expect(reminder).toContain("SearchExtraTools");
     expect(reminder).toContain("ExecuteExtraTool");
+    expect(reminder).toContain("repository code understanding");
+    expect(reminder).toContain("impact analysis");
+    expect(reminder).toContain("edit planning");
+    expect(reminder).toContain("quick verification");
 
     // Empty snapshot → no reminder
     const empty = formatDeferredToolsSystemReminder(context.language, {
@@ -25079,8 +25094,35 @@ console.log(JSON.stringify({ ok: true }));
     // Default codebase-memory whitelist → reminder must be embedded
     const prompt = createModelSystemPrompt("hello", context, { runtime: "test" });
     expect(prompt).toContain("DeferredToolsReminder=");
+    expect(prompt).toContain("PreEngineRepositoryTools=");
     expect(prompt).toContain("SearchExtraTools");
     expect(prompt).toContain("ExecuteExtraTool");
+    expect(prompt).toContain("pre_context");
+    expect(prompt).toContain("pre_impact");
+    expect(prompt).toContain("pre_plan");
+    expect(prompt).toContain("pre_verify");
+    expect(prompt).toContain("first-class readonly model tools");
+    expect(prompt).toContain("call them directly when useful");
+    expect(prompt).toContain("RepositoryAnalysisWorkflow=");
+    expect(prompt).toContain("Before broad Grep/Read exploration");
+    expect(prompt).toContain("answer_pack");
+    expect(prompt).toContain("suggested_minimal_reads");
+    expect(prompt).toContain("line-window hints");
+    expect(prompt).toContain("prefer ReadSnippets");
+    expect(prompt).toContain("call pre_context on that anchor first");
+    expect(prompt).toContain("pre_plan first only when no concrete anchor is known");
+    expect(prompt).toContain("repository code understanding");
+    expect(prompt).toContain("impact analysis");
+    expect(prompt).toContain("edit planning");
+    expect(prompt).toContain("quick verification");
+    expect(prompt).toContain("codebase-memory index is ready");
+    expect(prompt).toContain("index-backed tools for broad repository discovery");
+    expect(prompt).toContain("pre-engine for AST precision");
+    expect(context.discoveredDeferredToolNames.has("pre_context")).toBe(true);
+    expect(context.discoveredDeferredToolNames.has("pre_impact")).toBe(true);
+    expect(context.discoveredDeferredToolNames.has("pre_plan")).toBe(true);
+    expect(context.discoveredDeferredToolNames.has("pre_verify")).toBe(true);
+    expect(context.discoveredDeferredToolNames.has("index_repository")).toBe(false);
   });
 
   it("D.13I searchDeferredTools / findDeferredTool helpers behave deterministically", () => {
@@ -25111,6 +25153,53 @@ console.log(JSON.stringify({ ok: true }));
     ).toEqual(["search_code", "trace_path"]);
     expect(findDeferredTool("trace_path", tools)?.name).toBe("trace_path");
     expect(findDeferredTool("nope", tools)).toBeUndefined();
+  });
+
+  it("D.13I searchDeferredTools matches natural multi-token repository analysis queries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const tools = listDeferredTools(context);
+
+    const matches = searchDeferredTools("repository analysis routing", tools).map((tool) => tool.name);
+
+    expect(matches).toContain("pre_context");
+    expect(matches).toContain("pre_impact");
+    expect(matches).toContain("pre_plan");
+    expect(matches).toContain("pre_verify");
+  });
+
+  it("D.13I SearchExtraTools recommends pre-engine when the index is missing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const result = executeSearchExtraTools("repository analysis routing", context);
+
+    expect(result.data.recommendedNext).toEqual({
+      tool_name: "pre_plan",
+      params: { task: "repository analysis routing" },
+      reason:
+        "the codebase index is not ready, so pre-engine should provide the first structured repository-analysis pass",
+    });
+    expect(result.text).toContain("Recommended next: ExecuteExtraTool(pre_plan");
+  });
+
+  it("D.13I SearchExtraTools recommends codebase-memory when the index is ready", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.index.status = "ready";
+    context.index.projectName = "Linghun";
+
+    const result = executeSearchExtraTools("", context);
+
+    expect(result.data.recommendedNext?.tool_name).toBe("get_architecture");
+    expect(result.data.recommendedNext?.params).toEqual({ project: "Linghun" });
+    expect(result.text).toContain("Recommended next: ExecuteExtraTool(get_architecture");
   });
 });
 

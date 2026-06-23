@@ -247,6 +247,10 @@ export function createToolInputSchema(name: ToolName): unknown {
 // 动态发现的 MCP/skill/plugin 列表不进 toolSchemaHash，进 deferredToolListHash。
 export const SEARCH_EXTRA_TOOLS_NAME = "SearchExtraTools" as const;
 export const EXECUTE_EXTRA_TOOL_NAME = "ExecuteExtraTool" as const;
+export const PRE_CONTEXT_TOOL_NAME = "pre_context" as const;
+export const PRE_IMPACT_TOOL_NAME = "pre_impact" as const;
+export const PRE_PLAN_TOOL_NAME = "pre_plan" as const;
+export const PRE_VERIFY_TOOL_NAME = "pre_verify" as const;
 export const COMMAND_PROPOSAL_TOOL_NAME = "CommandProposal" as const;
 export const START_AGENT_TOOL_NAME = "StartAgent" as const;
 export const AGENT_CONTROL_TOOL_NAME = "AgentControl" as const;
@@ -257,10 +261,22 @@ export const RUN_VERIFICATION_TOOL_NAME = "RunVerification" as const;
 export const WRITE_REPORT_TOOL_NAME = "WriteReport" as const;
 
 export const SEARCH_EXTRA_TOOLS_DESCRIPTION =
-  "Discover deferred tools provided by enabled MCP servers, trusted skills, trusted plugins, and codebase-memory. Returns name/kind/description/requiredArgs/executable/reason for each match. Pass a free-text query to filter; pass empty string to list all. Use ExecuteExtraTool to actually invoke a discovered tool.";
+  "Discover deferred tools provided by enabled MCP servers, trusted skills, trusted plugins, codebase-memory, and pre-engine repository analysis. Use this before broad manual exploration when a task needs repository code understanding, impact analysis, edit planning, or quick verification. When a codebase-memory index is ready, prefer index-backed search/graph/architecture tools for broad repository discovery, then use pre-engine for AST precision; when the index is missing or stale, use pre-engine as the fast repository-analysis entry. Returns name/kind/description/requiredArgs/executable/reason for each match. Pass a free-text query to filter; pass empty string to list all. Use ExecuteExtraTool to actually invoke a discovered tool.";
 
 export const EXECUTE_EXTRA_TOOL_DESCRIPTION =
   "Invoke a deferred tool that was previously returned by SearchExtraTools with executable=true. Built-in tools (Read/ReadSnippets/SourcePack/Edit/Write/Bash/Grep/Glob/Todo) MUST be called directly, not via this wrapper. tool_name must match a discovered tool exactly; params must include all required args.";
+
+export const PRE_CONTEXT_DESCRIPTION =
+  "Fast readonly repository analysis: return AST-based definition, references, callees, callers, signature facts, and an answer_pack with entry points, affected files, related tests, risks, missing evidence, and suggested minimal line-window reads. Use after index-backed search/graph tools narrow candidate symbols, or before broad Grep/Read exploration when the index is missing, stale, or insufficient. If answer_pack has high/medium confidence and little missing evidence, answer from it and use ReadSnippets on suggested_minimal_reads line windows or specific gaps instead of broad Grep/full-file Read. For abstract architecture or impact questions without a concrete change list, use this on likely anchor symbols to map the relevant entry points.";
+
+export const PRE_IMPACT_DESCRIPTION =
+  "Fast readonly repository impact analysis: given planned file/symbol changes, return affected files, functions, and related tests from AST cross-references. Use after you already have planned changes; if the task is abstract and no changes are known yet, call pre_context on anchor symbols first.";
+
+export const PRE_PLAN_DESCRIPTION =
+  "Fast readonly repository edit planning: produce deterministic implementation hints, file order, dependency constraints, and an answer_pack for repository-analysis triage. Use this when no concrete target symbol is known yet; if the task already names a function, class, method, command, or file-level anchor, prefer pre_context on that anchor first. If no target files or symbols are known, use discovery mode to get anchor symbols, candidate files, related tests, risks, and suggested next calls before broad manual search.";
+
+export const PRE_VERIFY_DESCRIPTION =
+  "Fast readonly repository verification: check changed files for structural issues such as signatures, imports, and exports before or after edits.";
 
 export const COMMAND_PROPOSAL_DESCRIPTION =
   "Fallback only: propose an explicit Linghun slash command when the requested capability cannot be executed by an available structured tool. Do not use this as the default path for agent, workflow, index, verification, or report-writing requests.";
@@ -306,6 +322,65 @@ export function createExecuteExtraToolInputSchema(): unknown {
       params: { type: "object", additionalProperties: true },
     },
     required: ["tool_name"],
+  };
+}
+
+export function createPreContextInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      symbol: { type: "string" },
+      path: { type: "string" },
+      depth: { type: "number" },
+    },
+    required: ["symbol"],
+  };
+}
+
+export function createPreImpactInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      changes: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: { type: "string" },
+            symbols: { type: "array", items: { type: "string" } },
+          },
+          required: ["path"],
+        },
+      },
+    },
+    required: ["changes"],
+  };
+}
+
+export function createPrePlanInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      task: { type: "string" },
+      target_symbols: { type: "array", items: { type: "string" } },
+      target_files: { type: "array", items: { type: "string" } },
+    },
+    required: ["task"],
+  };
+}
+
+export function createPreVerifyInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      changed_files: { type: "array", items: { type: "string" } },
+    },
+    required: ["changed_files"],
   };
 }
 
@@ -454,16 +529,51 @@ export function createDeferredToolDispatchDefinitions(): ModelToolDefinition[] {
   ];
 }
 
+export function createPreEngineToolDefinitions(): ModelToolDefinition[] {
+  return [
+    {
+      name: PRE_CONTEXT_TOOL_NAME,
+      description: PRE_CONTEXT_DESCRIPTION,
+      inputSchema: createPreContextInputSchema(),
+    },
+    {
+      name: PRE_IMPACT_TOOL_NAME,
+      description: PRE_IMPACT_DESCRIPTION,
+      inputSchema: createPreImpactInputSchema(),
+    },
+    {
+      name: PRE_PLAN_TOOL_NAME,
+      description: PRE_PLAN_DESCRIPTION,
+      inputSchema: createPrePlanInputSchema(),
+    },
+    {
+      name: PRE_VERIFY_TOOL_NAME,
+      description: PRE_VERIFY_DESCRIPTION,
+      inputSchema: createPreVerifyInputSchema(),
+    },
+  ];
+}
+
+export function isPreEngineToolName(name: string): boolean {
+  return (
+    name === PRE_CONTEXT_TOOL_NAME ||
+    name === PRE_IMPACT_TOOL_NAME ||
+    name === PRE_PLAN_TOOL_NAME ||
+    name === PRE_VERIFY_TOOL_NAME
+  );
+}
+
 export function createModelToolDefinitions(): ModelToolDefinition[] {
   // D.13I：full-tool 模式才附加 deferred dispatch（SearchExtraTools / ExecuteExtraTool）；
   // reportGuard 受限子集走 createModelToolDefinitionsForTools，不附加。
   // D.14G：full-tool 模式附加结构化 Git 能力（stable point / status / managed worktree），
   // 让模型需要执行 Git 时调用真实工具，而不是靠本地自然语言 regex 拦截。
   return [
+    ...createPreEngineToolDefinitions(),
+    ...createDeferredToolDispatchDefinitions(),
     ...createModelToolDefinitionsForTools(
       Object.values(builtInTools) as (typeof builtInTools)[ToolName][],
     ),
-    ...createDeferredToolDispatchDefinitions(),
     {
       name: START_AGENT_TOOL_NAME,
       description: START_AGENT_DESCRIPTION,

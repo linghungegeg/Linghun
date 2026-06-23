@@ -175,6 +175,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             }
             if let Some(idx) = index.as_mut() {
                 idx.refresh();
+                let root_str = idx.root.to_string_lossy().to_string();
                 let mut definitions = Vec::new();
                 let mut references = Vec::new();
                 let mut callees = Vec::new();
@@ -214,12 +215,83 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     "file": c.file,
                     "line": c.line,
                 })).collect();
+                let mut affected_files: HashSet<String> = HashSet::new();
+                let mut suggested_minimal_reads: Vec<Value> = Vec::new();
+                for d in &definitions {
+                    let rel = make_relative(&d.file, &root_str);
+                    affected_files.insert(rel.clone());
+                    push_read_hint_unique(&mut suggested_minimal_reads, rel, d.line, "definition");
+                }
+                for r in &references {
+                    affected_files.insert(make_relative(&r.file, &root_str));
+                }
+                for c in callers.iter().chain(callees.iter()) {
+                    affected_files.insert(make_relative(&c.file, &root_str));
+                }
+                for c in callers.iter().take(4) {
+                    push_read_hint_unique(
+                        &mut suggested_minimal_reads,
+                        make_relative(&c.file, &root_str),
+                        c.line,
+                        "caller",
+                    );
+                }
+                let related_tests = find_related_tests(&affected_files, &HashSet::new(), idx);
+                for test in related_tests.iter().take(4) {
+                    push_read_hint_unique(&mut suggested_minimal_reads, test.clone(), 1, "related test");
+                }
+                let mut missing_evidence = Vec::new();
+                if definitions.is_empty() {
+                    missing_evidence.push("definition");
+                }
+                let confidence = if definitions.is_empty() {
+                    "low"
+                } else if callers.is_empty() && references.is_empty() {
+                    "medium"
+                } else {
+                    "high"
+                };
+                let entry_points: Vec<Value> = definitions
+                    .iter()
+                    .take(3)
+                    .map(|d| json!({
+                        "name": d.name,
+                        "file": make_relative(&d.file, &root_str),
+                        "line": d.line,
+                        "kind": format!("{:?}", d.kind),
+                    }))
+                    .collect();
+                let caller_chain: Vec<Value> = callers
+                    .iter()
+                    .take(8)
+                    .map(|c| json!({
+                        "name": c.name,
+                        "file": make_relative(&c.file, &root_str),
+                        "line": c.line,
+                    }))
+                    .collect();
                 let result = json!({
                     "definition": definition,
                     "references": refs_json,
                     "callees": callees_json,
                     "callers": callers_json,
                     "signature": definitions.first().map(|d| d.signature.as_str()).unwrap_or(""),
+                    "answer_pack": build_answer_pack(
+                        "context",
+                        confidence,
+                        entry_points,
+                        caller_chain,
+                        sorted_hash_set_strings(&affected_files),
+                        related_tests,
+                        vec![
+                            "tool dispatch order",
+                            "permission and approval boundary",
+                            "tool result and evidence recording",
+                            "related tests and prompt/tool schema drift",
+                        ],
+                        suggested_minimal_reads,
+                        missing_evidence,
+                    ),
                 });
                 json!({
                     "content": [{
@@ -335,12 +407,36 @@ fn handle_pre_impact(arguments: &Value, index: &mut Option<Index>) -> Value {
     }
 
     let related_tests = find_related_tests(&changed_files, &affected_files, idx);
+    let affected_files_sorted = sorted_hash_set_strings(&affected_files);
+    let mut suggested_minimal_reads: Vec<Value> = affected_files_sorted
+        .iter()
+        .map(|file| read_hint(file.clone(), 1, "affected file"))
+        .collect();
+    for test in related_tests.iter().take(6) {
+        push_read_hint_unique(&mut suggested_minimal_reads, test.clone(), 1, "related test");
+    }
 
     let result = json!({
-        "affected_files": affected_files.iter().collect::<Vec<_>>(),
+        "affected_files": affected_files_sorted,
         "affected_functions": affected_functions,
         "related_tests": related_tests,
         "seed_symbols": seed_symbols,
+        "answer_pack": build_answer_pack(
+            "impact",
+            "high",
+            seed_symbols.iter().take(8).map(|name| json!({ "name": name })).collect(),
+            Vec::new(),
+            sorted_hash_set_strings(&affected_files),
+            related_tests,
+            vec![
+                "upstream callers",
+                "permission and approval boundary",
+                "tool result and evidence recording",
+                "related tests",
+            ],
+            suggested_minimal_reads,
+            Vec::new(),
+        ),
     });
 
     json!({
@@ -405,6 +501,59 @@ fn find_related_tests(changed_files: &HashSet<String>, affected_files: &HashSet<
     result
 }
 
+fn sorted_hash_set_strings(values: &HashSet<String>) -> Vec<String> {
+    let mut result: Vec<String> = values.iter().cloned().collect();
+    result.sort();
+    result
+}
+
+fn read_hint(file: String, line: usize, reason: &str) -> Value {
+    json!({
+        "file": file,
+        "line": line.max(1),
+        "max_lines": 80,
+        "reason": reason,
+    })
+}
+
+fn push_read_hint_unique(values: &mut Vec<Value>, file: String, line: usize, reason: &str) {
+    if file.is_empty() {
+        return;
+    }
+    let line = line.max(1);
+    if values.iter().any(|value| {
+        value.get("file").and_then(|v| v.as_str()) == Some(file.as_str())
+            && value.get("line").and_then(|v| v.as_u64()) == Some(line as u64)
+    }) {
+        return;
+    }
+    values.push(read_hint(file, line, reason));
+}
+
+fn build_answer_pack(
+    mode: &str,
+    confidence: &str,
+    entry_points: Vec<Value>,
+    caller_chain: Vec<Value>,
+    affected_files: Vec<String>,
+    related_tests: Vec<String>,
+    risk_areas: Vec<&str>,
+    suggested_minimal_reads: Vec<Value>,
+    missing_evidence: Vec<&str>,
+) -> Value {
+    json!({
+        "mode": mode,
+        "confidence": confidence,
+        "entry_points": entry_points,
+        "caller_chain": caller_chain,
+        "affected_files": affected_files,
+        "related_tests": related_tests,
+        "risk_areas": risk_areas,
+        "suggested_minimal_reads": suggested_minimal_reads,
+        "missing_evidence": missing_evidence,
+    })
+}
+
 fn normalize_path(p: &str) -> String {
     p.replace('\\', "/")
 }
@@ -455,7 +604,7 @@ fn handle_pre_plan(arguments: &Value, index: &mut Option<Index>) -> Value {
     }
 
     if scope_files.is_empty() {
-        return tool_error("no target_files or target_symbols resolved to any indexed files");
+        return handle_pre_plan_discovery(arguments, idx, &root_str);
     }
 
     let mut file_deps: HashMap<String, HashSet<String>> = HashMap::new();
@@ -489,6 +638,7 @@ fn handle_pre_plan(arguments: &Value, index: &mut Option<Index>) -> Value {
     }
 
     let edit_order = topological_sort(&file_deps);
+    let related_tests = find_related_tests(&scope_files, &HashSet::new(), idx);
 
     let steps: Vec<Value> = edit_order.iter().enumerate().map(|(i, file)| {
         let deps: Vec<&String> = file_deps.get(file).map(|s| s.iter().collect()).unwrap_or_default();
@@ -500,10 +650,33 @@ fn handle_pre_plan(arguments: &Value, index: &mut Option<Index>) -> Value {
     }).collect();
 
     let task = arguments.get("task").and_then(|s| s.as_str()).unwrap_or("");
+    let mut suggested_minimal_reads: Vec<Value> = edit_order
+        .iter()
+        .map(|file| read_hint(file.clone(), 1, "planned edit file"))
+        .collect();
+    for test in related_tests.iter().take(6) {
+        push_read_hint_unique(&mut suggested_minimal_reads, test.clone(), 1, "related test");
+    }
     let result = json!({
         "task": task,
         "edit_order": steps,
         "total_files": scope_files.len(),
+        "related_tests": related_tests,
+        "answer_pack": build_answer_pack(
+            "plan",
+            "high",
+            target_symbols.iter().take(8).map(|name| json!({ "name": name })).collect(),
+            Vec::new(),
+            edit_order.clone(),
+            related_tests,
+            vec![
+                "file edit order",
+                "cross-file dependency order",
+                "related tests",
+            ],
+            suggested_minimal_reads,
+            Vec::new(),
+        ),
     });
 
     json!({
@@ -512,6 +685,272 @@ fn handle_pre_plan(arguments: &Value, index: &mut Option<Index>) -> Value {
             "text": serde_json::to_string_pretty(&result).unwrap_or_default()
         }]
     })
+}
+
+fn handle_pre_plan_discovery(arguments: &Value, idx: &Index, root_str: &str) -> Value {
+    let task = arguments.get("task").and_then(|s| s.as_str()).unwrap_or("");
+    let task_terms = tokenize_identifier(task);
+    let mut candidates: HashMap<String, PlanCandidate> = HashMap::new();
+    let file_entries: Vec<_> = idx.files().collect();
+
+    for entry in &file_entries {
+        let rel = make_relative(&entry.path.to_string_lossy(), root_str);
+        for d in symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang) {
+            if !is_discovery_anchor_candidate(&d.name, &rel) {
+                continue;
+            }
+            candidates
+                .entry(d.name.clone())
+                .or_insert_with(|| {
+                    PlanCandidate::new(
+                        d.name.clone(),
+                        rel.clone(),
+                        d.line,
+                        format!("{:?}", d.kind),
+                        relevance_score(task, &task_terms, &d.name, &rel),
+                    )
+                });
+        }
+    }
+
+    for entry in &file_entries {
+        let rel = make_relative(&entry.path.to_string_lossy(), root_str);
+        for d in symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang) {
+            if !is_discovery_anchor_candidate(&d.name, &rel) {
+                continue;
+            }
+            let callees = symbols::extract_callees(&entry.tree, &entry.source, &entry.path, &d.name, entry.lang);
+            if let Some(candidate) = candidates.get_mut(&d.name) {
+                candidate.callee_count += callees.len();
+            }
+            for callee in callees {
+                if is_builtin_or_common(&callee.name) {
+                    continue;
+                }
+                if let Some(candidate) = candidates.get_mut(&callee.name) {
+                    candidate.caller_count += 1;
+                    candidate.related_files.insert(rel.clone());
+                }
+            }
+        }
+    }
+
+    let mut ranked: Vec<PlanCandidate> = candidates.into_values().collect();
+    ranked.sort_by(|a, b| {
+        b.relevance
+            .cmp(&a.relevance)
+            .then_with(|| b.score()
+            .cmp(&a.score())
+            )
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    ranked.truncate(8);
+
+    let anchor_symbols: Vec<Value> = ranked
+        .iter()
+        .map(|c| json!({
+            "name": &c.name,
+            "file": &c.file,
+            "line": c.line,
+            "kind": &c.kind,
+            "score": c.score(),
+            "relevance": c.relevance,
+            "caller_count": c.caller_count,
+            "callee_count": c.callee_count,
+        }))
+        .collect();
+
+    let mut candidate_files: Vec<String> = ranked.iter().map(|c| c.file.clone()).collect();
+    candidate_files.sort();
+    candidate_files.dedup();
+
+    let suggested_calls: Vec<Value> = ranked
+        .iter()
+        .take(4)
+        .map(|c| json!({
+            "tool": "pre_context",
+            "arguments": {
+                "symbol": &c.name,
+                "depth": 2
+            },
+            "reason": "high centrality AST anchor",
+        }))
+        .collect();
+
+    let candidate_file_set: HashSet<String> = candidate_files.iter().cloned().collect();
+    let related_tests = find_related_tests(&candidate_file_set, &HashSet::new(), idx);
+    let mut suggested_minimal_reads: Vec<Value> = ranked
+        .iter()
+        .take(8)
+        .map(|c| read_hint(c.file.clone(), c.line, "candidate anchor"))
+        .collect();
+    for test in related_tests.iter().take(6) {
+        push_read_hint_unique(&mut suggested_minimal_reads, test.clone(), 1, "related test");
+    }
+    let missing_evidence = if ranked.is_empty() {
+        vec!["anchor_symbols"]
+    } else {
+        Vec::new()
+    };
+    let confidence = if ranked.is_empty() {
+        "low"
+    } else if ranked.iter().any(|c| c.relevance > 0) {
+        "high"
+    } else {
+        "medium"
+    };
+
+    let result = json!({
+        "task": task,
+        "mode": "discovery",
+        "anchor_symbols": anchor_symbols,
+        "candidate_files": candidate_files,
+        "suggested_calls": suggested_calls,
+        "related_tests": related_tests,
+        "risk_areas": [
+            "tool definition schema",
+            "model tool dispatch",
+            "tool result and evidence recording",
+            "prompt/runtime tool visibility"
+        ],
+        "answer_pack": build_answer_pack(
+            "discovery",
+            confidence,
+            anchor_symbols,
+            Vec::new(),
+            candidate_files,
+            related_tests,
+            vec![
+                "tool definition schema",
+                "model tool dispatch",
+                "tool result and evidence recording",
+                "prompt/runtime tool visibility",
+            ],
+            suggested_minimal_reads,
+            missing_evidence,
+        ),
+    });
+
+    json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+        }]
+    })
+}
+
+struct PlanCandidate {
+    name: String,
+    file: String,
+    line: usize,
+    kind: String,
+    relevance: usize,
+    caller_count: usize,
+    callee_count: usize,
+    related_files: HashSet<String>,
+}
+
+impl PlanCandidate {
+    fn new(name: String, file: String, line: usize, kind: String, relevance: usize) -> Self {
+        Self {
+            name,
+            file,
+            line,
+            kind,
+            relevance,
+            caller_count: 0,
+            callee_count: 0,
+            related_files: HashSet::new(),
+        }
+    }
+
+    fn score(&self) -> usize {
+        self.relevance * 20 + self.caller_count * 3 + self.callee_count + self.related_files.len()
+    }
+}
+
+fn relevance_score(task: &str, task_terms: &HashSet<String>, name: &str, file: &str) -> usize {
+    if task_terms.is_empty() {
+        return 0;
+    }
+
+    let mut score = 0;
+    let task_lower = task.to_ascii_lowercase();
+    let name_lower = name.to_ascii_lowercase();
+    if name.len() >= 4 && task_lower.contains(&name_lower) {
+        score += 10;
+    }
+
+    for term in tokenize_identifier(name).union(&tokenize_identifier(file)) {
+        if task_terms.contains(term) && !is_builtin_or_common(term) {
+            score += 1;
+        }
+    }
+    score
+}
+
+fn tokenize_identifier(text: &str) -> HashSet<String> {
+    let mut terms = HashSet::new();
+    let mut current = String::new();
+    let mut prev_lower_or_digit = false;
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase() && prev_lower_or_digit && !current.is_empty() {
+                insert_token(&mut terms, &current);
+                current.clear();
+            }
+            prev_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            current.push(ch.to_ascii_lowercase());
+        } else {
+            insert_token(&mut terms, &current);
+            current.clear();
+            prev_lower_or_digit = false;
+        }
+    }
+    insert_token(&mut terms, &current);
+    terms
+}
+
+fn insert_token(terms: &mut HashSet<String>, token: &str) {
+    if token.len() >= 3 {
+        terms.insert(token.to_string());
+    }
+}
+
+fn is_discovery_anchor_candidate(name: &str, file: &str) -> bool {
+    if is_builtin_or_common(name) || is_generic_anchor_name(name) {
+        return false;
+    }
+    let file = normalize_path(file);
+    let file_name = PathBuf::from(&file)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    !(file.contains("/fixtures/")
+        || file.contains("/testdata/")
+        || file_name.contains(".test.")
+        || file_name.contains(".spec.")
+        || file_name.contains("_test.")
+        || file_name.contains("_spec.")
+        || file_name.starts_with("test_"))
+}
+
+fn is_generic_anchor_name(name: &str) -> bool {
+    matches!(
+        name,
+        "execute"
+            | "files"
+            | "target"
+            | "deps"
+            | "options"
+            | "config"
+            | "handler"
+            | "run"
+            | "start"
+            | "stop"
+    )
 }
 
 fn topological_sort(deps: &HashMap<String, HashSet<String>>) -> Vec<String> {
