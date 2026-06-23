@@ -19,7 +19,6 @@ export type HeadlessBenchFailureCategory =
   | "unknown_agent_error"
   | "parse_or_harness_error"
   | "missing_artifact"
-  | "validation_contract"
   | "environment_missing_tool"
   | "environment_error"
   | "network_pull_error"
@@ -55,23 +54,8 @@ export type HeadlessBenchConfig = {
   testTimeoutMs: number;
   maxRepairAttempts: number;
   requiredArtifacts: string[];
-  validationContract?: ValidationContract;
   preflight: boolean;
   environmentSetupRetries: number;
-};
-
-export type ValidationContractItem = {
-  id: string;
-  kind: "artifact" | "service" | "preservation" | "binary";
-  path?: string;
-  target?: string;
-  validation?: "readiness" | "semantic";
-  semanticTokens?: string[];
-  requiredTool: "Bash.artifact" | "Bash.service" | "Bash.binary";
-};
-
-export type ValidationContract = {
-  items: ValidationContractItem[];
 };
 
 export type HeadlessBenchValidationResult =
@@ -160,10 +144,6 @@ export async function resolveHeadlessBenchConfig(input: {
     testTimeoutMs,
     maxRepairAttempts,
     requiredArtifacts,
-    validationContract: createValidationContract({
-      prompt: input.prompt,
-      requiredArtifacts,
-    }),
     preflight: input.options?.preflight ?? parseBoolean(env.LINGHUN_HEADLESS_PREFLIGHT) ?? true,
     environmentSetupRetries,
   };
@@ -198,7 +178,6 @@ export function createHeadlessBenchInitialPrompt(input: {
   const required = input.config.requiredArtifacts.length
     ? `Required artifacts detected: ${input.config.requiredArtifacts.join(", ")}. Verify they exist and are readable before final.`
     : "No explicit output artifact path was detected; still verify observable task completion.";
-  const contract = formatValidationContractPromptLines(input.config.validationContract);
   const test = input.config.testCommand
     ? `Official test command available: ${input.config.testCommand}. Prefer it over ad-hoc smoke tests before final.`
     : "No official test command was detected; use the strongest task-local verification available.";
@@ -209,11 +188,9 @@ export function createHeadlessBenchInitialPrompt(input: {
     "[Linghun headless bench guard]",
     test,
     required,
-    ...contract,
     preflight,
     formatInitialProfileStrategy(input.config.profile),
     "If rg is unavailable, use grep/find/sed/awk fallbacks instead of failing the task.",
-    ...formatCommonBenchStabilityGuidance(),
     "Do not claim completion from a self-written smoke test when an official test entrypoint is available.",
   ]
     .filter(Boolean)
@@ -374,7 +351,6 @@ export function createHeadlessBenchRepairPrompt(input: {
   maxAttempts: number;
   profile?: HeadlessBenchTaskProfile;
   preflight?: HeadlessEnvironmentPreflight;
-  validationContract?: ValidationContract;
 }): string {
   const artifactLine = input.failure.missingArtifacts?.length
     ? `Missing artifacts: ${input.failure.missingArtifacts.join(", ")}`
@@ -385,11 +361,9 @@ export function createHeadlessBenchRepairPrompt(input: {
     "Continue from the current workspace. Do not restart from scratch unless necessary.",
     "Use the official test failure and current files to make the smallest fix, then rerun the official test or artifact check.",
     formatRepairProfileStrategy(input.failure.category, input.profile ?? "generic"),
-    ...formatCommonBenchStabilityGuidance(),
     input.preflight?.missingTools.includes("rg")
       ? "rg is missing in this environment; use grep/find/sed/awk fallbacks."
       : "",
-    ...formatValidationContractPromptLines(input.validationContract),
     artifactLine,
     logLine,
     "",
@@ -401,221 +375,6 @@ export function createHeadlessBenchRepairPrompt(input: {
   ]
     .filter(Boolean)
     .join("\n");
-}
-
-export function createValidationContract(input: {
-  prompt: string;
-  requiredArtifacts: string[];
-}): ValidationContract {
-  const items: ValidationContractItem[] = [];
-  for (const path of input.requiredArtifacts) {
-    pushValidationContractItem(items, {
-      id: `artifact:${path}`,
-      kind: "artifact",
-      path,
-      requiredTool: "Bash.artifact",
-    });
-  }
-  for (const target of detectExplicitServiceTargets(input.prompt)) {
-    const semanticTokens = detectServiceSemanticTokens(input.prompt);
-    const semantic = semanticTokens.length >= 2 && hasSemanticServiceExpectation(input.prompt);
-    const validationTarget = semantic ? normalizeServiceReadinessTarget(target) : target;
-    pushValidationContractItem(items, {
-      id: `service:${validationTarget}`,
-      kind: "service",
-      target: validationTarget,
-      validation: semantic ? "semantic" : "readiness",
-      ...(semantic ? { semanticTokens } : {}),
-      requiredTool: "Bash.service",
-    });
-  }
-  if (hasPreservationRequirement(input.prompt)) {
-    for (const path of detectEngineeringArtifactTargets(input.prompt)) {
-      pushValidationContractItem(items, {
-        id: `preservation:${path}`,
-        kind: "preservation",
-        path,
-        requiredTool: "Bash.artifact",
-      });
-    }
-  }
-  for (const path of uniqueStrings([
-    ...input.requiredArtifacts.filter(isBinaryLikePath),
-    ...detectEngineeringArtifactTargets(input.prompt).filter((path) =>
-      isBinaryLikePath(path) || hasBinaryRequirementNearPath(input.prompt, path),
-    ),
-  ])) {
-    pushValidationContractItem(items, {
-      id: `binary:${path}`,
-      kind: "binary",
-      path,
-      requiredTool: "Bash.binary",
-    });
-  }
-  return { items };
-}
-
-function pushValidationContractItem(
-  items: ValidationContractItem[],
-  item: ValidationContractItem,
-): void {
-  if (items.some((existing) =>
-    existing.kind === item.kind &&
-    existing.path === item.path &&
-    normalizeContractTarget(existing.target) === normalizeContractTarget(item.target)
-  )) {
-    return;
-  }
-  items.push(item);
-}
-
-function formatValidationContractPromptLines(contract: ValidationContract | undefined): string[] {
-  if (!contract?.items.length) return [];
-  return [
-    "Validation contract: before final, satisfy each item with the required explicit tool.",
-    ...contract.items.map((item) => {
-      const subject = item.path ?? item.target ?? item.id;
-      const semantic =
-        item.kind === "service" && item.validation === "semantic"
-          ? `; also run semantic request/response probes for expected fields/values (${(item.semanticTokens ?? []).join(", ")}) including representative and adversarial cases`
-          : "";
-      return `- ${item.kind}: ${subject}; required Bash input: ${formatValidationContractToolInput(item)}${semantic}`;
-    }),
-  ];
-}
-
-function formatValidationContractToolInput(item: ValidationContractItem): string {
-  if (item.requiredTool === "Bash.service") {
-    const target = item.target ?? "http://127.0.0.1:PORT/";
-    const url = target.startsWith("http://") || target.startsWith("https://")
-      ? target
-      : `http://${target}`;
-    return `{ "service": { "action": "fetch", "url": ${JSON.stringify(url)}, "expectStatus": 200, "retry": 5 } }`;
-  }
-  if (item.requiredTool === "Bash.binary") {
-    return `{ "binary": { "path": ${JSON.stringify(item.path ?? "PATH")} } }`;
-  }
-  if (item.kind === "preservation") {
-    return `{ "artifact": { "path": ${JSON.stringify(item.path ?? "PATH")}, "preserve": { "mode": "compareNormalizedHtml", "expectedPath": "EXPECTED_PATH" } } }`;
-  }
-  return `{ "artifact": { "path": ${JSON.stringify(item.path ?? "PATH")} } }`;
-}
-
-function detectExplicitServiceTargets(prompt: string): string[] {
-  const targets: string[] = [];
-  const urlPattern = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?:\/[^\s`"')\]}<>]*)?/giu;
-  for (const match of prompt.matchAll(urlPattern)) {
-    targets.push(normalizeServiceTarget(match[0]));
-  }
-  const hostPortPattern = /\b(?:localhost|127\.0\.0\.1):\d{1,5}\b/giu;
-  for (const match of prompt.matchAll(hostPortPattern)) {
-    targets.push(normalizeServiceTarget(match[0]));
-  }
-  if (hasExplicitServicePortContext(prompt)) {
-    const portPattern =
-      /\b(?:port\s+(\d{1,5})|listen(?:ing)?(?:\s+on)?\s+(?:port\s+)?(\d{1,5})|localhost\s+port\s+(\d{1,5})|127\.0\.0\.1\s+port\s+(\d{1,5}))\b/giu;
-    for (const match of prompt.matchAll(portPattern)) {
-      const port = match[1] ?? match[2] ?? match[3] ?? match[4];
-      if (port) targets.push(`127.0.0.1:${port}`);
-    }
-  }
-  return uniqueStrings(targets).filter(hasValidServicePort);
-}
-
-function hasExplicitServicePortContext(prompt: string): boolean {
-  return /\b(?:service|server|serve|listen|http|endpoint|health|localhost|127\.0\.0\.1)\b/iu.test(prompt);
-}
-
-function hasSemanticServiceExpectation(prompt: string): boolean {
-  return /\b(?:api|endpoint|json|response|respond|return|schema|field|classification|sentiment|confidence|prediction|inference|request)\b|接口|响应|返回|字段|分类|预测/iu.test(
-    prompt,
-  );
-}
-
-function detectServiceSemanticTokens(prompt: string): string[] {
-  const tokens: string[] = [];
-  for (const match of prompt.matchAll(/["']([A-Za-z][A-Za-z0-9_-]{1,39})["']\s*:/gu)) {
-    tokens.push(match[1]);
-  }
-  for (const match of prompt.matchAll(/\b(?:positive|negative|true|false|pass|fail|success|error|valid|invalid)\b/giu)) {
-    tokens.push(match[0].toLowerCase());
-  }
-  return uniqueStrings(tokens).slice(0, 8);
-}
-
-function normalizeServiceTarget(value: string): string {
-  return value.replace(/[),.;!?]+$/u, "");
-}
-
-function normalizeServiceReadinessTarget(target: string): string {
-  try {
-    const url = target.startsWith("http://") || target.startsWith("https://")
-      ? new URL(target)
-      : new URL(`http://${target}`);
-    return target.startsWith("http://") || target.startsWith("https://")
-      ? url.origin
-      : `${url.hostname}:${url.port || (url.protocol === "https:" ? "443" : "80")}`;
-  } catch {
-    return target;
-  }
-}
-
-function normalizeContractTarget(target: string | undefined): string | undefined {
-  if (!target) return undefined;
-  try {
-    const url = target.startsWith("http://") || target.startsWith("https://")
-      ? new URL(target)
-      : new URL(`http://${target}`);
-    const port = url.port || (url.protocol === "https:" ? "443" : "80");
-    const path = url.pathname.replace(/\/$/u, "");
-    return `${url.hostname}:${port}${path}`;
-  } catch {
-    return target.replace(/\/$/u, "");
-  }
-}
-
-function hasValidServicePort(target: string): boolean {
-  try {
-    const url = target.startsWith("http://") || target.startsWith("https://")
-      ? new URL(target)
-      : new URL(`http://${target}`);
-    const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
-    return Number.isInteger(port) && port > 0 && port <= 65_535;
-  } catch {
-    return false;
-  }
-}
-
-function hasPreservationRequirement(prompt: string): boolean {
-  return /(?:\bpreserve\b|\bclean\b|\boriginal\b|\bunchanged\b|don't modify|do not modify|不要修改|保持原样|保留原始)/iu.test(
-    prompt,
-  );
-}
-
-function isBinaryLikePath(path: string): boolean {
-  return /\.(?:bin|elf|so|dll|dylib|exe|o|a|class|wasm|7z|zip|tar|gz|xz|bz2)$/iu.test(path);
-}
-
-function hasBinaryRequirementNearPath(prompt: string, path: string): boolean {
-  const index = prompt.indexOf(path);
-  if (index < 0) return false;
-  const window = prompt.slice(Math.max(0, index - 80), Math.min(prompt.length, index + path.length + 80));
-  return /(?:\bbinary\b|\bELF\b|二进制)/iu.test(window);
-}
-
-function formatCommonBenchStabilityGuidance(): string[] {
-  return [
-    "Command environment: prefer python3 over bare python. If a command reports python not found, treat it as recoverable and retry with python3.",
-    "Python dependencies: before relying on optional imports, probe with python3 -c \"import X\"; install only when appropriate, otherwise use a stdlib fallback.",
-    "Services: after starting HTTP/gRPC/server processes, poll the port or health endpoint with a bounded timeout and inspect logs before final verification.",
-    "Time budget: build the smallest verifiable solution first, run focused checks early, and avoid long blind builds/training runs near the deadline.",
-    "Verifier alignment: read task-local tests/verifier expectations and confirm output path, filename, port, and answer format instead of only matching examples.",
-    "Artifact checks: match validation commands to the artifact language or file type; do not run shell syntax checks on Python/JS/C++ source files.",
-    "Preservation tasks: when unchanged/clean/original content must survive, avoid parser/serializer round-trips unless tests allow reformatting; make targeted edits and compare preserved regions.",
-    "Sanitizer/filter tasks: run negative clean-sample checks that compare parser-normalized or whitespace-stripped output against the original; unsafe-case smoke tests alone are not enough.",
-    "Answer extraction: inspect tests/expected files for required count, ordering, and multi-line answers; do not stop at the first plausible value when the verifier expects multiple outputs.",
-    "Puzzle answer tasks: if multiple equally optimal or valid answers can exist and the output format allows a list, enumerate all required answers rather than a single example.",
-  ];
 }
 
 export async function detectHeadlessBenchTaskProfile(input: {
@@ -787,9 +546,6 @@ function formatRepairProfileStrategy(
 ): string {
   if (category === "missing_artifact") {
     return "Repair route: generate or write the required artifact now, then verify it exists, is readable, and is non-empty.";
-  }
-  if (category === "validation_contract") {
-    return "Repair route: run the required explicit validation tool for the contract item, then repair any failed evidence before final.";
   }
   if (category === "test_timeout") {
     return "Repair route: narrow validation to focused tests or logs first; avoid repeatedly launching full expensive runs.";

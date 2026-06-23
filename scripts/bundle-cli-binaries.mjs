@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cliBundledRoot = join(repoRoot, "apps", "cli", "bundled");
 const nativeRunnerManifest = join(repoRoot, "prototypes", "native-runner", "Cargo.toml");
+const preEngineManifest = join(repoRoot, "prototypes", "pre-engine", "Cargo.toml");
 const currentPlatformArch = `${process.platform}-${process.arch}`;
 const supportedPlatformArches = ["win32-x64", "linux-x64", "darwin-arm64", "darwin-x64"];
 const codebaseMemoryVersion = process.env.LINGHUN_CODEBASE_MEMORY_VERSION ?? "v0.8.1";
@@ -38,6 +39,8 @@ async function main() {
   } else if (!options.skipNativeRunner) {
     await bundleNativeRunner(currentPlatformArch);
   }
+
+  await bundlePreEngine(currentPlatformArch);
 
   if (options.allCodebaseMemory) {
     for (const platformArch of supportedPlatformArches) {
@@ -144,6 +147,75 @@ function nativeRunnerFileName(platformArch, kind = "release") {
       : "linghun-native-runner-prototype";
   }
   return platformArch.startsWith("win32-") ? "linghun-native-runner.exe" : "linghun-native-runner";
+}
+
+async function bundlePreEngine(platformArch) {
+  buildPreEngine();
+  const fileName = preEngineFileName(platformArch);
+  const candidates = [
+    join(repoRoot, "prototypes", "pre-engine", "target", "release", fileName),
+    join(repoRoot, "prototypes", "pre-engine", "target", "x86_64-pc-windows-gnu", "release", fileName),
+  ];
+  let source;
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      source = candidate;
+      break;
+    } catch {}
+  }
+  if (!source) {
+    await assertReadable(candidates[0], "pre-engine binary");
+    return;
+  }
+  await copyPreEngine(source, platformArch);
+}
+
+function buildPreEngine() {
+  const attempts =
+    process.platform === "win32"
+      ? [
+          ["cargo", ["build", "--release", "--manifest-path", preEngineManifest]],
+          [
+            "cargo",
+            [
+              "+stable-x86_64-pc-windows-gnu",
+              "build",
+              "--release",
+              "--manifest-path",
+              preEngineManifest,
+            ],
+          ],
+        ]
+      : [["cargo", ["build", "--release", "--manifest-path", preEngineManifest]]];
+
+  const failures = [];
+  for (const [command, args] of attempts) {
+    const result = spawnSync(command, args, {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    if (result.status === 0) return;
+    failures.push(`${command} ${args.join(" ")}\n${result.stderr || result.stdout || ""}`.trim());
+  }
+  throw new Error(`pre-engine build failed:\n${failures.join("\n\n")}`);
+}
+
+async function copyPreEngine(source, platformArch) {
+  const targetDir = join(cliBundledRoot, "pre-engine", platformArch);
+  await mkdir(targetDir, { recursive: true });
+  const target = join(targetDir, preEngineFileName(platformArch));
+  await copyFile(source, target);
+  if (!platformArch.startsWith("win32-")) {
+    await chmod(target, 0o755);
+  }
+  console.log(`[linghun] bundled pre-engine ${platformArch}: ${relative(target)}`);
+}
+
+function preEngineFileName(platformArch) {
+  return platformArch.startsWith("win32-") ? "linghun-pre-engine.exe" : "linghun-pre-engine";
 }
 
 async function bundleLocalCodebaseMemory(platformArch) {

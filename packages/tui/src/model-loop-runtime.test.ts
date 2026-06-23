@@ -88,20 +88,16 @@ describe("model-loop-runtime", () => {
     it("returns Bash schema with command and explicit validation modes", () => {
       const schema = createToolInputSchema("Bash") as {
         required?: string[];
-        properties: Record<string, { properties?: Record<string, unknown> }>;
+        properties: Record<string, { type?: string }>;
       };
-      expect(schema.required).toBeUndefined();
+      expect(schema.required).toEqual(["command"]);
       expect(schema.properties).toHaveProperty("command");
+      expect(schema.properties).toHaveProperty("description");
+      expect(schema.properties).toHaveProperty("timeoutMs");
       expect(schema.properties).toHaveProperty("run_in_background");
       expect(schema.properties).toHaveProperty("runInBackground");
-      expect(schema.properties).toHaveProperty("service");
-      expect(schema.properties).toHaveProperty("artifact");
-      expect(schema.properties).toHaveProperty("binary");
-      expect(schema.properties.service.properties).toHaveProperty("action");
-      expect(schema.properties.service.properties).toHaveProperty("url");
-      expect(schema.properties.artifact.properties).toHaveProperty("path");
-      expect(schema.properties.artifact.properties).toHaveProperty("text");
-      expect(schema.properties.binary.properties).toHaveProperty("path");
+      expect(schema.properties.command.type).toBe("string");
+      expect(schema.properties.description.type).toBe("string");
     });
 
     it("returns Todo schema with action required", () => {

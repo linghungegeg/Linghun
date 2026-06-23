@@ -341,7 +341,7 @@ describe("tool_result budget", () => {
 
   it("preserves compact diagnostics in transcript tool_end output", () => {
     const diagnostics = Array.from({ length: 6 }, (_, index) => ({
-      type: index === 0 ? "service_readiness" : `diagnostic_${index}`,
+      type: index === 0 ? "diagnostic_alpha" : `diagnostic_${index}`,
       severity: index === 1 ? "blocking" : "recoverable",
       evidence: index === 0 ? "connection refused" : `evidence ${index}`,
       suggestion: `suggestion ${index}`,
@@ -357,12 +357,12 @@ describe("tool_result budget", () => {
     }) as Extract<ReturnType<typeof createToolEndEvent>, { type: "tool_call_end" }>;
 
     expect(toolEnd.output.text).toContain("Linghun diagnostics:");
-    expect(toolEnd.output.text).toContain("- service_readiness: connection refused");
+    expect(toolEnd.output.text).toContain("- diagnostic_alpha: connection refused");
     const compactDiagnostics = (toolEnd.output.data as { diagnostics?: unknown[] }).diagnostics;
     expect(compactDiagnostics).toHaveLength(5);
     expect(compactDiagnostics).toEqual([
       {
-        type: "service_readiness",
+        type: "diagnostic_alpha",
         severity: "recoverable",
         evidence: "connection refused",
         target: "127.0.0.1:3000",
@@ -401,7 +401,7 @@ describe("tool_result budget", () => {
         data: {
           exitCode: 1,
           diagnostics: Array.from({ length: 6 }, (_, index) => ({
-            type: index === 0 ? "service_readiness" : index === 1 ? "missing_command" : `diagnostic_${index}`,
+            type: index === 0 ? "diagnostic_alpha" : index === 1 ? "missing_command" : `diagnostic_${index}`,
             severity: "recoverable",
             evidence: index === 0 ? "connection refused" : `evidence ${index}`,
             suggestion: `suggestion ${index}`,
@@ -416,12 +416,12 @@ describe("tool_result budget", () => {
 
     const event = events[0] as { content?: { text?: string; data?: unknown } };
     expect(event.content?.text).toContain("Linghun diagnostics:");
-    expect(event.content?.text).toContain("- service_readiness: connection refused");
+    expect(event.content?.text).toContain("- diagnostic_alpha: connection refused");
     expect(JSON.stringify(event.content?.data)).not.toContain("suggestion");
     expect(event.content?.data).toMatchObject({
       diagnostics: expect.arrayContaining([
         expect.objectContaining({
-          type: "service_readiness",
+          type: "diagnostic_alpha",
           severity: "recoverable",
           evidence: "connection refused",
           target: "127.0.0.1:3000",
@@ -435,7 +435,7 @@ describe("tool_result budget", () => {
     expect(context.tools.recentDiagnostics).toHaveLength(5);
     expect(context.tools.recentDiagnostics[0]).toEqual({
       source: "Bash",
-      type: "service_readiness",
+      type: "diagnostic_alpha",
       severity: "recoverable",
       evidence: "connection refused",
       target: "127.0.0.1:3000",
@@ -482,7 +482,7 @@ describe("tool_result budget", () => {
         data: {
           diagnostics: [
             {
-              type: "service_readiness",
+              type: "diagnostic_alpha",
               severity: "recoverable",
               evidence: "new diagnostic",
               suggestion: "do not store",
@@ -496,7 +496,7 @@ describe("tool_result budget", () => {
     expect(context.tools.recentDiagnostics).toHaveLength(20);
     expect(context.tools.recentDiagnostics[0]).toMatchObject({
       source: "Bash",
-      type: "service_readiness",
+      type: "diagnostic_alpha",
       evidence: "new diagnostic",
       toolUseId: "call-new",
     });
@@ -583,252 +583,15 @@ describe("tool_result budget", () => {
     });
   });
 
-  it("attaches compact validation evidence to matching evidence records and unlocks final gate", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
-    const context = {
-      projectPath: project,
-      evidence: [
-        {
-          id: "ev-validation",
-          kind: "command_output",
-          source: "Bash",
-          summary: "validation evidence",
-          supportsClaims: ["Bash"],
-          createdAt: new Date().toISOString(),
-        },
-      ],
-      tools: {
-        headlessBench: { enabled: true },
-        validationContract: {
-          items: [
-            { id: "artifact:out.txt", kind: "artifact", path: "out.txt", requiredTool: "Bash.artifact" },
-          ],
-        },
-        recentDiagnostics: [],
-      },
-      store: { appendEvent: async () => undefined },
-    };
 
-    await appendToolResultEvent(
-      context as unknown as Parameters<typeof appendToolResultEvent>[0],
-      "session-validation",
-      "call-validation",
-      "Bash",
-      {
-        text: "exit code 0",
-        data: {
-          exitCode: 0,
-          artifact: {
-            path: "out.txt",
-            exists: true,
-            checks: { text: { ok: true } },
-          },
-        },
-      },
-      false,
-      "ev-validation",
-    );
 
-    expect((context.evidence[0] as { data?: { validationEvidence?: unknown[] } }).data?.validationEvidence).toEqual([
-      expect.objectContaining({
-        kind: "artifact",
-        path: "out.txt",
-        tool: "Bash.artifact",
-        ok: true,
-      }),
-    ]);
-    expect(checkClaimSupport("ordinary final text", context as unknown as Parameters<typeof checkClaimSupport>[1]).status).toBe("passed");
-  });
-
-  it("does not satisfy headless service contract from ordinary background Bash evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
-    const context = {
-      projectPath: project,
-      evidence: [
-        {
-          id: "ev-background",
-          kind: "command_output",
-          source: "Bash",
-          summary: "ordinary background command started",
-          supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
-          createdAt: new Date().toISOString(),
-          data: {
-            backgroundTaskId: "bg_1",
-            outputPath: "/tmp/bg_1.log",
-          },
-        },
-        {
-          id: "ev-service",
-          kind: "command_output",
-          source: "Bash",
-          summary: "service validation",
-          supportsClaims: ["Bash"],
-          createdAt: new Date().toISOString(),
-        },
-      ],
-      tools: {
-        headlessBench: { enabled: true },
-        validationContract: {
-          items: [
-            {
-              id: "service:127.0.0.1:8080",
-              kind: "service",
-              target: "127.0.0.1:8080",
-              requiredTool: "Bash.service",
-            },
-          ],
-        },
-        recentDiagnostics: [],
-      },
-      store: { appendEvent: async () => undefined },
-    };
-
-    const blocked = checkClaimSupport(
-      "ordinary final text",
-      context as unknown as Parameters<typeof checkClaimSupport>[1],
-    );
-    expect(blocked.status).toBe("needs_disclaimer");
-    expect(blocked.unsupportedClaims.join("\n")).toContain("missing explicit Bash.service");
-
-    await appendToolResultEvent(
-      context as unknown as Parameters<typeof appendToolResultEvent>[0],
-      "session-validation-service-contract",
-      "call-validation-service-contract",
-      "Bash",
-      {
-        text: "service ok",
-        data: {
-          exitCode: 0,
-          service: {
-            target: "127.0.0.1:8080",
-            ready: true,
-            readiness: { ok: true, target: "127.0.0.1:8080" },
-          },
-        },
-      },
-      false,
-      "ev-service",
-    );
-
-    expect(checkClaimSupport("ordinary final text", context as unknown as Parameters<typeof checkClaimSupport>[1]).status).toBe("passed");
-  });
-
-  it("keeps validation evidence in transcript tool_result content without diagnostics", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
-    const events: unknown[] = [];
-    const context = {
-      projectPath: project,
-      tools: { recentDiagnostics: [] },
-      store: {
-        appendEvent: async (_sessionId: string, event: unknown) => {
-          events.push(event);
-        },
-      },
-    };
-
-    await appendToolResultEvent(
-      context as unknown as Parameters<typeof appendToolResultEvent>[0],
-      "session-validation-artifact",
-      "call-validation-artifact",
-      "Bash",
-      {
-        text: "artifact ok",
-        data: {
-          exitCode: 0,
-          artifact: {
-            path: "out.txt",
-            exists: true,
-            raw: "ARTIFACT_RAW_SHOULD_NOT_REACH_TRANSCRIPT",
-            checks: { text: { ok: true, raw: "TEXT_RAW_SHOULD_NOT_REACH_TRANSCRIPT" } },
-          },
-        },
-      },
-      false,
-    );
-    await appendToolResultEvent(
-      context as unknown as Parameters<typeof appendToolResultEvent>[0],
-      "session-validation-service",
-      "call-validation-service",
-      "Bash",
-      {
-        text: "service ok",
-        data: {
-          exitCode: 0,
-          service: {
-            target: "127.0.0.1:8000",
-            ready: true,
-            raw: "SERVICE_RAW_SHOULD_NOT_REACH_TRANSCRIPT",
-            fetch: { ok: true, status: 200, body: "BODY_SHOULD_NOT_REACH_TRANSCRIPT" },
-          },
-        },
-      },
-      false,
-    );
-    await appendToolResultEvent(
-      context as unknown as Parameters<typeof appendToolResultEvent>[0],
-      "session-validation-binary",
-      "call-validation-binary",
-      "Bash",
-      {
-        text: "binary ok",
-        data: {
-          exitCode: 0,
-          binary: {
-            path: "a.out",
-            magic: "ELF",
-            raw: "BINARY_RAW_SHOULD_NOT_REACH_TRANSCRIPT",
-          },
-        },
-      },
-      false,
-    );
-
-    const data = events.map((event) => (event as { content?: { data?: unknown } }).content?.data);
-    expect(data).toEqual([
-      {
-        validationEvidence: [
-          expect.objectContaining({
-            kind: "artifact",
-            path: "out.txt",
-            tool: "Bash.artifact",
-            ok: true,
-            checks: { text: { ok: true } },
-          }),
-        ],
-      },
-      {
-        validationEvidence: [
-          expect.objectContaining({
-            kind: "service",
-            target: "127.0.0.1:8000",
-            tool: "Bash.service",
-            ok: true,
-            checks: { fetch: { ok: true, status: 200 } },
-          }),
-        ],
-      },
-      {
-        validationEvidence: [
-          expect.objectContaining({
-            kind: "binary",
-            path: "a.out",
-            tool: "Bash.binary",
-            ok: true,
-            checks: { magic: "ELF" },
-          }),
-        ],
-      },
-    ]);
-    expect(JSON.stringify(data)).not.toContain("SHOULD_NOT_REACH_TRANSCRIPT");
-    expect(context.tools.recentDiagnostics).toEqual([]);
-  });
 
   it("does not change recentDiagnostics when tool result has no diagnostics", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
     const sentinel = [
       {
         source: "Bash" as const,
-        type: "service_readiness",
+        type: "diagnostic_alpha",
         severity: "recoverable",
         evidence: "existing",
         createdAt: "2026-01-01T00:00:00.000Z",

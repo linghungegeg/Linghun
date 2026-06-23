@@ -161,13 +161,13 @@ describe("tool-output-presenter", () => {
             exitCode: 1,
             diagnostics: [
               {
-                type: "service_readiness",
+                type: "diagnostic_alpha",
                 severity: "recoverable",
                 evidence: "connection refused",
                 suggestion: "poll health",
               },
               {
-                type: "artifact_preservation",
+                type: "diagnostic_beta",
                 severity: "blocking",
                 evidence: "clean HTML modified",
                 suggestion: "inspect artifacts",
@@ -191,8 +191,8 @@ describe("tool-output-presenter", () => {
       );
 
       expect(text).toContain("Linghun diagnostics:");
-      expect(text).toContain("- service_readiness: connection refused");
-      expect(text).toContain("- artifact_preservation: clean HTML modified");
+      expect(text).toContain("- diagnostic_alpha: connection refused");
+      expect(text).toContain("- diagnostic_beta: clean HTML modified");
       expect(text).toContain("- timeout: timed out");
       expect(text).not.toContain("- provider_or_network: gateway unstable");
     });

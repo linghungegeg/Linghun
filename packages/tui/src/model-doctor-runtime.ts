@@ -75,7 +75,7 @@ export type ModelDoctorContext = {
   // 由调用方（index.ts）注入 snapshotDeferredTools(context) 的摘要字段，doctor 仅做 read-only 渲染。
   deferredToolsSummary?: {
     total: number;
-    byKind: { "codebase-memory": number; mcp: number; skill: number; plugin: number };
+    byKind: { "codebase-memory": number; "pre-engine": number; mcp: number; skill: number; plugin: number };
     executableCount: number;
   };
   // D.13J Block 2：本 session 通过 SearchExtraTools 已发现的 deferred 工具名摘要。
@@ -355,7 +355,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   if (context.deferredToolsSummary) {
     const summary = context.deferredToolsSummary;
     lines.push(
-      `- deferred tools: total ${summary.total}; executable ${summary.executableCount}; codebase-memory ${summary.byKind["codebase-memory"]}; mcp ${summary.byKind.mcp}; skill ${summary.byKind.skill}; plugin ${summary.byKind.plugin} (SearchExtraTools/ExecuteExtraTool 入口；built-in 工具不走该派发)`,
+      `- deferred tools: total ${summary.total}; executable ${summary.executableCount}; codebase-memory ${summary.byKind["codebase-memory"]}; pre-engine ${summary.byKind["pre-engine"]}; mcp ${summary.byKind.mcp}; skill ${summary.byKind.skill}; plugin ${summary.byKind.plugin} (SearchExtraTools/ExecuteExtraTool 入口；built-in 工具不走该派发)`,
     );
   }
   // D.13J Block 2：本 session 通过 SearchExtraTools 已发现的 deferred 工具名摘要。

@@ -148,7 +148,6 @@ import {
 } from "./deferred-tools-catalog.js";
 import {
   checkClaimSupport,
-  createHeadlessBenchValidationContractRiskSummary,
   createHandoffPendingItems,
   createHandoffRiskItems,
   createPhase15BetaVerdictScope,
@@ -757,7 +756,6 @@ import {
 import {
   type HeadlessBenchOptions,
   type HeadlessBenchValidationResult,
-  type ValidationContract,
   collectHeadlessArtifactChecklist,
   createHeadlessBenchInitialPrompt,
   createHeadlessBenchRepairPrompt,
@@ -1584,16 +1582,12 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   });
   const headlessTools = context.tools as typeof context.tools & {
     headlessBench?: { enabled: boolean };
-    validationContract?: ValidationContract;
   };
   headlessTools.headlessBench = {
     enabled: benchConfig.enabled,
   };
   if (benchConfig.enabled) {
     headlessTools.isHeadlessBench = true;
-  }
-  if (benchConfig.enabled && benchConfig.validationContract) {
-    headlessTools.validationContract = benchConfig.validationContract;
   }
   const benchPreflight =
     benchConfig.enabled && benchConfig.preflight
@@ -1719,10 +1713,6 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
         let validation = await validateHeadlessBenchCompletion({ projectPath, config: benchConfig });
         if (validation.ok) {
-          const validationContractRisk = createHeadlessBenchValidationContractRiskSummary(context);
-          if (validationContractRisk) {
-            writeLine(errorOutput, `[headless] bench validation warning: validation_contract; ${validationContractRisk}`);
-          }
         }
         lastValidation = validation;
         if (validation.ok) {
@@ -1757,7 +1747,6 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           maxAttempts: benchConfig.maxRepairAttempts,
           profile: benchConfig.profile,
           ...(benchPreflight ? { preflight: benchPreflight } : {}),
-          ...(benchConfig.validationContract ? { validationContract: benchConfig.validationContract } : {}),
         });
         const repairStatus = await runOneRequest(repairPrompt);
         if (repairStatus.exitCode !== undefined) {

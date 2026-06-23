@@ -47,19 +47,6 @@ type CompactDiagnostic = {
   targetPort?: number;
 };
 
-type CompactValidationEvidence = {
-  kind: "artifact" | "service" | "preservation" | "binary";
-  path?: string;
-  target?: string;
-  tool: "Bash.artifact" | "Bash.service" | "Bash.binary";
-  ok: boolean;
-  checks?: Record<string, unknown>;
-};
-
-type CompactSemanticProbeEvidence = {
-  tokens: string[];
-};
-
 export function createEvidenceRecord(
   kind: EvidenceRecord["kind"],
   summary: string,
@@ -335,12 +322,6 @@ export async function recordToolEvidence(
     output.fullOutputPath ?? name,
     supportsClaims,
   );
-  const semanticProbe = supportsClaims.includes("bash_exit_0")
-    ? compactSemanticProbeEvidence(context, output, input)
-    : undefined;
-  if (semanticProbe) {
-    evidence.data = { ...(typeof evidence.data === "object" && evidence.data ? evidence.data : {}), semanticProbe };
-  }
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
@@ -700,26 +681,14 @@ function compactToolOutputDataForTranscript(data: unknown): unknown {
 }
 
 function compactToolStructuredDataForTranscript(data: unknown): Record<string, unknown> | undefined {
-  const compact: Record<string, unknown> = {};
   const diagnostics = compactDiagnosticsDataForTranscript(data);
-  const validationEvidence = compactValidationEvidenceDataForTranscript(data);
-  if (diagnostics) Object.assign(compact, diagnostics);
-  if (validationEvidence) Object.assign(compact, validationEvidence);
-  return Object.keys(compact).length > 0 ? compact : undefined;
+  return diagnostics;
 }
 
 function compactDiagnosticsDataForTranscript(data: unknown): { diagnostics: CompactDiagnostic[] } | undefined {
   const diagnostics = readDiagnosticsForTranscript(data);
   if (!diagnostics) return undefined;
   return { diagnostics };
-}
-
-function compactValidationEvidenceDataForTranscript(
-  data: unknown,
-): { validationEvidence: CompactValidationEvidence[] } | undefined {
-  const validationEvidence = readValidationEvidenceForTranscript(data);
-  if (!validationEvidence) return undefined;
-  return { validationEvidence };
 }
 
 function readDiagnosticsForTranscript(data: unknown): CompactDiagnostic[] | undefined {
@@ -882,59 +851,7 @@ function compactToolEvidenceData(data: unknown): Record<string, unknown> | undef
   for (const key of ["service", "serviceHint", "artifactHint", "binaryHint", "binaryPreflight"]) {
     if (record[key] !== undefined) compact[key] = record[key];
   }
-  const validationEvidence = readValidationEvidenceForTranscript(data);
-  if (validationEvidence) compact.validationEvidence = validationEvidence;
   return Object.keys(compact).length > 0 ? compact : undefined;
-}
-
-function compactSemanticProbeEvidence(
-  context: TuiContext,
-  output: ToolOutput,
-  input: unknown,
-): CompactSemanticProbeEvidence | undefined {
-  const tokens = collectSemanticContractTokens(context);
-  if (tokens.length === 0) return undefined;
-  if (!looksLikeServiceProbeCommand(input)) return undefined;
-  const haystack = [output.text, output.summary, output.preview]
-    .filter((item): item is string => typeof item === "string" && item.length > 0)
-    .join("\n")
-    .toLowerCase();
-  if (!haystack) return undefined;
-  const matched = tokens.filter((token) => haystack.includes(token.toLowerCase()));
-  const required = Math.min(2, tokens.length);
-  if (matched.length < required) return undefined;
-  return { tokens: matched.slice(0, 12) };
-}
-
-function looksLikeServiceProbeCommand(input: unknown): boolean {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
-  const command = (input as Record<string, unknown>).command;
-  if (typeof command !== "string") return false;
-  return /\b(?:curl|wget|http|httpie|python|python3|node|deno|ruby|perl|php)\b|(?:requests|fetch|urllib|http\.client|axios|localhost|127\.0\.0\.1)/iu.test(
-    command,
-  );
-}
-
-function collectSemanticContractTokens(context: TuiContext): string[] {
-  const tools = context.tools as typeof context.tools & {
-    headlessBench?: { enabled?: boolean };
-    validationContract?: {
-      items?: Array<{ kind?: unknown; validation?: unknown; semanticTokens?: unknown }>;
-    };
-  };
-  if (tools.headlessBench?.enabled !== true) return [];
-  const tokens = new Set<string>();
-  for (const item of tools.validationContract?.items ?? []) {
-    if (item.kind !== "service" || item.validation !== "semantic" || !Array.isArray(item.semanticTokens)) {
-      continue;
-    }
-    for (const token of item.semanticTokens) {
-      if (typeof token === "string" && token.trim()) {
-        tokens.add(token.trim());
-      }
-    }
-  }
-  return [...tokens];
 }
 
 function rememberRecentDiagnostics(
@@ -972,77 +889,6 @@ function appendToolResultContentDiagnostics(content: unknown): unknown {
     ...output,
     data: compactData,
     text: diagnostics ? appendCompactDiagnostics(output.text, diagnostics) : output.text,
-  };
-}
-
-function readValidationEvidenceForTranscript(data: unknown): CompactValidationEvidence[] | undefined {
-  if (!data || typeof data !== "object") return undefined;
-  const record = data as Record<string, unknown>;
-  const entries = [
-    readArtifactValidationEvidence(record),
-    readPreservationValidationEvidence(record),
-    readServiceValidationEvidence(record),
-    readBinaryValidationEvidence(record),
-  ].filter((item): item is CompactValidationEvidence => Boolean(item));
-  return entries.length > 0 ? entries : undefined;
-}
-
-function readArtifactValidationEvidence(record: Record<string, unknown>): CompactValidationEvidence | undefined {
-  const artifact = readRecord(record.artifact);
-  if (!artifact) return undefined;
-  const path = readString(artifact.path);
-  if (!path) return undefined;
-  return {
-    kind: "artifact",
-    path,
-    tool: "Bash.artifact",
-    ok: record.exitCode === 0 && artifact.exists === true && checksOk(readRecord(artifact.checks)),
-    ...(artifact.checks && typeof artifact.checks === "object" ? { checks: compactArtifactChecks(artifact.checks) } : {}),
-  };
-}
-
-function readPreservationValidationEvidence(record: Record<string, unknown>): CompactValidationEvidence | undefined {
-  const artifact = readRecord(record.artifact);
-  const checks = readRecord(artifact?.checks);
-  const preserve = readRecord(checks?.preserve);
-  const path = readString(artifact?.path);
-  if (!artifact || !checks || !preserve || !path) return undefined;
-  return {
-    kind: "preservation",
-    path,
-    tool: "Bash.artifact",
-    ok: record.exitCode === 0 && preserve.ok === true,
-    checks: { preserve: compactCheckRecord(preserve) },
-  };
-}
-
-function readServiceValidationEvidence(record: Record<string, unknown>): CompactValidationEvidence | undefined {
-  const service = readRecord(record.service);
-  if (!service) return undefined;
-  const target = readString(service.target) ?? readServiceTargetFromHostPort(service);
-  if (!target) return undefined;
-  const readiness = readRecord(service.readiness);
-  const fetch = readRecord(service.fetch);
-  return {
-    kind: "service",
-    target,
-    tool: "Bash.service",
-    ok: record.exitCode === 0 && (service.ready === true || readiness?.ok === true),
-    ...((readiness || fetch) ? { checks: { ...(readiness ? { readiness: compactCheckRecord(readiness) } : {}), ...(fetch ? { fetch: compactCheckRecord(fetch) } : {}) } } : {}),
-  };
-}
-
-function readBinaryValidationEvidence(record: Record<string, unknown>): CompactValidationEvidence | undefined {
-  const binary = readRecord(record.binary);
-  if (!binary) return undefined;
-  const path = readString(binary.path);
-  if (!path) return undefined;
-  return {
-    kind: "binary",
-    path,
-    tool: "Bash.binary",
-    ok: record.exitCode === 0,
-    checks: compactCheckRecord(binary),
   };
 }
 

@@ -22,7 +22,11 @@
     "@linghun/codebase-memory-darwin-x64": "0.1.0",
     "@linghun/codebase-memory-linux-x64": "0.1.0",
     "@linghun/codebase-memory-win32-x64": "0.1.0",
-    "@linghun/native-runner-win32-x64": "0.1.0"
+    "@linghun/native-runner-win32-x64": "0.1.0",
+    "@linghun/pre-engine-win32-x64": "0.1.0",
+    "@linghun/pre-engine-linux-x64": "0.1.0",
+    "@linghun/pre-engine-darwin-arm64": "0.1.0",
+    "@linghun/pre-engine-darwin-x64": "0.1.0"
   },
   "dependencies": {
     "@linghun/config": "workspace:*",

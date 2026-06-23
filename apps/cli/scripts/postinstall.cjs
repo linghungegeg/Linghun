@@ -11,6 +11,9 @@ const executables = [
   ["bundled", "native-runner", "linux-x64", "linghun-native-runner"],
   ["bundled", "native-runner", "darwin-arm64", "linghun-native-runner"],
   ["bundled", "native-runner", "darwin-x64", "linghun-native-runner"],
+  ["bundled", "pre-engine", "linux-x64", "linghun-pre-engine"],
+  ["bundled", "pre-engine", "darwin-arm64", "linghun-pre-engine"],
+  ["bundled", "pre-engine", "darwin-x64", "linghun-pre-engine"],
 ];
 
 for (const parts of executables) {
@@ -27,6 +30,9 @@ for (const packageName of [
   "@linghun/native-runner-linux-x64",
   "@linghun/native-runner-darwin-arm64",
   "@linghun/native-runner-darwin-x64",
+  "@linghun/pre-engine-linux-x64",
+  "@linghun/pre-engine-darwin-arm64",
+  "@linghun/pre-engine-darwin-x64",
 ]) {
   try {
     const packageRoot = join(requireFromCli.resolve(`${packageName}/package.json`), "..");
@@ -39,13 +45,21 @@ for (const packageName of [
             packageName.replace("@linghun/codebase-memory-", ""),
             "codebase-memory-mcp",
           )
-        : join(
-            packageRoot,
-            "bundled",
-            "native-runner",
-            packageName.replace("@linghun/native-runner-", ""),
-            "linghun-native-runner",
-          );
+        : packageName.includes("pre-engine")
+          ? join(
+              packageRoot,
+              "bundled",
+              "pre-engine",
+              packageName.replace("@linghun/pre-engine-", ""),
+              "linghun-pre-engine",
+            )
+          : join(
+              packageRoot,
+              "bundled",
+              "native-runner",
+              packageName.replace("@linghun/native-runner-", ""),
+              "linghun-native-runner",
+            );
     if (existsSync(executable)) {
       chmodSync(executable, 0o755);
     }

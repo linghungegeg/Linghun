@@ -10,7 +10,6 @@ import {
   hasArchitectureEvidenceForClaims,
 } from "./model-loop-runtime.js";
 import type { EvidenceRecord, VerdictEvidenceScope } from "./tui-data-types.js";
-import type { ValidationContractItem } from "./headless-bench-runtime.js";
 
 export function needsSolutionCompletenessReportClosure(
   context: TuiContext,
@@ -235,8 +234,6 @@ function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
 }
 
 export function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
-  const headlessRisk = createHeadlessBenchDiagnosticRiskSummary(context);
-  const validationContractRisk = createHeadlessBenchValidationContractRiskSummary(context);
   // D.13U：只接受模型声明的结构化 claim 契约；不再维护自然语言短语表。
   const structuredClaims = extractStructuredFinalAnswerClaims(claim);
   if (structuredClaims.some((item) => item.kind === "beta_readiness")) {
@@ -246,8 +243,6 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
         ...structuredClaims
           .filter((item) => item.kind === "beta_readiness")
           .map((item) => item.phrase),
-        ...(validationContractRisk ? [validationContractRisk] : []),
-        ...(headlessRisk ? [headlessRisk] : []),
       ],
       verdict: createPhase15BetaVerdictScope(context.evidence),
     };
@@ -259,26 +254,7 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     // 做最小匹配；普通低风险文本不误伤。
     const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
     if (nlCheck.status !== "passed") {
-      return {
-        ...nlCheck,
-        unsupportedClaims: [
-          ...nlCheck.unsupportedClaims,
-          ...(validationContractRisk ? [validationContractRisk] : []),
-          ...(headlessRisk ? [headlessRisk] : []),
-        ],
-      };
-    }
-    if (validationContractRisk) {
-      return {
-        status: "needs_disclaimer",
-        unsupportedClaims: [validationContractRisk],
-      };
-    }
-    if (headlessRisk) {
-      return {
-        status: "needs_disclaimer",
-        unsupportedClaims: [headlessRisk],
-      };
+      return nlCheck;
     }
     return { status: "passed", unsupportedClaims: [] };
   }
@@ -293,271 +269,18 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
         status: "needs_disclaimer",
         unsupportedClaims: [
           ...extended.verdict.matchedClaims.map((item) => item.phrase),
-          ...(validationContractRisk ? [validationContractRisk] : []),
-          ...(headlessRisk ? [headlessRisk] : []),
         ],
       };
     }
   }
   const verdict = evaluateFinalAnswerClaims(claim, context.evidence);
   if (verdict.status === "passed") {
-    if (validationContractRisk) {
-      return {
-        status: "needs_disclaimer",
-        unsupportedClaims: [validationContractRisk],
-      };
-    }
-    if (headlessRisk) {
-      return {
-        status: "needs_disclaimer",
-        unsupportedClaims: [headlessRisk],
-      };
-    }
     return { status: "passed", unsupportedClaims: [] };
   }
   return {
     status: "needs_disclaimer",
-    unsupportedClaims: [
-      ...structuredClaims.map((item) => item.phrase),
-      ...(validationContractRisk ? [validationContractRisk] : []),
-      ...(headlessRisk ? [headlessRisk] : []),
-    ],
+    unsupportedClaims: structuredClaims.map((item) => item.phrase),
   };
-}
-
-export function createHeadlessBenchValidationContractRiskSummary(context: TuiContext): string | undefined {
-  const tools = context.tools as typeof context.tools & {
-    headlessBench?: { enabled?: boolean };
-    validationContract?: { items?: ValidationContractItem[] };
-  };
-  if (tools.headlessBench?.enabled !== true) return undefined;
-  const items = tools.validationContract?.items ?? [];
-  if (items.length === 0) return undefined;
-  const risks = items
-    .map((item) => summarizeValidationContractItemRisk(item, context.evidence))
-    .filter((risk): risk is string => Boolean(risk));
-  if (risks.length === 0) return undefined;
-  return `validation contract needs validation: ${risks.slice(0, 4).join("; ")}`;
-}
-
-function summarizeValidationContractItemRisk(
-  item: ValidationContractItem,
-  evidence: EvidenceRecord[],
-): string | undefined {
-  const matching = collectMatchingValidationEvidence(item, evidence);
-  if (matching.some((entry) => entry.ok === true)) {
-    if (item.kind === "service" && item.validation === "semantic" && !hasSemanticServiceEvidence(item, matching, evidence)) {
-      const subject = item.path ?? item.target ?? item.id;
-      return `${item.kind} ${subject} missing semantic response probe evidence; status/readiness alone is not enough`;
-    }
-    return undefined;
-  }
-  const subject = item.path ?? item.target ?? item.id;
-  if (matching.some((entry) => entry.ok === false)) {
-    return `${item.kind} ${subject} failed explicit ${item.requiredTool}; needs_repair before final`;
-  }
-  return `${item.kind} ${subject} missing explicit ${item.requiredTool}`;
-}
-
-type ValidationEvidence = {
-  kind?: string;
-  path?: string;
-  target?: string;
-  tool?: string;
-  ok?: boolean;
-  checks?: Record<string, unknown>;
-};
-
-function collectMatchingValidationEvidence(
-  item: ValidationContractItem,
-  evidence: EvidenceRecord[],
-): ValidationEvidence[] {
-  return evidence.flatMap((record) => readValidationEvidence(record)).filter((entry) =>
-    entry.kind === item.kind &&
-    entry.tool === item.requiredTool &&
-    validationEvidenceSubjectMatches(item, entry)
-  );
-}
-
-function readValidationEvidence(evidence: EvidenceRecord): ValidationEvidence[] {
-  if (!evidence.data || typeof evidence.data !== "object") return [];
-  const value = (evidence.data as Record<string, unknown>).validationEvidence;
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((entry) => entry && typeof entry === "object" ? entry as ValidationEvidence : undefined)
-    .filter((entry): entry is ValidationEvidence => Boolean(entry));
-}
-
-function validationEvidenceSubjectMatches(
-  item: ValidationContractItem,
-  evidence: ValidationEvidence,
-): boolean {
-  if (item.path) return validationPathsMatch(evidence.path, item.path);
-  if (item.target) return normalizeValidationTarget(evidence.target) === normalizeValidationTarget(item.target);
-  return false;
-}
-
-function validationPathsMatch(evidencePath: string | undefined, contractPath: string): boolean {
-  const evidence = normalizeValidationPath(evidencePath);
-  const contract = normalizeValidationPath(contractPath);
-  if (!evidence || !contract) return false;
-  if (evidence === contract) return true;
-  return stripKnownWorkspaceRoot(evidence) === stripKnownWorkspaceRoot(contract);
-}
-
-function stripKnownWorkspaceRoot(path: string): string {
-  for (const prefix of ["/app/", "/workspace/"]) {
-    if (path.startsWith(prefix)) return path.slice(prefix.length);
-  }
-  return path;
-}
-
-function normalizeValidationPath(path: string | undefined): string | undefined {
-  if (!path) return undefined;
-  return path.replace(/\\/gu, "/").replace(/\/$/u, "");
-}
-
-function normalizeValidationTarget(target: string | undefined): string | undefined {
-  if (!target) return undefined;
-  try {
-    const url = target.startsWith("http://") || target.startsWith("https://")
-      ? new URL(target)
-      : new URL(`http://${target}`);
-    const port = url.port || (url.protocol === "https:" ? "443" : "80");
-    const path = target.startsWith("http://") || target.startsWith("https://") ? url.pathname.replace(/\/$/u, "") : "";
-    return `${url.hostname}:${port}${path}`;
-  } catch {
-    return target.replace(/\/$/u, "");
-  }
-}
-
-function hasSemanticServiceEvidence(
-  item: ValidationContractItem,
-  matching: ValidationEvidence[],
-  evidence: EvidenceRecord[],
-): boolean {
-  const tokens = item.semanticTokens ?? [];
-  if (matching.some((entry) => serviceFetchEvidenceHasSemanticChecks(entry, tokens))) return true;
-  return evidence.some((record) => commandOrVerificationEvidenceHasSemanticProbe(record, tokens));
-}
-
-function serviceFetchEvidenceHasSemanticChecks(entry: ValidationEvidence, tokens: string[]): boolean {
-  if (entry.ok !== true) return false;
-  const fetch = readRecord(entry.checks?.fetch);
-  const bodyContains = readStringList(fetch?.bodyContains);
-  if (bodyContains.length === 0) return false;
-  if (tokens.length === 0) return true;
-  const haystack = bodyContains.join("\n").toLowerCase();
-  return tokens.some((token) => haystack.includes(token.toLowerCase()));
-}
-
-function commandOrVerificationEvidenceHasSemanticProbe(record: EvidenceRecord, tokens: string[]): boolean {
-  if (record.kind === "test_result" && record.supportsClaims.includes("verification_passed")) return true;
-  if (record.kind !== "command_output") return false;
-  if (!record.supportsClaims.includes("bash_exit_0")) return false;
-  const semanticProbe = readRecord(readEvidenceDataRecord(record, "semanticProbe"));
-  const semanticProbeTokens = readStringList(semanticProbe?.tokens);
-  const haystack = `${record.summary}\n${record.source}\n${semanticProbeTokens.join("\n")}`.toLowerCase();
-  const matchedTokens = tokens.filter((token) => haystack.includes(token.toLowerCase()));
-  return matchedTokens.length >= Math.min(2, tokens.length);
-}
-
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function readStringList(value: unknown): string[] {
-  if (typeof value === "string" && value.trim()) return [value];
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-}
-
-function createHeadlessBenchDiagnosticRiskSummary(context: TuiContext): string | undefined {
-  const tools = context.tools as typeof context.tools & {
-    headlessBench?: { enabled?: boolean };
-    recentDiagnostics?: Array<StructuredDiagnosticRisk>;
-  };
-  if (tools.headlessBench?.enabled !== true) return undefined;
-  const risky = (tools.recentDiagnostics ?? []).slice(0, 10).filter((diagnostic) =>
-    (diagnostic.severity === "recoverable" || diagnostic.severity === "blocking") &&
-    (
-      diagnostic.type === "service_readiness" ||
-      diagnostic.type === "artifact_preservation" ||
-      diagnostic.type === "binary_tool_missing" ||
-      diagnostic.type === "missing_command" ||
-      diagnostic.type === "timeout" ||
-      diagnostic.type === "provider_or_network"
-    ) &&
-    !isDiagnosticRiskResolved(diagnostic, context.evidence)
-  );
-  if (risky.length === 0) return undefined;
-  return `headless bench risk: ${risky
-    .slice(0, 3)
-    .map((diagnostic) => `${diagnostic.type}: ${diagnostic.evidence ?? ""}`.trim())
-    .join("; ")}`;
-}
-
-type StructuredDiagnosticRisk = {
-  type?: string;
-  severity?: string;
-  evidence?: string;
-  target?: string;
-  path?: string;
-  targetHost?: string;
-  targetPort?: number;
-};
-
-function isDiagnosticRiskResolved(
-  diagnostic: StructuredDiagnosticRisk,
-  evidence: EvidenceRecord[],
-): boolean {
-  if (diagnostic.type === "service_readiness" || diagnostic.type === "timeout") {
-    const target = readDiagnosticServiceTarget(diagnostic);
-    if (!target) return false;
-    return evidence.some((item) => {
-      const serviceHint = readEvidenceDataRecord(item, "serviceHint");
-      const service = readEvidenceDataRecord(item, "service");
-      return (
-        serviceHint?.ready === true && serviceHint.target === target
-      ) || (
-        service?.ready === true && service.target === target
-      );
-    });
-  }
-  if (diagnostic.type === "artifact_preservation") {
-    if (!diagnostic.path) return false;
-    return evidence.some((item) => {
-      const artifactHint = readEvidenceDataRecord(item, "artifactHint");
-      return artifactHint?.exists === true && artifactHint.path === diagnostic.path;
-    });
-  }
-  if (diagnostic.type === "binary_tool_missing") {
-    if (!diagnostic.path) return false;
-    return evidence.some((item) =>
-      readEvidenceDataRecord(item, "binaryHint")?.path === diagnostic.path ||
-      readEvidenceDataRecord(item, "binaryPreflight")?.path === diagnostic.path
-    );
-  }
-  return false;
-}
-
-function readDiagnosticServiceTarget(diagnostic: StructuredDiagnosticRisk): string | undefined {
-  if (diagnostic.target) return diagnostic.target;
-  if (diagnostic.targetHost && diagnostic.targetPort !== undefined) {
-    return `${diagnostic.targetHost}:${diagnostic.targetPort}`;
-  }
-  return undefined;
-}
-
-function readEvidenceDataRecord(
-  evidence: EvidenceRecord,
-  key: "service" | "serviceHint" | "artifactHint" | "binaryHint" | "binaryPreflight" | "semanticProbe",
-): Record<string, unknown> | undefined {
-  if (!evidence.data || typeof evidence.data !== "object") return undefined;
-  const value = (evidence.data as Record<string, unknown>)[key];
-  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
 }
 
 // D.14H Phase 7.5-C：纯自然语言高风险 claim 最小兜底识别。

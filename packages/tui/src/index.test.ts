@@ -46,7 +46,6 @@ import {
   collectHeadlessArtifactChecklist,
   createHeadlessBenchInitialPrompt,
   createHeadlessBenchRepairPrompt,
-  createValidationContract,
   detectHeadlessBenchTaskProfile,
   detectEngineeringTaskProfile,
 } from "./headless-bench-runtime.js";
@@ -2114,7 +2113,7 @@ describe("runHeadlessTask", () => {
     context.tools.recentDiagnostics = [
       {
         source: "Bash",
-        type: "service_readiness",
+        type: "diagnostic_alpha",
         severity: "recoverable",
         evidence: "tcp 127.0.0.1:3000 failed",
         target: "127.0.0.1:3000",
@@ -2132,7 +2131,7 @@ describe("runHeadlessTask", () => {
     const result = checkClaimSupport("ordinary final text", context);
     expect(result.status).toBe("needs_disclaimer");
     expect(result.unsupportedClaims.join("\n")).toContain("headless bench risk");
-    expect(result.unsupportedClaims.join("\n")).toContain("service_readiness");
+    expect(result.unsupportedClaims.join("\n")).toContain("diagnostic_alpha");
   });
 
   it("final gate blocks headless bench verified completion on blocking artifact and service diagnostics only", async () => {
@@ -2143,7 +2142,7 @@ describe("runHeadlessTask", () => {
     context.tools.recentDiagnostics = [
       {
         source: "Bash",
-        type: "artifact_preservation",
+        type: "diagnostic_beta",
         severity: "blocking",
         evidence: "text expectation mismatch move.txt: missing g2g4",
         path: "move.txt",
@@ -2151,7 +2150,7 @@ describe("runHeadlessTask", () => {
       },
       {
         source: "Bash",
-        type: "service_readiness",
+        type: "diagnostic_alpha",
         severity: "blocking",
         evidence: "http http://127.0.0.1:8080/simple/vectorops/ status 404",
         target: "http://127.0.0.1:8080/simple/vectorops/",
@@ -2168,8 +2167,8 @@ describe("runHeadlessTask", () => {
 
     const result = checkClaimSupport("已验证完成", context);
     expect(result.status).toBe("needs_disclaimer");
-    expect(result.unsupportedClaims.join("\n")).toContain("artifact_preservation");
-    expect(result.unsupportedClaims.join("\n")).toContain("service_readiness");
+    expect(result.unsupportedClaims.join("\n")).toContain("diagnostic_beta");
+    expect(result.unsupportedClaims.join("\n")).toContain("diagnostic_alpha");
   });
 
   it("final gate reports missing command diagnostics with structured fallback", async () => {
@@ -2212,7 +2211,7 @@ describe("runHeadlessTask", () => {
     context.tools.recentDiagnostics = [
       {
         source: "Bash",
-        type: "service_readiness",
+        type: "diagnostic_alpha",
         severity: "recoverable",
         evidence: "tcp 127.0.0.1:3000 failed",
         target: "127.0.0.1:3000",
@@ -2245,7 +2244,7 @@ describe("runHeadlessTask", () => {
     context.tools.recentDiagnostics = [
       {
         source: "Bash",
-        type: "service_readiness",
+        type: "diagnostic_alpha",
         severity: "recoverable",
         evidence: "tcp 127.0.0.1:3000 failed",
         target: "127.0.0.1:3000",
@@ -2278,7 +2277,7 @@ describe("runHeadlessTask", () => {
     context.tools.recentDiagnostics = [
       {
         source: "Bash",
-        type: "service_readiness",
+        type: "diagnostic_alpha",
         severity: "recoverable",
         evidence: "tcp 127.0.0.1:3000 failed",
         target: "127.0.0.1:3000",
@@ -2310,7 +2309,7 @@ describe("runHeadlessTask", () => {
     context.tools.recentDiagnostics = [
       {
         source: "Bash",
-        type: "artifact_preservation",
+        type: "diagnostic_beta",
         severity: "blocking",
         evidence: "artifact missing",
         path: "out.json",
@@ -2318,7 +2317,7 @@ describe("runHeadlessTask", () => {
       },
       {
         source: "Bash",
-        type: "binary_tool_missing",
+        type: "diagnostic_gamma",
         severity: "recoverable",
         evidence: "xxd missing",
         path: "sample.elf",
@@ -2360,7 +2359,7 @@ describe("runHeadlessTask", () => {
     context.tools.recentDiagnostics = [
       {
         source: "Bash",
-        type: "artifact_preservation",
+        type: "diagnostic_beta",
         severity: "blocking",
         evidence: "artifact missing",
         path: "out.json",
@@ -2368,7 +2367,7 @@ describe("runHeadlessTask", () => {
       },
       {
         source: "Bash",
-        type: "binary_tool_missing",
+        type: "diagnostic_gamma",
         severity: "recoverable",
         evidence: "xxd missing",
         path: "sample.elf",
@@ -2397,572 +2396,6 @@ describe("runHeadlessTask", () => {
     expect(checkClaimSupport("ordinary final text", context).status).toBe("needs_disclaimer");
   });
 
-  it("validation contract final gate blocks required artifact without Bash.artifact evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-artifact-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          { id: "artifact:out.txt", kind: "artifact", path: "out.txt", requiredTool: "Bash.artifact" },
-        ],
-      },
-    });
-
-    const result = checkClaimSupport("ordinary final text", context);
-
-    expect(result.status).toBe("needs_disclaimer");
-    expect(result.unsupportedClaims.join("\n")).toContain("Bash.artifact");
-  });
-
-  it("validation contract final gate allows matching Bash.artifact passed evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-artifact-pass-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          { id: "artifact:out.txt", kind: "artifact", path: "out.txt", requiredTool: "Bash.artifact" },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "artifact-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "artifact explicit check",
-      supportsClaims: ["Bash"],
-      createdAt: new Date().toISOString(),
-      data: {
-        validationEvidence: [
-          { kind: "artifact", path: "out.txt", tool: "Bash.artifact", ok: true },
-        ],
-      },
-    });
-
-    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
-  });
-
-  it("validation contract final gate treats workspace-relative artifact evidence as matching /app paths", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-artifact-relative-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          { id: "artifact:/app/out.txt", kind: "artifact", path: "/app/out.txt", requiredTool: "Bash.artifact" },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "artifact-relative-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "artifact explicit check",
-      supportsClaims: ["Bash"],
-      createdAt: new Date().toISOString(),
-      data: {
-        validationEvidence: [
-          { kind: "artifact", path: "out.txt", tool: "Bash.artifact", ok: true },
-        ],
-      },
-    });
-
-    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
-  });
-
-  it("validation contract final gate blocks service endpoint without Bash.service evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          {
-            id: "service:http://127.0.0.1:8080/simple/",
-            kind: "service",
-            target: "http://127.0.0.1:8080/simple/",
-            requiredTool: "Bash.service",
-          },
-        ],
-      },
-    });
-
-    const result = checkClaimSupport("ordinary final text", context);
-
-    expect(result.status).toBe("needs_disclaimer");
-    expect(result.unsupportedClaims.join("\n")).toContain("Bash.service");
-  });
-
-  it("validation contract final gate allows matching Bash.service ready evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-pass-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          {
-            id: "service:http://127.0.0.1:8080/simple/",
-            kind: "service",
-            target: "http://127.0.0.1:8080/simple/",
-            requiredTool: "Bash.service",
-          },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "service-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "service explicit fetch",
-      supportsClaims: ["Bash"],
-      createdAt: new Date().toISOString(),
-      data: {
-        validationEvidence: [
-          {
-            kind: "service",
-            target: "http://127.0.0.1:8080/simple/",
-            tool: "Bash.service",
-            ok: true,
-            checks: { fetch: { status: 200 } },
-          },
-        ],
-      },
-    });
-
-    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
-  });
-
-  it("validation contract final gate blocks semantic service when only readiness passed", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-semantic-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          {
-            id: "service:http://127.0.0.1:5000/sentiment",
-            kind: "service",
-            target: "http://127.0.0.1:5000/sentiment",
-            validation: "semantic",
-            semanticTokens: ["sentiment", "confidence", "positive", "negative"],
-            requiredTool: "Bash.service",
-          },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "service-readiness-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "service explicit fetch",
-      supportsClaims: ["Bash"],
-      createdAt: new Date().toISOString(),
-      data: {
-        validationEvidence: [
-          {
-            kind: "service",
-            target: "http://127.0.0.1:5000/sentiment",
-            tool: "Bash.service",
-            ok: true,
-            checks: { fetch: { status: 200 } },
-          },
-        ],
-      },
-    });
-
-    const result = checkClaimSupport("ordinary final text", context);
-
-    expect(result.status).toBe("needs_disclaimer");
-    expect(result.unsupportedClaims.join("\n")).toContain("semantic response probe evidence");
-  });
-
-  it("validation contract final gate allows semantic service with response probe evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-semantic-pass-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          {
-            id: "service:http://127.0.0.1:5000/sentiment",
-            kind: "service",
-            target: "http://127.0.0.1:5000/sentiment",
-            validation: "semantic",
-            semanticTokens: ["sentiment", "confidence", "positive", "negative"],
-            requiredTool: "Bash.service",
-          },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "service-readiness-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "service explicit fetch",
-      supportsClaims: ["Bash"],
-      createdAt: new Date().toISOString(),
-      data: {
-        validationEvidence: [
-          {
-            kind: "service",
-            target: "http://127.0.0.1:5000/sentiment",
-            tool: "Bash.service",
-            ok: true,
-            checks: { fetch: { status: 200 } },
-          },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "semantic-probe-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "Bash: exit code 0; POST /sentiment returned sentiment=negative confidence positive=0.21 negative=0.79",
-      supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
-      createdAt: new Date().toISOString(),
-    });
-
-    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
-  });
-
-  it("validation contract final gate allows semantic service with compact probe evidence data", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-service-semantic-data-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          {
-            id: "service:http://127.0.0.1:5000/sentiment",
-            kind: "service",
-            target: "http://127.0.0.1:5000/sentiment",
-            validation: "semantic",
-            semanticTokens: ["sentiment", "confidence", "positive", "negative"],
-            requiredTool: "Bash.service",
-          },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "service-readiness-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "service explicit fetch",
-      supportsClaims: ["Bash"],
-      createdAt: new Date().toISOString(),
-      data: {
-        validationEvidence: [
-          {
-            kind: "service",
-            target: "http://127.0.0.1:5000/sentiment",
-            tool: "Bash.service",
-            ok: true,
-            checks: { fetch: { status: 200 } },
-          },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "semantic-probe-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "Bash: exit code 0; long output stored compactly",
-      supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
-      createdAt: new Date().toISOString(),
-      data: {
-        semanticProbe: {
-          tokens: ["sentiment", "confidence", "positive", "negative"],
-        },
-      },
-    });
-
-    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
-  });
-
-  it("validation contract final gate blocks preservation without explicit preserve evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-preserve-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          {
-            id: "preservation:clean.html",
-            kind: "preservation",
-            path: "clean.html",
-            requiredTool: "Bash.artifact",
-          },
-        ],
-      },
-    });
-
-    const result = checkClaimSupport("ordinary final text", context);
-
-    expect(result.status).toBe("needs_disclaimer");
-    expect(result.unsupportedClaims.join("\n")).toContain("preservation");
-    expect(result.unsupportedClaims.join("\n")).toContain("Bash.artifact");
-  });
-
-  it("validation contract final gate allows matching preservation evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-preserve-pass-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: true },
-      validationContract: {
-        items: [
-          {
-            id: "preservation:clean.html",
-            kind: "preservation",
-            path: "clean.html",
-            requiredTool: "Bash.artifact",
-          },
-        ],
-      },
-    });
-    context.evidence.push({
-      id: "preserve-pass",
-      kind: "command_output",
-      source: "Bash",
-      summary: "preserve explicit check",
-      supportsClaims: ["Bash"],
-      createdAt: new Date().toISOString(),
-      data: {
-        validationEvidence: [
-          {
-            kind: "preservation",
-            path: "clean.html",
-            tool: "Bash.artifact",
-            ok: true,
-            checks: { preserve: { ok: true, mode: "compareNormalizedHtml" } },
-          },
-        ],
-      },
-    });
-
-    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
-  });
-
-  it("validation contract final gate ignores contracts outside headless bench", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-validation-contract-nonbench-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    Object.assign(context.tools, {
-      headlessBench: { enabled: false },
-      validationContract: {
-        items: [
-          { id: "artifact:out.txt", kind: "artifact", path: "out.txt", requiredTool: "Bash.artifact" },
-        ],
-      },
-    });
-
-    expect(checkClaimSupport("ordinary final text", context).status).toBe("passed");
-  });
-
-  it("validation contract extraction is conservative and prompt-visible", () => {
-    const contract = createValidationContract({
-      prompt:
-        "Serve http://127.0.0.1:8080/simple/ and do not modify the clean file named clean.html. Write the answer to /app/out.txt.",
-      requiredArtifacts: ["/app/out.txt"],
-    });
-    const prompt = createHeadlessBenchInitialPrompt({
-      originalPrompt: "task",
-      config: {
-        enabled: true,
-        profile: "qemu_or_service",
-        testTimeoutMs: 600_000,
-        maxRepairAttempts: 1,
-        requiredArtifacts: ["/app/out.txt"],
-        validationContract: contract,
-        preflight: false,
-        environmentSetupRetries: 1,
-      },
-    });
-
-    expect(contract.items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "artifact", path: "/app/out.txt", requiredTool: "Bash.artifact" }),
-        expect.objectContaining({
-          kind: "service",
-          target: "http://127.0.0.1:8080/simple/",
-          requiredTool: "Bash.service",
-        }),
-        expect.objectContaining({ kind: "preservation", path: "clean.html", requiredTool: "Bash.artifact" }),
-      ]),
-    );
-    expect(prompt).toContain("Validation contract");
-    expect(prompt).toContain('"service": { "action": "fetch"');
-    expect(prompt).toContain("match validation commands to the artifact language or file type");
-    expect(prompt).toContain("avoid parser/serializer round-trips");
-    expect(prompt).toContain("negative clean-sample checks");
-    expect(prompt).toContain("multiple equally optimal or valid answers");
-  });
-
-  it("Bash model schema requires concrete validation mode fields", () => {
-    const schema = createToolInputSchema("Bash") as {
-      properties?: {
-        service?: { anyOf?: unknown[] };
-        artifact?: { required?: string[] };
-        binary?: { required?: string[] };
-      };
-    };
-
-    expect(schema.properties?.service?.anyOf).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ required: ["action", "url"] }),
-        expect.objectContaining({ required: ["type", "port"] }),
-      ]),
-    );
-    expect(schema.properties?.artifact?.required).toEqual(["path"]);
-    expect(schema.properties?.binary?.required).toEqual(["path"]);
-  });
-
-  it("validation contract extracts explicit service ports only with service context", () => {
-    const withServiceContext = createValidationContract({
-      prompt: "Start the HTTP server and listen on port 8000. The health endpoint should be ready.",
-      requiredArtifacts: [],
-    });
-    const withoutServiceContext = createValidationContract({
-      prompt: "Write the number to port 8000 in the report.",
-      requiredArtifacts: [],
-    });
-
-    expect(withServiceContext.items).toEqual([
-      {
-        id: "service:127.0.0.1:8000",
-        kind: "service",
-        target: "127.0.0.1:8000",
-        validation: "readiness",
-        requiredTool: "Bash.service",
-      },
-    ]);
-    expect(withoutServiceContext.items).toEqual([]);
-  });
-
-  it("validation contract marks response-schema services as semantic", () => {
-    const contract = createValidationContract({
-      prompt:
-        'Expose http://127.0.0.1:5000/sentiment. Endpoint: POST /sentiment. It accepts {"text": "sample"} and returns {"sentiment": "positive", "confidence": {"positive": 0.9, "negative": 0.1}} as JSON.',
-      requiredArtifacts: [],
-    });
-
-    expect(contract.items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "service",
-          target: "http://127.0.0.1:5000",
-          validation: "semantic",
-          semanticTokens: expect.arrayContaining(["sentiment", "confidence", "positive", "negative"]),
-        }),
-      ]),
-    );
-  });
-
-  it("bench mode warns instead of failing when only validation contract evidence is missing", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-headless-contract-validation-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    const output = new MemoryOutput();
-    const stderr = new MemoryOutput();
-
-    const exitCode = await runHeadlessTask({
-      prompt: "Start the HTTP server and listen on port 8000. The health endpoint should be ready.",
-      projectPath: project,
-      stdout: output,
-      stderr,
-      __testContext: context,
-      __testStore: store,
-      __testSkipHydration: true,
-      bench: {
-        enabled: true,
-        preflight: false,
-        maxRepairAttempts: 0,
-      },
-      __testSendMessage: async () => {},
-    });
-
-    expect(exitCode).toBe(0);
-    expect(output.text).toContain("bench validation passed");
-    expect(stderr.text).toContain("validation_contract");
-    expect(stderr.text).toContain("Bash.service");
-  });
-
-  it("bench mode repairs after official test failure and passes on the second validation", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-repair-"));
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
-    const context = await createTestContext(project, store, session, createTestModelConfig());
-    const marker = join(project, "fixed.txt");
-    const postTestDir = join(project, "post-test");
-    const testScript = join(project, "bench-test.cjs");
-    await mkdir(postTestDir, { recursive: true });
-    await writeFile(join(postTestDir, "tests.log"), "official assertion: missing fixed.txt", "utf8");
-    await writeFile(
-      testScript,
-      [
-        "const fs = require('fs');",
-        "if (!fs.existsSync('fixed.txt')) {",
-        "  console.error('official tests failed');",
-        "  process.exit(1);",
-        "}",
-      ].join("\n"),
-      "utf8",
-    );
-    const output = new MemoryOutput();
-    const stderr = new MemoryOutput();
-    const prompts: string[] = [];
-
-    const exitCode = await runHeadlessTask({
-      prompt: "Fix the project. Write fixed.txt when repaired.",
-      projectPath: project,
-      stdout: output,
-      stderr,
-      __testContext: context,
-      __testStore: store,
-      __testSkipHydration: true,
-      bench: {
-        enabled: true,
-        preflight: false,
-        maxRepairAttempts: 1,
-        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(testScript)}`,
-      },
-      __testSendMessage: async (text) => {
-        prompts.push(text);
-        if (prompts.length === 2) {
-          await writeFile(marker, "ok", "utf8");
-        }
-      },
-    });
-
-    expect(exitCode).toBe(0);
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain("Headless verification failed");
-    expect(prompts[1]).toContain("official assertion: missing fixed.txt");
-    expect(output.text).toContain("bench validation passed");
-    expect(stderr.text).toContain("bench validation failed");
-  });
 
   it("runs closure validation and skips repair when the headless deadline is approaching", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-"));
@@ -3200,10 +2633,7 @@ describe("runHeadlessTask", () => {
     expect(["swe_python", "large_python_project"]).toContain(profile);
     expect(prompt).toContain("read relevant tests and target modules first");
     expect(prompt).toContain("focused pytest/tests");
-    expect(prompt).toContain("prefer python3 over bare python");
-    expect(prompt).toContain('probe with python3 -c "import X"');
-    expect(prompt).toContain("poll the port or health endpoint");
-    expect(prompt).toContain("confirm output path");
+    expect(prompt).toContain("avoid unrelated architecture edits");
   });
 
   it("bench profile detects binary artifact tasks without changing non-bench headless prompts", async () => {
@@ -3241,7 +2671,6 @@ describe("runHeadlessTask", () => {
     expect(profile).toBe("binary_or_artifact");
     expect(benchPrompt).toContain("file/strings/hexdump/ldd/run mode");
     expect(benchPrompt).toContain("Verify they exist and are readable before final");
-    expect(benchPrompt).toContain("required count, ordering, and multi-line answers");
     expect(normalPrompt).toBe("hello");
   });
 
@@ -3271,7 +2700,7 @@ describe("runHeadlessTask", () => {
     expect(compilePrompt).toContain("align header/test signatures");
     expect(artifactPrompt).toContain("generate or write the required artifact");
     expect(timeoutPrompt).toContain("narrow validation to focused tests");
-    expect(timeoutPrompt).toContain("avoid long blind builds");
+    expect(timeoutPrompt).toContain("avoid repeatedly launching full expensive runs");
   });
 });
 
@@ -24938,7 +24367,9 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     const snapshot = snapshotDeferredTools(context);
     // codebase-memory whitelist 必须出现
     expect(snapshot.byKind["codebase-memory"]).toBeGreaterThanOrEqual(10);
-    expect(snapshot.executableCount).toBe(snapshot.byKind["codebase-memory"]);
+    expect(snapshot.executableCount).toBe(
+      snapshot.byKind["codebase-memory"] + snapshot.byKind["pre-engine"],
+    );
 
     // 任何 descriptor 不得泄露 raw schema / api_key / Bearer 等敏感字段
     const json = JSON.stringify(snapshot);
@@ -25601,7 +25032,7 @@ console.log(JSON.stringify({ ok: true }));
     const empty = formatDeferredToolsSystemReminder(context.language, {
       generatedAt: new Date().toISOString(),
       total: 0,
-      byKind: { "codebase-memory": 0, mcp: 0, skill: 0, plugin: 0 },
+      byKind: { "codebase-memory": 0, "pre-engine": 0, mcp: 0, skill: 0, plugin: 0 },
       executableCount: 0,
       tools: [],
     });

@@ -1107,7 +1107,7 @@ describe("model-doctor-runtime", () => {
           routeDecisions: [],
           deferredToolsSummary: {
             total: 12,
-            byKind: { "codebase-memory": 10, mcp: 2, skill: 0, plugin: 0 },
+            byKind: { "codebase-memory": 10, "pre-engine": 0, mcp: 2, skill: 0, plugin: 0 },
             executableCount: 10,
           },
         };

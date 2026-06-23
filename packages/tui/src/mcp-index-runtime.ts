@@ -515,6 +515,36 @@ export function getCodebaseMemoryPlatformArch(): string {
   return `${process.platform}-${process.arch}`;
 }
 
+const PRE_ENGINE_COMMAND = "linghun-pre-engine";
+
+export async function resolvePreEngineBinary(): Promise<string | undefined> {
+  const platformArch = `${process.platform}-${process.arch}`;
+  const fileName = platformArch.startsWith("win32")
+    ? `${PRE_ENGINE_COMMAND}.exe`
+    : PRE_ENGINE_COMMAND;
+  const roots: string[] = [];
+  if (process.env[CLI_BUNDLED_ROOT_ENV]) {
+    roots.push(join(process.env[CLI_BUNDLED_ROOT_ENV], "pre-engine"));
+  }
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  roots.push(join(moduleDir, "..", "bundled", "pre-engine"));
+  roots.push(join(moduleDir, "bundled", "pre-engine"));
+  for (const root of roots) {
+    const candidate = join(root, platformArch, fileName);
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  for (const dir of pathDirs) {
+    const candidate = join(dir, fileName);
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 export async function findPathCodebaseMemoryBinary(): Promise<
   { command: string; args: string[]; detailPath: string } | undefined
 > {
@@ -1357,6 +1387,33 @@ export async function executeExtraTool(
       ok: true,
       text: `ExecuteExtraTool(codebase-memory:${target.name}) 完成。`,
       data: cliResult.data,
+    };
+  }
+  if (target.kind === "pre-engine") {
+    const binary = await resolvePreEngineBinary();
+    if (!binary) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool(pre-engine:${target.name}) 失败：找不到 linghun-pre-engine 二进制文件（bundled 或 PATH 均未命中）。`,
+      };
+    }
+    const serverConfig: McpServerConfig = { command: binary, args: [] };
+    const result = await runMcpStdioToolCall(
+      serverConfig,
+      target.name,
+      params,
+      context.projectPath,
+    );
+    if (!result.ok) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool(pre-engine:${target.name}) 失败：${result.summary}${result.errorCode ? ` [${result.errorCode}]` : ""}`,
+      };
+    }
+    return {
+      ok: true,
+      text: `ExecuteExtraTool(pre-engine:${target.name}) 完成。`,
+      data: result.data,
     };
   }
   // 防御：MCP/skill/plugin 已在上面被 executable=false 拦截，理论上不会到这里。

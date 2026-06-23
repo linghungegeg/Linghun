@@ -90,7 +90,7 @@ function validateCodebaseMemoryToolSchema(
 //   - plugins：discover trusted manifest contribution，autoExecute=no，executable=false
 // ===========================================================================
 
-export type DeferredToolKind = "codebase-memory" | "mcp" | "skill" | "plugin";
+export type DeferredToolKind = "codebase-memory" | "pre-engine" | "mcp" | "skill" | "plugin";
 
 export type DeferredToolDescriptor = {
   name: string;
@@ -121,6 +121,26 @@ const CODEBASE_MEMORY_DESCRIPTIONS: Record<string, string> = {
   trace_path: "Trace a function call chain from -> to in an indexed project.",
   search_graph: "Find similar implementations / SIMILAR_TO entries in a project.",
 };
+
+const PRE_ENGINE_DESCRIPTIONS: Record<string, string> = {
+  pre_context: "Provide structured code facts (AST-based) for the current task context.",
+  pre_impact: "Analyze impact scope of a planned change via AST cross-references.",
+  pre_plan: "Generate structured implementation hints from AST analysis.",
+  pre_verify: "Verify code change correctness via AST structural checks.",
+};
+
+function listPreEngineDeferredTools(): DeferredToolDescriptor[] {
+  return Object.keys(PRE_ENGINE_DESCRIPTIONS)
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => ({
+      name,
+      kind: "pre-engine" as const,
+      description: PRE_ENGINE_DESCRIPTIONS[name] ?? `pre-engine tool: ${name}`,
+      requiredArgs: ["path"],
+      executable: true,
+      reason: "pre-engine static whitelist; readonly AST query, no mutation.",
+    }));
+}
 
 function listCodebaseMemoryDeferredTools(): DeferredToolDescriptor[] {
   const required = codebaseMemoryRequiredArgs();
@@ -257,6 +277,7 @@ function pluginManifestHasContribution(plugin: PluginSummary): boolean {
 export function listDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
   return [
     ...listCodebaseMemoryDeferredTools(),
+    ...listPreEngineDeferredTools(),
     ...listMcpDeferredTools(context),
     ...listSkillDeferredTools(context),
     ...listPluginDeferredTools(context),
@@ -267,6 +288,7 @@ export function snapshotDeferredTools(context: TuiContext): DeferredToolDiscover
   const tools = listDeferredTools(context);
   const byKind: Record<DeferredToolKind, number> = {
     "codebase-memory": 0,
+    "pre-engine": 0,
     mcp: 0,
     skill: 0,
     plugin: 0,

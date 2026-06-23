@@ -1,6 +1,7 @@
 node_modules/
 dist/
 prototypes/native-runner/target/
+prototypes/pre-engine/target/
 *.tsbuildinfo
 .env
 .env.local

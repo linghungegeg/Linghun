@@ -12,18 +12,7 @@ import {
 } from "./tool-runtime.js";
 import { toolPrompts } from "./tools/prompts.js";
 import { toolUserFacingNames } from "./tools/ui.js";
-import { checkArtifact } from "./tools/Bash/artifact-checker.js";
-import type { BashArtifactCheckInput } from "./tools/Bash/artifact-checker.js";
-import { inspectBinaryFile } from "./tools/Bash/binary-helper.js";
-import type { BashBinaryInspectInput } from "./tools/Bash/binary-helper.js";
 import { interpretCommandResult } from "./tools/Bash/command-semantics.js";
-import { runBashServiceLifecycleAction, startBashService } from "./tools/Bash/service-kernel.js";
-import type {
-  BashManagedServiceRecord,
-  BashServiceInput,
-  BashServiceLifecycleAction,
-  BashServiceReadiness,
-} from "./tools/Bash/service-kernel.js";
 import { bingSearch, formatSearchOutput, applyDomainFilter } from "./tools/WebSearch/bing-scraper.js";
 import type { WebSearchInput, SearchResult } from "./tools/WebSearch/bing-scraper.js";
 import { webFetch, formatFetchOutput } from "./tools/WebFetch/web-fetch.js";
@@ -120,7 +109,6 @@ export type ToolContext = {
   sourcePackCandidates?: SourcePackCandidate[];
   patchSummaries?: Record<string, DiffSummary>;
   recentDiagnostics?: RecentToolDiagnostic[];
-  services?: BashManagedServiceRecord[];
   abortSignal?: AbortSignal;
   isHeadlessBench?: boolean;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
@@ -183,18 +171,14 @@ export type GrepInput = { pattern: string; path?: string; limit?: number };
 export type GlobInput = { pattern: string; path?: string; limit?: number };
 export type BashInput = {
   command?: string;
+  description?: string;
   timeoutMs?: number;
-  service?: BashServiceInput;
-  binary?: BashBinaryInspectInput;
-  artifact?: BashArtifactCheckInput;
   runInBackground?: boolean;
+  run_in_background?: boolean;
 };
 type BashDiagnosticType =
   | "missing_command"
   | "missing_python_module"
-  | "service_readiness"
-  | "artifact_preservation"
-  | "binary_tool_missing"
   | "timeout"
   | "provider_or_network";
 type BashDiagnosticSeverity = "info" | "recoverable" | "blocking";
@@ -205,10 +189,6 @@ type BashDiagnostic = {
   suggestion: string;
   command?: string;
   fallback?: string;
-  target?: string;
-  path?: string;
-  targetHost?: string;
-  targetPort?: number;
 };
 export type TodoInput =
   | { action: "list" }
@@ -258,7 +238,6 @@ export function createToolContext(
     sourcePackCandidates: options.sourcePackCandidates,
     patchSummaries: {},
     recentDiagnostics: [],
-    services: [],
   };
 }
 
@@ -487,12 +466,7 @@ const toolDefinitions = {
     call: bashTool,
     prompt: () => toolPrompts.Bash,
     userFacingName: () => toolUserFacingNames.Bash,
-    getToolUseSummary: (input) =>
-      input.artifact
-        ? `Bash artifact ${input.artifact.path}`
-        : input.binary
-          ? `Bash binary ${input.binary.path}`
-          : `Bash ${input.command}`,
+    getToolUseSummary: (input) => `Bash ${input.command}`,
     getActivityDescription: () => "Running command",
   }),
   Todo: defineTool<TodoInput>({
@@ -804,128 +778,17 @@ function validateGlobInput(input: unknown): GlobInput {
 function validateBashInput(input: unknown): BashInput {
   const record = validateRecord(input, "Bash");
   const command = readOptionalString(record, "command", "Bash");
-  const binary = validateOptionalBashBinaryInspect(record.binary);
-  const artifact = validateOptionalBashArtifactCheck(record.artifact);
-  const service = validateOptionalBashServiceInput(record.service);
-  const serviceAction = isBashServiceLifecycleAction(service);
-  if (command === undefined && binary === undefined && artifact === undefined && !serviceAction) {
-    throw new Error("Bash.command、Bash.binary、Bash.artifact 或 Bash.service action 必须提供一个。");
-  }
-  const modeCount = [
-    command !== undefined,
-    binary !== undefined,
-    artifact !== undefined,
-    serviceAction,
-  ].filter(Boolean).length;
-  if (modeCount > 1 || ((binary !== undefined || artifact !== undefined) && service !== undefined)) {
-    throw new Error("Bash.command、Bash.binary、Bash.artifact 和 Bash.service 不能混用。");
-  }
-  if (service !== undefined && !serviceAction && command === undefined) {
-    throw new Error("Bash.service readiness 必须和 Bash.command 一起使用。");
+  if (command === undefined) {
+    throw new Error("Bash.command 必须提供。");
   }
   const runInBackground =
     record.runInBackground === true || record.run_in_background === true;
   return {
     command,
+    description: readOptionalString(record, "description", "Bash"),
     timeoutMs: readOptionalPositiveInteger(record, "timeoutMs", "Bash"),
-    service,
-    binary,
-    artifact,
     ...(runInBackground ? { runInBackground: true } : {}),
   };
-}
-
-function validateOptionalBashBinaryInspect(input: unknown): BashBinaryInspectInput | undefined {
-  if (input === undefined) return undefined;
-  if (isEmptyOptionalObject(input)) return undefined;
-  const record = validateRecord(input, "Bash");
-  return {
-    path: readString(record, "path", "Bash"),
-    previewBytes: readOptionalPositiveInteger(record, "previewBytes", "Bash"),
-  };
-}
-
-function validateOptionalBashArtifactCheck(input: unknown): BashArtifactCheckInput | undefined {
-  if (input === undefined) return undefined;
-  if (isEmptyOptionalObject(input)) return undefined;
-  const record = validateRecord(input, "Bash");
-  return {
-    path: readString(record, "path", "Bash"),
-    expectHeader: readOptionalString(record, "expectHeader", "Bash"),
-    expectMagic: readOptionalString(record, "expectMagic", "Bash"),
-    json: readOptionalBoolean(record, "json", "Bash"),
-    executable: readOptionalBoolean(record, "executable", "Bash"),
-    protectPaths: readOptionalStringArray(record, "protectPaths", "Bash"),
-    text: validateOptionalBashArtifactTextCheck(record.text),
-    preserve: validateOptionalBashArtifactPreserveCheck(record.preserve),
-  };
-}
-
-function validateOptionalBashServiceInput(input: unknown): BashServiceInput | undefined {
-  if (input === undefined) return undefined;
-  if (isEmptyOptionalObject(input)) return undefined;
-  const record = validateRecord(input, "Bash");
-  const action = readOptionalString(record, "action", "Bash");
-  if (action !== undefined) {
-    if (action === "fetch") {
-      const url = readString(record, "url", "Bash");
-      validateHttpUrl(url);
-      return {
-        action,
-        url,
-        expectStatus: readOptionalPositiveInteger(record, "expectStatus", "Bash"),
-        bodyContains: readOptionalStringOrStringArray(record, "bodyContains", "Bash"),
-        timeoutMs: readOptionalPositiveInteger(record, "timeoutMs", "Bash"),
-        retry: readOptionalPositiveInteger(record, "retry", "Bash"),
-        intervalMs: readOptionalPositiveInteger(record, "intervalMs", "Bash"),
-      } as BashServiceLifecycleAction;
-    }
-    if (action === "status" || action === "probe" || action === "logs" || action === "stop") {
-      return {
-        action,
-        serviceId: readString(record, "serviceId", "Bash"),
-        ...(action === "logs" ? { tailBytes: readOptionalPositiveInteger(record, "tailBytes", "Bash") } : {}),
-      } as BashServiceLifecycleAction;
-    }
-    throw new Error("Bash.service.action 必须是 status/probe/logs/stop/fetch。");
-  }
-  const type = readString(record, "type", "Bash");
-  const timeoutMs = readOptionalPositiveInteger(record, "timeoutMs", "Bash");
-  const intervalMs = readOptionalPositiveInteger(record, "intervalMs", "Bash");
-  if (type === "tcp") {
-    const rawPort = record.port;
-    if (!Number.isInteger(rawPort) || (rawPort as number) <= 0) {
-      throw new Error("Bash.service.port 必须是正整数。");
-    }
-    const port = rawPort as number;
-    if (port > 65_535) {
-      throw new Error("Bash.service.port 必须在 1-65535 范围内。");
-    }
-    return {
-      type,
-      port,
-      host: readOptionalString(record, "host", "Bash"),
-      timeoutMs,
-      intervalMs,
-    };
-  }
-  if (type === "http") {
-    const url = readString(record, "url", "Bash");
-    validateHttpUrl(url);
-    return { type, url, timeoutMs, intervalMs };
-  }
-  throw new Error("Bash.service.type 必须是 tcp 或 http。");
-}
-
-function isEmptyOptionalObject(input: unknown): boolean {
-  return (
-    input === null ||
-    (typeof input === "object" && !Array.isArray(input) && Object.keys(input).length === 0)
-  );
-}
-
-function isBashServiceLifecycleAction(input: BashServiceInput | undefined): input is BashServiceLifecycleAction {
-  return Boolean(input && "action" in input);
 }
 
 function validateTodoInput(input: unknown): TodoInput {
@@ -994,66 +857,6 @@ function readOptionalStringArray(
     throw new Error(`${toolName}.${key} 必须是字符串数组或 undefined。`);
   }
   return value;
-}
-
-function readOptionalBoolean(
-  record: Record<string, unknown>,
-  key: string,
-  toolName: ToolName,
-): boolean | undefined {
-  const value = record[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "boolean") {
-    throw new Error(`${toolName}.${key} 必须是 boolean 或 undefined。`);
-  }
-  return value;
-}
-
-function readOptionalStringOrStringArray(
-  record: Record<string, unknown>,
-  key: string,
-  toolName: ToolName,
-): string | string[] | undefined {
-  const value = record[key];
-  if (value === undefined) return undefined;
-  if (typeof value === "string") return value;
-  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
-  throw new Error(`${toolName}.${key} 必须是字符串、字符串数组或 undefined。`);
-}
-
-function validateOptionalBashArtifactTextCheck(input: unknown): BashArtifactCheckInput["text"] {
-  if (input === undefined) return undefined;
-  const record = validateRecord(input, "Bash");
-  return {
-    exact: readOptionalString(record, "exact", "Bash"),
-    contains: readOptionalStringOrStringArray(record, "contains", "Bash"),
-    lineSet: readOptionalStringArray(record, "lineSet", "Bash"),
-  };
-}
-
-function validateOptionalBashArtifactPreserveCheck(input: unknown): BashArtifactCheckInput["preserve"] {
-  if (input === undefined) return undefined;
-  const record = validateRecord(input, "Bash");
-  const mode = readString(record, "mode", "Bash");
-  if (mode !== "rawPreserve" && mode !== "compareNormalizedHtml") {
-    throw new Error("Bash.artifact.preserve.mode 必须是 rawPreserve 或 compareNormalizedHtml。");
-  }
-  return {
-    mode,
-    expectedPath: readOptionalString(record, "expectedPath", "Bash"),
-    expectedText: readOptionalString(record, "expectedText", "Bash"),
-  };
-}
-
-function validateHttpUrl(url: string): void {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error("protocol");
-    }
-  } catch {
-    throw new Error("Bash.service.url 必须是 http/https URL。");
-  }
 }
 
 async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOutput> {
@@ -1497,43 +1300,14 @@ function sanitizeSecrets(text: string): string {
 }
 
 async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOutput> {
-  if (input.artifact) {
-    return checkArtifact({
-      input: input.artifact,
-      target: resolveArtifactPath(context, input.artifact.path),
-      protectPaths: (input.artifact.protectPaths ?? []).map((path) => resolveArtifactPath(context, path)),
-      context,
-    });
-  }
-  if (input.binary) {
-    return inspectBinaryFile(input.binary, resolveWorkspacePath(context.workspaceRoot, input.binary.path));
-  }
   if (!input.command) {
-    if (isBashServiceLifecycleAction(input.service)) {
-      return runBashServiceLifecycleAction(input.service, context);
-    }
-    throw new Error("Bash.command、Bash.binary 或 Bash.service action 必须提供一个。");
+    throw new Error("Bash.command 必须提供。");
   }
   const logRoot = context.logRoot ?? join(context.workspaceRoot, ".linghun", "logs", "tools");
   await mkdir(logRoot, { recursive: true });
   const fullOutputPath = join(logRoot, `bash-${Date.now()}-${randomUUID()}.log`);
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
   const adapted = adaptShellCommand(input.command);
-  if (input.service && !isBashServiceLifecycleAction(input.service)) {
-    const readiness = withDefaultServiceReadiness(input.service, context);
-    return startBashService({
-      command: adapted.command,
-      logCommand: adapted.logCommand ?? adapted.command,
-      cwd: context.workspaceRoot,
-      fullOutputPath,
-      readiness,
-      context,
-      abortSignal: context.abortSignal,
-      onProgress: (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
-      trackChildProcess: context.trackChildProcess,
-      sanitizeText: sanitizeSecrets,
-    });
-  }
   // Background execution: only when explicitly requested via runInBackground=true
   if (input.runInBackground === true) {
     const taskId = randomUUID();
@@ -2240,18 +2014,6 @@ function normalizeHostPort(host: string, port: number): { host: string; port: nu
 function isHeadlessBenchContext(context: ToolContext): boolean {
   const record = context as ToolContext & { headlessBench?: { enabled?: boolean } };
   return record.headlessBench?.enabled === true || record.isHeadlessBench === true;
-}
-
-function withDefaultServiceReadiness(
-  readiness: BashServiceReadiness,
-  context: ToolContext,
-): BashServiceReadiness {
-  if (readiness.timeoutMs !== undefined) return readiness;
-  const hasReadinessRisk = (context.recentDiagnostics ?? []).some((diagnostic) =>
-    diagnostic.type === "service_readiness" || diagnostic.type === "timeout"
-  );
-  const timeoutMs = hasReadinessRisk ? 15_000 : isHeadlessBenchContext(context) ? 10_000 : 5_000;
-  return { ...readiness, timeoutMs };
 }
 
 function createBashOutcomeDiagnostics(
