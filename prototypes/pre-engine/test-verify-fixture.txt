@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"F:/Linghun/prototypes/pre-engine/fixtures"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pre_verify","arguments":{"changed_files":["a.ts"]}}}
+

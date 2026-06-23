@@ -11,6 +11,7 @@ pub struct Definition {
     pub line: usize,
     pub signature: String,
     pub kind: SymbolKind,
+    pub param_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +107,7 @@ fn match_ts_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Function,
+                param_count: count_params(node),
             })
         }
         "method_definition" => {
@@ -116,6 +118,7 @@ fn match_ts_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Method,
+                param_count: count_params(node),
             })
         }
         "class_declaration" => {
@@ -126,6 +129,7 @@ fn match_ts_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Class,
+                param_count: 0,
             })
         }
         "interface_declaration" => {
@@ -136,6 +140,7 @@ fn match_ts_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Interface,
+                param_count: 0,
             })
         }
         "type_alias_declaration" => {
@@ -146,6 +151,7 @@ fn match_ts_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Type,
+                param_count: 0,
             })
         }
         "lexical_declaration" | "variable_declaration" => {
@@ -154,6 +160,9 @@ fn match_ts_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
             let name_node = declarator.child_by_field_name("name")?;
             let text = node_text(name_node, source);
             if text.chars().next().map_or(false, |c| c.is_uppercase()) || is_arrow_or_func_value(declarator, source) {
+                let pc = declarator.child_by_field_name("value")
+                    .map(|v| count_params(v))
+                    .unwrap_or(0);
                 Some(Definition {
                     name: text.to_string(),
                     file: path.to_string_lossy().to_string(),
@@ -164,6 +173,7 @@ fn match_ts_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                     } else {
                         SymbolKind::Function
                     },
+                    param_count: pc,
                 })
             } else {
                 None
@@ -178,6 +188,7 @@ fn match_ts_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Enum,
+                param_count: 0,
             })
         }
         _ => None,
@@ -194,6 +205,7 @@ fn match_rust_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Function,
+                param_count: 0,
             })
         }
         "struct_item" => {
@@ -204,6 +216,7 @@ fn match_rust_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Struct,
+                param_count: 0,
             })
         }
         "enum_item" => {
@@ -214,6 +227,7 @@ fn match_rust_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Enum,
+                param_count: 0,
             })
         }
         "trait_item" => {
@@ -224,6 +238,7 @@ fn match_rust_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Interface,
+                param_count: 0,
             })
         }
         "impl_item" => None,
@@ -235,6 +250,7 @@ fn match_rust_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Type,
+                param_count: 0,
             })
         }
         "const_item" | "static_item" => {
@@ -245,6 +261,7 @@ fn match_rust_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Constant,
+                param_count: 0,
             })
         }
         _ => None,
@@ -261,6 +278,7 @@ fn match_python_definition(node: Node, source: &str, path: &Path) -> Option<Defi
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Function,
+                param_count: 0,
             })
         }
         "class_definition" => {
@@ -271,6 +289,7 @@ fn match_python_definition(node: Node, source: &str, path: &Path) -> Option<Defi
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Class,
+                param_count: 0,
             })
         }
         _ => None,
@@ -287,6 +306,7 @@ fn match_go_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Function,
+                param_count: 0,
             })
         }
         "method_declaration" => {
@@ -297,6 +317,7 @@ fn match_go_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Method,
+                param_count: 0,
             })
         }
         "type_declaration" => {
@@ -316,6 +337,7 @@ fn match_go_definition(node: Node, source: &str, path: &Path) -> Option<Definiti
                 line: child.start_position().row + 1,
                 signature: extract_signature(child, source),
                 kind: sk,
+                param_count: 0,
             })
         }
         _ => None,
@@ -332,6 +354,7 @@ fn match_java_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Method,
+                param_count: 0,
             })
         }
         "class_declaration" => {
@@ -342,6 +365,7 @@ fn match_java_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Class,
+                param_count: 0,
             })
         }
         "interface_declaration" => {
@@ -352,6 +376,7 @@ fn match_java_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Interface,
+                param_count: 0,
             })
         }
         "enum_declaration" => {
@@ -362,6 +387,7 @@ fn match_java_definition(node: Node, source: &str, path: &Path) -> Option<Defini
                 line: node.start_position().row + 1,
                 signature: extract_signature(node, source),
                 kind: SymbolKind::Enum,
+                param_count: 0,
             })
         }
         _ => None,
@@ -409,6 +435,7 @@ pub struct Callee {
     pub file: String,
     pub line: usize,
     pub is_member: bool,
+    pub arg_count: usize,
 }
 
 pub fn extract_callees(tree: &Tree, source: &str, path: &Path, symbol: &str, lang: Lang) -> Vec<Callee> {
@@ -499,6 +526,7 @@ fn collect_callees(node: Node, source: &str, path: &Path, callees: &mut Vec<Call
                 is_member: is_member || is_optional_ident_call,
                 file: path.to_string_lossy().to_string(),
                 line: node.start_position().row + 1,
+                arg_count: count_call_args(node),
             });
         }
     }
@@ -547,6 +575,7 @@ fn collect_callers(node: Node, source: &str, path: &Path, target: &str, lang: La
                             is_member: false,
                             file: path.to_string_lossy().to_string(),
                             line: node.start_position().row + 1,
+                            arg_count: 0,
                         });
                     }
                 }
@@ -591,6 +620,43 @@ fn dedup_callees(callees: &mut Vec<Callee>) {
     callees.retain(|c| seen.insert(c.name.clone()));
 }
 
+fn count_params(node: Node) -> usize {
+    let params = node.child_by_field_name("parameters")
+        .or_else(|| node.child_by_field_name("params"));
+    params.map_or(0, |p| {
+        let mut cursor = p.walk();
+        let mut count = 0;
+        if cursor.goto_first_child() {
+            loop {
+                let k = cursor.node().kind();
+                if k != "," && k != "(" && k != ")" {
+                    count += 1;
+                }
+                if !cursor.goto_next_sibling() { break; }
+            }
+        }
+        count
+    })
+}
+
+fn count_call_args(node: Node) -> usize {
+    let args = node.child_by_field_name("arguments");
+    args.map_or(0, |a| {
+        let mut cursor = a.walk();
+        let mut count = 0;
+        if cursor.goto_first_child() {
+            loop {
+                let k = cursor.node().kind();
+                if k != "," && k != "(" && k != ")" {
+                    count += 1;
+                }
+                if !cursor.goto_next_sibling() { break; }
+            }
+        }
+        count
+    })
+}
+
 pub fn extract_imports(tree: &Tree, source: &str, lang: Lang) -> HashSet<String> {
     let mut names = HashSet::new();
     if !matches!(lang, Lang::TypeScript | Lang::Tsx) {
@@ -622,6 +688,77 @@ fn collect_identifiers_under(node: Node, source: &str, names: &mut HashSet<Strin
     if cursor.goto_first_child() {
         loop {
             collect_identifiers_under(cursor.node(), source, names);
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+}
+
+pub fn extract_local_bindings(tree: &Tree, source: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_bindings(tree.root_node(), source, &mut names);
+    names
+}
+
+fn collect_bindings(node: Node, source: &str, names: &mut HashSet<String>) {
+    if matches!(node.kind(), "required_parameter" | "optional_parameter" | "rest_parameter") {
+        let mut c = node.walk();
+        if c.goto_first_child() {
+            loop {
+                if c.node().kind() == "identifier" {
+                    names.insert(node_text(c.node(), source).to_string());
+                    break;
+                }
+                if !c.goto_next_sibling() { break; }
+            }
+        }
+        return;
+    }
+    if node.kind() == "variable_declarator" {
+        if let Some(n) = node.child_by_field_name("name").filter(|n| n.kind() == "identifier") {
+            names.insert(node_text(n, source).to_string());
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_bindings(cursor.node(), source, names);
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+}
+
+pub fn extract_all_callees_grouped(tree: &Tree, source: &str, path: &Path, lang: Lang) -> Vec<(String, Vec<Callee>)> {
+    let mut result = Vec::new();
+    collect_functions_and_callees(tree.root_node(), source, path, lang, &mut result);
+    for (_, callees) in &mut result {
+        dedup_callees(callees);
+    }
+    result
+}
+
+fn collect_functions_and_callees(node: Node, source: &str, path: &Path, lang: Lang, out: &mut Vec<(String, Vec<Callee>)>) {
+    let is_fn = match lang {
+        Lang::TypeScript | Lang::Tsx => matches!(node.kind(), "function_declaration" | "method_definition" | "lexical_declaration" | "variable_declaration"),
+        Lang::Rust => node.kind() == "function_item",
+        Lang::Python => node.kind() == "function_definition",
+        Lang::Go => matches!(node.kind(), "function_declaration" | "method_declaration"),
+        Lang::Java => node.kind() == "method_declaration",
+    };
+    if is_fn {
+        if let Some(name) = get_def_name(node, source, lang) {
+            if let Some(body) = node.child_by_field_name("body") {
+                let mut callees = Vec::new();
+                collect_callees(body, source, path, &mut callees);
+                out.push((name, callees));
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_functions_and_callees(cursor.node(), source, path, lang, out);
             if !cursor.goto_next_sibling() { break; }
         }
     }

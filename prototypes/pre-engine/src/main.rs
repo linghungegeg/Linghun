@@ -565,7 +565,9 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>) -> Value {
         Some(i) => i,
         None => return tool_error("index not initialized — send initialize with rootUri first"),
     };
+    let t0 = std::time::Instant::now();
     idx.refresh();
+    let refresh_ms = t0.elapsed().as_millis();
     let root_str = idx.root.to_string_lossy().to_string();
 
     let changed_files: Vec<String> = arguments
@@ -578,11 +580,9 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>) -> Value {
         return tool_error("changed_files array is required and must not be empty");
     }
 
-    let all_defs: HashSet<String> = idx.files().flat_map(|entry| {
-        symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang)
-            .into_iter()
-            .map(|d| d.name)
-    }).collect();
+    let t1 = std::time::Instant::now();
+
+    let all_defs = idx.all_defs();
 
     let mut issues: Vec<Value> = Vec::new();
 
@@ -592,18 +592,34 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>) -> Value {
             continue;
         }
         let imported = symbols::extract_imports(&entry.tree, &entry.source, entry.lang);
-        let defs = symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
-        for d in &defs {
-            let callees = symbols::extract_callees(&entry.tree, &entry.source, &entry.path, &d.name, entry.lang);
-            for callee in &callees {
-                if callee.is_member || imported.contains(&callee.name) {
+        let local_bindings = symbols::extract_local_bindings(&entry.tree, &entry.source);
+        let fn_callees = symbols::extract_all_callees_grouped(&entry.tree, &entry.source, &entry.path, entry.lang);
+        for (fn_name, callees) in &fn_callees {
+            for callee in callees {
+                if callee.is_member
+                    || imported.contains(&callee.name)
+                    || local_bindings.contains(&callee.name)
+                    || is_builtin_or_common(&callee.name)
+                {
                     continue;
                 }
-                if !all_defs.contains(&callee.name) && !is_builtin_or_common(&callee.name) {
+                if let Some(&param_count) = all_defs.get(&callee.name) {
+                    if callee.arg_count > param_count {
+                        issues.push(json!({
+                            "type": "argument_count_mismatch",
+                            "file": rel,
+                            "function": fn_name,
+                            "calls": callee.name,
+                            "line": callee.line,
+                            "expected": param_count,
+                            "actual": callee.arg_count,
+                        }));
+                    }
+                } else {
                     issues.push(json!({
                         "type": "unresolved_call",
                         "file": rel,
-                        "function": d.name,
+                        "function": fn_name,
                         "calls": callee.name,
                         "line": callee.line,
                     }));
@@ -612,10 +628,15 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>) -> Value {
         }
     }
 
+    let verify_ms = t1.elapsed().as_millis();
+    let elapsed_ms = t0.elapsed().as_millis();
     let status = if issues.is_empty() { "pass" } else { "issues_found" };
     let result = json!({
         "status": status,
         "checked_files": changed_files.len(),
+        "elapsed_ms": elapsed_ms,
+        "refresh_ms": refresh_ms,
+        "verify_ms": verify_ms,
         "issues": issues,
     });
 

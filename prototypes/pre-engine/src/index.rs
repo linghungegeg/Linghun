@@ -7,6 +7,7 @@ use tree_sitter::{Parser, Tree};
 use walkdir::WalkDir;
 
 use crate::language::Lang;
+use crate::symbols;
 
 pub struct FileEntry {
     pub path: PathBuf,
@@ -19,6 +20,7 @@ pub struct FileEntry {
 pub struct Index {
     pub root: PathBuf,
     files: HashMap<PathBuf, FileEntry>,
+    defs_cache: HashMap<String, usize>,
 }
 
 impl Index {
@@ -26,6 +28,7 @@ impl Index {
         Self {
             root,
             files: HashMap::new(),
+            defs_cache: HashMap::new(),
         }
     }
 
@@ -49,6 +52,7 @@ impl Index {
         for item in parsed.into_iter().flatten() {
             self.files.insert(item.0, item.1);
         }
+        self.rebuild_defs_cache();
     }
 
     pub fn refresh(&mut self) {
@@ -87,7 +91,24 @@ impl Index {
         for item in parsed.into_iter().flatten() {
             self.files.insert(item.0, item.1);
         }
+        let removed_any = self.files.keys().any(|p| !seen.contains(p));
         self.files.retain(|p, _| seen.contains(p));
+        if !to_reparse.is_empty() || removed_any {
+            self.rebuild_defs_cache();
+        }
+    }
+
+    fn rebuild_defs_cache(&mut self) {
+        self.defs_cache.clear();
+        for entry in self.files.values() {
+            for d in symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang) {
+                self.defs_cache.insert(d.name, d.param_count);
+            }
+        }
+    }
+
+    pub fn all_defs(&self) -> &HashMap<String, usize> {
+        &self.defs_cache
     }
 
     pub fn file_count(&self) -> usize {
