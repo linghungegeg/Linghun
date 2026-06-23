@@ -204,14 +204,25 @@ function buildPreEngine() {
 }
 
 async function copyPreEngine(source, platformArch) {
-  const targetDir = join(cliBundledRoot, "pre-engine", platformArch);
-  await mkdir(targetDir, { recursive: true });
-  const target = join(targetDir, preEngineFileName(platformArch));
-  await copyFile(source, target);
+  const fileName = preEngineFileName(platformArch);
+
+  const cliTargetDir = join(cliBundledRoot, "pre-engine", platformArch);
+  await mkdir(cliTargetDir, { recursive: true });
+  const cliTarget = join(cliTargetDir, fileName);
+  await copyFile(source, cliTarget);
   if (!platformArch.startsWith("win32-")) {
-    await chmod(target, 0o755);
+    await chmod(cliTarget, 0o755);
   }
-  console.log(`[linghun] bundled pre-engine ${platformArch}: ${relative(target)}`);
+  console.log(`[linghun] bundled pre-engine ${platformArch}: ${relative(cliTarget)}`);
+
+  const pkgTargetDir = join(repoRoot, "packages", `pre-engine-${platformArch}`, "bundled", "pre-engine", platformArch);
+  await mkdir(pkgTargetDir, { recursive: true });
+  const pkgTarget = join(pkgTargetDir, fileName);
+  await copyFile(source, pkgTarget);
+  if (!platformArch.startsWith("win32-")) {
+    await chmod(pkgTarget, 0o755);
+  }
+  console.log(`[linghun] bundled pre-engine pkg ${platformArch}: ${relative(pkgTarget)}`);
 }
 
 function preEngineFileName(platformArch) {
