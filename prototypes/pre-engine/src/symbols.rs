@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use tree_sitter::{Node, Tree};
 
@@ -407,6 +408,7 @@ pub struct Callee {
     pub name: String,
     pub file: String,
     pub line: usize,
+    pub is_member: bool,
 }
 
 pub fn extract_callees(tree: &Tree, source: &str, path: &Path, symbol: &str, lang: Lang) -> Vec<Callee> {
@@ -483,9 +485,18 @@ fn get_def_name(node: Node, source: &str, lang: Lang) -> Option<String> {
 
 fn collect_callees(node: Node, source: &str, path: &Path, callees: &mut Vec<Callee>) {
     if node.kind() == "call_expression" || node.kind() == "macro_invocation" {
+        let func_node = node.child_by_field_name("function")
+            .or_else(|| node.child_by_field_name("macro"));
+        let is_member = func_node.map_or(false, |f| {
+            matches!(f.kind(), "member_expression" | "field_expression" | "scoped_identifier")
+        });
+        let is_optional_ident_call = !is_member
+            && func_node.map_or(false, |f| f.kind() == "identifier")
+            && node.child_by_field_name("optional_chain").is_some();
         if let Some(name) = extract_call_name(node, source) {
             callees.push(Callee {
                 name,
+                is_member: is_member || is_optional_ident_call,
                 file: path.to_string_lossy().to_string(),
                 line: node.start_position().row + 1,
             });
@@ -533,6 +544,7 @@ fn collect_callers(node: Node, source: &str, path: &Path, target: &str, lang: La
                     if body_calls_symbol(body, source, target) {
                         callers.push(Callee {
                             name: caller_name,
+                            is_member: false,
                             file: path.to_string_lossy().to_string(),
                             line: node.start_position().row + 1,
                         });
@@ -577,4 +589,40 @@ fn body_calls_symbol(node: Node, source: &str, target: &str) -> bool {
 fn dedup_callees(callees: &mut Vec<Callee>) {
     let mut seen = std::collections::HashSet::new();
     callees.retain(|c| seen.insert(c.name.clone()));
+}
+
+pub fn extract_imports(tree: &Tree, source: &str, lang: Lang) -> HashSet<String> {
+    let mut names = HashSet::new();
+    if !matches!(lang, Lang::TypeScript | Lang::Tsx) {
+        return names;
+    }
+    collect_import_names(tree.root_node(), source, &mut names);
+    names
+}
+
+fn collect_import_names(node: Node, source: &str, names: &mut HashSet<String>) {
+    if node.kind() == "import_statement" {
+        collect_identifiers_under(node, source, names);
+        return;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_import_names(cursor.node(), source, names);
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+}
+
+fn collect_identifiers_under(node: Node, source: &str, names: &mut HashSet<String>) {
+    if node.kind() == "identifier" || node.kind() == "property_identifier" {
+        names.insert(node_text(node, source).to_string());
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_identifiers_under(cursor.node(), source, names);
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
 }

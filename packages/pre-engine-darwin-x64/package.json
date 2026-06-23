@@ -1,0 +1,11 @@
+{
+  "name": "@linghun/pre-engine-darwin-x64",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bundled"],
+  "publishConfig": {
+    "access": "public"
+  }
+}
