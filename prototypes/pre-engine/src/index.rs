@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use rayon::prelude::*;
 use tree_sitter::{Parser, Tree};
 use walkdir::WalkDir;
 
@@ -18,7 +19,6 @@ pub struct FileEntry {
 pub struct Index {
     pub root: PathBuf,
     files: HashMap<PathBuf, FileEntry>,
-    parser: Parser,
 }
 
 impl Index {
@@ -26,56 +26,66 @@ impl Index {
         Self {
             root,
             files: HashMap::new(),
-            parser: Parser::new(),
         }
     }
 
     pub fn build(&mut self) {
-        let root = self.root.clone();
-        for entry in WalkDir::new(&root)
+        let candidates: Vec<(PathBuf, Lang)> = WalkDir::new(&self.root)
             .into_iter()
             .filter_entry(|e| !is_ignored(e.path()))
             .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path().to_path_buf();
-            let lang = match Lang::from_path(&path) {
-                Some(l) => l,
-                None => continue,
-            };
-            self.parse_file(&path, lang);
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| {
+                let path = e.path().to_path_buf();
+                Lang::from_path(&path).map(|lang| (path, lang))
+            })
+            .collect();
+
+        let parsed: Vec<Option<(PathBuf, FileEntry)>> = candidates
+            .par_iter()
+            .map(|(path, lang)| parse_file_standalone(path, *lang))
+            .collect();
+
+        for item in parsed.into_iter().flatten() {
+            self.files.insert(item.0, item.1);
         }
     }
 
     pub fn refresh(&mut self) {
-        let root = self.root.clone();
-        let mut seen = std::collections::HashSet::new();
-        for entry in WalkDir::new(&root)
+        let candidates: Vec<(PathBuf, Lang)> = WalkDir::new(&self.root)
             .into_iter()
             .filter_entry(|e| !is_ignored(e.path()))
             .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path().to_path_buf();
-            let lang = match Lang::from_path(&path) {
-                Some(l) => l,
-                None => continue,
-            };
-            seen.insert(path.clone());
-            let mtime = fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            let needs_reparse = match self.files.get(&path) {
-                Some(existing) => existing.mtime != mtime,
-                None => true,
-            };
-            if needs_reparse {
-                self.parse_file(&path, lang);
-            }
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| {
+                let path = e.path().to_path_buf();
+                Lang::from_path(&path).map(|lang| (path, lang))
+            })
+            .collect();
+
+        let seen: std::collections::HashSet<PathBuf> =
+            candidates.iter().map(|(p, _)| p.clone()).collect();
+
+        let to_reparse: Vec<&(PathBuf, Lang)> = candidates
+            .iter()
+            .filter(|(path, _)| {
+                let mtime = fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                match self.files.get(path) {
+                    Some(existing) => existing.mtime != mtime,
+                    None => true,
+                }
+            })
+            .collect();
+
+        let parsed: Vec<Option<(PathBuf, FileEntry)>> = to_reparse
+            .par_iter()
+            .map(|(path, lang)| parse_file_standalone(path, *lang))
+            .collect();
+
+        for item in parsed.into_iter().flatten() {
+            self.files.insert(item.0, item.1);
         }
         self.files.retain(|p, _| seen.contains(p));
     }
@@ -87,50 +97,56 @@ impl Index {
     pub fn files(&self) -> impl Iterator<Item = &FileEntry> {
         self.files.values()
     }
-
-    fn parse_file(&mut self, path: &Path, lang: Lang) {
-        let source = match fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let mtime = fs::metadata(path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        self.parser
-            .set_language(&lang.tree_sitter_language())
-            .expect("failed to set language");
-        let tree = match self.parser.parse(&source, None) {
-            Some(t) => t,
-            None => return,
-        };
-        self.files.insert(
-            path.to_path_buf(),
-            FileEntry {
-                path: path.to_path_buf(),
-                lang,
-                mtime,
-                tree,
-                source,
-            },
-        );
-    }
 }
 
+fn parse_file_standalone(path: &Path, lang: Lang) -> Option<(PathBuf, FileEntry)> {
+    let source = fs::read_to_string(path).ok()?;
+    let mtime = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut parser = Parser::new();
+    parser
+        .set_language(&lang.tree_sitter_language())
+        .expect("failed to set language");
+    let tree = parser.parse(&source, None)?;
+    Some((
+        path.to_path_buf(),
+        FileEntry {
+            path: path.to_path_buf(),
+            lang,
+            mtime,
+            tree,
+            source,
+        },
+    ))
+}
+
+const IGNORED_SEGMENTS: &[&str] = &[
+    ".bench",
+    ".linghun",
+    ".codebase-memory",
+    "node_modules",
+    ".git",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    "coverage",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "vendor",
+    ".turbo",
+    ".cache",
+];
+
 fn is_ignored(path: &Path) -> bool {
-    let name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(n) => n,
-        None => return false,
-    };
-    matches!(
-        name,
-        "node_modules"
-            | ".git"
-            | "target"
-            | "dist"
-            | "build"
-            | ".next"
-            | "__pycache__"
-            | ".venv"
-            | "vendor"
-    )
+    path.components().any(|c| {
+        if let std::path::Component::Normal(seg) = c {
+            if let Some(s) = seg.to_str() {
+                return IGNORED_SEGMENTS.contains(&s);
+            }
+        }
+        false
+    })
 }
