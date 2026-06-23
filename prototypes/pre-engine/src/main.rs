@@ -1,11 +1,18 @@
-use serde::{Deserialize, Serialize};
+mod index;
+mod language;
+mod symbols;
+
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
+
+use crate::index::Index;
 
 fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
+    let mut index: Option<Index> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -19,7 +26,7 @@ fn main() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(response) = handle_request(&request) {
+        if let Some(response) = handle_request(&request, &mut index) {
             let out = serde_json::to_string(&response).unwrap();
             writeln!(stdout_lock, "{}", out).ok();
             stdout_lock.flush().ok();
@@ -27,21 +34,32 @@ fn main() {
     }
 }
 
-fn handle_request(request: &Value) -> Option<Value> {
+fn handle_request(request: &Value, index: &mut Option<Index>) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
     match method {
-        "initialize" => Some(json_rpc_result(id, json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {
-                "tools": {}
-            },
-            "serverInfo": {
-                "name": "linghun-pre-engine",
-                "version": "0.1.0"
-            }
-        }))),
+        "initialize" => {
+            let root = request
+                .pointer("/params/rootUri")
+                .and_then(|v| v.as_str())
+                .or_else(|| request.pointer("/params/rootPath").and_then(|v| v.as_str()))
+                .unwrap_or(".");
+            let root_path = PathBuf::from(root);
+            let mut idx = Index::new(root_path);
+            idx.build();
+            *index = Some(idx);
+            Some(json_rpc_result(id, json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "linghun-pre-engine",
+                    "version": "0.1.0"
+                }
+            })))
+        }
         "notifications/initialized" => None,
         "tools/list" => Some(json_rpc_result(id, json!({
             "tools": tool_definitions()
@@ -55,7 +73,7 @@ fn handle_request(request: &Value) -> Option<Value> {
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(json!({}));
-            let result = handle_tool_call(tool_name, &arguments);
+            let result = handle_tool_call(tool_name, &arguments, index);
             Some(json_rpc_result(id, result))
         }
         _ => Some(json_rpc_error(id, -32601, "Method not found")),
@@ -147,22 +165,76 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn handle_tool_call(tool_name: &str, arguments: &Value) -> Value {
+fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>) -> Value {
     match tool_name {
         "pre_context" => {
             let symbol = arguments.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("[pre_context] placeholder — symbol: {}", symbol)
-                }]
-            })
+            if symbol.is_empty() {
+                return tool_error("symbol is required");
+            }
+            if let Some(idx) = index.as_mut() {
+                idx.refresh();
+                let mut definitions = Vec::new();
+                let mut references = Vec::new();
+                let mut callees = Vec::new();
+                let mut callers = Vec::new();
+                for entry in idx.files() {
+                    let defs = symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
+                    for d in &defs {
+                        if d.name == symbol {
+                            definitions.push(d.clone());
+                        }
+                    }
+                    let refs = symbols::extract_references(&entry.tree, &entry.source, &entry.path, symbol);
+                    references.extend(refs);
+                    let ces = symbols::extract_callees(&entry.tree, &entry.source, &entry.path, symbol, entry.lang);
+                    callees.extend(ces);
+                    let crs = symbols::extract_callers(&entry.tree, &entry.source, &entry.path, symbol, entry.lang);
+                    callers.extend(crs);
+                }
+                let definition = definitions.first().map(|d| json!({
+                    "name": d.name,
+                    "file": d.file,
+                    "line": d.line,
+                    "kind": format!("{:?}", d.kind),
+                    "signature": d.signature,
+                }));
+                let refs_json: Vec<Value> = references.iter().map(|r| json!({
+                    "file": r.file,
+                    "line": r.line,
+                })).collect();
+                let callees_json: Vec<Value> = callees.iter().map(|c| json!({
+                    "name": c.name,
+                    "file": c.file,
+                    "line": c.line,
+                })).collect();
+                let callers_json: Vec<Value> = callers.iter().map(|c| json!({
+                    "name": c.name,
+                    "file": c.file,
+                    "line": c.line,
+                })).collect();
+                let result = json!({
+                    "definition": definition,
+                    "references": refs_json,
+                    "callees": callees_json,
+                    "callers": callers_json,
+                    "signature": definitions.first().map(|d| d.signature.as_str()).unwrap_or(""),
+                });
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            } else {
+                tool_error("index not initialized — send initialize with rootUri first")
+            }
         }
         "pre_impact" => {
             json!({
                 "content": [{
                     "type": "text",
-                    "text": "[pre_impact] placeholder — no AST engine yet"
+                    "text": "[pre_impact] placeholder — awaiting Phase 2"
                 }]
             })
         }
@@ -179,7 +251,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value) -> Value {
             json!({
                 "content": [{
                     "type": "text",
-                    "text": "[pre_verify] placeholder — no AST engine yet"
+                    "text": "[pre_verify] placeholder — awaiting Phase 3"
                 }]
             })
         }
@@ -193,4 +265,14 @@ fn handle_tool_call(tool_name: &str, arguments: &Value) -> Value {
             })
         }
     }
+}
+
+fn tool_error(msg: &str) -> Value {
+    json!({
+        "content": [{
+            "type": "text",
+            "text": msg
+        }],
+        "isError": true
+    })
 }
