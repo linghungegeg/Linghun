@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -516,6 +517,136 @@ export function getCodebaseMemoryPlatformArch(): string {
 }
 
 const PRE_ENGINE_COMMAND = "linghun-pre-engine";
+
+class PreEngineDaemon {
+  private proc: ReturnType<typeof spawn> | null = null;
+  private queue: Promise<void> = Promise.resolve();
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private msgId = 1;
+
+  constructor(
+    private readonly binary: string,
+    private readonly cwd: string,
+  ) {}
+
+  call(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: boolean; summary: string; errorCode?: string; data?: unknown }> {
+    return new Promise((resolve, reject) => {
+      this.queue = this.queue
+        .then(() => this._doCall(toolName, args).then(resolve, reject))
+        .catch(() => {});
+    });
+  }
+
+  private _ensureProc(): Promise<ReturnType<typeof spawn>> {
+    if (this.proc) return Promise.resolve(this.proc);
+    const proc = spawn(this.binary, [], { cwd: this.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    this.proc = proc;
+    proc.on("exit", () => { if (this.proc === proc) this.proc = null; });
+    return new Promise((resolve) => {
+      let buf = "";
+      const onData = (chunk: Buffer | string) => {
+        buf += chunk.toString();
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.id === 0) {
+              proc.stdout!.off("data", onData);
+              proc.stdin!.write(
+                JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n",
+              );
+              resolve(proc);
+            }
+          } catch {}
+        }
+      };
+      proc.stdout!.on("data", onData);
+      proc.stdin!.write(
+        JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { rootUri: this.cwd } }) + "\n",
+      );
+    });
+  }
+
+  private _doCall(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: boolean; summary: string; data?: unknown }> {
+    this._resetIdle();
+    return this._ensureProc().then(
+      (proc) =>
+        new Promise((resolve) => {
+          const id = this.msgId++;
+          let buf = "";
+          const cleanup = () => {
+            proc.stdout!.off("data", onData);
+            proc.off("exit", onExit);
+          };
+          const onExit = () => {
+            cleanup();
+            resolve({ ok: false, summary: "pre-engine process exited unexpectedly" });
+          };
+          const onData = (chunk: Buffer | string) => {
+            buf += chunk.toString();
+            const lines = buf.split("\n");
+            buf = lines.pop() ?? "";
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const msg = JSON.parse(line);
+                if (msg.id === id) {
+                  cleanup();
+                  if (msg.error) {
+                    resolve({ ok: false, summary: msg.error.message ?? String(msg.error) });
+                  } else {
+                    const content = msg.result?.content;
+                    const text = Array.isArray(content)
+                      ? content.map((c: { text?: string }) => c.text ?? "").join("")
+                      : "";
+                    resolve({ ok: true, summary: text, data: msg.result });
+                  }
+                }
+              } catch {}
+            }
+          };
+          proc.stdout!.on("data", onData);
+          proc.on("exit", onExit);
+          proc.stdin!.write(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id,
+              method: "tools/call",
+              params: { name: toolName, arguments: args },
+            }) + "\n",
+          );
+        }),
+    );
+  }
+
+  private _resetIdle() {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.proc?.kill();
+      this.proc = null;
+    }, 30_000);
+  }
+}
+
+const _preEngineDaemons = new Map<string, PreEngineDaemon>();
+
+function getOrCreatePreEngineDaemon(binary: string, cwd: string): PreEngineDaemon {
+  const key = `${binary}\0${cwd}`;
+  let d = _preEngineDaemons.get(key);
+  if (!d) {
+    d = new PreEngineDaemon(binary, cwd);
+    _preEngineDaemons.set(key, d);
+  }
+  return d;
+}
 
 export async function resolvePreEngineBinary(): Promise<string | undefined> {
   const platformArch = `${process.platform}-${process.arch}`;
@@ -1397,17 +1528,12 @@ export async function executeExtraTool(
         text: `ExecuteExtraTool(pre-engine:${target.name}) 失败：找不到 linghun-pre-engine 二进制文件（bundled 或 PATH 均未命中）。`,
       };
     }
-    const serverConfig: McpServerConfig = { command: binary, args: [] };
-    const result = await runMcpStdioToolCall(
-      serverConfig,
-      target.name,
-      params,
-      context.projectPath,
-    );
+    const daemon = getOrCreatePreEngineDaemon(binary, context.projectPath);
+    const result = await daemon.call(target.name, params as Record<string, unknown>);
     if (!result.ok) {
       return {
         ok: false,
-        text: `ExecuteExtraTool(pre-engine:${target.name}) 失败：${result.summary}${result.errorCode ? ` [${result.errorCode}]` : ""}`,
+        text: `ExecuteExtraTool(pre-engine:${target.name}) 失败：${result.summary}`,
       };
     }
     return {
