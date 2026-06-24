@@ -324,14 +324,14 @@ function runGoBuild(root, files) {
   }
 
   const targetFiles = files.map(f =>
-    (path.isAbsolute(f) ? path.relative(cwd, f) : f).replace(/\\/g, "/")
+    path.relative(cwd, path.isAbsolute(f) ? f : path.resolve(root, f)).replace(/\\/g, "/")
   );
   const issues = [];
   const output = (result.stderr || "") + "\n" + (result.stdout || "");
   const lineRe = /^(.+?):(\d+):\d+:\s*(.+)$/gm;
   let m;
   while ((m = lineRe.exec(output)) !== null) {
-    const file = m[1].replace(/\\/g, "/");
+    const file = m[1].replace(/\\/g, "/").replace(/^\.\//, "");
     const line = parseInt(m[2], 10);
     const detail = m[3];
     if (targetFiles.length === 0 || targetFiles.some(tf => file === tf || file.endsWith("/" + tf))) {

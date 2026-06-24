@@ -357,7 +357,7 @@ function runCargoCheck(root, files) {
   }
   const manifestRoot = manifest ? path.dirname(manifest) : root;
   const targetFiles = files.map(f =>
-    (path.isAbsolute(f) ? path.relative(manifestRoot, f) : f).replace(/\\/g, "/")
+    path.relative(manifestRoot, path.isAbsolute(f) ? f : path.resolve(root, f)).replace(/\\/g, "/")
   );
   const issues = [];
   for (const line of (result.stdout || "").split(/\r?\n/)) {

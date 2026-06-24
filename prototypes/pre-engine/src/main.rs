@@ -1,8 +1,10 @@
 mod go_deep_layer;
 mod index;
+mod java_deep_layer;
 mod language;
 mod py_deep_layer;
 mod rust_deep_layer;
+mod sql_deep_layer;
 mod symbols;
 mod ts_deep_layer;
 
@@ -22,6 +24,8 @@ fn main() {
     let mut py_layer: Option<py_deep_layer::PyDeepLayer> = None;
     let mut rust_layer: Option<rust_deep_layer::RustDeepLayer> = None;
     let mut go_layer: Option<go_deep_layer::GoDeepLayer> = None;
+    let mut java_layer: Option<java_deep_layer::JavaDeepLayer> = None;
+    let mut sql_layer: Option<sql_deep_layer::SqlDeepLayer> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -35,7 +39,7 @@ fn main() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer, &mut rust_layer, &mut go_layer) {
+        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer, &mut rust_layer, &mut go_layer, &mut java_layer, &mut sql_layer) {
             let out = serde_json::to_string(&response).unwrap();
             writeln!(stdout_lock, "{}", out).ok();
             stdout_lock.flush().ok();
@@ -43,7 +47,7 @@ fn main() {
     }
 }
 
-fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>) -> Option<Value> {
+fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -82,7 +86,7 @@ fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut O
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(json!({}));
-            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer, rust_layer, go_layer);
+            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer);
             Some(json_rpc_result(id, result))
         }
         _ => Some(json_rpc_error(id, -32601, "Method not found")),
@@ -174,7 +178,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>) -> Value {
+fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>) -> Value {
     match tool_name {
         "pre_context" => {
             let symbol = arguments.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
@@ -318,7 +322,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             handle_pre_plan(arguments, index)
         }
         "pre_verify" => {
-            handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer)
+            handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer)
         }
         _ => {
             json!({
@@ -1007,7 +1011,7 @@ fn topological_sort(deps: &HashMap<String, HashSet<String>>) -> Vec<String> {
     sorted
 }
 
-fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>) -> Value {
+fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>) -> Value {
     let idx = match index.as_mut() {
         Some(i) => i,
         None => return tool_error("index not initialized — send initialize with rootUri first"),
@@ -1157,6 +1161,46 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
     let go_deep_layer_status = go_result.status;
     let go_deep_layer_reason = go_result.reason;
 
+    // Java Deep Layer: type-level checking via jdtls / javac subprocess
+    let java_files: Vec<String> = changed_files.iter()
+        .filter(|f| f.ends_with(".java"))
+        .cloned()
+        .collect();
+    let java_result = if java_files.is_empty() {
+        java_deep_layer::JavaDeepLayerResult {
+            issues: vec![],
+            status: "disabled",
+            reason: Some("no Java files in changed_files".to_string()),
+            elapsed_ms: 0,
+        }
+    } else {
+        java_deep_layer::run(java_layer, &idx.root, &java_files)
+    };
+    issues.extend(java_result.issues);
+    let java_deep_layer_ms = java_result.elapsed_ms;
+    let java_deep_layer_status = java_result.status;
+    let java_deep_layer_reason = java_result.reason;
+
+    // SQL Deep Layer: syntax/lint checking via sqlfluff / fallback
+    let sql_files: Vec<String> = changed_files.iter()
+        .filter(|f| f.ends_with(".sql"))
+        .cloned()
+        .collect();
+    let sql_result = if sql_files.is_empty() {
+        sql_deep_layer::SqlDeepLayerResult {
+            issues: vec![],
+            status: "disabled",
+            reason: Some("no SQL files in changed_files".to_string()),
+            elapsed_ms: 0,
+        }
+    } else {
+        sql_deep_layer::run(sql_layer, &idx.root, &sql_files)
+    };
+    issues.extend(sql_result.issues);
+    let sql_deep_layer_ms = sql_result.elapsed_ms;
+    let sql_deep_layer_status = sql_result.status;
+    let sql_deep_layer_reason = sql_result.reason;
+
     let elapsed_ms = t0.elapsed().as_millis();
     let status = if issues.is_empty() { "pass" } else { "issues_found" };
     let result = json!({
@@ -1169,6 +1213,8 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "py_deep_layer_ms": py_deep_layer_ms,
         "rust_deep_layer_ms": rust_deep_layer_ms,
         "go_deep_layer_ms": go_deep_layer_ms,
+        "java_deep_layer_ms": java_deep_layer_ms,
+        "sql_deep_layer_ms": sql_deep_layer_ms,
         "issues": issues,
         "deep_layer": {
             "status": deep_layer_status,
@@ -1185,6 +1231,14 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "go_deep_layer": {
             "status": go_deep_layer_status,
             "reason": go_deep_layer_reason,
+        },
+        "java_deep_layer": {
+            "status": java_deep_layer_status,
+            "reason": java_deep_layer_reason,
+        },
+        "sql_deep_layer": {
+            "status": sql_deep_layer_status,
+            "reason": sql_deep_layer_reason,
         },
     });
 
