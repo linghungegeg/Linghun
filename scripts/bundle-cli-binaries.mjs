@@ -211,6 +211,7 @@ async function copyPreEngine(source, platformArch) {
   const goHelperSource = join(repoRoot, "prototypes", "pre-engine", "go-deep-layer.cjs");
   const javaHelperSource = join(repoRoot, "prototypes", "pre-engine", "java-deep-layer.cjs");
   const sqlHelperSource = join(repoRoot, "prototypes", "pre-engine", "sql-deep-layer.cjs");
+  const shellHelperSource = join(repoRoot, "prototypes", "pre-engine", "shell-deep-layer.cjs");
 
   const cliTargetDir = join(cliBundledRoot, "pre-engine", platformArch);
   await mkdir(cliTargetDir, { recursive: true });
@@ -236,6 +237,9 @@ async function copyPreEngine(source, platformArch) {
   }
   if (await readable(sqlHelperSource)) {
     await copyFile(sqlHelperSource, join(cliTargetDir, "sql-deep-layer.cjs"));
+  }
+  if (await readable(shellHelperSource)) {
+    await copyFile(shellHelperSource, join(cliTargetDir, "shell-deep-layer.cjs"));
   }
   console.log(`[linghun] bundled pre-engine ${platformArch}: ${relative(cliTarget)}`);
 
@@ -263,6 +267,9 @@ async function copyPreEngine(source, platformArch) {
   }
   if (await readable(sqlHelperSource)) {
     await copyFile(sqlHelperSource, join(pkgTargetDir, "sql-deep-layer.cjs"));
+  }
+  if (await readable(shellHelperSource)) {
+    await copyFile(shellHelperSource, join(pkgTargetDir, "shell-deep-layer.cjs"));
   }
   console.log(`[linghun] bundled pre-engine pkg ${platformArch}: ${relative(pkgTarget)}`);
 }
