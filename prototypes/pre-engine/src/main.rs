@@ -1,6 +1,8 @@
+mod go_deep_layer;
 mod index;
 mod language;
 mod py_deep_layer;
+mod rust_deep_layer;
 mod symbols;
 mod ts_deep_layer;
 
@@ -18,6 +20,8 @@ fn main() {
     let mut index: Option<Index> = None;
     let mut deep_layer: Option<ts_deep_layer::DeepLayer> = None;
     let mut py_layer: Option<py_deep_layer::PyDeepLayer> = None;
+    let mut rust_layer: Option<rust_deep_layer::RustDeepLayer> = None;
+    let mut go_layer: Option<go_deep_layer::GoDeepLayer> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -31,7 +35,7 @@ fn main() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer) {
+        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer, &mut rust_layer, &mut go_layer) {
             let out = serde_json::to_string(&response).unwrap();
             writeln!(stdout_lock, "{}", out).ok();
             stdout_lock.flush().ok();
@@ -39,7 +43,7 @@ fn main() {
     }
 }
 
-fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>) -> Option<Value> {
+fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -78,7 +82,7 @@ fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut O
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(json!({}));
-            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer);
+            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer, rust_layer, go_layer);
             Some(json_rpc_result(id, result))
         }
         _ => Some(json_rpc_error(id, -32601, "Method not found")),
@@ -170,7 +174,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>) -> Value {
+fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>) -> Value {
     match tool_name {
         "pre_context" => {
             let symbol = arguments.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
@@ -314,7 +318,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             handle_pre_plan(arguments, index)
         }
         "pre_verify" => {
-            handle_pre_verify(arguments, index, deep_layer, py_layer)
+            handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer)
         }
         _ => {
             json!({
@@ -1003,7 +1007,7 @@ fn topological_sort(deps: &HashMap<String, HashSet<String>>) -> Vec<String> {
     sorted
 }
 
-fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>) -> Value {
+fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>) -> Value {
     let idx = match index.as_mut() {
         Some(i) => i,
         None => return tool_error("index not initialized — send initialize with rootUri first"),
@@ -1113,6 +1117,46 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
     let py_deep_layer_status = py_result.status;
     let py_deep_layer_reason = py_result.reason;
 
+    // Rust Deep Layer: type-level checking via cargo check subprocess
+    let rs_files: Vec<String> = changed_files.iter()
+        .filter(|f| f.ends_with(".rs"))
+        .cloned()
+        .collect();
+    let rust_result = if rs_files.is_empty() {
+        rust_deep_layer::RustDeepLayerResult {
+            issues: vec![],
+            status: "disabled",
+            reason: Some("no Rust files in changed_files".to_string()),
+            elapsed_ms: 0,
+        }
+    } else {
+        rust_deep_layer::run(rust_layer, &idx.root, &rs_files)
+    };
+    issues.extend(rust_result.issues);
+    let rust_deep_layer_ms = rust_result.elapsed_ms;
+    let rust_deep_layer_status = rust_result.status;
+    let rust_deep_layer_reason = rust_result.reason;
+
+    // Go Deep Layer: type-level checking via gopls / go build subprocess
+    let go_files: Vec<String> = changed_files.iter()
+        .filter(|f| f.ends_with(".go"))
+        .cloned()
+        .collect();
+    let go_result = if go_files.is_empty() {
+        go_deep_layer::GoDeepLayerResult {
+            issues: vec![],
+            status: "disabled",
+            reason: Some("no Go files in changed_files".to_string()),
+            elapsed_ms: 0,
+        }
+    } else {
+        go_deep_layer::run(go_layer, &idx.root, &go_files)
+    };
+    issues.extend(go_result.issues);
+    let go_deep_layer_ms = go_result.elapsed_ms;
+    let go_deep_layer_status = go_result.status;
+    let go_deep_layer_reason = go_result.reason;
+
     let elapsed_ms = t0.elapsed().as_millis();
     let status = if issues.is_empty() { "pass" } else { "issues_found" };
     let result = json!({
@@ -1123,6 +1167,8 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "verify_ms": verify_ms,
         "deep_layer_ms": deep_layer_ms,
         "py_deep_layer_ms": py_deep_layer_ms,
+        "rust_deep_layer_ms": rust_deep_layer_ms,
+        "go_deep_layer_ms": go_deep_layer_ms,
         "issues": issues,
         "deep_layer": {
             "status": deep_layer_status,
@@ -1131,6 +1177,14 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "py_deep_layer": {
             "status": py_deep_layer_status,
             "reason": py_deep_layer_reason,
+        },
+        "rust_deep_layer": {
+            "status": rust_deep_layer_status,
+            "reason": rust_deep_layer_reason,
+        },
+        "go_deep_layer": {
+            "status": go_deep_layer_status,
+            "reason": go_deep_layer_reason,
         },
     });
 
