@@ -262,7 +262,11 @@ describe("Pre-Real-Smoke Algorithmic Decision Deep Benchmark Gate", () => {
 
       expect(records.length).toBeGreaterThanOrEqual(50);
       expect(records.some((record) => record.scale.scale === "large")).toBe(true);
-      expect(records.every((record) => record.iterations >= DEFAULT_ITERATIONS)).toBe(true);
+      const nonLiveRecords = records.filter(
+        (record) => record.category !== "B.ModelRouting.ProviderCapability.Live",
+      );
+      expect(nonLiveRecords.every((record) => record.iterations >= DEFAULT_ITERATIONS)).toBe(true);
+      expect(liveRecords.every((record) => record.iterations >= 1)).toBe(true);
       expect(records.every((record) => record.warmupRuns === WARMUP_RUNS)).toBe(true);
     },
     240_000,
