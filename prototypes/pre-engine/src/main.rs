@@ -1,5 +1,6 @@
 mod index;
 mod language;
+mod py_deep_layer;
 mod symbols;
 mod ts_deep_layer;
 
@@ -16,6 +17,7 @@ fn main() {
     let mut stdout_lock = stdout.lock();
     let mut index: Option<Index> = None;
     let mut deep_layer: Option<ts_deep_layer::DeepLayer> = None;
+    let mut py_layer: Option<py_deep_layer::PyDeepLayer> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -29,7 +31,7 @@ fn main() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer) {
+        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer) {
             let out = serde_json::to_string(&response).unwrap();
             writeln!(stdout_lock, "{}", out).ok();
             stdout_lock.flush().ok();
@@ -37,7 +39,7 @@ fn main() {
     }
 }
 
-fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>) -> Option<Value> {
+fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -76,7 +78,7 @@ fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut O
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(json!({}));
-            let result = handle_tool_call(tool_name, &arguments, index, deep_layer);
+            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer);
             Some(json_rpc_result(id, result))
         }
         _ => Some(json_rpc_error(id, -32601, "Method not found")),
@@ -168,7 +170,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>) -> Value {
+fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>) -> Value {
     match tool_name {
         "pre_context" => {
             let symbol = arguments.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
@@ -312,7 +314,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             handle_pre_plan(arguments, index)
         }
         "pre_verify" => {
-            handle_pre_verify(arguments, index, deep_layer)
+            handle_pre_verify(arguments, index, deep_layer, py_layer)
         }
         _ => {
             json!({
@@ -1001,7 +1003,7 @@ fn topological_sort(deps: &HashMap<String, HashSet<String>>) -> Vec<String> {
     sorted
 }
 
-fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>) -> Value {
+fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>) -> Value {
     let idx = match index.as_mut() {
         Some(i) => i,
         None => return tool_error("index not initialized — send initialize with rootUri first"),
@@ -1091,6 +1093,26 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
     let deep_layer_status = deep_result.status;
     let deep_layer_reason = deep_result.reason;
 
+    // Python Deep Layer: type-level checking via pyright subprocess
+    let py_files: Vec<String> = changed_files.iter()
+        .filter(|f| f.ends_with(".py"))
+        .cloned()
+        .collect();
+    let py_result = if py_files.is_empty() {
+        py_deep_layer::PyDeepLayerResult {
+            issues: vec![],
+            status: "disabled",
+            reason: Some("no Python files in changed_files".to_string()),
+            elapsed_ms: 0,
+        }
+    } else {
+        py_deep_layer::run(py_layer, &idx.root, &py_files)
+    };
+    issues.extend(py_result.issues);
+    let py_deep_layer_ms = py_result.elapsed_ms;
+    let py_deep_layer_status = py_result.status;
+    let py_deep_layer_reason = py_result.reason;
+
     let elapsed_ms = t0.elapsed().as_millis();
     let status = if issues.is_empty() { "pass" } else { "issues_found" };
     let result = json!({
@@ -1100,10 +1122,15 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "refresh_ms": refresh_ms,
         "verify_ms": verify_ms,
         "deep_layer_ms": deep_layer_ms,
+        "py_deep_layer_ms": py_deep_layer_ms,
         "issues": issues,
         "deep_layer": {
             "status": deep_layer_status,
             "reason": deep_layer_reason,
+        },
+        "py_deep_layer": {
+            "status": py_deep_layer_status,
+            "reason": py_deep_layer_reason,
         },
     });
 
