@@ -205,6 +205,7 @@ function buildPreEngine() {
 
 async function copyPreEngine(source, platformArch) {
   const fileName = preEngineFileName(platformArch);
+  const helperSource = join(repoRoot, "prototypes", "pre-engine", "ts-deep-layer.cjs");
 
   const cliTargetDir = join(cliBundledRoot, "pre-engine", platformArch);
   await mkdir(cliTargetDir, { recursive: true });
@@ -212,6 +213,9 @@ async function copyPreEngine(source, platformArch) {
   await copyFile(source, cliTarget);
   if (!platformArch.startsWith("win32-")) {
     await chmod(cliTarget, 0o755);
+  }
+  if (await readable(helperSource)) {
+    await copyFile(helperSource, join(cliTargetDir, "ts-deep-layer.cjs"));
   }
   console.log(`[linghun] bundled pre-engine ${platformArch}: ${relative(cliTarget)}`);
 
@@ -221,6 +225,9 @@ async function copyPreEngine(source, platformArch) {
   await copyFile(source, pkgTarget);
   if (!platformArch.startsWith("win32-")) {
     await chmod(pkgTarget, 0o755);
+  }
+  if (await readable(helperSource)) {
+    await copyFile(helperSource, join(pkgTargetDir, "ts-deep-layer.cjs"));
   }
   console.log(`[linghun] bundled pre-engine pkg ${platformArch}: ${relative(pkgTarget)}`);
 }

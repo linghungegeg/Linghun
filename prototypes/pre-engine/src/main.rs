@@ -1,6 +1,7 @@
 mod index;
 mod language;
 mod symbols;
+mod ts_deep_layer;
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -14,6 +15,7 @@ fn main() {
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
     let mut index: Option<Index> = None;
+    let mut deep_layer: Option<ts_deep_layer::DeepLayer> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -27,7 +29,7 @@ fn main() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(response) = handle_request(&request, &mut index) {
+        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer) {
             let out = serde_json::to_string(&response).unwrap();
             writeln!(stdout_lock, "{}", out).ok();
             stdout_lock.flush().ok();
@@ -35,7 +37,7 @@ fn main() {
     }
 }
 
-fn handle_request(request: &Value, index: &mut Option<Index>) -> Option<Value> {
+fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -74,7 +76,7 @@ fn handle_request(request: &Value, index: &mut Option<Index>) -> Option<Value> {
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(json!({}));
-            let result = handle_tool_call(tool_name, &arguments, index);
+            let result = handle_tool_call(tool_name, &arguments, index, deep_layer);
             Some(json_rpc_result(id, result))
         }
         _ => Some(json_rpc_error(id, -32601, "Method not found")),
@@ -166,7 +168,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>) -> Value {
+fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>) -> Value {
     match tool_name {
         "pre_context" => {
             let symbol = arguments.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
@@ -310,7 +312,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             handle_pre_plan(arguments, index)
         }
         "pre_verify" => {
-            handle_pre_verify(arguments, index)
+            handle_pre_verify(arguments, index, deep_layer)
         }
         _ => {
             json!({
@@ -999,7 +1001,7 @@ fn topological_sort(deps: &HashMap<String, HashSet<String>>) -> Vec<String> {
     sorted
 }
 
-fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>) -> Value {
+fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>) -> Value {
     let idx = match index.as_mut() {
         Some(i) => i,
         None => return tool_error("index not initialized — send initialize with rootUri first"),
@@ -1068,6 +1070,27 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>) -> Value {
     }
 
     let verify_ms = t1.elapsed().as_millis();
+
+    // TypeScript Deep Layer: type-level checking via subprocess
+    let ts_files: Vec<String> = changed_files.iter()
+        .filter(|f| f.ends_with(".ts") || f.ends_with(".tsx"))
+        .cloned()
+        .collect();
+    let deep_result = if ts_files.is_empty() {
+        ts_deep_layer::DeepLayerResult {
+            issues: vec![],
+            status: "disabled",
+            reason: Some("no TypeScript files in changed_files".to_string()),
+            elapsed_ms: 0,
+        }
+    } else {
+        ts_deep_layer::run(deep_layer, &idx.root, &ts_files)
+    };
+    issues.extend(deep_result.issues);
+    let deep_layer_ms = deep_result.elapsed_ms;
+    let deep_layer_status = deep_result.status;
+    let deep_layer_reason = deep_result.reason;
+
     let elapsed_ms = t0.elapsed().as_millis();
     let status = if issues.is_empty() { "pass" } else { "issues_found" };
     let result = json!({
@@ -1076,7 +1099,12 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>) -> Value {
         "elapsed_ms": elapsed_ms,
         "refresh_ms": refresh_ms,
         "verify_ms": verify_ms,
+        "deep_layer_ms": deep_layer_ms,
         "issues": issues,
+        "deep_layer": {
+            "status": deep_layer_status,
+            "reason": deep_layer_reason,
+        },
     });
 
     json!({
