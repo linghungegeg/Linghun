@@ -5,47 +5,46 @@ const { spawnSync } = require("child_process");
 
 const CPP_EXTS = new Set([".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"]);
 
-function isCppFile(f) {
-  const ext = path.extname(f).toLowerCase();
-  return CPP_EXTS.has(ext);
+function isCppExt(file) {
+  return CPP_EXTS.has(path.extname(file).toLowerCase());
 }
 
-function findToolchain() {
-  const whichCmd = process.platform === "win32" ? "where.exe" : "which";
-  const candidates = isCppFile.__lastWasCpp
-    ? ["clang++", "g++", "clang", "gcc"]
-    : ["clang", "gcc", "clang++", "g++"];
-  for (const cmd of ["clang", "clang++", "gcc", "g++"]) {
-    const r = spawnSync(whichCmd, [cmd], {
-      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
-    });
-    if (r.status === 0) {
-      const line = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean)[0];
-      if (line) return { bin: cmd, path: line };
-    }
+const toolCache = new Map();
+
+function whichCmd(cmd) {
+  if (toolCache.has(cmd)) return toolCache.get(cmd);
+  const which = process.platform === "win32" ? "where.exe" : "which";
+  const r = spawnSync(which, [cmd], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+  });
+  const found = r.status === 0 &&
+    r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean)[0];
+  toolCache.set(cmd, found || null);
+  return found || null;
+}
+
+function findCompilerForFile(file) {
+  if (isCppExt(file)) {
+    if (whichCmd("clang++")) return "clang++";
+    if (whichCmd("g++")) return "g++";
+    return null;
   }
+  if (whichCmd("clang")) return "clang";
+  if (whichCmd("gcc")) return "gcc";
   return null;
 }
 
-function pickCompiler(file, toolchain) {
-  const ext = path.extname(file).toLowerCase();
-  const isCpp = CPP_EXTS.has(ext);
-  if (isCpp) {
-    if (toolchain.bin === "clang" || toolchain.bin === "clang++") return "clang++";
-    return "g++";
-  }
-  if (toolchain.bin === "clang++" || toolchain.bin === "clang") return "clang";
-  return "gcc";
-}
-
 function runCheck(root, files) {
-  const toolchain = findToolchain();
-  if (!toolchain) return null;
-
   const issues = [];
+  let anyCompilerFound = false;
+  let anySpawnFailed = false;
+
   for (const f of files) {
+    const compiler = findCompilerForFile(f);
+    if (!compiler) continue;
+    anyCompilerFound = true;
+
     const abs = path.isAbsolute(f) ? f : path.join(root, f);
-    const compiler = pickCompiler(f, toolchain);
     const args = ["-fsyntax-only", abs];
     let r;
     try {
@@ -53,9 +52,15 @@ function runCheck(root, files) {
         cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true, timeout: 60000,
       });
-    } catch (e) { continue; }
+    } catch (e) {
+      anySpawnFailed = true;
+      continue;
+    }
 
-    if (r.error) continue;
+    if (r.error) {
+      anySpawnFailed = true;
+      continue;
+    }
 
     if (r.status !== 0) {
       const output = (r.stderr || "") + (r.stdout || "");
@@ -87,6 +92,9 @@ function runCheck(root, files) {
       }
     }
   }
+
+  if (!anyCompilerFound) return null;
+  if (anySpawnFailed && issues.length === 0) return null;
   return { issues };
 }
 
