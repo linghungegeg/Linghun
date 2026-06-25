@@ -5,6 +5,7 @@ mod java_deep_layer;
 mod language;
 mod php_deep_layer;
 mod py_deep_layer;
+mod ruby_deep_layer;
 mod rust_deep_layer;
 mod shell_deep_layer;
 mod sql_deep_layer;
@@ -32,6 +33,7 @@ fn main() {
     let mut shell_layer: Option<shell_deep_layer::ShellDeepLayer> = None;
     let mut csharp_layer: Option<csharp_deep_layer::CsharpDeepLayer> = None;
     let mut php_layer: Option<php_deep_layer::PhpDeepLayer> = None;
+    let mut ruby_layer: Option<ruby_deep_layer::RubyDeepLayer> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -45,7 +47,7 @@ fn main() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer, &mut rust_layer, &mut go_layer, &mut java_layer, &mut sql_layer, &mut shell_layer, &mut csharp_layer, &mut php_layer) {
+        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer, &mut rust_layer, &mut go_layer, &mut java_layer, &mut sql_layer, &mut shell_layer, &mut csharp_layer, &mut php_layer, &mut ruby_layer) {
             let out = serde_json::to_string(&response).unwrap();
             writeln!(stdout_lock, "{}", out).ok();
             stdout_lock.flush().ok();
@@ -53,7 +55,7 @@ fn main() {
     }
 }
 
-fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>) -> Option<Value> {
+fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -92,7 +94,7 @@ fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut O
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(json!({}));
-            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer);
+            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer, ruby_layer);
             Some(json_rpc_result(id, result))
         }
         _ => Some(json_rpc_error(id, -32601, "Method not found")),
@@ -184,7 +186,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>) -> Value {
+fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>) -> Value {
     match tool_name {
         "pre_context" => {
             let symbol = arguments.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
@@ -328,7 +330,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             handle_pre_plan(arguments, index)
         }
         "pre_verify" => {
-            handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer)
+            handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer, ruby_layer)
         }
         _ => {
             json!({
@@ -1017,7 +1019,7 @@ fn topological_sort(deps: &HashMap<String, HashSet<String>>) -> Vec<String> {
     sorted
 }
 
-fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>) -> Value {
+fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>) -> Value {
     let idx = match index.as_mut() {
         Some(i) => i,
         None => return tool_error("index not initialized — send initialize with rootUri first"),
@@ -1267,6 +1269,26 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
     let php_deep_layer_status = php_result.status;
     let php_deep_layer_reason = php_result.reason;
 
+    // Ruby Deep Layer: ruby -c syntax checking
+    let ruby_files: Vec<String> = changed_files.iter()
+        .filter(|f| f.ends_with(".rb"))
+        .cloned()
+        .collect();
+    let ruby_result = if ruby_files.is_empty() {
+        ruby_deep_layer::RubyDeepLayerResult {
+            issues: vec![],
+            status: "disabled",
+            reason: Some("no Ruby files in changed_files".to_string()),
+            elapsed_ms: 0,
+        }
+    } else {
+        ruby_deep_layer::run(ruby_layer, &idx.root, &ruby_files)
+    };
+    issues.extend(ruby_result.issues);
+    let ruby_deep_layer_ms = ruby_result.elapsed_ms;
+    let ruby_deep_layer_status = ruby_result.status;
+    let ruby_deep_layer_reason = ruby_result.reason;
+
     let elapsed_ms = t0.elapsed().as_millis();
     let status = if issues.is_empty() { "pass" } else { "issues_found" };
     let result = json!({
@@ -1284,6 +1306,7 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "shell_deep_layer_ms": shell_deep_layer_ms,
         "csharp_deep_layer_ms": csharp_deep_layer_ms,
         "php_deep_layer_ms": php_deep_layer_ms,
+        "ruby_deep_layer_ms": ruby_deep_layer_ms,
         "issues": issues,
         "deep_layer": {
             "status": deep_layer_status,
@@ -1320,6 +1343,10 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "php_deep_layer": {
             "status": php_deep_layer_status,
             "reason": php_deep_layer_reason,
+        },
+        "ruby_deep_layer": {
+            "status": ruby_deep_layer_status,
+            "reason": ruby_deep_layer_reason,
         },
     });
 
