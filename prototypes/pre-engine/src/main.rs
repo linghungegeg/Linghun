@@ -1,3 +1,4 @@
+mod cpp_deep_layer;
 mod csharp_deep_layer;
 mod dart_deep_layer;
 mod go_deep_layer;
@@ -40,6 +41,7 @@ fn main() {
     let mut kotlin_layer: Option<kotlin_deep_layer::KotlinDeepLayer> = None;
     let mut dart_layer: Option<dart_deep_layer::DartDeepLayer> = None;
     let mut swift_layer: Option<swift_deep_layer::SwiftDeepLayer> = None;
+    let mut cpp_layer: Option<cpp_deep_layer::CppDeepLayer> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -53,7 +55,7 @@ fn main() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer, &mut rust_layer, &mut go_layer, &mut java_layer, &mut sql_layer, &mut shell_layer, &mut csharp_layer, &mut php_layer, &mut ruby_layer, &mut kotlin_layer, &mut dart_layer, &mut swift_layer) {
+        if let Some(response) = handle_request(&request, &mut index, &mut deep_layer, &mut py_layer, &mut rust_layer, &mut go_layer, &mut java_layer, &mut sql_layer, &mut shell_layer, &mut csharp_layer, &mut php_layer, &mut ruby_layer, &mut kotlin_layer, &mut dart_layer, &mut swift_layer, &mut cpp_layer) {
             let out = serde_json::to_string(&response).unwrap();
             writeln!(stdout_lock, "{}", out).ok();
             stdout_lock.flush().ok();
@@ -61,7 +63,7 @@ fn main() {
     }
 }
 
-fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>, kotlin_layer: &mut Option<kotlin_deep_layer::KotlinDeepLayer>, dart_layer: &mut Option<dart_deep_layer::DartDeepLayer>, swift_layer: &mut Option<swift_deep_layer::SwiftDeepLayer>) -> Option<Value> {
+fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>, kotlin_layer: &mut Option<kotlin_deep_layer::KotlinDeepLayer>, dart_layer: &mut Option<dart_deep_layer::DartDeepLayer>, swift_layer: &mut Option<swift_deep_layer::SwiftDeepLayer>, cpp_layer: &mut Option<cpp_deep_layer::CppDeepLayer>) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -100,7 +102,7 @@ fn handle_request(request: &Value, index: &mut Option<Index>, deep_layer: &mut O
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or(json!({}));
-            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer, ruby_layer, kotlin_layer, dart_layer, swift_layer);
+            let result = handle_tool_call(tool_name, &arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer, ruby_layer, kotlin_layer, dart_layer, swift_layer, cpp_layer);
             Some(json_rpc_result(id, result))
         }
         _ => Some(json_rpc_error(id, -32601, "Method not found")),
@@ -192,7 +194,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>, kotlin_layer: &mut Option<kotlin_deep_layer::KotlinDeepLayer>, dart_layer: &mut Option<dart_deep_layer::DartDeepLayer>, swift_layer: &mut Option<swift_deep_layer::SwiftDeepLayer>) -> Value {
+fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>, kotlin_layer: &mut Option<kotlin_deep_layer::KotlinDeepLayer>, dart_layer: &mut Option<dart_deep_layer::DartDeepLayer>, swift_layer: &mut Option<swift_deep_layer::SwiftDeepLayer>, cpp_layer: &mut Option<cpp_deep_layer::CppDeepLayer>) -> Value {
     match tool_name {
         "pre_context" => {
             let symbol = arguments.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
@@ -336,7 +338,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             handle_pre_plan(arguments, index)
         }
         "pre_verify" => {
-            handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer, ruby_layer, kotlin_layer, dart_layer, swift_layer)
+            handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer, ruby_layer, kotlin_layer, dart_layer, swift_layer, cpp_layer)
         }
         _ => {
             json!({
@@ -1025,7 +1027,7 @@ fn topological_sort(deps: &HashMap<String, HashSet<String>>) -> Vec<String> {
     sorted
 }
 
-fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>, kotlin_layer: &mut Option<kotlin_deep_layer::KotlinDeepLayer>, dart_layer: &mut Option<dart_deep_layer::DartDeepLayer>, swift_layer: &mut Option<swift_deep_layer::SwiftDeepLayer>) -> Value {
+fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>, kotlin_layer: &mut Option<kotlin_deep_layer::KotlinDeepLayer>, dart_layer: &mut Option<dart_deep_layer::DartDeepLayer>, swift_layer: &mut Option<swift_deep_layer::SwiftDeepLayer>, cpp_layer: &mut Option<cpp_deep_layer::CppDeepLayer>) -> Value {
     let idx = match index.as_mut() {
         Some(i) => i,
         None => return tool_error("index not initialized — send initialize with rootUri first"),
@@ -1355,6 +1357,30 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
     let swift_deep_layer_status = swift_result.status;
     let swift_deep_layer_reason = swift_result.reason;
 
+    // C/C++ Deep Layer: clang/gcc syntax checking
+    let cpp_files: Vec<String> = changed_files.iter()
+        .filter(|f| {
+            f.ends_with(".c") || f.ends_with(".h")
+                || f.ends_with(".cpp") || f.ends_with(".cc") || f.ends_with(".cxx")
+                || f.ends_with(".hpp") || f.ends_with(".hh") || f.ends_with(".hxx")
+        })
+        .cloned()
+        .collect();
+    let cpp_result = if cpp_files.is_empty() {
+        cpp_deep_layer::CppDeepLayerResult {
+            issues: vec![],
+            status: "disabled",
+            reason: Some("no C/C++ files in changed_files".to_string()),
+            elapsed_ms: 0,
+        }
+    } else {
+        cpp_deep_layer::run(cpp_layer, &idx.root, &cpp_files)
+    };
+    issues.extend(cpp_result.issues);
+    let cpp_deep_layer_ms = cpp_result.elapsed_ms;
+    let cpp_deep_layer_status = cpp_result.status;
+    let cpp_deep_layer_reason = cpp_result.reason;
+
     let elapsed_ms = t0.elapsed().as_millis();
     let status = if issues.is_empty() { "pass" } else { "issues_found" };
     let result = json!({
@@ -1376,6 +1402,7 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "kotlin_deep_layer_ms": kotlin_deep_layer_ms,
         "dart_deep_layer_ms": dart_deep_layer_ms,
         "swift_deep_layer_ms": swift_deep_layer_ms,
+        "cpp_deep_layer_ms": cpp_deep_layer_ms,
         "issues": issues,
         "deep_layer": {
             "status": deep_layer_status,
@@ -1428,6 +1455,10 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "swift_deep_layer": {
             "status": swift_deep_layer_status,
             "reason": swift_deep_layer_reason,
+        },
+        "cpp_deep_layer": {
+            "status": cpp_deep_layer_status,
+            "reason": cpp_deep_layer_reason,
         },
     });
 
