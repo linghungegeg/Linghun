@@ -212,6 +212,7 @@ async function copyPreEngine(source, platformArch) {
   const javaHelperSource = join(repoRoot, "prototypes", "pre-engine", "java-deep-layer.cjs");
   const sqlHelperSource = join(repoRoot, "prototypes", "pre-engine", "sql-deep-layer.cjs");
   const shellHelperSource = join(repoRoot, "prototypes", "pre-engine", "shell-deep-layer.cjs");
+  const csharpHelperSource = join(repoRoot, "prototypes", "pre-engine", "csharp-deep-layer.cjs");
 
   const cliTargetDir = join(cliBundledRoot, "pre-engine", platformArch);
   await mkdir(cliTargetDir, { recursive: true });
@@ -240,6 +241,9 @@ async function copyPreEngine(source, platformArch) {
   }
   if (await readable(shellHelperSource)) {
     await copyFile(shellHelperSource, join(cliTargetDir, "shell-deep-layer.cjs"));
+  }
+  if (await readable(csharpHelperSource)) {
+    await copyFile(csharpHelperSource, join(cliTargetDir, "csharp-deep-layer.cjs"));
   }
   console.log(`[linghun] bundled pre-engine ${platformArch}: ${relative(cliTarget)}`);
 
@@ -270,6 +274,9 @@ async function copyPreEngine(source, platformArch) {
   }
   if (await readable(shellHelperSource)) {
     await copyFile(shellHelperSource, join(pkgTargetDir, "shell-deep-layer.cjs"));
+  }
+  if (await readable(csharpHelperSource)) {
+    await copyFile(csharpHelperSource, join(pkgTargetDir, "csharp-deep-layer.cjs"));
   }
   console.log(`[linghun] bundled pre-engine pkg ${platformArch}: ${relative(pkgTarget)}`);
 }
