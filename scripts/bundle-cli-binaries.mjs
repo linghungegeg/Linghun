@@ -40,7 +40,11 @@ async function main() {
     await bundleNativeRunner(currentPlatformArch);
   }
 
-  await bundlePreEngine(currentPlatformArch);
+  if (options.preEngineArtifacts) {
+    await bundlePreEngineArtifacts(options.preEngineArtifacts);
+  } else {
+    await bundlePreEngine(currentPlatformArch);
+  }
 
   if (options.allCodebaseMemory) {
     for (const platformArch of supportedPlatformArches) {
@@ -58,6 +62,7 @@ function parseArgs(args) {
     allCodebaseMemory: args.includes("--all-codebase-memory"),
     downloadCodebaseMemory: args.includes("--download-codebase-memory"),
     nativeRunnerArtifacts: readOption(args, "--native-runner-artifacts"),
+    preEngineArtifacts: readOption(args, "--pre-engine-artifacts"),
     platformArch: readOption(args, "--platform-arch") ?? currentPlatformArch,
     skipNativeRunner: args.includes("--skip-native-runner"),
   };
@@ -169,6 +174,16 @@ async function bundlePreEngine(platformArch) {
     return;
   }
   await copyPreEngine(source, platformArch);
+}
+
+async function bundlePreEngineArtifacts(artifactsRoot) {
+  for (const platformArch of supportedPlatformArches) {
+    const source = join(resolve(artifactsRoot), platformArch, preEngineFileName(platformArch));
+    if (!(await readable(source))) {
+      throw new Error(`pre-engine artifact missing for ${platformArch}: ${source}`);
+    }
+    await copyPreEngine(source, platformArch);
+  }
 }
 
 function buildPreEngine() {

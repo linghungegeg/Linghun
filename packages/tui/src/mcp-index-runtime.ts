@@ -69,6 +69,7 @@ const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 const CLI_BUNDLED_ROOT_ENV = "LINGHUN_CLI_BUNDLED_ROOT";
 const CODEBASE_MEMORY_BUNDLED_ENV = "LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR";
+const PRE_ENGINE_BUNDLED_ENV = "LINGHUN_PRE_ENGINE_BUNDLED_DIR";
 const CODEBASE_MEMORY_BUNDLED_PLATFORM_ARCHES = new Set([
   "win32-x64",
   "linux-x64",
@@ -654,6 +655,9 @@ export async function resolvePreEngineBinary(): Promise<string | undefined> {
     ? `${PRE_ENGINE_COMMAND}.exe`
     : PRE_ENGINE_COMMAND;
   const roots: string[] = [];
+  if (process.env[PRE_ENGINE_BUNDLED_ENV]) {
+    roots.push(process.env[PRE_ENGINE_BUNDLED_ENV]);
+  }
   if (process.env[CLI_BUNDLED_ROOT_ENV]) {
     roots.push(join(process.env[CLI_BUNDLED_ROOT_ENV], "pre-engine"));
   }

@@ -110,10 +110,11 @@ function configureCliBundledRoot(): void {
   );
   configurePlatformBundledRoot("codebase-memory", "LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR");
   configurePlatformBundledRoot("native-runner", "LINGHUN_NATIVE_RUNNER_BUNDLED_DIR");
+  configurePlatformBundledRoot("pre-engine", "LINGHUN_PRE_ENGINE_BUNDLED_DIR");
 }
 
 function configurePlatformBundledRoot(
-  kind: "codebase-memory" | "native-runner",
+  kind: "codebase-memory" | "native-runner" | "pre-engine",
   envName: string,
 ): void {
   if (process.env[envName]) {

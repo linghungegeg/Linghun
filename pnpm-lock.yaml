@@ -97,6 +97,14 @@ importers:
 
   packages/native-runner-win32-x64: {}
 
+  packages/pre-engine-darwin-arm64: {}
+
+  packages/pre-engine-darwin-x64: {}
+
+  packages/pre-engine-linux-x64: {}
+
+  packages/pre-engine-win32-x64: {}
+
   packages/providers:
     dependencies:
       '@linghun/core':

@@ -41,10 +41,47 @@ jobs:
           name: native-runner-${{ matrix.platform_arch }}
           path: runtime-artifacts/native-runner/${{ matrix.platform_arch }}
 
+  pre-engine:
+    name: pre-engine ${{ matrix.platform_arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform_arch: win32-x64
+            binary: linghun-pre-engine.exe
+          - os: ubuntu-latest
+            platform_arch: linux-x64
+            binary: linghun-pre-engine
+          - os: macos-13
+            platform_arch: darwin-x64
+            binary: linghun-pre-engine
+          - os: macos-14
+            platform_arch: darwin-arm64
+            binary: linghun-pre-engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --manifest-path prototypes/pre-engine/Cargo.toml
+      - shell: bash
+        run: |
+          mkdir -p "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp prototypes/pre-engine/target/release/linghun-pre-engine.exe "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+          else
+            cp prototypes/pre-engine/target/release/linghun-pre-engine "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+            chmod +x "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pre-engine-${{ matrix.platform_arch }}
+          path: runtime-artifacts/pre-engine/${{ matrix.platform_arch }}
+
   assemble:
     name: assemble bundled runtime
     runs-on: ubuntu-latest
-    needs: native-runner
+    needs: [native-runner, pre-engine]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -57,6 +94,10 @@ jobs:
         with:
           pattern: native-runner-*
           path: runtime-artifacts/native-runner
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pre-engine-*
+          path: runtime-artifacts/pre-engine
       - shell: bash
         run: |
           set -euo pipefail
@@ -65,14 +106,29 @@ jobs:
             mkdir -p "runtime-artifacts/native-runner/${platform_arch}"
             find "$dir" -maxdepth 1 -type f -exec cp {} "runtime-artifacts/native-runner/${platform_arch}/" \;
           done
+          for dir in runtime-artifacts/pre-engine/pre-engine-*; do
+            platform_arch="${dir##*/pre-engine-}"
+            mkdir -p "runtime-artifacts/pre-engine/${platform_arch}"
+            find "$dir" -maxdepth 1 -type f -exec cp {} "runtime-artifacts/pre-engine/${platform_arch}/" \;
+          done
       - run: corepack pnpm install --frozen-lockfile
-      - run: node scripts/bundle-cli-binaries.mjs --skip-native-runner --native-runner-artifacts runtime-artifacts/native-runner --all-codebase-memory
+      - run: node scripts/bundle-cli-binaries.mjs --skip-native-runner --native-runner-artifacts runtime-artifacts/native-runner --pre-engine-artifacts runtime-artifacts/pre-engine --all-codebase-memory
+      - run: corepack pnpm --filter @linghun/shared build
+      - run: corepack pnpm --filter @linghun/tui build
       - run: corepack pnpm --filter @linghun/cli build
       - run: corepack pnpm --filter @linghun/cli typecheck
-      - run: corepack pnpm --filter @linghun/cli pack --pack-destination dist-pack
+      - shell: bash
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist-pack"
+          (cd apps/cli && corepack pnpm pack --pack-destination "$GITHUB_WORKSPACE/dist-pack")
+          (cd packages/pre-engine-win32-x64 && corepack pnpm pack --pack-destination "$GITHUB_WORKSPACE/dist-pack")
+          (cd packages/pre-engine-linux-x64 && corepack pnpm pack --pack-destination "$GITHUB_WORKSPACE/dist-pack")
+          (cd packages/pre-engine-darwin-x64 && corepack pnpm pack --pack-destination "$GITHUB_WORKSPACE/dist-pack")
+          (cd packages/pre-engine-darwin-arm64 && corepack pnpm pack --pack-destination "$GITHUB_WORKSPACE/dist-pack")
       - uses: actions/upload-artifact@v4
         with:
           name: linghun-cli-bundled-runtime
           path: |
             apps/cli/bundled
+            packages/pre-engine-*/bundled
             dist-pack/*.tgz

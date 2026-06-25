@@ -6,13 +6,9 @@
 
 把大模型接到真实项目、真实工具、真实权限、真实验证和真实上下文里。
 
-[English README](./README.en.md) · [中文白皮书](./WHITEPAPER.md) · [English Whitepaper](./WHITEPAPER.en.md) · [App Bridge](./docs/developers/capability-runtime-app-bridge.md)
+[English README](./README.en.md) · [中文白皮书](./WHITEPAPER.md) · [English Whitepaper](./WHITEPAPER.en.md) · [更新记录](./docs/updates.md) · [App Bridge](./docs/developers/capability-runtime-app-bridge.md)
 
 </div>
-
-> **Terminal-Bench 2.1 官方格式 k=5 结果**：Linghun 已按 Terminal-Bench 2.1 (`terminal-bench/terminal-bench-2-1`) 官方格式完成本地 `k=5` 运行，结果 **68/89 = 76.40%**。提交材料已随本仓库公开推送，等待 Terminal-Bench 官方验证/收录；按 2026-06-19 当前公开 leaderboard 分数横向参考，这个分数介于第 5 档（78.2%）和第 6 档（74.6%）之间。详见：[中文报告](./reports/terminal-bench-2.1-k5-official-submission.zh.md) / [English report](./reports/terminal-bench-2.1-k5-official-submission.md)。
-
-> **2026-06-17 更新**：终端可见层继续收敛，输入区、任务区和换行/光标稳定性已加强；工具调用链新增 SourcePack / ReadSnippets，减少重复 Grep/Read 往返，让相关代码片段更快交付给模型。
 
 ```bash
 npm install -g @linghun/cli
@@ -39,6 +35,11 @@ Linghun 可以理解成：给大模型装上一套工程化外骨骼。模型负
     </tr>
   </table>
 </div>
+
+## 更新记录
+
+- **2026-06-26**：预检系统扩展为多语言深度层，让模型开工前更快拿到索引、影响范围和语言级预检结果，减少无效读文件、重复探索和返工。详见：[更新记录](./docs/updates.md#2026-06-26-预检系统与多语言深度层)。
+- **2026-06-17**：终端可见层继续收敛，SourcePack / ReadSnippets 把相关代码片段更快交给模型，用户体感是更少等待、更少重复 Grep/Read、更快进入有效修改。详见：[更新记录](./docs/updates.md#2026-06-17-终端可见层与工具调用链)。
 
 ## 它能帮你做什么
 

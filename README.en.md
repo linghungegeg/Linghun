@@ -8,11 +8,7 @@ Ordinary chat tools can answer "how should I change this?" Linghun cares about a
 
 That is the value of Linghun's anti-hallucination system. It is not merely about making the model "say fewer wrong things"; it turns reading facts, checking evidence, distinguishing verification scope, rejecting empty completion claims, and stating uncertainty into runtime constraints. The model still reasons and generates, but critical engineering conclusions should not rely on model confidence alone.
 
-Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHITEPAPER.en.md).
-
-> **Terminal-Bench 2.1 official-format k=5 result**: Linghun completed a local official-format `k=5` run on Terminal-Bench 2.1 (`terminal-bench/terminal-bench-2-1`), scoring **68/89 = 76.40%**. The submission materials have been published in this repository and are awaiting Terminal-Bench official verification/listing; compared with the public leaderboard scores as of 2026-06-19, this result sits between the #5 score band (78.2%) and the #6 score band (74.6%). See: [English report](./reports/terminal-bench-2.1-k5-official-submission.md) / [中文报告](./reports/terminal-bench-2.1-k5-official-submission.zh.md).
-
-> **June 17, 2026 update**: The terminal display layer was tightened around input/task wrapping and cursor stability, and the tool chain gained SourcePack / ReadSnippets to reduce repeated Grep/Read round trips and deliver relevant snippets faster.
+Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHITEPAPER.en.md) / [Updates](./docs/updates.en.md).
 
 ## Special Thanks
 
@@ -26,6 +22,11 @@ Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHIT
     </tr>
   </table>
 </div>
+
+## Updates
+
+- **June 26, 2026**: The pre-check system expanded into multi-language deep layers, giving the model index facts, impact ranges, and language-level pre-check results earlier so it spends less time on blind file reading, repeated exploration, and rework. See: [Updates](./docs/updates.en.md#june-26-2026-pre-check-system-and-multi-language-deep-layers).
+- **June 17, 2026**: The terminal display layer was tightened, and SourcePack / ReadSnippets deliver relevant code snippets faster. The user-facing effect is less waiting, fewer repeated Grep/Read calls, and faster movement into useful edits. See: [Updates](./docs/updates.en.md#june-17-2026-terminal-display-layer-and-tool-call-chain).
 
 ## What It Helps You Do
 
