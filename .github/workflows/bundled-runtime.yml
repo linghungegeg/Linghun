@@ -120,7 +120,7 @@ jobs:
             mkdir -p "runtime-artifacts/pre-engine/${platform_arch}"
             find "$dir" -maxdepth 1 -type f -exec cp {} "runtime-artifacts/pre-engine/${platform_arch}/" \;
           done
-      - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm install --no-frozen-lockfile
       - run: node scripts/bundle-cli-binaries.mjs --skip-native-runner --native-runner-artifacts runtime-artifacts/native-runner --pre-engine-artifacts runtime-artifacts/pre-engine --all-codebase-memory
       - run: corepack pnpm --filter @linghun/shared build
       - run: corepack pnpm --filter @linghun/tui build
