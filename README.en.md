@@ -658,4 +658,4 @@ If you are interested in Linghun, want to share feedback, connect external app c
 
 Linghun is licensed under the [Apache License 2.0](./LICENSE).
 
-Commercial use is permitted under Apache License 2.0. For enterprise support, private deployment, custom integration, or commercial partnership, please contact the author.
+For commercial licensing, enterprise support, private deployment, custom integration, or brand partnership, please contact the author.
