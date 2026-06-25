@@ -216,6 +216,8 @@ async function copyPreEngine(source, platformArch) {
   const phpHelperSource = join(repoRoot, "prototypes", "pre-engine", "php-deep-layer.cjs");
   const rubyHelperSource = join(repoRoot, "prototypes", "pre-engine", "ruby-deep-layer.cjs");
   const kotlinHelperSource = join(repoRoot, "prototypes", "pre-engine", "kotlin-deep-layer.cjs");
+  const dartHelperSource = join(repoRoot, "prototypes", "pre-engine", "dart-deep-layer.cjs");
+  const swiftHelperSource = join(repoRoot, "prototypes", "pre-engine", "swift-deep-layer.cjs");
 
   const cliTargetDir = join(cliBundledRoot, "pre-engine", platformArch);
   await mkdir(cliTargetDir, { recursive: true });
@@ -256,6 +258,12 @@ async function copyPreEngine(source, platformArch) {
   }
   if (await readable(kotlinHelperSource)) {
     await copyFile(kotlinHelperSource, join(cliTargetDir, "kotlin-deep-layer.cjs"));
+  }
+  if (await readable(dartHelperSource)) {
+    await copyFile(dartHelperSource, join(cliTargetDir, "dart-deep-layer.cjs"));
+  }
+  if (await readable(swiftHelperSource)) {
+    await copyFile(swiftHelperSource, join(cliTargetDir, "swift-deep-layer.cjs"));
   }
   console.log(`[linghun] bundled pre-engine ${platformArch}: ${relative(cliTarget)}`);
 
@@ -298,6 +306,12 @@ async function copyPreEngine(source, platformArch) {
   }
   if (await readable(kotlinHelperSource)) {
     await copyFile(kotlinHelperSource, join(pkgTargetDir, "kotlin-deep-layer.cjs"));
+  }
+  if (await readable(dartHelperSource)) {
+    await copyFile(dartHelperSource, join(pkgTargetDir, "dart-deep-layer.cjs"));
+  }
+  if (await readable(swiftHelperSource)) {
+    await copyFile(swiftHelperSource, join(pkgTargetDir, "swift-deep-layer.cjs"));
   }
   console.log(`[linghun] bundled pre-engine pkg ${platformArch}: ${relative(pkgTarget)}`);
 }
