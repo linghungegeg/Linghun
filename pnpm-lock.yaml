@@ -61,6 +61,18 @@ importers:
       '@linghun/native-runner-win32-x64':
         specifier: 0.1.0
         version: 0.1.0
+      '@linghun/pre-engine-darwin-arm64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/pre-engine-darwin-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/pre-engine-linux-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/pre-engine-win32-x64':
+        specifier: 0.1.0
+        version: 0.1.0
 
   packages/codebase-memory-darwin-arm64: {}
 
