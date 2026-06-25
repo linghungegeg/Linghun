@@ -14,6 +14,7 @@ const queries = [
   { root, files: ["valid.cpp"] },
   { root, files: ["syntax_error.c"] },
   { root, files: ["valid.c"] },
+  { root, files: ["syntax_error.cpp", "valid.c"] },
 ];
 
 let buf = "";
@@ -42,13 +43,14 @@ helper.stdout.on("data", (chunk) => {
 });
 
 helper.on("close", () => {
-  const [r1, r2, r3, r4] = results;
+  const [r1, r2, r3, r4, r5] = results;
 
   console.log("=== C/C++ Deep Layer Smoke Test ===\n");
-  console.log(`Q1 [syntax_error.cpp]: ${r1.elapsed_ms}ms, status=${r1.status}, issues=${(r1.issues||[]).length}, reason=${r1.reason}`);
-  console.log(`Q2 [valid.cpp]:        ${r2.elapsed_ms}ms, status=${r2.status}, issues=${(r2.issues||[]).length}, reason=${r2.reason}`);
-  console.log(`Q3 [syntax_error.c]:   ${r3.elapsed_ms}ms, status=${r3.status}, issues=${(r3.issues||[]).length}, reason=${r3.reason}`);
-  console.log(`Q4 [valid.c]:          ${r4.elapsed_ms}ms, status=${r4.status}, issues=${(r4.issues||[]).length}, reason=${r4.reason}`);
+  console.log(`Q1 [syntax_error.cpp]:          ${r1.elapsed_ms}ms, status=${r1.status}, issues=${(r1.issues||[]).length}, reason=${r1.reason}`);
+  console.log(`Q2 [valid.cpp]:                 ${r2.elapsed_ms}ms, status=${r2.status}, issues=${(r2.issues||[]).length}, reason=${r2.reason}`);
+  console.log(`Q3 [syntax_error.c]:            ${r3.elapsed_ms}ms, status=${r3.status}, issues=${(r3.issues||[]).length}, reason=${r3.reason}`);
+  console.log(`Q4 [valid.c]:                   ${r4.elapsed_ms}ms, status=${r4.status}, issues=${(r4.issues||[]).length}, reason=${r4.reason}`);
+  console.log(`Q5 [syntax_error.cpp, valid.c]: ${r5.elapsed_ms}ms, status=${r5.status}, issues=${(r5.issues||[]).length}, reason=${r5.reason}`);
 
   const checks = [];
 
@@ -59,6 +61,7 @@ helper.on("close", () => {
     checks.push({ name: "D. Unavailable semantics (.c toolchain not found)", pass: r3.status === "unavailable" });
     checks.push({ name: "E. Unavailable returns no fake issues (.c)", pass: r3.issues.length === 0 });
     checks.push({ name: "F. Unavailable reason (.c)", pass: r3.reason === "cpp_toolchain_not_found" });
+    checks.push({ name: "G. Mixed unavailable (no toolchain)", pass: r5.status === "unavailable" && r5.reason === "cpp_toolchain_not_found" });
   } else {
     const cppErr = r1.issues && r1.issues.length > 0 && r1.issues[0].source === "cpp-deep-layer";
     checks.push({ name: "A. Functional (syntax_error.cpp has issues)", pass: cppErr });
@@ -77,6 +80,9 @@ helper.on("close", () => {
 
     const cReason = r3.reason === "cpp_toolchain";
     checks.push({ name: "F. Reason semantics (.c)", pass: cReason });
+
+    const mixedErr = r5.issues && r5.issues.length > 0 && r5.issues[0].source === "cpp-deep-layer";
+    checks.push({ name: "G. Mixed functional (syntax_error.cpp detected)", pass: mixedErr });
   }
 
   let allPass = true;

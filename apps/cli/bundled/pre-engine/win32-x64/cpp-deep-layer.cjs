@@ -36,13 +36,10 @@ function findCompilerForFile(file) {
 
 function runCheck(root, files) {
   const issues = [];
-  let anyCompilerFound = false;
-  let anySpawnFailed = false;
 
   for (const f of files) {
     const compiler = findCompilerForFile(f);
-    if (!compiler) continue;
-    anyCompilerFound = true;
+    if (!compiler) return null;
 
     const abs = path.isAbsolute(f) ? f : path.join(root, f);
     const args = ["-fsyntax-only", abs];
@@ -53,13 +50,11 @@ function runCheck(root, files) {
         windowsHide: true, timeout: 60000,
       });
     } catch (e) {
-      anySpawnFailed = true;
-      continue;
+      return null;
     }
 
     if (r.error) {
-      anySpawnFailed = true;
-      continue;
+      return null;
     }
 
     if (r.status !== 0) {
@@ -93,8 +88,6 @@ function runCheck(root, files) {
     }
   }
 
-  if (!anyCompilerFound) return null;
-  if (anySpawnFailed && issues.length === 0) return null;
   return { issues };
 }
 
