@@ -452,12 +452,20 @@ async function findFiles(root, fileName) {
 }
 
 function extractArchive(archive, targetDir) {
-  const result = spawnSync("tar", ["-xf", archive, "-C", targetDir], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    stdio: "pipe",
-    windowsHide: true,
-  });
+  const isZip = archive.toLowerCase().endsWith(".zip");
+  const result = isZip
+    ? spawnSync("unzip", ["-q", archive, "-d", targetDir], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        stdio: "pipe",
+        windowsHide: true,
+      })
+    : spawnSync("tar", ["-xf", archive, "-C", targetDir], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        stdio: "pipe",
+        windowsHide: true,
+      });
   if (result.status !== 0) {
     throw new Error(`failed to extract ${archive}:\n${result.stderr || result.stdout}`);
   }
