@@ -137,6 +137,11 @@ jobs:
       - run: git checkout -- apps/cli/package.json pnpm-lock.yaml
       - run: node scripts/bundle-cli-binaries.mjs --skip-native-runner --native-runner-artifacts runtime-artifacts/native-runner --pre-engine-artifacts runtime-artifacts/pre-engine --all-codebase-memory
       - run: corepack pnpm --filter @linghun/shared build
+      - run: corepack pnpm --filter @linghun/config build
+      - run: corepack pnpm --filter @linghun/core build
+      - run: corepack pnpm --filter @linghun/tools build
+      - run: corepack pnpm --filter @linghun/ink-runtime build
+      - run: corepack pnpm --filter @linghun/providers build
       - run: corepack pnpm --filter @linghun/tui build
       - run: corepack pnpm --filter @linghun/cli build
       - run: corepack pnpm --filter @linghun/cli typecheck
