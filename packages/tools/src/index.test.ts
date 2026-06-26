@@ -1875,6 +1875,19 @@ describe("Phase 05 core tools", () => {
     expect(which.command).toContain("'node'");
   });
 
+  it("wraps native PowerShell cmdlets on Windows before they reach cmd.exe", () => {
+    const childItems = adaptShellCommandForPlatform(
+      "Get-ChildItem -LiteralPath . -File",
+      "win32",
+    );
+    expect(childItems.adapter).toBe("powershell-adapted");
+    expect(childItems.command).toContain("powershell.exe");
+    expect(childItems.command).toContain("Get-ChildItem -LiteralPath . -File");
+
+    const node = adaptShellCommandForPlatform("node --version", "win32");
+    expect(node.adapter).toBe("native");
+  });
+
   it("blocks unsupported Windows Unix command forms without leaking raw scripts", () => {
     const catPipeline = adaptShellCommandForPlatform("cat package.json | grep version", "win32");
     expect(catPipeline.adapter).toBe("blocked");

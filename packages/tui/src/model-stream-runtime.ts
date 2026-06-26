@@ -177,8 +177,8 @@ type AggregatedFinalAnswerGateResult =
       unsupportedKinds: string[];
     };
 
-const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 80;
-const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 120;
+const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 32;
+const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 60;
 
 export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok">): boolean {
   return result.ok !== true;
@@ -770,6 +770,7 @@ export async function sendMessage(
   let assistantStreamBlockId = `assistant-stream-${assistantEventId}-0`;
   beginAssistantStream(output, assistantStreamBlockId);
   let assistantText = "";
+  let committedIntermediateAssistantText = "";
   let finalAnswerClaimRetried = false;
   let modelLoopCompleted = false;
   const controller = new AbortController();
@@ -1344,6 +1345,9 @@ export async function sendMessage(
         break;
       }
       if (roundAssistantText) {
+        replaceAssistantBlockContent(output, assistantStreamBlockId, roundAssistantText);
+        endAssistantStream(output);
+        committedIntermediateAssistantText = assistantText;
         output.write("\n");
       }
       if (reportWriteGuard && !hasReportWriteToolCall(reportWriteGuard, toolCalls)) {
@@ -1533,7 +1537,13 @@ export async function sendMessage(
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
     }
-    replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+    const visibleAssistantBlockText =
+      committedIntermediateAssistantText && assistantText.startsWith(committedIntermediateAssistantText)
+        ? assistantText.slice(committedIntermediateAssistantText.length).trimStart()
+        : assistantText;
+    if (visibleAssistantBlockText) {
+      replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
+    }
     endAssistantStream(output);
     clearRequestActivity(context);
     writeFinalAssistantText(output, assistantText);
@@ -2387,6 +2397,7 @@ export async function continueModelAfterToolResults(
   context.interrupt = { type: "running", taskId: "model-continuation", canCancel: true };
   startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
+  let committedIntermediateAssistantText = "";
   let finalAnswerClaimRetried = false;
   let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
@@ -2711,6 +2722,9 @@ export async function continueModelAfterToolResults(
         break;
       }
       if (roundAssistantText) {
+        replaceAssistantBlockContent(output, assistantStreamBlockId, roundAssistantText);
+        endAssistantStream(output);
+        committedIntermediateAssistantText = assistantText;
         output.write("\n");
       }
       const reportWriteGuard = continuation.reportWriteGuard;
@@ -2840,7 +2854,13 @@ export async function continueModelAfterToolResults(
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
       }
-      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      const visibleAssistantBlockText =
+        committedIntermediateAssistantText && assistantText.startsWith(committedIntermediateAssistantText)
+          ? assistantText.slice(committedIntermediateAssistantText.length).trimStart()
+          : assistantText;
+      if (visibleAssistantBlockText) {
+        replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
+      }
       endAssistantStream(output);
       clearRequestActivity(context);
       writeFinalAssistantText(output, assistantText);

@@ -2059,6 +2059,8 @@ export function adaptShellCommandForPlatform(
       "Unsupported multi-line Unix shell syntax on Windows PowerShell; use PowerShell-safe commands or Node one-liners.",
     );
   }
+  const nativePowerShell = convertNativePowerShellCommand(command);
+  if (nativePowerShell) return nativePowerShell;
   const converted = convertUnixPipelineForPowerShell(command);
   if (converted) return { command: converted, adapter: "powershell-adapted" };
   const readOnlyCommand = convertUnixReadOnlyCommandForPowerShell(command);
@@ -2071,6 +2073,23 @@ export function adaptShellCommandForPlatform(
   const unsupportedReadOnlyCommand = blockUnsupportedUnixReadOnlyCommand(command);
   if (unsupportedReadOnlyCommand) return unsupportedReadOnlyCommand;
   return { command, adapter: "native" };
+}
+
+function convertNativePowerShellCommand(command: string): ShellCommandAdapter | undefined {
+  const normalized = command.trim();
+  if (!normalized) return undefined;
+  if (/^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/iu.test(normalized)) return undefined;
+  if (!/^(?:Get|Set|New|Remove|Select|ForEach|Where|Test|Resolve|Join|Split|Copy|Move|Write|Out|Measure|Compare|Sort|Format)-[A-Za-z]+\b/u.test(normalized)) {
+    return undefined;
+  }
+  return {
+    command: [
+      "powershell.exe -NoProfile -NonInteractive -Command",
+      quoteCmdArg(`$ErrorActionPreference='Stop'; ${normalized}`),
+    ].join(" "),
+    adapter: "powershell-adapted",
+    logCommand: `powershell.exe -NoProfile -NonInteractive -Command <powershell cmdlet>`,
+  };
 }
 
 function convertNodeHereDocForPowerShell(command: string): ShellCommandAdapter | undefined {

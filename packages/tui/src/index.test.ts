@@ -27341,6 +27341,25 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(downgrade?.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("源码：流式预览小批次刷新且 Ink rerender 合帧", async () => {
+    const fs = await import("node:fs/promises");
+    const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
+    const rendererSrc = await fs.readFile(srcPath("shell/ink-renderer.tsx"), "utf8");
+    expect(runtimeSrc).toContain("const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 32");
+    expect(runtimeSrc).toContain("const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 60");
+    expect(rendererSrc).toContain("const RERENDER_FRAME_MS = 16");
+    expect(rendererSrc).toContain("pendingRenderTimer");
+  });
+
+  it("源码：Bash progress 主屏不再裸露 stdout/stderr 标签", async () => {
+    const fs = await import("node:fs/promises");
+    const runtimeSrc = await fs.readFile(srcPath("model-tool-runtime.ts"), "utf8");
+    expect(runtimeSrc).toContain("const displayText = event.text");
+    expect(runtimeSrc).not.toContain('output.write("[stdout]');
+    expect(runtimeSrc).not.toContain('output.write("[stderr]');
+    expect(runtimeSrc).not.toContain("[stdout] ... 更多输出已隐藏");
+  });
+
   it("no-tool provider final answer waits for final gate before Ink preview", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-no-tool-final-preview-"));
     const config: LinghunConfig = {

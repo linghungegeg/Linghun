@@ -22,6 +22,7 @@ export type InkShellInstance = {
 };
 
 type InkStdout = NodeJS.WriteStream & { __linghunRawStdout?: NodeJS.WriteStream };
+const RERENDER_FRAME_MS = 16;
 
 export function shouldUseInkShell(input: Readable, output: Writable): boolean {
   if (process.env.LINGHUN_TUI_PLAIN === "1") return false;
@@ -58,6 +59,8 @@ export function renderInkShell(
     terminalInteractionSession,
   );
   let instance: ReturnType<typeof render>;
+  let lastRenderAt = 0;
+  let pendingRenderTimer: ReturnType<typeof setTimeout> | undefined;
 
   try {
     terminalInteractionSession.enable();
@@ -93,6 +96,10 @@ export function renderInkShell(
       clearTimeout(resizeTimer);
       resizeTimer = undefined;
     }
+    if (pendingRenderTimer) {
+      clearTimeout(pendingRenderTimer);
+      pendingRenderTimer = undefined;
+    }
     terminalInteractionSignals.dispose();
     stdout?.off("resize", onResize);
     stdinStream?.off("close", doUnmount);
@@ -119,8 +126,9 @@ export function renderInkShell(
     stdin?.unref?.();
   };
 
-  const rerender = () => {
+  const rerenderNow = () => {
     if (unmounted) return;
+    lastRenderAt = Date.now();
     try {
       instance.rerender(<ShellApp controller={controller} capability={capability} />);
     } catch (error) {
@@ -133,6 +141,23 @@ export function renderInkShell(
       const message = error instanceof Error ? error.message : String(error);
       stderr?.write(`[linghun] Render error: ${message}\n`);
     }
+  };
+
+  const rerender = () => {
+    if (unmounted) return;
+    const elapsed = Date.now() - lastRenderAt;
+    if (elapsed >= RERENDER_FRAME_MS) {
+      if (pendingRenderTimer) {
+        clearTimeout(pendingRenderTimer);
+        pendingRenderTimer = undefined;
+      }
+      rerenderNow();
+      return;
+    }
+    pendingRenderTimer ??= setTimeout(() => {
+      pendingRenderTimer = undefined;
+      rerenderNow();
+    }, RERENDER_FRAME_MS - elapsed);
   };
 
   const onResize = () => {
@@ -173,6 +198,11 @@ export function renderInkShell(
       await waitUntilExitPromise;
     },
     waitUntilRenderFlush: async () => {
+      if (pendingRenderTimer) {
+        clearTimeout(pendingRenderTimer);
+        pendingRenderTimer = undefined;
+        rerenderNow();
+      }
       await instance.waitUntilRenderFlush();
     },
   };

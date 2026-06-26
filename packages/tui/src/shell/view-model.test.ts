@@ -5186,10 +5186,12 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
   it("cache-hit-low light hint is dim/low rather than an error or fail warning", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "cache-command-runtime.ts"), "utf8");
+    const streamSource = await readFile(join(SRC_ROOT, "model-stream-runtime.ts"), "utf8");
     const hintStart = source.indexOf('"cache-hit-low"');
     const hintSnippet = source.slice(hintStart, hintStart + 260);
-    const notificationStart = source.indexOf("context.notifications.push");
-    const notificationSnippet = source.slice(notificationStart, notificationStart + 360);
+    const policyHintsStart = streamSource.indexOf("function enqueuePolicyHints");
+    const notificationStart = streamSource.indexOf("context.notifications.push", policyHintsStart);
+    const notificationSnippet = streamSource.slice(notificationStart, notificationStart + 360);
 
     expect(hintSnippet).toContain('"info"');
     expect(hintSnippet).toContain("10,");

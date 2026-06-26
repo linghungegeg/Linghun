@@ -60,6 +60,11 @@ type MarkdownRenderSegment = { kind: "markdown" | "diff"; text: string };
 
 const GIT_CRLF_WARNING_RE =
   /^\[stderr\]\s*warning:\s+in the working copy of .+ LF will be replaced by CRLF\b.*$/iu;
+const MARKDOWN_SYNTAX_RE = /[#*`|[>\-_~]|\n\n|^\d+\. |\n\d+\. /u;
+
+function hasMarkdownSyntax(text: string): boolean {
+  return MARKDOWN_SYNTAX_RE.test(text.length > 500 ? text.slice(0, 500) : text);
+}
 
 function getCachedMarkdownTokens(text: string): Token[] {
   const cached = markdownTokenCache.get(text);
@@ -1016,6 +1021,22 @@ export function MessageMarkdown({
   }
   const effectiveWrapWidth = wrapWidth ?? 80;
   const normalized = stripLowValueDiagnosticNoise(text.replace(/\r/g, ""));
+  if (!hasMarkdownSyntax(normalized)) {
+    const color = baseColor(theme, dim, tone);
+    return (
+      <Box flexDirection="column">
+        {normalized.split("\n").flatMap((line, i) =>
+          wrapText(line.length === 0 ? " " : line, effectiveWrapWidth).map(
+            (wrapped, wrappedIndex) => (
+              <Text key={`p${i}-${wrappedIndex}-${wrapped}`} color={color} dimColor={dim}>
+                {wrapped}
+              </Text>
+            ),
+          ),
+        )}
+      </Box>
+    );
+  }
   const segments = splitRawDiffSections(normalized);
   if (segments.some((segment) => segment.kind === "diff")) {
     return (

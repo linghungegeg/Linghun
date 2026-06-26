@@ -3121,6 +3121,7 @@ function installToolProgressHandler(
       return;
     }
     const message = `[${event.stream}] ${event.text}`;
+    const displayText = event.text.replace(/\r/g, "");
     if (task) {
       task.currentStep = event.stream === "stderr" ? "stderr output" : "streaming output";
       task.updatedAt = new Date().toISOString();
@@ -3143,10 +3144,11 @@ function installToolProgressHandler(
         createdAt: new Date().toISOString(),
       }),
     );
-    const lines = message.split(/\r?\n/u).filter(Boolean);
+    const lines = displayText.split(/\r?\n/u).filter(Boolean);
     context.requestActivityToolLines = (context.requestActivityToolLines ?? 0) + lines.length;
-    context.requestActivityToolBytes = (context.requestActivityToolBytes ?? 0) + Buffer.byteLength(message, "utf-8");
-    const remainingLines = Math.max(0, 12 - visibleProgressLines);
+    context.requestActivityToolBytes =
+      (context.requestActivityToolBytes ?? 0) + Buffer.byteLength(displayText, "utf-8");
+    const remainingLines = Math.max(0, 6 - visibleProgressLines);
     const visibleLines = lines.slice(0, remainingLines);
     if (remainingLines > 0) {
       output.write(`${truncateDisplay(visibleLines.join("\n"), 2_000)}\n`);
@@ -3161,8 +3163,8 @@ function installToolProgressHandler(
     ) {
       output.write(
         context.language === "en-US"
-          ? "[stdout] ... more output hidden; press Ctrl+O to expand.\n"
-          : "[stdout] ... 更多输出已隐藏；按 Ctrl+O 展开。\n",
+          ? "... more command output hidden; press Ctrl+O for details.\n"
+          : "... 更多命令输出已隐藏；按 Ctrl+O 查看完整内容。\n",
       );
       progressSuppressed = true;
     }
