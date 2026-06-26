@@ -127,7 +127,7 @@ import {
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
-import { classifyToolRequest } from "./permission-policy-engine.js";
+import { classifyToolRequest, type PolicyVerdict } from "./permission-policy-engine.js";
 import {
   formatLocalToolPermissionPrompt,
   formatModelToolPermissionPrompt,
@@ -249,6 +249,13 @@ export function formatAgentRunToolResultData(agent: AgentRun | undefined) {
     recentResult: agent.lastResultSummary ?? agent.summary,
     resultFullReport: agent.lastResultFullReport ?? null,
   };
+}
+
+function formatPermissionAutoAllowEvent(toolName: string, verdict: PolicyVerdict): string {
+  if (verdict.decision === "auto_allow_readonly") {
+    return `permission auto allow readonly: tool ${toolName}; semantic ${verdict.semantic}; path safety ${verdict.pathSafety}; summary ${verdict.redactedSummary}; reason ${verdict.reason}`;
+  }
+  return `permission ${verdict.decision}: tool ${toolName}; semantic ${verdict.semantic}; path safety ${verdict.pathSafety}; summary ${verdict.redactedSummary}; reason ${verdict.reason}`;
 }
 
 export async function executeModelToolUse(
@@ -410,16 +417,16 @@ export async function executeModelToolUse(
     `permission verdict: tool ${toolName}; decision ${permission.decision}; risk ${permission.request.risk}; mode ${permission.request.mode}`,
     permission.decision === "allow" ? "info" : "warning",
   );
-  if (permission.autoAllowReadonly) {
-    // D.13N — engine short-circuited this tool to auto_allow_readonly.
+  if (permission.autoAllowPolicy) {
+    // Engine short-circuited this tool to an auto-allow policy path.
     // Record a structured event for transparency. Payload is sanitized: the
     // engine returns redactedSummary, never raw command text or absolute
     // sensitive paths, so this event is safe to ship in transcripts.
-    const verdict = permission.autoAllowReadonly;
+    const verdict = permission.autoAllowPolicy;
     await appendSystemEvent(
       context,
       sessionId,
-      `permission auto allow readonly: tool ${toolName}; semantic ${verdict.semantic}; path safety ${verdict.pathSafety}; summary ${verdict.redactedSummary}; reason ${verdict.reason}`,
+      formatPermissionAutoAllowEvent(toolName, verdict),
       "info",
     );
   }
@@ -465,7 +472,10 @@ export async function executeModelToolUse(
     await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
-  const boundaryPreflight = await runBoundaryEditPreflight(toolCall, toolName, context);
+  const boundaryPreflight =
+    context.permissionMode === "full-access"
+      ? { decision: "allow" as const, reason: "full-access skips TUI boundary confirmation" }
+      : await runBoundaryEditPreflight(toolCall, toolName, context);
   if (boundaryPreflight.decision === "confirm") {
     clearRequestActivity(context);
     const prompt = formatBoundaryEditPreflightPrompt(boundaryPreflight, context.language);
@@ -2770,16 +2780,16 @@ export async function handleToolCommand(
       reason: permission.reason,
       createdAt: new Date().toISOString(),
     });
-    if (permission.autoAllowReadonly) {
-      // D.13N — same audit event as the model-dispatched path. Mirrors the
+    if (permission.autoAllowPolicy) {
+      // Same audit event as the model-dispatched path. Mirrors the
       // emit in executeModelToolUse so transcripts have a single, uniform
       // signal regardless of whether the tool was triggered by the model
       // or by a user-typed slash command.
-      const verdict = permission.autoAllowReadonly;
+      const verdict = permission.autoAllowPolicy;
       await appendSystemEvent(
         context,
         sessionId,
-        `permission auto allow readonly: tool ${name}; semantic ${verdict.semantic}; path safety ${verdict.pathSafety}; summary ${verdict.redactedSummary}; reason ${verdict.reason}`,
+        formatPermissionAutoAllowEvent(name, verdict),
         "info",
       );
     }
@@ -2796,11 +2806,14 @@ export async function handleToolCommand(
       return;
     }
 
-    const boundaryPreflight = await runBoundaryEditPreflight(
-      { id: "slash-command-preflight", name, input },
-      name,
-      context,
-    );
+    const boundaryPreflight =
+      context.permissionMode === "full-access"
+        ? { decision: "allow" as const, reason: "full-access skips TUI boundary confirmation" }
+        : await runBoundaryEditPreflight(
+            { id: "slash-command-preflight", name, input },
+            name,
+            context,
+          );
     if (boundaryPreflight.decision === "confirm") {
       writeLine(output, formatBoundaryEditPreflightPrompt(boundaryPreflight, context.language));
       context.pendingLocalApproval = undefined;

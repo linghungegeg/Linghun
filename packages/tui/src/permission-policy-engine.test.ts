@@ -75,6 +75,44 @@ describe("permission-policy-engine — Bash readonly auto allow", () => {
   }
 });
 
+describe("permission-policy-engine — Bash routine development auto allow", () => {
+  for (const cmd of [
+    "pnpm test",
+    "pnpm exec vitest run",
+    "corepack pnpm exec vitest run",
+    "npm run build",
+    "npm ci",
+    "pnpm install",
+    "yarn install",
+    "bun test",
+    "tsc",
+    "eslint src",
+    "prettier --check .",
+    "biome check .",
+    "python3 -m pytest",
+    "python scripts/check.py",
+    "cargo test",
+    "go test ./...",
+    "git add .",
+    "git commit -m fix",
+    "git checkout -b feature/demo",
+    "git switch main",
+    "git stash push",
+    "docker build .",
+    "docker compose build",
+  ]) {
+    it(`auto_allow_development: ${cmd}`, () => {
+      const v = classifyToolRequest(bash(cmd));
+      expect(v.decision).toBe("auto_allow_development");
+    });
+  }
+
+  it("allows chained routine development commands only when every segment is auto-allowable", () => {
+    const v = classifyToolRequest(bash("pnpm test && pnpm run build"));
+    expect(v.decision).toBe("auto_allow_development");
+  });
+});
+
 describe("permission-policy-engine — Bash require_permission", () => {
   for (const cmd of [
     "rm -rf node_modules",
@@ -118,15 +156,17 @@ describe("permission-policy-engine — Bash require_permission", () => {
     "node --require ./preload.cjs scripts/check.mjs",
     "node scripts/check.mjs > out.txt",
     "python script.py",
-    "python3 -m pytest",
     "deno run x.ts",
-    "tsc",
     "javac Main.java",
     "java Main",
     "ruby script.rb",
     "docker logs app",
     "docker inspect app",
     "docker stats",
+    "docker run -p 8080:80 app",
+    "docker run --privileged app",
+    "pnpm exec unknown-tool",
+    "npm run dev -- --host 0.0.0.0",
   ]) {
     it(`require_permission: ${cmd}`, () => {
       const v = classifyToolRequest(bash(cmd));
@@ -433,8 +473,8 @@ describe("D.13R Git — stable redactedSummary for git mutating commands", () =>
   it('git commit -m "msg" → redactedSummary 稳定为 "git commit"', () => {
     const a = classifyToolRequest(bash('git commit -m "fix: foo"'));
     const b = classifyToolRequest(bash("git commit -a --no-verify"));
-    expect(a.decision).toBe("require_permission");
-    expect(b.decision).toBe("require_permission");
+    expect(a.decision).toBe("auto_allow_development");
+    expect(b.decision).toBe("auto_allow_development");
     expect(a.redactedSummary).toBe("git commit");
     expect(b.redactedSummary).toBe("git commit");
   });
@@ -453,7 +493,7 @@ describe("D.13R Git — stable redactedSummary for git mutating commands", () =>
 
   it("git checkout -b feature → 'git checkout'", () => {
     const v = classifyToolRequest(bash("git checkout -b feature"));
-    expect(v.decision).toBe("require_permission");
+    expect(v.decision).toBe("auto_allow_development");
     expect(v.redactedSummary).toBe("git checkout");
   });
 

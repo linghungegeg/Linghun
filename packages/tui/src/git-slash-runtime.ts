@@ -21,6 +21,7 @@ import {
   appendGitOperationEvent,
   performStablePoint,
   performWorktreeCreate,
+  performWorktreeRemoveExecute,
 } from "./git-tool-dispatch-runtime.js";
 import { summarizeWorktreeRemovePlan } from "./git-tool-runtime.js";
 import type { TuiContext } from "./index.js";
@@ -168,6 +169,23 @@ export async function runWorktreeRemoveSlash(
     force: parsed.force,
   });
   const summary = summarizeWorktreeRemovePlan(plan, context.language);
+  if (
+    summary.needsConfirmation &&
+    (plan.kind === "clean" || plan.kind === "dirty_force") &&
+    context.permissionMode === "full-access"
+  ) {
+    const result = await performWorktreeRemoveExecute(
+      context,
+      sessionId,
+      plan.name,
+      plan.path,
+      plan.kind === "dirty_force",
+      deps.dispatch,
+    );
+    deps.writeLine(output, result.text);
+    deps.writeStatus(output, context);
+    return;
+  }
   if (summary.needsConfirmation && (plan.kind === "clean" || plan.kind === "dirty_force")) {
     // slash 路径也走 pendingLocalApproval 轻/强确认；无 continuation（不回灌模型）。
     context.pendingLocalApproval = {

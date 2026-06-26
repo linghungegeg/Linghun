@@ -8,7 +8,7 @@
 //   - Only batch when ALL tools in the batch have the SAME tool name AND same risk.
 //   - Different tool names → individual_confirm (even if same risk).
 //   - Destructive / high-risk semantic → always individual_confirm.
-//   - auto_allow_readonly tools are grouped into auto_allow batches (no prompt).
+//   - auto_allow_* tools are grouped into auto_allow batches (no prompt).
 
 import type { PolicyVerdict, SemanticClass } from "./permission-policy-engine.js";
 
@@ -85,13 +85,13 @@ export function groupToolCallsForConfirmation(
       continue;
     }
 
-    // auto_allow_readonly: collect consecutive auto_allow with same tool name
-    if (current.verdict.decision === "auto_allow_readonly") {
+    // auto_allow_*: collect consecutive auto_allow with same tool name
+    if (isAutoAllowDecision(current.verdict.decision)) {
       const group: ToolCallGroup[] = [current.toolCall];
       let j = i + 1;
       while (
         j < classified.length &&
-        classified[j]!.verdict.decision === "auto_allow_readonly" &&
+        isAutoAllowDecision(classified[j]!.verdict.decision) &&
         classified[j]!.toolCall.toolName === current.toolCall.toolName
       ) {
         group.push(classified[j]!.toolCall);
@@ -100,7 +100,7 @@ export function groupToolCallsForConfirmation(
       batches.push({
         decision: "auto_allow",
         toolCalls: group,
-        riskLevel: "readonly",
+        riskLevel: current.verdict.semantic,
       });
       i = j;
       continue;
@@ -156,14 +156,18 @@ export function groupToolCallsForConfirmation(
 // ---------------------------------------------------------------------------
 
 function createSingleBatch(toolCall: ToolCallGroup, verdict: PolicyVerdict): ConfirmationBatch {
-  if (verdict.decision === "auto_allow_readonly") {
-    return { decision: "auto_allow", toolCalls: [toolCall], riskLevel: "readonly" };
+  if (isAutoAllowDecision(verdict.decision)) {
+    return { decision: "auto_allow", toolCalls: [toolCall], riskLevel: verdict.semantic };
   }
   return {
     decision: "individual_confirm",
     toolCalls: [toolCall],
     riskLevel: verdict.semantic,
   };
+}
+
+function isAutoAllowDecision(decision: PolicyVerdict["decision"]): boolean {
+  return decision === "auto_allow_readonly" || decision === "auto_allow_development";
 }
 
 function formatBatchSummary(group: ToolCallGroup[], semantic: SemanticClass): string {

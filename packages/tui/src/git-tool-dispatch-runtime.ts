@@ -741,6 +741,28 @@ async function runWorktreeRemoveTool(
   const summary = summarizeWorktreeRemovePlan(plan, context.language);
   deps.clearRequestActivity(context);
 
+  if (
+    summary.needsConfirmation &&
+    (plan.kind === "clean" || plan.kind === "dirty_force") &&
+    context.permissionMode === "full-access"
+  ) {
+    const result = await performWorktreeRemoveExecute(
+      context,
+      sessionId,
+      plan.name,
+      plan.path,
+      plan.kind === "dirty_force",
+      deps,
+    );
+    deps.writeLine(output, result.text);
+    return {
+      ok: result.ok,
+      tool: toolCall.name,
+      text: result.text,
+      evidenceId: result.evidenceId,
+    };
+  }
+
   if (summary.needsConfirmation && (plan.kind === "clean" || plan.kind === "dirty_force")) {
     // 进入轻/强确认；本工具本轮返回 pendingApproval，结果由 yes/no 后的 execute 回灌。
     context.pendingLocalApproval = {

@@ -9,7 +9,8 @@
 //                            install / secret_read / outside_workspace / unknown)
 //     → path safety classifier (workspace_safe / workspace_write /
 //                                outside_workspace / sensitive_path / unknown_path)
-//     → policy decision (auto_allow_readonly / require_permission / hard_deny)
+//     → policy decision (auto_allow_readonly / auto_allow_development /
+//                         require_permission / hard_deny)
 //
 // Behavioral references (no source copied):
 //   - Read-only shell command validation patterns
@@ -19,19 +20,21 @@
 //
 // Hard boundary: this module is **pure** logic — no fs / no network / no
 // TuiContext mutation. Callers (index.ts) are responsible for converting
-// `decision === "auto_allow_readonly"` into a `decidePermission`-shaped
-// allow result and for emitting the `permission_auto_allow_readonly` event.
+// `decision === "auto_allow_readonly"` / `auto_allow_development` into a
+// `decidePermission`-shaped allow result and for emitting the corresponding
+// audit event.
 //
 // Non-goals (D.13N):
 //   - This engine MUST NOT auto-deny outside the existing `getHardDenyReason`
 //     boundary; conservative path is `require_permission`.
 //   - Edit / Write / MultiEdit are intentionally never auto-allowed here.
 //   - "Always allow" rules continue to be expressed by `permissions.rules`;
-//     this engine only widens the *implicit* allow surface for safe readonly.
+//     this engine only widens the *implicit* allow surface for safe readonly
+//     and routine development commands.
 
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { classifyCompoundCommand } from "./bash-subcommand-parser.js";
+import { classifyCompoundCommand, parseCompoundCommand } from "./bash-subcommand-parser.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -54,7 +57,7 @@ export type PathSafetyClass =
   | "sensitive_path"
   | "unknown_path";
 
-export type PolicyDecision = "auto_allow_readonly" | "require_permission";
+export type PolicyDecision = "auto_allow_readonly" | "auto_allow_development" | "require_permission";
 
 /** Tool request shape the engine consumes. Decoupled from TuiContext. */
 export type PolicyRequest = {
@@ -343,6 +346,38 @@ const GIT_READONLY_SUBS = new Set<string>([
 // queries before falling into the install-pair detector.
 const VERSION_FLAGS = new Set<string>(["--version", "-v", "-V"]);
 
+const PACKAGE_MANAGER_HEADS = new Set<string>(["npm", "pnpm", "yarn", "bun"]);
+const PACKAGE_INSTALL_VERBS = new Set<string>(["install", "i", "ci"]);
+const SAFE_SCRIPT_VERBS = new Set<string>(["test", "lint", "build", "typecheck", "check", "format"]);
+const SAFE_SCRIPT_NAMES = new Set<string>([
+  "test",
+  "test:unit",
+  "test:e2e",
+  "lint",
+  "build",
+  "typecheck",
+  "check",
+  "format",
+  "format:check",
+]);
+const DIRECT_DEV_HEADS = new Set<string>([
+  "vitest",
+  "jest",
+  "eslint",
+  "prettier",
+  "biome",
+  "tsc",
+  "pytest",
+]);
+const ROUTINE_GIT_SUBS = new Set<string>(["add", "commit"]);
+const ROUTINE_DOCKER_BLOCK_FLAGS = new Set<string>([
+  "--privileged",
+  "--network=host",
+  "--net=host",
+  "--publish",
+]);
+const ROUTINE_DOCKER_SHORT_BLOCK_FLAGS = new Set<string>(["-p", "-P"]);
+
 // ---------------------------------------------------------------------------
 // Public entrypoint
 // ---------------------------------------------------------------------------
@@ -444,6 +479,16 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
         semantic: "unknown",
         pathSafety: "unknown_path",
         reason: "命令含子 shell 执行（$() / 反引号）；不自动放行。",
+        redactedSummary,
+      };
+    }
+    const compoundDevelopment = classifyRoutineDevelopmentCompoundCommand(command, req.workspaceRoot);
+    if (compoundDevelopment) {
+      return {
+        decision: "auto_allow_development",
+        semantic: "mutating",
+        pathSafety: "workspace_safe",
+        reason: "管道/链式命令各段均为常规开发命令；auto-review 自动放行。",
         redactedSummary,
       };
     }
@@ -555,6 +600,16 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
     };
   }
 
+  if (isRoutineDevelopmentCommand(head, args, req.workspaceRoot)) {
+    return {
+      decision: "auto_allow_development",
+      semantic,
+      pathSafety: "workspace_safe",
+      reason: `${head} 属于常规开发命令；auto-review 自动放行。`,
+      redactedSummary: finalSummary,
+    };
+  }
+
   return {
     decision: "require_permission",
     semantic,
@@ -569,6 +624,172 @@ function getPathReadArgs(head: string, args: string[]): string[] {
   if (head === "wc") return pathArgs;
   const firstPath = pathArgs[0];
   return firstPath ? [firstPath] : [];
+}
+
+function classifyRoutineDevelopmentCompoundCommand(command: string, workspaceRoot: string): boolean {
+  const segments = parseCompoundCommand(command);
+  if (segments.length <= 1) return false;
+  let sawDevelopment = false;
+  for (const segment of segments) {
+    if (/[<>`]/u.test(segment.command) || hasUnquotedSubshell(segment.command)) {
+      return false;
+    }
+    const verdict = classifyBashRequest({
+      toolName: "Bash",
+      input: { command: segment.command },
+      workspaceRoot,
+    });
+    if (verdict.decision === "require_permission") return false;
+    if (verdict.decision === "auto_allow_development") sawDevelopment = true;
+  }
+  return sawDevelopment;
+}
+
+function isRoutineDevelopmentCommand(head: string, args: string[], workspaceRoot: string): boolean {
+  const normalized = normalizeCorepackCommand(head, args);
+  const normalizedHead = normalized.head;
+  const normalizedArgs = normalized.args;
+
+  if (hasServerLikeArgs(normalizedArgs)) return false;
+  if (isPackageManagerDevelopmentCommand(normalizedHead, normalizedArgs)) return true;
+  if (isDirectDevelopmentTool(normalizedHead, normalizedArgs)) return true;
+  if (isRuntimeDevelopmentCommand(normalizedHead, normalizedArgs, workspaceRoot)) return true;
+  if (isRoutineGitCommand(normalizedHead, normalizedArgs)) return true;
+  if (isRoutineDockerCommand(normalizedHead, normalizedArgs)) return true;
+  return false;
+}
+
+function normalizeCorepackCommand(head: string, args: string[]): { head: string; args: string[] } {
+  if (head !== "corepack") return { head, args };
+  const index = args.findIndex((arg) => PACKAGE_MANAGER_HEADS.has(arg.toLowerCase()));
+  if (index === -1) return { head, args };
+  return {
+    head: args[index]!.toLowerCase(),
+    args: args.slice(index + 1),
+  };
+}
+
+function isPackageManagerDevelopmentCommand(head: string, args: string[]): boolean {
+  if (!PACKAGE_MANAGER_HEADS.has(head)) return false;
+  const verbIndex = args.findIndex((arg) => !arg.startsWith("-"));
+  const verb = verbIndex === -1 ? "" : args[verbIndex]!.toLowerCase();
+  if (!verb) return head === "yarn" && args.length === 0;
+  if (PACKAGE_INSTALL_VERBS.has(verb)) {
+    return installCommandHasNoPackageArgs(args.slice(verbIndex + 1));
+  }
+  if (SAFE_SCRIPT_VERBS.has(verb)) return true;
+  if (verb === "run") {
+    const script = args.slice(verbIndex + 1).find((arg) => !arg.startsWith("-"))?.toLowerCase();
+    return !!script && SAFE_SCRIPT_NAMES.has(script);
+  }
+  if (verb === "exec") {
+    const executable = args.slice(verbIndex + 1).find((arg) => !arg.startsWith("-"))?.toLowerCase();
+    return !!executable && DIRECT_DEV_HEADS.has(executable);
+  }
+  return false;
+}
+
+function installCommandHasNoPackageArgs(args: string[]): boolean {
+  for (const arg of args) {
+    if (arg === "--") return false;
+    if (!arg.startsWith("-")) return false;
+  }
+  return true;
+}
+
+function isDirectDevelopmentTool(head: string, args: string[]): boolean {
+  if (DIRECT_DEV_HEADS.has(head)) return true;
+  if (head === "go") {
+    const verb = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+    return verb === "test" || verb === "build";
+  }
+  if (head === "cargo") {
+    const verb = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+    return ["test", "build", "check", "fmt", "clippy"].includes(verb ?? "");
+  }
+  if (head === "make") {
+    const target = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+    return !target || SAFE_SCRIPT_NAMES.has(target) || SAFE_SCRIPT_VERBS.has(target);
+  }
+  if (head === "cmake") {
+    return args.includes("--build");
+  }
+  return false;
+}
+
+function isRuntimeDevelopmentCommand(
+  head: string,
+  args: string[],
+  workspaceRoot: string,
+): boolean {
+  if ((head === "python" || head === "python3") && args[0] === "-m") {
+    return args[1] === "pytest";
+  }
+  if (head !== "python" && head !== "python3" && head !== "ruby") return false;
+  const script = args.find((arg) => !arg.startsWith("-"));
+  if (!script) return false;
+  const normalized = script.replaceAll("\\", "/");
+  if (!/^(?:test|tests|scripts)\//iu.test(normalized)) return false;
+  if (head === "ruby" && !/\.rb$/iu.test(normalized)) return false;
+  if ((head === "python" || head === "python3") && !/\.py$/iu.test(normalized)) return false;
+  return classifyPathString(script, workspaceRoot) === "workspace_safe";
+}
+
+function isRoutineGitCommand(head: string, args: string[]): boolean {
+  if (head !== "git") return false;
+  if (args.includes("--global") || args.includes("--system")) return false;
+  const sub = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+  if (!sub) return false;
+  if (ROUTINE_GIT_SUBS.has(sub)) return true;
+  if (sub === "stash") {
+    const verb = args.filter((arg) => !arg.startsWith("-"))[1]?.toLowerCase();
+    return !verb || verb === "push" || verb === "save";
+  }
+  if (sub === "checkout") {
+    return (args.includes("-b") || args.includes("-B")) && !args.includes("--");
+  }
+  if (sub === "switch") {
+    return !args.includes("--detach") && !args.includes("--discard-changes");
+  }
+  return false;
+}
+
+function isRoutineDockerCommand(head: string, args: string[]): boolean {
+  if (head !== "docker") return false;
+  if (hasBlockedDockerArgs(args)) return false;
+  const sub = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+  if (sub === "build" || sub === "run") return true;
+  if (sub !== "compose") return false;
+  const composeVerb = args.filter((arg) => !arg.startsWith("-"))[1]?.toLowerCase();
+  return composeVerb === "build" || composeVerb === "up" || composeVerb === "run";
+}
+
+function hasBlockedDockerArgs(args: string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (ROUTINE_DOCKER_BLOCK_FLAGS.has(arg) || ROUTINE_DOCKER_SHORT_BLOCK_FLAGS.has(arg)) {
+      return true;
+    }
+    if (arg === "--network" || arg === "--net") {
+      const value = args[index + 1]?.toLowerCase();
+      if (value === "host") return true;
+    }
+    if (/^(?:--publish|-p)=/iu.test(arg)) return true;
+  }
+  return false;
+}
+
+function hasServerLikeArgs(args: string[]): boolean {
+  return args.some((arg) =>
+    arg === "--watch" ||
+    arg === "--serve" ||
+    arg === "--host" ||
+    arg === "0.0.0.0" ||
+    arg === "::" ||
+    arg === "--listen" ||
+    arg.startsWith("--host=") ||
+    arg.startsWith("--listen="),
+  );
 }
 
 /**

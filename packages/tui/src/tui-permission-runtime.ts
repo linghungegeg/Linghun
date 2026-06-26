@@ -58,6 +58,10 @@ export type PermissionCheck = {
    */
   autoAllowReadonly?: PolicyVerdict;
   /**
+   * Set when the policy engine short-circuited to any auto-allow path.
+   */
+  autoAllowPolicy?: PolicyVerdict;
+  /**
    * D.13Q-UX Closure: 为非 auto-allow 路径也附带 PolicyVerdict（semantic /
    * pathSafety / redactedSummary / reason），让 PermissionPanel 可以用真实
    * engine 决策渲染 explanationLines，而不是 toolName 简化推断。
@@ -159,6 +163,13 @@ export async function decidePermission(
     files,
     reason: tool.permission.reason,
   };
+  if (context.permissionMode === "full-access") {
+    return {
+      request,
+      decision: "allow",
+      reason: "full-access 已由本地用户显式开启，TUI 权限确认已放行。",
+    };
+  }
   if (hardDeny) {
     await recordPermissionDenied(context, name, hardDeny);
     return { request, decision: "deny", reason: hardDeny };
@@ -183,7 +194,7 @@ export async function decidePermission(
   // 哲学模块 1.3：权限引擎读取调度决策，预加热写入确认。
   const schedulerDecision = context.lastMetaSchedulerDecision;
   if (schedulerDecision?.policyDecision.permissionPlan.requireExplicitGate && verdict.semantic === "mutating") {
-    if (context.permissionMode === "default" || context.permissionMode === "full-access") {
+    if (context.permissionMode === "default") {
       return {
         request,
         decision: "ask",
@@ -215,6 +226,7 @@ export async function decidePermission(
           decision: "allow",
           reason: `policy auto_allow_readonly: ${verdict.reason}`,
           autoAllowReadonly: verdict,
+          autoAllowPolicy: verdict,
           verdict,
         };
       }
@@ -249,13 +261,17 @@ export async function decidePermission(
   }
 
   if (context.permissionMode === "auto-review") {
-    // Policy engine readonly shortcut takes priority even in auto-review.
-    if (verdict.decision === "auto_allow_readonly") {
+    // Policy engine shortcuts take priority even in auto-review.
+    if (verdict.decision === "auto_allow_readonly" || verdict.decision === "auto_allow_development") {
       return {
         request,
         decision: "allow",
-        reason: `auto-review 放行安全只读动作：${verdict.reason}`,
-        autoAllowReadonly: verdict,
+        reason:
+          verdict.decision === "auto_allow_readonly"
+            ? `auto-review 放行安全只读动作：${verdict.reason}`
+            : `auto-review 放行常规开发动作：${verdict.reason}`,
+        autoAllowReadonly: verdict.decision === "auto_allow_readonly" ? verdict : undefined,
+        autoAllowPolicy: verdict,
         verdict,
       };
     }
@@ -270,15 +286,6 @@ export async function decidePermission(
       request,
       decision: "allow",
       reason,
-      verdict,
-    };
-  }
-
-  if (context.permissionMode === "full-access") {
-    return {
-      request,
-      decision: "allow",
-      reason: "full-access 已由本地用户显式开启，但硬拒绝和安全路径仍生效。",
       verdict,
     };
   }

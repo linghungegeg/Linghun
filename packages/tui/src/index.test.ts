@@ -17538,7 +17538,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readFile(join(project, "medium.txt"), "utf8")).toBe("should-write");
   });
 
-  it("keeps full-access behind hard denies", async () => {
+  it("full-access skips TUI hard-deny confirmations", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -17549,9 +17549,9 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/write .env secret", context, output);
     await handleSlashCommand("/bash rm -rf tmp", context, output);
 
-    expect(output.text).toContain("安全保护：疑似密钥或敏感路径");
-    expect(output.text).toContain("安全保护：拒绝高风险删除");
-    await expect(readFile(join(project, ".env"), "utf8")).rejects.toThrow();
+    expect(output.text).not.toContain("安全保护：疑似密钥或敏感路径");
+    expect(output.text).not.toContain("安全保护：拒绝高风险删除");
+    expect(await readFile(join(project, ".env"), "utf8")).toBe("secret");
   });
 
   it("persists permission rules", async () => {
