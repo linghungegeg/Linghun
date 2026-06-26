@@ -1,0 +1,45 @@
+/* 设计 token — 亮色为采样真实值（默认），暗色为 Phase 2 推断 */
+:root {
+  --bg-app: #f6f6f6;
+  --bg-sidebar: #f6f6f6;
+  --bg-main: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-hover: #ededee;
+  --bg-selected: #e8e8e9;
+  --border: #bcbdbe;
+  --border-subtle: #e3e3e4;
+  --text: #1f2124;
+  --text-secondary: #35373a;
+  --text-muted: #5c5e60;
+  --accent: #59acf7;
+  --accent-hover: #53abfd;
+  --danger: #ef4444;
+  --warn: #d29922;
+  --success: #1a7f37;
+  --diff-add-bg: #e6ffec;
+  --diff-del-bg: #ffebe9;
+
+  --font-ui: "Segoe UI", -apple-system, system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --titlebar-h: 34px;
+  --sidebar-w: 318px;
+  --statusbar-h: 24px;
+  --radius-card: 6px;
+  --radius-panel: 8px;
+}
+
+:root[data-theme="dark"] {
+  --bg-app: #0d0d0f;
+  --bg-sidebar: #141417;
+  --bg-main: #1b1b1f;
+  --bg-elevated: #1b1b1f;
+  --bg-hover: #232329;
+  --bg-selected: #2a2a30;
+  --border: #2a2a30;
+  --border-subtle: #232329;
+  --text: #ececec;
+  --text-secondary: #c8c8ce;
+  --text-muted: #9a9aa2;
+  --accent: #6b8aff;
+  --accent-hover: #809cff;
+}
