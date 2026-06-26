@@ -885,6 +885,40 @@ describe("OpenAI stream parser", () => {
     ]);
   });
 
+  it("parses OpenAI SSE events by block and preserves Markdown newlines", async () => {
+    const markdown = "标题\n\n- 第一项\n- 第二项\n\n```ts\nconst x = 1;\n```";
+    const payload = JSON.stringify({
+      id: "chatcmpl-markdown",
+      choices: [{ delta: { content: markdown } }],
+    });
+    const events = await collectOpenAiEvents([
+      `event: completion\r\ndata: ${payload}\r\n\r\n`,
+      "data: [DONE]\r\n\r\n",
+    ]);
+
+    expect(events).toContainEqual({
+      type: "assistant_text_delta",
+      id: "chatcmpl-markdown",
+      text: markdown,
+    });
+  });
+
+  it("combines multi-line OpenAI SSE data fields before JSON parsing", async () => {
+    const events = await collectOpenAiEvents([
+      'event: completion\n',
+      'data: {"id":"chatcmpl-multidata",\n',
+      'data: "choices":[{"delta":{"content":"AB"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    expect(events).toContainEqual({
+      type: "assistant_text_delta",
+      id: "chatcmpl-multidata",
+      text: "AB",
+    });
+    expect(events.some((event) => event.type === "error")).toBe(false);
+  });
+
   it("converts streamed tool call deltas into tool_use events", async () => {
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({

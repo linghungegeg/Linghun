@@ -288,28 +288,11 @@ export function writeLightHints(_output: Writable, context: TuiContext): void {
     return;
   }
   const now = Date.now();
-  const visibleHints = collectLightHints(context)
+  for (const hint of collectLightHints(context)
     .filter((hint) => now - (context.cache.hintLastShownAt[hint.dedupeKey] ?? 0) >= hint.cooldownMs)
     .sort((a, b) => b.priority - a.priority)
-    .slice(0, MAX_LIGHT_HINTS_PER_TURN);
-  // D.13Q-UX Closure: writeLightHints 不再写主屏 transcript。
-  // 改为推到 context.notifications 队列，由 view-model 复制给 view.notifications，
-  // NotificationStack 右对齐单条主显（priority 高 = immediate）。
-  // 不再需要 suppressLastFullOutputCapture workaround：
-  // 既不写 transcript，就不会替换 lastFullOutput。
-  if (visibleHints.length === 0) return;
-  if (!context.notifications) context.notifications = [];
-  for (const hint of visibleHints) {
+    .slice(0, MAX_LIGHT_HINTS_PER_TURN)) {
     context.cache.hintLastShownAt[hint.dedupeKey] = now;
-    const text = formatPlainLightHint(hint, context.language);
-    context.notifications.push({
-      key: `lighthint:${hint.dedupeKey}`,
-      text,
-      priority: hint.severity === "warning" ? "medium" : "low",
-      timeoutMs: 5000,
-      createdAt: now,
-      tone: hint.severity === "warning" ? "warning" : "dim",
-    });
   }
 }
 

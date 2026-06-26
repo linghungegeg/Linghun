@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { isNodeErrorWithCode } from "@linghun/shared";
 
@@ -43,6 +43,82 @@ export async function readJsonl<T>(filePath: string): Promise<JsonlReadResult<T>
   });
 
   return { records, diagnostics };
+}
+
+export type JsonlTailReadOptions<T> = {
+  limit: number;
+  predicate?: (record: T) => boolean;
+};
+
+export async function readJsonlTail<T>(
+  filePath: string,
+  options: JsonlTailReadOptions<T>,
+): Promise<JsonlReadResult<T>> {
+  const exists = await fileExists(filePath);
+  if (!exists || options.limit <= 0) {
+    return { records: [], diagnostics: [] };
+  }
+
+  const recordsNewestFirst: T[] = [];
+  const diagnostics: JsonlDiagnostic[] = [];
+  const handleLine = (lineBuffer: Buffer) => {
+    if (recordsNewestFirst.length >= options.limit) {
+      return;
+    }
+    const line = lineBuffer.toString("utf8");
+    if (!line.trim()) {
+      return;
+    }
+    try {
+      const record = JSON.parse(line) as T;
+      if (!options.predicate || options.predicate(record)) {
+        recordsNewestFirst.push(record);
+      }
+    } catch (error) {
+      diagnostics.push({
+        line: 0,
+        message: error instanceof Error ? error.message : "无法解析 JSONL 行。",
+      });
+    }
+  };
+
+  const file = await open(filePath, "r");
+  try {
+    const { size } = await file.stat();
+    const chunkSize = 64 * 1024;
+    let position = size;
+    let carry = Buffer.alloc(0);
+
+    while (position > 0 && recordsNewestFirst.length < options.limit) {
+      const readSize = Math.min(chunkSize, position);
+      position -= readSize;
+      const chunk = Buffer.allocUnsafe(readSize);
+      await file.read(chunk, 0, readSize, position);
+      const data = carry.length === 0 ? chunk : Buffer.concat([chunk, carry]);
+      let lineEnd = data.length;
+
+      for (let index = data.length - 1; index >= 0; index -= 1) {
+        if (data[index] !== 0x0a) {
+          continue;
+        }
+        handleLine(data.subarray(index + 1, lineEnd));
+        lineEnd = index;
+        if (recordsNewestFirst.length >= options.limit) {
+          break;
+        }
+      }
+
+      carry = data.subarray(0, lineEnd);
+    }
+
+    if (position === 0 && recordsNewestFirst.length < options.limit && carry.length > 0) {
+      handleLine(carry);
+    }
+  } finally {
+    await file.close();
+  }
+
+  return { records: recordsNewestFirst.reverse(), diagnostics };
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

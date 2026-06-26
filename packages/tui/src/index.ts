@@ -790,6 +790,7 @@ export type RunHeadlessOptions = {
   deadlineMs?: number;
   deadlineAtMs?: number;
   bench?: HeadlessBenchOptions;
+  onEvent?: (event: TranscriptEvent) => void;
   __testGateway?: ModelGateway;
   __testContext?: TuiContext;
   __testStore?: SessionStore;
@@ -1558,6 +1559,18 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       ? { context: options.__testContext, store: options.__testStore }
       : await createTuiRuntimeContext(projectPath);
   const { context, store } = runtime;
+  if (options.onEvent) {
+    const { onEvent } = options;
+    const _origAppend = store.appendEvent.bind(store);
+    store.appendEvent = async (sessionId, event) => {
+      try {
+        onEvent(event);
+      } catch {
+        // 旁路回调异常不得影响引擎事件写入
+      }
+      return _origAppend(sessionId, event);
+    };
+  }
   context.permissionMode = options.mode ?? "full-access";
   context.planAccepted = false;
   installProcessGuardExitHandlers();

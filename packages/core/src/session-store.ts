@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
-import { type JsonlDiagnostic, appendJsonl, readJsonl } from "./jsonl.js";
+import { type JsonlDiagnostic, appendJsonl, readJsonl, readJsonlTail } from "./jsonl.js";
 import { identifyProject } from "./project.js";
 import {
   type Session,
@@ -61,6 +61,11 @@ export type ResumeSessionResult = {
   session: Session;
   transcript: TranscriptEvent[];
   diagnostics: JsonlDiagnostic[];
+};
+
+export type ReadRecentTranscriptEventsInput = {
+  limit: number;
+  predicate?: (event: TranscriptEvent) => boolean;
 };
 
 export class SessionStore {
@@ -142,6 +147,27 @@ export class SessionStore {
     return {
       session,
       transcript: transcript.records,
+      diagnostics: transcript.diagnostics,
+    };
+  }
+
+  async readRecentTranscriptEvents(
+    sessionId: string,
+    input: ReadRecentTranscriptEventsInput,
+  ): Promise<{ events: TranscriptEvent[]; diagnostics: JsonlDiagnostic[] }> {
+    assertValidSessionId(sessionId);
+    const project = identifyProject(this.projectPath);
+    const session = await this.readMetadata(project.projectId, sessionId);
+    if (!session) {
+      throw new Error(`未找到会话：${sessionId}`);
+    }
+
+    const transcript = await readJsonlTail<TranscriptEvent>(session.transcriptPath, {
+      limit: input.limit,
+      predicate: input.predicate,
+    });
+    return {
+      events: transcript.records,
       diagnostics: transcript.diagnostics,
     };
   }

@@ -177,6 +177,9 @@ type AggregatedFinalAnswerGateResult =
       unsupportedKinds: string[];
     };
 
+const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 80;
+const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 120;
+
 export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok">): boolean {
   return result.ok !== true;
 }
@@ -446,6 +449,30 @@ function buildAggregatedDowngradedFinalAnswer(
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+async function recordFinalAnswerGateDowngrade(
+  context: TuiContext,
+  sessionId: string,
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+): Promise<void> {
+  const kinds = result.unsupportedKinds.join(",") || "unsupported_final_claim";
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `final_answer_gate_aggregated downgrade kinds=${kinds}`,
+    "warning",
+  );
+  await captureFailureLearning(context, sessionId, {
+    category: "final_gate_downgrade",
+    failureSummary: `final answer gate downgraded unsupported claims: ${kinds}`,
+    rootCauseGuess: "assistant final answer claimed completion/verification without matching evidence",
+    avoidNextTime:
+      "Only claim done, passed, verified, or ready after matching evidence exists in the current turn.",
+    sourceRef: "system_event:final_answer_gate_aggregated",
+    relatedTarget: "final_answer_gate",
+    severity: "medium",
+  });
 }
 
 function createEngineeringFinalBoundaryReminder(
@@ -962,6 +989,7 @@ export async function sendMessage(
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       let pendingAssistantPreviewText = "";
+      let lastAssistantPreviewFlushAt = Date.now();
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       let roundChunkCount = 0;
       let roundHadUsage = false;
@@ -1059,6 +1087,18 @@ export async function sendMessage(
           assistantText += visibleText;
           roundAssistantText += visibleText;
           pendingAssistantPreviewText += visibleText;
+          if (
+            modelSupportsTools &&
+            shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)
+          ) {
+            const result = flushAssistantPreviewDelta(
+              output,
+              assistantStreamBlockId,
+              pendingAssistantPreviewText,
+            );
+            pendingAssistantPreviewText = result.text;
+            if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
+          }
           continue;
         }
         if (event.type === "tool_use") {
@@ -1066,10 +1106,13 @@ export async function sendMessage(
           assistantText += visibleText;
           roundAssistantText += visibleText;
           pendingAssistantPreviewText += visibleText;
-          if (pendingAssistantPreviewText) {
-            writeAssistantPreviewDelta(output, assistantStreamBlockId, pendingAssistantPreviewText);
-            pendingAssistantPreviewText = "";
-          }
+          const result = flushAssistantPreviewDelta(
+            output,
+            assistantStreamBlockId,
+            pendingAssistantPreviewText,
+          );
+          pendingAssistantPreviewText = result.text;
+          if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
           clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
           continue;
@@ -1150,8 +1193,13 @@ export async function sendMessage(
       roundAssistantText += finalVisibleText;
       pendingAssistantPreviewText += finalVisibleText;
       if (toolCalls.length > 0 && pendingAssistantPreviewText) {
-        writeAssistantPreviewDelta(output, assistantStreamBlockId, pendingAssistantPreviewText);
-        pendingAssistantPreviewText = "";
+        const result = flushAssistantPreviewDelta(
+          output,
+          assistantStreamBlockId,
+          pendingAssistantPreviewText,
+        );
+        pendingAssistantPreviewText = result.text;
+        if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
       }
 
       if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
@@ -1452,12 +1500,7 @@ export async function sendMessage(
     {
       const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
       if (gateResult.status === "needs_disclaimer") {
-        await appendSystemEvent(
-          context,
-          sessionId,
-          `final_answer_gate_aggregated downgrade kinds=${gateResult.unsupportedKinds.join(",")}`,
-          "warning",
-        );
+        await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
         assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
@@ -1632,6 +1675,24 @@ function writeAssistantPreviewDelta(output: Writable, id: string, text: string):
   }
 }
 
+function shouldFlushAssistantPreview(text: string, lastFlushAt: number, now = Date.now()): boolean {
+  return (
+    text.length >= ASSISTANT_PREVIEW_FLUSH_MIN_CHARS ||
+    text.includes("\n") ||
+    now - lastFlushAt >= ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS
+  );
+}
+
+function flushAssistantPreviewDelta(
+  output: Writable,
+  id: string,
+  text: string,
+): { text: string; flushed: boolean } {
+  if (!text) return { text, flushed: false };
+  writeAssistantPreviewDelta(output, id, text);
+  return { text: "", flushed: true };
+}
+
 function writeFinalAssistantText(output: Writable, text: string): void {
   if (!text || output instanceof ShellBlockOutput) return;
   writeLine(output, text);
@@ -1667,38 +1728,12 @@ function shouldSurfacePolicyHint(_id: string, _decision: PolicyDecision): boolea
   return false;
 }
 
-function enqueueMemoryCandidateHint(context: TuiContext, count: number): void {
-  const key = "memory:auto-learning-candidates";
-  context.notifications ??= [];
-  if (context.notifications.some((item) => item.key === key)) return;
-  context.notifications.push({
-    key,
-    text:
-      context.language === "en-US"
-        ? `Memory: ${count} candidate(s) created; review with /memory review.`
-        : `记忆：已生成 ${count} 条候选；用 /memory review 查看。`,
-    priority: "low",
-    timeoutMs: 5000,
-    createdAt: Date.now(),
-    tone: "dim",
-  });
+function enqueueMemoryCandidateHint(_context: TuiContext, _count: number): void {
+  return;
 }
 
-function enqueueAutoMemoryHint(context: TuiContext, created: number, updated: number): void {
-  const key = "memory:auto-extraction-accepted";
-  context.notifications ??= [];
-  if (context.notifications.some((item) => item.key === key)) return;
-  context.notifications.push({
-    key,
-    text:
-      context.language === "en-US"
-        ? `Memory: saved ${created} and updated ${updated}; review with /memory review.`
-        : `记忆：已保存 ${created} 条、更新 ${updated} 条；用 /memory review 查看。`,
-    priority: "low",
-    timeoutMs: 5000,
-    createdAt: Date.now(),
-    tone: "dim",
-  });
+function enqueueAutoMemoryHint(_context: TuiContext, _created: number, _updated: number): void {
+  return;
 }
 
 function policyHintPriority(hint: PolicyDecision["hints"][number]): number {
@@ -1886,16 +1921,15 @@ export async function buildModelMessagesWithRecentContext(
 ): Promise<ModelMessage[]> {
   const messages: ModelMessage[] = [{ role: "system", content: systemPrompt }];
   try {
-    const resumed = await context.store.resume(sessionId);
-    const recent = resumed.transcript
-      .filter(
-        (event) =>
-          event.type === "user_message" ||
-          event.type === "assistant_text_delta" ||
-          event.type === "tool_call_start" ||
-          event.type === "tool_result",
-      )
-      .slice(-MAX_CONTEXT_MESSAGES * 2 - 1);
+    const recentTranscript = await context.store.readRecentTranscriptEvents(sessionId, {
+      limit: MAX_CONTEXT_MESSAGES * 2 + 1,
+      predicate: (event) =>
+        event.type === "user_message" ||
+        event.type === "assistant_text_delta" ||
+        event.type === "tool_call_start" ||
+        event.type === "tool_result",
+    });
+    const recent = recentTranscript.events;
     const lastRecent = recent.at(-1);
     const withoutCurrent =
       lastRecent?.type === "user_message" && lastRecent.text === currentUserText
@@ -2195,12 +2229,7 @@ async function streamFinalModelAnswerWithoutTools(
     startRequestActivity(output, context, "verifying_final_answer");
     const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
     if (gateResult.status === "needs_disclaimer") {
-      await appendSystemEvent(
-        context,
-        sessionId,
-        `final_answer_gate_aggregated downgrade kinds=${gateResult.unsupportedKinds.join(",")}`,
-        "warning",
-      );
+      await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
       assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
@@ -2385,6 +2414,7 @@ export async function continueModelAfterToolResults(
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       let pendingAssistantPreviewText = "";
+      let lastAssistantPreviewFlushAt = Date.now();
       let roundChunkCount = 0;
       let roundHadUsage = false;
       let roundFinishReason: string | undefined;
@@ -2452,6 +2482,15 @@ export async function continueModelAfterToolResults(
           assistantText += visibleText;
           roundAssistantText += visibleText;
           pendingAssistantPreviewText += visibleText;
+          if (shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)) {
+            const result = flushAssistantPreviewDelta(
+              output,
+              assistantStreamBlockId,
+              pendingAssistantPreviewText,
+            );
+            pendingAssistantPreviewText = result.text;
+            if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
+          }
           continue;
         }
         if (event.type === "tool_use") {
@@ -2459,10 +2498,13 @@ export async function continueModelAfterToolResults(
           assistantText += visibleText;
           roundAssistantText += visibleText;
           pendingAssistantPreviewText += visibleText;
-          if (pendingAssistantPreviewText) {
-            writeAssistantPreviewDelta(output, assistantStreamBlockId, pendingAssistantPreviewText);
-            pendingAssistantPreviewText = "";
-          }
+          const result = flushAssistantPreviewDelta(
+            output,
+            assistantStreamBlockId,
+            pendingAssistantPreviewText,
+          );
+          pendingAssistantPreviewText = result.text;
+          if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
           clearRequestActivity(context);
           pendingContinuationToolUses.push({ id: event.id, name: event.name, input: event.input });
           continue;
@@ -2541,8 +2583,13 @@ export async function continueModelAfterToolResults(
       roundAssistantText += finalVisibleText;
       pendingAssistantPreviewText += finalVisibleText;
       if (toolCalls.length > 0 && pendingAssistantPreviewText) {
-        writeAssistantPreviewDelta(output, assistantStreamBlockId, pendingAssistantPreviewText);
-        pendingAssistantPreviewText = "";
+        const result = flushAssistantPreviewDelta(
+          output,
+          assistantStreamBlockId,
+          pendingAssistantPreviewText,
+        );
+        pendingAssistantPreviewText = result.text;
+        if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
       }
       if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
         await appendSystemEvent(
@@ -2762,12 +2809,7 @@ export async function continueModelAfterToolResults(
       {
         const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
         if (gateResult.status === "needs_disclaimer") {
-          await appendSystemEvent(
-            context,
-            sessionId,
-            `final_answer_gate_aggregated downgrade kinds=${gateResult.unsupportedKinds.join(",")}`,
-            "warning",
-          );
+          await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
           assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }

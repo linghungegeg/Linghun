@@ -2108,13 +2108,14 @@ export async function* parseOpenAiStream(
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      for (const event of parseOpenAiStreamLine(line, state, endpoint)) {
+    let separator = findSseEventSeparator(buffer);
+    while (separator) {
+      const eventBlock = buffer.slice(0, separator.index);
+      buffer = buffer.slice(separator.index + separator.length);
+      for (const event of parseOpenAiStreamEventBlock(eventBlock, state, endpoint)) {
         yield event;
       }
+      separator = findSseEventSeparator(buffer);
     }
   }
 
@@ -2122,8 +2123,10 @@ export async function* parseOpenAiStream(
   if (tail) {
     buffer += tail;
   }
-  for (const event of parseOpenAiStreamLine(buffer, state, endpoint)) {
-    yield event;
+  if (buffer.trim().length > 0) {
+    for (const event of parseOpenAiStreamEventBlock(buffer, state, endpoint)) {
+      yield event;
+    }
   }
   if (state.pendingToolCalls.size > 0 || state.pendingResponsesToolCalls.size > 0) {
     yield {
@@ -2144,6 +2147,32 @@ export async function* parseOpenAiStream(
     chunkCount: state.chunkCount,
     hadUsage: state.hadUsage,
   };
+}
+
+function findSseEventSeparator(value: string): { index: number; length: number } | undefined {
+  const candidates = [
+    { index: value.indexOf("\r\n\r\n"), length: 4 },
+    { index: value.indexOf("\n\n"), length: 2 },
+    { index: value.indexOf("\r\r"), length: 2 },
+  ].filter((candidate) => candidate.index >= 0);
+  candidates.sort((left, right) => left.index - right.index);
+  return candidates[0];
+}
+
+function parseOpenAiStreamEventBlock(
+  block: string,
+  state: OpenAiStreamParseState,
+  endpoint = "/v1/chat/completions",
+): LinghunEvent[] {
+  const dataLines: string[] = [];
+  for (const rawLine of block.split(/\r?\n|\r/u)) {
+    const line = rawLine.trim();
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trim());
+    }
+  }
+  if (dataLines.length === 0) return [];
+  return parseOpenAiStreamLine(`data: ${dataLines.join("\n")}`, state, endpoint);
 }
 
 // ---------------------------------------------------------------------------

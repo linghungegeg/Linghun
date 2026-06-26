@@ -234,6 +234,11 @@ function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
 }
 
 export function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
+  const headlessDiagnosticsCheck = checkHeadlessRecentDiagnostics(context);
+  if (headlessDiagnosticsCheck.status !== "passed") {
+    return headlessDiagnosticsCheck;
+  }
+
   // D.13U：只接受模型声明的结构化 claim 契约；不再维护自然语言短语表。
   const structuredClaims = extractStructuredFinalAnswerClaims(claim);
   if (structuredClaims.some((item) => item.kind === "beta_readiness")) {
@@ -281,6 +286,114 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     status: "needs_disclaimer",
     unsupportedClaims: structuredClaims.map((item) => item.phrase),
   };
+}
+
+function checkHeadlessRecentDiagnostics(context: TuiContext): ClaimCheck {
+  const tools = context.tools as TuiContext["tools"] & {
+    headlessBench?: { enabled?: boolean };
+  };
+  if (!tools.headlessBench?.enabled) {
+    return { status: "passed", unsupportedClaims: [] };
+  }
+  const unresolved = (tools.recentDiagnostics ?? []).filter(
+    (diagnostic) => !hasStructuredEvidenceForDiagnostic(context, diagnostic),
+  );
+  if (unresolved.length === 0) {
+    return { status: "passed", unsupportedClaims: [] };
+  }
+  return {
+    status: "needs_disclaimer",
+    unsupportedClaims: unresolved.map((diagnostic) =>
+      `headless bench risk: ${String(diagnostic.type ?? "diagnostic")} ${String(
+        diagnostic.evidence ?? "",
+      )}`.trim(),
+    ),
+  };
+}
+
+function hasStructuredEvidenceForDiagnostic(context: TuiContext, diagnostic: unknown): boolean {
+  if (!diagnostic || typeof diagnostic !== "object") return false;
+  const record = diagnostic as Record<string, unknown>;
+  if (typeof record.target === "string" || typeof record.targetHost === "string") {
+    return hasServiceDiagnosticEvidence(context, record);
+  }
+  if (typeof record.path === "string") {
+    return hasArtifactDiagnosticEvidence(context, record.path);
+  }
+  return false;
+}
+
+function hasServiceDiagnosticEvidence(
+  context: TuiContext,
+  diagnostic: Record<string, unknown>,
+): boolean {
+  const targets = new Set<string>();
+  for (const key of ["target", "targetHost"] as const) {
+    const value = diagnostic[key];
+    if (typeof value === "string" && value.trim()) targets.add(value.trim());
+  }
+  if (typeof diagnostic.targetHost === "string" && typeof diagnostic.targetPort === "number") {
+    targets.add(`${diagnostic.targetHost}:${diagnostic.targetPort}`);
+  }
+  return context.evidence.some((item) => {
+    const service = readGenericEvidenceDataRecord(item, "service");
+    const serviceHint = readGenericEvidenceDataRecord(item, "serviceHint");
+    return serviceMatchesDiagnostic(service, targets) || serviceMatchesDiagnostic(serviceHint, targets);
+  });
+}
+
+function serviceMatchesDiagnostic(
+  data: Record<string, unknown> | undefined,
+  targets: Set<string>,
+): boolean {
+  if (data?.ready !== true) return false;
+  if (targets.size === 0) return true;
+  const target = typeof data.target === "string" ? data.target : "";
+  return target !== "" && Array.from(targets).some((item) => target.includes(item));
+}
+
+function hasArtifactDiagnosticEvidence(context: TuiContext, path: string): boolean {
+  return context.evidence.some((item) => {
+    const artifactHint = readGenericEvidenceDataRecord(item, "artifactHint");
+    if (
+      artifactHint?.exists === true &&
+      typeof artifactHint.path === "string" &&
+      pathsReferToSameArtifact(artifactHint.path, path)
+    ) {
+      return true;
+    }
+    const binaryPreflight = readGenericEvidenceDataRecord(item, "binaryPreflight");
+    return (
+      typeof binaryPreflight?.path === "string" &&
+      pathsReferToSameArtifact(binaryPreflight.path, path)
+    );
+  });
+}
+
+function readGenericEvidenceDataRecord(
+  evidence: { data?: unknown },
+  key: string,
+): Record<string, unknown> | undefined {
+  if (!evidence.data || typeof evidence.data !== "object") return undefined;
+  const value = (evidence.data as Record<string, unknown>)[key];
+  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
+
+function pathsReferToSameArtifact(actual: string, target: string): boolean {
+  const normalizedActual = normalizeArtifactEvidencePath(actual);
+  const normalizedTarget = normalizeArtifactEvidencePath(target);
+  return (
+    normalizedActual === normalizedTarget ||
+    basenameLike(normalizedActual) === basenameLike(normalizedTarget)
+  );
+}
+
+function normalizeArtifactEvidencePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+}
+
+function basenameLike(path: string): string {
+  return path.split("/").filter(Boolean).at(-1) ?? path;
 }
 
 // D.14H Phase 7.5-C：纯自然语言高风险 claim 最小兜底识别。

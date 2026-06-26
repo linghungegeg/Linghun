@@ -56,6 +56,80 @@ describe("SessionStore", () => {
     expect(resumed.diagnostics).toEqual([]);
   });
 
+  it("reads recent transcript events from the tail without requiring a full resume", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+
+    const lines = [
+      { type: "session_start", sessionId: session.id, projectPath: project, createdAt: "start" },
+      ...Array.from({ length: 80 }, (_, index) => ({
+        type: "system_event",
+        id: `system-${index}`,
+        level: "info",
+        message: "x".repeat(2048),
+        createdAt: new Date(index).toISOString(),
+      })),
+      { type: "user_message", id: "u1", text: "你好", createdAt: new Date(81).toISOString() },
+      { type: "assistant_text_delta", id: "a1", text: "收到", createdAt: new Date(82).toISOString() },
+      { type: "user_message", id: "u2", text: "继续", createdAt: new Date(83).toISOString() },
+    ];
+    await writeFile(
+      session.transcriptPath,
+      `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+      "utf8",
+    );
+
+    const recent = await store.readRecentTranscriptEvents(session.id, {
+      limit: 2,
+      predicate: (event) =>
+        event.type === "user_message" || event.type === "assistant_text_delta",
+    });
+
+    expect(recent.events).toEqual([
+      { type: "assistant_text_delta", id: "a1", text: "收到", createdAt: new Date(82).toISOString() },
+      { type: "user_message", id: "u2", text: "继续", createdAt: new Date(83).toISOString() },
+    ]);
+    expect(recent.diagnostics).toEqual([]);
+  });
+
+  it("reports diagnostics for malformed lines while tail-reading recent transcript events", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+
+    await writeFile(
+      session.transcriptPath,
+      [
+        JSON.stringify({
+          type: "user_message",
+          id: "u1",
+          text: "old",
+          createdAt: new Date(0).toISOString(),
+        }),
+        "{broken",
+        JSON.stringify({
+          type: "assistant_text_delta",
+          id: "a1",
+          text: "new",
+          createdAt: new Date(1).toISOString(),
+        }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const recent = await store.readRecentTranscriptEvents(session.id, { limit: 3 });
+
+    expect(recent.events.map((event) => event.type)).toEqual([
+      "user_message",
+      "assistant_text_delta",
+    ]);
+    expect(recent.diagnostics).toHaveLength(1);
+  });
+
   it("serializes concurrent appendEvent calls for one session", async () => {
     const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
