@@ -2,6 +2,28 @@
 
 This page records product updates that directly affect user experience. For the full system design, see the [English Whitepaper](../WHITEPAPER.en.md).
 
+## June 27, 2026: Session Storage, Model Streaming, and Permission Modes
+
+Linghun tightened three parts of the terminal mainline that users can directly feel: long-session storage, model streaming output, and permission modes.
+
+The focus of this update is not adding a new feature. It makes the existing foundation steadier: long conversations keep less session history in process memory; Claude, OpenAI, and OpenAI-compatible SSE output go through a more consistent parsing and rendering path; and auto-review / full-access permission behavior better matches everyday development expectations with fewer unnecessary interruptions.
+
+### How It Works
+
+- Session recording and replay paths were tightened so long conversation history is stored in traceable files instead of continuously growing inside one long-running process.
+- Model streaming deltas were normalized more consistently, reducing provider-specific differences in line breaks, code blocks, tool output, and final-answer display.
+- Some internal-state terminal notices were removed from the user-visible layer. Cache and memory work still runs, but it no longer adds avoidable noise to the main screen.
+- Permission-mode policy was adjusted: default and plan modes remain cautious, auto-review interrupts less for low-risk operations, and full-access better matches the expectation users have when they explicitly choose it.
+- The underlying permission, evidence, session, index, and verification paths remain in place. The user-visible cleanup does not remove the foundation logic.
+
+### User Experience
+
+- Long conversations are less likely to slow down or hit memory pressure because session history keeps growing.
+- Claude, OpenAI, and OpenAI-compatible model output render more consistently in terminal line breaks, code blocks, and long paragraphs.
+- Command stderr, long text blocks, and tool output are easier to read, and the main screen is less likely to collapse into scattered code blocks only.
+- Auto-review mode interrupts less for normal reads, writes, and development commands; full-access behaves closer to "the user explicitly allowed this, let the task run."
+- Cache refreshes, memory updates, and other background capabilities still exist, but they interfere less with the terminal surface.
+
 ## June 26, 2026: Pre-check System and Multi-language Deep Layers
 
 Linghun's pre-check system expanded into multi-language deep layers covering TypeScript, Python, Rust, Go, Java, SQL, Shell, C#, PHP, Ruby, Kotlin, Dart, Swift, C/C++, and other common development stacks.

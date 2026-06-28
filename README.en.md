@@ -10,6 +10,17 @@ That is the value of Linghun's anti-hallucination system. It is not merely about
 
 Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHITEPAPER.en.md) / [Updates](./docs/updates.en.md).
 
+## Novita x Harbor Benchmark Records
+
+Linghun has completed and submitted runs for the four public TB2.1 tracks in the Novita x Harbor Agent Benchmark:
+
+| Track | Harbor record |
+| --- | --- |
+| File & Recovery | [f77879ac-b30f-47bb-8fb1-650108364fc0](https://hub.harborframework.com/jobs/f77879ac-b30f-47bb-8fb1-650108364fc0) |
+| Systems & Security | [151a5351-bbf9-45c9-ae2f-1f8db1cd0619](https://hub.harborframework.com/jobs/151a5351-bbf9-45c9-ae2f-1f8db1cd0619) |
+| Data & Science | [dc4a720b-79a5-49dd-b083-6fc40acd1079](https://hub.harborframework.com/jobs/dc4a720b-79a5-49dd-b083-6fc40acd1079) |
+| Code & Debug | [23a26b7f-f1c0-4653-b0c2-4ecc4acae4de](https://hub.harborframework.com/jobs/23a26b7f-f1c0-4653-b0c2-4ecc4acae4de) |
+
 ## Special Thanks
 
 <div>
@@ -25,6 +36,7 @@ Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHIT
 
 ## Updates
 
+- **June 27, 2026**: Session storage, model streaming, and permission modes were tightened to reduce memory pressure in long conversations, make Claude / OpenAI-compatible streaming output more stable, and make command/file-edit behavior clearer in auto-review and full-access modes. See: [Updates](./docs/updates.en.md#june-27-2026-session-storage-model-streaming-and-permission-modes).
 - **June 26, 2026**: The pre-check system expanded into multi-language deep layers, giving the model index facts, impact ranges, and language-level pre-check results earlier so it spends less time on blind file reading, repeated exploration, and rework. See: [Updates](./docs/updates.en.md#june-26-2026-pre-check-system-and-multi-language-deep-layers).
 - **June 17, 2026**: The terminal display layer was tightened, and SourcePack / ReadSnippets deliver relevant code snippets faster. The user-facing effect is less waiting, fewer repeated Grep/Read calls, and faster movement into useful edits. See: [Updates](./docs/updates.en.md#june-17-2026-terminal-display-layer-and-tool-call-chain).
 

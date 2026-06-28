@@ -23,6 +23,17 @@ Linghun 可以理解成：给大模型装上一套工程化外骨骼。模型负
 
 这就是 Linghun 反幻觉系统的价值：不是让模型少说错话那么简单，而是把“读事实、看证据、区分验证范围、拒绝空口完成、说明不确定性”变成运行时约束。模型仍然会推理和生成，但关键工程结论不能只靠模型自信。
 
+## Novita x Harbor 榜单记录
+
+Linghun 已完成 Novita x Harbor Agent Benchmark 四个公开 TB2.1 榜单的运行与提交：
+
+| 榜单 | Harbor 记录 |
+| --- | --- |
+| File & Recovery | [f77879ac-b30f-47bb-8fb1-650108364fc0](https://hub.harborframework.com/jobs/f77879ac-b30f-47bb-8fb1-650108364fc0) |
+| Systems & Security | [151a5351-bbf9-45c9-ae2f-1f8db1cd0619](https://hub.harborframework.com/jobs/151a5351-bbf9-45c9-ae2f-1f8db1cd0619) |
+| Data & Science | [dc4a720b-79a5-49dd-b083-6fc40acd1079](https://hub.harborframework.com/jobs/dc4a720b-79a5-49dd-b083-6fc40acd1079) |
+| Code & Debug | [23a26b7f-f1c0-4653-b0c2-4ecc4acae4de](https://hub.harborframework.com/jobs/23a26b7f-f1c0-4653-b0c2-4ecc4acae4de) |
+
 ## 特别感谢
 
 <div>
@@ -38,6 +49,7 @@ Linghun 可以理解成：给大模型装上一套工程化外骨骼。模型负
 
 ## 更新记录
 
+- **2026-06-27**：会话存储、模型流式输出和权限模式继续收敛，降低长对话内存压力，让 Claude / OpenAI 兼容流式输出更稳定，并让自动审核、完全放行等模式的命令与改文件体验更清晰。详见：[更新记录](./docs/updates.md#2026-06-27-会话存储模型流式输出与权限模式)。
 - **2026-06-26**：预检系统扩展为多语言深度层，让模型开工前更快拿到索引、影响范围和语言级预检结果，减少无效读文件、重复探索和返工。详见：[更新记录](./docs/updates.md#2026-06-26-预检系统与多语言深度层)。
 - **2026-06-17**：终端可见层继续收敛，SourcePack / ReadSnippets 把相关代码片段更快交给模型，用户体感是更少等待、更少重复 Grep/Read、更快进入有效修改。详见：[更新记录](./docs/updates.md#2026-06-17-终端可见层与工具调用链)。
 
