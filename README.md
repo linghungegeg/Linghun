@@ -27,12 +27,12 @@ Linghun 可以理解成：给大模型装上一套工程化外骨骼。模型负
 
 Linghun 已完成 Novita x Harbor Agent Benchmark 四个公开 TB2.1 榜单的运行与提交：
 
-| 榜单 | Harbor 记录 |
-| --- | --- |
-| File & Recovery | [f77879ac-b30f-47bb-8fb1-650108364fc0](https://hub.harborframework.com/jobs/f77879ac-b30f-47bb-8fb1-650108364fc0) |
-| Systems & Security | [151a5351-bbf9-45c9-ae2f-1f8db1cd0619](https://hub.harborframework.com/jobs/151a5351-bbf9-45c9-ae2f-1f8db1cd0619) |
-| Data & Science | [dc4a720b-79a5-49dd-b083-6fc40acd1079](https://hub.harborframework.com/jobs/dc4a720b-79a5-49dd-b083-6fc40acd1079) |
-| Code & Debug | [23a26b7f-f1c0-4653-b0c2-4ecc4acae4de](https://hub.harborframework.com/jobs/23a26b7f-f1c0-4653-b0c2-4ecc4acae4de) |
+| 榜单 | 提交时名次 | Harbor 记录 |
+| --- | --- | --- |
+| File & Recovery | 第 2 名 | [f77879ac-b30f-47bb-8fb1-650108364fc0](https://hub.harborframework.com/jobs/f77879ac-b30f-47bb-8fb1-650108364fc0) |
+| Systems & Security | 第 1 名 | [151a5351-bbf9-45c9-ae2f-1f8db1cd0619](https://hub.harborframework.com/jobs/151a5351-bbf9-45c9-ae2f-1f8db1cd0619) |
+| Data & Science | 第 1 名 | [dc4a720b-79a5-49dd-b083-6fc40acd1079](https://hub.harborframework.com/jobs/dc4a720b-79a5-49dd-b083-6fc40acd1079) |
+| Code & Debug | 第 3 名 | [23a26b7f-f1c0-4653-b0c2-4ecc4acae4de](https://hub.harborframework.com/jobs/23a26b7f-f1c0-4653-b0c2-4ecc4acae4de) |
 
 ## 特别感谢
 
