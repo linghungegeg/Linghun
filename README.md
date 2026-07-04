@@ -7,10 +7,10 @@
 把大模型接到真实项目、真实工具、真实权限、真实验证和真实上下文里。
 
 <p>
-  <a href="https://www.npmjs.com/package/@linghun/cli"><img alt="npm version" src="https://img.shields.io/npm/v/%40linghun%2Fcli?style=flat-square&label=npm" /></a>
+  <a href="https://www.npmjs.com/package/@linghun/cli"><img alt="npm version" src="https://img.shields.io/npm/v/%40linghun%2Fcli?style=flat-square&amp;label=npm" /></a>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" /></a>
-  <img alt="Node.js >=22" src="https://img.shields.io/badge/node-%3E%3D22-339933?style=flat-square&logo=node.js&logoColor=white" />
-  <img alt="Windows first" src="https://img.shields.io/badge/Windows-first-0078D4?style=flat-square&logo=windows&logoColor=white" />
+  <img alt="Node.js 22+" src="https://img.shields.io/badge/node-22%2B-339933?style=flat-square&amp;logo=node.js&amp;logoColor=white" />
+  <img alt="Windows first" src="https://img.shields.io/badge/Windows-first-0078D4?style=flat-square&amp;logo=windows&amp;logoColor=white" />
 </p>
 
 [English README](./README.en.md) · [中文白皮书](./WHITEPAPER.md) · [English Whitepaper](./WHITEPAPER.en.md) · [更新记录](./docs/updates.md) · [English Updates](./docs/updates.en.md) · [App Bridge](./docs/developers/capability-runtime-app-bridge.md)
