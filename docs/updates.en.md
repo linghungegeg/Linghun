@@ -4,13 +4,14 @@ This page records product updates that directly affect user experience. For the 
 
 ## July 5, 2026: Terminal Foundation, Task Panels, and Runtime Recovery
 
-This release continues to harden Linghun's terminal mainline: model streaming, terminal scroll and copy boundaries, background task status, diff / Markdown rendering, provider network recovery, and runtime storage were all tightened.
+This release continues to harden Linghun's terminal mainline and smoothness: model streaming, terminal scroll and copy boundaries, background task status, answer display after anti-hallucination cleanup, diff / Markdown rendering, provider network recovery, and runtime storage were all tightened.
 
-The goal is not a new visual skin. It is to make long development runs feel like a steadier engineering terminal: growing output remains readable, scrollable, and copyable; background task and permission state are easier to see; provider startup, failure recovery, and final-answer validation are less likely to feel stuck or misaligned with evidence.
+The goal is not a new visual skin. It is to make long development runs feel like a steadier engineering terminal: output reaches the screen faster while growing content remains readable, scrollable, and copyable; background task and permission state are easier to see; model answers pass through anti-hallucination cleanup, evidence alignment, and final-answer validation before entering the user-visible layer, reducing stuck or evidence-misaligned displays.
 
 ### How It Works
 
 - Model streaming now enters the terminal in a more controlled rhythm, separating high-frequency deltas from stable transcript commits to reduce jitter during long answers.
+- The path from the final-answer gate into the visible layer was tightened, making the boundary between anti-hallucination cleanup, evidence alignment, and display commits clearer and reducing repeated, jumping, or incomplete cleaned answers.
 - Terminal-first scroll, copy, and normal-screen boundaries were tightened while keeping native terminal selection as the default and preserving Linghun's Markdown, code block, and task presentation style.
 - The task bottom panel and background task status model were strengthened so running, waiting, failed, permission, and progress states are easier to see in the main screen.
 - Diff, plain-text, Markdown, and tool-output rendering were refined to reduce noise when long output, stderr, patches, and code blocks appear together.
@@ -18,7 +19,8 @@ The goal is not a new visual skin. It is to make long development runs feel like
 
 ### User Experience
 
-- Long answers and tool output are steadier, and the terminal is less likely to become hard to scroll, copy, or read while streaming continues.
+- Long answers and tool output reach the visible layer faster, and the terminal is less likely to become hard to scroll, copy, or read while streaming continues.
+- Model answers are shown after anti-hallucination cleanup, making the transition from cleanup to the visible final state steadier and smoother in more scenarios.
 - Background tasks, permission waits, and execution states are clearer, making it easier to tell whether Linghun is running, waiting, recovering, or done.
 - Diff, Markdown, code blocks, and plain text render more consistently, reducing format noise during patch review and model explanations.
 - Provider startup and failure recovery feel smoother, with clearer status during network instability.
