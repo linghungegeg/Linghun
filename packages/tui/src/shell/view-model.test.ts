@@ -40,6 +40,7 @@ import {
 import {
   createOutputBlock,
   createShellViewModel,
+  computeRecentCacheHitRate,
   getComposerPlaceholder,
   mapBottomPaneStatusToView,
   mapPendingApprovalToPermission,
@@ -6907,6 +6908,56 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       viewMode: "task",
     });
     expect(view.taskFooter?.cacheTone).toBe("warning");
+  });
+
+  it("task footer cache uses recent 20-turn aggregate instead of the last turn only", () => {
+    const ctx = createContext();
+    const history = Array.from({ length: 19 }, (_, index) => ({
+      turn: index + 1,
+      timestamp: Date.now(),
+      hitRate: 0.8,
+      inputTokens: 20,
+      outputTokens: 0,
+      cacheReadTokens: 80,
+      cacheWriteTokens: 0,
+      cacheWriteTokensSource: "reported",
+      model: "test-model",
+      provider: "test-provider",
+      endpoint: "chat",
+      source: "api_usage",
+      compacted: false,
+      freshness: { changedKeys: [] },
+    }));
+    history.push({
+      ...history[0],
+      turn: 20,
+      hitRate: 0,
+      inputTokens: 100,
+      cacheReadTokens: 0,
+    });
+    (ctx as unknown as { cache: { history: typeof history } }).cache.history = history;
+
+    const view = createShellViewModel(ctx, {
+      width: 120,
+      viewMode: "task",
+    });
+
+    expect(view.taskFooter?.cache).toBe("缓存 76%");
+    expect(view.taskFooter?.cacheTone).toBe("default");
+  });
+
+  it("recent cache aggregate only uses the latest 20 records", () => {
+    const history = [
+      { hitRate: 1, inputTokens: 0, cacheReadTokens: 1000, cacheWriteTokens: 0 },
+      ...Array.from({ length: 20 }, () => ({
+        hitRate: 0,
+        inputTokens: 100,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      })),
+    ];
+
+    expect(computeRecentCacheHitRate(history)).toBe(0);
   });
 
   it("权限请求附带 explanationLines（不暴露 rule.id）", () => {

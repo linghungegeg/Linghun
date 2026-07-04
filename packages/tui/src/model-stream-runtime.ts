@@ -22,6 +22,7 @@ import {
 import { RESOURCE_GUARD_KIND, checkResourceGuard } from "./background-control-runtime.js";
 import { buildPromptCacheRequestFields } from "./break-cache-runtime.js";
 import { writeLightHints } from "./cache-command-runtime.js";
+import { stableStringify } from "./cache-freshness.js";
 import {
   appendUsageEvents,
   compactPreflightDeps,
@@ -201,9 +202,86 @@ export type FinalGateEvidenceActionResult =
 const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 16;
 const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 24;
 const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 2;
+const SAME_TOOL_FAILURE_RETRY_GUARD_LIMIT = 4;
+const TOOL_FAILURE_NO_TOOL_RECOVERY_PROMPT_LIMIT = 4;
 
 export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok">): boolean {
   return result.ok !== true;
+}
+
+export type ToolFailureRecoveryState = {
+  previousRoundFingerprint?: string;
+  repeatedFailureRounds: number;
+};
+
+export function createToolFailureRecoveryFingerprint(
+  toolCall: Pick<ModelToolCall, "name" | "input">,
+  result: Pick<ModelToolExecutionResult, "tool" | "text">,
+): string {
+  const toolName = result.tool || toolCall.name;
+  return [
+    toolName,
+    classifyToolFailureForRecovery(result.text),
+    stableStringify(toolCall.input ?? null).slice(0, 2_000),
+  ].join("|");
+}
+
+export function updateToolFailureRecoveryState(
+  state: ToolFailureRecoveryState,
+  fingerprints: string[],
+  limit = SAME_TOOL_FAILURE_RETRY_GUARD_LIMIT,
+): { state: ToolFailureRecoveryState; shouldStop: boolean } {
+  const roundFingerprint = fingerprints.slice().sort().join("\n");
+  if (!roundFingerprint) {
+    return { state: { repeatedFailureRounds: 0 }, shouldStop: false };
+  }
+  const repeatedFailureRounds =
+    state.previousRoundFingerprint === roundFingerprint ? state.repeatedFailureRounds + 1 : 1;
+  const nextState = {
+    previousRoundFingerprint: roundFingerprint,
+    repeatedFailureRounds,
+  };
+  return { state: nextState, shouldStop: repeatedFailureRounds > limit };
+}
+
+export function shouldContinueAfterToolFailureWithoutToolCall(
+  state: ToolFailureRecoveryState,
+  promptCount: number,
+  limit = TOOL_FAILURE_NO_TOOL_RECOVERY_PROMPT_LIMIT,
+): boolean {
+  return state.repeatedFailureRounds > 0 && promptCount < limit;
+}
+
+function classifyToolFailureForRecovery(text: string): string {
+  const normalized = text.toLowerCase();
+  if (
+    /old_string|no match|not found|0 replacements|no replacement|找不到|未匹配|没有匹配/u.test(
+      normalized,
+    )
+  ) {
+    return "edit_no_match";
+  }
+  if (/permission|denied|rejected|拒绝|权限/u.test(normalized)) return "permission";
+  if (/timeout|timed out|超时/u.test(normalized)) return "timeout";
+  if (/not recognized|command not found|不是内部或外部命令|找不到命令/u.test(normalized)) {
+    return "command_not_found";
+  }
+  if (/syntax|parse|heredoc|here-string|解析|语法/u.test(normalized)) return "shell_syntax";
+  return normalized.replace(/\s+/gu, " ").trim().slice(0, 240);
+}
+
+function createToolFailureRecoveryReminder(language: Language): string {
+  return language === "en-US"
+    ? [
+        "The previous tool attempt failed and the task is not recovered yet.",
+        "Continue by calling tools now: read or search the current file context first if needed, then use corrected Edit/MultiEdit/Write/Bash inputs.",
+        "Do not only describe what you will do. If permission, scope, or budget blocks the recovery, explain that blocker instead.",
+      ].join("\n")
+    : [
+        "上一轮工具调用失败，任务还没有恢复完成。",
+        "现在请继续调用工具：必要时先 Read/Grep 获取最新文件上下文，再用修正后的 Edit/MultiEdit/Write/Bash 输入继续。",
+        "不要只描述接下来要做什么；如果权限、范围或预算阻塞恢复，再说明阻塞原因。",
+      ].join("\n");
 }
 
 export function createToolBatchFailFastSkippedResult(
@@ -1485,6 +1563,8 @@ export async function sendMessage(
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
     let toolFailureRetries = 0;
+    let toolFailureRecoveryState: ToolFailureRecoveryState = { repeatedFailureRounds: 0 };
+    let toolFailureNoToolRecoveryPrompts = 0;
     let highReasoningToolsEmptyRetried = false;
     const _suggestedMax = metaSchedulerDecision.suggestedMaxTodoRounds;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
@@ -1783,6 +1863,29 @@ export async function sendMessage(
         });
       }
       if (toolCalls.length === 0) {
+        if (
+          metaSchedulerDecision.shouldUseRetryGuard &&
+          shouldContinueAfterToolFailureWithoutToolCall(
+            toolFailureRecoveryState,
+            toolFailureNoToolRecoveryPrompts,
+          )
+        ) {
+          discardAssistantBlock(output, assistantStreamBlockId);
+          assistantText = committedIntermediateAssistantText;
+          roundAssistantText = "";
+          toolFailureNoToolRecoveryPrompts += 1;
+          messagesForProvider.push({
+            role: "user",
+            content: createToolFailureRecoveryReminder(context.language),
+          });
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `tool_failure_recovery_no_tool_continue prompts=${toolFailureNoToolRecoveryPrompts}`,
+            "warning",
+          );
+          continue;
+        }
         if (consecutiveTodoOnlyRounds >= _killThreshold && todoOnlyWarningSent) {
           const limitMsg =
             evidenceRounds === 0
@@ -1944,6 +2047,7 @@ export async function sendMessage(
       let roundHadProgress = false;
       let batchFailureCount = 0;
       let lastBatchFailureReason: string | undefined;
+      const roundFailureFingerprints: string[] = [];
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(toolCall, context, sessionId, output, {
           messages: messagesForProvider,
@@ -1962,6 +2066,7 @@ export async function sendMessage(
           roundHadProgress = true;
           batchFailureCount = 0;
         } else {
+          roundFailureFingerprints.push(createToolFailureRecoveryFingerprint(toolCall, result));
           batchFailureCount += 1;
           lastBatchFailureReason = result.text;
           if (batchFailureCount >= 3) {
@@ -1997,18 +2102,25 @@ export async function sendMessage(
       }
       const roundHadToolFailure = toolCalls.length > 0 && !roundHadProgress;
       if (roundHadToolFailure && metaSchedulerDecision.shouldUseRetryGuard) {
-        toolFailureRetries += 1;
-        if (toolFailureRetries > 1) {
+        const recovery = updateToolFailureRecoveryState(
+          toolFailureRecoveryState,
+          roundFailureFingerprints,
+        );
+        toolFailureRecoveryState = recovery.state;
+        toolFailureRetries = toolFailureRecoveryState.repeatedFailureRounds;
+        if (recovery.shouldStop) {
           await appendSystemEvent(
             context,
             sessionId,
-            `meta_scheduler:retry_guard_limit tool_failure_retries=${toolFailureRetries}`,
+            `meta_scheduler:retry_guard_limit tool_failure_retries=${toolFailureRetries} repeated_same_failure=yes`,
             "warning",
           );
           break;
         }
       } else if (roundHadProgress) {
         toolFailureRetries = 0;
+        toolFailureRecoveryState = { repeatedFailureRounds: 0 };
+        toolFailureNoToolRecoveryPrompts = 0;
       }
       if (todoOnly && consecutiveTodoOnlyRounds >= _hintThreshold && !todoOnlyHintSent) {
         const todoHint =

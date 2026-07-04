@@ -11,13 +11,16 @@ import {
   __testStreamFinalModelAnswerWithoutTools,
   buildFinalGateClaimAlignmentFallback,
   buildAggregatedDowngradedFinalAnswer,
+  createToolFailureRecoveryFingerprint,
   createToolBatchFailFastSkippedResult,
   evaluateAggregatedFinalAnswerGate,
   handleNaturalInput,
   isToolBatchFailure,
   planFinalGateEvidenceGapAction,
   shouldRewriteFinalGateClaimAlignment,
+  shouldContinueAfterToolFailureWithoutToolCall,
   shouldRetryHighReasoningToolsEmptyResponse,
+  updateToolFailureRecoveryState,
 } from "./model-stream-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import { createShellBlockOutputForTest } from "./tui-output-surface.js";
@@ -170,6 +173,67 @@ describe("tool batch fail-fast helpers", () => {
       tool: "Read",
       data: { skipped: true, reason: "tool_batch_fail_fast", lastFailure: "Read failed" },
     });
+  });
+});
+
+describe("tool failure recovery guard", () => {
+  it("does not stop while the model changes failed tool inputs", () => {
+    let state = { repeatedFailureRounds: 0 };
+    const first = createToolFailureRecoveryFingerprint(
+      { name: "Edit", input: { file_path: "a.ts", old_string: "old one", new_string: "new" } },
+      { tool: "Edit", text: "old_string not found" },
+    );
+    let result = updateToolFailureRecoveryState(state, [first], 4);
+    expect(result.shouldStop).toBe(false);
+    expect(result.state.repeatedFailureRounds).toBe(1);
+
+    const changedInput = createToolFailureRecoveryFingerprint(
+      { name: "Edit", input: { file_path: "a.ts", old_string: "old two", new_string: "new" } },
+      { tool: "Edit", text: "old_string not found" },
+    );
+    result = updateToolFailureRecoveryState(result.state, [changedInput], 4);
+    expect(result.shouldStop).toBe(false);
+    expect(result.state.repeatedFailureRounds).toBe(1);
+
+    state = result.state;
+    const changedTool = createToolFailureRecoveryFingerprint(
+      { name: "Read", input: { file_path: "a.ts" } },
+      { tool: "Read", text: "file not found" },
+    );
+    result = updateToolFailureRecoveryState(state, [changedTool], 4);
+    expect(result.shouldStop).toBe(false);
+    expect(result.state.repeatedFailureRounds).toBe(1);
+  });
+
+  it("stops only after the same failed action repeats past the enlarged limit", () => {
+    let state = { repeatedFailureRounds: 0 };
+    const fingerprint = createToolFailureRecoveryFingerprint(
+      { name: "Edit", input: { file_path: "a.ts", old_string: "same", new_string: "new" } },
+      { tool: "Edit", text: "old_string not found" },
+    );
+
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      const result = updateToolFailureRecoveryState(state, [fingerprint], 4);
+      expect(result.shouldStop).toBe(false);
+      expect(result.state.repeatedFailureRounds).toBe(attempt);
+      state = result.state;
+    }
+
+    const stopped = updateToolFailureRecoveryState(state, [fingerprint], 4);
+    expect(stopped.shouldStop).toBe(true);
+    expect(stopped.state.repeatedFailureRounds).toBe(5);
+  });
+
+  it("continues after a failed tool round when the next assistant turn has no tool call", () => {
+    expect(
+      shouldContinueAfterToolFailureWithoutToolCall({ repeatedFailureRounds: 1 }, 0, 4),
+    ).toBe(true);
+    expect(
+      shouldContinueAfterToolFailureWithoutToolCall({ repeatedFailureRounds: 1 }, 4, 4),
+    ).toBe(false);
+    expect(
+      shouldContinueAfterToolFailureWithoutToolCall({ repeatedFailureRounds: 0 }, 0, 4),
+    ).toBe(false);
   });
 });
 

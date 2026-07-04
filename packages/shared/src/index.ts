@@ -1,6 +1,6 @@
 export const LINGHUN_NAME = "Linghun";
 export const LINGHUN_CLI_NAME = "linghun";
-export const LINGHUN_VERSION = "0.1.12";
+export const LINGHUN_VERSION = "0.1.13";
 export const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
 export const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 export const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";

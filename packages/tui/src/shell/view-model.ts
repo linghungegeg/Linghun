@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import type { CacheTurnStats } from "@linghun/core";
 import { type Language, type PermissionMode, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
 import { calculateContextPercentages } from "../context-window-runtime.js";
@@ -419,7 +420,7 @@ export function createShellViewModel(
     cyclePermHint,
     effectiveModel: context.model,
     setupNeeded,
-    cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
+    cacheHitRate: computeRecentCacheHitRate(context.cache?.history ?? []),
     indexStatus: context.index.status,
     reasoningLevel: options.reasoningLevel,
     reasoningSent: options.reasoningSent,
@@ -2161,6 +2162,40 @@ type TaskFooterInput = {
   contextUsageLabel?: string;
   isRemoteMode: boolean;
 };
+
+export function computeRecentCacheHitRate(
+  history: Pick<CacheTurnStats, "hitRate" | "inputTokens" | "cacheReadTokens" | "cacheWriteTokens">[],
+  windowSize = 20,
+): number | null {
+  const recent = history.slice(-Math.max(1, windowSize));
+  if (recent.length === 0) return null;
+
+  const totals = recent.reduce(
+    (acc, item) => {
+      const inputTokens = Number.isFinite(item.inputTokens) ? Math.max(0, item.inputTokens) : 0;
+      const cacheReadTokens = Number.isFinite(item.cacheReadTokens)
+        ? Math.max(0, item.cacheReadTokens)
+        : 0;
+      const cacheWriteTokens = Number.isFinite(item.cacheWriteTokens)
+        ? Math.max(0, item.cacheWriteTokens)
+        : 0;
+      acc.cacheReadTokens += cacheReadTokens;
+      acc.cacheEligibleTokens += inputTokens + cacheReadTokens + cacheWriteTokens;
+      return acc;
+    },
+    { cacheReadTokens: 0, cacheEligibleTokens: 0 },
+  );
+
+  if (totals.cacheEligibleTokens > 0) {
+    return totals.cacheReadTokens / totals.cacheEligibleTokens;
+  }
+
+  const validHitRates = recent
+    .map((item) => item.hitRate)
+    .filter((value): value is number => Number.isFinite(value));
+  if (validHitRates.length === 0) return null;
+  return validHitRates.reduce((sum, value) => sum + value, 0) / validHitRates.length;
+}
 
 function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
   const modelInfo = formatFooterModel(
