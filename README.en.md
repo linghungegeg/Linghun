@@ -2,6 +2,13 @@
 
 Linghun is a local-first, evidence-first AI coding terminal.
 
+<p>
+  <a href="https://www.npmjs.com/package/@linghun/cli"><img alt="npm version" src="https://img.shields.io/npm/v/%40linghun%2Fcli?style=flat-square&label=npm" /></a>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" /></a>
+  <img alt="Node.js >=22" src="https://img.shields.io/badge/node-%3E%3D22-339933?style=flat-square&logo=node.js&logoColor=white" />
+  <img alt="Windows first" src="https://img.shields.io/badge/Windows-first-0078D4?style=flat-square&logo=windows&logoColor=white" />
+</p>
+
 You can think of it as an engineering exoskeleton for large models. The model handles understanding, reasoning, and generation. Linghun connects the model to real projects, real tools, real permissions, real verification, and real context.
 
 Ordinary chat tools can answer "how should I change this?" Linghun cares about another question: did it actually read the relevant code, edit the right files, run verification, and explain what remains uncertain?
