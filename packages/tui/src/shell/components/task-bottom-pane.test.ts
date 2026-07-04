@@ -195,11 +195,11 @@ describe("TaskBottomPane budget allocation", () => {
     expect(source).not.toContain("footer.permissionModeColor || theme.permission");
   });
 
-  it("does not render a duplicate working status while permission is active", () => {
+  it("keeps a low-noise working status while permission is active", () => {
     const source = readFileSync(new URL("./TaskBottomPane.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain("const bottomPaneStatus = view.permission");
-    expect(source).toContain("? undefined");
-    expect(source).toContain("view.bottomPaneStatus ?? legacyStatusFromActivity(view.activity)");
+    expect(source).toContain("const bottomPaneStatus = view.bottomPaneStatus ?? legacyStatusFromActivity(view.activity)");
+    expect(source).not.toContain("const bottomPaneStatus = view.permission");
+    expect(source).not.toContain("? undefined");
   });
 });

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderInkShell } from "./ink-renderer.js";
@@ -365,6 +366,7 @@ describe("Ink TTY interaction smoke", () => {
     };
     shell.rerender();
     await shell.waitUntilRenderFlush();
+    expect(output.text).not.toContain("选择操作：y 同意 · n 拒绝 · d 详情 · Esc 取消");
 
     const beforePermissionEvents = events.length;
     input.write("x");
@@ -401,6 +403,25 @@ describe("Ink TTY interaction smoke", () => {
     expect(events).toContainEqual({ type: "permission-action", actionId: "deny" });
 
     shell.unmount();
+  });
+
+  it("permission source keeps Composer single-pane and flushes approve progress before execution", () => {
+    const composerSource = readFileSync(new URL("./components/Composer.tsx", import.meta.url), "utf8");
+    expect(composerSource).toContain("permissionActive && view.permission ?");
+    expect(composerSource).toContain(") : (\n        <>\n          {showSuggestions ? (");
+    expect(composerSource).toContain("showInlineCursor = index === cursorRow");
+    expect(composerSource).not.toContain("showInlineCursor = !permissionActive && index === cursorRow");
+
+    const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+    const allowOnceBranch = indexSource.slice(
+      indexSource.indexOf('case "allow_once"'),
+      indexSource.indexOf('case "allow_always_tool"'),
+    );
+    expect(allowOnceBranch.indexOf("await refreshApprovedPermissionProgress(approval)")).toBeLessThan(
+      allowOnceBranch.indexOf("await executePermissionApprove(approval, context, gateway, shellOutput)"),
+    );
+    expect(indexSource).toContain("startRequestActivity(shellOutput, context, \"tool_running\", { toolName })");
+    expect(allowOnceBranch).toContain("await shell?.waitUntilRenderFlush()");
   });
 
   it("routes selectable background CommandPanel keys to panel actions", async () => {

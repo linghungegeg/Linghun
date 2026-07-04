@@ -957,6 +957,7 @@ import {
   handleNaturalInput,
   handleRemoteInboundMessage,
   sendMessage,
+  startRequestActivity,
 } from "./model-stream-runtime.js";
 export { evaluateAggregatedFinalAnswerGate };
 import {
@@ -2503,6 +2504,12 @@ async function runInkShell(
     appendTranscriptSourceBlock(context, block);
     blocks.push(block);
   };
+  const refreshApprovedPermissionProgress = async (approval: PendingLocalApproval): Promise<void> => {
+    const toolName = "toolName" in approval ? approval.toolName : approval.kind;
+    startRequestActivity(shellOutput, context, "tool_running", { toolName });
+    shell?.rerender();
+    await shell?.waitUntilRenderFlush();
+  };
   const controller: ShellController = {
     getViewModel: () => {
       const runtime = getSelectedModelRuntime(context);
@@ -3343,6 +3350,7 @@ async function runInkShell(
           case "allow_once":
           case "yes": {
             context.pendingLocalApproval = undefined;
+            await refreshApprovedPermissionProgress(approval);
             await executePermissionApprove(approval, context, gateway, shellOutput);
             shell?.rerender();
             await shell?.waitUntilRenderFlush();
@@ -3411,6 +3419,7 @@ async function runInkShell(
             }
             // duplicate / added 都视为持久化成功 → approve
             context.pendingLocalApproval = undefined;
+            await refreshApprovedPermissionProgress(approval);
             await executePermissionApprove(approval, context, gateway, shellOutput);
             shell?.rerender();
             await shell?.waitUntilRenderFlush();

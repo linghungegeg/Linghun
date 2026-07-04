@@ -1618,51 +1618,54 @@ export function Composer({
           width={composerContentWidth(composerLayout)}
           language={view.language}
         />
-      ) : null}
-      {showSuggestions ? (
-        <SlashSuggestions
-          candidates={slashCandidates}
-          selectedIndex={slashSelectionClamped}
-          theme={theme}
-          language={view.language}
-          width={slashSuggestionWidth}
-          maxRows={slashMaxRows}
-          hint={
-            view.language === "en-US"
-              ? "Tab accept · ↑↓ pick · Esc hide · Enter submit"
-              : "Tab 选中 · ↑↓ 切换 · Esc 隐藏 · Enter 提交"
-          }
-        />
-      ) : null}
-      <Box ref={anchorRef} width="100%" flexDirection="column">
-        {visualLines.map((line, index) => {
-          const clippedLine = line.text;
-          const showInlineCursor = !permissionActive && index === cursorRow;
-          return (
-            <Text key={`${index}-${line.prefix}-${line.text}`} color={color} bold={Boolean(text)}>
-              <Text color={theme.muted} dimColor={!text}>
-                {line.prefix}
-              </Text>
-              {showInlineCursor
-                ? renderInlineComposerCursor(clippedLine, cursorCol, cursorBlinkOn)
-                : clippedLine}
-              {index === visualLines.length - 1 && ghostSuffix ? (
-                <Text color="gray" dimColor>
-                  {ghostSuffix}
+      ) : (
+        <>
+          {showSuggestions ? (
+            <SlashSuggestions
+              candidates={slashCandidates}
+              selectedIndex={slashSelectionClamped}
+              theme={theme}
+              language={view.language}
+              width={slashSuggestionWidth}
+              maxRows={slashMaxRows}
+              hint={
+                view.language === "en-US"
+                  ? "Tab accept · ↑↓ pick · Esc hide · Enter submit"
+                  : "Tab 选中 · ↑↓ 切换 · Esc 隐藏 · Enter 提交"
+              }
+            />
+          ) : null}
+          <Box ref={anchorRef} width="100%" flexDirection="column">
+            {visualLines.map((line, index) => {
+              const clippedLine = line.text;
+              const showInlineCursor = index === cursorRow;
+              return (
+                <Text key={`${index}-${line.prefix}-${line.text}`} color={color} bold={Boolean(text)}>
+                  <Text color={theme.muted} dimColor={!text}>
+                    {line.prefix}
+                  </Text>
+                  {showInlineCursor
+                    ? renderInlineComposerCursor(clippedLine, cursorCol, cursorBlinkOn)
+                    : clippedLine}
+                  {index === visualLines.length - 1 && ghostSuffix ? (
+                    <Text color="gray" dimColor>
+                      {ghostSuffix}
+                    </Text>
+                  ) : null}
                 </Text>
-              ) : null}
+              );
+            })}
+          </Box>
+          {showUnknownHint ? (
+            <Text color={theme.muted}>
+              {fitText(formatUnknownSlashCommand(text, view.language), composerContentWidth(composerLayout))}
             </Text>
-          );
-        })}
-      </Box>
-      {showUnknownHint ? (
-        <Text color={theme.muted}>
-          {fitText(formatUnknownSlashCommand(text, view.language), composerContentWidth(composerLayout))}
-        </Text>
-      ) : null}
-      {hintNotice ? (
-        <Text color={theme.muted}>{fitText(hintNotice, composerContentWidth(composerLayout))}</Text>
-      ) : null}
+          ) : null}
+          {hintNotice ? (
+            <Text color={theme.muted}>{fitText(hintNotice, composerContentWidth(composerLayout))}</Text>
+          ) : null}
+        </>
+      )}
     </Box>
   );
 }

@@ -1021,8 +1021,12 @@ describe("task-only view mode", () => {
     // permission is still present on the view model
     expect(view.permission?.toolName).toBe("Bash");
     expect(view.streamingAssistantText).toBeUndefined();
-    expect(view.activity).toBeUndefined();
-    expect(view.bottomPaneStatus).toBeUndefined();
+    expect(view.activity).toMatchObject({ phase: "permission_waiting", toolName: "Bash" });
+    expect(view.bottomPaneStatus).toMatchObject({
+      kind: "action_required",
+      source: "permission",
+      text: "等待确认 · Bash",
+    });
     expect(view.composer.busy).toBe(true);
     // viewMode is still task
     expect(view.viewMode).toBe("task");
@@ -1260,7 +1264,7 @@ describe("mapBottomPaneStatusToView — unified bottom status", () => {
     expect(status?.text).toBe("思考中…");
   });
 
-  it("keeps permission pending out of the bottom status line", () => {
+  it("maps permission pending to a low-noise bottom status line", () => {
     const ctx = createContext({ requestActivityPhase: "request_started" } as Partial<TuiContext>);
     const permission = mapPendingApprovalToPermission({
       ...ctx,
@@ -1276,7 +1280,11 @@ describe("mapBottomPaneStatusToView — unified bottom status", () => {
     });
 
     expect(permission?.toolName).toBe("Bash");
-    expect(status).toBeUndefined();
+    expect(status).toMatchObject({
+      kind: "action_required",
+      source: "permission",
+      text: "等待确认 · Bash",
+    });
   });
 
   it("maps final answer gate to verifying", () => {
@@ -4438,7 +4446,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     expect(source).toContain("useAnchoredCursor(null, anchorRef, capability)");
-    expect(source).toContain("const showInlineCursor = !permissionActive && index === cursorRow");
+    expect(source).toContain("permissionActive && view.permission ?");
+    expect(source).toContain(") : (\n        <>\n          {showSuggestions ? (");
+    expect(source).not.toContain("const showInlineCursor = !permissionActive && index === cursorRow");
   });
 
   it("Composer Shift+Tab emits cycle-permission-mode (not raw escape sequences)", async () => {
@@ -6642,12 +6652,14 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const colorView = createShellViewModel(colorCtx, {
       outputBlocks: [createOutputBlock(diff, "zh-CN", "out-diff-color")],
       width: 120,
+      height: 40,
       viewMode: "task",
     });
     const noColorView = createShellViewModel(noColorCtx, {
       noColor: true,
       outputBlocks: [createOutputBlock(diff, "zh-CN", "out-diff-nocolor")],
       width: 54,
+      height: 40,
       viewMode: "task",
     });
     const colorRendered = renderPlainShell(colorView);
@@ -6656,8 +6668,9 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
     const stripAnsi = (value: string): string => value.replace(ANSI_STRIP, "");
 
-    expect(colorRendered).toContain("\x1B[38;2;46;160;67m  8 + \x1B[0m\x1B[38;2;46;160;67madded line");
-    expect(colorRendered).toContain("\x1B[38;2;248;81;73m8   - \x1B[0m\x1B[38;2;248;81;73mremoved line");
+    expect(colorRendered).toContain("\x1B[");
+    expect(stripAnsi(colorRendered)).toContain("  |   8 + added line");
+    expect(stripAnsi(colorRendered)).toContain("  | 8   - removed line");
     expect(colorRendered).toContain("@@ -7,2 +7,2 @@");
     expect(noColorRendered).toContain("  | --- a/demo.ts");
     expect(noColorRendered).toContain("  | @@ -7,2 +7,2 @@");

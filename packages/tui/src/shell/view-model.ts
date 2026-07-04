@@ -491,7 +491,10 @@ export function createShellViewModel(
   const permissionView = options.permission
     ? withPermissionActions(options.permission, language, context)
     : undefined;
-  const visibleActivity = permissionView ? undefined : effectiveActivity;
+  const permissionActivity = permissionView
+    ? createPermissionWaitingActivity(context, permissionView)
+    : undefined;
+  const visibleActivity = permissionActivity ?? effectiveActivity;
   const streamingAssistantText = permissionView
     ? undefined
     : selectStreamingAssistantText(context, fullFittedBlocks);
@@ -1370,6 +1373,23 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
   };
 }
 
+function createPermissionWaitingActivity(
+  context: TuiContext,
+  permission: TaskPermissionView,
+): TaskActivityView {
+  const startedAt = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
+  return {
+    phase: "permission_waiting",
+    text:
+      context.language === "en-US"
+        ? `Waiting for approval · ${permission.toolName}`
+        : `等待确认 · ${permission.toolName}`,
+    toolName: permission.toolName,
+    elapsed: startedAt ? formatElapsedSince(new Date(startedAt).toISOString()) : undefined,
+    language: context.language,
+  };
+}
+
 export function mapBottomPaneStatusToView(
   context: TuiContext,
   input: {
@@ -1384,7 +1404,16 @@ export function mapBottomPaneStatusToView(
   const phase = (context as { requestActivityPhase?: string }).requestActivityPhase;
 
   if (input.permission) {
-    return undefined;
+    return {
+      kind: "action_required",
+      source: "permission",
+      text: isEn
+        ? `Waiting for approval · ${input.permission.toolName}`
+        : `等待确认 · ${input.permission.toolName}`,
+      reason: input.permission.actionSummary,
+      nextAction: input.permission.hint,
+      elapsed: input.activity?.elapsed,
+    };
   }
 
   if (phase === "verifying_final_answer") {

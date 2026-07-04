@@ -334,49 +334,23 @@ export async function executeModelToolUse(
   if (!toolName) {
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
   }
-  if (
+  const architectureDrift =
     !architectureDriftConfirmed &&
     context.currentArchitectureCard &&
     shouldConfirmArchitectureDriftForTool(toolName)
-  ) {
-    clearRequestActivity(context);
-    const drift = detectArchitectureDrift(context.currentArchitectureCard, {
-      toolName,
-      input: toolCall.input,
-      summary: createToolUseDriftSummary(toolName, toolCall.input),
-    });
-    if (drift.drift) {
-      const warning =
-        context.language === "en-US"
-          ? `Scope change requires confirmation before this tool use: ${drift.warnings.join("; ")}`
-          : `本次工具调用改变约定范围，需要确认后才能执行：${drift.warnings.join("；")}`;
-      await appendSystemEvent(context, sessionId, warning, "warning");
-      await appendPolicyToolFeedback(
-        context,
-        sessionId,
-        `architecture drift pending: tool ${toolName}; warnings ${drift.warnings.join("|")}`,
-        "warning",
-      );
-      writeLine(
-        output,
-        context.language === "en-US"
-          ? "This tool use changes the agreed scope. Confirm before running it."
-          : "本次工具调用会改变已约定范围。确认后才会运行本工具。",
-      );
-      context.pendingLocalApproval = {
-        kind: "architecture_drift",
-        toolCall,
-        toolName,
-        sessionId,
-        warnings: drift.warnings,
-        continuation: continuation
-          ? createSingleToolCallContinuation(continuation, toolCall)
-          : undefined,
-      };
-      return { ok: false, tool: toolName, text: warning, pendingApproval: true };
-    }
-  }
-  const permission = await decidePermission(toolName, toolCall.input, context, sessionId);
+      ? detectArchitectureDrift(context.currentArchitectureCard, {
+          toolName,
+          input: toolCall.input,
+          summary: createToolUseDriftSummary(toolName, toolCall.input),
+        })
+      : undefined;
+  const permission = await decidePermission(
+    toolName,
+    toolCall.input,
+    context,
+    sessionId,
+    architectureDrift?.drift ? { architectureDrift: { warnings: architectureDrift.warnings } } : undefined,
+  );
   await context.store.appendEvent(sessionId, {
     type: "permission_request",
     request: permission.request,
@@ -395,6 +369,20 @@ export async function executeModelToolUse(
     `permission verdict: tool ${toolName}; decision ${permission.decision}; risk ${permission.request.risk}; mode ${permission.request.mode}`,
     permission.decision === "allow" ? "info" : "warning",
   );
+  if (permission.architectureDrift) {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `architecture drift ${permission.decision}: tool ${toolName}; mode ${context.permissionMode}; warnings ${permission.architectureDrift.warnings.join("|")}`,
+      permission.decision === "allow" ? "info" : "warning",
+    );
+    await appendPolicyToolFeedback(
+      context,
+      sessionId,
+      `architecture drift ${permission.decision}: tool ${toolName}; warnings ${permission.architectureDrift.warnings.join("|")}`,
+      permission.decision === "allow" ? "info" : "warning",
+    );
+  }
   if (permission.autoAllowPolicy) {
     // Engine short-circuited this tool to an auto-allow policy path.
     // Record a structured event for transparency. Payload is sanitized: the
@@ -425,16 +413,27 @@ export async function executeModelToolUse(
       );
     }
     if (isAskWithPanel) {
-      context.pendingLocalApproval = {
-        kind: "model_tool_use",
-        toolCall,
-        toolName,
-        sessionId,
-        continuation: continuation
-          ? createSingleToolCallContinuation(continuation, toolCall)
-          : undefined,
-        verdict: permission.verdict,
-      };
+      const pendingContinuation = continuation
+        ? createSingleToolCallContinuation(continuation, toolCall)
+        : undefined;
+      context.pendingLocalApproval = permission.architectureDrift
+        ? {
+            kind: "architecture_drift",
+            toolCall,
+            toolName,
+            sessionId,
+            warnings: permission.architectureDrift.warnings,
+            continuation: pendingContinuation,
+            verdict: permission.verdict,
+          }
+        : {
+            kind: "model_tool_use",
+            toolCall,
+            toolName,
+            sessionId,
+            continuation: pendingContinuation,
+            verdict: permission.verdict,
+          };
       return { ok: false, tool: toolName, text, pendingApproval: true };
     }
     const evidence = await recordToolFailureEvidence(

@@ -67,6 +67,15 @@ export type PermissionCheck = {
    * engine 决策渲染 explanationLines，而不是 toolName 简化推断。
    */
   verdict?: PolicyVerdict;
+  architectureDrift?: PermissionArchitectureDriftSignal;
+};
+
+export type PermissionArchitectureDriftSignal = {
+  warnings: string[];
+};
+
+export type PermissionDecisionOptions = {
+  architectureDrift?: PermissionArchitectureDriftSignal;
 };
 
 export type AddAllowRuleResult =
@@ -140,6 +149,7 @@ export async function decidePermission(
   input: unknown,
   context: TuiContext,
   _sessionId: string,
+  options: PermissionDecisionOptions = {},
 ): Promise<PermissionCheck> {
   const tool = builtInTools[name];
   const files = collectInputFiles(input);
@@ -168,6 +178,7 @@ export async function decidePermission(
       request,
       decision: "allow",
       reason: "full-access 已由本地用户显式开启，TUI 权限确认已放行。",
+      architectureDrift: options.architectureDrift,
     };
   }
   if (hardDeny) {
@@ -243,6 +254,19 @@ export async function decidePermission(
     return { request, decision: "deny", reason, verdict };
   }
 
+  if (options.architectureDrift && context.permissionMode !== "auto-review") {
+    return {
+      request,
+      decision: "ask",
+      reason:
+        context.language === "en-US"
+          ? `Scope change requires confirmation before this tool use: ${options.architectureDrift.warnings.join("; ")}`
+          : `本次工具调用改变约定范围，需要确认后才能执行：${options.architectureDrift.warnings.join("；")}`,
+      verdict,
+      architectureDrift: options.architectureDrift,
+    };
+  }
+
   const rule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
   if (rule) {
     if (rule.effect === "deny") {
@@ -273,6 +297,7 @@ export async function decidePermission(
         autoAllowReadonly: verdict.decision === "auto_allow_readonly" ? verdict : undefined,
         autoAllowPolicy: verdict,
         verdict,
+        architectureDrift: options.architectureDrift,
       };
     }
     // Only non-readonly high-risk actions still ask in auto-review.
@@ -287,6 +312,7 @@ export async function decidePermission(
       decision: "allow",
       reason,
       verdict,
+      architectureDrift: options.architectureDrift,
     };
   }
 

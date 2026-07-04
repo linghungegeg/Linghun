@@ -192,6 +192,7 @@ describe("tui permission runtime — CCB-aligned modes", () => {
   it("architecture drift still confirms mutating drift before execution", async () => {
     const { context, sessionId } = await createTestContext();
     context.currentArchitectureCard = architectureCard();
+    context.isInkSession = true;
     const output = new MemoryOutput();
 
     const result = await executeModelToolUse(
@@ -210,6 +211,39 @@ describe("tui permission runtime — CCB-aligned modes", () => {
       kind: "architecture_drift",
       toolName: "Edit",
     });
+    expect(output.text).not.toContain("本次工具调用会改变已约定范围");
+    expect(output.text).not.toContain("Confirm before running it");
+  });
+
+  it("architecture drift follows permission modes for Edit", async () => {
+    for (const mode of ["auto-review", "full-access", "plan"] as const) {
+      const { context, sessionId } = await createTestContext();
+      context.permissionMode = mode;
+      context.currentArchitectureCard = architectureCard();
+      const output = new MemoryOutput();
+
+      const result = await executeModelToolUse(
+        call("Edit", {
+          path: "packages/other/src/new-runtime.ts",
+          oldText: "a",
+          newText: "b",
+        }),
+        context,
+        sessionId,
+        output,
+      );
+
+      if (mode === "plan") {
+        expect(result.pendingApproval, mode).not.toBe(true);
+        expect(result.ok, mode).toBe(false);
+        expect(context.pendingLocalApproval, mode).toBeUndefined();
+        continue;
+      }
+      expect(result.pendingApproval, mode).not.toBe(true);
+      expect(context.pendingLocalApproval, mode).toBeUndefined();
+      expect(output.text, mode).not.toContain("确认范围变化");
+      expect(output.text, mode).not.toContain("需要您授权");
+    }
   });
 
   it("auto-review skips architecture boundary confirmation for large-file edits", async () => {

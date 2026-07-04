@@ -34,7 +34,6 @@ import { continueModelAfterToolResults, handleNaturalInput } from "./model-strea
 import {
   executeApprovedIndexToolUse,
   executeApprovedModelToolUse,
-  executeModelToolUse,
   formatBoundaryEditPreflightPrompt,
   formatPlanProposal,
 } from "./model-tool-runtime.js";
@@ -515,27 +514,28 @@ export async function executePermissionApprove(
     return;
   }
   if (approval.kind === "architecture_drift") {
-    const result = await executeModelToolUse(
+    const result = await executeApprovedModelToolUse(
       approval.toolCall,
+      approval.toolName,
       context,
       approval.sessionId,
       output,
-      approval.continuation,
-      true,
+      undefined,
+      approval.continuation?.reportWriteGuard,
     );
     await recordModelToolFailureForMetaScheduler(context, approval.sessionId, result);
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
     if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
       reportWriteGuard.completed = true;
     }
-    if (gateway && approval.continuation && !result.pendingApproval) {
+    if (gateway && approval.continuation) {
       approval.continuation.messages.push({
         role: "tool",
         tool_call_id: approval.toolCall.id,
         content: JSON.stringify(result),
       });
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
-    } else if (approval.continuation && !result.pendingApproval) {
+    } else if (approval.continuation) {
       await appendApprovalContinuationWarning(
         context,
         approval.sessionId,

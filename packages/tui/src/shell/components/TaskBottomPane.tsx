@@ -144,9 +144,7 @@ export function TaskBottomPane({
   theme: ShellTheme;
 }): React.ReactNode {
   const cw = taskComposerMaxWidth(view.width);
-  const bottomPaneStatus = view.permission
-    ? undefined
-    : (view.bottomPaneStatus ?? legacyStatusFromActivity(view.activity));
+  const bottomPaneStatus = view.bottomPaneStatus ?? legacyStatusFromActivity(view.activity);
   const statusActive = isBottomPaneStatusVisible(bottomPaneStatus);
   const slashRows = Math.max(0, Math.floor(view.composerOverlayRows ?? 0));
   const slotEstimates: BottomPaneSlotEstimates = {
