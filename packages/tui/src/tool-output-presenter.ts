@@ -26,7 +26,10 @@ const RAW_TOOL_USE_PATTERNS = [
   /```(?:json|xml)?\s*[\s\S]*?\btool_use(?:_id)?\b[\s\S]*?```/giu,
   /\{[\s\S]{0,400}?"type"\s*:\s*"tool_use"[\s\S]{0,1600}?\}/giu,
 ];
+const RAW_THINKING_XML_BLOCK =
+  /(^|[\r\n])[^\S\r\n]*<thinking\b[^>]*>[\s\S]*?<\/thinking>[^\S\r\n]*(?:\r?\n)?/giu;
 const RAW_TOOL_XML_START = /<tool_use(?:_error)?\b|<tool_uses\b/iu;
+const RAW_THINKING_XML_START = /(^|[\r\n])[^\S\r\n]*<thinking\b/iu;
 const RAW_TOOL_PREFIXES = [
   "<",
   "<t",
@@ -41,6 +44,17 @@ const RAW_TOOL_PREFIXES = [
   "<tool_use_er",
   "<tool_use_err",
   "<tool_use_erro",
+];
+const RAW_THINKING_PREFIXES = [
+  "<",
+  "<t",
+  "<th",
+  "<thi",
+  "<thin",
+  "<think",
+  "<thinki",
+  "<thinkin",
+  "<thinking",
 ];
 const INTERNAL_STREAM_LABEL_REPLACEMENTS = [
   ["RunVerification", { "zh-CN": "验证命令", "en-US": "verification command" }],
@@ -57,6 +71,9 @@ export function createLayeredToolOutput(
 ): LayeredToolOutput {
   const preview = createToolOutputPreview(name, output.preview ?? output.text, language, output);
   const truncated = Boolean(preview.truncated || output.truncated);
+  const details = isEditingTool(name)
+    ? (createStructuredPatchDetails(output) ?? output.details)
+    : output.details;
   return {
     layer: "primary",
     toolName: name,
@@ -65,7 +82,7 @@ export function createLayeredToolOutput(
       language,
     ),
     preview: preview.text,
-    details: output.details,
+    details,
     truncated,
     fullOutputPath: output.fullOutputPath,
     evidenceId: evidenceId ?? output.evidenceId,
@@ -113,7 +130,9 @@ export function formatToolOutput(
 
 export function formatToolDiagnosticsSummary(output: ToolOutput): string | undefined {
   const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
-  const diagnostics = Array.isArray((metadata as { diagnostics?: unknown } | undefined)?.diagnostics)
+  const diagnostics = Array.isArray(
+    (metadata as { diagnostics?: unknown } | undefined)?.diagnostics,
+  )
     ? (metadata as { diagnostics: unknown[] }).diagnostics
     : [];
   const lines = diagnostics
@@ -158,13 +177,9 @@ function formatPrimaryToolLead(
     const removedLines = readNumber(metadata, "removedLines") ?? 0;
     const patchPart = `+${addedLines} -${removedLines}`;
     if (language === "en-US") {
-      return filePart
-        ? `${name}(${filePart}) ${patchPart}`
-        : `${name} ${patchPart}`;
+      return filePart ? `${name}(${filePart}) ${patchPart}` : `${name} ${patchPart}`;
     }
-    return filePart
-      ? `${name}(${filePart}) ${patchPart}`
-      : `${name} ${patchPart}`;
+    return filePart ? `${name}(${filePart}) ${patchPart}` : `${name} ${patchPart}`;
   }
   if (language === "en-US") {
     if (name === "Grep") return `Found **${count ?? 0}** matches.`;
@@ -213,10 +228,7 @@ function lineCount(value: string): number {
  * Bash lead line: short command summary + exit status indicator.
  * Success: "Bash(git status) ✓"  Failure: "Bash(npm test) ✗ exit 1"
  */
-function formatBashLead(
-  metadata: object | undefined,
-  language: Language,
-): string {
+function formatBashLead(metadata: object | undefined, language: Language): string {
   const command = readStringValue(metadata, "command") ?? "";
   const exitCode = readNumber(metadata, "exitCode");
   const shortCmd = command.length > 60 ? `${command.slice(0, 57)}...` : command;
@@ -227,9 +239,7 @@ function formatBashLead(
   if (exitCode === 0) {
     return `${cmdPart} ✓`;
   }
-  return language === "en-US"
-    ? `${cmdPart} ✗ exit ${exitCode}`
-    : `${cmdPart} ✗ 退出 ${exitCode}`;
+  return language === "en-US" ? `${cmdPart} ✗ exit ${exitCode}` : `${cmdPart} ✗ 退出 ${exitCode}`;
 }
 
 function formatBashEndSummary(
@@ -410,7 +420,12 @@ export function sanitizeAssistantPrimaryTextWithMetadata(
 ): { text: string; removedRawToolProtocol: boolean } {
   let sanitized = text;
   let removed = false;
+  let removedThinking = false;
   let replacedInternalLabel = false;
+  sanitized = sanitized.replace(RAW_THINKING_XML_BLOCK, (_match, leading: string) => {
+    removedThinking = true;
+    return leading ?? "";
+  });
   for (const pattern of RAW_TOOL_USE_PATTERNS) {
     sanitized = sanitized.replace(pattern, () => {
       removed = true;
@@ -425,7 +440,7 @@ export function sanitizeAssistantPrimaryTextWithMetadata(
   }
   if (!removed) {
     return {
-      text: replacedInternalLabel ? sanitized : text,
+      text: replacedInternalLabel || removedThinking ? sanitized.replace(/\n{3,}/gu, "\n\n") : text,
       removedRawToolProtocol: false,
     };
   }
@@ -448,7 +463,12 @@ export function createAssistantPrimaryTextSanitizer(language: Language): {
   function sanitizeBuffered(text: string): string {
     if (!text) return "";
     const combined = pending + text;
-    const holdAt = findPendingRawToolStart(combined) ?? findRawToolPrefixAtEnd(combined);
+    const holdAt = firstDefinedNumber(
+      findPendingRawThinkingStart(combined),
+      findPendingRawToolStart(combined),
+      findRawThinkingPrefixAtEnd(combined),
+      findRawToolPrefixAtEnd(combined),
+    );
     if (holdAt !== undefined) {
       pending = combined.slice(holdAt);
       const result = sanitizeAssistantPrimaryTextWithMetadata(combined.slice(0, holdAt), language);
@@ -491,6 +511,19 @@ function findInternalStreamLabelPrefixAtEnd(text: string): string | undefined {
   return INTERNAL_STREAM_LABEL_PREFIXES.find((prefix) => text.endsWith(prefix));
 }
 
+function firstDefinedNumber(...values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
+  if (defined.length === 0) return undefined;
+  return Math.min(...defined);
+}
+
+function findPendingRawThinkingStart(text: string): number | undefined {
+  const match = RAW_THINKING_XML_START.exec(text);
+  if (!match || match.index < 0) return undefined;
+  const tail = text.slice(match.index).toLowerCase();
+  return tail.includes("</thinking>") ? undefined : match.index;
+}
+
 function findPendingRawToolStart(text: string): number | undefined {
   const match = RAW_TOOL_XML_START.exec(text);
   if (!match || match.index < 0) return undefined;
@@ -505,6 +538,15 @@ function findPendingRawToolStart(text: string): number | undefined {
   }
   if (tail.includes("/>")) return undefined;
   return tail.includes("</tool_use>") ? undefined : start;
+}
+
+function findRawThinkingPrefixAtEnd(text: string): number | undefined {
+  for (const prefix of RAW_THINKING_PREFIXES) {
+    if (text.toLowerCase().endsWith(prefix)) {
+      return text.length - prefix.length;
+    }
+  }
+  return undefined;
 }
 
 function findRawToolPrefixAtEnd(text: string): number | undefined {
@@ -811,9 +853,7 @@ function createSummaryFirstPreview(
     text.length > 10000;
   if (hasHiddenContent) {
     const tail = name === "Bash" && !looksLikeMojibake(text) ? formatBashTail(lines, language) : [];
-    // Phase 3 — editing tools: inject compact diff fence from details so
-    // MessageMarkdown → StructuredDiff renders a visual patch preview.
-    const diffFence = isEditingTool(name) ? extractCompactDiffFence(output?.details) : "";
+    const diffFence = isEditingTool(name) ? createCompactDiffFence(output) : "";
     return {
       text: [`- ${stats.join("; ")}`, ...tail, diffFence].filter(Boolean).join("\n"),
       truncated: true,
@@ -904,11 +944,109 @@ function isEditingTool(name: ToolName): boolean {
 }
 
 /**
- * Phase 3 — extract the before/after changed-line sections from createPatchDetails()
- * output and wrap them in a ```diff fence so StructuredDiff renders automatically.
- * Caps at EDIT_DIFF_PREVIEW_LINES to keep primary output compact.
+ * Editing tools prefer structured patch hunks from ToolOutput.data. Older
+ * transcript events still fall back to the legacy details text format.
  */
 const EDIT_DIFF_PREVIEW_LINES = 24;
+
+type StructuredPatchHunk = {
+  oldStart: number;
+  newStart: number;
+  oldLines: string[];
+  newLines: string[];
+  oldLineCount: number;
+  newLineCount: number;
+  truncated?: boolean;
+};
+
+type StructuredPatchFile = {
+  path: string;
+  hunks: StructuredPatchHunk[];
+};
+
+type StructuredPatch = {
+  files: StructuredPatchFile[];
+};
+
+function createCompactDiffFence(output: ToolOutput | undefined): string {
+  const structured = extractStructuredPatch(output?.data);
+  if (structured) return structuredPatchToDiffFence(structured);
+  return extractCompactDiffFence(output?.details);
+}
+
+function createStructuredPatchDetails(output: ToolOutput | undefined): string | undefined {
+  const structured = extractStructuredPatch(output?.data);
+  if (!structured) return undefined;
+  const diff = structuredPatchToDiffFence(structured, Number.POSITIVE_INFINITY);
+  if (!diff) return undefined;
+  return output?.details ? `${output.details}\n\n${diff}` : diff;
+}
+
+function extractStructuredPatch(data: unknown): StructuredPatch | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const patch = (data as { structuredPatch?: unknown }).structuredPatch;
+  if (!patch || typeof patch !== "object") return undefined;
+  const files = (patch as { files?: unknown }).files;
+  if (!Array.isArray(files)) return undefined;
+
+  const normalizedFiles: StructuredPatchFile[] = [];
+  for (const file of files) {
+    if (!file || typeof file !== "object") continue;
+    const path =
+      typeof (file as { path?: unknown }).path === "string" ? (file as { path: string }).path : "";
+    const hunks = normalizePatchHunks((file as { hunks?: unknown }).hunks);
+    if (path && hunks.length > 0) normalizedFiles.push({ path, hunks });
+  }
+  return normalizedFiles.length > 0 ? { files: normalizedFiles } : undefined;
+}
+
+function normalizePatchHunks(value: unknown): StructuredPatchHunk[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): StructuredPatchHunk[] => {
+    if (!item || typeof item !== "object") return [];
+    const oldStart = readNumber(item, "oldStart");
+    const newStart = readNumber(item, "newStart");
+    const oldLines = readStringList(item, "oldLines");
+    const newLines = readStringList(item, "newLines");
+    if (oldStart === undefined || newStart === undefined) return [];
+    if (oldLines.length === 0 && newLines.length === 0) return [];
+    return [
+      {
+        oldStart,
+        newStart,
+        oldLines,
+        newLines,
+        oldLineCount: readNumber(item, "oldLineCount") ?? oldLines.length,
+        newLineCount: readNumber(item, "newLineCount") ?? newLines.length,
+        truncated: Boolean((item as { truncated?: unknown }).truncated),
+      },
+    ];
+  });
+}
+
+function structuredPatchToDiffFence(
+  patch: StructuredPatch,
+  maxLines = EDIT_DIFF_PREVIEW_LINES,
+): string {
+  const diffLines: string[] = [];
+  for (const file of patch.files) {
+    diffLines.push(`--- ${file.path}`);
+    diffLines.push(`+++ ${file.path}`);
+    for (const hunk of file.hunks) {
+      const oldCount = Math.max(hunk.oldLineCount, hunk.oldLines.length);
+      const newCount = Math.max(hunk.newLineCount, hunk.newLines.length);
+      diffLines.push(`@@ -${hunk.oldStart},${oldCount} +${hunk.newStart},${newCount} @@`);
+      for (const line of hunk.oldLines) diffLines.push(`-${line}`);
+      for (const line of hunk.newLines) diffLines.push(`+${line}`);
+      if (hunk.truncated) diffLines.push("... structured patch truncated ...");
+      if (diffLines.length >= maxLines) break;
+    }
+    if (diffLines.length >= maxLines) break;
+  }
+  const compact = diffLines.slice(0, maxLines);
+  if (compact.length === 0) return "";
+  return `\`\`\`diff\n${compact.join("\n")}\n\`\`\``;
+}
 
 function extractCompactDiffFence(details: string | undefined): string {
   if (!details) return "";
@@ -947,7 +1085,7 @@ function extractCompactDiffFence(details: string | undefined): string {
   }
   if (diffLines.length === 0) return "";
 
-  return "```diff\n" + diffLines.join("\n") + "\n```";
+  return `\`\`\`diff\n${diffLines.join("\n")}\n\`\`\``;
 }
 
 function looksLikeMojibake(text: string): boolean {

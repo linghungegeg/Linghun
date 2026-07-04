@@ -2092,6 +2092,7 @@ export async function* parseOpenAiStream(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let streamDone = false;
   const state: OpenAiStreamParseState = {
     pendingToolCalls: new Map(),
     pendingResponsesToolCalls: new Map(),
@@ -2102,51 +2103,63 @@ export async function* parseOpenAiStream(
     lastId: "assistant",
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) {
-      break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        streamDone = true;
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let separator = findSseEventSeparator(buffer);
+      while (separator) {
+        const eventBlock = buffer.slice(0, separator.index);
+        buffer = buffer.slice(separator.index + separator.length);
+        for (const event of parseOpenAiStreamEventBlock(eventBlock, state, endpoint)) {
+          yield event;
+        }
+        separator = findSseEventSeparator(buffer);
+      }
     }
-    buffer += decoder.decode(value, { stream: true });
-    let separator = findSseEventSeparator(buffer);
-    while (separator) {
-      const eventBlock = buffer.slice(0, separator.index);
-      buffer = buffer.slice(separator.index + separator.length);
-      for (const event of parseOpenAiStreamEventBlock(eventBlock, state, endpoint)) {
+
+    const tail = decoder.decode();
+    if (tail) {
+      buffer += tail;
+    }
+    if (buffer.trim().length > 0) {
+      for (const event of parseOpenAiStreamEventBlock(buffer, state, endpoint)) {
         yield event;
       }
-      separator = findSseEventSeparator(buffer);
     }
-  }
-
-  const tail = decoder.decode();
-  if (tail) {
-    buffer += tail;
-  }
-  if (buffer.trim().length > 0) {
-    for (const event of parseOpenAiStreamEventBlock(buffer, state, endpoint)) {
-      yield event;
+    if (state.pendingToolCalls.size > 0 || state.pendingResponsesToolCalls.size > 0) {
+      yield {
+        type: "error",
+        error: new LinghunError({
+          code: "PROVIDER_PARTIAL_TOOL_CALL",
+          message: "模型请求失败：流结束时仍有未完成的 tool call。",
+          suggestion:
+            "请重试；如持续出现，运行 /model doctor 检查 provider 的 tool calling 流式兼容性或切换 endpoint profile。",
+          recoverable: true,
+        }),
+      };
     }
-  }
-  if (state.pendingToolCalls.size > 0 || state.pendingResponsesToolCalls.size > 0) {
     yield {
-      type: "error",
-      error: new LinghunError({
-        code: "PROVIDER_PARTIAL_TOOL_CALL",
-        message: "模型请求失败：流结束时仍有未完成的 tool call。",
-        suggestion:
-          "请重试；如持续出现，运行 /model doctor 检查 provider 的 tool calling 流式兼容性或切换 endpoint profile。",
-        recoverable: true,
-      }),
+      type: "message_stop",
+      id: state.lastId,
+      finishReason: state.finishReason,
+      chunkCount: state.chunkCount,
+      hadUsage: state.hadUsage,
     };
+  } finally {
+    if (!streamDone) {
+      await reader.cancel().catch(() => undefined);
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // Reader may already be released by the runtime after cancel.
+    }
   }
-  yield {
-    type: "message_stop",
-    id: state.lastId,
-    finishReason: state.finishReason,
-    chunkCount: state.chunkCount,
-    hadUsage: state.hadUsage,
-  };
 }
 
 function findSseEventSeparator(value: string): { index: number; length: number } | undefined {
@@ -2195,6 +2208,7 @@ export async function* parseAnthropicMessagesStream(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let streamDone = false;
   const state: AnthropicStreamParseState = {
     chunkCount: 0,
     hadUsage: false,
@@ -2207,51 +2221,65 @@ export async function* parseAnthropicMessagesStream(
     pendingToolUses: new Map(),
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    // SSE 事件以 "\n\n" 分隔；按事件粒度切，避免半截 data 行解析失败。
-    let separatorIndex = buffer.indexOf("\n\n");
-    while (separatorIndex !== -1) {
-      const eventBlock = buffer.slice(0, separatorIndex);
-      buffer = buffer.slice(separatorIndex + 2);
-      for (const event of parseAnthropicMessagesEventBlock(eventBlock, state, endpoint)) {
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        streamDone = true;
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      // SSE 事件以 "\n\n" 分隔；按事件粒度切，避免半截 data 行解析失败。
+      let separatorIndex = buffer.indexOf("\n\n");
+      while (separatorIndex !== -1) {
+        const eventBlock = buffer.slice(0, separatorIndex);
+        buffer = buffer.slice(separatorIndex + 2);
+        for (const event of parseAnthropicMessagesEventBlock(eventBlock, state, endpoint)) {
+          yield event;
+        }
+        separatorIndex = buffer.indexOf("\n\n");
+      }
+    }
+
+    const tail = decoder.decode();
+    if (tail) buffer += tail;
+    if (buffer.trim().length > 0) {
+      for (const event of parseAnthropicMessagesEventBlock(buffer, state, endpoint)) {
         yield event;
       }
-      separatorIndex = buffer.indexOf("\n\n");
     }
-  }
 
-  const tail = decoder.decode();
-  if (tail) buffer += tail;
-  if (buffer.trim().length > 0) {
-    for (const event of parseAnthropicMessagesEventBlock(buffer, state, endpoint)) {
-      yield event;
+    if (state.pendingToolUses.size > 0) {
+      state.pendingToolUses.clear();
+      yield {
+        type: "error",
+        error: new LinghunError({
+          code: "PROVIDER_PARTIAL_TOOL_CALL",
+          message: "模型请求失败：Anthropic 流结束时仍有未完成的 tool_use。",
+          suggestion:
+            "请重试；如持续出现，运行 /model doctor 检查 provider 的 Anthropic Messages tool_use 流式兼容性或切换 provider/model。",
+          recoverable: true,
+        }),
+      };
     }
-  }
 
-  if (state.pendingToolUses.size > 0) {
-    state.pendingToolUses.clear();
     yield {
-      type: "error",
-      error: new LinghunError({
-        code: "PROVIDER_PARTIAL_TOOL_CALL",
-        message: "模型请求失败：Anthropic 流结束时仍有未完成的 tool_use。",
-        suggestion:
-          "请重试；如持续出现，运行 /model doctor 检查 provider 的 Anthropic Messages tool_use 流式兼容性或切换 provider/model。",
-        recoverable: true,
-      }),
+      type: "message_stop",
+      id: state.lastId,
+      finishReason: state.finishReason,
+      chunkCount: state.chunkCount,
+      hadUsage: state.hadUsage,
     };
+  } finally {
+    if (!streamDone) {
+      await reader.cancel().catch(() => undefined);
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // Reader may already be released by the runtime after cancel.
+    }
   }
-
-  yield {
-    type: "message_stop",
-    id: state.lastId,
-    finishReason: state.finishReason,
-    chunkCount: state.chunkCount,
-    hadUsage: state.hadUsage,
-  };
 }
 
 type AnthropicPendingToolUse = {

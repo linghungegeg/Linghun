@@ -108,7 +108,7 @@ export function buildExplicitDetailsCommandPanel(
     detailsParts.push(isEn ? "## Background tasks" : "## 后台任务");
     for (const t of context.backgroundTasks.slice(0, 8)) {
       detailsParts.push(
-        `- ${t.id} ${t.kind} ${t.status}: ${sanitizePanelDetailsText(t.userVisibleSummary, context.projectPath)}`,
+        `- ${safePanelText(t.id, "background-task")} ${safePanelText(t.kind, "background")} ${safePanelText(t.status, "blocked")}: ${sanitizePanelDetailsText(t.userVisibleSummary, context.projectPath)}`,
       );
     }
     if (backgroundCount > 8) {
@@ -239,8 +239,8 @@ export function buildExplicitDetailsCommandPanel(
   };
 }
 
-function sanitizePanelDetailsText(value: string, projectPath: string): string {
-  return sanitizeDiagnosticText(sanitizeDisplayPaths(value, projectPath))
+function sanitizePanelDetailsText(value: unknown, projectPath: string): string {
+  return sanitizeDiagnosticText(sanitizeDisplayPaths(safePanelText(value, "-"), projectPath))
     .replace(
       /\bno PASS evidence generated\b/giu,
       "no evidence that verification passed was generated",
@@ -249,14 +249,20 @@ function sanitizePanelDetailsText(value: string, projectPath: string): string {
     .replace(/\bpassEvidence\b/gu, "pass evidence");
 }
 
-function sanitizeCompactDetailsText(value: string, projectPath: string): string {
-  return sanitizeDiagnosticText(sanitizeDisplayPaths(value, projectPath))
+function sanitizeCompactDetailsText(value: unknown, projectPath: string): string {
+  return sanitizeDiagnosticText(sanitizeDisplayPaths(safePanelText(value, "-"), projectPath))
     .replace(
       /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
       (_match, key: string, sep: string) => `${key}${sep}***`,
     )
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
     .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
+}
+
+function safePanelText(value: unknown, fallback: string): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
 }
 
 export function showCommandPanel(

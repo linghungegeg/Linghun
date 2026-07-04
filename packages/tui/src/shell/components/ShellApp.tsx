@@ -1,13 +1,16 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { resolveAlternateScreen } from "../ink-renderer.js";
+import {
+  nativeScrollbackTaskFrameHasContent,
+  nativeScrollbackTaskFrameHeight,
+  shouldUseNativeScrollbackTaskFrame,
+} from "../native-scrollback-frame.js";
 import type { TerminalCapability } from "../terminal-capability.js";
-import { brandWordmark, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
+import { taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
 import type { ShellController, ShellViewModel, TaskActivityView } from "../types.js";
-import { AgentProgressTree } from "./AgentProgressTree.js";
-import { BackgroundTaskOverlay } from "./BackgroundTaskOverlay.js";
 import { BtwPanel } from "./BtwPanel.js";
 import { CommandPanel } from "./CommandPanel.js";
 import { Composer, type ComposerLayout } from "./Composer.js";
@@ -15,24 +18,23 @@ import { ConfigPanel } from "./ConfigPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
 import { StreamingMarkdown } from "./MessageMarkdown.js";
 import { MouseInputRouter } from "./MouseInputRouter.js";
-import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
 import { TranscriptViewport } from "./ScrollViewport.js";
 import { SessionsPanel } from "./SessionsPanel.js";
-import { StatusFooter } from "./StatusFooter.js";
-import { StatusTray } from "./StatusTray.js";
-import { TaskListView } from "./TaskListView.js";
+import { TaskBottomPane } from "./TaskBottomPane.js";
 import { TaskSuggestionBar } from "./TaskSuggestionBar.js";
 import { UnseenMessagePill } from "./UnseenMessagePill.js";
-import { WorkflowProgressView } from "./WorkflowProgressView.js";
 
 export function ShellApp({
   controller,
   capability,
+  renderTick,
 }: {
   controller: ShellController;
   capability: TerminalCapability;
+  renderTick?: number;
 }): React.ReactNode {
+  void renderTick;
   const view = controller.getViewModel();
   const theme = useMemo(() => createShellTheme(view.themeMode === "no-color"), [view.themeMode]);
 
@@ -43,46 +45,16 @@ export function ShellApp({
   // any terminal cells.
   const panel = resolvePanel(view, controller, view.width, view.themeMode === "no-color");
   if (panel) {
-    const cardWidth = Math.min(view.width - 4, 80);
     return (
       <Box
         width={view.width}
         height={view.height}
         flexDirection="column"
         backgroundColor={theme.background}
-        alignItems="center"
       >
-        <Box flexGrow={1} minHeight={0} />
-        <Box flexShrink={0} width={cardWidth}>
-          <Text color={theme.dim ?? theme.muted} dimColor>
-            {"─".repeat(cardWidth)}
-          </Text>
-        </Box>
-        <Box
-          flexDirection="column"
-          paddingTop={1}
-          flexShrink={1}
-          overflow="hidden"
-          width={cardWidth}
-        >
+        <Box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden" width={view.width}>
           {panel}
         </Box>
-        <Box flexShrink={0} width={cardWidth}>
-          <Text color={theme.dim ?? theme.muted} dimColor>
-            {"─".repeat(cardWidth)}
-          </Text>
-        </Box>
-        <Box flexGrow={1} minHeight={0} />
-        {view.taskFooter ? (
-          <StatusFooter
-            footer={view.taskFooter}
-            theme={theme}
-            width={view.width}
-            language={view.language}
-            modelDim={view.taskFooter.modelDim}
-            cacheTone={view.taskFooter.cacheTone}
-          />
-        ) : null}
         {/* Headless Composer — keyboard routing only, zero visual footprint. */}
         <Box height={0} overflow="hidden">
           <Composer
@@ -96,101 +68,7 @@ export function ShellApp({
     );
   }
 
-  if (view.viewMode === "task" || view.viewMode === "pending") {
-    return <TaskLayout view={view} theme={theme} controller={controller} capability={capability} />;
-  }
-  return <HomeLayout view={view} theme={theme} controller={controller} capability={capability} />;
-}
-
-function HomeLayout({
-  view,
-  theme,
-  controller,
-  capability,
-}: {
-  view: ShellViewModel;
-  theme: ReturnType<typeof createShellTheme>;
-  controller: ShellController;
-  capability: TerminalCapability;
-}): React.ReactNode {
-  const noColor = view.themeMode === "no-color";
-  const cw = composerMaxWidth(view.width);
-  const brandLines = brandWordmark(noColor, view.width, capability);
-
-  return (
-    <Box
-      flexDirection="column"
-      width={view.width}
-      height={view.height}
-      alignItems="center"
-      justifyContent="center"
-    >
-      <Box flexGrow={1} minHeight={0} />
-
-      {/* Brand wordmark: ASCII-safe on legacy terminals */}
-      <Box flexDirection="column" alignItems="center">
-        {brandLines.map((line) => (
-          <Text key={line || "empty"} color={theme.brand} bold>
-            {line}
-          </Text>
-        ))}
-      </Box>
-
-      {view.homeVision ? (
-        <Box marginTop={1} justifyContent="center">
-          <Text color={theme.muted}>{fitText(view.homeVision, cw - 2)}</Text>
-        </Box>
-      ) : null}
-
-      {/* Setup hint (if needed) */}
-      {view.setupHint ? (
-        <Box marginTop={1} justifyContent="center" width={cw}>
-          <Text color={theme.warning}>{fitText(view.setupHint, cw - 2)}</Text>
-        </Box>
-      ) : null}
-
-      {/* Composer: single cursor owner */}
-      <Box marginTop={1} flexDirection="column" width={cw}>
-        <Composer
-          view={view}
-          onInput={controller.onInput}
-          capability={capability}
-          layout={homeComposerLayout(view.width)}
-        />
-      </Box>
-
-      {/* Status tray */}
-      <Box marginTop={1} justifyContent="center">
-        <StatusTray status={view.status} theme={theme} width={view.width} />
-      </Box>
-
-      {view.blocks.length > 0 ? (
-        <Box flexDirection="column" marginTop={1} width={cw}>
-          {view.blocks.map((block) => (
-            <ProductBlock
-              key={block.id}
-              block={block}
-              theme={theme}
-              width={cw}
-              language={view.language}
-            />
-          ))}
-        </Box>
-      ) : null}
-
-      {view.limitations.length > 0 ? (
-        <Box flexDirection="column" marginTop={1} width={cw}>
-          {view.limitations.map((item) => (
-            <Text key={item} color={theme.muted}>
-              {item}
-            </Text>
-          ))}
-        </Box>
-      ) : null}
-
-      <Box flexGrow={2} minHeight={0} />
-    </Box>
-  );
+  return <TaskLayout view={view} theme={theme} controller={controller} capability={capability} />;
 }
 
 /**
@@ -226,114 +104,118 @@ function TaskLayout({
   capability: TerminalCapability;
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
-  const cw = taskComposerMaxWidth(view.width);
   const contentWidth = taskContentWidth(view.width);
-  const mouseRouterActive = resolveAlternateScreen(capability);
+  const appOwnedScreen = resolveAlternateScreen(capability);
+  const normalScreenNativeScrollback = !appOwnedScreen && shouldUseNativeScrollbackTaskFrame();
+  const nativeFrameHasContent = nativeScrollbackTaskFrameHasContent(view);
+  const normalScreenWheel = !appOwnedScreen && capability.cursorPositioning && process.env.LINGHUN_TUI_MOUSE === "1";
+  const frameHeight = normalScreenNativeScrollback
+    ? nativeScrollbackTaskFrameHeight(view)
+    : view.height;
+  const terminalFrameTop = normalScreenNativeScrollback
+    ? Math.max(0, view.height - frameHeight)
+    : 0;
+  const wheelRouterActive = appOwnedScreen || normalScreenWheel;
+  const mouseSelectionActive = process.env.LINGHUN_TUI_MOUSE_SELECTION === "1";
+  const transcriptBlocks = mergeTranscriptBlocks(view.staticHistoryBlocks ?? [], view.blocks);
+  const visibleTranscriptBlocks = normalScreenNativeScrollback
+    ? view.blocks
+    : transcriptBlocks;
   const expandedTranscriptBlock =
     view.ctrlOExpand?.active && view.ctrlOExpand.blockId
-      ? view.blocks.find((block) => block.id === view.ctrlOExpand?.blockId)
+      ? visibleTranscriptBlocks.find((block) => block.id === view.ctrlOExpand?.blockId)
       : undefined;
 
-  // Periodic re-render tick: when agent/workflow progress is visible, force
-  // re-renders so eviction timers fire and completed items disappear.
-  const [, setTick] = useState(0);
+  // Shared local pulse for task progress eviction and activity animation. Keep
+  // these React-owned refreshes on one interval so they do not compete while
+  // transcript streaming/scrolling is also requesting frames through the shell.
+  const [framePulse, setFramePulse] = useState(0);
   const hasProgress = !!(view.agentProgressTree || view.workflowProgressView);
+  const hasAnimatedActivity =
+    !!view.activity &&
+    view.activity.phase !== "completed" &&
+    view.activity.phase !== "error" &&
+    view.activity.phase !== "permission_waiting";
   useEffect(() => {
-    if (!hasProgress) return;
-    const timer = setInterval(() => setTick((t) => t + 1), 1000);
+    if (!hasProgress && !hasAnimatedActivity) return;
+    const intervalMs = hasAnimatedActivity ? 100 : 1000;
+    const timer = setInterval(() => setFramePulse((frame) => frame + 1), intervalMs);
     return () => clearInterval(timer);
-  }, [hasProgress]);
+  }, [hasProgress, hasAnimatedActivity]);
 
   return (
-    <Box flexDirection="column" width={view.width} height={view.height}>
+    <Box flexDirection="column" width={view.width} height={frameHeight}>
       {/* Single dynamic transcript surface: resize must reflow every visible block without replaying Static output. */}
-      <Box flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
-        <MouseInputRouter
-          active={mouseRouterActive}
-          scroll={view.transcriptScroll}
-          onInput={controller.onInput}
-        />
-        <TranscriptViewport
-          scroll={view.transcriptScroll}
-          virtualRange={view.transcriptVirtualRange}
-          onMeasure={({ viewportHeight, contentHeight }) =>
-            controller.onInput({ type: "transcript-scroll-measure", viewportHeight, contentHeight })
-          }
-          onGeometry={(geometry) =>
-            controller.onInput({ type: "transcript-viewport-geometry", geometry })
-          }
-        >
-          <Box flexDirection="column" paddingX={2}>
-            {expandedTranscriptBlock ? (
-              <Box flexDirection="column" marginBottom={1}>
-                <ProductBlock
-                  block={{ ...expandedTranscriptBlock, ctrlOCollapsed: false }}
-                  theme={theme}
-                  width={contentWidth}
-                  language={view.language}
-                />
-              </Box>
-            ) : view.blocks.length > 0 ? (
-              <Box flexDirection="column">
-                {view.blocks.map((block) => (
-                  <ProductBlock
-                    key={block.id}
-                    block={block}
-                    theme={theme}
-                    width={contentWidth}
-                    language={view.language}
-                  />
-                ))}
-              </Box>
-            ) : null}
-
-            {view.streamingAssistantText ? (
-              <Box marginTop={expandedTranscriptBlock || view.blocks.length > 0 ? 1 : 0}>
-                <StreamingMarkdown
-                  text={view.streamingAssistantText}
-                  theme={theme}
-                  wrapWidth={contentWidth}
-                />
-              </Box>
-            ) : null}
-
-            {view.activity ? (
-              <Box
-                marginTop={
-                  expandedTranscriptBlock || view.blocks.length > 0 || view.streamingAssistantText
-                    ? 1
-                    : 0
-                }
-              >
-                <ActivityIndicator
-                  activity={view.activity}
-                  theme={theme}
-                  width={contentWidth}
-                  tokenCount={estimateStreamingTokens(view.streamingAssistantText)}
-                />
-              </Box>
-            ) : null}
-
-            {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
-              <TaskSuggestionBar
-                suggestions={view.taskSuggestions}
-                cursor={view.taskSuggestionCursor ?? 0}
-                width={view.width}
-                noColor={noColor}
-              />
-            ) : null}
-
-            {view.limitations.length > 0 ? (
-              <Box flexDirection="column" marginTop={1}>
-                {view.limitations.map((item) => (
-                  <Text key={item} color={theme.muted}>
-                    {item}
-                  </Text>
-                ))}
-              </Box>
-            ) : null}
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        minHeight={0}
+        overflow="hidden"
+        justifyContent={normalScreenNativeScrollback && nativeFrameHasContent ? "flex-end" : undefined}
+      >
+        {normalScreenNativeScrollback ? null : (
+          <MouseInputRouter
+            wheelActive={wheelRouterActive}
+            mouseActive={appOwnedScreen}
+            selectionActive={mouseSelectionActive}
+            scroll={view.transcriptScroll}
+            onInput={controller.onInput}
+          />
+        )}
+        {normalScreenNativeScrollback ? (
+          <Box flexDirection="column" flexShrink={0} paddingX={2} paddingTop={1}>
+            <TaskActivityRegion
+              activity={undefined}
+              expandedTranscriptBlock={expandedTranscriptBlock}
+              framePulse={framePulse}
+              limitations={view.limitations}
+              noColor={noColor}
+              streamingAssistantText={view.streamingAssistantText}
+              language={view.language}
+              taskSuggestions={view.taskSuggestions}
+              taskSuggestionCursor={view.taskSuggestionCursor}
+              theme={theme}
+              transcriptBlocks={visibleTranscriptBlocks}
+              viewWidth={view.width}
+              contentWidth={contentWidth}
+            />
           </Box>
-        </TranscriptViewport>
+        ) : (
+          <TranscriptViewport
+            scroll={view.transcriptScroll}
+            virtualRange={view.transcriptVirtualRange}
+            onMeasure={({ viewportHeight, contentHeight }) =>
+              controller.onInput({ type: "transcript-scroll-measure", viewportHeight, contentHeight })
+            }
+            onGeometry={(geometry) => {
+              controller.onInput({
+                type: "transcript-viewport-geometry",
+                geometry:
+                  terminalFrameTop > 0
+                    ? { ...geometry, y: geometry.y + terminalFrameTop }
+                    : geometry,
+              });
+            }}
+          >
+            <Box flexDirection="column" paddingX={2}>
+              <TaskActivityRegion
+                activity={view.activity}
+                expandedTranscriptBlock={expandedTranscriptBlock}
+                framePulse={framePulse}
+                limitations={view.limitations}
+                noColor={noColor}
+                streamingAssistantText={view.streamingAssistantText}
+                language={view.language}
+                taskSuggestions={view.taskSuggestions}
+                taskSuggestionCursor={view.taskSuggestionCursor}
+                theme={theme}
+                transcriptBlocks={visibleTranscriptBlocks}
+                viewWidth={view.width}
+                contentWidth={contentWidth}
+              />
+            </Box>
+          </TranscriptViewport>
+        )}
         {view.unseenMessageCount && view.unseenMessageCount > 0 ? (
           <UnseenMessagePill
             count={view.unseenMessageCount}
@@ -343,90 +225,15 @@ function TaskLayout({
         ) : null}
       </Box>
 
-      {/* Composer band — pinned to terminal bottom */}
-      <Box flexShrink={0} flexDirection="column">
-        {view.backgroundTaskOverlay && !view.permission ? (
-          <BackgroundTaskOverlay
-            overlay={view.backgroundTaskOverlay}
-            width={contentWidth}
-            noColor={noColor}
-          />
-        ) : null}
-        {/* P1-7: ConfigPanel as overlay, preserving scroll ability */}
-        {view.configPanel ? (
-          <ConfigPanel
-            panel={view.configPanel}
-            controller={controller}
-            width={view.width}
-            noColor={noColor}
-            language={view.language}
-          />
-        ) : null}
-        <NotificationStack notifications={view.notifications} theme={theme} />
-        {view.taskRuntimeSummary ? (
-          <Box width={cw} marginTop={1}>
-            <ProductBlock
-              block={view.taskRuntimeSummary}
-              theme={theme}
-              width={cw}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
-        {view.taskListView ? (
-          <Box paddingX={2} marginBottom={1}>
-            <TaskListView
-              list={view.taskListView}
-              width={contentWidth}
-              noColor={noColor}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
-        {view.agentProgressTree ? (
-          <Box width={view.width} paddingX={2}>
-            <AgentProgressTree
-              tree={view.agentProgressTree}
-              width={contentWidth}
-              noColor={noColor}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
-        {view.workflowProgressView ? (
-          <Box width={view.width} paddingX={2}>
-            <WorkflowProgressView
-              workflow={view.workflowProgressView}
-              width={contentWidth}
-              noColor={noColor}
-              language={view.language}
-            />
-          </Box>
-        ) : null}
-
-        <Box flexDirection="column" width={cw} paddingTop={1}>
-          <Composer
-            view={view}
-            onInput={controller.onInput}
-            capability={capability}
-            layout={taskComposerLayout(view.width)}
-          />
-        </Box>
-
-        {view.taskFooter ? (
-          <StatusFooter
-            footer={view.taskFooter}
-            theme={theme}
-            width={view.width}
-            language={view.language}
-            modelDim={view.taskFooter.modelDim}
-            cacheTone={view.taskFooter.cacheTone}
-          />
-        ) : null}
-      </Box>
+      <TaskBottomPane
+        view={view}
+        controller={controller}
+        capability={capability}
+        frameHeight={frameHeight}
+        contentWidth={contentWidth}
+        noColor={noColor}
+        theme={theme}
+      />
     </Box>
   );
 }
@@ -438,14 +245,105 @@ function taskContentWidth(viewWidth: number): number {
   return Math.max(8, viewWidth - 4);
 }
 
-function homeComposerLayout(viewWidth: number): ComposerLayout {
-  return {
-    width: composerMaxWidth(viewWidth),
-    paddingLeft: 2,
-    paddingRight: 2,
-    prefixWidth: 2,
-    minContentWidth: 4,
-  };
+function TaskActivityRegion({
+  activity,
+  contentWidth,
+  expandedTranscriptBlock,
+  framePulse,
+  limitations,
+  language,
+  noColor,
+  streamingAssistantText,
+  taskSuggestions,
+  taskSuggestionCursor,
+  theme,
+  transcriptBlocks,
+  viewWidth,
+}: {
+  activity: ShellViewModel["activity"];
+  contentWidth: number;
+  expandedTranscriptBlock: ShellViewModel["blocks"][number] | undefined;
+  framePulse: number;
+  limitations: ShellViewModel["limitations"];
+  language: ShellViewModel["language"];
+  noColor: boolean;
+  streamingAssistantText: ShellViewModel["streamingAssistantText"];
+  taskSuggestions: ShellViewModel["taskSuggestions"];
+  taskSuggestionCursor: ShellViewModel["taskSuggestionCursor"];
+  theme: ReturnType<typeof createShellTheme>;
+  transcriptBlocks: ShellViewModel["blocks"];
+  viewWidth: number;
+}): React.ReactNode {
+  const hasTranscript = Boolean(expandedTranscriptBlock || transcriptBlocks.length > 0);
+  const hasStreaming = Boolean(streamingAssistantText);
+
+  return (
+    <>
+      {expandedTranscriptBlock ? (
+        <Box flexDirection="column" marginBottom={1}>
+          <ProductBlock
+            block={{ ...expandedTranscriptBlock, ctrlOCollapsed: false }}
+            theme={theme}
+            width={contentWidth}
+            language={language}
+          />
+        </Box>
+      ) : transcriptBlocks.length > 0 ? (
+        <Box flexDirection="column">
+          {transcriptBlocks.map((block) => (
+            <ProductBlock
+              key={block.id}
+              block={block}
+              theme={theme}
+              width={contentWidth}
+              language={language}
+            />
+          ))}
+        </Box>
+      ) : null}
+
+      {streamingAssistantText ? (
+        <Box marginTop={1}>
+          <StreamingMarkdown
+            text={streamingAssistantText}
+            theme={theme}
+            wrapWidth={contentWidth}
+          />
+        </Box>
+      ) : null}
+
+      {activity ? (
+        <Box marginTop={1}>
+          <ActivityIndicator
+            activity={activity}
+            theme={theme}
+            width={contentWidth}
+            frame={framePulse}
+            tokenCount={estimateStreamingTokens(streamingAssistantText)}
+          />
+        </Box>
+      ) : null}
+
+      {taskSuggestions && taskSuggestions.length > 0 ? (
+        <TaskSuggestionBar
+          suggestions={taskSuggestions}
+          cursor={taskSuggestionCursor ?? 0}
+          width={viewWidth}
+          noColor={noColor}
+        />
+      ) : null}
+
+      {limitations.length > 0 ? (
+        <Box flexDirection="column" marginTop={1}>
+          {limitations.map((item) => (
+            <Text key={item} color={theme.muted}>
+              {item}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
+    </>
+  );
 }
 
 function taskComposerLayout(viewWidth: number): ComposerLayout {
@@ -499,7 +397,17 @@ function resolvePanel(
       />
     );
   }
-  // P1-7: ConfigPanel moved to overlay mode, no longer fullscreen
+  if (view.configPanel) {
+    return (
+      <ConfigPanel
+        panel={view.configPanel}
+        controller={controller}
+        width={width}
+        noColor={noColor}
+        language={view.language}
+      />
+    );
+  }
   if (view.commandPanel) {
     return (
       <CommandPanel
@@ -514,18 +422,32 @@ function resolvePanel(
   return null;
 }
 
+function mergeTranscriptBlocks(
+  staticHistoryBlocks: ShellViewModel["staticHistoryBlocks"],
+  liveBlocks: ShellViewModel["blocks"],
+): ShellViewModel["blocks"] {
+  if (!staticHistoryBlocks || staticHistoryBlocks.length === 0) return liveBlocks;
+  if (liveBlocks.length === 0) return staticHistoryBlocks;
+  const seen = new Set(staticHistoryBlocks.map((block) => block.id));
+  const liveOnlyBlocks = liveBlocks.filter((block) => !seen.has(block.id));
+  return liveOnlyBlocks.length > 0
+    ? [...staticHistoryBlocks, ...liveOnlyBlocks]
+    : staticHistoryBlocks;
+}
+
 function ActivityIndicator({
   activity,
   theme,
   width,
+  frame,
   tokenCount,
 }: {
   activity: TaskActivityView;
   theme: ReturnType<typeof createShellTheme>;
   width: number;
+  frame: number;
   tokenCount?: number;
 }): React.ReactNode {
-  const [frame, setFrame] = useState(0);
   // Auto-hide completed/error terminal phases after 1.2s so the indicator
   // doesn't linger once the answer is already visible in the transcript.
   const [hidden, setHidden] = useState(false);
@@ -536,18 +458,6 @@ function ActivityIndicator({
     }
     setHidden(false);
     return;
-  }, [activity.phase]);
-
-  useEffect(() => {
-    if (
-      activity.phase === "completed" ||
-      activity.phase === "error" ||
-      activity.phase === "permission_waiting"
-    ) {
-      return;
-    }
-    const timer = setInterval(() => setFrame((current) => current + 1), 100);
-    return () => clearInterval(timer);
   }, [activity.phase]);
 
   if (hidden) return null;

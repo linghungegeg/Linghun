@@ -405,6 +405,10 @@ describe("permission-continuation-runtime", () => {
       it("returns undefined for non-report request", () => {
         expect(createReportWriteGuard("帮我看看代码")).toBeUndefined();
       });
+
+      it("does not invent report.md when the markdown target is not parseable", () => {
+        expect(createReportWriteGuard("生成报告保存为 .md")).toBeUndefined();
+      });
     });
 
     describe("isReportFileWriteRequest", () => {
@@ -463,7 +467,7 @@ describe("permission-continuation-runtime", () => {
     });
 
     describe("shouldSendReportEvidenceReminder", () => {
-      it("returns true when guard needs evidence", () => {
+      it("does not force an evidence reminder before writing", () => {
         const guard: ReportWriteGuard = {
           requestedPath: "r.md",
           pathExplicit: true,
@@ -474,7 +478,7 @@ describe("permission-continuation-runtime", () => {
           nonWriteToolRounds: 0,
           evidenceRead: false,
         };
-        expect(shouldSendReportEvidenceReminder(guard)).toBe(true);
+        expect(shouldSendReportEvidenceReminder(guard)).toBe(false);
       });
 
       it("returns false when evidence already read", () => {
@@ -497,7 +501,7 @@ describe("permission-continuation-runtime", () => {
     });
 
     describe("shouldSendReportWriteReminder", () => {
-      it("returns true when evidence read but not completed", () => {
+      it("returns true when not completed even without evidence", () => {
         const guard: ReportWriteGuard = {
           requestedPath: "r.md",
           pathExplicit: true,
@@ -506,7 +510,7 @@ describe("permission-continuation-runtime", () => {
           evidenceReminderSent: true,
           finalReferenceReminderSent: false,
           nonWriteToolRounds: 0,
-          evidenceRead: true,
+          evidenceRead: false,
         };
         expect(shouldSendReportWriteReminder(guard)).toBe(true);
       });
@@ -632,6 +636,48 @@ describe("permission-continuation-runtime", () => {
         );
       });
 
+      it("returns true when Edit matches guard path", () => {
+        const guard: ReportWriteGuard = {
+          requestedPath: "report.md",
+          pathExplicit: true,
+          completed: false,
+          reminderSent: false,
+          evidenceReminderSent: false,
+          finalReferenceReminderSent: false,
+          nonWriteToolRounds: 0,
+          evidenceRead: false,
+        };
+        const toolCall = {
+          id: "tc1",
+          name: "Edit",
+          input: { path: "report.md", oldText: "draft", newText: "final" },
+        };
+        expect(doesWriteSatisfyReportGuard(guard, toolCall, { ok: true, tool: "Edit" })).toBe(
+          true,
+        );
+      });
+
+      it("returns true when WriteReport delegates to a matching Write", () => {
+        const guard: ReportWriteGuard = {
+          requestedPath: "report.md",
+          pathExplicit: true,
+          completed: false,
+          reminderSent: false,
+          evidenceReminderSent: false,
+          finalReferenceReminderSent: false,
+          nonWriteToolRounds: 0,
+          evidenceRead: false,
+        };
+        const toolCall = {
+          id: "tc1",
+          name: "WriteReport",
+          input: { path: "report.md", content: "x" },
+        };
+        expect(doesWriteSatisfyReportGuard(guard, toolCall, { ok: true, tool: "Write" })).toBe(
+          true,
+        );
+      });
+
       it("returns false when result not ok", () => {
         const guard: ReportWriteGuard = {
           requestedPath: "report.md",
@@ -670,6 +716,44 @@ describe("permission-continuation-runtime", () => {
           evidenceRead: true,
         };
         const calls = [{ id: "tc1", name: "Write", input: { path: "report.md", content: "x" } }];
+        expect(hasReportWriteToolCall(guard, calls)).toBe(true);
+      });
+
+      it("matches explicit path through MultiEdit", () => {
+        const guard: ReportWriteGuard = {
+          requestedPath: "report.md",
+          pathExplicit: true,
+          completed: false,
+          reminderSent: false,
+          evidenceReminderSent: false,
+          finalReferenceReminderSent: false,
+          nonWriteToolRounds: 0,
+          evidenceRead: false,
+        };
+        const calls = [
+          {
+            id: "tc1",
+            name: "MultiEdit",
+            input: { path: "report.md", edits: [{ oldText: "draft", newText: "final" }] },
+          },
+        ];
+        expect(hasReportWriteToolCall(guard, calls)).toBe(true);
+      });
+
+      it("matches explicit path through WriteReport", () => {
+        const guard: ReportWriteGuard = {
+          requestedPath: "report.md",
+          pathExplicit: true,
+          completed: false,
+          reminderSent: false,
+          evidenceReminderSent: false,
+          finalReferenceReminderSent: false,
+          nonWriteToolRounds: 0,
+          evidenceRead: false,
+        };
+        const calls = [
+          { id: "tc1", name: "WriteReport", input: { path: "report.md", content: "x" } },
+        ];
         expect(hasReportWriteToolCall(guard, calls)).toBe(true);
       });
 

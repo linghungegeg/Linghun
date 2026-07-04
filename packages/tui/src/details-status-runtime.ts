@@ -8,6 +8,7 @@ import { calculateContextPercentages } from "./context-window-runtime.js";
 import { formatBackgroundDetails, formatBackgroundOutputDetails } from "./job-runner-presenter.js";
 import { formatLogArtifactSlice, readLogArtifactSlice } from "./log-artifact.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
+import { readRuntimeLedgerRecords, type RuntimeLedgerRecord } from "./runtime-storage.js";
 import type { BackgroundTaskSummary, CommandPanelSection, CommandPanelView, ProductBlockViewModel } from "./shell/types.js";
 import { formatModeBehavior } from "./slash-dispatch.js";
 import { formatError, writeLine } from "./startup-runtime.js";
@@ -31,7 +32,12 @@ import { messages } from "./tui-messages.js";
 import { getRuntimeStatusProvider, getSelectedModelRuntime } from "./tui-model-runtime.js";
 import { formatEstimatedCny, sumCacheHistory, sumRoleUsageEstimatedCny } from "./usage-stats-presenter.js";
 import { hydrateWorkflowRuns } from "./workflow-command-runtime.js";
-import { createShellBlockOutputForTest, writeErrorLine } from "./tui-output-surface.js";
+import {
+  type AssistantStreamOptions,
+  createShellBlockOutputForTest,
+  type TerminalFirstAssistantSink,
+  writeErrorLine,
+} from "./tui-output-surface.js";
 
 // Module 4 — upsertJobBackgroundTask / createJobBackgroundTask /
 // toJobContext / listDurableJobs / findDurableJob / getDurableJobsRoot /
@@ -60,6 +66,10 @@ async function runDetailsCommandBody(
 ): Promise<void> {
   const action = args[0];
   const id = args[1];
+  if (action === "ledger" || action === "runtime") {
+    writeLine(output, await formatRuntimeLedgerDetails(context));
+    return;
+  }
   if (action === "evidence") {
     const evidence = findEvidence(context, id);
     writeLine(
@@ -119,7 +129,7 @@ async function runDetailsCommandBody(
   if (action && action !== "list") {
     writeLine(
       output,
-      "用法：/details | /details evidence <id> | /details background <id> | /details output <id>",
+      "用法：/details | /details ledger | /details evidence <id> | /details background <id> | /details output <id>",
     );
     return;
   }
@@ -133,6 +143,53 @@ async function runDetailsCommandBody(
     return;
   }
   showCommandPanel(context, output, panel);
+}
+
+async function formatRuntimeLedgerDetails(context: TuiContext): Promise<string> {
+  const result = await readRuntimeLedgerRecords(context.memory.sessionDir);
+  if (result.records.length === 0) {
+    return context.language === "en-US"
+      ? "Runtime ledger is empty for the current session."
+      : "当前会话 runtime ledger 为空。";
+  }
+  const recent = result.records.slice(-12);
+  const counts = countRuntimeLedgerKinds(result.records);
+  const lines = [
+    context.language === "en-US" ? "Runtime ledger" : "运行时账本",
+    `- total: ${result.records.length}`,
+    `- kinds: ${Array.from(counts.entries()).map(([kind, count]) => `${kind}=${count}`).join(", ")}`,
+    ...(result.diagnostics.length > 0
+      ? [`- diagnostics: ${result.diagnostics.length} malformed line(s) skipped`]
+      : []),
+    context.language === "en-US" ? "Recent records:" : "最近记录：",
+    ...recent.map((record) => `- ${formatRuntimeLedgerRecord(record)}`),
+  ];
+  return lines.join("\n");
+}
+
+function countRuntimeLedgerKinds(records: RuntimeLedgerRecord[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const record of records) {
+    counts.set(record.kind, (counts.get(record.kind) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function formatRuntimeLedgerRecord(record: RuntimeLedgerRecord): string {
+  return [
+    record.kind,
+    record.status ? `status=${record.status}` : "",
+    record.evidenceId ? `evidence=${record.evidenceId}` : "",
+    record.verificationId ? `verification=${record.verificationId}` : "",
+    record.jobId ? `job=${record.jobId}` : "",
+    record.agentId ? `agent=${record.agentId}` : "",
+    record.workflowId ? `workflow=${record.workflowId}` : "",
+    record.handoffId ? `handoff=${record.handoffId}` : "",
+    record.artifactPath ? `artifact=${basename(record.artifactPath)}` : "",
+    record.summary ? `summary=${record.summary}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 async function findDurableBackgroundTask(
@@ -474,8 +531,9 @@ export function __testCreateShellBlockOutput(
   context: TuiContext,
   blocks: ProductBlockViewModel[],
   onWrite: () => void = () => {},
+  terminalFirstAssistantSink?: TerminalFirstAssistantSink,
 ): Writable & {
-  beginAssistantStream(id: string): void;
+  beginAssistantStream(id: string, options?: AssistantStreamOptions): void;
   appendAssistantDelta(text: string): void;
   endAssistantStream(): void;
   // D.13V — 暴露 retry/downgrade 路径上的 streaming block 操作，便于单测验证
@@ -484,7 +542,7 @@ export function __testCreateShellBlockOutput(
   replaceAssistantBlockContent(id: string, text: string): void;
   compactOutputMemory(): Promise<void>;
 } {
-  return createShellBlockOutputForTest(context, blocks, onWrite);
+  return createShellBlockOutputForTest(context, blocks, onWrite, terminalFirstAssistantSink);
 }
 
 /**

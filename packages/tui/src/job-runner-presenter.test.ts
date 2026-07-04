@@ -248,6 +248,29 @@ describe("job runner presenters", () => {
     expect(details).toContain("- details: /details background job-test");
   });
 
+  it("formats malformed blocked background task records without throwing", () => {
+    const malformed = {
+      id: "blocked-old",
+      status: "blocked",
+      startedAt: "not-a-date",
+      updatedAt: "not-a-date",
+      staleAfterMs: 60_000,
+      heartbeatIntervalMs: 30_000,
+    } as Partial<BackgroundTaskState> as BackgroundTaskState;
+
+    expect(() => formatBackgroundTask(malformed, "zh-CN")).not.toThrow();
+    expect(() => formatBackgroundTaskPanelRow(malformed, "zh-CN")).not.toThrow();
+    expect(() => formatBackgroundTaskPanelDetails(malformed, "zh-CN")).not.toThrow();
+    expect(() => formatBackgroundDetails(malformed, "zh-CN")).not.toThrow();
+    expect(() => formatBackgroundOutputDetails(malformed, "zh-CN")).not.toThrow();
+
+    expect(formatBackgroundTaskPanelRow(malformed, "zh-CN")).toContain("后台任务");
+    expect(formatBackgroundTaskPanelDetails(malformed, "zh-CN")).toContain(
+      "/details background blocked-old",
+    );
+    expect(formatBackgroundDetails(malformed, "zh-CN")).toContain("- summary: -");
+  });
+
   it("shell/git/process primary background row omits long command, log path, checkpoint id, and raw JSON", () => {
     const task: BackgroundTaskState = {
       ...baseBackground,

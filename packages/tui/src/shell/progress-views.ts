@@ -11,6 +11,8 @@ import type {
 } from "./types.js";
 
 const MAX_LIST_ITEMS = 8;
+const MAX_AGENT_ROWS = 6;
+const MAX_WORKFLOW_STEPS = 5;
 const MAX_DETAIL_LINES = 12;
 /** Agent eviction delay: completed agents stay visible briefly (3s) then auto-dismiss. */
 const AGENT_EVICTION_DELAY_MS = 3_000;
@@ -71,15 +73,16 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
   );
 
   const running = allAgents.filter((a) => a.status === "running");
-  const visible = [...running, ...recentlyCompleted];
-  if (visible.length === 0) return undefined;
+  const agents = [...running, ...recentlyCompleted];
+  if (agents.length === 0) return undefined;
+  const visible = smartSlice(agents, MAX_AGENT_ROWS, (agent) => agent.status === "running");
 
   const cursor = context.agentTreeState?.cursor ?? -1;
   const state = context.agentTreeState;
   return {
-    rows: visible.map((agent, index) => ({
+    rows: visible.visible.map((agent, index) => ({
       id: agent.id,
-      branch: index === visible.length - 1 ? "last" : "middle",
+      branch: index === visible.visible.length - 1 ? "last" : "middle",
       name: agent.displayName ?? agent.addressableName ?? agent.id,
       status: agent.lastTerminalStatus === "completed" && agent.status === "idle"
         ? "completed"
@@ -89,7 +92,7 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
       toolUses: agent.mailbox.length,
       tokens: 0,
     })),
-    hiddenPending: 0,
+    hiddenPending: visible.hiddenPending,
     activitySummary: summarizeActivity(allAgents),
     cursor,
     expandedId: state?.expandedId,
@@ -151,20 +154,20 @@ export function buildWorkflowProgressView(context: TuiContext): WorkflowProgress
   return {
     runs: sliced.visible.map((run) => {
       const current = selectCurrentStep(run);
+      const steps = smartSlice(run.steps, MAX_WORKFLOW_STEPS, (step) => step.status === "running");
       return {
         id: run.id,
         goal: run.goal,
         status: run.status,
         elapsed: typeof run.startedAt === "string" ? formatElapsedSince(run.startedAt, now) : undefined,
         currentStepId: current?.id,
-        steps: smartSlice(run.steps, MAX_LIST_ITEMS, (step) => step.status === "running").visible.map(
-          (step) => ({
-            id: step.id,
-            title: step.title,
-            status: step.status,
-            active: step.id === current?.id,
-          }),
-        ),
+        steps: steps.visible.map((step) => ({
+          id: step.id,
+          title: step.title,
+          status: step.status,
+          active: step.id === current?.id,
+        })),
+        hiddenSteps: steps.hiddenPending,
       };
     }),
     hiddenPending: sliced.hiddenPending,

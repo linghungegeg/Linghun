@@ -50,6 +50,7 @@ export type SessionStoreOptions = {
   sessionRootDir: string;
   projectPath?: string;
   now?: () => Date;
+  runtimeLedgerPathForTest?: (sessionDir: string) => string;
 };
 
 export type CreateSessionInput = {
@@ -72,12 +73,14 @@ export class SessionStore {
   readonly sessionRootDir: string;
   readonly projectPath: string;
   private readonly now: () => Date;
+  private readonly runtimeLedgerPathForTest?: (sessionDir: string) => string;
   private readonly sessionWriteQueues = new Map<string, Promise<void>>();
 
   constructor(options: SessionStoreOptions) {
     this.sessionRootDir = options.sessionRootDir;
     this.projectPath = options.projectPath ?? process.cwd();
     this.now = options.now ?? (() => new Date());
+    this.runtimeLedgerPathForTest = options.runtimeLedgerPathForTest;
   }
 
   async create(input: CreateSessionInput = {}): Promise<Session> {
@@ -182,6 +185,11 @@ export class SessionStore {
       }
 
       await appendJsonl(session.transcriptPath, event);
+      await this.appendRuntimeLedgerBestEffort(
+        this.getSessionDir(project.projectId, sessionId),
+        sessionId,
+        event,
+      );
       await this.writeMetadata(project.projectId, {
         ...session,
         updatedAt: this.now().toISOString(),
@@ -286,6 +294,25 @@ export class SessionStore {
     await writeFile(metadataPath, `${JSON.stringify(session, null, 2)}\n`, "utf8");
   }
 
+  private async appendRuntimeLedgerBestEffort(
+    sessionDir: string,
+    sessionId: string,
+    event: TranscriptEvent,
+  ): Promise<void> {
+    try {
+      await appendRuntimeLedgerForTranscriptEvent(
+        this.runtimeLedgerPathForTest?.(sessionDir) ?? join(sessionDir, "runtime-ledger.jsonl"),
+        sessionId,
+        event,
+        this.now().toISOString(),
+      );
+    } catch (error) {
+      process.stderr.write(
+        `[linghun] runtime_ledger_write_failed session=${sessionId} reason=${formatDiagnosticError(error)}\n`,
+      );
+    }
+  }
+
   private enqueueSessionWrite(
     projectId: string,
     sessionId: string,
@@ -318,4 +345,198 @@ async function safeReadDir(dir: string, label: string): Promise<string[]> {
     );
     return [];
   }
+}
+
+type RuntimeLedgerRecord = {
+  id: string;
+  sessionId: string;
+  kind:
+    | "evidence_recorded"
+    | "artifact_created"
+    | "verification_recorded"
+    | "background_updated"
+    | "job_updated"
+    | "agent_updated"
+    | "workflow_updated";
+  createdAt: string;
+  status?: string;
+  evidenceId?: string;
+  evidenceKind?: string;
+  agentId?: string;
+  workflowId?: string;
+  jobId?: string;
+  backgroundId?: string;
+  verificationId?: string;
+  artifactPath?: string;
+  source?: string;
+  summary?: string;
+};
+
+async function appendRuntimeLedgerForTranscriptEvent(
+  ledgerPath: string,
+  sessionId: string,
+  event: TranscriptEvent,
+  fallbackCreatedAt: string,
+): Promise<void> {
+  const record = createRuntimeLedgerRecord(sessionId, event, fallbackCreatedAt);
+  if (!record) return;
+  await appendJsonl(ledgerPath, record);
+}
+
+function createRuntimeLedgerRecord(
+  sessionId: string,
+  event: TranscriptEvent,
+  fallbackCreatedAt: string,
+): RuntimeLedgerRecord | undefined {
+  const createdAt = "createdAt" in event && typeof event.createdAt === "string"
+    ? event.createdAt
+    : fallbackCreatedAt;
+  if (event.type === "verification_start") {
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "verification_recorded",
+      createdAt,
+      status: "started",
+      verificationId: event.run.id,
+      summary: `verification started with ${event.run.plan.length} command(s)`,
+    };
+  }
+  if (event.type === "evidence_record") {
+    const record = event as TranscriptEvent & Record<string, unknown>;
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "evidence_recorded",
+      createdAt,
+      evidenceId: event.id,
+      evidenceKind: event.kind,
+      artifactPath: readString(record, "fullOutputPath") ?? readString(record, "outputPath") ??
+        readString(record, "logPath") ?? (looksLikeArtifactPath(event.source) ? event.source : undefined),
+      source: event.source,
+      summary: event.summary,
+    };
+  }
+  if (event.type === "verification_end") {
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "verification_recorded",
+      createdAt,
+      status: event.report.status,
+      verificationId: event.report.id,
+      artifactPath: event.report.logPath,
+      summary: event.report.summary,
+    };
+  }
+  if (event.type === "background_task_update") {
+    const task = event.task;
+    const kind = task.kind === "job" ? "job_updated" : "background_updated";
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind,
+      createdAt,
+      status: task.status,
+      backgroundId: task.id,
+      ...(task.kind === "job" ? { jobId: task.id } : {}),
+      ...(task.kind === "agent" ? { agentId: task.id } : {}),
+      artifactPath: task.outputPath ?? task.logPath,
+      source: task.kind,
+      summary: task.userVisibleSummary || task.title,
+    };
+  }
+  if (event.type === "agent_start") {
+    const agent = readRecord(event.agent);
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "agent_updated",
+      createdAt,
+      status: "started",
+      agentId: readString(agent, "id"),
+      summary: readString(agent, "summary") ?? readString(agent, "goal") ?? "agent started",
+    };
+  }
+  if (event.type === "agent_end") {
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "agent_updated",
+      createdAt,
+      status: event.status,
+      agentId: event.agentId,
+      summary: event.summary,
+    };
+  }
+  if (event.type === "workflow_start") {
+    const workflow = readRecord(event.workflow);
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "workflow_updated",
+      createdAt,
+      status: "started",
+      workflowId: readString(workflow, "id"),
+      summary: readString(workflow, "summary") ?? readString(workflow, "name") ?? "workflow started",
+    };
+  }
+  if (event.type === "workflow_step_start") {
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "workflow_updated",
+      createdAt,
+      status: "step_started",
+      workflowId: event.workflowId,
+      summary: "workflow step started",
+    };
+  }
+  if (event.type === "workflow_step_result") {
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "workflow_updated",
+      createdAt,
+      status: event.status,
+      workflowId: event.workflowId,
+      summary: event.summary,
+    };
+  }
+  if (event.type === "workflow_end") {
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "workflow_updated",
+      createdAt,
+      status: event.status,
+      workflowId: event.workflowId,
+      summary: event.summary,
+    };
+  }
+  if (event.type === "tool_call_end" && event.output.fullOutputPath) {
+    return {
+      id: randomUUID(),
+      sessionId,
+      kind: "artifact_created",
+      createdAt,
+      artifactPath: event.output.fullOutputPath,
+      source: "tool_call_end",
+      summary: "tool output artifact recorded",
+    };
+  }
+  return undefined;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
+
+function readString(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function looksLikeArtifactPath(value: string): boolean {
+  return /[\\/]/u.test(value) || /\.[a-z0-9]{1,12}$/iu.test(value);
 }

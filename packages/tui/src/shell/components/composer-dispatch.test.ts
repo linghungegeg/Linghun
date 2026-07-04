@@ -17,6 +17,7 @@ import {
   bufferToString,
   bufferWordLeft,
   bufferWordRight,
+  composerSlashOverlayRows,
   createEditBuffer,
   createInputHistory,
   formatComposerRenderLines,
@@ -33,11 +34,17 @@ import {
   splitLineAtDisplayCol,
 } from "./Composer.js";
 
-// ---------------------------------------------------------------------------
-// 基础 EditBuffer 已有专门测试覆盖于 Composer.test.ts；本文件只补本次新增的
-// owner-priority dispatcher 行为：粘贴聚合判定、双击窗口、slash 粘性、
-// CJK 换行 / 单词跳跃 / Ctrl+B/F 等价 / 多行 ↑↓ vs 历史。
-// ---------------------------------------------------------------------------
+describe("slash overlay row budgeting", () => {
+  it("keeps the default slash popup visible when no task-pane cap is provided", () => {
+    expect(composerSlashOverlayRows({ visible: true, candidateCount: 5, width: 80 })).toBe(6);
+  });
+
+  it("does not report a visible slash popup when the task pane gives it no rows", () => {
+    expect(composerSlashOverlayRows({ visible: true, candidateCount: 5, width: 80, slashMaxRows: 0 })).toBe(0);
+    expect(composerSlashOverlayRows({ visible: true, candidateCount: 5, width: 80, slashMaxRows: 1 })).toBe(1);
+  });
+});
+
 
 describe("Composer dispatcher behavior boundaries", () => {
   describe("paste path discrimination", () => {
@@ -415,6 +422,26 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(r.visualLines.slice(1).every((line) => line.prefix === "")).toBe(true);
     });
 
+    it("marks truncated visible composer rows with brackets without changing raw lines", () => {
+      const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
+      const buf: EditBuffer = { ...createEditBuffer(text), cursor: 29 };
+      const r = formatComposerRenderLines({
+        buffer: buf,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        maxWidth: 80,
+        maxVisibleLines: 3,
+      });
+
+      expect(r.lines).toEqual(["line3", "line4", "line5"]);
+      expect(r.visualLines.map((line) => line.text)).toEqual(["[line3]", "line4", "[line5]"]);
+      expect(r.truncatedAbove).toBe(3);
+      expect(r.truncatedBelow).toBe(2);
+      expect(r.cursorRow).toBe(1);
+      expect(r.cursorCol).toBe(5);
+    });
+
     it("Home and Task composer layout params produce stable but separate wrapping", () => {
       const buf = bufferInsert(createEditBuffer(""), "abcdefghij");
       const home = formatComposerRenderLines({
@@ -487,6 +514,30 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(taskMultiline.cursorCol).toBe(2);
       expect(taskCjk.cursorRow).toBe(0);
       expect(taskCjk.cursorCol).toBe(8);
+    });
+  });
+
+  describe("composer overlay rows", () => {
+    it("caps slash overlay rows in full mode", () => {
+      expect(
+        composerSlashOverlayRows({
+          visible: true,
+          candidateCount: 20,
+          width: 80,
+          slashMaxRows: 9,
+        }),
+      ).toBe(9);
+    });
+
+    it("caps slash overlay rows in compact mode", () => {
+      expect(
+        composerSlashOverlayRows({
+          visible: true,
+          candidateCount: 20,
+          width: 80,
+          slashMaxRows: 4,
+        }),
+      ).toBe(4);
     });
   });
 

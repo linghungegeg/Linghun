@@ -27,7 +27,10 @@ import type {
   ShellViewModel,
   TaskPermissionView,
 } from "../types.js";
-import { SlashSuggestions } from "./SlashSuggestions.js";
+import {
+  SlashSuggestions,
+  slashSuggestionRowCount,
+} from "./SlashSuggestions.js";
 import { useAnchoredCursor } from "./useAnchoredCursor.js";
 
 type ComposerProps = {
@@ -35,6 +38,8 @@ type ComposerProps = {
   onInput: (event: ShellInputEvent) => void | Promise<void>;
   capability: TerminalCapability;
   layout?: ComposerLayout;
+  composerMaxVisibleLines?: number;
+  slashMaxRows?: number;
 };
 
 export type ComposerLayout = {
@@ -536,8 +541,17 @@ const DOUBLE_PRESS_WINDOW_MS = 1000;
 const HINT_NOTICE_DECAY_MS = 1500;
 const INLINE_CURSOR_BLINK_MS = 530;
 
-export function Composer({ view, onInput, capability, layout }: ComposerProps): React.ReactNode {
-  const [buffer, setBuffer] = useState<EditBuffer>(createEditBuffer());
+export function Composer({
+  view,
+  onInput,
+  capability,
+  layout,
+  composerMaxVisibleLines,
+  slashMaxRows: slashMaxRowsProp,
+}: ComposerProps): React.ReactNode {
+  const [buffer, setBuffer] = useState<EditBuffer>(
+    createEditBuffer(view.composer.draftText ?? ""),
+  );
   const bufferRef = useRef<EditBuffer>(buffer);
   const [slashSelection, setSlashSelection] = useState(0);
   const [slashHidden, setSlashHidden] = useState(false);
@@ -603,6 +617,12 @@ export function Composer({ view, onInput, capability, layout }: ComposerProps): 
   );
 
   const text = bufferToString(buffer);
+  const composerDraftRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (composerDraftRef.current === text) return;
+    composerDraftRef.current = text;
+    emitInput({ type: "composer-draft-change", text });
+  }, [emitInput, text]);
   const commandPanelActive = Boolean(view.commandPanel);
   const commandPanelConsumesInput = hasSelectableCommandPanelRows(view.commandPanel);
   const slashHeadCurrent = useMemo(() => slashHead(text), [text]);
@@ -1346,8 +1366,9 @@ export function Composer({ view, onInput, capability, layout }: ComposerProps): 
         return;
       }
 
-      // Up / Down — task mode 输入为空时优先滚动任务区（终端无 mouse tracking 时
-      // 滚轮到达 app 的形式就是 Up/Down 箭头）；其余走 slash / 多行 / 历史。
+      // Up / Down — also used by terminal alternate-scroll (CSI ?1007) to
+      // bridge mouse wheels into the same transcript-scroll path.
+      const appTranscriptScrollKeys = inTaskMode;
       if (key.upArrow) {
         if (slashVisible && slashSelection >= 0) {
           setSlashSelection((current) => {
@@ -1364,7 +1385,7 @@ export function Composer({ view, onInput, capability, layout }: ComposerProps): 
           emitInput({ type: "agent-tree-move", delta: -1 });
           return;
         }
-        if (text.length === 0 && inTaskMode) {
+        if (text.length === 0 && appTranscriptScrollKeys) {
           emitInput({ type: "transcript-scroll", action: "lineUp" });
           return;
         }
@@ -1397,7 +1418,7 @@ export function Composer({ view, onInput, capability, layout }: ComposerProps): 
           emitInput({ type: "agent-tree-move", delta: 1 });
           return;
         }
-        if (text.length === 0 && inTaskMode) {
+        if (text.length === 0 && appTranscriptScrollKeys) {
           emitInput({ type: "transcript-scroll", action: "lineDown" });
           return;
         }
@@ -1521,8 +1542,9 @@ export function Composer({ view, onInput, capability, layout }: ComposerProps): 
         masking: view.composer.masking,
         noColor,
         layout: composerLayout,
+        maxVisibleLines: composerMaxVisibleLines,
       }),
-    [buffer, placeholderText, view.composer.masking, noColor, composerLayout],
+    [buffer, placeholderText, view.composer.masking, noColor, composerLayout, composerMaxVisibleLines],
   );
 
   // Position native cursor — anchored to Composer's outer Box via parent-chain
@@ -1535,7 +1557,27 @@ export function Composer({ view, onInput, capability, layout }: ComposerProps): 
   // Task/pending now use the same native cursor declaration as home. If the
   // terminal cannot position it, useAnchoredCursor hides it via capability.
   const showSuggestions =
-    !permissionActive && slashCandidates.length > 0 && slashSelection >= 0 && !slashHidden;
+    !permissionActive &&
+    !configPanelActive &&
+    !commandPanelActive &&
+    slashCandidates.length > 0 &&
+    slashSelection >= 0 &&
+    !slashHidden &&
+    (slashMaxRowsProp ?? 1) > 0;
+  const composerOverlayRowsRef = useRef(-1);
+  const slashSuggestionWidth = composerContentWidth(composerLayout);
+  const slashMaxRows = Math.max(0, Math.floor(slashMaxRowsProp ?? Number.MAX_SAFE_INTEGER));
+  useEffect(() => {
+    const rows = composerSlashOverlayRows({
+      visible: showSuggestions,
+      candidateCount: slashCandidates.length,
+      width: slashSuggestionWidth,
+      slashMaxRows,
+    });
+    if (composerOverlayRowsRef.current === rows) return;
+    composerOverlayRowsRef.current = rows;
+    emitInput({ type: "composer-overlay-rows-change", rows });
+  }, [emitInput, showSuggestions, slashCandidates.length, slashSuggestionWidth, slashMaxRows]);
 
   // Windows Terminal + normal-screen Ink output does not provide a stable
   // native cursor anchor when the composer soft-wraps or moves between Home
@@ -1583,7 +1625,8 @@ export function Composer({ view, onInput, capability, layout }: ComposerProps): 
           selectedIndex={slashSelectionClamped}
           theme={theme}
           language={view.language}
-          width={composerContentWidth(composerLayout)}
+          width={slashSuggestionWidth}
+          maxRows={slashMaxRows}
           hint={
             view.language === "en-US"
               ? "Tab accept · ↑↓ pick · Esc hide · Enter submit"
@@ -1781,6 +1824,23 @@ export type ComposerRenderResult = {
   cursorRow: number;
 };
 
+export function composerSlashOverlayRows({
+  visible,
+  candidateCount,
+  width,
+  slashMaxRows,
+}: {
+  visible: boolean;
+  candidateCount: number;
+  width: number;
+  slashMaxRows?: number;
+}): number {
+  if (!visible || candidateCount <= 0) return 0;
+  const cappedRows = Math.max(0, Math.floor(slashMaxRows ?? Number.MAX_SAFE_INTEGER));
+  if (cappedRows <= 0) return 0;
+  return slashSuggestionRowCount(candidateCount, width, cappedRows) + 1;
+}
+
 export function formatComposerRenderLines({
   buffer,
   placeholder,
@@ -1788,6 +1848,7 @@ export function formatComposerRenderLines({
   noColor,
   maxWidth,
   layout,
+  maxVisibleLines,
 }: {
   buffer: EditBuffer;
   placeholder: string;
@@ -1795,6 +1856,7 @@ export function formatComposerRenderLines({
   noColor: boolean;
   maxWidth?: number;
   layout?: ComposerLayout;
+  maxVisibleLines?: number;
 }): ComposerRenderResult {
   void noColor;
   const text = bufferToString(buffer);
@@ -1822,33 +1884,70 @@ export function formatComposerRenderLines({
   });
 
   const totalLines = wrapped.lines.length;
+  const visibleLineLimit = Math.max(
+    1,
+    Math.floor(maxVisibleLines ?? COMPOSER_MAX_VISIBLE_LINES),
+  );
   let startLine = 0;
   let endLineExclusive = totalLines;
-  if (totalLines > COMPOSER_MAX_VISIBLE_LINES) {
-    const half = Math.floor(COMPOSER_MAX_VISIBLE_LINES / 2);
+  if (totalLines > visibleLineLimit) {
+    const half = Math.floor(visibleLineLimit / 2);
     startLine = Math.max(0, wrapped.cursorRow - half);
-    endLineExclusive = startLine + COMPOSER_MAX_VISIBLE_LINES;
+    endLineExclusive = startLine + visibleLineLimit;
     if (endLineExclusive > totalLines) {
       endLineExclusive = totalLines;
-      startLine = Math.max(0, endLineExclusive - COMPOSER_MAX_VISIBLE_LINES);
+      startLine = Math.max(0, endLineExclusive - visibleLineLimit);
     }
   }
   const renderedLines = wrapped.lines.slice(startLine, endLineExclusive);
   const truncatedAbove = startLine;
   const truncatedBelow = totalLines - endLineExclusive;
   const cursorVisibleRow = Math.max(0, Math.min(wrapped.cursorRow - startLine, renderedLines.length - 1));
+  const visualLines = renderedLines.map((line, index) => {
+    const isTopTruncated = index === 0 && truncatedAbove > 0;
+    const isBottomTruncated = index === renderedLines.length - 1 && truncatedBelow > 0;
+    return isTopTruncated || isBottomTruncated
+      ? bracketTruncatedComposerLine(line, wrapped.contentWidth)
+      : line;
+  });
+  const cursorLineMarked =
+    (cursorVisibleRow === 0 && truncatedAbove > 0) ||
+    (cursorVisibleRow === renderedLines.length - 1 && truncatedBelow > 0);
+  const rawCursorCol = Math.min(wrapped.cursorCol, Math.max(4, wrapped.contentWidth));
+  const cursorCol = cursorLineMarked
+    ? Math.min(rawCursorCol + 1, displayWidthOf(visualLines[cursorVisibleRow] ?? ""))
+    : rawCursorCol;
 
   return {
     lines: renderedLines,
     visualLines: renderedLines.map((line, index) => ({
       prefix: startLine + index === 0 ? PROMPT_MARKER : "",
-      text: line,
+      text: visualLines[index] ?? line,
     })),
     truncatedAbove,
     truncatedBelow,
-    cursorCol: Math.min(wrapped.cursorCol, Math.max(4, wrapped.contentWidth)),
+    cursorCol,
     cursorRow: cursorVisibleRow,
   };
+}
+
+function bracketTruncatedComposerLine(line: string, maxWidth: number): string {
+  const safeWidth = Math.max(0, Math.floor(maxWidth));
+  if (safeWidth < 4) return line;
+  return `[${clipDisplayWidth(line, safeWidth - 2)}]`;
+}
+
+function clipDisplayWidth(value: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  let width = 0;
+  let out = "";
+  for (const char of Array.from(value)) {
+    const next = width + charWidth(char);
+    if (next > maxWidth) break;
+    out += char;
+    width = next;
+  }
+  return out;
 }
 
 function composerContentWidth(layout: ComposerLayout): number {

@@ -1,80 +1,28 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
+import {
+  type DiffLineKind,
+  type ParsedDiffLine,
+  computeLineNumberWidth,
+  formatLineNumber,
+  markerFor,
+  parseDiffLines,
+} from "../diff-renderer.js";
+import {
+  type SyntaxDiffLine,
+  inferDiffFilePath,
+  renderSyntaxHighlightedDiffHunk,
+} from "../diff-syntax-highlighter.js";
 import { displayWidth, fitText, wrapText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 
 /**
- * StructuredDiff — renders unified diff content with:
+ * StructuredDiff renders unified diff content with:
  * - Dashed top/bottom border (subtle color)
  * - Gutter column: +/- marker + line number, dimColor (visually separated)
  * - Content column: syntax-colored diff lines with background tinting
- * - Hunk separators (···)
- *
- * Phase 3 output-maturity component.
+ * - Hunk separators
  */
-
-type DiffLine = {
-  type: "add" | "remove" | "context" | "header" | "hunk";
-  content: string;
-  /** Original-file line number (for remove/context). */
-  oldNum?: number;
-  /** New-file line number (for add/context). */
-  newNum?: number;
-};
-
-function parseDiffLines(code: string): DiffLine[] {
-  const raw = code.split("\n");
-  const lines: DiffLine[] = [];
-  let oldLine = 1;
-  let newLine = 1;
-
-  for (const line of raw) {
-    if (line.startsWith("@@")) {
-      // Hunk header — parse line numbers
-      const match = line.match(/@@ -(\d+)/u);
-      if (match) {
-        oldLine = Number(match[1]);
-      }
-      const matchNew = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/u);
-      if (matchNew) {
-        newLine = Number(matchNew[1]);
-      }
-      lines.push({ type: "hunk", content: line });
-      continue;
-    }
-    if (line.startsWith("---") || line.startsWith("+++")) {
-      lines.push({ type: "header", content: line });
-      continue;
-    }
-    if (line.startsWith("+")) {
-      lines.push({ type: "add", content: line.slice(1), newNum: newLine });
-      newLine++;
-      continue;
-    }
-    if (line.startsWith("-")) {
-      lines.push({ type: "remove", content: line.slice(1), oldNum: oldLine });
-      oldLine++;
-      continue;
-    }
-    // Context line (may start with space or be empty)
-    const content = line.startsWith(" ") ? line.slice(1) : line;
-    lines.push({ type: "context", content, oldNum: oldLine, newNum: newLine });
-    oldLine++;
-    newLine++;
-  }
-  return lines;
-}
-
-function computeGutterWidth(lines: DiffLine[]): number {
-  let maxNum = 1;
-  for (const line of lines) {
-    if (line.oldNum && line.oldNum > maxNum) maxNum = line.oldNum;
-    if (line.newNum && line.newNum > maxNum) maxNum = line.newNum;
-  }
-  // marker(1) + space + digits + space + │ + space = digits + 5
-  return String(maxNum).length + 5;
-}
-
 export function StructuredDiff({
   code,
   theme,
@@ -86,10 +34,13 @@ export function StructuredDiff({
   wrapWidth: number;
   dim?: boolean;
 }): React.ReactNode {
-  const lines = parseDiffLines(code);
-  const gutterWidth = computeGutterWidth(lines);
+  const rawLines = code.split("\n");
+  const lines = parseDiffLines(rawLines);
+  const lineNumberWidth = computeLineNumberWidth(lines);
+  const gutterWidth = lineNumberWidth * 2 + 5;
   const safeWrapWidth = Math.max(8, Math.floor(wrapWidth));
   const contentWidth = Math.max(8, safeWrapWidth - gutterWidth - 2);
+  const syntaxHighlights = computeStructuredSyntaxHighlights(lines, rawLines, theme, contentWidth);
   const borderChar = "┈";
   const borderLine = borderChar.repeat(safeWrapWidth);
 
@@ -99,19 +50,21 @@ export function StructuredDiff({
         {borderLine}
       </Text>
       {lines.map((line, idx) => {
-        if (line.type === "hunk") {
+        if (line.kind === "hunk") {
+          const lineKey = `${line.kind}-${line.oldLine ?? ""}-${line.newLine ?? ""}-${line.text}-${idx}`;
           return (
-            <Box key={`hunk-${idx}`}>
+            <Box key={lineKey}>
               <Text color={theme.muted} dimColor>
                 {padDisplay("  ···", safeWrapWidth)}
               </Text>
             </Box>
           );
         }
-        if (line.type === "header") {
-          const header = fitText(`  ${line.content}`, safeWrapWidth);
+        if (line.kind === "fileHeader" || line.kind === "metadata") {
+          const header = fitText(`  ${line.text}`, safeWrapWidth);
+          const lineKey = `${line.kind}-${line.oldLine ?? ""}-${line.newLine ?? ""}-${line.text}-${idx}`;
           return (
-            <Box key={`header-${idx}`}>
+            <Box key={lineKey}>
               <Text color={theme.muted} dimColor>
                 {padDisplay(header, safeWrapWidth)}
               </Text>
@@ -119,49 +72,46 @@ export function StructuredDiff({
           );
         }
 
-        const marker = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
-        const lineNum =
-          line.type === "add" ? line.newNum : line.type === "remove" ? line.oldNum : line.newNum;
-        const numStr =
-          lineNum !== undefined
-            ? String(lineNum).padStart(
-                String(gutterWidth - 5).length > 0 ? gutterWidth - 5 : 1,
-                " ",
-              )
-            : " ";
-        const gutter = `${marker} ${numStr} │ `;
+        const oldText = formatLineNumber(line.oldLine, lineNumberWidth);
+        const newText = formatLineNumber(line.newLine, lineNumberWidth);
+        const marker = markerFor(line.kind);
+        const gutter = `${oldText} ${newText} ${marker} `;
+        const continuationGutter = `${" ".repeat(lineNumberWidth)} ${" ".repeat(lineNumberWidth)}   `;
+        const lineKey = `${line.kind}-${line.oldLine ?? ""}-${line.newLine ?? ""}-${line.text}-${idx}`;
 
         const lineColor =
-          line.type === "add"
+          line.kind === "add"
             ? (theme.diffAddedWord ?? theme.success ?? "green")
-            : line.type === "remove"
+            : line.kind === "remove"
               ? (theme.diffRemovedWord ?? theme.error ?? "red")
               : undefined;
 
         const lineBg =
-          line.type === "add"
+          line.kind === "add"
             ? (theme.diffAdded ?? undefined)
-            : line.type === "remove"
+            : line.kind === "remove"
               ? (theme.diffRemoved ?? undefined)
               : undefined;
 
-        const wrapped = wrapText(line.content || " ", contentWidth);
+        const wrapped = wrapText(line.text || " ", contentWidth);
+        const syntaxHighlight = syntaxHighlights.get(line);
 
         return (
-          <Box key={`line-${idx}-${marker}-${lineNum}`} flexDirection="column">
+          <Box key={lineKey} flexDirection="column">
             {wrapped.map((wrappedLine, wIdx) => {
               const paddedLine = padDisplay(wrappedLine, contentWidth);
+              const useSyntaxHighlight = wIdx === 0 && wrapped.length === 1 && syntaxHighlight;
               return (
-                <Box key={`${idx}-w${wIdx}`} flexDirection="row">
+                <Box key={`${lineKey}-wrap-${wIdx}-${wrappedLine}`} flexDirection="row">
                   <Text color={theme.dim ?? theme.muted} dimColor>
-                    {wIdx === 0 ? gutter : " ".repeat(gutter.length)}
+                    {wIdx === 0 ? gutter : continuationGutter}
                   </Text>
                   <Text
-                    color={lineColor}
+                    color={useSyntaxHighlight ? undefined : lineColor}
                     backgroundColor={lineBg}
-                    dimColor={dim || line.type === "context"}
+                    dimColor={useSyntaxHighlight ? dim : dim || line.kind === "context"}
                   >
-                    {paddedLine}
+                    {useSyntaxHighlight ? padDisplay(syntaxHighlight, contentWidth) : paddedLine}
                   </Text>
                 </Box>
               );
@@ -179,4 +129,59 @@ export function StructuredDiff({
 function padDisplay(value: string, width: number): string {
   const visible = displayWidth(value);
   return `${value}${" ".repeat(Math.max(0, width - visible))}`;
+}
+
+type StructuredSyntaxLine = Extract<DiffLineKind, "add" | "remove" | "context">;
+
+function computeStructuredSyntaxHighlights(
+  lines: ParsedDiffLine[],
+  rawLines: string[],
+  theme: ShellTheme,
+  contentWidth: number,
+): Map<ParsedDiffLine, string> {
+  const filePath = inferDiffFilePath(rawLines);
+  const highlights = new Map<ParsedDiffLine, string>();
+  if (!filePath || theme.mode === "no-color") return highlights;
+
+  let hunkHeader: string | undefined;
+  let hunkLines: ParsedDiffLine[] = [];
+  const flushHunk = (): void => {
+    if (hunkLines.length === 0) return;
+    const syntaxLines: SyntaxDiffLine[] = hunkLines.map((line) => ({
+      kind: line.kind as StructuredSyntaxLine,
+      text: line.text,
+    }));
+    const rendered = renderSyntaxHighlightedDiffHunk({
+      filePath,
+      hunkHeader,
+      lines: syntaxLines,
+      themeKey: syntaxThemeKey(theme),
+      width: contentWidth,
+      noColor: theme.mode === "no-color",
+    });
+    rendered?.forEach((value, index) => {
+      const line = hunkLines[index];
+      if (line && value) highlights.set(line, value);
+    });
+    hunkLines = [];
+  };
+
+  for (const line of lines) {
+    if (line.kind === "hunk") {
+      flushHunk();
+      hunkHeader = line.text;
+      continue;
+    }
+    if (line.kind === "fileHeader" || line.kind === "metadata") {
+      flushHunk();
+      continue;
+    }
+    hunkLines.push(line);
+  }
+  flushHunk();
+  return highlights;
+}
+
+function syntaxThemeKey(theme: ShellTheme): string {
+  return [theme.mode, theme.inlineCode ?? "", theme.accent ?? ""].join(":");
 }

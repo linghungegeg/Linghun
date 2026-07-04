@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { SessionStore } from "@linghun/core";
 import { isToolOutputFailure, recordToolEvidence } from "./evidence-runtime.js";
+import { readRuntimeLedgerRecords } from "./runtime-storage.js";
 
 describe("evidence-runtime", () => {
   it("records read-only tool evidence with low-noise summaries", async () => {
@@ -66,6 +71,43 @@ describe("evidence-runtime", () => {
       expect.arrayContaining(["test_passed", "build_passed"]),
     );
     expect(events).toHaveLength(2);
+  });
+
+  it("registers persisted evidence in the runtime ledger", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-evidence-ledger-root-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-evidence-ledger-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+    const sessionDir = dirname(session.transcriptPath);
+    const context = {
+      evidence: [],
+      memory: { sessionDir },
+      store,
+    } as never;
+
+    const evidence = await recordToolEvidence(
+      context,
+      session.id,
+      "Bash",
+      {
+        text: "ok",
+        fullOutputPath: join(sessionDir, "full-output.log"),
+      },
+      { command: "echo ok" },
+    );
+
+    const ledger = await readRuntimeLedgerRecords(sessionDir);
+    const outputPath = join(sessionDir, "full-output.log");
+    expect(ledger.records).toMatchObject([
+      {
+        sessionId: session.id,
+        kind: "evidence_recorded",
+        evidenceId: evidence?.id,
+        evidenceKind: "command_output",
+        artifactPath: outputPath,
+        source: outputPath,
+      },
+    ]);
   });
 });
 

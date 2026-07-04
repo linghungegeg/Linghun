@@ -7,11 +7,13 @@ import {
   DISABLE_KITTY_KEYBOARD,
   DISABLE_MODIFY_OTHER_KEYS,
   DISABLE_SGR_MOUSE,
+  DISABLE_ALTERNATE_SCROLL,
   ENABLE_BRACKETED_PASTE,
   ENABLE_FOCUS_EVENTS,
   ENABLE_KITTY_KEYBOARD,
   ENABLE_MODIFY_OTHER_KEYS,
   ENABLE_SGR_MOUSE,
+  ENABLE_ALTERNATE_SCROLL,
   bindTerminalInteractionSignals,
   createTerminalInteractionSession,
   disableTerminalInteractionModes,
@@ -42,6 +44,26 @@ describe("terminal interaction modes", () => {
       kittyKeyboard: true,
       modifyOtherKeys: true,
       mouseTracking: false,
+      wheelMouseTracking: false,
+      alternateScroll: false,
+      focusEvents: false,
+      bracketedPaste: false,
+    });
+  });
+
+  it("enables normal-screen wheel tracking without alternate scroll or paste", () => {
+    expect(
+      resolveTerminalInteractionModes({
+        capability: capability(),
+        env: { LINGHUN_TUI_MOUSE: "1" },
+        normalScreenWheel: true,
+      }),
+    ).toEqual({
+      kittyKeyboard: true,
+      modifyOtherKeys: true,
+      mouseTracking: true,
+      wheelMouseTracking: true,
+      alternateScroll: false,
       focusEvents: false,
       bracketedPaste: false,
     });
@@ -69,17 +91,29 @@ describe("terminal interaction modes", () => {
     ).toBe(false);
   });
 
-  it("keeps app-owned mouse tracking off by default so native selection remains available", () => {
+  it("enables app-owned wheel tracking by default", () => {
     const modes = resolveTerminalInteractionModes({
       capability: capability(),
       env: {},
       appOwnedScreen: true,
     });
-    expect(modes.mouseTracking).toBe(false);
+    expect(modes.mouseTracking).toBe(true);
+    expect(modes.wheelMouseTracking).toBe(false);
+    expect(modes.alternateScroll).toBe(true);
     expect(modes.focusEvents).toBe(false);
   });
 
-  it("enables app-owned wheel tracking only when explicitly requested", () => {
+  it("allows disabling terminal alternate-scroll explicitly", () => {
+    expect(
+      resolveTerminalInteractionModes({
+        capability: capability(),
+        env: { LINGHUN_TUI_ALTERNATE_SCROLL: "0" },
+        appOwnedScreen: true,
+      }).alternateScroll,
+    ).toBe(false);
+  });
+
+  it("keeps app-owned wheel tracking enabled when explicitly requested", () => {
     const modes = resolveTerminalInteractionModes({
       capability: capability(),
       env: { LINGHUN_TUI_MOUSE: "1" },
@@ -99,7 +133,7 @@ describe("terminal interaction modes", () => {
     expect(modes.focusEvents).toBe(true);
   });
 
-  it("does not enable wheel tracking when the Ink shell is not using an app-owned screen", () => {
+  it("does not enable wheel tracking on the main screen without the normal-screen wheel bridge", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
@@ -109,13 +143,14 @@ describe("terminal interaction modes", () => {
     ).toBe(false);
   });
 
-  it("allows disabling app-owned wheel tracking explicitly", () => {
+  it("keeps app-owned mouse tracking on by default regardless of LINGHUN_TUI_MOUSE", () => {
     expect(
       resolveTerminalInteractionModes({
         capability: capability(),
         env: { LINGHUN_TUI_MOUSE: "0" },
+        appOwnedScreen: true,
       }).mouseTracking,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("does not enable keyboard protocols when the terminal is not allowlisted", () => {
@@ -128,6 +163,8 @@ describe("terminal interaction modes", () => {
       kittyKeyboard: false,
       modifyOtherKeys: false,
       mouseTracking: false,
+      wheelMouseTracking: false,
+      alternateScroll: false,
       focusEvents: false,
       bracketedPaste: false,
     });
@@ -145,6 +182,7 @@ describe("terminal interaction modes", () => {
       kittyKeyboard: true,
       modifyOtherKeys: true,
       mouseTracking: true,
+      alternateScroll: true,
       focusEvents: true,
       bracketedPaste: true,
     };
@@ -154,8 +192,10 @@ describe("terminal interaction modes", () => {
 
     expect(ENABLE_SGR_MOUSE).toBe("\x1B[?1000h\x1B[?1002h\x1B[?1003h\x1B[?1006h");
     expect(DISABLE_SGR_MOUSE).toBe("\x1B[?1006l\x1B[?1003l\x1B[?1002l\x1B[?1000l");
+    expect(ENABLE_ALTERNATE_SCROLL).toBe("\x1B[?1007h");
+    expect(DISABLE_ALTERNATE_SCROLL).toBe("\x1B[?1007l");
     expect(output).toBe(
-      `${ENABLE_KITTY_KEYBOARD}${ENABLE_MODIFY_OTHER_KEYS}${ENABLE_SGR_MOUSE}${ENABLE_FOCUS_EVENTS}${ENABLE_BRACKETED_PASTE}${DISABLE_BRACKETED_PASTE}${DISABLE_FOCUS_EVENTS}${DISABLE_SGR_MOUSE}${DISABLE_MODIFY_OTHER_KEYS}${DISABLE_KITTY_KEYBOARD}`,
+      `${ENABLE_KITTY_KEYBOARD}${ENABLE_MODIFY_OTHER_KEYS}${ENABLE_ALTERNATE_SCROLL}${ENABLE_SGR_MOUSE}${ENABLE_FOCUS_EVENTS}${ENABLE_BRACKETED_PASTE}${DISABLE_BRACKETED_PASTE}${DISABLE_FOCUS_EVENTS}${DISABLE_SGR_MOUSE}${DISABLE_ALTERNATE_SCROLL}${DISABLE_MODIFY_OTHER_KEYS}${DISABLE_KITTY_KEYBOARD}`,
     );
   });
 
@@ -171,13 +211,16 @@ describe("terminal interaction modes", () => {
       kittyKeyboard: false,
       modifyOtherKeys: false,
       mouseTracking: true,
+      alternateScroll: true,
       focusEvents: true,
       bracketedPaste: true,
     };
 
     reassertTerminalInteractionModes(stdout, modes);
 
-    expect(output).toBe(`${ENABLE_SGR_MOUSE}${ENABLE_FOCUS_EVENTS}${ENABLE_BRACKETED_PASTE}`);
+    expect(output).toBe(
+      `${ENABLE_ALTERNATE_SCROLL}${ENABLE_SGR_MOUSE}${ENABLE_FOCUS_EVENTS}${ENABLE_BRACKETED_PASTE}`,
+    );
   });
 
   it("session disables once and reasserts only while enabled", () => {
@@ -192,6 +235,7 @@ describe("terminal interaction modes", () => {
       kittyKeyboard: false,
       modifyOtherKeys: false,
       mouseTracking: true,
+      alternateScroll: true,
       focusEvents: false,
       bracketedPaste: true,
     };
@@ -204,7 +248,7 @@ describe("terminal interaction modes", () => {
     session.disable();
 
     expect(output).toBe(
-      `${ENABLE_SGR_MOUSE}${ENABLE_BRACKETED_PASTE}${ENABLE_SGR_MOUSE}${ENABLE_BRACKETED_PASTE}${DISABLE_BRACKETED_PASTE}${DISABLE_SGR_MOUSE}`,
+      `${ENABLE_ALTERNATE_SCROLL}${ENABLE_SGR_MOUSE}${ENABLE_BRACKETED_PASTE}${ENABLE_ALTERNATE_SCROLL}${ENABLE_SGR_MOUSE}${ENABLE_BRACKETED_PASTE}${DISABLE_BRACKETED_PASTE}${DISABLE_SGR_MOUSE}${DISABLE_ALTERNATE_SCROLL}`,
     );
   });
 
@@ -222,6 +266,7 @@ describe("terminal interaction modes", () => {
       kittyKeyboard: false,
       modifyOtherKeys: false,
       mouseTracking: true,
+      alternateScroll: true,
       focusEvents: true,
       bracketedPaste: true,
     };
@@ -253,7 +298,7 @@ describe("terminal interaction modes", () => {
     expect(events.size).toBe(0);
 
     expect(output).toBe(
-      `${ENABLE_SGR_MOUSE}${ENABLE_FOCUS_EVENTS}${ENABLE_BRACKETED_PASTE}${DISABLE_BRACKETED_PASTE}${DISABLE_FOCUS_EVENTS}${DISABLE_SGR_MOUSE}${ENABLE_SGR_MOUSE}${ENABLE_FOCUS_EVENTS}${ENABLE_BRACKETED_PASTE}`,
+      `${ENABLE_ALTERNATE_SCROLL}${ENABLE_SGR_MOUSE}${ENABLE_FOCUS_EVENTS}${ENABLE_BRACKETED_PASTE}${DISABLE_BRACKETED_PASTE}${DISABLE_FOCUS_EVENTS}${DISABLE_SGR_MOUSE}${DISABLE_ALTERNATE_SCROLL}${ENABLE_ALTERNATE_SCROLL}${ENABLE_SGR_MOUSE}${ENABLE_FOCUS_EVENTS}${ENABLE_BRACKETED_PASTE}`,
     );
   });
 });

@@ -19,7 +19,14 @@ export type RuntimeStatusSnapshotInput = {
   workflow?: WorkflowState["activeRun"];
   backgroundTasks: BackgroundTaskState[];
   lastVerification?: { status: string; summary: string; endedAt: string };
-  lastModelRequest?: { phase: string; toolName?: string; endedAt: string };
+  lastModelRequest?: {
+    phase: string;
+    toolName?: string;
+    endedAt: string;
+    durationMs?: number;
+    firstDeltaMs?: number;
+    firstDeltaType?: string;
+  };
 };
 
 export type RuntimeTaskSnapshot = {
@@ -83,6 +90,7 @@ export function createRuntimeStatusSnapshot(
       status: input.lastModelRequest.phase,
       currentStep: input.lastModelRequest.toolName,
       endedAt: input.lastModelRequest.endedAt,
+      summary: formatModelRequestTiming(input.lastModelRequest, input.language),
     });
   }
   recentTerminalTasks.sort((a, b) => compareIsoDesc(a.endedAt, b.endedAt));
@@ -156,6 +164,27 @@ function mapRequestActivity(
   if (phase.includes("failed") || phase === "error") return "error";
   if (phase.includes("completed") || phase === "completed") return "completed";
   return "thinking";
+}
+
+function formatModelRequestTiming(
+  request: NonNullable<RuntimeStatusSnapshotInput["lastModelRequest"]>,
+  language: Language,
+): string | undefined {
+  if (request.firstDeltaMs === undefined && request.durationMs === undefined) return undefined;
+  const parts: string[] = [];
+  if (request.firstDeltaMs !== undefined) {
+    parts.push(
+      language === "en-US"
+        ? `first delta ${request.firstDeltaMs}ms`
+        : `首包 ${request.firstDeltaMs}ms`,
+    );
+  }
+  if (request.durationMs !== undefined) {
+    parts.push(
+      language === "en-US" ? `duration ${request.durationMs}ms` : `总耗时 ${request.durationMs}ms`,
+    );
+  }
+  return parts.join(" · ");
 }
 
 function mapWorkflow(

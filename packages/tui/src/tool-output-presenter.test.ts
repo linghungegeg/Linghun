@@ -27,6 +27,47 @@ describe("tool-output-presenter", () => {
       expect(out).not.toContain("RunVerification");
       expect(out).toContain("verification command was not called");
     });
+
+    it("removes relay-leaked thinking XML blocks from assistant text", () => {
+      const raw =
+        "前置判断。\n<thinking>\nGood, I'll give a balanced assessment.\n</thinking>\n正式回答。";
+      const out = sanitizeAssistantPrimaryText(raw, "zh-CN");
+
+      expect(out).toContain("前置判断。");
+      expect(out).toContain("正式回答。");
+      expect(out).not.toContain("前置判断。\n\n正式回答。");
+      expect(out).not.toContain("<thinking>");
+      expect(out).not.toContain("balanced assessment");
+      expect(out).not.toContain("已隐藏");
+    });
+
+    it("removes relay-leaked thinking XML blocks when the final text follows the closing tag", () => {
+      const raw = "<thinking>hidden chain</thinking>正式回答。";
+      const out = sanitizeAssistantPrimaryText(raw, "zh-CN");
+
+      expect(out).toBe("正式回答。");
+    });
+
+    it("removes relay-leaked thinking XML blocks split across streamed chunks", () => {
+      const sanitizer = createAssistantPrimaryTextSanitizer("zh-CN");
+      const out = [
+        sanitizer.push("前置判断。\n<think"),
+        sanitizer.push("ing>\nGood, I'll give a balanced assessment."),
+        sanitizer.push("\n</thinking>\n正式回答。"),
+        sanitizer.flush(),
+      ].join("");
+
+      expect(out).toContain("前置判断。");
+      expect(out).toContain("正式回答。");
+      expect(out).not.toContain("<thinking");
+      expect(out).not.toContain("balanced assessment");
+    });
+
+    it("keeps inline thinking tag mentions as normal user-visible text", () => {
+      const out = sanitizeAssistantPrimaryText("XML 标签 `<thinking>` 可以作为示例文本。", "zh-CN");
+
+      expect(out).toContain("`<thinking>`");
+    });
   });
 
   describe("formatToolStart", () => {
@@ -317,6 +358,48 @@ describe("tool-output-presenter", () => {
       expect(layered.preview).toContain("补丁 +3 -1");
       expect(layered.preview).toContain("改动文件 1");
       expect(layered.preview).not.toContain("changedFiles 1");
+    });
+
+    it("Edit preview and details prefer structured patch hunks", () => {
+      const output = {
+        text: "edited",
+        details: "operation: Edit\nlegacy detail",
+        data: {
+          addedLines: 1,
+          removedLines: 1,
+          lines: 2,
+          changedFiles: ["src/app.ts"],
+          structuredPatch: {
+            files: [
+              {
+                path: "src/app.ts",
+                hunks: [
+                  {
+                    oldStart: 7,
+                    newStart: 7,
+                    oldLines: ["const label = 'old';"],
+                    newLines: ["const label = 'new';"],
+                    oldLineCount: 1,
+                    newLineCount: 1,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        truncated: true,
+      };
+
+      const formatted = formatToolOutput("Edit", output, "en-US");
+      const layered = createLayeredToolOutput("Edit", output, "en-US");
+
+      expect(formatted).toContain("```diff");
+      expect(formatted).toContain("--- src/app.ts");
+      expect(formatted).toContain("@@ -7,1 +7,1 @@");
+      expect(formatted).toContain("-const label = 'old';");
+      expect(formatted).toContain("+const label = 'new';");
+      expect(layered.details).toContain("legacy detail");
+      expect(layered.details).toContain("```diff");
     });
 
     it("主屏 summary 将半机器字段改成人话", () => {

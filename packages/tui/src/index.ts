@@ -11,7 +11,7 @@ import {
 } from "node:process";
 import { clearLine, cursorTo, emitKeypressEvents, moveCursor } from "node:readline";
 import { createInterface } from "node:readline/promises";
-import type { Readable, Writable } from "node:stream";
+import { Writable, type Readable } from "node:stream";
 import {
   type LinghunConfig,
   type McpServerConfig,
@@ -530,13 +530,23 @@ import {
   createCommandBlock,
   createUserTextBlock,
 } from "./shell/models/command-transcript-presenter.js";
+import {
+  createTranscriptSource,
+  transcriptSourceRawTextForBlock,
+  transcriptSourceKindForBlock,
+  upsertTranscriptSourceCell,
+} from "./shell/models/transcript-source.js";
 import { reduceTranscriptScroll } from "./shell/models/transcript-scroll-state.js";
 import {
   buildTranscriptScreenBuffer,
   isSelectionStale,
   reduceTranscriptSelection,
 } from "./shell/models/transcript-selection-state.js";
-import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
+import {
+  nativeScrollbackTaskHistoryGeometry,
+  shouldUseNativeScrollbackTaskFrame,
+} from "./shell/native-scrollback-frame.js";
+import { computePlainPromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import {
   getBackgroundOverlaySelectedTask,
   updateBackgroundOverlayCursor,
@@ -624,6 +634,8 @@ import { type MessageKey, messages } from "./tui-messages.js";
 import {
   ShellBlockOutput,
   beginAssistantStream,
+  commitTerminalFirstUserBlock,
+  createTerminalFirstAssistantSink,
   createShellBlockOutputForTest,
   discardAssistantBlock,
   endAssistantStream,
@@ -778,6 +790,18 @@ export type RunTuiOptions = {
   projectPath?: string;
 };
 
+export type HeadlessPermissionRequest = {
+  // 已脱敏的审批描述（复用 mapPendingApprovalToPermission，绝不含原始 input / 密钥 / 敏感绝对路径）。
+  kind: string;
+  toolName: string;
+  actionSummary: string;
+  risk: "low" | "medium" | "high";
+  scope: string[];
+  reason: string;
+};
+
+export type HeadlessPermissionDecision = "allow_once" | "allow_always" | "deny";
+
 export type RunHeadlessOptions = {
   prompt: string;
   stdout?: Writable;
@@ -791,6 +815,11 @@ export type RunHeadlessOptions = {
   deadlineAtMs?: number;
   bench?: HeadlessBenchOptions;
   onEvent?: (event: TranscriptEvent) => void;
+  // 桌面端双向审批接缝：当引擎在 headless run 中停在权限确认（decidePermission → "ask"，
+  // 设置 pendingLocalApproval）时，若提供此回调则交由外部（GUI）决策，复用既有
+  // executePermissionApprove / executePermissionDeny / addAllowRule，不新增第五种权限模式。
+  // 未提供时维持原 auto-approve / abort 行为，向后兼容。
+  onPermissionRequest?: (request: HeadlessPermissionRequest) => Promise<HeadlessPermissionDecision>;
   __testGateway?: ModelGateway;
   __testContext?: TuiContext;
   __testStore?: SessionStore;
@@ -1299,6 +1328,10 @@ import {
   resolveInitialModel,
   shouldOfferUserScopedModelSetup,
 } from "./tui-model-runtime.js";
+import {
+  shouldWarmProviderDnsForStreams,
+  warmConfiguredProviderDns,
+} from "./provider-network-warmup.js";
 import { addAllowRule, decidePermission, loadPermissionState } from "./tui-permission-runtime.js";
 import {
   applyRemoteSessionDisables,
@@ -1507,6 +1540,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const startup = await prepareTuiStartup(input, output, context);
   await hydrateRuntimeContext(context);
   const gateway = createModelGateway(context.config);
+  if (shouldWarmProviderDnsForStreams(input, output)) {
+    warmConfiguredProviderDns(context.config);
+  }
   // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
   context.modelGateway = gateway;
   // R6 — Register provider retry hook so the TUI can show retry activity.
@@ -1583,6 +1619,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   attachProviderRuntimeHooks(context);
   const maxApprovals = Math.max(0, Math.min(options.maxApprovals ?? 32, 200));
   const autoApprove = options.autoApprove ?? true;
+  const onPermissionRequest = options.onPermissionRequest;
   const maxContinuations = Math.max(
     0,
     Math.min(options.maxContinuations ?? DEFAULT_HEADLESS_MAX_CONTINUATIONS, MAX_HEADLESS_CONTINUATIONS),
@@ -1633,6 +1670,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           approvals = value;
         },
         deferredApprovals,
+        onPermissionRequest,
       });
       const messageResult = await runWithHeadlessApprovalPump(messagePromise, pump);
       if (messageResult.exitCode !== undefined) {
@@ -1647,6 +1685,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         maxApprovals,
         approvals,
         deferredApprovals,
+        onPermissionRequest,
       });
       approvals = approvalStatus.approvals;
       if (approvalStatus.exitCode !== undefined) {
@@ -1661,6 +1700,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         maxApprovals,
         approvals,
         deferredApprovals,
+        onPermissionRequest,
       });
       approvals = deferredStatus.approvals;
       if (deferredStatus.exitCode !== undefined) {
@@ -1815,6 +1855,41 @@ type HeadlessApprovalPumpResult = {
 
 type HeadlessDeferredApproval = NonNullable<TuiContext["pendingLocalApproval"]>;
 
+// 把停在确认的 pendingLocalApproval 映射成脱敏的审批请求，交给外部回调决策。
+// 复用交互 TUI 同款 mapPendingApprovalToPermission，保证 GUI 与 TUI 看到同一套语义与 risk。
+async function resolveHeadlessPermissionDecision(
+  context: TuiContext,
+  approval: HeadlessDeferredApproval,
+  onPermissionRequest: (request: HeadlessPermissionRequest) => Promise<HeadlessPermissionDecision>,
+): Promise<HeadlessPermissionDecision> {
+  const view = mapPendingApprovalToPermission(context);
+  const request: HeadlessPermissionRequest = {
+    kind: approval.kind,
+    toolName: view?.toolName ?? ("toolName" in approval ? String(approval.toolName) : approval.kind),
+    actionSummary: view?.actionSummary ?? "",
+    risk: view?.risk ?? "high",
+    scope: view?.scope ?? [],
+    reason: view?.reason ?? "",
+  };
+  try {
+    return await onPermissionRequest(request);
+  } catch {
+    // 外部决策异常按拒绝处理，绝不静默放行。
+    return "deny";
+  }
+}
+
+// allow_always：复用 addAllowRule 写持久允许规则；仅对携带 toolName 的工具审批有意义，
+// 其它审批种类（memory/image 等）退化为 allow_once（已在调用处批准）。
+async function maybeAddHeadlessAllowRule(
+  context: TuiContext,
+  approval: HeadlessDeferredApproval,
+): Promise<void> {
+  if (!("toolName" in approval) || !approval.toolName) return;
+  const view = mapPendingApprovalToPermission(context);
+  await addAllowRule(context, approval.toolName as ToolName, view?.risk);
+}
+
 async function pumpHeadlessApprovals(input: {
   context: TuiContext;
   gateway: ModelGateway;
@@ -1824,9 +1899,37 @@ async function pumpHeadlessApprovals(input: {
   maxApprovals: number;
   approvals: number;
   deferredApprovals?: HeadlessDeferredApproval[];
+  onPermissionRequest?: (request: HeadlessPermissionRequest) => Promise<HeadlessPermissionDecision>;
 }): Promise<HeadlessApprovalPumpResult> {
   let approvals = input.approvals;
   while (input.context.pendingLocalApproval) {
+    // 双向审批接缝优先：提供了外部决策回调时，停在确认的审批交由 GUI 决定，
+    // 而不是 auto-approve / abort。复用既有 executePermissionApprove / Deny / addAllowRule。
+    if (input.onPermissionRequest) {
+      const approval = input.context.pendingLocalApproval;
+      const decision = await resolveHeadlessPermissionDecision(
+        input.context,
+        approval,
+        input.onPermissionRequest,
+      );
+      if (decision === "deny") {
+        input.context.pendingLocalApproval = undefined;
+        await executePermissionDeny(approval, input.context, input.gateway, input.output, false);
+        continue;
+      }
+      // allow_always 需在清空 pendingLocalApproval 前读取 risk（mapPendingApprovalToPermission 依赖它）。
+      if (decision === "allow_always") {
+        await maybeAddHeadlessAllowRule(input.context, approval);
+      }
+      input.context.pendingLocalApproval = undefined;
+      approvals += 1;
+      if (input.deferredApprovals && hasModelContinuation(approval)) {
+        input.deferredApprovals.push(approval);
+        continue;
+      }
+      await executePermissionApprove(approval, input.context, input.gateway, input.output);
+      continue;
+    }
     if (!input.autoApprove) {
       input.context.activeAbortController?.abort();
       writeLine(
@@ -1865,6 +1968,7 @@ async function runDeferredHeadlessApprovals(input: {
   maxApprovals: number;
   approvals: number;
   deferredApprovals: HeadlessDeferredApproval[];
+  onPermissionRequest?: (request: HeadlessPermissionRequest) => Promise<HeadlessPermissionDecision>;
 }): Promise<HeadlessApprovalPumpResult> {
   let approvals = input.approvals;
   while (input.deferredApprovals.length > 0) {
@@ -1879,6 +1983,7 @@ async function runDeferredHeadlessApprovals(input: {
       autoApprove: input.autoApprove,
       maxApprovals: input.maxApprovals,
       approvals,
+      onPermissionRequest: input.onPermissionRequest,
     });
     approvals = nested.approvals;
     if (nested.exitCode !== undefined) {
@@ -1902,6 +2007,7 @@ function createHeadlessApprovalPump(input: {
   getApprovals: () => number;
   setApprovals: (value: number) => void;
   deferredApprovals: HeadlessDeferredApproval[];
+  onPermissionRequest?: (request: HeadlessPermissionRequest) => Promise<HeadlessPermissionDecision>;
 }): () => Promise<HeadlessApprovalPumpResult> {
   let running: Promise<HeadlessApprovalPumpResult> | undefined;
   return async () => {
@@ -1915,6 +2021,7 @@ function createHeadlessApprovalPump(input: {
       maxApprovals: input.maxApprovals,
       approvals: input.getApprovals(),
       deferredApprovals: input.deferredApprovals,
+      onPermissionRequest: input.onPermissionRequest,
     }).then((result) => {
       input.setApprovals(result.approvals);
       return result;
@@ -2205,6 +2312,18 @@ function pushTransientNotification(
   });
 }
 
+function appendTranscriptSourceBlock(context: TuiContext, block: ProductBlockViewModel): void {
+  const kind = transcriptSourceKindForBlock(block);
+  if (!kind) return;
+  context.transcriptSource ??= createTranscriptSource();
+  upsertTranscriptSourceCell(context.transcriptSource, {
+    id: block.id,
+    kind,
+    block,
+    rawText: transcriptSourceRawTextForBlock(block),
+  });
+}
+
 async function runPlainTui(
   input: Readable,
   output: Writable,
@@ -2217,7 +2336,10 @@ async function runPlainTui(
   const { isNoColorTerminal } = await import("./shell/ink-renderer.js");
   const isTty = (input as { isTTY?: boolean }).isTTY === true;
   const blocks: ProductBlockViewModel[] = [];
-  context.pushTranscriptBlock = (block) => blocks.push(block);
+  context.pushTranscriptBlock = (block) => {
+    appendTranscriptSourceBlock(context, block);
+    blocks.push(block);
+  };
 
   // Non-TTY (pipe/script) keeps legacy text startup for scripting compatibility.
   // TTY legacy (Windows cmd) gets the product-grade plain shell.
@@ -2243,7 +2365,7 @@ async function runPlainTui(
 
   for await (const line of readInputLines(input, output, {
     prompt: isTty
-      ? `${computeHomePromptPrefix(readOutputColumns(output))}> `
+      ? `${computePlainPromptPrefix(readOutputColumns(output))}> `
       : t(context, "inputPrompt"),
     onEsc: () => handleTuiKeypress("escape", context, output),
     onEnter: () => handleTuiKeypress("return", context, output),
@@ -2333,16 +2455,54 @@ async function runInkShell(
   let shell: ReturnType<typeof renderInkShell> | undefined;
   let submittedPending = false;
   let submittedPendingStartedAt: number | undefined;
+  let transientFrameCleared = false;
   let activityTicker: ReturnType<typeof setInterval> | undefined;
   // D.13E Step 2 — command transcript 行序号；createCommandBlock 用 sequence 生成稳定 id。
   let commandSequence = 0;
+  let composerOverlayRows = 0;
+  let composerDraftText = "";
   let resolveExit: (code: number) => void = () => undefined;
   const exitPromise = new Promise<number>((resolve) => {
     resolveExit = resolve;
   });
-  const shellOutput = new ShellBlockOutput(context, blocks, () => shell?.rerender());
+  const requestShellFrame = (): void => {
+    shell?.rerender();
+  };
+  const terminalFirstSink = createTerminalFirstAssistantSink(output, {
+    noColor: isNoColorTerminal,
+    columns: () => readOutputColumns(output),
+    rows: () => readOutputRows(output),
+    // Plan B: derive the frame-top boundary fresh at commit time from the live
+    // view model (frame height is fixed, so y = rows - frameHeight). This
+    // removes the beforeRender geometry-timing dependency that let history
+    // blocks pile up in the Ink frame — the root of 病根2.
+    viewportGeometry: () =>
+      shouldUseNativeScrollbackTaskFrame()
+        ? nativeScrollbackTaskHistoryGeometry(controller.getViewModel())
+        : context.transcriptViewportGeometry,
+    transcriptSource: () => context.transcriptSource,
+  });
+  const pushCommandTranscriptBlock = (command: string): void => {
+    const block = createCommandBlock(commandSequence++, command);
+    appendTranscriptSourceBlock(context, block);
+    blocks.push(block);
+    terminalFirstSink?.commitStableTranscriptBlock?.(block, () => {
+      appendTranscriptSourceBlock(context, block);
+      const idx = blocks.indexOf(block);
+      if (idx >= 0) blocks.splice(idx, 1);
+    });
+  };
+  const shellOutput = new ShellBlockOutput(
+    context,
+    blocks,
+    requestShellFrame,
+    terminalFirstSink,
+  );
   context.compactOutputMemory = () => shellOutput.compactOutputMemory();
-  context.pushTranscriptBlock = (block) => blocks.push(block);
+  context.pushTranscriptBlock = (block) => {
+    appendTranscriptSourceBlock(context, block);
+    blocks.push(block);
+  };
   const controller: ShellController = {
     getViewModel: () => {
       const runtime = getSelectedModelRuntime(context);
@@ -2356,12 +2516,15 @@ async function runInkShell(
         setupNeeded: startup.setupNeeded,
         projectRouteProblem: startup.projectRouteProblem,
         outputBlocks: blocks,
+        transcriptSource: context.transcriptSource,
         activity,
         permission: mapPendingApprovalToPermission(context),
         submitted: submittedPending,
         submittedStartedAt: submittedPendingStartedAt,
         reasoningLevel: runtime.reasoningLevel,
         reasoningSent: runtime.reasoningSent,
+        composerOverlayRows,
+        composerDraftText,
         // D.13Q-UX Task Surface — controller 持有的 configPanelState 必须显式
         // 喂给 view-model；旧实现遗漏这一行，导致 /config submit 后 ConfigPanel
         // 永远不会出现在 ShellViewModel.configPanel 上。
@@ -2416,6 +2579,19 @@ async function runInkShell(
         }
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "composer-overlay-rows-change") {
+        const nextRows = Math.max(0, Math.floor(event.rows));
+        if (composerOverlayRows !== nextRows) {
+          composerOverlayRows = nextRows;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+        }
+        return;
+      }
+      if (event.type === "composer-draft-change") {
+        composerDraftText = event.text;
         return;
       }
       if (event.type === "interrupt") {
@@ -2665,7 +2841,6 @@ async function runInkShell(
       }
       // ─── Main transcript scroll ─────────────────────────────────────────────
       if (event.type === "transcript-scroll") {
-        const previous = context.transcriptScrollState;
         const next =
           "action" in event
             ? reduceTranscriptScroll(context.transcriptScrollState, {
@@ -2677,8 +2852,7 @@ async function runInkShell(
                 delta: event.delta,
               });
         context.transcriptScrollState = next;
-        shell?.rerender();
-        await shell?.waitUntilRenderFlush();
+        requestShellFrame();
         return;
       }
       if (event.type === "transcript-scroll-measure") {
@@ -2690,8 +2864,7 @@ async function runInkShell(
         });
         if (!isSameTranscriptScrollState(previous, next)) {
           context.transcriptScrollState = next;
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
+          requestShellFrame();
         }
         return;
       }
@@ -2710,16 +2883,14 @@ async function runInkShell(
           existing.textHash !== next.textHash
         ) {
           context.transcriptBlockHeightCache[event.id] = next;
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
+          requestShellFrame();
         }
         return;
       }
       if (event.type === "transcript-viewport-geometry") {
         if (!isSameTranscriptViewportGeometry(context.transcriptViewportGeometry, event.geometry)) {
           context.transcriptViewportGeometry = event.geometry;
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
+          requestShellFrame();
         }
         return;
       }
@@ -2763,8 +2934,7 @@ async function runInkShell(
             pushTransientNotification(context, message, "success");
           }
         }
-        shell?.rerender();
-        await shell?.waitUntilRenderFlush();
+        requestShellFrame();
         return;
       }
       if (event.type === "transcript-scroll-end") {
@@ -2772,25 +2942,24 @@ async function runInkShell(
           type: "end",
         });
         context.unseenMessageCount = 0;
-        shell?.rerender();
-        await shell?.waitUntilRenderFlush();
+        requestShellFrame();
         return;
       }
       if (event.type === "transcript-scroll-top") {
         context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
           type: "top",
         });
-        shell?.rerender();
-        await shell?.waitUntilRenderFlush();
+        requestShellFrame();
         return;
       }
       // ─── D.13E Step 2 修正 #2 — /config 拦截：在 ink 模式下打开真 panel UI ────
       // handleSlashCommand("/config") 仍然只 writeLine(formatConfigOverview(...))，
       // 保留 plain TUI 与 index.test 不破。这里只在 ink 路径上用 panel 接管。
       if (event.type === "submit" && event.text.trim() === "/config") {
+        composerDraftText = "";
         const trimmed = event.text;
         // 推 transcript 命令行（与其它 slash 一致），让用户能看到他敲了 /config
-        blocks.push(createCommandBlock(commandSequence++, trimmed));
+        pushCommandTranscriptBlock(trimmed);
         context.configPanelState = { phase: "panel_list", cursor: 0, scrollOffset: 0 };
         submittedPending = false;
         shell?.rerender();
@@ -2801,6 +2970,7 @@ async function runInkShell(
       // plain TUI 仍走 formatCatalogHelp 文本表 fallback；ink 模式不 writeLine，
       // 直接打开 panel。/help advanced / /help details 进入对应分组。
       if (event.type === "submit") {
+        composerDraftText = "";
         const trimmed = event.text.trim();
         if (trimmed === "/help" || trimmed === "/help advanced" || trimmed === "/help details") {
           const group: "core" | "advanced" | "details" =
@@ -2809,7 +2979,7 @@ async function runInkShell(
               : trimmed === "/help details"
                 ? "details"
                 : "core";
-          blocks.push(createCommandBlock(commandSequence++, trimmed));
+          pushCommandTranscriptBlock(trimmed);
           context.helpPanelState = { group, cursor: 0, scrollOffset: 0 };
           submittedPending = false;
           shell?.rerender();
@@ -2869,7 +3039,7 @@ async function runInkShell(
         context.helpPanelState = undefined;
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
-        blocks.push(createCommandBlock(commandSequence++, target.slash));
+        pushCommandTranscriptBlock(target.slash);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         await processTuiLine(target.slash, context, gateway, shellOutput, store);
@@ -2886,7 +3056,7 @@ async function runInkShell(
         context.helpPanelState = undefined;
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
-        blocks.push(createCommandBlock(commandSequence++, target.slash));
+        pushCommandTranscriptBlock(target.slash);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         await processTuiLine(target.slash, context, gateway, shellOutput, store);
@@ -2919,7 +3089,7 @@ async function runInkShell(
         return;
       }
       if (event.type === "sessions-open") {
-        blocks.push(createCommandBlock(commandSequence++, "/sessions"));
+        pushCommandTranscriptBlock("/sessions");
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         await processTuiLine("/sessions", context, gateway, shellOutput, store);
@@ -2966,7 +3136,7 @@ async function runInkShell(
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         const cmd = `/resume ${target.id}`;
-        blocks.push(createCommandBlock(commandSequence++, cmd));
+        pushCommandTranscriptBlock(cmd);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         await processTuiLine(cmd, context, gateway, shellOutput, store);
@@ -3095,7 +3265,7 @@ async function runInkShell(
         } else if (command === "/language") {
           command = context.language === "zh-CN" ? "/language en-US" : "/language zh-CN";
         }
-        blocks.push(createCommandBlock(commandSequence++, command));
+        pushCommandTranscriptBlock(command);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         await processTuiLine(command, context, gateway, shellOutput, store);
@@ -3270,7 +3440,7 @@ async function runInkShell(
         context.taskSuggestionCursor = 0;
         if (suggestion.action.kind === "slash") {
           context.commandPanelState = undefined;
-          blocks.push(createCommandBlock(commandSequence++, suggestion.action.command));
+          pushCommandTranscriptBlock(suggestion.action.command);
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
           await processTuiLine(suggestion.action.command, context, gateway, shellOutput, store);
@@ -3288,6 +3458,7 @@ async function runInkShell(
         return;
       }
       if (event.type === "empty-submit") {
+        composerDraftText = "";
         submittedPending = false;
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -3306,9 +3477,38 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      if (event.text.trim().startsWith("/")) {
+        composerDraftText = "";
+        const command = event.text.trim();
+        if (command.length === 0) {
+          submittedPending = false;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+        pushCommandTranscriptBlock(command);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        const result = await processTuiLine(command, context, gateway, shellOutput, store);
+        submittedPending = false;
+        submittedPendingStartedAt = undefined;
+        shell?.rerender();
+        if (result === "exit") {
+          shell?.unmount();
+          resolveExit(0);
+          return;
+        }
+        await shell?.waitUntilRenderFlush();
+        runMemoryEviction(context, blocks);
+        return;
+      }
       // P1-6: immediately enter pending state to prevent home flicker
       submittedPending = true;
       submittedPendingStartedAt = Date.now();
+      if (!transientFrameCleared) {
+        transientFrameCleared = true;
+        shell?.clearTransientFrame();
+      }
       if (event.text.trim().length > 0) {
         dismissCurrentFailureSuggestion(context, blocks);
       }
@@ -3325,7 +3525,7 @@ async function runInkShell(
       // independent `❯ /command` row above the tool/output blocks.
       if (event.type === "submit" && event.text.startsWith("/")) {
         // D.13E Step 2 — 用 createCommandBlock 替代手写 push，统一 transcript 行格式。
-        blocks.push(createCommandBlock(commandSequence++, event.text));
+        pushCommandTranscriptBlock(event.text);
       } else if (event.type === "submit" && event.text.length > 0) {
         // D.13Q-UX Real Smoke Fix v2 — C. 用户普通消息立即推 user transcript block，
         // 让任务页"对话流"成立：模型还没回话之前，用户输入也已经在屏幕上可见，
@@ -3334,7 +3534,14 @@ async function runInkShell(
         const isModelSetup = Boolean(context.pendingModelSetup);
         const isPendingConfirm = hasPendingEnterConfirmation(context);
         if (!isModelSetup && !isPendingConfirm) {
-          blocks.push(createUserTextBlock(commandSequence++, event.text, Date.now()));
+          const userBlock = createUserTextBlock(commandSequence++, event.text, Date.now());
+          appendTranscriptSourceBlock(context, userBlock);
+          blocks.push(userBlock);
+          commitTerminalFirstUserBlock(terminalFirstSink, userBlock, () => {
+            appendTranscriptSourceBlock(context, userBlock);
+            const idx = blocks.indexOf(userBlock);
+            if (idx >= 0) blocks.splice(idx, 1);
+          });
         }
       }
       shell?.rerender();
@@ -3368,6 +3575,13 @@ async function runInkShell(
       stdin: input,
       stdout: output,
       stderr: errorOutput,
+      beforeRender: () => {
+        if (shouldUseNativeScrollbackTaskFrame()) {
+          context.transcriptViewportGeometry = nativeScrollbackTaskHistoryGeometry(
+            controller.getViewModel(),
+          );
+        }
+      },
     });
     activityTicker = setInterval(() => {
       // P1-6: 清理完成超过 5 秒的后台任务
@@ -3391,10 +3605,10 @@ async function runInkShell(
       ) {
         return;
       }
-      shell?.rerender();
+      requestShellFrame();
     }, 1000);
     // D.14D — 暴露 rerender 钩子给需要在 handler 内先刷 loading 帧的命令（/btw）。
-    context.shellRerender = () => shell?.rerender();
+    context.shellRerender = requestShellFrame;
   } catch (error) {
     blocks.push(
       createOutputBlock(

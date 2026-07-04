@@ -3136,19 +3136,19 @@ export function evaluateChildAgentSummaryClaims(
   }
   const missing =
     Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching evidence";
-  const unsupported = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
+  const needed = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
   const safeText =
     language === "en-US"
       ? [
           "Child agent completed its run, but its high-risk claim was downgraded before reporting.",
           `Missing evidence: ${missing}.`,
-          `Blocked claim types: ${unsupported}.`,
+          `Evidence needed: ${needed}.`,
           "Use the child transcript, tool results, or verification evidence before treating the original claim as proven.",
         ].join("\n")
       : [
           "子 agent 已完成本次运行，但其高风险结论在回流前已被降级。",
           `缺少证据：${missing}。`,
-          `被拦截的声明类型：${unsupported}。`,
+          `需要补齐：${needed}。`,
           "请先查看子 transcript、工具结果或验证 evidence，再把原始结论当作已证明事实。",
         ].join("\n");
   return {

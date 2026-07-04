@@ -79,9 +79,9 @@ export function permissionModeSymbol(mode: PermissionMode): string {
 export function permissionModeColor(mode: PermissionMode): string {
   // Semantic color mapping aligned with CCB convention:
   // default = no color (inherits text), plan = cyan/blue, auto-review = yellow/warning, full-access = red/danger
-  if (mode === "full-access") return "#ff4444";
-  if (mode === "auto-review") return "#e0a020";
-  if (mode === "plan") return "#00aaff";
+  if (mode === "full-access") return "#f85149";
+  if (mode === "auto-review") return "#d29922";
+  if (mode === "plan") return "#58a6ff";
   return "";
 }
 

@@ -14,6 +14,7 @@ import type {
 } from "./tui-data-types.js";
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
+import { recordHandoffInRuntimeLedger } from "./runtime-storage.js";
 import { isRecord } from "./tui-state-runtime.js";
 
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
@@ -536,4 +537,5 @@ export async function writeHandoffPacket(
     `${JSON.stringify(packet, null, 2)}\n`,
     "utf8",
   );
+  await recordHandoffInRuntimeLedger(context, packet);
 }

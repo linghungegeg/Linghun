@@ -64,10 +64,9 @@ export function ConfigPanel({
     const visible = panel.panels.slice(scrollOffset, scrollOffset + MAX_VISIBLE);
     const visibleEnd = Math.min(scrollOffset + MAX_VISIBLE, total);
     const titleWidth = Math.min(
-      18,
+      16,
       Math.max(8, ...panel.panels.map((p) => [...p.title].length)) + 2,
     );
-    const summaryWidth = Math.max(16, innerWidth - titleWidth - 5);
 
     return (
       <Box
@@ -96,17 +95,11 @@ export function ConfigPanel({
           {visible.map((p, vi) => {
             const realIdx = scrollOffset + vi;
             const active = realIdx === panel.cursor;
-            const titleCol = p.title.padEnd(titleWidth);
+            const rowText = `${active ? "▌ " : "  "}${fitText(p.title, titleWidth)}`;
             return (
               <Box key={p.id} marginTop={vi > 0 ? 1 : 0}>
                 <Text color={active ? theme.accent : (theme.dim ?? theme.muted)} bold={active}>
-                  {active ? "▌ " : "  "}
-                </Text>
-                <Text color={active ? theme.accent : undefined} bold={active}>
-                  {fitText(titleCol, titleWidth)}
-                </Text>
-                <Text color={active ? undefined : (theme.dim ?? theme.muted)}>
-                  {fitText(p.summary, summaryWidth)}
+                  {fitText(rowText, innerWidth)}
                 </Text>
               </Box>
             );

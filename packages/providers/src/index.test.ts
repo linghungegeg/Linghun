@@ -838,6 +838,26 @@ async function collectOpenAiEvents(
 }
 
 describe("OpenAI stream parser", () => {
+  it("cancels the stream reader when the consumer stops after a parser error", async () => {
+    const encoder = new TextEncoder();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: {bad json}\n\n"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    for await (const event of parseOpenAiStream(body)) {
+      expect(event.type).toBe("error");
+      break;
+    }
+
+    expect(cancelled).toBe(true);
+  });
+
   it("converts text deltas and usage into Linghun events", async () => {
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({
@@ -1889,6 +1909,26 @@ describe("resolveProviderRuntimeContract anthropic_messages branch", () => {
 });
 
 describe("Anthropic Messages stream parser", () => {
+  it("cancels the stream reader when the consumer stops after a parser error", async () => {
+    const encoder = new TextEncoder();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("event: message_start\ndata: {bad json}\n\n"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    for await (const event of parseAnthropicMessagesStream(body)) {
+      expect(event.type).toBe("error");
+      break;
+    }
+
+    expect(cancelled).toBe(true);
+  });
+
   it("parses message_start, content_block_delta text and message_delta usage", async () => {
     const events = await collectAnthropicEvents([
       'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":7,"cache_read_input_tokens":3}}}\n\n',

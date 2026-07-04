@@ -22,6 +22,7 @@ import { computePromptCacheHitRate } from "@linghun/core";
 import type { ModelMessage } from "@linghun/providers";
 import { type ToolOutput, createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { enqueueAgentCompletionNotice } from "./agent-completion-finalizer.js";
 import { finishBackgroundTaskFromToolOutput } from "./background-control-runtime.js";
 import { formatCompactStatus } from "./cache-command-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
@@ -5855,6 +5856,59 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(cleaned).not.toContain("LinghunFinalAnswerClaims");
     expect(cleaned).not.toContain("内部运行时上下文已从主屏省略");
+  });
+
+  it("injects pending agent completions into main-chain prompt and sanitizes its marker", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-completion-prompt-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    enqueueAgentCompletionNotice(context, {
+      agent: {
+        id: "agent-main-chain",
+        type: "worker",
+        role: "executor",
+        provider: "test",
+        parentSessionId: session.id,
+        forkedFrom: "handoff-test",
+        task: "verify the focused UI regression",
+        model: "test-model",
+        permissionMode: "default",
+        status: "idle",
+        lastTerminalStatus: "completed",
+        activityStatus: "idle",
+        activitySummary: "done",
+        transcriptPath: "agent.jsonl",
+        transcriptSessionId: "child-session",
+        mailbox: [],
+        summary: "worker verified the focused UI regression",
+        contextSummary: "prompt integration test",
+        cost: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          estimatedCny: 0,
+        },
+        startedAt: "2026-06-13T00:00:00.000Z",
+        updatedAt: "2026-06-13T00:00:01.000Z",
+      },
+      status: "completed",
+      summary: "worker verified the focused UI regression",
+      evidenceRefs: ["ev-agent-test"],
+      now: "2026-06-13T00:00:01.000Z",
+    });
+
+    const prompt = createModelSystemPrompt("继续", context, { runtime: "test" });
+    expect(prompt).toContain("AgentCompletionReturnsForMainChain=");
+    expect(prompt).toContain("worker verified the focused UI regression");
+    expect(prompt).toContain("ev-agent-test");
+
+    const cleaned = sanitizeMainScreenLeakage(
+      "AgentCompletionReturnsForMainChain=子智能体结果已回流主链",
+      "zh-CN",
+    );
+    expect(cleaned).not.toContain("AgentCompletionReturnsForMainChain");
   });
 
   it("injects bounded GitStatus into system prompt and sanitizes its label", async () => {
@@ -12774,6 +12828,138 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
+  it("keeps normal tools available and allows direct report Write for explicit document files", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify(createOpenAiExecutorTestConfig("direct-report-write-model")),
+      "utf8",
+    );
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        if (requests.length === 1) {
+          const body = `data: ${JSON.stringify({
+            id: "chatcmpl-direct-report-1",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-write",
+                      type: "function",
+                      function: {
+                        name: "Write",
+                        arguments: JSON.stringify({
+                          path: "requested-report.md",
+                          content: "# Requested Report",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n`;
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        const body = `data: ${JSON.stringify({
+          id: "chatcmpl-direct-report-2",
+          choices: [
+            {
+              delta: {
+                content:
+                  "已生成 requested-report.md。\n结论：报告已保存。\n推断/未确认：未做额外项目分析。\n下一步：打开 requested-report.md 复核。",
+              },
+            },
+          ],
+        })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请生成报告 requested-report.md 在根目录下\n", "yes\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const firstRequest = requests[0] as {
+      tools?: Array<{ name?: string; function?: { name?: string } }>;
+    };
+    const toolNames = firstRequest.tools?.map((tool) => tool.name ?? tool.function?.name);
+    expect(toolNames).toContain("Read");
+    expect(toolNames).toContain("Grep");
+    expect(toolNames).toContain("Glob");
+    expect(toolNames).toContain("Write");
+    expect(toolNames).toContain("Edit");
+    expect(toolNames).toContain("Bash");
+    expect(requests).toHaveLength(2);
+    expect(output.text).toContain("写入 requested-report.md");
+    expect(output.text).toContain("已生成 requested-report.md。");
+    expect(output.text).not.toContain("写报告前需要先读取关键项目证据");
+    await expect(readFile(join(project, "requested-report.md"), "utf8")).resolves.toBe(
+      "# Requested Report",
+    );
+  });
+
+  it("marks approved WriteReport as completed after it delegates to Write", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify(createOpenAiExecutorTestConfig("write-report-approval-model")),
+      "utf8",
+    );
+    const requests = mockOpenAiToolSequence(
+      [
+        {
+          toolName: "WriteReport",
+          input: { path: "requested-report.md", content: "# Requested Report" },
+        },
+      ],
+      "已生成 requested-report.md。\n结论：报告已保存。\n推断/未确认：未做额外项目分析。\n下一步：打开 requested-report.md 复核。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请生成报告 requested-report.md 在根目录下\n", "yes\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    const secondRequest = requests[1] as { messages?: Array<{ content?: string }> };
+    expect(
+      secondRequest.messages?.some((message) =>
+        message.content?.includes("当前还没有保存报告"),
+      ),
+    ).toBe(false);
+    expect(output.text).toContain("报告已保存：requested-report.md");
+    expect(output.text).toContain("已生成 requested-report.md。");
+    expect(output.text).not.toContain("报告生成受阻");
+    await expect(readFile(join(project, "requested-report.md"), "utf8")).resolves.toBe(
+      "# Requested Report",
+    );
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).not.toContain("report_incomplete");
+  });
+
   it("generates Chinese document paths with spaces through Write after permission approval", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -17879,6 +18065,33 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.commandPanelState?.expanded).toBe(false);
   });
 
+  it("Ink /background tolerates malformed blocked task records", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-malformed-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    context.backgroundTasks = [
+      {
+        id: "blocked-old",
+        status: "blocked",
+        startedAt: "not-a-date",
+        updatedAt: "not-a-date",
+        staleAfterMs: 60_000,
+        heartbeatIntervalMs: 30_000,
+      },
+    ] as unknown as TuiContext["backgroundTasks"];
+
+    await expect(handleSlashCommand("/background", context, output)).resolves.toBe("handled");
+
+    const panel = context.commandPanelState;
+    expect(panel?.title).toBe("/background");
+    expect(panel?.tone).toBe("warning");
+    expect(panel?.detailsText).toContain("/details background blocked-old");
+    expect(output.text).toBe("");
+  });
+
   it("CommandPanel selection updates cursor and scrollOffset on selectable /background rows", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-background-selection-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -21269,10 +21482,22 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("因限流失败");
     expect(output.text).toContain("备用模型回答成功");
     expect(output.text).not.toContain("模型服务触发限流。本次请求未完成");
+    expect(output.text).not.toContain("任务状态：最终回答等待证据确认");
+    expect(output.text).not.toContain("缺少：");
+    expect(output.text).not.toContain("当前证据：");
+    expect(output.text).not.toContain("模型请求未完成");
 
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const sessions = await store.list();
     const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" &&
+          event.message.includes("provider fallback attempt") &&
+          event.message.includes("status attempted"),
+      ),
+    ).toBe(true);
     expect(
       transcript.some(
         (event) =>
@@ -27326,6 +27551,9 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(runtimeSrc).toMatch(
       /streamFinalModelAnswerWithoutTools\([\s\S]*?assistantStreamBlockId,\s*true,\s*\)/,
     );
+    expect(runtimeSrc).toContain(
+      "beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true })",
+    );
   });
 
   it("源码：sendMessage / continueModelAfterToolResults 在 retry 后调 discardAssistantBlock", async () => {
@@ -27345,8 +27573,8 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const fs = await import("node:fs/promises");
     const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
     const rendererSrc = await fs.readFile(srcPath("shell/ink-renderer.tsx"), "utf8");
-    expect(runtimeSrc).toContain("const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 32");
-    expect(runtimeSrc).toContain("const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 60");
+    expect(runtimeSrc).toContain("const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 16");
+    expect(runtimeSrc).toContain("const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 24");
     expect(rendererSrc).toContain("const RERENDER_FRAME_MS = 16");
     expect(rendererSrc).toContain("pendingRenderTimer");
   });
@@ -27360,7 +27588,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(runtimeSrc).not.toContain("[stdout] ... 更多输出已隐藏");
   });
 
-  it("no-tool provider final answer waits for final gate before Ink preview", async () => {
+  it("no-tool provider final answer stays mutable before final gate commit", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-no-tool-final-preview-"));
     const config: LinghunConfig = {
       ...defaultConfig,
@@ -27404,7 +27632,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const pending = __testSendMessage("普通纯文本回答", context, gateway, output);
     await deltaProcessed;
 
-    expect(context.streamingAssistant?.text ?? "").not.toContain(finalText);
+    expect(context.streamingAssistant?.text ?? "").toContain(finalText);
     expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
       finalText,
     );
@@ -27417,7 +27645,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(finalBlocks).toHaveLength(1);
   });
 
-  it("tool-capable pure text answer streams Ink preview before final commit", async () => {
+  it("tool-capable pure text answer keeps only mutable Ink preview before final gate commit", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-text-preview-"));
     const config: LinghunConfig = {
       ...defaultConfig,

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -70,12 +71,14 @@ const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 const CLI_BUNDLED_ROOT_ENV = "LINGHUN_CLI_BUNDLED_ROOT";
 const CODEBASE_MEMORY_BUNDLED_ENV = "LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR";
 const PRE_ENGINE_BUNDLED_ENV = "LINGHUN_PRE_ENGINE_BUNDLED_DIR";
+const INDEX_REPOSITORY_TIMEOUT_MS = 600_000;
 const CODEBASE_MEMORY_BUNDLED_PLATFORM_ARCHES = new Set([
   "win32-x64",
   "linux-x64",
   "darwin-arm64",
   "darwin-x64",
 ]);
+const requireFromRuntime = createRequire(import.meta.url);
 
 export type CodebaseMemoryResolution = {
   command: string;
@@ -108,6 +111,7 @@ export type McpIndexRuntimeDeps = {
     task: BackgroundTaskState,
   ) => Promise<void>;
   rememberEvidence: (context: TuiContext, evidence: EvidenceRecord) => void;
+  resolveCodebaseMemoryPackageRoot?: (packageName: string) => string | undefined;
 };
 
 let runtimeDeps: McpIndexRuntimeDeps | undefined;
@@ -476,11 +480,11 @@ export async function findManagedCodebaseMemoryBinary(
 export async function findBundledCodebaseMemoryBinary(): Promise<
   { command: string; args: string[]; detailPath: string } | undefined
 > {
-  const roots = getBundledCodebaseMemoryRoots();
   const platformArch = getCodebaseMemoryPlatformArch();
   if (!CODEBASE_MEMORY_BUNDLED_PLATFORM_ARCHES.has(platformArch)) {
     return undefined;
   }
+  const roots = getBundledCodebaseMemoryRoots(platformArch);
   const names = platformArch.startsWith("win32")
     ? [`${CODEBASE_MEMORY_COMMAND}.exe`, `${CODEBASE_MEMORY_COMMAND}.cjs`]
     : [CODEBASE_MEMORY_COMMAND, `${CODEBASE_MEMORY_COMMAND}.cjs`];
@@ -495,7 +499,9 @@ export async function findBundledCodebaseMemoryBinary(): Promise<
   return undefined;
 }
 
-export function getBundledCodebaseMemoryRoots(): string[] {
+export function getBundledCodebaseMemoryRoots(
+  platformArch = getCodebaseMemoryPlatformArch(),
+): string[] {
   const roots: string[] = [];
   if (process.env[CODEBASE_MEMORY_BUNDLED_ENV]) {
     roots.push(process.env[CODEBASE_MEMORY_BUNDLED_ENV]);
@@ -506,7 +512,24 @@ export function getBundledCodebaseMemoryRoots(): string[] {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   roots.push(join(moduleDir, "..", "bundled", "codebase-memory"));
   roots.push(join(moduleDir, "bundled", "codebase-memory"));
+  const packageRoot = resolveOptionalCodebaseMemoryPackageRoot(platformArch);
+  if (packageRoot) {
+    roots.push(join(packageRoot, "bundled", "codebase-memory"));
+  }
   return roots;
+}
+
+function resolveOptionalCodebaseMemoryPackageRoot(platformArch: string): string | undefined {
+  const packageName = `@linghun/codebase-memory-${platformArch}`;
+  const injected = runtimeDeps?.resolveCodebaseMemoryPackageRoot?.(packageName);
+  if (injected) {
+    return injected;
+  }
+  try {
+    return dirname(requireFromRuntime.resolve(`${packageName}/package.json`));
+  } catch {
+    return undefined;
+  }
 }
 
 export function getCodebaseMemoryPlatformArch(): string {
@@ -1226,7 +1249,7 @@ export async function runIndexRepository(
     startedAt: now,
     updatedAt: now,
     heartbeatIntervalMs: 30_000,
-    staleAfterMs: 120_000,
+    staleAfterMs: INDEX_REPOSITORY_TIMEOUT_MS,
     hasOutput: false,
     userVisibleSummary: `索引${actionLabel === "refresh" ? "刷新" : "初始化"}正在执行。`,
     nextAction: "等待完成，或用 /interrupt 标记取消后检查 /index status。",
@@ -1249,7 +1272,7 @@ export async function runIndexRepository(
         : {}),
     },
     context.projectPath,
-    120_000,
+    INDEX_REPOSITORY_TIMEOUT_MS,
   );
   const endedAt = new Date().toISOString();
   task.updatedAt = endedAt;

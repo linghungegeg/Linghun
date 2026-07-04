@@ -10,6 +10,11 @@ import type {
 import { findKnownModel } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import {
+  collectPendingAgentCompletionNotices,
+  formatAgentCompletionMainChainContext,
+  markAgentCompletionNoticeReported,
+} from "./agent-completion-finalizer.js";
+import {
   createArchitectureCard,
   createArchitectureRuntimeDirective,
   shouldTriggerArchitectureRuntime,
@@ -63,17 +68,12 @@ import {
 import { detectEngineeringTaskProfile } from "./headless-bench-runtime.js";
 import { startModelSetup } from "./model-command-runtime.js";
 import {
-  buildDowngradedFinalAnswer,
-  createFinalAnswerClaimReminder,
   createModelToolDefinitionsForReportGuard,
   evaluateFinalAnswerClaims,
+  isEvidenceStaleForClaim,
 } from "./model-loop-runtime.js";
 import type { FinalAnswerClaimVerdict, FinalAnswerExtendedVerdict } from "./model-loop-runtime.js";
-import {
-  buildExtendedDowngradedFinalAnswer,
-  createExtendedFinalAnswerReminder,
-  stripStructuredFinalAnswerClaims,
-} from "./model-loop-runtime.js";
+import { stripStructuredFinalAnswerClaims } from "./model-loop-runtime.js";
 import { createModelSystemPrompt, sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
 import { looksLikeModelSetupInput, parseModelSetupPrefill } from "./model-setup-runtime.js";
 import { executeModelToolUse, recordReportIncompleteEvidence } from "./model-tool-runtime.js";
@@ -116,6 +116,7 @@ import {
   type RequestActivityPhase,
   formatProviderEmptyResponsePrimary,
   formatProviderFailurePrimary,
+  formatProviderFailureTitle,
   formatProviderFallbackAttemptSummary,
   formatProviderThinkingOnlyResponsePrimary,
   formatReportEvidenceRequired,
@@ -126,8 +127,10 @@ import { detectTerminalCapability } from "./shell/terminal-capability.js";
 import { addRoleUsage } from "./slash-command-runtime.js";
 import { handleSlashCommand } from "./slash-command-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
+import { formatFinalGateTaskStatus } from "./task-status-presenter.js";
 import { createAssistantPrimaryTextSanitizer } from "./tool-output-presenter.js";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
+import { createVerificationPlan } from "./verification-command-runtime.js";
 import type { PendingModelContinuation, TuiContext } from "./tui-context-runtime.js";
 import { updateTurnContinuity } from "./turn-continuity-runtime.js";
 import {
@@ -177,8 +180,27 @@ type AggregatedFinalAnswerGateResult =
       unsupportedKinds: string[];
     };
 
-const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 32;
-const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 60;
+export type FinalGateEvidenceGapActionPlan = {
+  action: "readonly_check" | "verification_request" | "blocked_explanation" | "downgrade_only";
+  reason: string;
+  directive: string;
+  evidenceAction?: {
+    toolName: string;
+    input?: unknown;
+    strategy?: "minimal_bash_verification" | "artifact_readonly_check";
+    summary: string;
+  };
+};
+
+export type FinalGateEvidenceActionResult =
+  | { status: "evidence_recorded"; messages: ModelMessage[]; result: ModelToolExecutionResult }
+  | { status: "permission_pending" }
+  | { status: "blocked"; reason: string }
+  | { status: "unsupported"; reason: string };
+
+const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 16;
+const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 24;
+const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 2;
 
 export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok">): boolean {
   return result.ok !== true;
@@ -206,6 +228,34 @@ function pushToolResultMessage(
     tool_call_id: toolCall.id,
     content: JSON.stringify(result),
   });
+}
+
+function latestUserTextFromMessages(messages: ModelMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "user" && message.content.trim()) return message.content;
+  }
+  return undefined;
+}
+
+function injectAgentCompletionMainChainContext(
+  messages: ModelMessage[],
+  context: TuiContext,
+): string[] {
+  const pendingNoticeIds = collectPendingAgentCompletionNotices(context).map((notice) => notice.id);
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      message?.role === "system" &&
+      message.content.includes("AgentCompletionReturnsForMainChain=")
+    ) {
+      messages.splice(index, 1);
+    }
+  }
+  const promptContext = formatAgentCompletionMainChainContext(context);
+  if (!promptContext) return pendingNoticeIds;
+  messages.push({ role: "system", content: promptContext });
+  return pendingNoticeIds;
 }
 
 function isHighReasoningLevel(level: string | undefined): boolean {
@@ -421,34 +471,481 @@ function uniqueArtifactTargets(targets: string[]): string[] {
   return Array.from(out);
 }
 
-function createAggregatedFinalAnswerReminder(
-  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
-  language: Language,
-): string {
-  return [
-    result.claimVerdict ? createFinalAnswerClaimReminder(result.claimVerdict, language) : "",
-    result.extendedVerdict
-      ? createExtendedFinalAnswerReminder(result.extendedVerdict, language)
-      : "",
-    result.engineeringVerdict ? createEngineeringFinalBoundaryReminder(result, language) : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+export function planFinalGateEvidenceGapAction(input: {
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
+  context: Pick<TuiContext, "permissionMode" | "evidence" | "language">;
+  userText?: string;
+  assistantText?: string;
+  retryBudgetRemaining?: boolean;
+}): FinalGateEvidenceGapActionPlan {
+  const { result, context } = input;
+  const language = context.language;
+  if (input.retryBudgetRemaining === false) {
+    return {
+      action: "downgrade_only",
+      reason: "retry_budget_exhausted",
+      directive: formatEvidenceGapBlocker("retry_budget_exhausted", language),
+    };
+  }
+  if (userForbidsCommandEvidence(input.userText)) {
+    return {
+      action: "blocked_explanation",
+      reason: "user_forbid_commands",
+      directive: formatEvidenceGapBlocker("user_forbid_commands", language),
+    };
+  }
+  const gap = classifyFinalGateEvidenceGap(result.unsupportedKinds);
+  if (gap === "artifact") {
+    const artifactAction = createArtifactReadonlyEvidenceAction(input.assistantText ?? input.userText ?? "");
+    return {
+      action: "readonly_check",
+      reason: "artifact_gap_readonly",
+      directive: formatEvidenceGapToolDirective({
+        language,
+        action: "readonly_check",
+        missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
+        tools: ["Read", "Grep", "Glob"],
+        note:
+          language === "en-US"
+            ? "Only inspect existing files or report references; do not write files and do not run Bash."
+            : "只检查已有文件或报告引用；不要写文件，也不要运行 Bash。",
+      }),
+      evidenceAction: artifactAction,
+    };
+  }
+  if (gap === "git") {
+    return {
+      action: "readonly_check",
+      reason: "git_gap_readonly",
+      directive: formatEvidenceGapToolDirective({
+        language,
+        action: "readonly_check",
+        missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
+        tools: ["GitStatusInspect"],
+        note:
+          language === "en-US"
+            ? "Inspect git status only; do not create commits, branches, worktrees, or run Bash."
+            : "只检查 git 状态；不要创建 commit、分支、worktree，也不要运行 Bash。",
+      }),
+      evidenceAction: {
+        toolName: "GitStatusInspect",
+        input: { includeDetails: true },
+        summary: "inspect git status for final-gate git evidence",
+      },
+    };
+  }
+  if (gap === "runtime") {
+    const runtimeAction = createServiceRuntimeReadonlyEvidenceAction(
+      [input.assistantText, input.userText].filter(Boolean).join("\n"),
+    );
+    return {
+      action: "readonly_check",
+      reason: "service_runtime_gap_readonly",
+      directive: formatEvidenceGapToolDirective({
+        language,
+        action: "readonly_check",
+        missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
+        tools: ["Read", "Grep", "Glob"],
+        note:
+          language === "en-US"
+            ? "Only inspect existing logs, config, or health/status references; do not start services, run Bash, curl networks, or write files."
+            : "只检查已有日志、配置或 health/status 线索；不要启动服务，不要运行 Bash，不要 curl 网络，也不要写文件。",
+      }),
+      evidenceAction: runtimeAction,
+    };
+  }
+  if (gap === "verification") {
+    if (context.permissionMode === "plan") {
+      return {
+        action: "blocked_explanation",
+        reason: "readonly_mode_blocks_verification",
+        directive: formatEvidenceGapBlocker("readonly_mode_blocks_verification", language),
+      };
+    }
+    return {
+      action: "verification_request",
+      reason: context.permissionMode === "default" ? "verification_requires_permission" : "verification_allowed_by_mode",
+      directive: formatEvidenceGapToolDirective({
+        language,
+        action: "verification_request",
+        missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
+        tools: context.permissionMode === "default" ? ["Bash"] : ["RunVerification"],
+        note:
+          context.permissionMode === "default"
+            ? language === "en-US"
+              ? "Use one minimal focused/typecheck Bash command so decidePermission can route approval through pendingLocalApproval/PermissionPanel; do not use RunVerification to bypass ask mode."
+              : "使用一条最小 focused/typecheck Bash 命令，让 decidePermission 通过 pendingLocalApproval/PermissionPanel 处理授权；不要用 RunVerification 绕过 ask 模式。"
+            : language === "en-US"
+              ? "Run the smallest focused/typecheck verification first; do not run a full suite unless focused evidence is insufficient."
+              : "先运行最小 focused/typecheck 验证；除非 focused 证据不足，不要直接跑全量套件。",
+      }),
+      evidenceAction:
+        context.permissionMode === "default"
+          ? {
+              toolName: "Bash",
+              strategy: "minimal_bash_verification",
+              summary: "run one minimal verification command through Bash permission flow",
+            }
+          : {
+              toolName: "RunVerification",
+              input: { level: "typecheck" },
+              summary: "run minimal typecheck verification through RunVerification",
+            },
+    };
+  }
+  return {
+    action: "downgrade_only",
+    reason: "unsupported_gap",
+    directive: createFinalGateEvidenceTaskDirective(result, language),
+  };
 }
 
-function buildAggregatedDowngradedFinalAnswer(
+async function runFinalGateEvidenceAction(input: {
+  actionPlan: FinalGateEvidenceGapActionPlan;
+  context: TuiContext;
+  output: Writable;
+  sessionId: string;
+  messages: ModelMessage[];
+  runtime: {
+    provider: string;
+    model: string;
+    endpointProfile: EndpointProfile;
+    reasoningLevel?: string;
+    reasoningSent: boolean;
+  };
+  reportWriteGuard?: PendingModelContinuation["reportWriteGuard"];
+}): Promise<FinalGateEvidenceActionResult> {
+  const toolCall = await createFinalGateEvidenceToolCall(input.actionPlan, input.context);
+  if (!toolCall) {
+    return { status: "unsupported", reason: input.actionPlan.reason };
+  }
+  const continuation: PendingModelContinuation = {
+    messages: [
+      ...input.messages,
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [toolCall],
+      },
+    ],
+    provider: input.runtime.provider,
+    model: input.runtime.model,
+    endpointProfile: input.runtime.endpointProfile,
+    reasoningLevel: input.runtime.reasoningLevel,
+    reasoningSent: input.runtime.reasoningSent,
+    ...(input.reportWriteGuard ? { reportWriteGuard: input.reportWriteGuard } : {}),
+  };
+  await appendSystemEvent(
+    input.context,
+    input.sessionId,
+    `final_answer_gap_action dispatch tool=${toolCall.name} reason=${input.actionPlan.reason}`,
+    "info",
+  );
+  const result = await executeModelToolUse(
+    toolCall,
+    input.context,
+    input.sessionId,
+    input.output,
+    continuation,
+  );
+  await recordModelToolFailureForMetaScheduler(input.context, input.sessionId, result);
+  if (result.pendingApproval) {
+    return { status: "permission_pending" };
+  }
+  continuation.messages.push({
+    role: "tool",
+    tool_call_id: toolCall.id,
+    content: JSON.stringify(result),
+  });
+  return { status: "evidence_recorded", messages: continuation.messages, result };
+}
+
+export async function __testRunFinalGateEvidenceAction(
+  input: Parameters<typeof runFinalGateEvidenceAction>[0],
+): Promise<FinalGateEvidenceActionResult> {
+  return runFinalGateEvidenceAction(input);
+}
+
+async function createFinalGateEvidenceToolCall(
+  actionPlan: FinalGateEvidenceGapActionPlan,
+  context: TuiContext,
+): Promise<ModelToolCall | undefined> {
+  const action = actionPlan.evidenceAction;
+  if (!action) return undefined;
+  if (action.strategy === "minimal_bash_verification") {
+    const command = await selectMinimalBashVerificationCommand(context);
+    if (!command) return undefined;
+    return {
+      id: `final-gate-evidence-${randomUUID()}`,
+      name: "Bash",
+      input: {
+        command,
+        description: "final gate minimal verification evidence",
+        timeoutMs: 120_000,
+      },
+    };
+  }
+  return {
+    id: `final-gate-evidence-${randomUUID()}`,
+    name: action.toolName,
+    input: action.input ?? {},
+  };
+}
+
+async function selectMinimalBashVerificationCommand(context: TuiContext): Promise<string | undefined> {
+  const plan = await createVerificationPlan(context.projectPath, "focused");
+  const step =
+    plan.find((item) => item.kind === "typecheck" && item.synthetic !== true) ??
+    plan.find((item) => item.synthetic !== true);
+  return step?.command;
+}
+
+export function buildAggregatedDowngradedFinalAnswer(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  language: Language,
+  evidence: TuiContext["evidence"] = [],
+): string {
+  return buildFinalAnswerGapChecklist(result, language, evidence);
+}
+
+function buildFinalAnswerGapChecklist(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  language: Language,
+  evidence: TuiContext["evidence"],
+): string {
+  const labels = mapFinalGateKindsToUserLabels(result.unsupportedKinds, language);
+  return formatFinalGateTaskStatus({
+    language,
+    missingLabels: labels,
+    evidence,
+  });
+}
+
+export function shouldRewriteFinalGateClaimAlignment(
+  result: AggregatedFinalAnswerGateResult,
+  context: Pick<TuiContext, "evidence">,
+): boolean {
+  if (result.status !== "needs_disclaimer") return false;
+  if (!result.claimVerdict) return false;
+  if (result.unsupportedKinds.some((kind) => kind !== "completion_claim")) return false;
+  if (result.claimVerdict.unsupportedKinds.some((kind) => kind !== "completion_claim")) {
+    return false;
+  }
+  return hasFreshVerificationEvidenceForFinalClaimAlignment(context.evidence);
+}
+
+function hasFreshVerificationEvidenceForFinalClaimAlignment(evidence: TuiContext["evidence"]): boolean {
+  return evidence.some((record) => {
+    if (record.kind !== "command_output" && record.kind !== "test_result") return false;
+    if (record.supportsClaims.includes("tool_failure")) return false;
+    if (record.supportsClaims.includes("bash_exit_nonzero")) return false;
+    if (
+      record.supportsClaims.includes("verification_passed") &&
+      !isEvidenceStaleForClaim(record, "verification_claim")
+    ) {
+      return true;
+    }
+    return (
+      ["test_passed", "typecheck_passed", "build_passed", "diff_check_passed", "smoke_passed"].some(
+        (claim) => record.supportsClaims.includes(claim),
+      ) && !isEvidenceStaleForClaim(record, "completion_pass")
+    );
+  });
+}
+
+function createFinalGateClaimAlignmentRewritePrompt(language: Language): string {
+  if (language === "en-US") {
+    return [
+      "Final answer claim alignment:",
+      "- Existing fresh verification/test evidence supports a verification or pass claim, not broad task completion.",
+      "- Rewrite the final answer naturally from the current evidence.",
+      "- Keep the visible answer scoped to what was actually verified.",
+      "- Use verification_claim or completion_pass in LinghunFinalAnswerClaims. Do not use completion_claim unless task completion evidence exists.",
+      "- Do not call tools for this rewrite.",
+    ].join("\n");
+  }
+  return [
+    "最终回答声明对齐：",
+    "- 当前已有 fresh 验证/测试证据，只能支撑验证通过或测试通过声明，不能扩大成整个任务完成。",
+    "- 请基于当前证据重写自然最终答案。",
+    "- 可见正文只写实际已验证的范围。",
+    "- LinghunFinalAnswerClaims 使用 verification_claim 或 completion_pass；除非已有 task completion evidence，不要使用 completion_claim。",
+    "- 本次重写不要调用工具。",
+  ].join("\n");
+}
+
+export function buildFinalGateClaimAlignmentFallback(language: Language): string {
+  if (language === "en-US") {
+    return [
+      "I can only confirm the verified portion from the recorded checks.",
+      "Those checks support a verification or test result, but they do not by themselves cover full task completion.",
+      "To give a broader final conclusion, I need a completion record that states scope, validation, and remaining risk.",
+    ].join("\n");
+  }
+  return [
+    "我只能确认已记录检查覆盖到的验证范围。",
+    "这些检查可以支撑验证或测试结果通过，但不能单独概括为整个任务完成。",
+    "若要给出更完整的最终结论，还需要补充覆盖范围、验证方式和剩余风险记录。",
+  ].join("\n");
+}
+
+function createFinalGateEvidenceTaskDirective(
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
   language: Language,
 ): string {
+  const labels = mapFinalGateKindsToUserLabels(result.unsupportedKinds, language);
+  const missing = labels.length > 0 ? labels.join(language === "en-US" ? ", " : "、") : (
+    language === "en-US" ? "matching evidence" : "匹配证据"
+  );
+  return language === "en-US"
+    ? [
+        "Evidence task:",
+        `- Missing: ${missing}.`,
+        "- Do not produce another final answer yet if this evidence can be gathered.",
+        "- Call the smallest relevant tool or verification command now. If permission, budget, or scope blocks that, explain the blocker and downgrade.",
+      ].join("\n")
+    : [
+        "补证据任务：",
+        `- 缺少：${missing}。`,
+        "- 如果这些证据可以通过工具获得，不要立刻再次给最终回答。",
+        "- 现在调用最小相关工具或验证命令；若权限、预算或范围阻塞，再说明阻塞原因并降级。",
+      ].join("\n");
+}
+
+function classifyFinalGateEvidenceGap(kinds: string[]): "verification" | "artifact" | "git" | "runtime" | "other" {
+  if (kinds.some((kind) => /git|commit|branch|push|stable_point/iu.test(kind))) return "git";
+  if (kinds.some((kind) => /artifact|file|report|write/iu.test(kind))) return "artifact";
+  if (kinds.some((kind) => /service|runtime|port|health|log|daemon|server/iu.test(kind))) {
+    return "runtime";
+  }
+  if (kinds.some((kind) => /test|typecheck|build|lint|verification|completion|pass|full_suite/iu.test(kind))) {
+    return "verification";
+  }
+  return "other";
+}
+
+function createArtifactReadonlyEvidenceAction(text: string): NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
+  const path = extractLikelyArtifactPath(text);
+  if (path) {
+    return {
+      toolName: "Read",
+      input: { path, limit: 200 },
+      summary: `read claimed artifact ${path}`,
+    };
+  }
+  return {
+    toolName: "Glob",
+    input: { pattern: "**/*.{md,txt,json,log}", path: ".", limit: 20 },
+    strategy: "artifact_readonly_check",
+    summary: "glob for likely report/artifact files",
+  };
+}
+
+function createServiceRuntimeReadonlyEvidenceAction(text: string): NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
+  const path = extractLikelyArtifactPath(text);
+  if (path) {
+    return {
+      toolName: "Read",
+      input: { path, limit: 200 },
+      summary: `read claimed runtime evidence ${path}`,
+    };
+  }
+  return {
+    toolName: "Grep",
+    input: {
+      pattern: "health|ready|listening|server|service|daemon|port|localhost|127\\.0\\.0\\.1|error|failed",
+      path: ".",
+      limit: 30,
+    },
+    summary: "grep existing files for service/runtime health evidence",
+  };
+}
+
+function extractLikelyArtifactPath(text: string): string | undefined {
+  const match = text.match(
+    /(?:^|[\s"'`：（(])((?:\.{1,2}[\\/]|[A-Za-z]:[\\/]|\/)?[\w .@()-]+(?:[\\/][\w .@()-]+)*\.(?:md|txt|json|jsonl|log|html|csv|xml|yaml|yml|pdf|png|jpg|jpeg|zip|tar|gz|tsx?|jsx?|py|rs|go|java|cs|cpp|c|h))(?:$|[\s"'`，。；:）)])/iu,
+  );
+  return match?.[1]?.trim();
+}
+
+function userForbidsCommandEvidence(userText: string | undefined): boolean {
+  if (!userText) return false;
+  return /(?:不要|别|不准|禁止|只(?:定位|看|分析|审计)|先(?:定位|看|分析|审计)).{0,24}(?:改|修改|运行测试|跑测试|执行命令|运行命令|跑命令|测试|typecheck|build|lint|Bash|命令)|(?:do\s+not|don't|dont|no)\s+(?:run|execute|modify|edit).{0,24}(?:tests?|commands?|bash|typecheck|build|lint|files?)?|(?:read[-\s]?only|audit\s+only|diagnose\s+only)/iu.test(
+    userText,
+  );
+}
+
+function formatEvidenceGapToolDirective(input: {
+  language: Language;
+  action: FinalGateEvidenceGapActionPlan["action"];
+  missing: string[];
+  tools: string[];
+  note: string;
+}): string {
+  const missing = input.missing.length > 0
+    ? input.missing.join(input.language === "en-US" ? ", " : "、")
+    : input.language === "en-US" ? "matching evidence" : "匹配证据";
+  const tools = input.tools.join(", ");
+  if (input.language === "en-US") {
+    return [
+      "Permission-aware evidence gap plan:",
+      `- Action: ${input.action}.`,
+      `- Missing: ${missing}.`,
+      `- Use exactly the smallest relevant tool path first: ${tools}.`,
+      `- ${input.note}`,
+      "- Do not produce a final answer until the tool result or permission blocker is recorded.",
+    ].join("\n");
+  }
   return [
-    result.claimVerdict ? buildDowngradedFinalAnswer(result.claimVerdict, language) : "",
-    result.extendedVerdict
-      ? buildExtendedDowngradedFinalAnswer(result.extendedVerdict, language)
-      : "",
-    result.engineeringVerdict ? buildEngineeringDowngradedFinalAnswer(result, language) : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+    "权限感知补证据计划：",
+    `- 动作：${input.action}。`,
+    `- 缺少：${missing}。`,
+    `- 优先使用最小相关工具路径：${tools}。`,
+    `- ${input.note}`,
+    "- 在工具结果或权限阻塞被记录前，不要输出最终回答。",
+  ].join("\n");
+}
+
+function formatEvidenceGapBlocker(
+  reason: "retry_budget_exhausted" | "user_forbid_commands" | "readonly_mode_blocks_verification",
+  language: Language,
+): string {
+  if (language === "en-US") {
+    if (reason === "user_forbid_commands") {
+      return "Evidence gap remains, but the user explicitly constrained this turn to no commands/tests. Downgrade and state the needed authorization.";
+    }
+    if (reason === "readonly_mode_blocks_verification") {
+      return "Evidence gap requires verification commands, but current permission mode is read-only/plan. Downgrade and ask for authorization before running tests or Bash.";
+    }
+    return "Evidence gap remains and final-gate retry budget is exhausted. Downgrade without claiming completion.";
+  }
+  if (reason === "user_forbid_commands") {
+    return "证据缺口仍存在，但用户明确限制本轮不要执行命令/测试。请降级说明，并写明需要用户授权的下一步。";
+  }
+  if (reason === "readonly_mode_blocks_verification") {
+    return "证据缺口需要验证命令，但当前是只读/plan 模式。请降级说明，并在运行测试或 Bash 前请求授权。";
+  }
+  return "证据缺口仍存在，且 final-gate retry 预算已用尽。请降级说明，不要声称完成。";
+}
+
+function mapFinalGateKindsToUserLabels(kinds: string[], language: Language): string[] {
+  const labels = new Set<string>();
+  for (const kind of kinds) {
+    if (/test|typecheck|build|lint|verification|completion|pass|full_suite/iu.test(kind)) {
+      labels.add(language === "en-US" ? "verification or test evidence" : "验证或测试证据");
+    } else if (/artifact|file|report|write/iu.test(kind)) {
+      labels.add(language === "en-US" ? "artifact or file evidence" : "产物或文件证据");
+    } else if (/architecture|completeness|drift|boundary/iu.test(kind)) {
+      labels.add(language === "en-US" ? "architecture or closure evidence" : "架构或闭合证据");
+    } else if (/service|runtime|port|health/iu.test(kind)) {
+      labels.add(language === "en-US" ? "service runtime evidence" : "服务运行证据");
+    } else if (/git|commit|branch|push/iu.test(kind)) {
+      labels.add(language === "en-US" ? "Git operation evidence" : "Git 操作证据");
+    } else {
+      labels.add(language === "en-US" ? "matching evidence" : "匹配证据");
+    }
+  }
+  return Array.from(labels);
 }
 
 async function recordFinalAnswerGateDowngrade(
@@ -473,26 +970,6 @@ async function recordFinalAnswerGateDowngrade(
     relatedTarget: "final_answer_gate",
     severity: "medium",
   });
-}
-
-function createEngineeringFinalBoundaryReminder(
-  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
-  language: Language,
-): string {
-  const message = result.engineeringVerdict?.message ?? "engineering verification boundary missing";
-  return language === "en-US"
-    ? `Engineering boundary: ${message}. Downgrade the final answer unless matching evidence is available.`
-    : `工程边界：${message}。除非已有匹配证据，否则最终回答必须降级说明。`;
-}
-
-function buildEngineeringDowngradedFinalAnswer(
-  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
-  language: Language,
-): string {
-  const message = result.engineeringVerdict?.message ?? "engineering verification boundary missing";
-  return language === "en-US"
-    ? `I cannot honestly mark this as complete yet: ${message}.`
-    : `我不能把这轮诚实标记为已完成：${message}。`;
 }
 
 export function handleNaturalInput(
@@ -582,10 +1059,6 @@ export async function handleNaturalInput(
     context.pendingNaturalCommand = undefined;
   }
 
-  if (/^(yes|y|confirm|ok|okay|确认|是|继续|执行)$/iu.test(text.trim())) {
-    return "handled";
-  }
-
   // D.14D — 模型未配好时的 onboarding 入口（state-gated，不是普通自然语言截胡）。
   // 只有当 shouldOfferUserScopedModelSetup 为真（即当前没有可用的 user provider 配置）
   // 时才命中；模型一旦配好，这条永远不触发，普通自然语言照常进模型主链。这是新手安全
@@ -632,20 +1105,44 @@ export function clearRequestActivity(context: TuiContext): void {
   }
   if (context.requestActivityPhase) {
     const startedAt = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
+    const endedAtMs = Date.now();
+    const firstDeltaAt = (context as { requestActivityFirstDeltaAt?: number })
+      .requestActivityFirstDeltaAt;
+    const firstDeltaType = (context as { requestActivityFirstDeltaType?: string })
+      .requestActivityFirstDeltaType;
     context.lastModelRequest = {
       phase: context.requestActivityPhase,
       toolName: context.requestActivityToolName,
       startedAt: startedAt ? new Date(startedAt).toISOString() : undefined,
-      endedAt: new Date().toISOString(),
+      endedAt: new Date(endedAtMs).toISOString(),
+      durationMs: startedAt ? Math.max(0, endedAtMs - startedAt) : undefined,
+      firstDeltaMs:
+        startedAt && firstDeltaAt ? Math.max(0, firstDeltaAt - startedAt) : undefined,
+      firstDeltaType,
     };
   }
   context.requestActivity = undefined;
+  context.retryInfo = undefined;
   context.requestActivityPhase = undefined;
   context.requestActivityToolName = undefined;
   context.requestActivityToolLines = undefined;
   context.requestActivityToolBytes = undefined;
   (context as { requestActivityStartedAt?: number }).requestActivityStartedAt = undefined;
+  (context as { requestActivityFirstDeltaAt?: number }).requestActivityFirstDeltaAt = undefined;
+  (context as { requestActivityFirstDeltaType?: string }).requestActivityFirstDeltaType =
+    undefined;
   (context as { requestActivityToolTarget?: string }).requestActivityToolTarget = undefined;
+}
+
+export function recordRequestFirstDelta(context: TuiContext, type: string, nowMs = Date.now()): void {
+  const state = context as {
+    requestActivityStartedAt?: number;
+    requestActivityFirstDeltaAt?: number;
+    requestActivityFirstDeltaType?: string;
+  };
+  if (!state.requestActivityStartedAt || state.requestActivityFirstDeltaAt) return;
+  state.requestActivityFirstDeltaAt = nowMs;
+  state.requestActivityFirstDeltaType = type;
 }
 
 export function startRequestActivity(
@@ -768,10 +1265,11 @@ export async function sendMessage(
   // 避免被 _write 的 ephemeral splice 淘汰为最后一片 chunk。plain TUI / 测试
   // MemoryOutput 上没有 beginAssistantStream，writeAssistantDelta 会回退到 write。
   let assistantStreamBlockId = `assistant-stream-${assistantEventId}-0`;
-  beginAssistantStream(output, assistantStreamBlockId);
+  beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
   let assistantText = "";
   let committedIntermediateAssistantText = "";
   let finalAnswerClaimRetried = false;
+  let finalAnswerClaimAlignmentRewrites = 0;
   let modelLoopCompleted = false;
   const controller = new AbortController();
   context.activeAbortController = controller;
@@ -796,6 +1294,12 @@ export async function sendMessage(
   if (architectureCard) {
     context.currentArchitectureCard = architectureCard;
     await recordArchitectureRuntimeCard(context, sessionId, architectureCard);
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Architecture preflight started: collecting project facts before changing or verifying."
+        : "已进入架构预检：先收集项目事实，再决定是否执行或验证。",
+    );
   }
   const architectureDirective = architectureCard
     ? createArchitectureRuntimeDirective(architectureCard)
@@ -936,6 +1440,9 @@ export async function sendMessage(
   const _tDirective0 = Date.now();
   const _msDirective = formatMetaSchedulerDirective(metaSchedulerDecision);
   metaSchedulerDecision.internalEvents.push(`perf:scheduler_directive_ms=${Date.now() - _tDirective0}`);
+  const agentCompletionNoticeIdsForTurn = collectPendingAgentCompletionNotices(context).map(
+    (notice) => notice.id,
+  );
   const _tSysPrompt0 = Date.now();
   const systemPrompt = createModelSystemPrompt(
     text,
@@ -985,12 +1492,12 @@ export async function sendMessage(
     modelRoundLoop: for (let round = 0; ; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-${assistantEventId}-${round}`;
-        beginAssistantStream(output, assistantStreamBlockId);
+        beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
       }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       let pendingAssistantPreviewText = "";
-      let lastAssistantPreviewFlushAt = Date.now();
+      let lastAssistantPreviewFlushAt = 0;
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       let roundChunkCount = 0;
       let roundHadUsage = false;
@@ -1082,16 +1589,14 @@ export async function sendMessage(
           writeLine(output, t(context, "toolInterrupted"));
           return;
         }
+        recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
           clearRequestActivity(context);
           const visibleText = textSanitizer.push(event.text);
           assistantText += visibleText;
           roundAssistantText += visibleText;
           pendingAssistantPreviewText += visibleText;
-          if (
-            modelSupportsTools &&
-            shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)
-          ) {
+          if (shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)) {
             const result = flushAssistantPreviewDelta(
               output,
               assistantStreamBlockId,
@@ -1185,7 +1690,11 @@ export async function sendMessage(
             }
             continue modelRoundLoop;
           }
-          writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
+          writeErrorLine(
+            output,
+            formatProviderFailurePrimary(event.error, context.language),
+            formatProviderFailureTitle(context.language),
+          );
           return;
         }
       }
@@ -1193,7 +1702,7 @@ export async function sendMessage(
       assistantText += finalVisibleText;
       roundAssistantText += finalVisibleText;
       pendingAssistantPreviewText += finalVisibleText;
-      if (toolCalls.length > 0 && pendingAssistantPreviewText) {
+      if (pendingAssistantPreviewText) {
         const result = flushAssistantPreviewDelta(
           output,
           assistantStreamBlockId,
@@ -1317,7 +1826,7 @@ export async function sendMessage(
           continue;
         }
         // D.13U — Final Answer Claim Gate 和 Extended Gate 聚合检查
-        if (!finalAnswerClaimRetried && assistantText) {
+        if (assistantText) {
           const gateResult = evaluateAggregatedFinalAnswerGate(
             context,
             assistantText,
@@ -1331,15 +1840,87 @@ export async function sendMessage(
               `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
               "warning",
             );
-
-            messagesForProvider.push({
-              role: "user",
-              content: createAggregatedFinalAnswerReminder(gateResult, context.language),
+            if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
+              if (finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES) {
+                finalAnswerClaimAlignmentRewrites += 1;
+                await appendSystemEvent(
+                  context,
+                  sessionId,
+                  `final_answer_claim_alignment_rewrite attempt=${finalAnswerClaimAlignmentRewrites}`,
+                  "warning",
+                );
+                discardAssistantBlock(output, assistantStreamBlockId);
+                assistantText = "";
+                roundAssistantText = "";
+                messagesForProvider.push({
+                  role: "user",
+                  content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+                });
+                continue;
+              }
+              assistantText = buildFinalGateClaimAlignmentFallback(context.language);
+              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+              break;
+            }
+            const actionPlan = planFinalGateEvidenceGapAction({
+              result: gateResult,
+              context,
+              userText: text,
+              assistantText,
+              retryBudgetRemaining: !finalAnswerClaimRetried,
             });
-            finalAnswerClaimRetried = true;
-            assistantText = "";
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_planner action=${actionPlan.action} reason=${actionPlan.reason}`,
+              actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+                ? "warning"
+                : "info",
+            );
+            if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
+              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              assistantText = buildAggregatedDowngradedFinalAnswer(
+                gateResult,
+                context.language,
+                context.evidence,
+              );
+              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+              break;
+            }
             discardAssistantBlock(output, assistantStreamBlockId);
-            continue;
+            assistantText = "";
+            roundAssistantText = "";
+            const actionResult = await runFinalGateEvidenceAction({
+              actionPlan,
+              context,
+              output,
+              sessionId,
+              messages: messagesForProvider,
+              runtime: selectedRuntime,
+              ...(reportWriteGuard ? { reportWriteGuard } : {}),
+            });
+            if (actionResult.status === "permission_pending") {
+              return;
+            }
+            if (actionResult.status === "evidence_recorded") {
+              messagesForProvider = actionResult.messages;
+              finalAnswerClaimRetried = true;
+              continue;
+            }
+            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+            assistantText = buildAggregatedDowngradedFinalAnswer(
+              gateResult,
+              context.language,
+              context.evidence,
+            );
+            replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_action_${actionResult.status} reason=${actionResult.reason}`,
+              "warning",
+            );
+            break;
           }
         }
         break;
@@ -1477,19 +2058,8 @@ export async function sendMessage(
   if (selectedRuntime.provider !== originalProvider || selectedRuntime.model !== originalModel) {
     clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
   }
-  if (
-    context.lastProviderFallbackAttempt?.toProvider === selectedRuntime.provider &&
-    context.lastProviderFallbackAttempt.toModel === selectedRuntime.model &&
-    context.lastProviderFallbackAttempt.status === "attempted"
-  ) {
-    context.lastProviderFallbackAttempt.status = "succeeded";
-    context.lastProviderFallbackAttempt.createdAt = new Date().toISOString();
-    await appendSystemEvent(
-      context,
-      sessionId,
-      `provider fallback attempt: status succeeded; to ${selectedRuntime.provider}/${selectedRuntime.model}`,
-      "info",
-    );
+  if (assistantText) {
+    await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
   }
 
   if (reportWriteGuard && !reportWriteGuard.completed) {
@@ -1504,8 +2074,54 @@ export async function sendMessage(
     {
       const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
       if (gateResult.status === "needs_disclaimer") {
-        await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-        assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
+        if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
+          if (finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES) {
+            finalAnswerClaimAlignmentRewrites += 1;
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_claim_alignment_rewrite final_safety=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
+              "warning",
+            );
+            messagesForProvider.push({
+              role: "assistant",
+              content: truncateRoundAssistantForProvider(assistantText, context),
+            });
+            messagesForProvider.push({
+              role: "user",
+              content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+            });
+            replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+            assistantText = await streamFinalModelAnswerWithoutTools(
+              {
+                messages: messagesForProvider,
+                provider: selectedRuntime.provider,
+                model: selectedRuntime.model,
+                endpointProfile: selectedRuntime.endpointProfile,
+                reasoningLevel: selectedRuntime.reasoningLevel,
+                reasoningSent: selectedRuntime.reasoningSent,
+                ...(reportWriteGuard ? { reportWriteGuard } : {}),
+              },
+              context,
+              gateway,
+              sessionId,
+              output,
+              controller.signal,
+              assistantStreamBlockId,
+              false,
+              finalAnswerClaimAlignmentRewrites,
+            );
+          } else {
+            assistantText = buildFinalGateClaimAlignmentFallback(context.language);
+          }
+        } else {
+          await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+          assistantText = buildAggregatedDowngradedFinalAnswer(
+            gateResult,
+            context.language,
+            context.evidence,
+          );
+        }
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
       const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -1554,6 +2170,10 @@ export async function sendMessage(
       text: assistantText,
       createdAt: new Date().toISOString(),
     });
+    const reportedAt = new Date().toISOString();
+    for (const noticeId of agentCompletionNoticeIdsForTurn) {
+      markAgentCompletionNoticeReported(context, noticeId, reportedAt);
+    }
   }
   if (metaSchedulerDecision.shouldPreferVerifier && assistantText) {
     await appendSystemEvent(
@@ -1588,6 +2208,30 @@ export async function __testSendMessage(
   await sendMessage(text, context, gateway, output);
 }
 
+export async function __testStreamFinalModelAnswerWithoutTools(
+  continuation: PendingModelContinuation,
+  context: TuiContext,
+  gateway: ModelGateway,
+  sessionId: string,
+  output: Writable,
+  signal: AbortSignal,
+  reuseAssistantStreamBlockId?: string,
+  fallbackAttempted = false,
+  claimAlignmentRewriteCount = 0,
+): Promise<string> {
+  return streamFinalModelAnswerWithoutTools(
+    continuation,
+    context,
+    gateway,
+    sessionId,
+    output,
+    signal,
+    reuseAssistantStreamBlockId,
+    fallbackAttempted,
+    claimAlignmentRewriteCount,
+  );
+}
+
 function createPolicyContextPressureMessages(
   runtimeStatus: unknown,
   userText: string,
@@ -1600,6 +2244,36 @@ function createPolicyContextPressureMessages(
     },
     { role: "user", content: userText },
   ];
+}
+
+async function clearActiveProviderFailureAfterRecovery(
+  context: TuiContext,
+  sessionId: string,
+  runtime: { provider: string; model: string },
+): Promise<void> {
+  const fallbackAttempt = context.lastProviderFallbackAttempt;
+  const recoveredByFallback =
+    fallbackAttempt?.toProvider === runtime.provider &&
+    fallbackAttempt.toModel === runtime.model &&
+    fallbackAttempt.status === "attempted";
+  if (recoveredByFallback) {
+    fallbackAttempt.status = "succeeded";
+    fallbackAttempt.createdAt = new Date().toISOString();
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `provider fallback attempt: status succeeded; to ${runtime.provider}/${runtime.model}`,
+      "info",
+    );
+  }
+  if (!context.lastProviderFailure) return;
+  context.lastProviderFailure = undefined;
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `provider failure recovered: active provider failure cleared after successful response from ${runtime.provider}/${runtime.model}`,
+    "info",
+  );
 }
 
 function createMetaSchedulerInput(
@@ -2050,6 +2724,7 @@ async function streamFinalModelAnswerWithoutTools(
   // 才能命中真实 block。不传则保持旧行为新建一个 final 专用 id。
   reuseAssistantStreamBlockId?: string,
   fallbackAttempted = false,
+  claimAlignmentRewriteCount = 0,
 ): Promise<string> {
   let assistantText = "";
   const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -2058,7 +2733,7 @@ async function streamFinalModelAnswerWithoutTools(
   const assistantStreamBlockId =
     reuseAssistantStreamBlockId ?? `assistant-stream-final-${randomUUID()}`;
   if (!reuseAssistantStreamBlockId) {
-    beginAssistantStream(output, assistantStreamBlockId);
+    beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
   }
   let chunkCount = 0;
   let hadUsage = false;
@@ -2107,6 +2782,7 @@ async function streamFinalModelAnswerWithoutTools(
       writeLine(output, t(context, "toolInterrupted"));
       return assistantText;
     }
+    recordRequestFirstDelta(context, event.type);
     if (event.type === "assistant_text_delta") {
       clearRequestActivity(context);
       const visibleText = textSanitizer.push(event.text);
@@ -2197,7 +2873,11 @@ async function streamFinalModelAnswerWithoutTools(
           ))
         );
       }
-      writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
+      writeErrorLine(
+        output,
+        formatProviderFailurePrimary(event.error, context.language),
+        formatProviderFailureTitle(context.language),
+      );
       return assistantText;
     }
   }
@@ -2236,11 +2916,49 @@ async function streamFinalModelAnswerWithoutTools(
     }
   }
   if (assistantText) {
+    clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
+    if (continuation.provider !== originalProvider || continuation.model !== originalModel) {
+      clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
+    }
+    await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
     startRequestActivity(output, context, "verifying_final_answer");
     const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
     if (gateResult.status === "needs_disclaimer") {
-      await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-      assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
+      if (
+        shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
+        claimAlignmentRewriteCount < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
+      ) {
+        continuation.messages.push({
+          role: "assistant",
+          content: truncateRoundAssistantForProvider(assistantText, context),
+        });
+        continuation.messages.push({
+          role: "user",
+          content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+        });
+        replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+        return streamFinalModelAnswerWithoutTools(
+          continuation,
+          context,
+          gateway,
+          sessionId,
+          output,
+          signal,
+          assistantStreamBlockId,
+          fallbackAttempted,
+          claimAlignmentRewriteCount + 1,
+        );
+      }
+      if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
+        assistantText = buildFinalGateClaimAlignmentFallback(context.language);
+      } else {
+        await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+        assistantText = buildAggregatedDowngradedFinalAnswer(
+          gateResult,
+          context.language,
+          context.evidence,
+        );
+      }
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
     const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -2257,24 +2975,6 @@ async function streamFinalModelAnswerWithoutTools(
     endAssistantStream(output);
     clearRequestActivity(context);
     writeFinalAssistantText(output, assistantText);
-  }
-  clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
-  if (continuation.provider !== originalProvider || continuation.model !== originalModel) {
-    clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
-  }
-  if (
-    context.lastProviderFallbackAttempt?.toProvider === continuation.provider &&
-    context.lastProviderFallbackAttempt.toModel === continuation.model &&
-    context.lastProviderFallbackAttempt.status === "attempted"
-  ) {
-    context.lastProviderFallbackAttempt.status = "succeeded";
-    context.lastProviderFallbackAttempt.createdAt = new Date().toISOString();
-    await appendSystemEvent(
-      context,
-      sessionId,
-      `provider fallback attempt: status succeeded; to ${continuation.provider}/${continuation.model}`,
-      "info",
-    );
   }
   return assistantText;
 }
@@ -2399,12 +3099,17 @@ export async function continueModelAfterToolResults(
   let assistantText = "";
   let committedIntermediateAssistantText = "";
   let finalAnswerClaimRetried = false;
+  let finalAnswerClaimAlignmentRewrites = 0;
   let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
   let assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-0`;
-  beginAssistantStream(output, assistantStreamBlockId);
+  beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
   const sessionId = await ensureSession(context);
+  const agentCompletionNoticeIdsForTurn = injectAgentCompletionMainChainContext(
+    continuation.messages,
+    context,
+  );
   try {
     let evidenceRounds = 0;
     let consecutiveTodoOnlyRounds = 0;
@@ -2420,12 +3125,12 @@ export async function continueModelAfterToolResults(
     continuationRoundLoop: for (let round = 0; ; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
-        beginAssistantStream(output, assistantStreamBlockId);
+        beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
       }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       let pendingAssistantPreviewText = "";
-      let lastAssistantPreviewFlushAt = Date.now();
+      let lastAssistantPreviewFlushAt = 0;
       let roundChunkCount = 0;
       let roundHadUsage = false;
       let roundFinishReason: string | undefined;
@@ -2487,6 +3192,7 @@ export async function continueModelAfterToolResults(
           writeLine(output, t(context, "toolInterrupted"));
           return;
         }
+        recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
           clearRequestActivity(context);
           const visibleText = textSanitizer.push(event.text);
@@ -2582,7 +3288,11 @@ export async function continueModelAfterToolResults(
             }
             continue continuationRoundLoop;
           }
-          writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
+          writeErrorLine(
+            output,
+            formatProviderFailurePrimary(event.error, context.language),
+            formatProviderFailureTitle(context.language),
+          );
           return;
         }
       }
@@ -2593,7 +3303,7 @@ export async function continueModelAfterToolResults(
       assistantText += finalVisibleText;
       roundAssistantText += finalVisibleText;
       pendingAssistantPreviewText += finalVisibleText;
-      if (toolCalls.length > 0 && pendingAssistantPreviewText) {
+      if (pendingAssistantPreviewText) {
         const result = flushAssistantPreviewDelta(
           output,
           assistantStreamBlockId,
@@ -2699,7 +3409,7 @@ export async function continueModelAfterToolResults(
           continue;
         }
         // D.13U — Final Answer Claim Gate + Extended Gate 聚合（continuation 镜像）
-        if (!finalAnswerClaimRetried && assistantText) {
+        if (assistantText) {
           const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
           if (gateResult.status === "needs_disclaimer") {
             await appendSystemEvent(
@@ -2708,15 +3418,87 @@ export async function continueModelAfterToolResults(
               `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
               "warning",
             );
-            continuation.messages.push({
-              role: "user",
-              content: createAggregatedFinalAnswerReminder(gateResult, context.language),
+            if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
+              if (finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES) {
+                finalAnswerClaimAlignmentRewrites += 1;
+                await appendSystemEvent(
+                  context,
+                  sessionId,
+                  `final_answer_claim_alignment_rewrite continuation=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
+                  "warning",
+                );
+                discardAssistantBlock(output, assistantStreamBlockId);
+                assistantText = "";
+                roundAssistantText = "";
+                continuation.messages.push({
+                  role: "user",
+                  content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+                });
+                continue;
+              }
+              assistantText = buildFinalGateClaimAlignmentFallback(context.language);
+              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+              break;
+            }
+            const actionPlan = planFinalGateEvidenceGapAction({
+              result: gateResult,
+              context,
+              userText: latestUserTextFromMessages(continuation.messages),
+              assistantText,
+              retryBudgetRemaining: !finalAnswerClaimRetried,
             });
-            finalAnswerClaimRetried = true;
-            assistantText = "";
-            // D.13V — 同步丢弃 continuation 当前 streaming block 累计的违规原文。
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_planner action=${actionPlan.action} reason=${actionPlan.reason}`,
+              actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+                ? "warning"
+                : "info",
+            );
+            if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
+              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              assistantText = buildAggregatedDowngradedFinalAnswer(
+                gateResult,
+                context.language,
+                context.evidence,
+              );
+              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+              break;
+            }
             discardAssistantBlock(output, assistantStreamBlockId);
-            continue;
+            assistantText = "";
+            roundAssistantText = "";
+            const actionResult = await runFinalGateEvidenceAction({
+              actionPlan,
+              context,
+              output,
+              sessionId,
+              messages: continuation.messages,
+              runtime: runtimeFromContinuation(continuation),
+              ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
+            });
+            if (actionResult.status === "permission_pending") {
+              return;
+            }
+            if (actionResult.status === "evidence_recorded") {
+              continuation.messages = actionResult.messages;
+              finalAnswerClaimRetried = true;
+              continue;
+            }
+            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+            assistantText = buildAggregatedDowngradedFinalAnswer(
+              gateResult,
+              context.language,
+              context.evidence,
+            );
+            replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_action_${actionResult.status} reason=${actionResult.reason}`,
+              "warning",
+            );
+            break;
           }
         }
         break;
@@ -2817,14 +3599,57 @@ export async function continueModelAfterToolResults(
     }
     continuationLoopCompleted = true;
     if (assistantText) {
+      clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
+      if (continuation.provider !== originalContProvider || continuation.model !== originalContModel) {
+        clearProviderBreaker(context.providerBreaker, originalContProvider, originalContModel);
+      }
+      await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
       startRequestActivity(output, context, "verifying_final_answer");
       // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
       // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
       {
         const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
         if (gateResult.status === "needs_disclaimer") {
-          await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-          assistantText = buildAggregatedDowngradedFinalAnswer(gateResult, context.language);
+          if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
+            if (finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES) {
+              finalAnswerClaimAlignmentRewrites += 1;
+              await appendSystemEvent(
+                context,
+                sessionId,
+                `final_answer_claim_alignment_rewrite continuation_final_safety=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
+                "warning",
+              );
+              continuation.messages.push({
+                role: "assistant",
+                content: truncateRoundAssistantForProvider(assistantText, context),
+              });
+              continuation.messages.push({
+                role: "user",
+                content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+              });
+              replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+              assistantText = await streamFinalModelAnswerWithoutTools(
+                continuation,
+                context,
+                gateway,
+                sessionId,
+                output,
+                controller.signal,
+                assistantStreamBlockId,
+                false,
+                finalAnswerClaimAlignmentRewrites,
+              );
+            } else {
+              assistantText = buildFinalGateClaimAlignmentFallback(context.language);
+            }
+          } else {
+            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+            assistantText = buildAggregatedDowngradedFinalAnswer(
+              gateResult,
+              context.language,
+              context.evidence,
+            );
+          }
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
         const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -2871,24 +3696,10 @@ export async function continueModelAfterToolResults(
         text: assistantText,
         createdAt: new Date().toISOString(),
       });
-    }
-    clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
-    if (continuation.provider !== originalContProvider || continuation.model !== originalContModel) {
-      clearProviderBreaker(context.providerBreaker, originalContProvider, originalContModel);
-    }
-    if (
-      context.lastProviderFallbackAttempt?.toProvider === continuation.provider &&
-      context.lastProviderFallbackAttempt.toModel === continuation.model &&
-      context.lastProviderFallbackAttempt.status === "attempted"
-    ) {
-      context.lastProviderFallbackAttempt.status = "succeeded";
-      context.lastProviderFallbackAttempt.createdAt = new Date().toISOString();
-      await appendSystemEvent(
-        context,
-        sessionId,
-        `provider fallback attempt: status succeeded; to ${continuation.provider}/${continuation.model}`,
-        "info",
-      );
+      const reportedAt = new Date().toISOString();
+      for (const noticeId of agentCompletionNoticeIdsForTurn) {
+        markAgentCompletionNoticeReported(context, noticeId, reportedAt);
+      }
     }
   } finally {
     if (!continuationLoopCompleted || !assistantText) {

@@ -397,6 +397,9 @@ export type TuiContext = {
     toolName?: string;
     startedAt?: string;
     endedAt: string;
+    durationMs?: number;
+    firstDeltaMs?: number;
+    firstDeltaType?: string;
   };
   lastApiTokenCount?: {
     provider: string;
@@ -446,7 +449,15 @@ export type TuiContext = {
    * state owned by ShellBlockOutput and rendered outside historical blocks;
    * it is not transcript input and is cleared before final block commit.
    */
-  streamingAssistant?: { id: string; text: string };
+  transcriptSource?: import("./shell/models/transcript-source.js").TranscriptSource;
+  /** Incremented when normal-screen Static history must replay from source after resize. */
+  transcriptStaticReplayGeneration?: number;
+  streamingAssistant?: {
+    id: string;
+    text: string;
+    tailText?: string;
+    committedText?: string;
+  };
   /** Phase 7.9 — app-owned transcript mouse selection state for alt-screen TUI. */
   transcriptSelectionState?: TranscriptSelectionState;
   /** Phase 7.9 — measured transcript viewport geometry used by mouse selection. */

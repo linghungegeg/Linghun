@@ -39,6 +39,22 @@ export const DEFAULT_HELP_SLASHES = [
   "/exit",
 ] as const;
 
+export const BARE_SLASH_SUGGESTION_SLASHES = [
+  "/model",
+  "/mode",
+  "/doctor",
+  "/problems",
+  "/help",
+  "/memory",
+  "/index",
+  "/permissions",
+  "/background",
+  "/details",
+  "/diff",
+  "/config",
+  "/exit",
+] as const;
+
 export const COMMAND_GROUP_LABELS: Record<CommandGroup, { en: string; zh: string }> = {
   core: { en: "Core", zh: "核心" },
   edit: { en: "Edit", zh: "编辑" },
@@ -175,23 +191,26 @@ export function formatSlashDiscovery(language: Language, prefix = "/"): string {
 //   不再只限于 DEFAULT_HELP_SLASHES。
 // - /status 仍隐藏：getUserVisibleCommandCapabilities 已经过滤掉 hiddenReason 项。
 // - /config 等用户可见命令进入候选，与 /help all 保持一致。
-// - 上限固定 8 条，避免炸屏。
+// - 渲染层负责窗口化显示，候选源不在这里截断，避免高级命令不可达。
 export function getSlashPrefixCandidates(prefix: string): CommandCapability[] {
   if (!prefix.startsWith("/") || prefix.length <= 1) return [];
   const normalized = prefix.toLowerCase();
-  return getUserVisibleCommandCapabilities()
-    .filter((item) => item.slash.toLowerCase().startsWith(normalized))
-    .slice(0, 8);
+  return getUserVisibleCommandCapabilities().filter((item) =>
+    item.slash.toLowerCase().startsWith(normalized),
+  );
 }
 
 /**
  * Core slash candidates surfaced when the user types just `/` and nothing else.
- * Returns the same DEFAULT_HELP_SLASHES set used by /help discovery (max 8),
- * keeping the inline overlay narrow without炸屏. Used by the Composer as a
- * soft onboarding affordance — not an alternate dispatch path.
+ * Keep the bare popup focused on common entries. Prefix search still uses the
+ * full user-visible catalog, so advanced entries remain reachable by typing
+ * `/ba`, `/git`, `/edit`, etc.
  */
 export function getCoreSlashCandidates(): CommandCapability[] {
-  return getDefaultVisibleCommandCapabilities().slice(0, 8);
+  const all = getUserVisibleCommandCapabilities();
+  return BARE_SLASH_SUGGESTION_SLASHES.map((slash) =>
+    all.find((item) => item.slash === slash),
+  ).filter((item): item is CommandCapability => Boolean(item));
 }
 
 export function formatUnknownSlashCommand(command: string, language: Language): string {

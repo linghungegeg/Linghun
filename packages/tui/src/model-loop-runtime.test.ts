@@ -326,7 +326,7 @@ describe("model-loop-runtime", () => {
       expect(defs.some((d) => d.name === "Bash")).toBe(true);
     });
 
-    it("returns only Read/Grep/Glob when evidence not read", () => {
+    it("keeps normal tools available before evidence is read", () => {
       const guard = {
         requestedPath: "r.md",
         pathExplicit: true,
@@ -338,11 +338,15 @@ describe("model-loop-runtime", () => {
         evidenceRead: false,
       };
       const defs = createModelToolDefinitionsForReportGuard(guard);
-      expect(defs.length).toBe(3);
-      expect(defs.map((d) => d.name).sort()).toEqual(["Glob", "Grep", "Read"]);
+      expect(defs.some((d) => d.name === "Read")).toBe(true);
+      expect(defs.some((d) => d.name === "Grep")).toBe(true);
+      expect(defs.some((d) => d.name === "Glob")).toBe(true);
+      expect(defs.some((d) => d.name === "Write")).toBe(true);
+      expect(defs.some((d) => d.name === "Edit")).toBe(true);
+      expect(defs.some((d) => d.name === "Bash")).toBe(true);
     });
 
-    it("excludes Bash when evidence read but nonWriteToolRounds < 1", () => {
+    it("keeps Bash available after evidence is read", () => {
       const guard = {
         requestedPath: "r.md",
         pathExplicit: true,
@@ -354,11 +358,11 @@ describe("model-loop-runtime", () => {
         evidenceRead: true,
       };
       const defs = createModelToolDefinitionsForReportGuard(guard);
-      expect(defs.some((d) => d.name === "Bash")).toBe(false);
+      expect(defs.some((d) => d.name === "Bash")).toBe(true);
       expect(defs.some((d) => d.name === "Write")).toBe(true);
     });
 
-    it("returns only Write when nonWriteToolRounds >= 1", () => {
+    it("keeps normal tools available after non-write rounds", () => {
       const guard = {
         requestedPath: "r.md",
         pathExplicit: true,
@@ -370,8 +374,9 @@ describe("model-loop-runtime", () => {
         evidenceRead: true,
       };
       const defs = createModelToolDefinitionsForReportGuard(guard);
-      expect(defs.length).toBe(1);
-      expect(defs[0].name).toBe("Write");
+      expect(defs.some((d) => d.name === "Read")).toBe(true);
+      expect(defs.some((d) => d.name === "Write")).toBe(true);
+      expect(defs.some((d) => d.name === "Bash")).toBe(true);
     });
   });
 
@@ -822,6 +827,27 @@ describe("model-loop-runtime", () => {
         evidence,
       );
       expect(verdict.status).toBe("passed");
+    });
+
+    it("still blocks broad completion_claim when only verification evidence exists", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+          summary: "Bash: vitest --run all green",
+        }),
+        makeEvidence({
+          kind: "test_result",
+          supportsClaims: ["verification_passed"],
+          summary: "focused verification passed",
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成，验证通过。", [{ kind: "completion_claim", phrase: "已完成" }]),
+        evidence,
+      );
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_claim");
     });
 
     it("blocks overall completion when only typecheck PASS evidence exists", () => {
@@ -1408,7 +1434,8 @@ describe("model-loop-runtime", () => {
       const downgraded = buildDowngradedFinalAnswer(verdict, "zh-CN");
       expect(downgraded).toContain("当前证据不足");
       expect(downgraded).toContain("缺少证据");
-      expect(downgraded).toContain("被拦截的声明类型");
+      expect(downgraded).toContain("需要补齐");
+      expect(downgraded).not.toContain("被拦截的声明类型");
       expect(downgraded).not.toContain("已完成，测试通过");
       expect(downgraded).not.toContain("[未验证]");
       expect(downgraded).not.toContain("FinalAnswerClaimGate");
@@ -1427,7 +1454,8 @@ describe("model-loop-runtime", () => {
       const downgraded = buildDowngradedFinalAnswer(verdict, "en-US");
       expect(downgraded).toContain("I cannot provide a verified final claim");
       expect(downgraded).toContain("Missing evidence");
-      expect(downgraded).toContain("Blocked claim types");
+      expect(downgraded).toContain("Evidence needed");
+      expect(downgraded).not.toContain("Blocked claim types");
       expect(downgraded).not.toContain("Done, tests passed");
       expect(downgraded).not.toContain("[unverified]");
       expect(downgraded).not.toContain("test_passed");
@@ -1838,7 +1866,8 @@ describe("model-loop-runtime", () => {
       );
       expect(out).toContain("当前证据不足");
       expect(out).toContain("缺少支撑");
-      expect(out).toContain("被拦截的声明类型");
+      expect(out).toContain("需要补齐");
+      expect(out).not.toContain("被拦截的声明类型");
       expect(out).not.toContain("符合架构边界");
       expect(out).not.toContain("没有架构漂移");
       expect(out).not.toContain("[未验证]");

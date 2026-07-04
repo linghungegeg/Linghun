@@ -80,6 +80,23 @@ describe("runtime status snapshot", () => {
     expect(text).toContain("最近：verification 通过 · typecheck 通过。");
   });
 
+  it("reports recent model request first-delta timing", () => {
+    const snapshot = createRuntimeStatusSnapshot({
+      language: "zh-CN",
+      backgroundTasks: [],
+      lastModelRequest: {
+        phase: "request_started",
+        endedAt: "2026-06-07T10:00:00.000Z",
+        firstDeltaMs: 128,
+        durationMs: 640,
+        firstDeltaType: "assistant_text_delta",
+      },
+    });
+
+    const text = formatRuntimeStatusSnapshotForBtw(snapshot, "zh-CN");
+    expect(text).toContain("最近：model request request_started · 首包 128ms · 总耗时 640ms。");
+  });
+
   it("labels workflow progress instead of showing a bare ratio", () => {
     const snapshot = createRuntimeStatusSnapshot({
       language: "zh-CN",

@@ -260,9 +260,12 @@ export function createReportWriteGuard(text: string): ReportWriteGuard | undefin
     return undefined;
   }
   const requestedPath = extractRequestedReportPath(text);
+  if (!requestedPath) {
+    return undefined;
+  }
   return {
-    requestedPath: requestedPath ?? "report.md",
-    pathExplicit: Boolean(requestedPath),
+    requestedPath,
+    pathExplicit: true,
     completed: false,
     reminderSent: false,
     evidenceReminderSent: false,
@@ -308,11 +311,12 @@ export function normalizeReportPath(path: string): string {
 }
 
 export function shouldSendReportEvidenceReminder(guard: ReportWriteGuard | undefined): boolean {
-  return Boolean(guard && !guard.completed && !guard.evidenceRead && !guard.evidenceReminderSent);
+  void guard;
+  return false;
 }
 
 export function shouldSendReportWriteReminder(guard: ReportWriteGuard | undefined): boolean {
-  return Boolean(guard?.evidenceRead && !guard.completed && !guard.reminderSent);
+  return Boolean(guard && !guard.completed && !guard.reminderSent);
 }
 
 export function shouldSendReportFinalReferenceReminder(
@@ -343,14 +347,14 @@ export function createReportFinalReferenceReminder(
 
 export function createReportTaskGuard(guard: ReportWriteGuard, language: Language): string {
   return language === "en-US"
-    ? `Task-specific completion requirement for this turn only: the user explicitly asked for a saved report file. Before final answer, call Write with path ${guard.requestedPath}. If you inspect the project first, keep it minimal and still finish by writing ${guard.requestedPath}. The final answer must reference ${guard.requestedPath}, include 2-4 evidence-based conclusions, separate inferred/unconfirmed items, and list next steps.`
-    : `仅本轮任务的完成要求：用户明确要求保存报告文件。最终回答前必须调用 Write，path 使用 ${guard.requestedPath}。如需先检查项目，请保持最小必要检查，并仍以写入 ${guard.requestedPath} 收口。最终回答必须引用 ${guard.requestedPath}，列出 2-4 条基于证据的核心结论，单独说明推断/未确认项，并给出下一步。`;
+    ? `Task-specific completion requirement for this turn only: the user explicitly asked for a saved report file. Before final answer, call Write or Edit with path ${guard.requestedPath}. If you inspect the project first, keep it minimal and still finish by writing ${guard.requestedPath}. The final answer must reference ${guard.requestedPath} and accurately separate confirmed facts from unconfirmed items.`
+    : `仅本轮任务的完成要求：用户明确要求保存报告文件。最终回答前必须调用 Write 或 Edit，path 使用 ${guard.requestedPath}。如需先检查项目，请保持最小必要检查，并仍以写入 ${guard.requestedPath} 收口。最终回答必须引用 ${guard.requestedPath}，并准确区分已确认事实和未确认项。`;
 }
 
 export function createReportWriteReminder(guard: ReportWriteGuard, language: Language): string {
   return language === "en-US"
-    ? `The user explicitly asked you to generate and save a report file. No saved report exists yet. Call the Write tool now with path ${guard.requestedPath}, then give a final answer that references ${guard.requestedPath}.`
-    : `用户明确要求生成并保存报告文件，但当前还没有保存报告。现在请调用 Write 工具写入 ${guard.requestedPath}，然后在最终回答中引用 ${guard.requestedPath}。`;
+    ? `The user explicitly asked you to generate and save a report file. No saved report exists yet. Call Write or Edit now with path ${guard.requestedPath}, then give a final answer that references ${guard.requestedPath}.`
+    : `用户明确要求生成并保存报告文件，但当前还没有保存报告。现在请调用 Write 或 Edit 写入 ${guard.requestedPath}，然后在最终回答中引用 ${guard.requestedPath}。`;
 }
 
 export function doesWriteSatisfyReportGuard(
@@ -359,7 +363,13 @@ export function doesWriteSatisfyReportGuard(
   result: { ok: boolean; tool: string },
 ): guard is ReportWriteGuard {
   return Boolean(
-    guard && result.ok && result.tool === "Write" && hasReportWriteToolCall(guard, [toolCall]),
+    guard &&
+      result.ok &&
+      (result.tool === "Write" ||
+        result.tool === "Edit" ||
+        result.tool === "MultiEdit" ||
+        result.tool === "WriteReport") &&
+      hasReportWriteToolCall(guard, [toolCall]),
   );
 }
 
@@ -368,7 +378,14 @@ export function hasReportWriteToolCall(
   toolCalls: ModelToolCallLike[],
 ): boolean {
   for (const toolCall of toolCalls) {
-    if (normalizeToolName(toolCall.name) !== "Write") {
+    const normalizedToolName = normalizeToolName(toolCall.name);
+    const isWriteReportTool = toolCall.name.toLowerCase() === "writereport";
+    if (
+      !isWriteReportTool &&
+      normalizedToolName !== "Write" &&
+      normalizedToolName !== "Edit" &&
+      normalizedToolName !== "MultiEdit"
+    ) {
       continue;
     }
     const input = toolCall.input;

@@ -4,8 +4,11 @@ export const ENABLE_MODIFY_OTHER_KEYS = "\x1B[>4;2m";
 export const DISABLE_MODIFY_OTHER_KEYS = "\x1B[>4m";
 export const ENABLE_KITTY_KEYBOARD = "\x1B[>1u";
 export const DISABLE_KITTY_KEYBOARD = "\x1B[<u";
+export const ENABLE_SGR_WHEEL_MOUSE = "\x1B[?1000h\x1B[?1006h";
 export const ENABLE_SGR_MOUSE = "\x1B[?1000h\x1B[?1002h\x1B[?1003h\x1B[?1006h";
 export const DISABLE_SGR_MOUSE = "\x1B[?1006l\x1B[?1003l\x1B[?1002l\x1B[?1000l";
+export const ENABLE_ALTERNATE_SCROLL = "\x1B[?1007h";
+export const DISABLE_ALTERNATE_SCROLL = "\x1B[?1007l";
 export const ENABLE_FOCUS_EVENTS = "\x1B[?1004h";
 export const DISABLE_FOCUS_EVENTS = "\x1B[?1004l";
 export const ENABLE_BRACKETED_PASTE = "\x1B[?2004h";
@@ -15,6 +18,8 @@ export type TerminalInteractionModes = {
   kittyKeyboard: boolean;
   modifyOtherKeys: boolean;
   mouseTracking: boolean;
+  wheelMouseTracking?: boolean;
+  alternateScroll?: boolean;
   focusEvents: boolean;
   bracketedPaste: boolean;
 };
@@ -25,7 +30,10 @@ export function enableTerminalInteractionModes(
 ): void {
   if (modes.kittyKeyboard) writeBestEffort(stdout, ENABLE_KITTY_KEYBOARD);
   if (modes.modifyOtherKeys) writeBestEffort(stdout, ENABLE_MODIFY_OTHER_KEYS);
-  if (modes.mouseTracking) writeBestEffort(stdout, ENABLE_SGR_MOUSE);
+  if (modes.alternateScroll) writeBestEffort(stdout, ENABLE_ALTERNATE_SCROLL);
+  if (modes.mouseTracking) {
+    writeBestEffort(stdout, modes.wheelMouseTracking ? ENABLE_SGR_WHEEL_MOUSE : ENABLE_SGR_MOUSE);
+  }
   if (modes.focusEvents) writeBestEffort(stdout, ENABLE_FOCUS_EVENTS);
   if (modes.bracketedPaste) writeBestEffort(stdout, ENABLE_BRACKETED_PASTE);
 }
@@ -37,6 +45,7 @@ export function disableTerminalInteractionModes(
   if (modes.bracketedPaste) writeBestEffort(stdout, DISABLE_BRACKETED_PASTE);
   if (modes.focusEvents) writeBestEffort(stdout, DISABLE_FOCUS_EVENTS);
   if (modes.mouseTracking) writeBestEffort(stdout, DISABLE_SGR_MOUSE);
+  if (modes.alternateScroll) writeBestEffort(stdout, DISABLE_ALTERNATE_SCROLL);
   if (modes.modifyOtherKeys) writeBestEffort(stdout, DISABLE_MODIFY_OTHER_KEYS);
   if (modes.kittyKeyboard) writeBestEffort(stdout, DISABLE_KITTY_KEYBOARD);
 }

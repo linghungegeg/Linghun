@@ -3,10 +3,35 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { Writable } from "node:stream";
 import { TOGGLE_DETAILS_KEYBIND, formatDiagnosticError } from "@linghun/shared";
+import { highlight, type Theme } from "cli-highlight";
 import type { TuiContext } from "./index.js";
-import type { ProductBlockViewModel } from "./shell/types.js";
+import {
+  appendAssistantStreamDelta,
+  assistantStreamVisibleTail,
+  createAssistantStreamDisplayState,
+  drainAssistantStreamCommits,
+  finalizeAssistantStreamDisplayState,
+  type AssistantStreamDisplayState,
+} from "./shell/models/streaming-transcript-state.js";
+import {
+  createTranscriptSource,
+  findTranscriptSourceCell,
+  snapshotTranscriptSourceCells,
+  type TranscriptSource,
+  transcriptSourceRawTextForBlock,
+  transcriptSourceKindForBlock,
+  upsertTranscriptSourceCell,
+} from "./shell/models/transcript-source.js";
+import { isDiffFenceLanguage } from "./shell/diff-renderer.js";
+import { renderPlainMarkdownLines } from "./shell/plain-renderer.js";
+import {
+  canInsertTerminalHistoryText,
+  insertTerminalHistoryText,
+} from "./shell/terminal-history-inserter.js";
+import { displayWidth, wrapText } from "./shell/text-utils.js";
+import type { ProductBlockViewModel, TranscriptViewportGeometryView } from "./shell/types.js";
 import { createOutputBlock } from "./shell/view-model.js";
-import { writeLine } from "./startup-runtime.js";
+import { stripAnsi, writeLine } from "./startup-runtime.js";
 
 const MAX_OUTPUT_BLOCKS = 80;
 const PRESERVE_RECENT_EPHEMERAL_BLOCKS = 12;
@@ -16,6 +41,52 @@ const LAST_FULL_OUTPUT_PREVIEW_CHARS = 2_000;
 const OUTPUT_MEMORY_ARTIFACT_DIR = "tui-output";
 // Phase 6.5: summary 首行超长时截断，避免单行渲染撑爆 TUI。
 const MAX_STREAMING_SUMMARY_CHARS = 500;
+const ASSISTANT_STREAM_COMMIT_TICK_MS = 16;
+const NATIVE_SCROLLBACK_ENV = "LINGHUN_TUI_NATIVE_SCROLLBACK";
+const TERMINAL_FIRST_TRANSCRIPT_ENV = "LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT";
+const TERMINAL_FIRST_CODE_THEME: Theme = {
+  keyword: (text) => ansiStyle("35", text),
+  built_in: (text) => ansiStyle("36", text),
+  type: (text) => ansiStyle("36", text),
+  literal: (text) => ansiStyle("35", text),
+  number: (text) => ansiStyle("33", text),
+  string: (text) => ansiStyle("32", text),
+  regexp: (text) => ansiStyle("32", text),
+  title: (text) => ansiStyle("36", text),
+  function: (text) => ansiStyle("36", text),
+  comment: (text) => ansiStyle("2", text),
+  meta: (text) => ansiStyle("33", text),
+};
+
+export type TerminalFirstAssistantSink = {
+  stageStableAssistantText(text: string): void;
+  commitStableAssistantText(sourceCellId?: string, onFlush?: () => void): boolean;
+  rollbackStableAssistantText(): void;
+  resetAssistantStream?(): void;
+  commitAssistantTurnBreak?(): boolean;
+  commitStableTranscriptBlock?(block: ProductBlockViewModel, onFlush?: () => void): boolean;
+  commitUserTranscriptBlock?(block: ProductBlockViewModel, onFlush?: () => void): boolean;
+};
+
+export type TerminalFirstAssistantSinkOptions = {
+  noColor?: boolean | (() => boolean);
+  columns?: number | (() => number);
+  rows?: number | (() => number);
+  viewportGeometry?: TranscriptViewportGeometryView | (() => TranscriptViewportGeometryView | undefined);
+  transcriptSource?: TranscriptSource | (() => TranscriptSource | undefined);
+  // Plan B fix: explicit frame-top row (1-indexed), derived from live terminal
+  // height so history writes land at the right boundary even at the instant a
+  // user message is committed. Preferred over viewportGeometry when present.
+  frameTopRow?: number | (() => number | undefined);
+};
+
+export type AssistantStreamOptions = {
+  holdStableCommit?: boolean;
+};
+
+export function isNativeScrollbackEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[NATIVE_SCROLLBACK_ENV] !== "0";
+}
 
 function isRuntimeStatusDump(line: string): boolean {
   if (line.startsWith("[Linghun] 会话 ")) return true;
@@ -41,11 +112,18 @@ export class ShellBlockOutput extends Writable {
   private compactOutputMemoryQueue: Promise<void> = Promise.resolve();
   private assistantStreamText = "";
   private assistantPreviewText = "";
+  private assistantStreamState: AssistantStreamDisplayState | undefined;
+  private assistantCommitTick: ReturnType<typeof setTimeout> | undefined;
+  private assistantTerminalFirstText = "";
+  private assistantTerminalFirstCommitted = false;
+  private assistantTerminalFirstStaged = false;
+  private assistantHoldStableCommit = false;
 
   constructor(
     private readonly context: TuiContext,
     private readonly blocks: ProductBlockViewModel[],
     private readonly onWrite: () => void,
+    private readonly terminalFirstAssistantSink?: TerminalFirstAssistantSink,
   ) {
     super();
   }
@@ -63,7 +141,10 @@ export class ShellBlockOutput extends Writable {
         callback();
         return;
       }
-      this.blocks.push(createOutputBlock(normalized, this.context.language));
+      const block = createOutputBlock(normalized, this.context.language);
+      this.appendTranscriptSourceBlock(block);
+      this.blocks.push(block);
+      this.commitTerminalFirstStableBlock(block);
       // 缓存"最近一次普通 writeLine 的完整正文"，让 /details 默认分支可以展开
       // 长正文（如 /model doctor 的 provider.env merge / providers / endpointPath
       // 等多行 body）。/details 自身不能覆盖这条记录，否则连续 /details 会陷入
@@ -88,7 +169,7 @@ export class ShellBlockOutput extends Writable {
 
   /**
    * 注册一条 assistant streaming preview id，但 **不立即** 推入 blocks 数组。
-   * 真正的 keep:true block 只在 end/replace 时提交。这样在
+   * 首个 keep:true block 只在 stable commit tick / end / replace 时出现。这样在
    * thinking-only / 空响应 / 慢请求等场景下，
    * 主屏不会出现一条空 block 渲染成"没有可见输出。"占位行 —— 等待态由
    * requestActivityPhase / mapRequestActivityToView 驱动的 ActivityIndicator
@@ -97,13 +178,25 @@ export class ShellBlockOutput extends Writable {
    * id 由调用方传入（每个 request 用一个稳定 id），便于多轮请求各自占用
    * 独立 block，互不覆盖。
    */
-  beginAssistantStream(id: string): void {
+  beginAssistantStream(id: string, options: AssistantStreamOptions = {}): void {
     if (this.assistantBlockId && this.assistantBlockId !== id) {
-      this.clearStreamingPreview(this.assistantBlockId);
+      if (this.assistantHoldStableCommit) {
+        this.discardAssistantBlock(this.assistantBlockId);
+      } else {
+        this.finalizeActiveAssistantStream(this.assistantBlockId, { captureLastFullOutput: true });
+        this.clearStreamingPreview(this.assistantBlockId);
+      }
     }
     this.assistantBlockId = id;
+    this.assistantHoldStableCommit = options.holdStableCommit === true;
     this.assistantStreamText = "";
     this.assistantPreviewText = "";
+    this.assistantStreamState = createAssistantStreamDisplayState();
+    this.assistantTerminalFirstText = "";
+    this.assistantTerminalFirstCommitted = false;
+    this.assistantTerminalFirstStaged = false;
+    this.terminalFirstAssistantSink?.resetAssistantStream?.();
+    this.terminalFirstAssistantSink?.rollbackStableAssistantText();
     this.context.streamingAssistant = undefined;
     this.setStreamingPreview(id, "");
     // 不再 push 初始空 block；只通知一次 rerender（让 ActivityIndicator 起来）。
@@ -125,8 +218,8 @@ export class ShellBlockOutput extends Writable {
 
   /**
    * 将一段 assistant_text_delta 追加到当前 streaming preview。
-   * - 流式期间只更新 visible-only streaming state，不写历史 ProductBlock
-   * - 正式 assistant block 在 end/replace 时一次性接管，避免重复显示
+   * - delta 先进入 display state，稳定行由 commit tick 渐进写入历史 ProductBlock
+   * - mutable live tail 保持为独立 preview，避免全量正文反复作为热渲染单元
    * - 找不到 active id 时静默 fallback 到 _write，保持非交互回退
    */
   appendAssistantDelta(text: string): void {
@@ -137,8 +230,15 @@ export class ShellBlockOutput extends Writable {
       return;
     }
     this.assistantStreamText += text;
-    this.assistantPreviewText = this.assistantStreamText;
-    this.setStreamingPreview(id, this.assistantPreviewText);
+    this.assistantStreamState = appendAssistantStreamDelta(this.assistantStreamState, text);
+    if (!this.assistantHoldStableCommit) {
+      this.ensureAssistantCommitTick();
+      this.assistantPreviewText = assistantStreamVisibleTail(this.assistantStreamState);
+      this.setStreamingPreview(id, this.assistantPreviewText);
+    } else {
+      this.assistantPreviewText = "";
+      this.clearStreamingPreview(id);
+    }
     this.onWrite();
   }
 
@@ -150,15 +250,18 @@ export class ShellBlockOutput extends Writable {
   endAssistantStream(): void {
     const id = this.assistantBlockId;
     if (id) {
-      const visibleText = this.assistantStreamText || this.assistantPreviewText;
-      if (visibleText) {
-        this.commitAssistantBlock(id, visibleText);
+      if (this.assistantHoldStableCommit) {
+        this.discardAssistantBlock(id);
+      } else {
+        this.finalizeActiveAssistantStream(id, { captureLastFullOutput: true });
+        this.clearStreamingPreview(id);
       }
-      this.clearStreamingPreview(id);
     }
     this.assistantBlockId = undefined;
+    this.assistantHoldStableCommit = false;
     this.assistantStreamText = "";
     this.assistantPreviewText = "";
+    this.assistantStreamState = undefined;
     this.compactOutputMemory().catch((error) => {
       void this.appendCompactOutputMemoryWarning(error);
     });
@@ -172,15 +275,19 @@ export class ShellBlockOutput extends Writable {
    */
   discardAssistantBlock(id: string): void {
     if (this.assistantBlockId === id) {
+      this.stopAssistantCommitTick();
       this.assistantStreamText = "";
       this.assistantPreviewText = "";
+      this.assistantStreamState = createAssistantStreamDisplayState();
+      this.assistantTerminalFirstText = "";
+      this.assistantTerminalFirstCommitted = false;
+      this.assistantTerminalFirstStaged = false;
+      this.terminalFirstAssistantSink?.resetAssistantStream?.();
+      this.terminalFirstAssistantSink?.rollbackStableAssistantText();
     }
     this.clearStreamingPreview(id);
-    const block = this.blocks.find((b) => b.id === id);
-    if (block) {
-      block.fullText = "";
-      block.summary = "";
-    }
+    const blockIndex = this.blocks.findIndex((b) => b.id === id);
+    if (blockIndex >= 0) this.blocks.splice(blockIndex, 1);
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = undefined;
     }
@@ -194,11 +301,31 @@ export class ShellBlockOutput extends Writable {
    */
   replaceAssistantBlockContent(id: string, text: string): void {
     if (this.assistantBlockId === id) {
+      this.stopAssistantCommitTick();
       this.assistantStreamText = "";
       this.assistantPreviewText = "";
+      this.assistantStreamState = undefined;
+      this.assistantHoldStableCommit = false;
+      this.assistantTerminalFirstText = "";
+      this.assistantTerminalFirstCommitted = false;
+      this.assistantTerminalFirstStaged = false;
+      this.terminalFirstAssistantSink?.resetAssistantStream?.();
+      this.terminalFirstAssistantSink?.rollbackStableAssistantText();
+      // Plan B fix: the Final Answer Gate replaces the streamed draft with a
+      // safe final text. Re-seed the stream + stage the safe text so the
+      // subsequent finalize still writes this block into terminal scrollback.
+      // Without this, replaced blocks never leave the Ink frame (root of the
+      // "assistant reply never enters scrollback → resize duplicates it" bug).
+      if (text) {
+        this.assistantStreamText = text;
+        this.terminalFirstAssistantSink?.stageStableAssistantText(text);
+        this.assistantTerminalFirstText = text;
+        this.assistantTerminalFirstStaged = true;
+      }
     }
     this.clearStreamingPreview(id);
-    this.commitAssistantBlock(id, text);
+    const block = this.commitAssistantBlock(id, text, { captureLastFullOutput: true });
+    if (block) this.appendTranscriptSourceBlock(block);
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = text;
     }
@@ -227,7 +354,7 @@ export class ShellBlockOutput extends Writable {
       this.context.language === "en-US"
         ? `${TOGGLE_DETAILS_KEYBIND} for details`
         : `${TOGGLE_DETAILS_KEYBIND} 查看完整内容`;
-    this.blocks.push({
+    const block: ProductBlockViewModel = {
       id: `diag-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       kind: "details",
       status: "info",
@@ -236,7 +363,10 @@ export class ShellBlockOutput extends Writable {
       fullText: normalized,
       nextAction: hasMore ? detailsHint : undefined,
       messageKind: "diagnostic",
-    });
+    };
+    this.appendTranscriptSourceBlock(block);
+    this.blocks.push(block);
+    this.commitTerminalFirstStableBlock(block);
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
@@ -268,7 +398,7 @@ export class ShellBlockOutput extends Writable {
       this.context.language === "en-US"
         ? `${TOGGLE_DETAILS_KEYBIND} for full error`
         : `${TOGGLE_DETAILS_KEYBIND} 查看完整错误`;
-    this.blocks.push({
+    const block: ProductBlockViewModel = {
       id: `err-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       kind: "error",
       status: "fail",
@@ -280,7 +410,21 @@ export class ShellBlockOutput extends Writable {
       retrySeconds: this.context.retryInfo?.delaySec,
       retryAttempt: this.context.retryInfo?.attempt,
       retryMax: this.context.retryInfo?.max,
-    });
+    };
+    const last = this.blocks.at(-1);
+    if (
+      last?.messageKind === "tool_result_error" &&
+      last.title === block.title &&
+      last.fullText === block.fullText
+    ) {
+      if (!this.context.suppressLastFullOutputCapture) {
+        this.context.lastFullOutput = normalized;
+      }
+      this.onWrite();
+      return;
+    }
+    this.appendTranscriptSourceBlock(block);
+    this.blocks.push(block);
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
@@ -301,7 +445,7 @@ export class ShellBlockOutput extends Writable {
       this.context.language === "en-US"
         ? `${TOGGLE_DETAILS_KEYBIND} for details`
         : `${TOGGLE_DETAILS_KEYBIND} 查看完整内容`;
-    this.blocks.push({
+    const block: ProductBlockViewModel = {
       id: `local-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       kind: "tool",
       status: "info",
@@ -310,7 +454,10 @@ export class ShellBlockOutput extends Writable {
       fullText: normalized,
       nextAction: hasMore ? detailsHint : undefined,
       messageKind: "local_command_output",
-    });
+    };
+    this.appendTranscriptSourceBlock(block);
+    this.blocks.push(block);
+    this.commitTerminalFirstStableBlock(block);
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
@@ -349,7 +496,11 @@ export class ShellBlockOutput extends Writable {
     }
   }
 
-  private commitAssistantBlock(id: string, text: string): ProductBlockViewModel | undefined {
+  private commitAssistantBlock(
+    id: string,
+    text: string,
+    options: { captureLastFullOutput?: boolean } = {},
+  ): ProductBlockViewModel | undefined {
     if (!text) return undefined;
     const block = this.ensureAssistantBlock(id);
     if (!block) return undefined;
@@ -359,20 +510,98 @@ export class ShellBlockOutput extends Writable {
       firstLine.length > MAX_STREAMING_SUMMARY_CHARS
         ? `${firstLine.slice(0, MAX_STREAMING_SUMMARY_CHARS)}…`
         : firstLine;
-    if (!this.context.suppressLastFullOutputCapture) {
+    if (options.captureLastFullOutput !== false && !this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = text;
     }
     return block;
   }
 
-  private setStreamingPreview(id: string, text: string): void {
-    if (!text) {
+  private setStreamingPreview(id: string, text: string): boolean {
+    const fullText = this.assistantStreamText || text;
+    if (!fullText) {
       if (this.context.streamingAssistant?.id === id) {
         this.context.streamingAssistant = undefined;
+        return true;
       }
-      return;
+      return false;
     }
-    this.context.streamingAssistant = { id, text };
+    const previous = this.context.streamingAssistant;
+    this.context.streamingAssistant = {
+      id,
+      text: fullText,
+      tailText: text,
+      committedText: this.assistantStreamState?.committedText,
+    };
+    return (
+      !previous ||
+      previous.id !== id ||
+      previous.text !== fullText ||
+      previous.tailText !== text ||
+      previous.committedText !== this.assistantStreamState?.committedText
+    );
+  }
+
+  private drainAssistantStableCommits(id: string): void {
+    if (!this.assistantStreamState) return;
+    const drained = drainAssistantStreamCommits(this.assistantStreamState);
+    this.assistantStreamState = drained.state;
+    if (drained.committedDelta) {
+      this.commitAssistantBlock(id, this.assistantStreamState.committedText, {
+        captureLastFullOutput: false,
+      });
+    }
+  }
+
+  private ensureAssistantCommitTick(): void {
+    if (this.assistantHoldStableCommit) return;
+    if (this.assistantCommitTick || !this.assistantStreamState?.pendingStableText) return;
+    this.assistantCommitTick = setTimeout(() => {
+      this.assistantCommitTick = undefined;
+      this.runAssistantCommitTick();
+    }, ASSISTANT_STREAM_COMMIT_TICK_MS);
+  }
+
+  private runAssistantCommitTick(): void {
+    const id = this.assistantBlockId;
+    if (!id || !this.assistantStreamState) return;
+    this.drainAssistantStableCommits(id);
+    this.assistantPreviewText = assistantStreamVisibleTail(this.assistantStreamState);
+    if (this.setStreamingPreview(id, this.assistantPreviewText)) {
+      this.onWrite();
+    }
+    this.ensureAssistantCommitTick();
+  }
+
+  private stopAssistantCommitTick(): void {
+    if (!this.assistantCommitTick) return;
+    clearTimeout(this.assistantCommitTick);
+    this.assistantCommitTick = undefined;
+  }
+
+  private finalizeActiveAssistantStream(
+    id: string,
+    options: { captureLastFullOutput?: boolean } = {},
+  ): void {
+    this.stopAssistantCommitTick();
+    const visibleText = this.assistantStreamText || this.assistantPreviewText;
+    if (!visibleText) return;
+    this.assistantStreamState = finalizeAssistantStreamDisplayState(this.assistantStreamState);
+    const terminalFirstTargetText = this.stageTerminalFirstAssistantText(visibleText);
+    // Materialize the block (fullText/summary) before committing to terminal
+    // history: a successful commit physically removes the block from the Ink
+    // array, so it must be fully formed first. This keeps single ownership —
+    // the block lives either in Ink (not yet committed) or in terminal
+    // scrollback (committed), never both.
+    const block = this.commitAssistantBlock(id, visibleText, options);
+    if (block) this.appendTranscriptSourceBlock(block);
+    const hadTerminalFirstText =
+      this.assistantTerminalFirstCommitted ||
+      this.assistantTerminalFirstStaged ||
+      Boolean(terminalFirstTargetText);
+    const committed = this.commitTerminalFirstAssistantText(terminalFirstTargetText);
+    if (hadTerminalFirstText && committed) {
+      this.terminalFirstAssistantSink?.commitAssistantTurnBreak?.();
+    }
   }
 
   private clearStreamingPreview(id: string): void {
@@ -384,13 +613,73 @@ export class ShellBlockOutput extends Writable {
   private async compactOutputMemoryOnce(): Promise<void> {
     trimOutputBlocks(this.blocks);
     try {
-      await compactBlockFullText(this.context, this.blocks);
+      const compactedBlocks = await compactBlockFullText(this.context, this.blocks);
+      for (const block of compactedBlocks) this.appendTranscriptSourceBlock(block);
       await compactLastFullOutput(this.context);
     } catch (error) {
-      compactBlockFullTextInMemory(this.blocks, error);
+      const compactedBlocks = compactBlockFullTextInMemory(this.blocks, error);
+      for (const block of compactedBlocks) this.appendTranscriptSourceBlock(block);
       compactLastFullOutputInMemory(this.context, error);
     }
   }
+
+  private stageTerminalFirstAssistantText(text: string): string | undefined {
+    if (!this.terminalFirstAssistantSink) return undefined;
+    if (!text.startsWith(this.assistantTerminalFirstText)) return undefined;
+    const delta = text.slice(this.assistantTerminalFirstText.length);
+    if (!delta) return undefined;
+    this.terminalFirstAssistantSink.stageStableAssistantText(delta);
+    this.assistantTerminalFirstStaged = true;
+    return text;
+  }
+
+  private commitTerminalFirstAssistantText(committedText?: string): boolean {
+    if (!this.terminalFirstAssistantSink) return false;
+    const id = this.assistantBlockId;
+    // Plan B single ownership: the sink writes to terminal scrollback and
+    // fires onFlush synchronously on success, so the splice happens inline.
+    // A failed commit leaves the block in the Ink array as the visible fallback.
+    const committed = this.terminalFirstAssistantSink.commitStableAssistantText(id, () => {
+      this.assistantTerminalFirstCommitted = true;
+      this.assistantTerminalFirstStaged = false;
+      if (committedText) this.assistantTerminalFirstText = committedText;
+      if (!id) return;
+      const idx = this.blocks.findIndex((candidate) => candidate.id === id);
+      if (idx >= 0) {
+        this.appendTranscriptSourceBlock(this.blocks[idx]);
+        this.blocks.splice(idx, 1);
+      }
+    });
+    if (!committed) {
+      this.terminalFirstAssistantSink.rollbackStableAssistantText();
+      this.assistantTerminalFirstCommitted = false;
+      this.assistantTerminalFirstStaged = false;
+    }
+    return committed;
+  }
+
+  private commitTerminalFirstStableBlock(block: ProductBlockViewModel): void {
+    // Plan B single ownership: onFlush fires synchronously on a successful
+    // terminal write, splicing the block out of the Ink array inline.
+    this.terminalFirstAssistantSink?.commitStableTranscriptBlock?.(block, () => {
+      this.appendTranscriptSourceBlock(block);
+      const idx = this.blocks.indexOf(block);
+      if (idx >= 0) this.blocks.splice(idx, 1);
+    });
+  }
+
+  private appendTranscriptSourceBlock(block: ProductBlockViewModel): void {
+    const kind = transcriptSourceKindForBlock(block);
+    if (!kind) return;
+    this.context.transcriptSource ??= createTranscriptSource();
+    upsertTranscriptSourceCell(this.context.transcriptSource, {
+      id: block.id,
+      kind,
+      block,
+      rawText: transcriptSourceRawTextForBlock(block),
+    });
+  }
+
 }
 
 function trimOutputBlocks(blocks: ProductBlockViewModel[]): void {
@@ -419,7 +708,8 @@ function trimOutputBlocks(blocks: ProductBlockViewModel[]): void {
 async function compactBlockFullText(
   context: TuiContext,
   blocks: ProductBlockViewModel[],
-): Promise<void> {
+): Promise<ProductBlockViewModel[]> {
+  const compacted: ProductBlockViewModel[] = [];
   for (const block of blocks) {
     const value = block.fullText;
     if (!value || value.length <= MAX_BLOCK_FULL_TEXT_CHARS || isCompactedOutputText(value)) {
@@ -436,10 +726,16 @@ async function compactBlockFullText(
       sha256: artifact.sha256,
       preview: value.slice(0, LAST_FULL_OUTPUT_PREVIEW_CHARS),
     });
+    compacted.push(block);
   }
+  return compacted;
 }
 
-function compactBlockFullTextInMemory(blocks: ProductBlockViewModel[], error: unknown): void {
+function compactBlockFullTextInMemory(
+  blocks: ProductBlockViewModel[],
+  error: unknown,
+): ProductBlockViewModel[] {
+  const compacted: ProductBlockViewModel[] = [];
   for (const block of blocks) {
     const value = block.fullText;
     if (!value || value.length <= MAX_BLOCK_FULL_TEXT_CHARS || isCompactedOutputText(value)) {
@@ -451,7 +747,9 @@ function compactBlockFullTextInMemory(blocks: ProductBlockViewModel[], error: un
       originalChars: value.length,
       preview: value.slice(0, LAST_FULL_OUTPUT_PREVIEW_CHARS),
     });
+    compacted.push(block);
   }
+  return compacted;
 }
 
 async function compactLastFullOutput(context: TuiContext): Promise<void> {
@@ -535,16 +833,353 @@ function isCompactedOutputText(value: string): boolean {
   );
 }
 
+export function createTerminalFirstAssistantSink(
+  output: Writable | undefined,
+  options: TerminalFirstAssistantSinkOptions = {},
+): TerminalFirstAssistantSink | undefined {
+  if (process.env[TERMINAL_FIRST_TRANSCRIPT_ENV] === "0") return undefined;
+  const nativeScrollback = isNativeScrollbackEnabled();
+  if (!nativeScrollback) return undefined;
+  if ((output as { isTTY?: boolean } | undefined)?.isTTY !== true) return undefined;
+  const ttyOutput = output as Writable;
+  let stagedText = "";
+  let assistantMarkdownState = createTerminalFirstMarkdownState();
+  // Plan B single ownership: history is written to terminal scrollback
+  // synchronously at commit time and immediately spliced out of the Ink block
+  // array by the caller's onFlush. No queue, no flush timing, no reflow/replay
+  // state machine — the write path mirrors ceshi/scrollback-probe.mjs.
+  const writeHistory = (text: string | undefined): boolean => {
+    if (!text) return false;
+    try {
+      return insertTerminalHistoryText(ttyOutput, text, {
+        frameTopRow: resolveOptionalOption(options.frameTopRow),
+        viewportGeometry: resolveOptionalOption(options.viewportGeometry),
+        terminalRows: resolveOptionalOption(options.rows),
+      });
+    } catch {
+      return false;
+    }
+  };
+  return {
+    stageStableAssistantText(text: string): void {
+      if (!text) return;
+      stagedText += text;
+    },
+    commitStableAssistantText(_sourceCellId?: string, onFlush?: () => void): boolean {
+      if (!stagedText) return true;
+      const sourceText = stagedText;
+      let rendered: string | undefined;
+      const nextMarkdownState = { ...assistantMarkdownState };
+      try {
+        rendered = renderTerminalFirstAssistantText(sourceText, options, nextMarkdownState);
+      } catch {
+        stagedText = "";
+        return false;
+      }
+      if (!writeHistory(rendered)) return false;
+      assistantMarkdownState = nextMarkdownState;
+      stagedText = "";
+      onFlush?.();
+      return true;
+    },
+    rollbackStableAssistantText(): void {
+      stagedText = "";
+    },
+    resetAssistantStream(): void {
+      stagedText = "";
+      assistantMarkdownState = createTerminalFirstMarkdownState();
+    },
+    commitAssistantTurnBreak(): boolean {
+      return writeHistory("\r\n");
+    },
+    commitStableTranscriptBlock(block: ProductBlockViewModel, onFlush?: () => void): boolean {
+      if (!canRenderTerminalFirstStableBlock(block)) return false;
+      let rendered: string | undefined;
+      try {
+        rendered = renderTerminalFirstStableBlock(block, options);
+      } catch {
+        return false;
+      }
+      if (!writeHistory(rendered)) return false;
+      if (block.messageKind === "assistant_text") {
+        writeHistory("\r\n");
+      }
+      onFlush?.();
+      return true;
+    },
+    commitUserTranscriptBlock(block: ProductBlockViewModel, onFlush?: () => void): boolean {
+      if (!canRenderTerminalFirstUserBlock(block)) return false;
+      let rendered: string | undefined;
+      try {
+        rendered = renderTerminalFirstUserBlock(block, options);
+      } catch {
+        return false;
+      }
+      if (!writeHistory(rendered)) return false;
+      onFlush?.();
+      return true;
+    },
+  };
+}
+
+function canRenderTerminalFirstStableBlock(block: ProductBlockViewModel): boolean {
+  const text = terminalFirstStableBlockText(block);
+  if (!text) return false;
+  return (
+    block.messageKind === "assistant_text" ||
+    block.messageKind === "tool_result_success" ||
+    block.messageKind === "diagnostic" ||
+    block.messageKind === "local_command_output" ||
+    (block.kind === "command" && !block.messageKind)
+  );
+}
+
+function renderTerminalFirstAssistantText(
+  text: string,
+  options: TerminalFirstAssistantSinkOptions,
+  state?: TerminalFirstMarkdownState,
+): string {
+  const noColor = resolveOption(options.noColor, false);
+  const columns = resolveTerminalFirstColumns(options);
+  const wrapWidth = Math.max(8, Math.floor(columns));
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = state
+    ? renderTerminalFirstMarkdownDeltaLines(normalized, noColor, wrapWidth, state)
+    : renderPlainMarkdownLines(normalized, noColor, { wrapWidth });
+  return withTerminalFirstRows(lines);
+}
+
+function renderTerminalFirstStableBlock(
+  block: ProductBlockViewModel,
+  options: TerminalFirstAssistantSinkOptions,
+): string | undefined {
+  const text = terminalFirstStableBlockText(block);
+  if (!text) return undefined;
+  const noColor = resolveOption(options.noColor, false);
+  const columns = resolveTerminalFirstColumns(options);
+  const wrapWidth = Math.max(8, Math.floor(columns));
+  const messageKind = block.messageKind;
+  if (block.kind === "command" && !messageKind) {
+    return `${dimAnsi("\u276F ", noColor)}${cyanAnsi(text, noColor)}\r\n`;
+  }
+  if (messageKind === "assistant_text") {
+    const state = createTerminalFirstMarkdownState();
+    return withTerminalFirstRows(renderTerminalFirstMarkdownDeltaLines(text, noColor, wrapWidth, state));
+  }
+  if (messageKind === "tool_result_success") {
+    const prefix = dimAnsi("  \u23BF  ", noColor);
+    return renderPlainMarkdownLines(text, noColor, { wrapWidth: Math.max(8, wrapWidth - 6) })
+      .map((line) => `${prefix}${line}`)
+      .join("\n")
+      .replace(/\n/g, "\r\n") + "\r\n\r\n";
+  }
+  if (messageKind === "diagnostic") {
+    return renderPlainMarkdownLines(text, noColor, { diagnostic: true, wrapWidth })
+      .join("\n")
+      .replace(/\n/g, "\r\n") + "\r\n\r\n";
+  }
+  if (messageKind === "local_command_output") {
+    const prefix = dimAnsi("  ⎿  ", noColor);
+    return renderPlainMarkdownLines(text, noColor, { wrapWidth: Math.max(8, wrapWidth - 6) })
+      .map((line) => `${prefix}${line}`)
+      .join("\n")
+      .replace(/\n/g, "\r\n") + "\r\n\r\n";
+  }
+  return undefined;
+}
+
+function terminalFirstStableBlockText(block: ProductBlockViewModel): string {
+  const source = block.kind === "command" && !block.messageKind
+    ? block.title
+    : (block.fullText ?? block.summary);
+  return source.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+}
+
+function canRenderTerminalFirstUserBlock(block: ProductBlockViewModel): boolean {
+  const text = (block.fullText ?? block.title).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  return block.messageKind === "user_text" && text.length > 0;
+}
+
+function renderTerminalFirstUserBlock(
+  block: ProductBlockViewModel,
+  options: TerminalFirstAssistantSinkOptions,
+): string | undefined {
+  if (block.messageKind !== "user_text") return undefined;
+  const text = (block.fullText ?? block.title).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!text) return undefined;
+  const noColor = resolveOption(options.noColor, false);
+  const columns = resolveTerminalFirstColumns(options);
+  const wrapWidth = Math.max(8, Math.floor(columns) - 2);
+  return withTerminalFirstTurnSpacing(
+    renderPlainMarkdownLines(text, noColor, { wrapWidth }).map(
+      (line, index) => `${index === 0 ? dimAnsi("│ ", noColor) : "  "}${line}`,
+    ),
+  );
+}
+
+function withTerminalFirstTurnSpacing(lines: string[]): string {
+  const rendered = lines.join("\n").replace(/\n/g, "\r\n");
+  return rendered ? `${rendered}\r\n\r\n` : "";
+}
+
+type TerminalFirstMarkdownState = {
+  inCode: boolean;
+  codeLang?: string;
+  codeLineNumber: number;
+};
+
+function createTerminalFirstMarkdownState(): TerminalFirstMarkdownState {
+  return { inCode: false, codeLineNumber: 1 };
+}
+
+function renderTerminalFirstMarkdownDeltaLines(
+  text: string,
+  noColor: boolean,
+  wrapWidth: number,
+  state: TerminalFirstMarkdownState,
+): string[] {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  const hasTrailingNewline = text.endsWith("\n");
+  const lineCount = hasTrailingNewline ? lines.length - 1 : lines.length;
+
+  for (let index = 0; index < lineCount; index += 1) {
+    const raw = lines[index] ?? "";
+    const fence = raw.match(/^\s*```\s*([A-Za-z0-9_+-]*)\s*$/u);
+    if (fence) {
+      if (state.inCode) {
+        out.push(dimAnsi("  +", noColor));
+        state.inCode = false;
+        state.codeLang = undefined;
+        state.codeLineNumber = 1;
+      } else {
+        state.inCode = true;
+        state.codeLang = fence[1] || undefined;
+        state.codeLineNumber = 1;
+        out.push(dimAnsi(`  +${state.codeLang ? ` ${state.codeLang}` : ""}`, noColor));
+      }
+      continue;
+    }
+
+    if (!state.inCode) {
+      out.push(...renderPlainMarkdownLines(raw, noColor, { wrapWidth }));
+      continue;
+    }
+
+    const isDiff = isDiffFenceLanguage(state.codeLang);
+    const gutter = `${String(state.codeLineNumber).padStart(2, " ")} │ `;
+    const bodyWidth = Math.max(8, wrapWidth - gutter.length - 2);
+    const highlightedLine = highlightTerminalFirstCodeLine(raw, state.codeLang, noColor, bodyWidth);
+    if (highlightedLine) {
+      out.push(`${dimAnsi(gutter, noColor)}${highlightedLine}`);
+      state.codeLineNumber += 1;
+      continue;
+    }
+    const wrappedLines = wrapText(raw.length === 0 ? " " : raw, bodyWidth);
+    wrappedLines.forEach((wrapped, wrappedIndex) => {
+      const wrappedBody =
+        isDiff && wrapped.startsWith("+") && !wrapped.startsWith("+++")
+          ? greenAnsi(wrapped, noColor)
+          : isDiff && wrapped.startsWith("-") && !wrapped.startsWith("---")
+            ? redAnsi(wrapped, noColor)
+            : dimAnsi(wrapped, noColor);
+      const prefix = wrappedIndex === 0 ? gutter : " ".repeat(gutter.length);
+      out.push(`${dimAnsi(prefix, noColor)}${wrappedBody}`);
+    });
+    state.codeLineNumber += 1;
+  }
+
+  return out;
+}
+
+function highlightTerminalFirstCodeLine(
+  raw: string,
+  lang: string | undefined,
+  noColor: boolean,
+  maxWidth: number,
+): string | undefined {
+  if (noColor || !lang || isDiffFenceLanguage(lang) || raw.length === 0) return undefined;
+  try {
+    const highlighted = highlight(raw, {
+      language: lang,
+      ignoreIllegals: true,
+      theme: TERMINAL_FIRST_CODE_THEME,
+    }).replace(/\n$/u, "");
+    return displayWidth(stripAnsi(highlighted)) <= maxWidth ? highlighted : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function withTerminalFirstRows(lines: string[]): string {
+  const rendered = lines.join("\n").replace(/\n/g, "\r\n");
+  return rendered ? `${rendered}\r\n` : "";
+}
+
+export function commitTerminalFirstUserBlock(
+  sink: TerminalFirstAssistantSink | undefined,
+  block: ProductBlockViewModel,
+  onFlush?: () => void,
+): boolean {
+  // Plan B: commitUserTranscriptBlock writes to terminal scrollback and fires
+  // onFlush synchronously on success, so this wrapper just forwards the result.
+  return sink?.commitUserTranscriptBlock?.(block, onFlush) ?? false;
+}
+
+function dimAnsi(text: string, noColor: boolean): string {
+  if (noColor) return text;
+  return `\x1B[2m${text}\x1B[0m`;
+}
+
+function cyanAnsi(text: string, noColor: boolean): string {
+  if (noColor) return text;
+  return `\x1B[36m${text}\x1B[0m`;
+}
+
+function redAnsi(text: string, noColor: boolean): string {
+  if (noColor) return text;
+  return `\x1B[31m${text}\x1B[0m`;
+}
+
+function greenAnsi(text: string, noColor: boolean): string {
+  if (noColor) return text;
+  return `\x1B[32m${text}\x1B[0m`;
+}
+
+function ansiStyle(code: string, text: string): string {
+  return `\x1B[${code}m${text}\x1B[0m`;
+}
+
+function resolveOption<T>(option: T | (() => T) | undefined, fallback: T): T {
+  if (typeof option === "function") return (option as () => T)();
+  return option ?? fallback;
+}
+
+function resolveTerminalFirstColumns(options: TerminalFirstAssistantSinkOptions): number {
+  const columns = resolveOptionalOption(options.columns);
+  if (typeof columns === "number") return columns;
+  return resolveOptionalOption(options.viewportGeometry)?.width ?? 100;
+}
+
+function resolveOptionalOption<T>(option: T | (() => T) | undefined): T | undefined {
+  if (typeof option === "function") return (option as () => T)();
+  return option;
+}
+
 /**
  * Duck-typed helpers for assistant streaming. Ink shell 注入 ShellBlockOutput
  * 时走 begin/append/end 三段式，把每个 assistant_text_delta 累积到同一条
  * keep:true block；其他 Writable（plain TUI、MemoryOutput、tests）走原始
  * output.write 路径，保持非交互行为不变。
  */
-export function beginAssistantStream(output: Writable, id: string): void {
-  const candidate = output as { beginAssistantStream?: (id: string) => void };
+export function beginAssistantStream(
+  output: Writable,
+  id: string,
+  options: AssistantStreamOptions = {},
+): void {
+  const candidate = output as { beginAssistantStream?: (id: string, options?: AssistantStreamOptions) => void };
   if (typeof candidate.beginAssistantStream === "function") {
-    candidate.beginAssistantStream(id);
+    candidate.beginAssistantStream(id, options);
   }
 }
 
@@ -640,8 +1275,9 @@ export function createShellBlockOutputForTest(
   context: TuiContext,
   blocks: ProductBlockViewModel[],
   onWrite: () => void = () => {},
+  terminalFirstAssistantSink?: TerminalFirstAssistantSink,
 ): Writable & {
-  beginAssistantStream(id: string): void;
+  beginAssistantStream(id: string, options?: AssistantStreamOptions): void;
   appendAssistantDelta(text: string): void;
   endAssistantStream(): void;
   discardAssistantBlock(id: string): void;
@@ -649,5 +1285,5 @@ export function createShellBlockOutputForTest(
   writeLocalCommandOutputLine(text: string): void;
   compactOutputMemory(): Promise<void>;
 } {
-  return new ShellBlockOutput(context, blocks, onWrite);
+  return new ShellBlockOutput(context, blocks, onWrite, terminalFirstAssistantSink);
 }

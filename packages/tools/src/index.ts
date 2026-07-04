@@ -155,6 +155,25 @@ export type DiffSummary = {
   riskyFiles: string[];
 };
 
+export type PatchHunk = {
+  oldStart: number;
+  newStart: number;
+  oldLines: string[];
+  newLines: string[];
+  oldLineCount: number;
+  newLineCount: number;
+  truncated?: boolean;
+};
+
+export type StructuredPatchFile = {
+  path: string;
+  hunks: PatchHunk[];
+};
+
+export type StructuredPatch = {
+  files: StructuredPatchFile[];
+};
+
 export type ReadInput = { path: string; offset?: number; limit?: number };
 export type ReadSnippetsInput = {
   ranges: { path: string; start: number; end: number }[];
@@ -2052,15 +2071,20 @@ export function adaptShellCommandForPlatform(
   platform: NodeJS.Platform,
 ): ShellCommandAdapter {
   if (platform !== "win32") return { command, adapter: "native" };
+  if (isExplicitPowerShellCommand(command)) return { command, adapter: "native" };
+  const fileWriteBlock = blockWindowsShellFileWriteCommand(command);
+  if (fileWriteBlock) return fileWriteBlock;
   const heredoc = convertNodeHereDocForPowerShell(command);
   if (heredoc) return heredoc;
+  const nativePowerShell = convertNativePowerShellCommand(command);
+  if (nativePowerShell) return nativePowerShell;
   if (looksLikeUnsupportedUnixMultiline(command)) {
     return createBlockedPowerShellAdapter(
       "Unsupported multi-line Unix shell syntax on Windows PowerShell; use PowerShell-safe commands or Node one-liners.",
     );
   }
-  const nativePowerShell = convertNativePowerShellCommand(command);
-  if (nativePowerShell) return nativePowerShell;
+  const unsupportedPosix = blockUnsupportedPosixShellSyntax(command);
+  if (unsupportedPosix) return unsupportedPosix;
   const converted = convertUnixPipelineForPowerShell(command);
   if (converted) return { command: converted, adapter: "powershell-adapted" };
   const readOnlyCommand = convertUnixReadOnlyCommandForPowerShell(command);
@@ -2075,11 +2099,40 @@ export function adaptShellCommandForPlatform(
   return { command, adapter: "native" };
 }
 
+function isExplicitPowerShellCommand(command: string): boolean {
+  return /^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/iu.test(command.trim());
+}
+
+const WINDOWS_SHELL_WRITE_BLOCK_MESSAGE =
+  "Linghun Bash does not support shell apply_patch or heredoc file writes on Windows; use Edit/MultiEdit/Write structured tools instead.";
+
+function blockWindowsShellFileWriteCommand(command: string): ShellCommandAdapter | undefined {
+  const normalized = command.replace(/\r\n/gu, "\n").trim();
+  if (!normalized) return undefined;
+  if (
+    /\bapply_patch\b/iu.test(normalized) &&
+    (/(?:^|\n|;)\s*apply_patch\s*<</iu.test(normalized) ||
+      /@['"][\s\S]*?['"]@\s*\|\s*apply_patch\b/iu.test(normalized) ||
+      /\$[A-Za-z_][\w]*\s*=\s*@['"][\s\S]*?['"]@/u.test(normalized) ||
+      /\$[A-Za-z_][\w]*\s*\|\s*apply_patch\b/u.test(normalized))
+  ) {
+    return createBlockedPowerShellAdapter(WINDOWS_SHELL_WRITE_BLOCK_MESSAGE);
+  }
+  if (
+    /(?:^|\n|;)\s*cat\b[^\n;]*>\s*\S+/iu.test(normalized) ||
+    /(?:^|\n|;)\s*cat\b[^\n;]*<<[^\n]*>\s*\S+/iu.test(normalized) ||
+    /(?:^|\n|;)\s*tee\b\s+\S+/iu.test(normalized)
+  ) {
+    return createBlockedPowerShellAdapter(WINDOWS_SHELL_WRITE_BLOCK_MESSAGE);
+  }
+  return undefined;
+}
+
 function convertNativePowerShellCommand(command: string): ShellCommandAdapter | undefined {
   const normalized = command.trim();
   if (!normalized) return undefined;
-  if (/^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/iu.test(normalized)) return undefined;
-  if (!/^(?:Get|Set|New|Remove|Select|ForEach|Where|Test|Resolve|Join|Split|Copy|Move|Write|Out|Measure|Compare|Sort|Format)-[A-Za-z]+\b/u.test(normalized)) {
+  if (isExplicitPowerShellCommand(normalized)) return undefined;
+  if (!looksLikePowerShellScript(normalized)) {
     return undefined;
   }
   return {
@@ -2088,8 +2141,47 @@ function convertNativePowerShellCommand(command: string): ShellCommandAdapter | 
       quoteCmdArg(`$ErrorActionPreference='Stop'; ${normalized}`),
     ].join(" "),
     adapter: "powershell-adapted",
-    logCommand: `powershell.exe -NoProfile -NonInteractive -Command <powershell cmdlet>`,
+    logCommand: `powershell.exe -NoProfile -NonInteractive -Command <powershell script>`,
   };
+}
+
+function looksLikePowerShellScript(command: string): boolean {
+  const normalized = command.trim();
+  if (/^\$[A-Za-z_][\w]*\s*=/u.test(normalized)) return true;
+  if (/^\$PWD\.Path\b/iu.test(normalized)) return true;
+  if (/@['"][\s\S]*?['"]@/u.test(normalized)) return true;
+  if (/^\$[A-Za-z_][\w]*\s*\|/u.test(normalized) || /;\s*\$[A-Za-z_][\w]*\s*\|/u.test(normalized)) {
+    return true;
+  }
+  const cmdlet = /\b(?:Get|Set|New|Remove|Select|ForEach|Where|Test|Resolve|Join|Split|Copy|Move|Write|Out|Measure|Compare|Sort|Format)-[A-Za-z]+\b/u;
+  if (!cmdlet.test(normalized)) return false;
+  if (/^(?:Get|Set|New|Remove|Select|ForEach|Where|Test|Resolve|Join|Split|Copy|Move|Write|Out|Measure|Compare|Sort|Format)-[A-Za-z]+\b/u.test(normalized)) {
+    return true;
+  }
+  return /[;|]/u.test(normalized) || /\$[A-Za-z_][\w]*(?:\.|\s*\|)/u.test(normalized);
+}
+
+function blockUnsupportedPosixShellSyntax(command: string): ShellCommandAdapter | undefined {
+  const normalized = command.replace(/\r\n/gu, "\n").trim();
+  if (!normalized) return undefined;
+  const message =
+    "Unsupported POSIX shell syntax on Windows; use PowerShell-safe commands, Node one-liners, or structured tools.";
+  if (/<<\s*['"]?[A-Za-z_][\w.-]*['"]?/u.test(normalized)) {
+    return createBlockedPowerShellAdapter(message);
+  }
+  if (/(?:^|\n|;)\s*export\s+[A-Za-z_][\w]*=/u.test(normalized)) {
+    return createBlockedPowerShellAdapter(message);
+  }
+  if (/^(?:[A-Za-z_][\w]*=[^\s]+\s+)+\S+/u.test(normalized)) {
+    return createBlockedPowerShellAdapter(message);
+  }
+  if (/\$\([^)]*\)/u.test(normalized)) {
+    return createBlockedPowerShellAdapter(message);
+  }
+  if (/\n/u.test(normalized)) {
+    return createBlockedPowerShellAdapter(message);
+  }
+  return undefined;
 }
 
 function convertNodeHereDocForPowerShell(command: string): ShellCommandAdapter | undefined {
@@ -2613,6 +2705,8 @@ function createEditOutput(
 ): ToolOutput {
   const rel = relativePath(context.workspaceRoot, filePath);
   const summary = createPatchSummary([rel], before, after);
+  const structuredPatch = createStructuredPatch(rel, before, after);
+  const patchHunks = structuredPatch.files.flatMap((file) => file.hunks);
   context.patchSummaries = { ...(context.patchSummaries ?? {}), [rel]: summary };
   const newlineBefore = detectNewlineStyle(before);
   const newlineAfter = detectNewlineStyle(after);
@@ -2639,8 +2733,58 @@ function createEditOutput(
       newlineBefore,
       newlineAfter,
       encoding: "utf8",
+      structuredPatch,
+      patchHunks,
     },
     changedFiles: [rel],
+  };
+}
+
+const STRUCTURED_PATCH_LINE_LIMIT = 120;
+
+function createStructuredPatch(path: string, before: string, after: string): StructuredPatch {
+  const beforeLines = splitPatchLines(before);
+  const afterLines = splitPatchLines(after);
+  const hunk = createPatchHunk(beforeLines, afterLines);
+  return { files: [{ path, hunks: hunk ? [hunk] : [] }] };
+}
+
+function splitPatchLines(content: string): string[] {
+  if (content.length === 0) return [];
+  return content.replace(/\r\n/gu, "\n").replace(/\n$/u, "").split("\n");
+}
+
+function createPatchHunk(beforeLines: string[], afterLines: string[]): PatchHunk | undefined {
+  let prefix = 0;
+  while (
+    prefix < beforeLines.length &&
+    prefix < afterLines.length &&
+    beforeLines[prefix] === afterLines[prefix]
+  ) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < beforeLines.length - prefix &&
+    suffix < afterLines.length - prefix &&
+    beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  const oldLines = beforeLines.slice(prefix, beforeLines.length - suffix);
+  const newLines = afterLines.slice(prefix, afterLines.length - suffix);
+  if (oldLines.length === 0 && newLines.length === 0) return undefined;
+
+  return {
+    oldStart: oldLines.length > 0 ? prefix + 1 : prefix,
+    newStart: newLines.length > 0 ? prefix + 1 : prefix,
+    oldLines: oldLines.slice(0, STRUCTURED_PATCH_LINE_LIMIT),
+    newLines: newLines.slice(0, STRUCTURED_PATCH_LINE_LIMIT),
+    oldLineCount: oldLines.length,
+    newLineCount: newLines.length,
+    truncated: oldLines.length > STRUCTURED_PATCH_LINE_LIMIT || newLines.length > STRUCTURED_PATCH_LINE_LIMIT,
   };
 }
 

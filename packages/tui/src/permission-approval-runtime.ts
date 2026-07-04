@@ -642,6 +642,10 @@ export async function executePermissionApprove(
       undefined,
       approval.continuation?.reportWriteGuard,
     );
+    const reportWriteGuard = approval.continuation?.reportWriteGuard;
+    if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
+      reportWriteGuard.completed = true;
+    }
     if (gateway && approval.continuation) {
       approval.continuation.messages.push({
         role: "tool",

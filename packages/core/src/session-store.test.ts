@@ -56,6 +56,142 @@ describe("SessionStore", () => {
     expect(resumed.diagnostics).toEqual([]);
   });
 
+  it("indexes runtime transcript events into the session ledger", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+    const createdAt = new Date(0).toISOString();
+
+    await store.appendEvent(session.id, {
+      type: "verification_end",
+      report: {
+        id: "verify-1",
+        status: "pass",
+        summary: "focused tests passed",
+        commands: [],
+        unverified: [],
+        risk: [],
+        logPath: join(project, ".linghun", "verify.log"),
+        startedAt: createdAt,
+        endedAt: createdAt,
+        durationMs: 1,
+        nextAction: "none",
+      },
+      createdAt,
+    });
+    await store.appendEvent(session.id, {
+      type: "background_task_update",
+      task: {
+        id: "job-1",
+        kind: "job",
+        title: "Job 1",
+        status: "running",
+        startedAt: createdAt,
+        updatedAt: createdAt,
+        heartbeatIntervalMs: 1000,
+        staleAfterMs: 2000,
+        logPath: join(project, ".linghun", "job.log"),
+        hasOutput: true,
+        userVisibleSummary: "job running",
+      },
+      createdAt,
+    });
+    await store.appendEvent(session.id, {
+      type: "agent_end",
+      agentId: "agent-1",
+      status: "completed",
+      summary: "agent completed",
+      createdAt,
+    });
+    await store.appendEvent(session.id, {
+      type: "workflow_end",
+      workflowId: "workflow-1",
+      status: "partial",
+      summary: "workflow partial",
+      createdAt,
+    });
+    await store.appendEvent(session.id, {
+      type: "tool_call_end",
+      id: "tool-1",
+      output: { text: "large", fullOutputPath: join(project, ".linghun", "tool.log") },
+      createdAt,
+    });
+
+    const ledgerText = await readFile(join(session.transcriptPath, "..", "runtime-ledger.jsonl"), "utf8");
+    const records = ledgerText.trim().split(/\r?\n/u).map((line) => JSON.parse(line) as {
+      kind: string;
+      status?: string;
+      verificationId?: string;
+      jobId?: string;
+      agentId?: string;
+      workflowId?: string;
+      artifactPath?: string;
+    });
+
+    expect(records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "verification_recorded",
+          status: "pass",
+          verificationId: "verify-1",
+        }),
+        expect.objectContaining({ kind: "job_updated", status: "running", jobId: "job-1" }),
+        expect.objectContaining({
+          kind: "agent_updated",
+          status: "completed",
+          agentId: "agent-1",
+        }),
+        expect.objectContaining({
+          kind: "workflow_updated",
+          status: "partial",
+          workflowId: "workflow-1",
+        }),
+        expect.objectContaining({ kind: "artifact_created", artifactPath: expect.stringContaining("tool.log") }),
+      ]),
+    );
+  });
+
+  it("keeps transcript and metadata writes when runtime ledger write fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const ledgerDirectory = await mkdtemp(join(tmpdir(), "linghun-ledger-as-dir-"));
+    const times = [
+      new Date("2026-01-01T00:00:00.000Z"),
+      new Date("2026-01-01T00:00:01.000Z"),
+      new Date("2026-01-01T00:00:02.000Z"),
+    ];
+    let timeIndex = 0;
+    const store = new SessionStore({
+      sessionRootDir: root,
+      projectPath: project,
+      now: () => times[Math.min(timeIndex++, times.length - 1)] ?? times.at(-1)!,
+      runtimeLedgerPathForTest: () => ledgerDirectory,
+    });
+    const session = await store.create();
+
+    await store.appendEvent(session.id, {
+      type: "verification_end",
+      report: {
+        id: "verify-ledger-fails",
+        status: "pass",
+        summary: "pass even though ledger fails",
+        commands: [],
+        unverified: [],
+        risk: [],
+        startedAt: "start",
+        endedAt: "end",
+        durationMs: 1,
+        nextAction: "none",
+      },
+      createdAt: "event-time",
+    });
+
+    const resumed = await store.resume(session.id);
+    expect(resumed.transcript.some((event) => event.type === "verification_end")).toBe(true);
+    expect(resumed.session.updatedAt).toBe("2026-01-01T00:00:02.000Z");
+  });
+
   it("reads recent transcript events from the tail without requiring a full resume", async () => {
     const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-project-"));

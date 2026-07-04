@@ -80,6 +80,45 @@ describe("Phase R3 progress view projectors", () => {
     expect(view?.runs[0]?.steps[1]).toMatchObject({ title: "Implement", active: true });
   });
 
+  it("bounds agent and workflow progress rows while keeping active work visible", () => {
+    const ctx = createContext();
+    ctx.agents = Array.from({ length: 9 }, (_, index) => ({
+      id: `agent-${index}`,
+      displayName: `Agent ${index}`,
+      status: index === 0 ? "running" : "idle",
+      lastTerminalStatus: index === 0 ? undefined : "completed",
+      activitySummary: index === 0 ? "working" : undefined,
+      startedAt: new Date(Date.now() - 5_000).toISOString(),
+      mailbox: [],
+      cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+    })) as unknown as TuiContext["agents"];
+    ctx.agentCompletedAt = Object.fromEntries(
+      Array.from({ length: 8 }, (_, index) => [`agent-${index + 1}`, Date.now()]),
+    );
+    ctx.workflows.activeRuns = [
+      {
+        id: "wf-many",
+        goal: "bounded progress",
+        status: "running",
+        steps: Array.from({ length: 9 }, (_, index) => ({
+          id: `s${index}`,
+          title: `step ${index}`,
+          status: index === 4 ? "running" : "queued",
+        })),
+      },
+    ] as unknown as NonNullable<TuiContext["workflows"]["activeRuns"]>;
+
+    const agents = buildAgentProgressTreeView(ctx);
+    const workflow = buildWorkflowProgressView(ctx);
+
+    expect(agents?.rows).toHaveLength(6);
+    expect(agents?.hiddenPending).toBe(3);
+    expect(agents?.rows.some((row) => row.id === "agent-0")).toBe(true);
+    expect(workflow?.runs[0]?.steps).toHaveLength(5);
+    expect(workflow?.runs[0]?.hiddenSteps).toBe(4);
+    expect(workflow?.runs[0]?.steps.some((step) => step.id === "s4" && step.active)).toBe(true);
+  });
+
   it("opens a navigable background overlay and selects the cursor row", () => {
     const ctx = createContext();
     ctx.backgroundOverlayState = { open: true, cursor: 0 };

@@ -5,6 +5,7 @@ import {
   createAgentCompletionState,
   enqueueAgentCompletionNotice,
   formatAgentCompletionDigest,
+  formatAgentCompletionMainChainContext,
   markAgentCompletionNoticeReported,
 } from "./agent-completion-finalizer.js";
 import type { TuiContext } from "./tui-context-runtime.js";
@@ -71,7 +72,7 @@ describe("agent-completion-finalizer", () => {
       completed: 1,
       evidenceRefs: ["ev-source-1"],
     });
-    expect(context.notifications?.[0]?.text).toContain("已完成");
+    expect(context.notifications).toEqual([]);
   });
 
   it("keeps failed returns invalid until reported and does not equate them with verification pass", () => {
@@ -88,6 +89,7 @@ describe("agent-completion-finalizer", () => {
     expect(notice.validity).toBe("invalid");
     expect(digest).toContain("智能体结果：1 条待处理通知");
     expect(digest).toContain("不要把结果直接等同于全部通过");
+    expect(context.notifications).toEqual([]);
 
     markAgentCompletionNoticeReported(context, notice.id, "2026-01-01T00:00:03.000Z");
     expect(collectPendingAgentCompletionNotices(context)).toHaveLength(0);
@@ -137,6 +139,31 @@ describe("agent-completion-finalizer", () => {
     });
 
     expect(transcriptBlocks).toHaveLength(0);
+  });
+
+  it("formats pending completions as internal main-chain context until reported", () => {
+    const transcriptBlocks: unknown[] = [];
+    const context = createContext();
+    (context as { pushTranscriptBlock?: (block: unknown) => void }).pushTranscriptBlock = (block) =>
+      transcriptBlocks.push(block);
+
+    const notice = enqueueAgentCompletionNotice(context, {
+      agent: createAgent({ id: "agent-main-chain", displayName: "worker" }),
+      status: "completed",
+      summary: "worker edited the focused test and verified the narrow suite",
+      evidenceRefs: ["ev-read", "ev-test"],
+      now: "2026-06-13T00:00:01.000Z",
+    });
+
+    const promptContext = formatAgentCompletionMainChainContext(context);
+    expect(promptContext).toContain("AgentCompletionReturnsForMainChain=");
+    expect(promptContext).toContain("agent-main-chain");
+    expect(promptContext).toContain("worker edited the focused test");
+    expect(promptContext).toContain("ev-test");
+    expect(transcriptBlocks).toHaveLength(0);
+
+    markAgentCompletionNoticeReported(context, notice.id, "2026-06-13T00:00:02.000Z");
+    expect(formatAgentCompletionMainChainContext(context)).toBeNull();
   });
 });
 

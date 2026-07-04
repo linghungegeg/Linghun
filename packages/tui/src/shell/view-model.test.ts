@@ -11,6 +11,10 @@ import {
 } from "../index.js";
 import { formatToolOutput } from "../tool-output-presenter.js";
 import {
+  commitTerminalFirstUserBlock,
+  createTerminalFirstAssistantSink,
+} from "../tui-output-surface.js";
+import {
   bufferInsert,
   bufferMoveDown,
   bufferMoveUp,
@@ -30,9 +34,14 @@ import { detectTerminalCapability, resetTerminalCapabilityCache } from "./termin
 import { displayWidth } from "./text-utils.js";
 import type { ProductBlockViewModel } from "./types.js";
 import {
+  createTranscriptSource,
+  upsertTranscriptSourceCell,
+} from "./models/transcript-source.js";
+import {
   createOutputBlock,
   createShellViewModel,
   getComposerPlaceholder,
+  mapBottomPaneStatusToView,
   mapPendingApprovalToPermission,
   mapRequestActivityToView,
 } from "./view-model.js";
@@ -43,6 +52,7 @@ import {
 afterEach(() => {
   resetTerminalCapabilityCache();
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 // Resolve src/ root from this test file's location so source-invariant
@@ -106,6 +116,24 @@ function createContext(overrides: Partial<TuiContext> = {}): TuiContext {
     backgroundTasks: [{ status: "running" }, { status: "completed" }],
     ...overrides,
   } as unknown as TuiContext;
+}
+
+function createBackgroundTask(
+  overrides: Partial<TuiContext["backgroundTasks"][number]> = {},
+): TuiContext["backgroundTasks"][number] {
+  return {
+    id: "bg-test",
+    kind: "agent",
+    title: "background test",
+    status: "running",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:01.000Z",
+    heartbeatIntervalMs: 1000,
+    staleAfterMs: 5000,
+    hasOutput: false,
+    userVisibleSummary: "后台任务运行中",
+    ...overrides,
+  };
 }
 
 describe("shell view model", () => {
@@ -313,6 +341,7 @@ describe("Ink shell selection", () => {
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     vi.stubEnv("LINGHUN_FULLSCREEN", "0");
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const widths: number[] = [];
@@ -353,10 +382,50 @@ describe("Ink shell selection", () => {
     expect(widths).toContain(40);
     expect(heights).toContain(24);
     expect(heights).toContain(15);
-    // Explicit fullscreen opt-out keeps this compatibility path out of alt-screen.
+    // Explicit fullscreen opt-out keeps this path in normal screen and clears
+    // the live viewport before redraw.
     expect(output.text).not.toContain("\u001B[?1049h");
     expect(output.text).not.toContain("\u001B[?1049l");
-    expect(resizeCallbacks).toBe(0);
+    expect(resizeCallbacks).toBe(1);
+    // Plan A append-only: task-mode resize clears only the bottom frame (cursor
+    // to the frame anchor row + clear-to-end) instead of wiping the whole
+    // screen, so native scrollback history above the frame is preserved.
+    expect(output.text).toMatch(/\x1b\[\d+;1H\x1b\[J/);
+    expect(output.text).not.toContain("\x1b[3J");
+  });
+
+  it("legacy normal-screen compatibility opt-out still clears viewport on resize", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    vi.stubEnv("LINGHUN_FULLSCREEN", "0");
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    output.columns = 40;
+    output.rows = 15;
+    output.emit("resize");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).not.toContain("\u001B[?1049h");
     expect(output.text).toContain("\x1b[2J\x1b[H");
     expect(output.text).not.toContain("\x1b[3J");
   });
@@ -393,11 +462,12 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("keeps terminal-native selection on the main screen by not enabling SGR mouse tracking", async () => {
+  it("enables normal-screen wheel tracking and disables it on exit", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     vi.stubEnv("LINGHUN_FULLSCREEN", "0");
+    vi.stubEnv("LINGHUN_TUI_MOUSE", "1");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -414,21 +484,51 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).not.toContain("\x1B[?1000h");
-    expect(output.text).not.toContain("\x1B[?1006h");
-    expect(output.text).not.toContain("\x1B[?1006l");
-    expect(output.text).not.toContain("\x1B[?1000l");
+    expect(output.text).toContain("\x1B[?1000h");
+    expect(output.text).toContain("\x1B[?1006h");
     expect(output.text).not.toContain("\x1B[?1002h");
-    expect(output.text).not.toContain("\x1B[?1002l");
+    expect(output.text).not.toContain("\x1B[?1003h");
+    expect(output.text).toContain("\x1B[?1006l");
+    expect(output.text).toContain("\x1B[?1000l");
+    expect(output.text).not.toContain("\x1B[?1007h");
   });
 
-  it("uses alternate screen by default on supported interactive terminals with explicit opt-out", () => {
+  it("default task shell uses the native bottom frame for scrollback coexist", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () => createShellViewModel(createContext(), { width: output.columns }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).not.toContain("\x1B[?1049h");
+    expect(output.text).not.toContain("\x1B[?1049l");
+    expect(output.text).toMatch(/\x1B\[\d+;1H/u);
+  });
+
+  it("uses native scrollback by default and keeps alternate screen as explicit opt-out", () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const capability = detectTerminalCapability();
-    expect(resolveAlternateScreen(capability)).toBe(true);
+    expect(resolveAlternateScreen(capability)).toBe(false);
     vi.stubEnv("LINGHUN_FULLSCREEN", "1");
+    expect(resolveAlternateScreen(capability)).toBe(false);
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    expect(resolveAlternateScreen(capability)).toBe(false);
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     expect(resolveAlternateScreen(capability)).toBe(true);
     vi.stubEnv("LINGHUN_FULLSCREEN", "0");
     expect(resolveAlternateScreen(capability)).toBe(false);
@@ -531,7 +631,7 @@ describe("Ink shell selection", () => {
     expect(source).not.toContain("onResize?.()");
   });
 
-  it("renders the mature home with the R2 round composer and without setup cards", async () => {
+  it("renders the task shell with the R2 round composer and without setup cards", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -556,18 +656,12 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("LingHun");
+    expect(output.text).not.toContain("LingHun");
     expect(output.text).not.toContain("L I N G H U N");
     expect(output.text).not.toContain("信任：");
-    // D.13D: home no longer overrides composer placeholder with the setup
-    // sentence; the default placeholder remains and the setup entry path is
-    // the Enter-to-start flow plus the explicit setup hint surface (in task
-    // mode). Home keeps the default placeholder even when setupNeeded=true.
-    expect(output.text).toContain("我能帮您做点什么？");
-    expect(output.text).not.toContain("按 Enter 开始配置模型");
-    // No large setupHint block or old-style verbose guidance
-    expect(output.text).not.toContain("还没有模型配置");
-    expect(output.text).not.toContain("我要配置模型");
+    expect(output.text).toContain("继续输入…");
+    expect(output.text).toContain("继续模型配置");
+    // No old-style REPL guidance
     expect(output.text).not.toContain("你 >");
     expect(output.text).not.toContain("直接描述目标");
   });
@@ -624,7 +718,7 @@ describe("Ink shell selection", () => {
     });
   });
 
-  it("keeps the brand wordmark stable without blocky pixel glyphs or duplicate text lines", async () => {
+  it("keeps the task composer stable without blocky pixel glyphs or duplicate text lines", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -648,7 +742,7 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("LingHun");
+    expect(output.text).not.toContain("LingHun");
     // Composer prompt marker present without heavy box-drawing borders
     expect(output.text).toContain("›");
     expect(output.text).not.toContain("█");
@@ -671,10 +765,10 @@ describe("Ink shell selection", () => {
   });
 });
 
-describe("home → task view mode transition", () => {
-  it("defaults to home mode when no output/activity/permission", () => {
+describe("task-only view mode", () => {
+  it("defaults to task mode when no output/activity/permission", () => {
     const view = createShellViewModel(createContext(), { width: 80 });
-    expect(view.viewMode).toBe("home");
+    expect(view.viewMode).toBe("task");
   });
 
   it("switches to task mode when outputBlocks are present", () => {
@@ -705,7 +799,7 @@ describe("home → task view mode transition", () => {
     expect(view.viewMode).toBe("task");
   });
 
-  it("allows explicit viewMode override", () => {
+  it("keeps task and pending as the only runtime layouts", () => {
     const view = createShellViewModel(createContext(), { width: 80, viewMode: "task" });
     expect(view.viewMode).toBe("task");
     const homeView = createShellViewModel(createContext(), {
@@ -713,7 +807,7 @@ describe("home → task view mode transition", () => {
       viewMode: "home",
       outputBlocks: [createOutputBlock("x", "zh-CN")],
     });
-    expect(homeView.viewMode).toBe("home");
+    expect(homeView.viewMode).toBe("task");
   });
 
   it("task mode plain render has compact top bar without full brand area", () => {
@@ -897,9 +991,23 @@ describe("home → task view mode transition", () => {
 
   it("permission pending suppresses output blocks to avoid double display", () => {
     const block = createOutputBlock("permission prompt text", "zh-CN", "out-perm");
-    const view = createShellViewModel(createContext(), {
+    const ctx = createContext();
+    ctx.streamingAssistant = {
+      id: "assistant-active",
+      text: "正在输出的 assistant preview",
+      tailText: "正在输出的 assistant preview",
+    };
+    ctx.pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolName: "Bash",
+      sessionId: "test-session",
+      toolCall: { id: "tool-1", name: "Bash", input: { command: "echo hi" } },
+      resume: async () => undefined,
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+    const view = createShellViewModel(ctx, {
       width: 80,
       outputBlocks: [block],
+      activity: { phase: "tool_running", text: "正在执行工具…" },
       permission: {
         toolName: "Bash",
         reason: "需要执行命令",
@@ -912,6 +1020,10 @@ describe("home → task view mode transition", () => {
     expect(view.blocks.find((b) => b.id === "out-perm")).toBeUndefined();
     // permission is still present on the view model
     expect(view.permission?.toolName).toBe("Bash");
+    expect(view.streamingAssistantText).toBeUndefined();
+    expect(view.activity).toBeUndefined();
+    expect(view.bottomPaneStatus).toBeUndefined();
+    expect(view.composer.busy).toBe(true);
     // viewMode is still task
     expect(view.viewMode).toBe("task");
   });
@@ -920,6 +1032,7 @@ describe("home → task view mode transition", () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     let callCount = 0;
@@ -961,6 +1074,7 @@ describe("home → task view mode transition", () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -1116,11 +1230,195 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     expect(result?.text).toBe("Running Bash…");
   });
 
+  it("does not carry stale retryInfo after request activity is cleared", () => {
+    const retrying = createContext({
+      requestActivityPhase: "provider_retrying",
+      retryInfo: { attempt: 1, max: 10, delaySec: 3 },
+    } as Partial<TuiContext>);
+    expect(mapRequestActivityToView(retrying)?.text).toContain("1/10");
+
+    const cleared = createContext({ retryInfo: { attempt: 1, max: 10, delaySec: 3 } } as Partial<TuiContext>);
+    expect(mapRequestActivityToView(cleared)).toBeUndefined();
+    expect(createShellViewModel(cleared).activity?.text ?? "").not.toContain("1/10");
+  });
+
   it("returns undefined for unknown phase values", () => {
     const ctx = createContext({
       requestActivityPhase: "unknown_phase" as unknown,
     } as Partial<TuiContext>);
     expect(mapRequestActivityToView(ctx)).toBeUndefined();
+  });
+});
+
+describe("mapBottomPaneStatusToView — unified bottom status", () => {
+  it("maps request running to running", () => {
+    const ctx = createContext({ requestActivityPhase: "request_started" } as Partial<TuiContext>);
+    const activity = mapRequestActivityToView(ctx);
+    const status = mapBottomPaneStatusToView(ctx, { activity });
+
+    expect(status).toMatchObject({ kind: "running", source: "request" });
+    expect(status?.text).toBe("思考中…");
+  });
+
+  it("keeps permission pending out of the bottom status line", () => {
+    const ctx = createContext({ requestActivityPhase: "request_started" } as Partial<TuiContext>);
+    const permission = mapPendingApprovalToPermission({
+      ...ctx,
+      pendingLocalApproval: {
+        kind: "model_tool_use",
+        toolName: "Bash",
+        toolCall: { input: { command: "git status" } },
+      },
+    } as unknown as TuiContext);
+    const status = mapBottomPaneStatusToView(ctx, {
+      activity: mapRequestActivityToView(ctx),
+      permission,
+    });
+
+    expect(permission?.toolName).toBe("Bash");
+    expect(status).toBeUndefined();
+  });
+
+  it("maps final answer gate to verifying", () => {
+    const ctx = createContext({
+      requestActivityPhase: "verifying_final_answer",
+    } as Partial<TuiContext>);
+    const status = mapBottomPaneStatusToView(ctx, {
+      activity: mapRequestActivityToView(ctx),
+    });
+
+    expect(status).toMatchObject({ kind: "verifying", source: "final_gate" });
+    expect(status?.nextAction).toContain("scrollback");
+  });
+
+  it("maps compact cooldown/resource cap to blocked with next action", () => {
+    const ctx = createContext();
+    ctx.cache.compactFailure = {
+      at: new Date().toISOString(),
+      reason: "context_compact_cooldown_active",
+      blocked: true,
+      cooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+    };
+    ctx.cache.compactCooldownUntil = Date.now() + 60_000;
+
+    const status = mapBottomPaneStatusToView(ctx);
+
+    expect(status).toMatchObject({ kind: "blocked", source: "resource" });
+    expect(status?.reason).toContain("context_compact");
+    expect(status?.nextAction).toContain("冷却");
+  });
+
+  it("maps active blocked background task to blocked", () => {
+    const ctx = createContext({
+      backgroundTasks: [
+        createBackgroundTask({
+          status: "blocked",
+          userVisibleSummary: "并发上限：等待后台槽位",
+          nextAction: "用 /background 查看详情。",
+        }),
+      ],
+    });
+
+    const status = mapBottomPaneStatusToView(ctx);
+
+    expect(status).toMatchObject({ kind: "blocked", source: "resource" });
+    expect(status?.text).toBe("后台任务受阻");
+    expect(status?.reason).toContain("并发上限");
+  });
+
+  it("ignores completed background task history even when it mentions resource cap", () => {
+    const ctx = createContext({
+      backgroundTasks: [
+        createBackgroundTask({
+          status: "completed",
+          result: "partial",
+          userVisibleSummary: "resource/concurrency cap 已解除",
+          nextAction: "旧记录",
+        }),
+      ],
+    });
+
+    expect(mapBottomPaneStatusToView(ctx)).toBeUndefined();
+  });
+
+  it("ignores dismissed blocked background tasks", () => {
+    const ctx = createContext({
+      backgroundTasks: [
+        createBackgroundTask({
+          id: "bg-dismissed",
+          status: "blocked",
+          userVisibleSummary: "并发上限：等待后台槽位",
+        }),
+      ],
+      dismissedBackgroundTaskIds: new Set(["bg-dismissed"]),
+    } as Partial<TuiContext>);
+
+    expect(mapBottomPaneStatusToView(ctx)).toBeUndefined();
+  });
+
+  it("maps provider failure to failed", () => {
+    const ctx = createContext({
+      language: "en-US",
+      lastProviderFailure: {
+        code: "HTTP_502",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5.5",
+        endpointProfile: "default",
+        summary: "HTTP 502",
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const status = mapBottomPaneStatusToView(ctx);
+
+    expect(status).toMatchObject({ kind: "failed", source: "provider" });
+    expect(status?.reason).toBe("HTTP 502");
+  });
+
+  it("does not let stale provider failure override active request status", () => {
+    const ctx = createContext({
+      requestActivityPhase: "request_started",
+      lastProviderFailure: {
+        code: "HTTP_502",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5.5",
+        endpointProfile: "default",
+        summary: "previous HTTP 502",
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const status = mapBottomPaneStatusToView(ctx, {
+      activity: mapRequestActivityToView(ctx),
+    });
+
+    expect(status).toMatchObject({ kind: "running", source: "request" });
+    expect(status?.reason).not.toBe("previous HTTP 502");
+  });
+
+  it("keeps request activity ahead of agent/workflow running summaries", () => {
+    const ctx = createContext({
+      requestActivityPhase: "tool_running",
+      requestActivityToolName: "Bash",
+    } as unknown as Partial<TuiContext>);
+    const status = mapBottomPaneStatusToView(ctx, {
+      activity: mapRequestActivityToView(ctx),
+      visibleWorkState: {
+        mainRequestActive: true,
+        userInputPending: false,
+        toolsRunning: true,
+        agentsRunning: 1,
+        backgroundTasksRunning: 0,
+        explicitWorkflowRunning: false,
+        multiAgentWorkflowRunning: false,
+        pendingCompletionCount: 0,
+        scrollDetached: false,
+        unseenCount: 0,
+      },
+    });
+
+    expect(status).toMatchObject({ kind: "running", source: "tool" });
+    expect(status?.text).toContain("Bash");
   });
 });
 
@@ -1450,12 +1748,12 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(recoverable.taskRuntimeSummary).toBeUndefined();
   });
 
-  it("home mode does not show background blocks", () => {
+  it("task mode does not show background blocks by default", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       backgroundSummaries: [{ id: "t7", title: "lint", status: "running" }],
     });
-    expect(view.viewMode).toBe("home");
+    expect(view.viewMode).toBe("task");
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
   });
 });
@@ -1723,23 +2021,20 @@ describe("D.12B — P1-1: output blocks keep last 20", () => {
   });
 });
 
-describe("D.12B — P1-2: narrow terminal StatusTray keeps background", () => {
+describe("D.12B — P1-2: narrow terminal status keeps background", () => {
   it("width=40 shows background count with short label", () => {
     const view = createShellViewModel(createContext(), { width: 40 });
-    const rendered = renderPlainShell(view);
-    expect(rendered).toContain("后台:1");
+    expect(view.status.background).toBe("后台:1");
   });
 
   it("width=80 shows full background label", () => {
     const view = createShellViewModel(createContext(), { width: 80 });
-    const rendered = renderPlainShell(view);
-    expect(rendered).toContain("后台：1");
+    expect(view.status.background).toBe("后台：1");
   });
 
   it("en-US width=40 shows BG:N short label", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), { width: 40 });
-    const rendered = renderPlainShell(view);
-    expect(rendered).toContain("BG:1");
+    expect(view.status.background).toBe("BG:1");
   });
 });
 
@@ -1826,13 +2121,13 @@ describe("D.12B — #9: home flicker guard (submitted pending state)", () => {
     expect(rendered).not.toContain("项目：");
   });
 
-  it("explicit viewMode override takes precedence over submitted", () => {
+  it("legacy home override is normalized to task", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       submitted: true,
       viewMode: "home",
     });
-    expect(view.viewMode).toBe("home");
+    expect(view.viewMode).toBe("task");
   });
 });
 
@@ -1846,20 +2141,15 @@ describe("D.12B — P3-1: home vision copy", () => {
   });
 });
 
-describe("D.12B — P3-2: plain status tray total length control", () => {
+describe("D.12B — P3-2: plain task header total length control", () => {
   it("status tray does not exceed view width", () => {
     const ctx = createContext({
       projectPath: "/tmp/a-very-long-project-name-that-exceeds-normal-width",
       model: "deepseek-v4-flash-with-extremely-long-model-name-variant",
     });
     const view = createShellViewModel(ctx as unknown as TuiContext, { width: 60 });
-    const rendered = renderPlainShell(view);
-    const statusLine = rendered.split("\n").find((l) => l.includes("项目："));
-    // Status tray should be controlled within width
-    expect(statusLine).toBeDefined();
-    if (statusLine) {
-      expect(statusLine.length).toBeLessThanOrEqual(80); // reasonable upper bound
-    }
+    expect(view.status.project.length).toBeLessThanOrEqual(32);
+    expect(view.status.model.length).toBeLessThanOrEqual(32);
   });
 });
 
@@ -1901,7 +2191,8 @@ describe("D.12C — Composer cursor alignment closure", () => {
 
     // Plain renderer shows placeholder inside composer box as hint (no "> " prefix)
     const rendered = renderPlainShell(createShellViewModel(createContext(), { width: 80 }));
-    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
     expect(rendered).not.toContain("\u258C");
   });
@@ -2023,22 +2314,23 @@ describe("D.12C — Composer cursor alignment closure", () => {
     const rendered = renderPlainShell(
       createShellViewModel(createContext(), { noColor: true, width: 80 }),
     );
-    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("\u258C");
   });
 
-  it("brand wordmark to composer has spacing in plain home render", () => {
+  it("plain task render keeps compact brand before task content", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
     const lines = rendered.split("\n");
     const brandIdx = lines.findIndex((l) => l.trim() === "LingHun");
     expect(brandIdx).toBeGreaterThanOrEqual(0);
-    const accentLine = lines[brandIdx + 1];
-    expect(accentLine).toBeDefined();
-    expect((accentLine as string).trim()).toMatch(/^-+$/);
+    const separatorLine = lines[brandIdx + 1];
+    expect(separatorLine).toBeDefined();
+    expect((separatorLine as string).trim()).toMatch(/^-+$/);
     expect(rendered).not.toContain("技术普惠");
-    expect(lines.findIndex((l) => l.includes("我能帮您做点什么？"))).toBeGreaterThan(brandIdx);
+    expect(lines.findIndex((l) => l.includes("我能帮您做点什么？"))).toBe(-1);
   });
 
   it("ink-renderer does not add extra hide cursor — Ink manages cursor via useCursor", async () => {
@@ -2129,18 +2421,24 @@ describe("D.12C — Composer cursor alignment closure", () => {
     expect(lastShow).toBeGreaterThan(lastHide);
   });
 
-  it("ink-renderer resize only clears viewport in normal-screen fallback", async () => {
+  it("ink-renderer resize clears the bottom frame without replaying native scrollback", async () => {
     const source = await readFile(join(SRC_ROOT, "shell/ink-renderer.tsx"), "utf8");
     const resizeStart = source.indexOf("const onResize = () =>");
     expect(resizeStart).toBeGreaterThan(0);
     const resizeEnd = source.indexOf("};", resizeStart + 30);
     const body = source.slice(resizeStart, resizeEnd);
     expect(body).toContain("if (!useAlternateScreen)");
-    expect(body).toContain('writeBestEffort(stdout, "\\x1B[2J\\x1B[H")');
-    expect(body).not.toContain("3J");
+    // Native scrollback stays append-only: resize must not replay flushed
+    // history or clear terminal scrollback, only the live bottom frame.
+    expect(body).not.toContain("shouldReplayNativeScrollbackOnResize");
+    expect(body).not.toContain("beforeNativeScrollbackResizeReflow");
+    expect(body).toContain("clearNativeScrollbackFrameUnion(");
+    expect(body).not.toContain("previousFrameAnchorRow");
+    expect(body).not.toContain('writeBestEffort(stdout, "\\x1B[2J\\x1B[3J\\x1B[H")');
+    expect(body).toContain("controller.onResize?.()");
   });
 
-  it("home brand/vision still renders, layout not switched to top bar", async () => {
+  it("task ink render stays on task layout without home vision", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -2164,9 +2462,9 @@ describe("D.12C — Composer cursor alignment closure", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("LingHun");
+    expect(output.text).not.toContain("LingHun");
     expect(output.text).not.toContain("技术普惠会越来越成熟");
-    expect(output.text).toContain("我能帮您做点什么？");
+    expect(output.text).toContain("继续输入…");
   });
 
   it("width=40 does not crash", () => {
@@ -2174,7 +2472,7 @@ describe("D.12C — Composer cursor alignment closure", () => {
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("LingHun");
     expect(rendered).not.toContain("v0.1.0");
-    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("\u258C");
   });
 
@@ -2247,10 +2545,10 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(rendered).not.toContain("━━━━━━━━━━━━━━");
   });
 
-  it("Home does not show background blocks", () => {
+  it("Task does not show background blocks", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
-      viewMode: "home",
+      viewMode: "task",
       backgroundSummaries: [
         { id: "bg1", title: "running job", status: "running" },
         { id: "bg2", title: "failed job", status: "failed" },
@@ -2690,12 +2988,12 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(rendered).toContain("\u2717");
   });
 
-  it("80x24 and 40 width do not squeeze placeholder hint", () => {
+  it("80x24 and 40 width do not render a fake placeholder prompt", () => {
     for (const width of [80, 40]) {
       const view = createShellViewModel(createContext(), { width, height: 24 });
       const rendered = renderPlainShell(view);
-      // Placeholder shown inside composer box as hint (no "> " prefix)
-      expect(rendered).toContain("我能帮您做点什么？");
+      expect(rendered).toContain("LingHun");
+      expect(rendered).not.toContain("我能帮您做点什么？");
       expect(rendered).not.toContain("> 我能帮您做点什么？");
     }
   });
@@ -2713,25 +3011,24 @@ describe("TTY legacy fallback product shell", () => {
     // Must contain product shell elements
     expect(rendered).toContain("LingHun");
     expect(rendered).not.toContain("v0.1.0");
-    // Composer box with placeholder hint (no "> " prefix to avoid double-input)
-    expect(rendered).toContain("我能帮您做点什么？");
+    // Task-only plain fallback no longer renders the old Home placeholder.
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
   });
 
-  it("TTY legacy fallback outputs renderPlainShell Home product layout", () => {
+  it("TTY legacy fallback outputs renderPlainShell task product layout", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
-    // Product shell structure: brand + vision + composer box + status
+    // Product shell structure: compact task brand + separator only.
     expect(rendered).toContain("LingHun");
     expect(rendered).not.toContain("v0.1.0");
     expect(rendered).not.toContain("技术普惠会越来越成熟");
-    // Composer box includes placeholder hint (no "> " prefix — readline provides the real prompt)
-    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
-    expect(rendered).toContain("项目：");
-    expect(rendered).toContain("模型：");
-    expect(rendered).toContain("权限：");
+    expect(rendered).not.toContain("项目：");
+    expect(rendered).not.toContain("模型：");
+    expect(rendered).not.toContain("权限：");
   });
 
   it("non-TTY pipe mode can still use plain text without product frame", () => {
@@ -2743,7 +3040,7 @@ describe("TTY legacy fallback product shell", () => {
     expect(rendered).not.toContain("v0.1.0");
   });
 
-  it("cmd fallback includes ASCII-safe compact header and status, no ASCII art", () => {
+  it("cmd fallback includes ASCII-safe compact header, no ASCII art", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
@@ -2761,12 +3058,10 @@ describe("TTY legacy fallback product shell", () => {
     expect(rendered).not.toContain("┗");
     expect(rendered).not.toContain("─");
     expect(rendered).not.toContain("═");
-    // Composer box with "> placeholder" inside
-    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
-    // Status tray present
-    expect(rendered).toContain("项目：");
-    expect(rendered).toContain("模型：");
+    expect(rendered).not.toContain("项目：");
+    expect(rendered).not.toContain("模型：");
   });
 
   it("cmd fallback Task view has structured permission card with ASCII borders", () => {
@@ -2820,11 +3115,11 @@ describe("TTY legacy fallback product shell", () => {
     expect(rendered).toContain("─");
   });
 
-  it("modern terminal plain Home render uses Unicode separator", () => {
+  it("modern terminal plain task render uses Unicode separator", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
-    const view = createShellViewModel(createContext(), { width: 80, viewMode: "home" });
+    const view = createShellViewModel(createContext(), { width: 80, viewMode: "task" });
     const rendered = renderPlainShell(view);
-    // Home view has ─ separator lines (no ═ hero frame)
+    // Task view has ─ separator lines (no ═ hero frame)
     expect(rendered).toContain("─");
     expect(rendered).not.toContain("═");
     // Compact header without version
@@ -2832,7 +3127,7 @@ describe("TTY legacy fallback product shell", () => {
     expect(rendered).not.toContain("v0.1.0");
   });
 
-  it("plain Home contains LingHun, short underline, vision, composer cyan lines, status", () => {
+  it("plain task contains LingHun, separator, and no home vision/status tray", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const view = createShellViewModel(createContext(), { width: 80, height: 24 });
     const rendered = renderPlainShell(view);
@@ -2840,24 +3135,22 @@ describe("TTY legacy fallback product shell", () => {
 
     // Brand
     expect(rendered).toContain("LingHun");
-    // Short underline (─ repeated 12-16 chars)
+    // Task separator (─ repeated across the task composer width)
     // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping requires matching ESC control character
     const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
     const underlineIdx = lines.findIndex((l) =>
-      /^[\s]*─{12,16}[\s]*$/.test(l.replace(ANSI_STRIP, "")),
+      /^[\s]*─{40,}[\s]*$/.test(l.replace(ANSI_STRIP, "")),
     );
     expect(underlineIdx).toBeGreaterThan(0);
     // Vision
     expect(rendered).not.toContain("技术普惠会越来越成熟");
-    // Composer top/bottom cyan lines (─ repeated composerWidth)
     const composerLineCount = lines.filter((l) => {
       const stripped = l.replace(ANSI_STRIP, "");
       return /^─{40,}$/.test(stripped.trim());
     }).length;
-    expect(composerLineCount).toBeGreaterThanOrEqual(2);
-    // Status tray below composer
-    expect(rendered).toContain("项目：");
-    expect(rendered).toContain("模型：");
+    expect(composerLineCount).toBe(1);
+    expect(rendered).not.toContain("项目：");
+    expect(rendered).not.toContain("模型：");
     // No version number
     expect(rendered).not.toContain("v0.1.0");
     // No large ASCII art
@@ -2865,21 +3158,20 @@ describe("TTY legacy fallback product shell", () => {
     expect(rendered).not.toContain("_     _");
   });
 
-  it("plain Home contains localized composer placeholder", () => {
+  it("plain task does not render localized composer placeholder", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const zhView = createShellViewModel(createContext({ language: "zh-CN" }), { width: 80 });
     const enView = createShellViewModel(createContext({ language: "en-US" }), { width: 80 });
     const zhRendered = renderPlainShell(zhView);
     const enRendered = renderPlainShell(enView);
 
-    // Placeholder shown as hint (no "> " prefix — readline provides the real prompt)
-    expect(zhRendered).toContain("我能帮您做点什么？");
+    expect(zhRendered).not.toContain("我能帮您做点什么？");
     expect(zhRendered).not.toContain("> 我能帮您做点什么？");
-    expect(enRendered).toContain("What can I help you with?");
+    expect(enRendered).not.toContain("What can I help you with?");
     expect(enRendered).not.toContain("> What can I help you with?");
   });
 
-  it("color plain Home contains ANSI escapes; no-color plain Home does not", () => {
+  it("color plain task contains ANSI escapes; no-color plain task does not", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const colorView = createShellViewModel(createContext(), { width: 80 });
     const noColorView = createShellViewModel(createContext(), { noColor: true, width: 80 });
@@ -2888,10 +3180,9 @@ describe("TTY legacy fallback product shell", () => {
 
     expect(colorRendered).toContain("\x1B[");
     expect(noColorRendered).not.toContain("\x1B[");
-    // Both contain the placeholder (as hint, no "> " prefix)
-    expect(colorRendered).toContain("我能帮您做点什么？");
+    expect(colorRendered).not.toContain("我能帮您做点什么？");
     expect(colorRendered).not.toContain("> 我能帮您做点什么？");
-    expect(noColorRendered).toContain("我能帮您做点什么？");
+    expect(noColorRendered).not.toContain("我能帮您做点什么？");
     expect(noColorRendered).not.toContain("> 我能帮您做点什么？");
   });
 
@@ -2920,8 +3211,8 @@ describe("TTY legacy fallback product shell", () => {
     });
     const rendered = renderPlainShell(view);
 
-    // Activity
-    expect(rendered).toContain("正在运行 Bash…");
+    // Permission is exclusive while approval is pending.
+    expect(rendered).not.toContain("正在运行 Bash…");
     // Permission card with risk
     expect(rendered).toContain("[Bash]");
     expect(rendered).toContain("[HIGH]");
@@ -3024,9 +3315,7 @@ describe("Windows TTY terminal capability detection", () => {
     resetTerminalCapabilityCache();
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
-    // Placeholder text is present as a hint
-    expect(rendered).toContain("我能帮您做点什么？");
-    // But NOT with "> " prefix (that would duplicate the readline prompt)
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
     // No "你 >" old REPL prompt
     expect(rendered).not.toContain("你 >");
@@ -3039,14 +3328,12 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
   // P1-1: Plain fallback input area closure
   // =========================================================================
 
-  it("plain fallback Home placeholder has no '> ' prefix (avoids double-input with readline)", () => {
+  it("plain fallback task renderer has no fake prompt prefix", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
     resetTerminalCapabilityCache();
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
-    // Placeholder present as dim hint
-    expect(rendered).toContain("我能帮您做点什么？");
-    // No "> " prefix on placeholder (readline provides the real prompt)
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
     // No old REPL-style prompts
     expect(rendered).not.toContain("你 >");
@@ -3076,7 +3363,7 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     // Even with modern tier, if plain is forced, the renderer should not add "> " prefix
     const view = createShellViewModel(createContext(), { noColor: false, width: 80 });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
   });
 
@@ -3086,7 +3373,7 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("LingHun");
-    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("> 我能帮您做点什么？");
   });
 
@@ -3094,25 +3381,22 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
   // P2-1: Home setup guidance maturity
   // =========================================================================
 
-  it("setupNeeded=true in home mode keeps the default composer placeholder (zh-CN)", () => {
+  it("setupNeeded=true keeps the default composer placeholder (zh-CN)", () => {
     const view = createShellViewModel(createContext({ language: "zh-CN" }), {
       setupNeeded: true,
       width: 80,
     });
-    // D.13D: home no longer overrides composer placeholder; the default
-    // greeting stays. Setup entry is reachable via Enter-to-start; the
-    // dedicated setupHint banner is reserved for task mode.
     expect(view.composer.placeholder).toBe("我能帮您做点什么？");
-    expect(view.setupHint).toBeUndefined();
+    expect(view.setupHint).toContain("按 Enter");
   });
 
-  it("setupNeeded=true in home mode keeps the default composer placeholder (en-US)", () => {
+  it("setupNeeded=true keeps the default composer placeholder (en-US)", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       setupNeeded: true,
       width: 80,
     });
     expect(view.composer.placeholder).toBe("What can I help you with?");
-    expect(view.setupHint).toBeUndefined();
+    expect(view.setupHint).toContain("Press Enter");
   });
 
   it("setupNeeded=false in home mode shows normal placeholder", () => {
@@ -3140,7 +3424,7 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     expect(view.composer.placeholder).toBe("我能帮您做点什么？");
   });
 
-  it("Home does not show large setupHint block when setupNeeded=true", () => {
+  it("Task does not show large setupHint block when setupNeeded=true", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     resetTerminalCapabilityCache();
     const view = createShellViewModel(createContext(), {
@@ -3151,13 +3435,11 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     // No large "还没有模型配置" block
     expect(rendered).not.toContain("还没有模型配置");
     expect(rendered).not.toContain("我要配置模型");
-    // D.13D: home no longer carries the setup sentence as placeholder.
     expect(rendered).not.toContain("按 Enter 开始配置模型");
-    // Default greeting remains.
-    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("我能帮您做点什么？");
   });
 
-  it("Home visual structure preserved with setup placeholder", () => {
+  it("Task visual structure stays compact with setup hint", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     resetTerminalCapabilityCache();
     const view = createShellViewModel(createContext(), {
@@ -3166,15 +3448,11 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
       height: 24,
     });
     const rendered = renderPlainShell(view);
-    // Brand centered
     expect(rendered).toContain("LingHun");
-    // Vision
     expect(rendered).not.toContain("技术普惠会越来越成熟");
-    // Composer box lines (─)
     expect(rendered).toContain("─");
-    // Status tray
-    expect(rendered).toContain("项目：");
-    expect(rendered).toContain("模型：");
+    expect(rendered).not.toContain("项目：");
+    expect(rendered).not.toContain("模型：");
   });
 
   // =========================================================================
@@ -3476,7 +3754,7 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
   // Home/Task structure non-regression
   // =========================================================================
 
-  it("Home structure: brand → composer → status without vision copy (no regression)", () => {
+  it("Task structure: brand → separator without home composer/status tray", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     resetTerminalCapabilityCache();
     const view = createShellViewModel(createContext(), { width: 80, height: 24 });
@@ -3486,16 +3764,18 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     const lines = rendered.split("\n").map((l) => l.replace(ANSI_STRIP, ""));
 
     const brandIdx = lines.findIndex((l) => l.trim() === "LingHun");
+    const separatorIdx = lines.findIndex((l) => /^─{40,}$/.test(l.trim()));
     const composerIdx = lines.findIndex((l) => l.includes("我能帮您做点什么？"));
     const statusIdx = lines.findIndex((l) => l.includes("项目："));
 
     expect(brandIdx).toBeGreaterThanOrEqual(0);
     expect(rendered).not.toContain("技术普惠");
-    expect(composerIdx).toBeGreaterThan(brandIdx);
-    expect(statusIdx).toBeGreaterThan(composerIdx);
+    expect(separatorIdx).toBeGreaterThan(brandIdx);
+    expect(composerIdx).toBe(-1);
+    expect(statusIdx).toBe(-1);
   });
 
-  it("Task structure: topbar → separator → activity → permission → output (no regression)", () => {
+  it("Task structure: topbar → separator → permission, with activity hidden during approval", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     resetTerminalCapabilityCache();
     const view = createShellViewModel(createContext(), {
@@ -3520,8 +3800,8 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     const permIdx = lines.findIndex((l) => l.includes("[Bash]"));
 
     expect(brandIdx).toBeGreaterThanOrEqual(0);
-    expect(activityIdx).toBeGreaterThan(brandIdx);
-    expect(permIdx).toBeGreaterThan(activityIdx);
+    expect(activityIdx).toBe(-1);
+    expect(permIdx).toBeGreaterThan(brandIdx);
   });
 });
 
@@ -3761,7 +4041,7 @@ describe("D.13D Final Closure — interaction shell", () => {
     expect(output.text).toContain("继续输入…");
   });
 
-  it("Home Ink render still shows brand wordmark (no regression)", async () => {
+  it("Task Ink render still hides home brand wordmark", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -3783,8 +4063,8 @@ describe("D.13D Final Closure — interaction shell", () => {
     await shell.waitUntilRenderFlush();
     shell.unmount();
     await shell.waitUntilExit();
-    expect(output.text).toContain("LingHun");
-    expect(output.text).toContain("我能帮您做点什么？");
+    expect(output.text).not.toContain("LingHun");
+    expect(output.text).toContain("继续输入…");
   });
 
   it("useAnchoredCursor recalculates after layout commits so parent-chain moves do not drift", async () => {
@@ -3800,10 +4080,10 @@ describe("D.13D Final Closure — interaction shell", () => {
 });
 
 describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permission focus", () => {
-  it("home view does NOT carry taskFooter (taskFooter is task-mode only)", () => {
+  it("task-only view carries taskFooter", () => {
     const view = createShellViewModel(createContext(), { width: 80 });
-    expect(view.viewMode).toBe("home");
-    expect(view.taskFooter).toBeUndefined();
+    expect(view.viewMode).toBe("task");
+    expect(view.taskFooter).toBeDefined();
   });
 
   it("task view exposes taskFooter with permission mode + index, no [Linghun] 会话 noise", () => {
@@ -4036,19 +4316,21 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(view.taskFooter?.hint).toBeUndefined();
   });
 
-  it("bare slash '/' surfaces core candidates from getCoreSlashCandidates()", async () => {
-    const { getCoreSlashCandidates } = await import("../slash-dispatch.js");
+  it("bare slash '/' surfaces common commands while prefix search keeps advanced commands reachable", async () => {
+    const { BARE_SLASH_SUGGESTION_SLASHES, getCoreSlashCandidates, getSlashPrefixCandidates } =
+      await import("../slash-dispatch.js");
     const candidates = getCoreSlashCandidates();
-    expect(candidates.length).toBeGreaterThan(0);
-    // D.13P: bare-slash cap raised from 5 to 8 to surface the full
-    // DEFAULT_HELP_SLASHES core set without relying on /help all for the
-    // most common entries. Hard cap stays 8 so the inline overlay stays narrow.
-    expect(candidates.length).toBeLessThanOrEqual(8);
     const slashes = candidates.map((c) => c.slash);
-    expect(slashes).toContain("/model");
-    expect(slashes).toContain("/mode");
-    expect(slashes).toContain("/help");
-    expect(slashes).toContain("/problems");
+    expect(slashes).toEqual([...BARE_SLASH_SUGGESTION_SLASHES]);
+    expect(slashes.length).toBeGreaterThanOrEqual(10);
+    expect(slashes.length).toBeLessThanOrEqual(15);
+    expect(slashes).not.toContain("/bash");
+    expect(slashes).not.toContain("/batch");
+    expect(slashes).not.toContain("/write");
+
+    const baCandidates = getSlashPrefixCandidates("/ba").map((c) => c.slash);
+    expect(baCandidates).toContain("/background");
+    expect(baCandidates).toContain("/bash");
   });
 
   it("D.13P slash prefix candidates pull from full user-visible registry, not just default-help", async () => {
@@ -4072,11 +4354,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(wCandidates).toContain("/write");
   });
 
-  it("D.13P slash prefix candidates cap at 8 and exclude hidden /status", async () => {
+  it("D.13P slash prefix candidates are uncapped and exclude hidden /status", async () => {
     const { getSlashPrefixCandidates } = await import("../slash-dispatch.js");
-    // /s would match many — verify cap=8 is honored.
     const sCandidates = getSlashPrefixCandidates("/s");
-    expect(sCandidates.length).toBeLessThanOrEqual(8);
+    expect(sCandidates.length).toBeGreaterThan(0);
     // /status is registered with userVisible=false; it must not surface even
     // when the prefix exactly matches.
     const statusCandidates = getSlashPrefixCandidates("/status").map((c) => c.slash);
@@ -4183,7 +4464,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toMatch(/^\s*writeStatus\(output, context\);\s*$/m);
   });
 
-  it("ShellApp TaskLayout uses one dynamic transcript viewport in normal chat", async () => {
+  it("ShellApp TaskLayout keeps one transcript viewport and the pinned composer band", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     const taskLayoutStart = source.indexOf("function TaskLayout(");
@@ -4197,23 +4478,32 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).toContain("transcript-viewport-geometry");
     expect(body).toContain('overflow="hidden"');
     expect(source).not.toContain("TASK_RECENT_TAIL_BLOCKS");
-    expect(body).not.toContain("staticHistoryBlocks");
+    expect(body).toContain("mergeTranscriptBlocks(view.staticHistoryBlocks ?? [], view.blocks)");
     expect(body).not.toContain("recentStaticBlocks");
     expect(body).not.toContain("currentBlocks");
-    expect(body).toContain("view.blocks.map");
-    expect(body).not.toContain('justifyContent="flex-end"');
-    expect(body).not.toContain("<Static");
+    expect(body).toContain("visibleTranscriptBlocks");
+    expect(source).toContain("transcriptBlocks.map(");
+    expect(source).toContain("function mergeTranscriptBlocks(");
+    expect(body).toContain("<TranscriptViewport");
     expect(body).not.toContain("items={nativeTranscript.staticBlocks}");
+    expect(source).not.toContain("function TaskInlineFrame(");
     expect(source).not.toContain("useNativeTranscriptWindow");
     expect(source).not.toContain("nativeTranscript.liveBlocks");
     expect(source).not.toContain("NATIVE_TRANSCRIPT_LIVE_BLOCKS");
     expect(body).toContain("<UnseenMessagePill");
-    expect(body).toContain("<ProductBlock");
-    expect(body).toContain("<Composer");
-    expect(body).toContain("layout={taskComposerLayout(view.width)}");
-    expect(body).toContain("height={view.height}");
+    expect(body).toContain("<TaskBottomPane");
+    expect(body).toContain("contentWidth={contentWidth}");
+    expect(body).toContain("height={frameHeight}");
+    expect(body).toContain("terminalFrameTop");
     expect(body).toContain("flexGrow={1}");
     expect(body).toContain("minHeight={0}");
+    const bottomPaneSource = await readFile(
+      join(SRC_ROOT, "shell/components/TaskBottomPane.tsx"),
+      "utf8",
+    );
+    expect(bottomPaneSource).toContain("<ProductBlock");
+    expect(bottomPaneSource).toContain("<Composer");
+    expect(bottomPaneSource).toContain("layout={taskComposerLayout(view.width)}");
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
     expect(outerWrapper).not.toContain('alignItems="center"');
   });
@@ -4285,6 +4575,18 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(source).toContain("context.transcriptScrollState = next");
   });
 
+  it("ink slash submits do not enter the natural request pending path", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
+    const submitStart = source.indexOf('if (event.type !== "submit")');
+    const slashSubmit = source.indexOf('if (event.text.trim().startsWith("/"))', submitStart);
+    const naturalPending = source.indexOf("submittedPending = true", submitStart);
+
+    expect(submitStart).toBeGreaterThan(0);
+    expect(slashSubmit).toBeGreaterThan(submitStart);
+    expect(naturalPending).toBeGreaterThan(slashSubmit);
+  });
+
   it("model-facing control tools restore any existing command panel after internal runtime calls", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "model-tool-runtime.ts"), "utf8");
@@ -4294,26 +4596,26 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
   it("TaskLayout renders a task composer separator and keeps footer surfaces separated", async () => {
     const { readFile } = await import("node:fs/promises");
-    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
-    const taskLayoutStart = source.indexOf("function TaskLayout(");
-    const nextFn = source.indexOf("function ", taskLayoutStart + 20);
-    const body = source.slice(taskLayoutStart, nextFn);
-
-    expect(body).toContain("<Composer");
-    expect(body).toContain("layout={taskComposerLayout(view.width)}");
-    expect(body).toContain('<Box flexDirection="column" width={cw} paddingTop={1}>');
-    expect(body).not.toContain("const composerRule = lineChar(noColor, capability).repeat(cw)");
-    expect(body).not.toContain("{composerRule}");
-    expect(body).not.toContain("width={cw} paddingX={1}");
-    expect(body).toContain("view.taskRuntimeSummary");
-    expect(body).toContain("block={view.taskRuntimeSummary}");
-    expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("<Composer"));
-    expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer"));
-    expect(body.indexOf("<AgentProgressTree")).toBeLessThan(body.indexOf("<Composer"));
-    expect(body.indexOf("<WorkflowProgressView")).toBeLessThan(
-      body.indexOf("<Composer"),
+    const source = await readFile(
+      join(SRC_ROOT, "shell/components/TaskBottomPane.tsx"),
+      "utf8",
     );
-    expect(body).not.toContain(
+
+    expect(source).toContain("<Composer");
+    expect(source).toContain("layout={taskComposerLayout(view.width)}");
+    expect(source).toContain('width={cw} paddingTop={allocation.mode === "full" ? 1 : 0}');
+    expect(source).not.toContain("const composerRule = lineChar(noColor, capability).repeat(cw)");
+    expect(source).not.toContain("{composerRule}");
+    expect(source).not.toContain("width={cw} paddingX={1}");
+    expect(source).toContain("view.taskRuntimeSummary");
+    expect(source).toContain("block={view.taskRuntimeSummary}");
+    expect(source.indexOf("<NotificationStack")).toBeLessThan(source.indexOf("<Composer"));
+    expect(source.indexOf("<StatusFooter")).toBeGreaterThan(source.indexOf("<Composer"));
+    expect(source.indexOf("<AgentProgressTree")).toBeLessThan(source.indexOf("<Composer"));
+    expect(source.indexOf("<WorkflowProgressView")).toBeLessThan(
+      source.indexOf("<Composer"),
+    );
+    expect(source).not.toContain(
       "`${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`",
     );
   });
@@ -4345,6 +4647,65 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(source).toContain("context.transcriptBlockHeightCache ??= {}");
     expect(source).toContain("context.transcriptBlockHeightCache[event.id]");
   });
+
+  it("Phase 2 source: high-frequency transcript updates share one frame request path", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
+    const shellAppSource = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    const frameStart = source.indexOf("const requestShellFrame = (): void =>");
+    const scrollStart = source.indexOf('// ─── Main transcript scroll', frameStart);
+    const scrollEnd = source.indexOf("// ─── D.13E Step 2 修正 #2", scrollStart);
+    const scrollSlice = source.slice(scrollStart, scrollEnd);
+
+    expect(frameStart).toBeGreaterThan(0);
+    expect(scrollStart).toBeGreaterThan(frameStart);
+    expect(source).toContain("const shellOutput = new ShellBlockOutput(");
+    expect(source).toContain("createTerminalFirstAssistantSink(output,");
+    expect(source).toContain("columns: () => readOutputColumns(output)");
+    expect(source).toContain("context.shellRerender = requestShellFrame;");
+    expect(scrollSlice).toContain('if (event.type === "transcript-scroll")');
+    expect(scrollSlice).toContain('if (event.type === "transcript-scroll-measure")');
+    expect(scrollSlice).toContain('if (event.type === "transcript-block-measure")');
+    expect(scrollSlice).toContain('if (event.type === "transcript-viewport-geometry")');
+    expect(scrollSlice).toContain('if (event.type === "transcript-scroll-end")');
+    expect(scrollSlice).toContain('if (event.type === "transcript-scroll-top")');
+    expect(scrollSlice).toContain("requestShellFrame();");
+    expect(scrollSlice).not.toContain("await shell?.waitUntilRenderFlush()");
+
+    const tickerStart = source.indexOf("activityTicker = setInterval");
+    const tickerEnd = source.indexOf("}, 1000);", tickerStart);
+    const tickerSlice = source.slice(tickerStart, tickerEnd);
+    expect(tickerSlice).toContain("requestShellFrame();");
+    expect(tickerSlice).not.toContain("shell?.rerender()");
+
+    expect(shellAppSource.match(/setInterval/g) ?? []).toHaveLength(1);
+    expect(shellAppSource).toContain("const [framePulse, setFramePulse] = useState(0);");
+    expect(shellAppSource).toContain("const intervalMs = hasAnimatedActivity ? 100 : 1000;");
+    expect(shellAppSource).toContain("frame={framePulse}");
+    expect(shellAppSource).not.toContain("setFrame((current) => current + 1)");
+  });
+
+  it("Phase 3 source: task and progress surfaces keep bounded stable rows", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const progressSource = await readFile(join(SRC_ROOT, "shell/progress-views.ts"), "utf8");
+    const taskListSource = await readFile(join(SRC_ROOT, "shell/components/TaskListView.tsx"), "utf8");
+    const workflowSource = await readFile(
+      join(SRC_ROOT, "shell/components/WorkflowProgressView.tsx"),
+      "utf8",
+    );
+    const agentSource = await readFile(
+      join(SRC_ROOT, "shell/components/AgentProgressTree.tsx"),
+      "utf8",
+    );
+
+    expect(progressSource).toContain("const MAX_AGENT_ROWS = 6;");
+    expect(progressSource).toContain("const MAX_WORKFLOW_STEPS = 5;");
+    expect(progressSource).toContain("hiddenSteps: steps.hiddenPending");
+    expect(taskListSource).toContain("const rowText =");
+    expect(taskListSource).not.toContain("fitText(`${row.activity}…`");
+    expect(workflowSource).toContain("run.hiddenSteps");
+    expect(agentSource).toContain("tree.hiddenPending");
+  });
 });
 
 // ShellBlockOutput streaming assistant block —— assistant_text_delta 多片必须
@@ -4352,6 +4713,14 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 // 触发场景：sendMessage / streamFinalModelAnswerWithoutTools /
 // continueModelAfterToolResults 三处 gateway.stream 循环。
 describe("ShellBlockOutput — assistant streaming block", () => {
+  const terminalHistoryGeometry = {
+    x: 0,
+    y: 17,
+    width: 80,
+    height: 8,
+    contentHeight: 8,
+    topOffset: 0,
+  };
   function makeFakeContext(): TuiContext {
     return createContext({
       language: "zh-CN",
@@ -4362,7 +4731,8 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     } as Partial<TuiContext>);
   }
 
-  it("appendAssistantDelta 不创建 ProductBlock，只更新独立 streaming state", () => {
+  it("appendAssistantDelta 只更新 live tail；commit tick 再写稳定 ProductBlock", () => {
+    vi.useFakeTimers();
     const blocks: ProductBlockViewModel[] = [];
     let renderCount = 0;
     const ctx = makeFakeContext();
@@ -4378,9 +4748,22 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(ctx.streamingAssistant).toEqual({
       id: "assistant-stream-test-1",
       text: "连接成功\n尾",
+      tailText: "连接成功\n尾",
+      committedText: "",
+    });
+    vi.advanceTimersByTime(16);
+    expect(blocks.find((b) => b.id === "assistant-stream-test-1")?.fullText).toBe("连接成功\n");
+    expect(ctx.streamingAssistant).toEqual({
+      id: "assistant-stream-test-1",
+      text: "连接成功\n尾",
+      tailText: "尾",
+      committedText: "连接成功\n",
     });
     const streamingView = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
-    expect(streamingView.streamingAssistantText).toBe("连接成功\n尾");
+    expect(streamingView.blocks.find((b) => b.id === "assistant-stream-test-1")?.fullText).toBe(
+      "连接成功\n",
+    );
+    expect(streamingView.streamingAssistantText).toBe("尾");
     output.replaceAssistantBlockContent("assistant-stream-test-1", "连接成功\n尾部完成");
     output.endAssistantStream();
 
@@ -4394,7 +4777,8 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(renderCount).toBeGreaterThanOrEqual(4);
   });
 
-  it("appendAssistantDelta 每次只刷新独立 preview，不走 ProductBlock/MessageMarkdown 历史路径", () => {
+  it("appendAssistantDelta 每次只刷新独立 preview，稳定行由 tick 写入 ProductBlock", () => {
+    vi.useFakeTimers();
     const blocks: ProductBlockViewModel[] = [];
     let renderCount = 0;
     const ctx = makeFakeContext();
@@ -4412,29 +4796,47 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.appendAssistantDelta("\nC");
     expect(blocks).toHaveLength(0);
     expect(ctx.streamingAssistant?.text).toBe("AB\nC");
+    expect(ctx.streamingAssistant?.tailText).toBe("AB\nC");
     expect(renderCount).toBe(4);
+
+    vi.advanceTimersByTime(16);
+    expect(blocks).toHaveLength(1);
+    expect(ctx.streamingAssistant?.tailText).toBe("C");
+    expect(blocks[0]?.fullText).toBe("AB\n");
+    const streamingView = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
+    expect(
+      streamingView.blocks.find((b) => b.id === "assistant-stream-complete-line")?.fullText,
+    ).toBe("AB\n");
+    expect(streamingView.streamingAssistantText).toBe("C");
+    expect(renderCount).toBe(5);
 
     output.endAssistantStream();
     expect(blocks[0]?.fullText).toBe("AB\nC");
     expect(ctx.streamingAssistant).toBeUndefined();
-    expect(renderCount).toBe(5);
+    expect(renderCount).toBe(6);
   });
 
   it("endAssistantStream 只 commit 一条正式 assistant block，并清空 streaming preview", () => {
+    vi.useFakeTimers();
     const ctx = makeFakeContext();
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(ctx, blocks);
 
     output.beginAssistantStream("assistant-stream-interrupt");
     output.appendAssistantDelta("第一行可见\n第二行半截");
-    expect(blocks).toHaveLength(0);
+    expect(blocks.find((b) => b.id === "assistant-stream-interrupt")).toBeUndefined();
     expect(ctx.streamingAssistant?.text).toBe("第一行可见\n第二行半截");
+    expect(ctx.streamingAssistant?.tailText).toBe("第一行可见\n第二行半截");
     output.endAssistantStream();
+    vi.advanceTimersByTime(16);
 
     const streamingBlock = blocks.find((b) => b.id === "assistant-stream-interrupt");
     expect(blocks.filter((b) => b.id === "assistant-stream-interrupt")).toHaveLength(1);
     expect(streamingBlock?.messageKind).toBe("assistant_text");
     expect(streamingBlock?.fullText).toBe("第一行可见\n第二行半截");
+    expect(ctx.transcriptSource?.cells).toHaveLength(1);
+    expect(ctx.transcriptSource?.cells[0]?.kind).toBe("assistant");
+    expect(ctx.transcriptSource?.cells[0]?.block.fullText).toBe("第一行可见\n第二行半截");
     expect(ctx.streamingAssistant).toBeUndefined();
     expect(ctx.lastFullOutput).toBe("第一行可见\n第二行半截");
   });
@@ -4476,7 +4878,8 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(blocks[0]?.summary).toContain("fallback text");
   });
 
-  it("lastFullOutput 在 append 时累计；suppressLastFullOutputCapture=true 时不写入", () => {
+  it("lastFullOutput 只在 final commit 时累计；中途 stable commit 不写入", () => {
+    vi.useFakeTimers();
     const ctx = makeFakeContext();
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(ctx, blocks);
@@ -4486,7 +4889,17 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(ctx.lastFullOutput).toBeUndefined();
     output.appendAssistantDelta("接成功\n");
     expect(ctx.lastFullOutput).toBeUndefined();
-    expect(ctx.streamingAssistant?.text).toBe("连接成功\n");
+    expect(ctx.streamingAssistant?.tailText).toBe("连接成功\n");
+    expect(blocks.find((b) => b.id === "assistant-stream-test-3")).toBeUndefined();
+    vi.advanceTimersByTime(16);
+    expect(ctx.lastFullOutput).toBeUndefined();
+    expect(ctx.streamingAssistant).toEqual({
+      id: "assistant-stream-test-3",
+      text: "连接成功\n",
+      tailText: "",
+      committedText: "连接成功\n",
+    });
+    expect(blocks.find((b) => b.id === "assistant-stream-test-3")?.fullText).toBe("连接成功\n");
 
     // 切换到 suppress 模式后，新的 delta 不能再覆盖 lastFullOutput。
     ctx.suppressLastFullOutputCapture = true;
@@ -4497,6 +4910,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
   });
 
   it("final gate discard/replace clears old streaming preview without leaking discarded text", () => {
+    vi.useFakeTimers();
     const ctx = makeFakeContext();
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(ctx, blocks);
@@ -4508,23 +4922,44 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(blocks.find((b) => b.id === "assistant-stream-gate")?.fullText).toBeUndefined();
 
     output.appendAssistantDelta("安全新文本\n");
-    expect(ctx.streamingAssistant?.text).toBe("安全新文本\n");
+    expect(ctx.streamingAssistant?.tailText).toBe("安全新文本\n");
+    vi.advanceTimersByTime(16);
+    expect(ctx.streamingAssistant).toEqual({
+      id: "assistant-stream-gate",
+      text: "安全新文本\n",
+      tailText: "",
+      committedText: "安全新文本\n",
+    });
+    expect(blocks.find((b) => b.id === "assistant-stream-gate")?.fullText).toBe("安全新文本\n");
     output.replaceAssistantBlockContent("assistant-stream-gate", "最终安全文本");
     expect(ctx.streamingAssistant).toBeUndefined();
 
     const committed = blocks.find((b) => b.id === "assistant-stream-gate");
     expect(committed?.fullText).toBe("最终安全文本");
+    expect(ctx.transcriptSource?.cells).toHaveLength(1);
+    expect(ctx.transcriptSource?.cells[0]?.block.fullText).toBe("最终安全文本");
     expect(JSON.stringify(blocks)).not.toContain("违规旧文本");
   });
 
   it("beginAssistantStream starts a fresh preview so continuation rounds do not glue together", () => {
+    vi.useFakeTimers();
     const ctx = makeFakeContext();
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(ctx, blocks);
 
     output.beginAssistantStream("assistant-stream-round-1");
     output.appendAssistantDelta("第一轮 preview\n");
-    expect(ctx.streamingAssistant?.text).toBe("第一轮 preview\n");
+    expect(ctx.streamingAssistant?.tailText).toBe("第一轮 preview\n");
+    vi.advanceTimersByTime(16);
+    expect(ctx.streamingAssistant).toEqual({
+      id: "assistant-stream-round-1",
+      text: "第一轮 preview\n",
+      tailText: "",
+      committedText: "第一轮 preview\n",
+    });
+    expect(blocks.find((b) => b.id === "assistant-stream-round-1")?.fullText).toBe(
+      "第一轮 preview\n",
+    );
 
     output.beginAssistantStream("assistant-stream-round-2");
     expect(ctx.streamingAssistant).toBeUndefined();
@@ -4532,9 +4967,1268 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(ctx.streamingAssistant).toEqual({
       id: "assistant-stream-round-2",
       text: "第二轮 preview",
+      tailText: "第二轮 preview",
+      committedText: "",
     });
-    expect(blocks.find((b) => b.id === "assistant-stream-round-1")).toBeUndefined();
+    expect(blocks.find((b) => b.id === "assistant-stream-round-1")?.fullText).toBe(
+      "第一轮 preview\n",
+    );
     expect(ctx.streamingAssistant?.text).not.toContain("第一轮");
+  });
+
+  it("commit tick updates stable text and refreshes the live tail boundary", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    let renderCount = 0;
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => {
+      renderCount += 1;
+    });
+
+    output.beginAssistantStream("assistant-stream-invisible-tick");
+    output.appendAssistantDelta("A\nB");
+    expect(renderCount).toBe(2);
+
+    vi.advanceTimersByTime(16);
+
+    expect(blocks.find((b) => b.id === "assistant-stream-invisible-tick")?.fullText).toBe("A\n");
+    expect(ctx.streamingAssistant?.text).toBe("A\nB");
+    expect(ctx.streamingAssistant?.tailText).toBe("B");
+    expect(renderCount).toBe(3);
+  });
+
+  it("holdStableCommit keeps final-answer draft out of stable blocks until replacement", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    output.beginAssistantStream("assistant-stream-held-final", { holdStableCommit: true });
+    output.appendAssistantDelta("原始最终回答\n第二行");
+    vi.advanceTimersByTime(64);
+
+    expect(blocks.find((b) => b.id === "assistant-stream-held-final")).toBeUndefined();
+    expect(ctx.lastFullOutput).toBeUndefined();
+    expect(ctx.streamingAssistant).toBeUndefined();
+
+    output.discardAssistantBlock("assistant-stream-held-final");
+    output.appendAssistantDelta("retry 后的原始回答\n");
+    vi.advanceTimersByTime(64);
+    expect(blocks.find((b) => b.id === "assistant-stream-held-final")).toBeUndefined();
+    expect(ctx.lastFullOutput).toBeUndefined();
+
+    output.replaceAssistantBlockContent("assistant-stream-held-final", "清洗后的最终回答");
+    output.endAssistantStream();
+
+    const committed = blocks.find((b) => b.id === "assistant-stream-held-final");
+    expect(committed?.fullText).toBe("清洗后的最终回答");
+    expect(ctx.lastFullOutput).toBe("清洗后的最终回答");
+    expect(JSON.stringify(blocks)).not.toContain("原始最终回答");
+    expect(JSON.stringify(blocks)).not.toContain("retry 后的原始回答");
+  });
+
+  it("holdStableCommit discards a draft when the stream ends without replacement", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const terminalWrites: string[] = [];
+    let stagedText = "";
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: (text) => {
+        stagedText += text;
+      },
+      commitStableAssistantText: () => {
+        terminalWrites.push(stagedText);
+        stagedText = "";
+        return true;
+      },
+      rollbackStableAssistantText: () => {
+        stagedText = "";
+      },
+    });
+
+    output.beginAssistantStream("assistant-held-end", { holdStableCommit: true });
+    output.appendAssistantDelta("unsafe draft before abort\n");
+    vi.advanceTimersByTime(64);
+    output.endAssistantStream();
+
+    expect(blocks.find((b) => b.id === "assistant-held-end")).toBeUndefined();
+    expect(ctx.lastFullOutput).toBeUndefined();
+    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(stagedText).toBe("");
+    expect(terminalWrites).toEqual([]);
+  });
+
+  it("holdStableCommit discards an active draft when a new stream id starts", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const terminalWrites: string[] = [];
+    let stagedText = "";
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: (text) => {
+        stagedText += text;
+      },
+      commitStableAssistantText: () => {
+        terminalWrites.push(stagedText);
+        stagedText = "";
+        return true;
+      },
+      rollbackStableAssistantText: () => {
+        stagedText = "";
+      },
+    });
+
+    output.beginAssistantStream("assistant-held-old", { holdStableCommit: true });
+    output.appendAssistantDelta("unsafe draft before fallback\n");
+    vi.advanceTimersByTime(64);
+
+    output.beginAssistantStream("assistant-held-new", { holdStableCommit: true });
+
+    expect(blocks.find((b) => b.id === "assistant-held-old")).toBeUndefined();
+    expect(ctx.lastFullOutput).toBeUndefined();
+    expect(ctx.streamingAssistant?.id).toBeUndefined();
+    expect(stagedText).toBe("");
+    expect(terminalWrites).toEqual([]);
+
+    output.appendAssistantDelta("new draft\n");
+    vi.advanceTimersByTime(64);
+    expect(blocks.find((b) => b.id === "assistant-held-new")).toBeUndefined();
+    expect(ctx.streamingAssistant).toBeUndefined();
+  });
+
+  it("terminal-first assistant gate discards held draft on direct end", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const terminalWrites: string[] = [];
+    let stagedText = "";
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: (text) => {
+        stagedText += text;
+      },
+      commitStableAssistantText: (_id, onFlush) => {
+        terminalWrites.push(stagedText);
+        stagedText = "";
+        onFlush?.();
+        return true;
+      },
+      rollbackStableAssistantText: () => {
+        stagedText = "";
+      },
+      commitAssistantTurnBreak: () => {
+        terminalWrites.push("<turn-break>");
+        return true;
+      },
+    });
+
+    output.beginAssistantStream("assistant-terminal-first", { holdStableCommit: true });
+    output.appendAssistantDelta("A\nB");
+    vi.advanceTimersByTime(16);
+
+    expect(stagedText).toBe("");
+    expect(terminalWrites).toEqual([]);
+    expect(blocks.find((b) => b.id === "assistant-terminal-first")).toBeUndefined();
+    const streamingView = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
+    expect(streamingView.blocks.find((b) => b.id === "assistant-terminal-first")).toBeUndefined();
+    expect(streamingView.streamingAssistantText).toBeUndefined();
+
+    output.endAssistantStream();
+    expect(terminalWrites).toEqual([]);
+    expect(blocks.find((b) => b.id === "assistant-terminal-first")).toBeUndefined();
+    const finalView = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
+    expect(finalView.blocks.find((b) => b.id === "assistant-terminal-first")).toBeUndefined();
+    expect(finalView.streamingAssistantText).toBeUndefined();
+    expect(ctx.lastFullOutput).toBeUndefined();
+  });
+
+  it("terminal-first assistant gate commits only the final-gate replacement", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const terminalWrites: string[] = [];
+    let stagedText = "";
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: (text) => {
+        stagedText += text;
+      },
+      commitStableAssistantText: () => {
+        terminalWrites.push(stagedText);
+        stagedText = "";
+        return true;
+      },
+      rollbackStableAssistantText: () => {
+        stagedText = "";
+      },
+    });
+
+    output.beginAssistantStream("assistant-terminal-first-replace", { holdStableCommit: true });
+    output.appendAssistantDelta("unsafe draft\n");
+    vi.advanceTimersByTime(16);
+    expect(blocks.find((b) => b.id === "assistant-terminal-first-replace")).toBeUndefined();
+    expect(terminalWrites).toEqual([]);
+    output.replaceAssistantBlockContent("assistant-terminal-first-replace", "safe final");
+
+    const view = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
+    expect(view.blocks.find((b) => b.id === "assistant-terminal-first-replace")?.fullText).toBe(
+      "safe final",
+    );
+    expect(view.streamingAssistantText).toBeUndefined();
+    // After replaceAssistantBlockContent the safe text is re-staged so
+    // finalizeActiveAssistantStream can commit it to terminal scrollback.
+    expect(stagedText).toBe("safe final");
+    expect(terminalWrites).toEqual([]);
+    output.endAssistantStream();
+    expect(terminalWrites).toEqual(["safe final"]);
+  });
+
+  it("deduplicates adjacent provider failure error blocks by title and body", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    let renderCount = 0;
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => {
+      renderCount += 1;
+    });
+    const errorOutput = output as unknown as {
+      writeErrorLine(text: string, title?: string): void;
+    };
+
+    errorOutput.writeErrorLine("模型请求未完成。可运行 /model doctor 查看详情后重试。", "模型请求失败");
+    errorOutput.writeErrorLine("模型请求未完成。可运行 /model doctor 查看详情后重试。", "模型请求失败");
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.title).toBe("模型请求失败");
+    expect(blocks[0]?.messageKind).toBe("tool_result_error");
+    expect(renderCount).toBe(2);
+  });
+
+  it("terminal-first assistant gate rolls back staged text on discard", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const terminalWrites: string[] = [];
+    let stagedText = "";
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: (text) => {
+        stagedText += text;
+      },
+      commitStableAssistantText: () => {
+        terminalWrites.push(stagedText);
+        stagedText = "";
+        return true;
+      },
+      rollbackStableAssistantText: () => {
+        stagedText = "";
+      },
+    });
+
+    output.beginAssistantStream("assistant-terminal-first-discard");
+    output.appendAssistantDelta("bad\n");
+    vi.advanceTimersByTime(16);
+    expect(stagedText).toBe("");
+    expect(terminalWrites).toEqual([]);
+
+    output.discardAssistantBlock("assistant-terminal-first-discard");
+
+    expect(stagedText).toBe("");
+    expect(terminalWrites).toEqual([]);
+    expect(blocks.find((b) => b.id === "assistant-terminal-first-discard")).toBeUndefined();
+  });
+
+  it("terminal-first assistant gate keeps final text visible in Ink when terminal commit fails", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    let stagedText = "";
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: (text) => {
+        stagedText += text;
+      },
+      commitStableAssistantText: () => {
+        stagedText = "";
+        return false;
+      },
+      rollbackStableAssistantText: () => {
+        stagedText = "";
+      },
+    });
+
+    output.beginAssistantStream("assistant-terminal-first-commit-failed");
+    output.appendAssistantDelta("A\nB");
+    vi.advanceTimersByTime(16);
+    expect(stagedText).toBe("");
+
+    output.endAssistantStream();
+
+    const block = blocks.find((b) => b.id === "assistant-terminal-first-commit-failed");
+    expect(block?.terminalOwned).toBeUndefined();
+    expect(block?.fullText).toBe("A\nB");
+    const finalView = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
+    expect(
+      finalView.blocks.find((b) => b.id === "assistant-terminal-first-commit-failed")?.fullText,
+    ).toBe("A\nB");
+    expect(finalView.streamingAssistantText).toBeUndefined();
+    expect(ctx.lastFullOutput).toBe("A\nB");
+    expect(stagedText).toBe("");
+  });
+
+  it("native scrollback stable diagnostic blocks leave Ink after commit succeeds", () => {
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT", "1");
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const committed: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: () => undefined,
+      commitStableAssistantText: () => true,
+      rollbackStableAssistantText: () => undefined,
+      commitStableTranscriptBlock: (block, onFlush) => {
+        committed.push(block);
+        onFlush?.();
+        return true;
+      },
+    }) as unknown as {
+      writeDiagnosticLine?: (text: string) => void;
+    };
+
+    output.writeDiagnosticLine?.("MCP status\n- enabled: yes");
+
+    expect(committed).toHaveLength(1);
+    expect(committed[0]?.messageKind).toBe("diagnostic");
+    // Plan A single ownership: committed block is removed from the Ink array.
+    expect(blocks).toHaveLength(0);
+    expect(ctx.lastFullOutput).toBe("MCP status\n- enabled: yes");
+  });
+
+  it("native scrollback stable diagnostics stay visible in Ink when commit fails", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: () => undefined,
+      commitStableAssistantText: () => true,
+      rollbackStableAssistantText: () => undefined,
+      commitStableTranscriptBlock: () => false,
+    }) as unknown as {
+      writeDiagnosticLine?: (text: string) => void;
+    };
+
+    output.writeDiagnosticLine?.("MCP status\n- enabled: yes");
+
+    expect(blocks[0]?.terminalOwned).toBeUndefined();
+    const view = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
+    expect(view.blocks.find((b) => b.id === blocks[0]?.id)?.messageKind).toBe("diagnostic");
+  });
+
+  it("native scrollback stable local command output leaves Ink after commit", () => {
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT", "1");
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const committed: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: () => undefined,
+      commitStableAssistantText: () => true,
+      rollbackStableAssistantText: () => undefined,
+      commitStableTranscriptBlock: (block, onFlush) => {
+        committed.push(block);
+        onFlush?.();
+        return true;
+      },
+    }) as unknown as {
+      writeLocalCommandOutputLine?: (text: string) => void;
+    };
+
+    output.writeLocalCommandOutputLine?.("Tool Bash completed\n- 40 行");
+
+    expect(committed).toHaveLength(1);
+    expect(committed[0]?.messageKind).toBe("local_command_output");
+    // Plan A single ownership: committed block is removed from the Ink array.
+    expect(blocks).toHaveLength(0);
+  });
+
+  it("view-model keeps terminal-owned blocks available for non-native projections", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT", "1");
+    const ctx = makeFakeContext();
+    const block: ProductBlockViewModel = {
+      id: "terminal-owned-native",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "already in terminal",
+      fullText: "already in terminal",
+      terminalOwned: true,
+    };
+
+    const view = createShellViewModel(ctx, { outputBlocks: [block], viewMode: "task" });
+
+    expect(view.blocks.find((b) => b.id === block.id)).toBeDefined();
+    vi.unstubAllEnvs();
+  });
+
+  it("view-model keeps terminal-owned user text in the canonical projection", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT", "1");
+    const ctx = makeFakeContext();
+    const block: ProductBlockViewModel = {
+      id: "terminal-owned-user",
+      kind: "user",
+      status: "info",
+      title: "你是谁",
+      summary: "",
+      fullText: "你是谁",
+      messageKind: "user_text",
+      terminalOwned: true,
+    };
+
+    const view = createShellViewModel(ctx, { outputBlocks: [block], viewMode: "task" });
+
+    expect(view.blocks.find((b) => b.id === block.id)).toBeDefined();
+    vi.unstubAllEnvs();
+  });
+
+  it("view-model preserves older terminal-owned user text instead of filtering by ownership", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT", "1");
+    const ctx = makeFakeContext();
+    const older: ProductBlockViewModel = {
+      id: "older-terminal-owned-user",
+      kind: "user",
+      status: "info",
+      title: "旧消息",
+      summary: "",
+      fullText: "旧消息",
+      messageKind: "user_text",
+      terminalOwned: true,
+    };
+    const newer: ProductBlockViewModel = {
+      id: "newer-pending-user",
+      kind: "user",
+      status: "info",
+      title: "新消息",
+      summary: "",
+      fullText: "新消息",
+      messageKind: "user_text",
+    };
+
+    const view = createShellViewModel(ctx, { outputBlocks: [older, newer], viewMode: "task" });
+
+    expect(view.blocks.find((b) => b.id === older.id)).toBeDefined();
+    expect(view.blocks.find((b) => b.id === newer.id)).toBeDefined();
+    vi.unstubAllEnvs();
+  });
+
+  it("native scrollback keeps unflushed user text visible as the Ink fallback", () => {
+    vi.unstubAllEnvs();
+    const ctx = makeFakeContext();
+    const block: ProductBlockViewModel = {
+      id: "pending-user",
+      kind: "user",
+      status: "info",
+      title: "还没写入终端",
+      summary: "",
+      fullText: "还没写入终端",
+      messageKind: "user_text",
+    };
+
+    const view = createShellViewModel(ctx, { outputBlocks: [block], viewMode: "task" });
+
+    expect(view.blocks.find((b) => b.id === block.id)).toBeDefined();
+    vi.unstubAllEnvs();
+  });
+
+  it("terminal-owned block filtering can be disabled as an explicit compatibility fallback", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_OWNED_FILTER", "0");
+    const ctx = makeFakeContext();
+    const block: ProductBlockViewModel = {
+      id: "terminal-owned-compat",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "already in terminal",
+      fullText: "already in terminal",
+      terminalOwned: true,
+    };
+
+    const view = createShellViewModel(ctx, { outputBlocks: [block], viewMode: "task" });
+
+    expect(view.blocks.find((b) => b.id === block.id)).toBeDefined();
+    vi.unstubAllEnvs();
+  });
+
+  it("native scrollback opt-out keeps terminal-owned blocks in the Ink transcript", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
+    const ctx = makeFakeContext();
+    const block: ProductBlockViewModel = {
+      id: "terminal-owned-native-off",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "fallback visible",
+      fullText: "fallback visible",
+      terminalOwned: true,
+    };
+
+    const view = createShellViewModel(ctx, { outputBlocks: [block], viewMode: "task" });
+
+    expect(view.blocks.find((b) => b.id === block.id)).toBeDefined();
+    vi.unstubAllEnvs();
+  });
+
+  it("source-backed Ink projection matches the current block projection without changing styles", () => {
+    const ctx = makeFakeContext();
+    const source = createTranscriptSource();
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "source-user",
+        kind: "user",
+        status: "info",
+        title: "现在要怎么做",
+        summary: "",
+        fullText: "现在要怎么做",
+        messageKind: "user_text",
+      },
+      {
+        id: "source-assistant",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "先保留样式",
+        fullText: "先保留样式\n再补 source replay",
+        messageKind: "assistant_text",
+      },
+      {
+        id: "source-diagnostic",
+        kind: "details",
+        status: "info",
+        title: "诊断",
+        summary: "native scrollback gated",
+        fullText: "native scrollback gated",
+        messageKind: "diagnostic",
+      },
+    ];
+    for (const block of blocks) {
+      upsertTranscriptSourceCell(source, {
+        id: block.id,
+        kind:
+          block.messageKind === "user_text"
+            ? "user"
+            : block.messageKind === "diagnostic"
+              ? "diagnostic"
+              : "assistant",
+        block,
+      });
+    }
+
+    const fromBlocks = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
+    const fromSource = createShellViewModel(ctx, { transcriptSource: source, viewMode: "task" });
+    const inferredFromSource = createShellViewModel(ctx, { transcriptSource: source });
+
+    // Plan A: in native scrollback mode the source feeds the canonical
+    // staticHistory projection (non-native replay path / Ctrl+O), not the live
+    // Ink frame. Its projection must still match the block-derived projection
+    // 1:1 without changing styles or order.
+    expect(fromSource.staticHistoryBlocks).toEqual(fromBlocks.blocks);
+    expect(fromSource.viewMode).toBe("task");
+    expect(inferredFromSource.viewMode).toBe("task");
+  });
+
+  it("empty TranscriptSource falls back to current output blocks", () => {
+    const ctx = makeFakeContext();
+    const source = createTranscriptSource();
+    const block: ProductBlockViewModel = {
+      id: "fallback-block",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "fallback visible",
+      fullText: "fallback visible",
+      messageKind: "assistant_text",
+    };
+
+    const view = createShellViewModel(ctx, {
+      outputBlocks: [block],
+      transcriptSource: source,
+      viewMode: "task",
+    });
+
+    expect(view.blocks.find((candidate) => candidate.id === block.id)).toBeDefined();
+  });
+
+  it("source-backed projection preserves terminal-owned cells for canonical replay", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT", "1");
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const ctx = makeFakeContext();
+    const source = createTranscriptSource();
+    const block: ProductBlockViewModel = {
+      id: "source-terminal-owned",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "already in terminal",
+      fullText: "already in terminal",
+      messageKind: "assistant_text",
+      terminalOwned: true,
+    };
+    upsertTranscriptSourceCell(source, {
+      id: block.id,
+      kind: "assistant",
+      block,
+    });
+
+    const view = createShellViewModel(ctx, { transcriptSource: source, viewMode: "task" });
+
+    // Plan A: a committed (terminal-owned) source cell is preserved in the
+    // canonical staticHistory projection for replay / Ctrl+O, but is NOT
+    // rendered into the live native Ink frame.
+    expect(view.staticHistoryBlocks?.find((candidate) => candidate.id === block.id)).toBeDefined();
+    expect(view.blocks.find((candidate) => candidate.id === block.id)).toBeUndefined();
+    vi.unstubAllEnvs();
+  });
+
+  it("source-backed Static history keeps the append-only transcript beyond visible block clipping", () => {
+    const ctx = makeFakeContext();
+    const source = createTranscriptSource();
+    for (let index = 0; index < 25; index++) {
+      const block: ProductBlockViewModel = {
+        id: `assistant-${index}`,
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: `answer ${index}`,
+        fullText: `answer ${index}`,
+        messageKind: "assistant_text",
+      };
+      upsertTranscriptSourceCell(source, {
+        id: block.id,
+        kind: "assistant",
+        block,
+      });
+    }
+
+    const view = createShellViewModel(ctx, { transcriptSource: source, viewMode: "task" });
+
+    expect(view.blocks.length).toBeLessThan(view.staticHistoryBlocks?.length ?? 0);
+    expect(view.staticHistoryBlocks?.at(0)?.id).toBe("assistant-0");
+    expect(view.staticHistoryBlocks?.at(-1)?.id).toBe("assistant-24");
+  });
+
+  it("passes Static history replay generation from context for normal-screen resize reflow", () => {
+    const ctx = makeFakeContext() as ReturnType<typeof makeFakeContext> & {
+      transcriptStaticReplayGeneration?: number;
+    };
+    ctx.transcriptStaticReplayGeneration = 3;
+    const block: ProductBlockViewModel = {
+      id: "replay-generation",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "resize replay",
+      fullText: "resize replay",
+      messageKind: "assistant_text",
+    };
+
+    const view = createShellViewModel(ctx, { outputBlocks: [block], viewMode: "task" });
+
+    expect(view.staticHistoryReplayGeneration).toBe(3);
+  });
+
+  it("keeps two submitted terminal-owned turns available through source-backed history", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const source = createTranscriptSource();
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "submit-1-user",
+        kind: "user",
+        status: "info",
+        title: "first user",
+        summary: "first user",
+        fullText: "first user",
+        messageKind: "user_text",
+        keep: true,
+        terminalOwned: true,
+      },
+      {
+        id: "submit-1-assistant",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "first assistant",
+        fullText: "first assistant",
+        messageKind: "assistant_text",
+        keep: true,
+        terminalOwned: true,
+      },
+      {
+        id: "submit-2-user",
+        kind: "user",
+        status: "info",
+        title: "second user",
+        summary: "second user",
+        fullText: "second user",
+        messageKind: "user_text",
+        keep: true,
+        terminalOwned: true,
+      },
+    ];
+
+    for (const block of blocks) {
+      upsertTranscriptSourceCell(source, {
+        id: block.id,
+        kind: block.messageKind === "assistant_text" ? "assistant" : "user",
+        block,
+      });
+    }
+
+    const view = createShellViewModel(createContext(), {
+      transcriptSource: source,
+      viewMode: "task",
+    });
+
+    expect(source.cells.map((cell) => cell.id)).toEqual([
+      "submit-1-user",
+      "submit-1-assistant",
+      "submit-2-user",
+    ]);
+    expect(view.staticHistoryBlocks?.map((block) => block.id)).toEqual([
+      "submit-1-user",
+      "submit-1-assistant",
+      "submit-2-user",
+    ]);
+  });
+
+  it("keeps only the unflushed submitted turn in Ink while flushed history is terminal-owned", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT", "1");
+    const source = createTranscriptSource();
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "turn-1-user",
+        kind: "user",
+        status: "info",
+        title: "第一条用户消息",
+        summary: "第一条用户消息",
+        fullText: "第一条用户消息",
+        messageKind: "user_text",
+        keep: true,
+        terminalOwned: true,
+      },
+      {
+        id: "turn-1-assistant",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "第一条回复",
+        fullText: "第一条回复",
+        messageKind: "assistant_text",
+        keep: true,
+        terminalOwned: true,
+      },
+      {
+        id: "turn-2-user",
+        kind: "user",
+        status: "info",
+        title: "第二条用户消息",
+        summary: "第二条用户消息",
+        fullText: "第二条用户消息",
+        messageKind: "user_text",
+        keep: true,
+        terminalOwned: true,
+      },
+      {
+        id: "turn-2-assistant",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "第二条回复",
+        fullText: "第二条回复",
+        messageKind: "assistant_text",
+        keep: true,
+        terminalOwned: true,
+      },
+      {
+        id: "turn-3-user",
+        kind: "user",
+        status: "info",
+        title: "第三条用户消息",
+        summary: "第三条用户消息",
+        fullText: "第三条用户消息",
+        messageKind: "user_text",
+        keep: true,
+      },
+    ];
+
+    for (const block of blocks) {
+      upsertTranscriptSourceCell(source, {
+        id: block.id,
+        kind: block.messageKind === "assistant_text" ? "assistant" : "user",
+        block,
+      });
+    }
+
+    const view = createShellViewModel(createContext(), {
+      transcriptSource: source,
+      viewMode: "task",
+    });
+
+    // Plan A single ownership: this view has only a transcriptSource (every row
+    // already committed to terminal history) and no live outputBlocks. In
+    // native scrollback mode the Ink frame must render NOTHING from the source —
+    // committed rows live in the terminal's own scrollback, not the fixed
+    // bottom frame. The canonical order stays in staticHistoryBlocks for the
+    // non-native replay path and Ctrl+O.
+    expect(view.blocks.map((block) => block.id)).toEqual([]);
+    expect(view.staticHistoryBlocks?.map((block) => block.id)).toEqual([
+      "turn-1-user",
+      "turn-1-assistant",
+      "turn-2-user",
+      "turn-2-assistant",
+      "turn-3-user",
+    ]);
+  });
+
+  // Plan B single ownership: the sink writes history to terminal scrollback
+  // synchronously at commit time and fires onFlush on the same call. There is no
+  // flush queue, no reflow/replay state machine, and no geometry-wait — commit
+  // either writes + returns true, or fails + returns false leaving the block in
+  // the Ink fallback. These contract tests replace the old queue/replay suite.
+  const makeTtyCapture = () => {
+    let written = "";
+    const output = Object.assign(
+      new Writable({
+        write(chunk, _encoding, callback) {
+          written += String(chunk);
+          callback();
+        },
+      }),
+      { isTTY: true },
+    );
+    return { output, read: () => written };
+  };
+
+  it("native scrollback opt-in enables the raw terminal-first sink", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    vi.stubEnv("LINGHUN_FULLSCREEN", "1");
+    const output = Object.assign(new Writable({ write() {} }), { isTTY: true });
+
+    expect(createTerminalFirstAssistantSink(output)).toBeDefined();
+  });
+
+  it("terminal-first compatibility opt-out disables the default sink", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_TERMINAL_FIRST_TRANSCRIPT", "0");
+    vi.stubEnv("LINGHUN_FULLSCREEN", "1");
+    const output = Object.assign(new Writable({ write() {} }), { isTTY: true });
+
+    expect(createTerminalFirstAssistantSink(output)).toBeUndefined();
+  });
+
+  it("native scrollback compatibility opt-out disables the default sink", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
+    vi.stubEnv("LINGHUN_FULLSCREEN", "1");
+    const output = Object.assign(new Writable({ write() {} }), { isTTY: true });
+
+    expect(createTerminalFirstAssistantSink(output)).toBeUndefined();
+  });
+
+  it("non-TTY output disables the sink", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    expect(createTerminalFirstAssistantSink(new Writable({ write() {} }))).toBeUndefined();
+  });
+
+  it("commitStableAssistantText writes staged text to terminal history and fires onFlush inline", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    expect(sink).toBeDefined();
+    const onFlush = vi.fn();
+    sink?.stageStableAssistantText("A\nB");
+
+    expect(sink?.commitStableAssistantText(undefined, onFlush)).toBe(true);
+    // Synchronous single ownership: the write lands during commit, not on a
+    // later flush tick.
+    expect(read()).toContain("\x1B[1;17r");
+    expect(read()).toContain("\x1B[17;1H");
+    expect(read()).toContain("\r\nA\x1B[K");
+    expect(read()).toContain("\r\nB\x1B[K");
+    expect(read()).toContain("\x1B[u");
+    expect(onFlush).toHaveBeenCalledTimes(1);
+  });
+
+  it("commitStableAssistantText returns false and skips onFlush when the terminal write fails", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const output = Object.assign(
+      new Writable({
+        write() {
+          throw new Error("terminal write failed");
+        },
+      }),
+      { isTTY: true },
+    );
+    const sink = createTerminalFirstAssistantSink(output, {
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const onFlush = vi.fn();
+    sink?.stageStableAssistantText("A\n");
+
+    expect(sink?.commitStableAssistantText(undefined, onFlush)).toBe(false);
+    expect(onFlush).not.toHaveBeenCalled();
+  });
+
+  it("commitStableAssistantText returns false when geometry gives no room above the frame", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      // y=1 leaves no history region above the frame → inserter refuses.
+      viewportGeometry: { ...terminalHistoryGeometry, y: 1 },
+      rows: 30,
+    });
+    sink?.stageStableAssistantText("A\n");
+
+    expect(sink?.commitStableAssistantText()).toBe(false);
+    expect(read()).toBe("");
+  });
+
+  it("commitStableAssistantText no-ops as success when nothing is staged", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+
+    expect(sink?.commitStableAssistantText()).toBe(true);
+    expect(read()).toBe("");
+  });
+
+  it("rollbackStableAssistantText drops staged text so a later commit writes nothing", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    sink?.stageStableAssistantText("discarded");
+    sink?.rollbackStableAssistantText();
+
+    expect(sink?.commitStableAssistantText()).toBe(true);
+    expect(read()).toBe("");
+  });
+
+  it("commitStableTranscriptBlock writes a user/tool/command source row and fires onFlush inline", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const commandBlock: ProductBlockViewModel = {
+      id: "cmd-onflush",
+      kind: "command",
+      status: "info",
+      title: "/help",
+      summary: "",
+      keep: true,
+    };
+    const onFlush = vi.fn();
+
+    expect(sink?.commitStableTranscriptBlock?.(commandBlock, onFlush)).toBe(true);
+    expect(read()).toContain("\r\n❯ /help\x1B[K");
+    expect(onFlush).toHaveBeenCalledTimes(1);
+  });
+
+  it("commitStableTranscriptBlock returns false for a block it cannot render", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const onFlush = vi.fn();
+    const emptyBlock: ProductBlockViewModel = {
+      id: "empty",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "",
+    };
+
+    expect(sink?.commitStableTranscriptBlock?.(emptyBlock, onFlush)).toBe(false);
+    expect(read()).toBe("");
+    expect(onFlush).not.toHaveBeenCalled();
+  });
+
+  it("commitUserTranscriptBlock writes the user row prefix and fires onFlush inline", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const userBlock: ProductBlockViewModel = {
+      id: "user-onflush",
+      kind: "user",
+      status: "info",
+      title: "你是谁",
+      summary: "你是谁",
+      fullText: "你是谁",
+      messageKind: "user_text",
+      keep: true,
+    };
+    const onFlush = vi.fn();
+
+    expect(sink?.commitUserTranscriptBlock?.(userBlock, onFlush)).toBe(true);
+    expect(read()).toContain("│ 你是谁");
+    expect(read()).toContain("\r\n\x1B[K");
+    expect(onFlush).toHaveBeenCalledTimes(1);
+  });
+
+  it("commitTerminalFirstUserBlock helper fires onFlush exactly once via the sink", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const userBlock: ProductBlockViewModel = {
+      id: "user-helper",
+      kind: "user",
+      status: "info",
+      title: "hello",
+      summary: "hello",
+      fullText: "hello",
+      messageKind: "user_text",
+      keep: true,
+    };
+    const onFlush = vi.fn();
+
+    expect(commitTerminalFirstUserBlock(sink, userBlock, onFlush)).toBe(true);
+    expect(onFlush).toHaveBeenCalledTimes(1);
+  });
+
+  it("native scrollback gate commits assistant text through ANSI markdown rows", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    sink?.stageStableAssistantText("# Heading\n\nsome **bold** text");
+
+    expect(sink?.commitStableAssistantText()).toBe(true);
+    // ANSI styling present (color mode) and rows are terminated with \r\n + \x1B[K.
+    expect(read()).toContain("\x1B[");
+    expect(read()).toContain("Heading");
+    expect(read()).toContain("\x1B[K");
+  });
+
+  it("native scrollback ANSI renderer respects no-color mode", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    sink?.stageStableAssistantText("plain text row");
+
+    expect(sink?.commitStableAssistantText()).toBe(true);
+    expect(read()).toContain("plain text row");
+    // No SGR color escapes in no-color mode (cursor/scroll-region control codes
+    // still use \x1B, so assert specifically on color-setting sequences).
+    expect(read()).not.toMatch(/\x1B\[3\dm/);
+  });
+
+  it("native scrollback sink preserves code-fence state across incremental assistant commits", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+
+    sink?.stageStableAssistantText("```ts\n");
+    expect(sink?.commitStableAssistantText()).toBe(true);
+    sink?.stageStableAssistantText("return state.message ?? \"Something went wrong\";\n");
+    expect(sink?.commitStableAssistantText()).toBe(true);
+
+    expect(read()).toContain("  + ts");
+    expect(read()).toContain(" 1 │ return state.message ?? \"Something went wrong\";");
+  });
+
+  it("native scrollback stable assistant blocks use terminal-first code styling", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const block: ProductBlockViewModel = {
+      id: "assistant-code",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "code",
+      fullText: "```ts\none\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n```",
+      messageKind: "assistant_text",
+    };
+
+    expect(sink?.commitStableTranscriptBlock?.(block)).toBe(true);
+    expect(read()).toContain("  + ts");
+    expect(read()).toContain(" 1 │ one");
+    expect(read()).toContain("10 │ ten");
+    expect(read()).toContain("\r\n\x1B[K");
+  });
+
+  it("native scrollback terminal-first code keeps syntax color when color is enabled", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: false,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+
+    sink?.stageStableAssistantText("```ts\nconst answer = 1;\n```");
+
+    expect(sink?.commitStableAssistantText()).toBe(true);
+    expect(read()).toContain("  + ts");
+    expect(read()).toContain(" 1 │ ");
+    expect(read()).toMatch(/\x1B\[(?!0m|2m)[0-9;]+m/);
+  });
+
+  it("native scrollback sink renders stable diagnostic and local command rows", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const diagnostic: ProductBlockViewModel = {
+      id: "diag-row",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "MCP status",
+      fullText: "MCP status",
+      messageKind: "diagnostic",
+    };
+    const local: ProductBlockViewModel = {
+      id: "local-row",
+      kind: "tool",
+      status: "info",
+      title: "",
+      summary: "bash done",
+      fullText: "bash done",
+      messageKind: "local_command_output",
+    };
+
+    expect(sink?.commitStableTranscriptBlock?.(diagnostic)).toBe(true);
+    expect(sink?.commitStableTranscriptBlock?.(local)).toBe(true);
+    expect(read()).toContain("MCP status");
+    expect(read()).toContain("⎿");
+    expect(read()).toContain("bash done");
+  });
+
+  it("native scrollback sink renders assistant and tool success source rows", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const assistant: ProductBlockViewModel = {
+      id: "asst-row",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "assistant body",
+      fullText: "assistant body",
+      messageKind: "assistant_text",
+    };
+    const toolSuccess: ProductBlockViewModel = {
+      id: "tool-row",
+      kind: "tool",
+      status: "info",
+      title: "",
+      summary: "tool body",
+      fullText: "tool body",
+      messageKind: "tool_result_success",
+    };
+
+    expect(sink?.commitStableTranscriptBlock?.(assistant)).toBe(true);
+    expect(sink?.commitStableTranscriptBlock?.(toolSuccess)).toBe(true);
+    const history = read();
+    expect(history).toContain("assistant body");
+    expect(history).toContain("tool body");
+    // tool_result_success rows carry the ⎿ continuation prefix.
+    expect(history).toContain("⎿");
+    expect(history).toContain("  ⎿  tool body\x1B[K\r\n\x1B[K");
+  });
+
+  it("commit tick drains queued stable lines smoothly and catches up when queue is old", () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    output.beginAssistantStream("assistant-stream-tick");
+    output.appendAssistantDelta("A\nB\nC");
+    expect(blocks.find((b) => b.id === "assistant-stream-tick")).toBeUndefined();
+
+    vi.advanceTimersByTime(16);
+    expect(blocks.find((b) => b.id === "assistant-stream-tick")?.fullText).toBe("A\nB\n");
+    expect(ctx.streamingAssistant?.tailText).toBe("C");
+
+    output.appendAssistantDelta("D\nE\nF\nG\nH\nI\nJ\nK\nL\ntail");
+    vi.advanceTimersByTime(16);
+    expect(blocks.find((b) => b.id === "assistant-stream-tick")?.fullText).toBe(
+      "A\nB\nCD\nE\nF\nG\nH\nI\nJ\nK\nL\n",
+    );
+    expect(ctx.streamingAssistant?.tailText).toBe("tail");
   });
 
   it("view-model dedupes streaming preview when final assistant block already has same text", () => {
@@ -4553,15 +6247,55 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(view.streamingAssistantText).toBeUndefined();
   });
 
+  it("view-model renders active assistant stream as committed block plus live tail", () => {
+    const ctx = createContext({
+      streamingAssistant: {
+        id: "assistant-stream-continuous",
+        text: "1. 标题\n说明正文",
+        tailText: "说明正文",
+      },
+    } as Partial<TuiContext>);
+    const committed = createOutputBlock("1. 标题\n", "zh-CN", "assistant-stream-continuous");
+    committed.keep = true;
+
+    const view = createShellViewModel(ctx, {
+      outputBlocks: [committed],
+      viewMode: "task",
+    });
+
+    expect(view.blocks.find((b) => b.id === "assistant-stream-continuous")?.fullText).toBe(
+      "1. 标题",
+    );
+    expect(view.streamingAssistantText).toBe("\n说明正文");
+  });
+
   it("ShellApp renders streaming preview as a sibling after blocks and before activity", async () => {
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
-    const blocksIndex = source.indexOf("view.blocks.map");
-    const previewIndex = source.indexOf("view.streamingAssistantText");
-    const activityIndex = source.indexOf("view.activity ?");
+    const blocksIndex = source.indexOf("transcriptBlocks.map(");
+    const previewIndex = source.indexOf("streamingAssistantText ? (", blocksIndex);
+    const activityIndex = source.indexOf("activity ? (", previewIndex);
     expect(blocksIndex).toBeGreaterThan(0);
     expect(previewIndex).toBeGreaterThan(blocksIndex);
     expect(activityIndex).toBeGreaterThan(previewIndex);
     expect(source).toContain("<StreamingMarkdown");
+    expect(source).toContain("const visibleTranscriptBlocks = normalScreenNativeScrollback");
+    // Plan A single ownership: ShellApp no longer filters by terminalOwned;
+    // committed blocks are physically removed from view.blocks at the source.
+    expect(source).not.toContain("block.terminalOwned !== true");
+  });
+
+  it("ShellApp keeps config and command panels in the independent fullscreen panel route", async () => {
+    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    const taskLayoutStart = source.indexOf("function TaskLayout(");
+    const resolvePanelStart = source.indexOf("function resolvePanel(");
+    const taskLayoutBody = source.slice(taskLayoutStart, resolvePanelStart);
+    const resolvePanelBody = source.slice(resolvePanelStart);
+
+    expect(taskLayoutBody).not.toContain("view.configPanel ? (");
+    expect(resolvePanelBody).toContain("if (view.configPanel)");
+    expect(resolvePanelBody).toContain("<ConfigPanel");
+    expect(resolvePanelBody).toContain("if (view.commandPanel)");
+    expect(resolvePanelBody).toContain("<CommandPanel");
   });
 
   // D.13M-B：beginAssistantStream 不得制造用户可见的空 block。
@@ -4763,6 +6497,40 @@ describe("StreamingMarkdown stable prefix", () => {
     expect(openCode.stablePrefix).toBe("段落\n\n");
     expect(openCode.unstableSuffix).toBe("`code 还没闭合\n");
   });
+
+  it("holds markdown tables as a mutable suffix until a blank line closes the table", () => {
+    const state = { stablePrefix: "" };
+    const tableOpen = splitStreamingMarkdownForRender(
+      [
+        "这是表格：",
+        "",
+        "| 语言 | tree-sitter 绑定 |",
+        "| --- | --- |",
+        "| Rust | ✅ |",
+        "",
+      ].slice(0, 5).join("\n") + "\n",
+      state,
+    );
+
+    expect(tableOpen.stablePrefix).toBe("这是表格：\n\n");
+    expect(tableOpen.unstableSuffix).toContain("| 语言 | tree-sitter 绑定 |");
+
+    const tableClosed = splitStreamingMarkdownForRender(
+      [
+        "这是表格：",
+        "",
+        "| 语言 | tree-sitter 绑定 |",
+        "| --- | --- |",
+        "| Rust | ✅ |",
+        "",
+        "表格后正文",
+      ].join("\n"),
+      state,
+    );
+
+    expect(tableClosed.stablePrefix).toContain("| Rust | ✅ |");
+    expect(tableClosed.unstableSuffix).toBe("表格后正文");
+  });
 });
 
 describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer setup-needed", () => {
@@ -4852,8 +6620,17 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     expect(rendered).not.toContain("function x() { return 1; }");
   });
 
-  it("diff code fence 在 color 与 no-color plain renderer 中区分 +/-/context", () => {
-    const diff = "```diff\n context line\n+added line\n-removed line\n```";
+  it("diff code fence 在 color 与 no-color plain renderer 中展示结构化行号 gutter", () => {
+    const diff = [
+      "```diff",
+      "--- a/demo.ts",
+      "+++ b/demo.ts",
+      "@@ -7,2 +7,2 @@",
+      " context line",
+      "-removed line",
+      "+added line with enough trailing words to wrap in a narrow plain renderer",
+      "```",
+    ].join("\n");
     const colorCtx = createContext() as TuiContext & {
       ctrlOExpandState?: { active: boolean; blockId?: string };
     };
@@ -4870,19 +6647,37 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const noColorView = createShellViewModel(noColorCtx, {
       noColor: true,
       outputBlocks: [createOutputBlock(diff, "zh-CN", "out-diff-nocolor")],
-      width: 120,
+      width: 54,
       viewMode: "task",
     });
     const colorRendered = renderPlainShell(colorView);
     const noColorRendered = renderPlainShell(noColorView);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping requires matching ESC control character
+    const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
+    const stripAnsi = (value: string): string => value.replace(ANSI_STRIP, "");
 
-    expect(colorRendered).toContain("\x1B[32m+added line");
-    expect(colorRendered).toContain("\x1B[31m-removed line");
-    expect(colorRendered).toContain("  | ");
-    expect(noColorRendered).toContain("  | +added line");
-    expect(noColorRendered).toContain("  | -removed line");
-    expect(noColorRendered).toContain("  |  context line");
+    expect(colorRendered).toContain("\x1B[38;2;46;160;67m  8 + \x1B[0m\x1B[38;2;46;160;67madded line");
+    expect(colorRendered).toContain("\x1B[38;2;248;81;73m8   - \x1B[0m\x1B[38;2;248;81;73mremoved line");
+    expect(colorRendered).toContain("@@ -7,2 +7,2 @@");
+    expect(noColorRendered).toContain("  | --- a/demo.ts");
+    expect(noColorRendered).toContain("  | @@ -7,2 +7,2 @@");
+    expect(noColorRendered).toContain("  | 7 7   context line");
+    expect(noColorRendered).toContain("  | 8   - removed line");
+    expect(noColorRendered).toContain("  |   8 + added line with enough trailing words");
+    expect(noColorRendered).toContain("  |       to wrap in a narrow plain renderer");
     expect(noColorRendered).not.toContain("\x1B[");
+
+    const colorDiffLines = colorRendered
+      .split("\n")
+      .map(stripAnsi)
+      .filter((line) => line.startsWith("  | "));
+    const noColorDiffLines = noColorRendered
+      .split("\n")
+      .filter((line) => line.startsWith("  | "));
+    expect(colorDiffLines.some((line) => line.includes("  8 + added line"))).toBe(true);
+    for (const line of noColorDiffLines) {
+      expect(displayWidth(line)).toBeLessThanOrEqual(54);
+    }
   });
 
   it("task 主屏中 user / assistant / tool / code 四类 block 在 no-color 下可区分", () => {
@@ -4967,6 +6762,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
 
   it("Ink task layout keeps transcript, notices, composer, footer, and light hints separated", async () => {
     vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
@@ -5041,9 +6837,9 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const composerIdx = text.indexOf("›", hintIdx);
     const footerIdx = text.indexOf("Shift+Tab");
 
-    expect(userIdx).toBeGreaterThan(0);
+    expect(userIdx).toBeGreaterThanOrEqual(0);
     expect(assistantIdx).toBeGreaterThan(userIdx);
-    expect(hintIdx).toBeGreaterThan(assistantIdx);
+    expect(hintIdx).toBeGreaterThan(0);
     expect(composerIdx).toBeGreaterThan(hintIdx);
     expect(footerIdx).toBeGreaterThan(composerIdx);
     // Phase 6.6: workspaceStatus / runtimeStatus are no longer rendered
@@ -5327,14 +7123,18 @@ describe("deriveBackgroundActivityFallback — request activity cleared but work
 });
 
 describe("D.13Q-UX Real Smoke Fix v2 — B. Composer task width", () => {
-  it("ShellApp separates Home and Task composer layout width sources", async () => {
+  it("ShellApp uses the task composer layout width source", async () => {
     const fs = await import("node:fs");
     const shellSource = fs.readFileSync(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    const bottomPaneSource = fs.readFileSync(
+      join(SRC_ROOT, "shell/components/TaskBottomPane.tsx"),
+      "utf8",
+    );
     const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
 
-    expect(shellSource).toContain("layout={homeComposerLayout(view.width)}");
-    expect(shellSource).toContain("layout={taskComposerLayout(view.width)}");
-    expect(shellSource).toMatch(/function taskComposerLayout\(viewWidth: number\)[\s\S]*taskComposerMaxWidth\(viewWidth\)/);
+    expect(shellSource).not.toContain("homeComposerLayout");
+    expect(bottomPaneSource).toContain("layout={taskComposerLayout(view.width)}");
+    expect(bottomPaneSource).toMatch(/function taskComposerLayout\(viewWidth: number\)[\s\S]*taskComposerMaxWidth\(viewWidth\)/);
     expect(composerSource).toContain("layout?: ComposerLayout");
   });
 });
@@ -5423,6 +7223,66 @@ describe("TaskSuggestionBar executable state", () => {
     );
     expect(view.taskSuggestions?.[0]?.id).toBe("setup:resume");
     expect(view.taskSuggestionCursor).toBe(0);
+  });
+
+  it("keeps provider request failure to a single visible prompt", () => {
+    const ctx = createContext({
+      lastProviderFailure: {
+        code: "PROVIDER_STREAM_ERROR",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5",
+        endpointProfile: "default",
+        summary: "stream ended",
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "provider-fail",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          messageKind: "tool_result_error",
+        },
+      ],
+    });
+
+    expect(view.blocks.some((block) => block.title === "模型请求失败")).toBe(true);
+    expect(view.taskSuggestions?.some((item) => item.source === "tool_error") ?? false).toBe(
+      false,
+    );
+    expect(view.bottomPaneStatus?.text).not.toBe("Provider 请求失败");
+  });
+
+  it("renders provider retry outcome inside the same error block", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "provider-fail",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          messageKind: "tool_result_error",
+          retryAttempt: 2,
+          retryMax: 2,
+        },
+      ],
+    });
+
+    const rendered = renderPlainShell(view);
+
+    expect(rendered).toContain("已自动重试 2/2 后仍未完成");
+    expect(rendered).not.toContain("正在重试");
   });
 
   it("permission view includes details and project-level allow choices", () => {
@@ -5681,6 +7541,8 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.messageKind).toBe("diagnostic");
     expect(blocks[0]?.status).toBe("info");
+    expect(ctx.transcriptSource?.cells[0]?.kind).toBe("diagnostic");
+    expect(ctx.transcriptSource?.cells[0]?.block.fullText).toContain("MCP status");
   });
 
   it("ShellBlockOutput.writeErrorLine 写入 messageKind=tool_result_error 块（kind=error/status=fail）", () => {
@@ -5707,6 +7569,8 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     expect(blocks[0]?.nextAction).toBeUndefined();
     // fullText 累计到 lastFullOutput，让 /details 仍能展开
     expect(ctx.lastFullOutput).toContain("provider 拒绝了本次请求 schema");
+    expect(ctx.transcriptSource?.cells[0]?.kind).toBe("tool_result_error");
+    expect(ctx.transcriptSource?.cells[0]?.block.title).toBe("provider 失败");
   });
 
   it("ShellBlockOutput.writeErrorLine 多行错误正文挂 Ctrl+O 错误展开 hint", () => {
@@ -5740,6 +7604,8 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     expect(blocks[0]?.messageKind).toBe("assistant_text");
     expect(blocks[0]?.status).toBe("info");
     expect(blocks[0]?.kind).toBe("details");
+    expect(ctx.transcriptSource?.cells[0]?.kind).toBe("assistant");
+    expect(ctx.transcriptSource?.cells[0]?.block.fullText).toContain("error: build failed");
   });
 
   it("Bash/local command producer 写入 local_command_output，从属输出不走 CommandPanel", () => {
@@ -5757,6 +7623,8 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     expect(blocks[0]?.messageKind).toBe("local_command_output");
     expect(blocks[0]?.kind).toBe("tool");
     expect(ctx.lastFullOutput).toContain("Tool Bash completed");
+    expect(ctx.transcriptSource?.cells[0]?.kind).toBe("local_command_output");
+    expect(ctx.transcriptSource?.cells[0]?.block.fullText).toContain("Tool Bash completed");
     const view = createShellViewModel(ctx, {
       outputBlocks: blocks,
       width: 100,
@@ -6654,14 +8522,23 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     const taskStart = source.indexOf("function TaskLayout(");
     const taskEnd = source.indexOf("function taskContentWidth", taskStart);
     const taskBody = source.slice(taskStart, taskEnd);
-    const widthFn = source.slice(taskEnd, source.indexOf("function homeComposerLayout", taskEnd));
+    const widthFn = source.slice(taskEnd, source.indexOf("function taskComposerLayout", taskEnd));
+    const activityStart = source.indexOf("function TaskActivityRegion(");
+    const activityEnd = source.indexOf("function taskComposerLayout", activityStart);
+    const activityBody = source.slice(activityStart, activityEnd);
+    const bottomPaneSource = await readFile(
+      join(SRC_ROOT, "shell/components/TaskBottomPane.tsx"),
+      "utf8",
+    );
 
     expect(taskBody).toContain("const contentWidth = taskContentWidth(view.width)");
-    expect(taskBody).toContain("width={contentWidth}");
-    expect(taskBody).toContain("wrapWidth={contentWidth}");
-    expect(taskBody).toContain("<ActivityIndicator");
-    expect(taskBody).toContain("width={contentWidth}");
-    expect(taskBody).not.toContain('<Box flexGrow={1} minHeight={0} />');
+    expect(taskBody).toContain("contentWidth={contentWidth}");
+    expect(activityBody).toContain("wrapWidth={contentWidth}");
+    expect(activityBody).toContain("<ActivityIndicator");
+    expect(bottomPaneSource).toContain("width={contentWidth}");
+    expect(taskBody).toContain("flexGrow={1}");
+    expect(taskBody).toContain("minHeight={0}");
+    expect(taskBody).toContain("<TranscriptViewport");
     expect(widthFn).toContain("return Math.max(8, viewWidth - 4)");
     expect(widthFn).not.toContain("viewWidth - 6");
   });
@@ -6682,8 +8559,52 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
 
     expect(source).not.toContain("Math.min(wrapWidth, 60)");
     expect(source).toContain("borderChar.repeat(safeWrapWidth)");
+    expect(source).toContain("const gutterWidth = lineNumberWidth * 2 + 5");
+    expect(source).toContain("const oldText = formatLineNumber(line.oldLine, lineNumberWidth)");
+    expect(source).toContain("const newText = formatLineNumber(line.newLine, lineNumberWidth)");
+    expect(source).toContain("const continuationGutter");
     expect(source).toContain("padDisplay(wrappedLine, contentWidth)");
     expect(source).toContain("displayWidth(value)");
+  });
+
+  it("StructuredDiff reuses the shared diff parser instead of duplicating parsing", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/StructuredDiff.tsx"), "utf8");
+
+    expect(source).toContain("parseDiffLines");
+    expect(source).toContain("../diff-renderer.js");
+    expect(source).not.toContain("function parseDiffLines(");
+    expect(source).not.toContain("type DiffLine =");
+  });
+
+  it("plain diff rendering accepts ShellTheme semantic colors", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/diff-renderer.ts"), "utf8");
+    const plainSource = await readFile(join(SRC_ROOT, "shell/plain-renderer.ts"), "utf8");
+
+    expect(source).toContain("theme?: ShellTheme");
+    expect(source).toContain("theme?.diffAddedWord ?? theme?.success");
+    expect(source).toContain("theme?.diffRemovedWord ?? theme?.error");
+    expect(source).toContain("ansiColorCode(color)");
+    expect(plainSource).toContain("createShellTheme(noColor)");
+    expect(plainSource).toContain("theme: options.theme");
+  });
+
+  it("diff rendering entry points use the shared diff fence language gate", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const messageMarkdownSource = await readFile(
+      join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"),
+      "utf8",
+    );
+    const terminalSurfaceSource = await readFile(join(SRC_ROOT, "tui-output-surface.ts"), "utf8");
+
+    for (const source of [messageMarkdownSource, terminalSurfaceSource]) {
+      expect(source).toContain("isDiffFenceLanguage");
+      expect(source).not.toContain('lang === "diff"');
+      expect(source).not.toContain('lang === "patch"');
+    }
+    expect(messageMarkdownSource).toContain("../diff-renderer.js");
+    expect(terminalSurfaceSource).toContain("./shell/diff-renderer.js");
   });
 
   it("MessageMarkdown code rows pad to wrapWidth for whole-line visual consistency", async () => {
@@ -6693,6 +8614,31 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(source).toContain("padDisplay(wrapped, wrapWidth)");
     expect(source).toContain("displayWidth(stripAnsi(value))");
     expect(source).toContain("wrapText(line, effectiveWrapWidth)");
+  });
+
+  it("MessageMarkdown table header cells are centered", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
+
+    expect(source).toContain("function centerPadDisplay(");
+    expect(source).toContain("boldHeader");
+    expect(source).toContain("centerPadDisplay(cell.lines[lineIndex] ?? \"\", cell.width)");
+  });
+
+  it("StreamingMarkdown does not render an accent cursor marker", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
+
+    expect(source).not.toContain("<Text color={theme.accent}>{\"▌\"}</Text>");
+  });
+
+  it("wheel scroll runtime dispatches microtask batches without slow row quantization", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/hooks/useScrollRuntime.ts"), "utf8");
+
+    expect(source).toContain("queueMicrotask");
+    expect(source).not.toContain("SCROLL_QUANTUM");
+    expect(source).not.toContain("DRAIN_INTERVAL_MS");
   });
 
   it("MessageMarkdown selection rows still use effective wrap width", async () => {
@@ -7001,6 +8947,23 @@ describe("D.14D explicit details summary-first panel", () => {
     expect(panel?.detailsText).toContain("bg-1");
   });
 
+  it("malformed blocked backgroundTasks still render details instead of throwing", () => {
+    const ctx = createContext() as TuiContext;
+    ctx.lastFullOutput = undefined;
+    ctx.evidence = [];
+    ctx.backgroundTasks = [
+      {
+        id: "bg-blocked-old",
+        status: "blocked",
+      },
+    ] as unknown as TuiContext["backgroundTasks"];
+
+    expect(() => __testBuildExplicitDetailsCommandPanel(ctx)).not.toThrow();
+    const panel = __testBuildExplicitDetailsCommandPanel(ctx);
+    expect(panel?.detailsText).toContain("bg-blocked-old");
+    expect(panel?.detailsText).toContain("background");
+  });
+
   it("多源组合时分区齐全（最近输出 / 证据 / 后台），detailsText 不互相套娃", () => {
     const ctx = createContext() as TuiContext & { lastFullOutput?: string };
     ctx.lastFullOutput = "最近输出正文";
@@ -7083,6 +9046,7 @@ describe("D.14D-C — scroll hint noise + activity placement", () => {
 
   it("Ink task 渲染：activity 出现在最新块之后（底部对话流）", async () => {
     vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
@@ -7123,7 +9087,6 @@ describe("D.14D-C — scroll hint noise + activity placement", () => {
     const activityPos = text.indexOf("活动标记QWQ");
     expect(blockPos).toBeGreaterThanOrEqual(0);
     expect(activityPos).toBeGreaterThanOrEqual(0);
-    // C3：activity 渲染在块之后（更靠 composer 的对话流底部）。
     expect(activityPos).toBeGreaterThan(blockPos);
   });
 

@@ -174,6 +174,21 @@ describe("tui permission runtime — CCB-aligned modes", () => {
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 
+  it("ink model-tool deny for auto-review Read does not leak yes/no prompt text", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.isInkSession = true;
+    context.permissionMode = "auto-review";
+    const output = new MemoryOutput();
+
+    const result = await executeModelToolUse(call("Read", { path: "../outside.txt" }), context, sessionId, output);
+
+    expect(result.ok).toBe(false);
+    expect(result.pendingApproval).not.toBe(true);
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(output.text).not.toContain("Linghun 想执行 Read");
+    expect(output.text).not.toContain("允许本次执行？yes / no");
+  });
+
   it("architecture drift still confirms mutating drift before execution", async () => {
     const { context, sessionId } = await createTestContext();
     context.currentArchitectureCard = architectureCard();
@@ -195,6 +210,27 @@ describe("tui permission runtime — CCB-aligned modes", () => {
       kind: "architecture_drift",
       toolName: "Edit",
     });
+  });
+
+  it("auto-review skips architecture boundary confirmation for large-file edits", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.permissionMode = "auto-review";
+    const bigSource = Array.from({ length: 820 }, (_, index) => `export const v${index} = ${index};`).join("\n");
+    const nextSource = `${bigSource}\n${Array.from({ length: 45 }, (_, index) => `export const added${index} = ${index};`).join("\n")}\n`;
+    await writeFile(join(context.projectPath, "big.ts"), `${bigSource}\n`, "utf8");
+    const output = new MemoryOutput();
+
+    const result = await executeModelToolUse(
+      call("Write", { path: "big.ts", content: nextSource }),
+      context,
+      sessionId,
+      output,
+    );
+
+    expect(result.pendingApproval).not.toBe(true);
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(output.text).not.toContain("确认范围变化");
+    expect(output.text).not.toContain("需要您授权");
   });
 });
 

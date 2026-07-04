@@ -1350,6 +1350,24 @@ export async function saveModelRoute(
   return next;
 }
 
+// 桌面端权限设置写入：持久化默认权限模式（default / auto-review / plan / full-access）。
+// 复用既有 load → mutate → writeConfig 链路，保持 secret 剥离与原子写一致。
+export async function savePermissionMode(
+  mode: PermissionMode,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const next: LinghunConfig = {
+    ...current,
+    permission: {
+      ...current.permission,
+      defaultMode: mode,
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
 export async function saveExtensionEnablement(
   kind: "skills" | "plugins",
   id: string,
@@ -1465,6 +1483,45 @@ export async function saveWorkspaceTrust(
       recorded: true,
       trustedAt: level === "trusted" ? (current.workspaceTrust.trustedAt ?? now) : undefined,
       updatedAt: now,
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
+// 桌面端索引设置写入：持久化 index.enabled / mode / ignoreFile（真实底座字段）。
+// 复用既有 load → mutate → writeConfig 链路，secret 剥离与原子写一致；不改索引运行时。
+export async function saveIndexConfig(
+  index: Pick<LinghunConfig["index"], "enabled" | "mode" | "ignoreFile">,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const next: LinghunConfig = {
+    ...current,
+    index: {
+      ...current.index,
+      enabled: index.enabled,
+      mode: index.mode,
+      ignoreFile: index.ignoreFile,
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
+// 桌面端扩展项总开关写入：持久化 <kind>.enabled（skills/workflows/hooks/plugins）。
+// 仅切换 enabled 字段，不动 disabledIds/trustedIds/目录；不加载或执行扩展运行时。
+export async function saveExtensionSectionEnabled(
+  kind: "skills" | "workflows" | "hooks" | "plugins",
+  enabled: boolean,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const next: LinghunConfig = {
+    ...current,
+    [kind]: {
+      ...current[kind],
+      enabled,
     },
   };
   await writeConfig(projectPath, next);

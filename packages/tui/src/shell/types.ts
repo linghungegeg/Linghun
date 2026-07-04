@@ -88,6 +88,8 @@ export type ProductBlockViewModel = {
   selectionLineIndexes?: number[];
   /** Cell-column ranges highlighted by the app-owned transcript selection substrate. */
   selectionLineRanges?: ProductBlockSelectionRange[];
+  /** True when stable text has been handed to terminal scrollback in the native transcript path. */
+  terminalOwned?: boolean;
   /** Phase 14 — message timestamp (ms since epoch), rendered dim next to user_text blocks. */
   timestamp?: number;
   /** Phase 15 — retry countdown info for error recovery UI. */
@@ -138,6 +140,7 @@ export type ComposerViewModel = {
   placeholder: string;
   taskPlaceholder: string;
   submittedHint: string;
+  draftText?: string;
   masking: boolean;
   /** Active model setup flow (apiKey / baseUrl / model / confirm). */
   setupActive: boolean;
@@ -154,7 +157,8 @@ export type ComposerViewModel = {
   busyHint?: string;
 };
 
-export type ShellViewMode = "home" | "task" | "pending";
+export type ShellViewMode = "task" | "pending";
+export type LegacyShellViewMode = ShellViewMode | "home";
 
 export type TaskActivityView = {
   phase: "thinking" | "tool_running" | "permission_waiting" | "continuing" | "completed" | "error";
@@ -168,6 +172,33 @@ export type TaskActivityView = {
   totalBytes?: number;
   /** Concrete sub-phase label (e.g. "reading_context"), set by the runtime instead of the UI cycling arbitrarily. */
   thinkingLabel?: string;
+};
+
+export type BottomPaneStatusKind =
+  | "running"
+  | "action_required"
+  | "verifying"
+  | "blocked"
+  | "failed"
+  | "completed_partial";
+
+export type BottomPaneStatusSource =
+  | "request"
+  | "permission"
+  | "final_gate"
+  | "provider"
+  | "resource"
+  | "tool"
+  | "agent_workflow"
+  | "background";
+
+export type BottomPaneStatusView = {
+  kind: BottomPaneStatusKind;
+  source: BottomPaneStatusSource;
+  text: string;
+  reason?: string;
+  nextAction?: string;
+  elapsed?: string;
 };
 
 /**
@@ -398,6 +429,7 @@ export type WorkflowProgressView = {
     elapsed?: string;
     currentStepId?: string;
     steps: { id: string; title: string; status: string; active: boolean }[];
+    hiddenSteps?: number;
   }[];
   hiddenPending: number;
 };
@@ -471,17 +503,25 @@ export type ShellViewModel = {
   homeVision: string;
   setupHint?: string;
   activity?: TaskActivityView;
+  /** Unified bottom-pane status line: what is running, waiting, blocked, failed, or verifying. */
+  bottomPaneStatus?: BottomPaneStatusView;
   permission?: TaskPermissionView;
   status: StatusTrayViewModel;
   composer: ComposerViewModel;
   blocks: ProductBlockViewModel[];
+  /** Append-only finalized history for normal-screen Static output. */
+  staticHistoryBlocks?: ProductBlockViewModel[];
+  /** Changes when normal-screen Static history must replay from source. */
+  staticHistoryReplayGeneration?: number;
   transcriptVirtualRange?: TranscriptVirtualRangeView;
   /** Live assistant preview rendered outside the historical ProductBlock list. */
   streamingAssistantText?: string;
   ctrlOExpand?: CtrlOExpandView;
   limitations: string[];
-  /** Compact task-mode footer. Present in task/pending viewMode; absent in home. */
+  /** Compact task-mode footer. Runtime normalizes legacy home requests to task. */
   taskFooter?: TaskFooterView;
+  /** Extra visual rows above the composer, owned by the composer input surface. */
+  composerOverlayRows?: number;
   /** Footer-adjacent background/workflow summary; kept out of transcript blocks. */
   taskRuntimeSummary?: ProductBlockViewModel;
   agentProgressTree?: AgentProgressTreeView;
@@ -510,7 +550,7 @@ export type ShellViewModel = {
    */
   commandPanel?: CommandPanelView;
   /**
-   * D.13Q-UX Task Surface — 任务区滚动状态。home 模式不存在；task/pending
+   * D.13Q-UX Task Surface — 任务区滚动状态。运行时只进入 task/pending，
    * 模式始终存在，默认 scrollOffset=0 / stickToBottom=true。
    */
   transcriptScroll?: TranscriptScrollView;
@@ -699,6 +739,8 @@ export type ShellInputEvent =
   | { type: "external-editor" }
   | { type: "clipboard-copied"; text: string }
   | { type: "clipboard-failed"; error: string }
+  | { type: "composer-overlay-rows-change"; rows: number }
+  | { type: "composer-draft-change"; text: string }
   /** Agent tree keyboard navigation (Phase 3 visual alignment). */
   | { type: "agent-tree-move"; delta: -1 | 1 }
   | { type: "agent-tree-enter" }
@@ -715,6 +757,10 @@ export type ShellRenderOptions = {
   stdin?: Readable;
   stdout?: Writable;
   stderr?: Writable;
+  beforeRender?: () => void;
+  beforeClearTransientFrame?: () => void;
+  hasNativeScrollbackHistory?: () => boolean;
+  beforeNativeScrollbackResizeReflow?: () => boolean | void;
 };
 
 export type BackgroundTaskSummary = {

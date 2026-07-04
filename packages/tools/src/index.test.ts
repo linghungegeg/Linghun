@@ -1884,8 +1884,30 @@ describe("Phase 05 core tools", () => {
     expect(childItems.command).toContain("powershell.exe");
     expect(childItems.command).toContain("Get-ChildItem -LiteralPath . -File");
 
+    const probe = adaptShellCommandForPlatform(
+      "$PWD.Path; Get-Command rg -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source",
+      "win32",
+    );
+    expect(probe.adapter).toBe("powershell-adapted");
+    expect(probe.command).toContain("powershell.exe");
+    expect(probe.command).toContain("$PWD.Path; Get-Command rg");
+
+    const hereString = adaptShellCommandForPlatform("$x = @'\nhello\n'@; Write-Output $x", "win32");
+    expect(hereString.adapter).toBe("powershell-adapted");
+    expect(hereString.command).toContain("powershell.exe");
+    expect(hereString.logCommand).toContain("<powershell script>");
+
+    const explicitPowerShell = adaptShellCommandForPlatform("pwsh -NoProfile -Command Get-Date", "win32");
+    expect(explicitPowerShell.adapter).toBe("native");
+
     const node = adaptShellCommandForPlatform("node --version", "win32");
     expect(node.adapter).toBe("native");
+
+    const corepack = adaptShellCommandForPlatform("corepack pnpm test", "win32");
+    expect(corepack.adapter).toBe("native");
+
+    const git = adaptShellCommandForPlatform("git status", "win32");
+    expect(git.adapter).toBe("native");
   });
 
   it("blocks unsupported Windows Unix command forms without leaking raw scripts", () => {
@@ -1903,9 +1925,46 @@ describe("Phase 05 core tools", () => {
 
     const multiline = adaptShellCommandForPlatform("cat <<EOF\nsecret raw script\nEOF", "win32");
     expect(multiline.adapter).toBe("blocked");
-    expect(multiline.command).toContain("Unsupported multi-line Unix shell syntax");
+    expect(multiline.command).toContain("Unsupported POSIX shell syntax");
     expect(multiline.command).not.toContain("secret raw script");
     expect(multiline.logCommand).not.toContain("secret raw script");
+  });
+
+  it("blocks shell file writes and apply_patch forms on Windows without leaking patch bodies", () => {
+    const patchBody = "SECRET_PATCH_BODY";
+    const patchHeredoc = adaptShellCommandForPlatform(
+      `apply_patch <<'PATCH'\n${patchBody}\nPATCH`,
+      "win32",
+    );
+    expect(patchHeredoc.adapter).toBe("blocked");
+    expect(patchHeredoc.command).toContain("Linghun Bash does not support shell apply_patch");
+    expect(patchHeredoc.command).not.toContain(patchBody);
+    expect(patchHeredoc.logCommand).not.toContain(patchBody);
+
+    const pipedHereString = adaptShellCommandForPlatform(`@'\n${patchBody}\n'@ | apply_patch`, "win32");
+    expect(pipedHereString.adapter).toBe("blocked");
+    expect(pipedHereString.command).not.toContain(patchBody);
+    expect(pipedHereString.logCommand).not.toContain(patchBody);
+
+    const patchVariable = adaptShellCommandForPlatform(
+      `$patch = @'\n${patchBody}\n'@; $patch | apply_patch`,
+      "win32",
+    );
+    expect(patchVariable.adapter).toBe("blocked");
+    expect(patchVariable.command).not.toContain(patchBody);
+    expect(patchVariable.logCommand).not.toContain(patchBody);
+
+    for (const command of ["cat <<EOF > file", "cat > file", "tee file"]) {
+      const adapted = adaptShellCommandForPlatform(command, "win32");
+      expect(adapted.adapter).toBe("blocked");
+      expect(adapted.command).toContain("Linghun Bash does not support shell apply_patch");
+    }
+  });
+
+  it("does not apply Windows shell adaptation on non-Windows platforms", () => {
+    const command = "$PWD.Path; Get-Command rg";
+    const adapted = adaptShellCommandForPlatform(command, "linux");
+    expect(adapted).toEqual({ command, adapter: "native" });
   });
 
   // D.14H Phase 7.5-C：Glob("**/*") 修复——根目录文件不应被 globToRegExp 漏掉。

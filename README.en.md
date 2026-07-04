@@ -36,6 +36,7 @@ Linghun has completed and submitted runs for the four public TB2.1 tracks in the
 
 ## Updates
 
+- **July 5, 2026**: The terminal foundation, task panels, and runtime recovery path were hardened. Model streaming is steadier, background task status is clearer, diff / Markdown rendering is cleaner, and provider network warmup plus session storage behave better during long development runs. See: [Updates](./docs/updates.en.md#july-5-2026-terminal-foundation-task-panels-and-runtime-recovery).
 - **June 27, 2026**: Session storage, model streaming, and permission modes were tightened to reduce memory pressure in long conversations, make Claude / OpenAI-compatible streaming output more stable, and make command/file-edit behavior clearer in auto-review and full-access modes. See: [Updates](./docs/updates.en.md#june-27-2026-session-storage-model-streaming-and-permission-modes).
 - **June 26, 2026**: The pre-check system expanded into multi-language deep layers, giving the model index facts, impact ranges, and language-level pre-check results earlier so it spends less time on blind file reading, repeated exploration, and rework. See: [Updates](./docs/updates.en.md#june-26-2026-pre-check-system-and-multi-language-deep-layers).
 - **June 17, 2026**: The terminal display layer was tightened, and SourcePack / ReadSnippets deliver relevant code snippets faster. The user-facing effect is less waiting, fewer repeated Grep/Read calls, and faster movement into useful edits. See: [Updates](./docs/updates.en.md#june-17-2026-terminal-display-layer-and-tool-call-chain).
@@ -655,7 +656,7 @@ I also hope you can use Linghun to build better work and improve your own effici
 ## Next Steps
 
 - Continue polishing the terminal TUI experience so main-screen output, task state, scrolling, interaction feedback, and diagnostic layers feel more natural, stable, and suitable for long-term engineering work.
-- Move toward desktop and mobile releases while keeping Linghun local-first, evidence-first, and permission-bounded, so it can support richer multi-window, multi-task, visual, mobile notification, mobile approval, and long-project collaboration workflows.
+- Move toward remote entry and multi-device collaboration while keeping Linghun local-first, evidence-first, and permission-bounded, so it can support richer multi-task, notification, approval, and long-project collaboration workflows.
 
 ## Contact and Support
 

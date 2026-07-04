@@ -32,34 +32,21 @@ export function TaskListView({
         const marker = taskMarker(row.status, noColor);
         const hasBlockers = blocked && row.blockedBy && row.blockedBy.length > 0;
         const blockedByLabel = language === "en-US" ? "blocked by" : "被阻塞";
+        const ownerText = row.owner ? ` (@${row.owner})` : "";
+        const blockerText = hasBlockers
+          ? ` ▸ ${blockedByLabel} ${row.blockedBy!.map((id) => `#${id}`).join(", ")}`
+          : "";
+        const activityText = inProgress && !blocked && row.activity ? ` · ${row.activity}…` : "";
+        const rowText = `${marker} ${row.subject}${ownerText}${blockerText}${activityText}`;
         return (
-          <Box key={row.id} flexDirection="column">
-            <Box flexDirection="row">
-              <Text
-                color={inProgress ? theme.status.running : undefined}
-                bold={inProgress}
-                dimColor={blocked}
-              >
-                {marker} {fitText(row.subject, Math.max(8, innerWidth - 4 - (row.owner ? row.owner.length + 3 : 0)))}
-              </Text>
-              {row.owner ? (
-                <Text color={theme.muted} dimColor>
-                  {" "}(@{row.owner})
-                </Text>
-              ) : null}
-              {hasBlockers ? (
-                <Text color={theme.muted} dimColor>
-                  {" "}▸ {blockedByLabel} {row.blockedBy!.map((id) => `#${id}`).join(", ")}
-                </Text>
-              ) : null}
-            </Box>
-            {inProgress && !blocked && row.activity ? (
-              <Box paddingLeft={2}>
-                <Text color={theme.muted} dimColor>
-                  {fitText(`${row.activity}…`, Math.max(8, innerWidth - 4))}
-                </Text>
-              </Box>
-            ) : null}
+          <Box key={row.id}>
+            <Text
+              color={inProgress ? theme.status.running : undefined}
+              bold={inProgress}
+              dimColor={blocked}
+            >
+              {fitText(rowText, innerWidth)}
+            </Text>
           </Box>
         );
       })}

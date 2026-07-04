@@ -54,6 +54,11 @@ export function WorkflowProgressView({
                 </Text>
               );
             })}
+            {run.hiddenSteps && run.hiddenSteps > 0 ? (
+              <Text color={theme.muted} dimColor>
+                {fitText(`… +${run.hiddenSteps} ${text.r3PendingHiddenSuffix}`, innerWidth)}
+              </Text>
+            ) : null}
           </Box>
         );
       })}

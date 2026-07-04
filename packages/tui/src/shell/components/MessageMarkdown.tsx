@@ -4,6 +4,8 @@ import { type Token, type Tokens, lexer } from "marked";
 import { createContext, useContext } from "react";
 import type React from "react";
 import { memo, useRef } from "react";
+import { isDiffFenceLanguage } from "../diff-renderer.js";
+import { findStableMarkdownPrefixLength } from "../models/markdown-stability.js";
 import { charWidth, displayWidth, wrapText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 import type { ProductBlockSelectionRange } from "../types.js";
@@ -541,7 +543,7 @@ function stripAnsi(value: string): string {
 
 function highlightedCodeLines(code: string, lang: string | undefined): string[] {
   if (!lang) return code.split("\n");
-  if (lang === "diff" || lang === "patch") return code.split("\n");
+  if (isDiffFenceLanguage(lang)) return code.split("\n");
   try {
     return highlight(code, { language: lang, ignoreIllegals: true }).split("\n");
   } catch {
@@ -568,7 +570,7 @@ function CodeLine({
   ranges?: ProductBlockSelectionRange[];
   wrapWidth: number;
 }): React.ReactNode {
-  const isDiff = lang === "diff" || lang === "patch";
+  const isDiff = isDiffFenceLanguage(lang);
   const color =
     isDiff && line.startsWith("+") && !line.startsWith("+++")
       ? (theme.success ?? theme.status.pass)
@@ -634,7 +636,7 @@ function renderCodeBlock({
   blockKey: string;
 }): React.ReactNode {
   // Phase 3: diff/patch blocks use StructuredDiff for visual diff rendering.
-  if (lang === "diff" || lang === "patch") {
+  if (isDiffFenceLanguage(lang)) {
     return (
       <StructuredDiff key={blockKey} code={code} theme={theme} wrapWidth={wrapWidth} dim={dim} />
     );
@@ -848,6 +850,14 @@ function padDisplay(value: string, width: number): string {
   return `${value}${" ".repeat(Math.max(0, width - visible))}`;
 }
 
+function centerPadDisplay(value: string, width: number): string {
+  const visible = displayWidth(stripAnsi(value));
+  const padding = Math.max(0, width - visible);
+  const left = Math.floor(padding / 2);
+  const right = padding - left;
+  return `${" ".repeat(left)}${value}${" ".repeat(right)}`;
+}
+
 function tableWidths(table: Tokens.Table, wrapWidth: number): number[] {
   const columnCount = table.header.length;
   const maxPerCol = Math.max(
@@ -941,7 +951,9 @@ function renderTable(
           <Text key={`${rowKey}-${lineIndex}-${cellIndex}`}>
             {" "}
             <Text bold={boldHeader} color={boldHeader && !dim ? theme.accent : undefined}>
-              {padDisplay(cell.lines[lineIndex] ?? "", cell.width)}
+              {boldHeader
+                ? centerPadDisplay(cell.lines[lineIndex] ?? "", cell.width)
+                : padDisplay(cell.lines[lineIndex] ?? "", cell.width)}
             </Text>{" "}
             <Text color={borderColor} dimColor={dim}>
               │
@@ -1185,7 +1197,7 @@ export function splitStreamingMarkdownForRender(
   }
   const boundary = state.stablePrefix.length;
   const suffixInput = normalized.slice(boundary);
-  const advance = findStablePrefixAdvance(suffixInput);
+  const advance = findStableMarkdownPrefixLength(suffixInput);
   if (advance > 0) {
     state.stablePrefix = normalized.slice(0, boundary + advance);
   }
@@ -1194,51 +1206,6 @@ export function splitStreamingMarkdownForRender(
     unstableSuffix: normalized.slice(state.stablePrefix.length),
     parsedSuffixInput: suffixInput,
   };
-}
-
-function findStablePrefixAdvance(text: string): number {
-  let offset = 0;
-  let boundary = 0;
-  let inCode = false;
-  for (const match of text.matchAll(/[^\n]*(?:\n|$)/gu)) {
-    const segment = match[0];
-    if (!segment) break;
-    if (!segment.endsWith("\n")) break;
-    const line = segment.slice(0, -1);
-    const fence = /^\s*```\s*[A-Za-z0-9_+-]*\s*$/u.test(line);
-    if (fence) {
-      inCode = !inCode;
-      offset += segment.length;
-      if (!inCode) boundary = offset;
-      continue;
-    }
-    offset += segment.length;
-    if (!inCode && line.trim().length === 0) boundary = offset;
-  }
-  if (!inCode && text.endsWith("\n") && hasBalancedInlineMarkdown(text)) return text.length;
-  return boundary;
-}
-
-function hasBalancedInlineMarkdown(text: string): boolean {
-  let inInlineCode = false;
-  let boldOpen = false;
-  let italicOpen = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    if (char === "`") {
-      inInlineCode = !inInlineCode;
-      continue;
-    }
-    if (!inInlineCode && char === "*" && text[index + 1] === "*") {
-      boldOpen = !boldOpen;
-      index += 1;
-      continue;
-    }
-    if (!inInlineCode && char === "*") {
-      italicOpen = !italicOpen;
-    }
-  }
-  return !inInlineCode && !boldOpen && !italicOpen;
 }
 
 export function StreamingMarkdown({
@@ -1262,20 +1229,15 @@ export function StreamingMarkdown({
         />
       ) : null}
       {unstableSuffix ? (
-        <Box flexDirection="row">
-          <MessageMarkdown
-            text={unstableSuffix}
-            theme={theme}
-            dim={dim}
-            tone={tone}
-            wrapWidth={wrapWidth}
-            isStreaming
-          />
-          <Text color={theme.accent}>{"▌"}</Text>
-        </Box>
-      ) : (
-        <Text color={theme.accent}>{"▌"}</Text>
-      )}
+        <MessageMarkdown
+          text={unstableSuffix}
+          theme={theme}
+          dim={dim}
+          tone={tone}
+          wrapWidth={wrapWidth}
+          isStreaming
+        />
+      ) : null}
     </Box>
   );
 }

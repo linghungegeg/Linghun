@@ -2,6 +2,28 @@
 
 This page records product updates that directly affect user experience. For the full system design, see the [English Whitepaper](../WHITEPAPER.en.md).
 
+## July 5, 2026: Terminal Foundation, Task Panels, and Runtime Recovery
+
+This release continues to harden Linghun's terminal mainline: model streaming, terminal scroll and copy boundaries, background task status, diff / Markdown rendering, provider network recovery, and runtime storage were all tightened.
+
+The goal is not a new visual skin. It is to make long development runs feel like a steadier engineering terminal: growing output remains readable, scrollable, and copyable; background task and permission state are easier to see; provider startup, failure recovery, and final-answer validation are less likely to feel stuck or misaligned with evidence.
+
+### How It Works
+
+- Model streaming now enters the terminal in a more controlled rhythm, separating high-frequency deltas from stable transcript commits to reduce jitter during long answers.
+- Terminal-first scroll, copy, and normal-screen boundaries were tightened while keeping native terminal selection as the default and preserving Linghun's Markdown, code block, and task presentation style.
+- The task bottom panel and background task status model were strengthened so running, waiting, failed, permission, and progress states are easier to see in the main screen.
+- Diff, plain-text, Markdown, and tool-output rendering were refined to reduce noise when long output, stderr, patches, and code blocks appear together.
+- Provider network warmup and runtime storage paths were added so first-request DNS / network jitter is less visible and long-session state is easier to recover.
+
+### User Experience
+
+- Long answers and tool output are steadier, and the terminal is less likely to become hard to scroll, copy, or read while streaming continues.
+- Background tasks, permission waits, and execution states are clearer, making it easier to tell whether Linghun is running, waiting, recovering, or done.
+- Diff, Markdown, code blocks, and plain text render more consistently, reducing format noise during patch review and model explanations.
+- Provider startup and failure recovery feel smoother, with clearer status during network instability.
+- Long conversations and multi-step tasks keep stronger state, giving resume, summary, and final-answer validation better evidence.
+
 ## June 27, 2026: Session Storage, Model Streaming, and Permission Modes
 
 Linghun tightened three parts of the terminal mainline that users can directly feel: long-session storage, model streaming output, and permission modes.

@@ -123,7 +123,6 @@ import {
   isReportFileWriteRequest,
   normalizeReportPath,
   normalizeToolName,
-  shouldSendReportEvidenceReminder,
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
@@ -137,7 +136,6 @@ import { createProcessGuard, requestTrackedProcessStop } from "./process-guard.j
 import { consumeRemoteInboundMessage } from "./remote-command-runtime.js";
 import { processRemoteBindCommand } from "./remote-inbound-bridge-runtime.js";
 import {
-  formatReportEvidenceRequired,
   formatReportIncompletePrimary,
 } from "./request-lifecycle-presenter.js";
 import {
@@ -378,26 +376,6 @@ export async function executeModelToolUse(
       return { ok: false, tool: toolName, text: warning, pendingApproval: true };
     }
   }
-  if (continuation?.reportWriteGuard && toolName === "Bash") {
-    const text =
-      context.language === "en-US"
-        ? "Bash is not available for report file generation; use Write/Edit so shell output cannot pollute the report body."
-        : "报告文件生成不开放 Bash；请使用 Write/Edit，避免 shell 输出污染报告正文。";
-    const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
-    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
-    return { ok: false, tool: toolName, text, evidenceId: evidence.id };
-  }
-  if (
-    continuation?.reportWriteGuard &&
-    !continuation.reportWriteGuard.evidenceRead &&
-    (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit")
-  ) {
-    const text = formatReportEvidenceRequired(context.language);
-    continuation.reportWriteGuard.evidenceReminderSent = true;
-    const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
-    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
-    return { ok: false, tool: toolName, text, evidenceId: evidence.id };
-  }
   const permission = await decidePermission(toolName, toolCall.input, context, sessionId);
   await context.store.appendEvent(sessionId, {
     type: "permission_request",
@@ -433,18 +411,14 @@ export async function executeModelToolUse(
   if (permission.decision !== "allow") {
     clearRequestActivity(context);
     const text = `${permission.decision}: ${permission.reason}`;
-    const isAskWithPanel =
-      permission.decision === "ask" &&
-      (toolName === "Write" ||
-        toolName === "Edit" ||
-        toolName === "MultiEdit" ||
-        toolName === "Bash");
+    const isAskWithPanel = permission.decision === "ask";
     // P0-1 — ink 主屏的提权 UI 必须是 PermissionPanel（pendingLocalApproval →
     // mapPendingApprovalToPermission → view.permission），不得用 writeLine 把
     // "Linghun 想执行 …？yes/no" 当作普通 assistant/output 文本糊到主屏。
     // ink ask 路径只设 pendingLocalApproval，由 PermissionPanel 渲染；
+    // ink deny 路径只回灌工具失败，避免把不可批准的 yes/no prompt 写进主屏 scrollback。
     // plain TUI / 非交互 / 测试仍走文本 yes/no fallback（保留既有断言）。
-    if (!(context.isInkSession && isAskWithPanel)) {
+    if (!context.isInkSession) {
       writeLine(
         output,
         formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
@@ -473,8 +447,8 @@ export async function executeModelToolUse(
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
   const boundaryPreflight =
-    context.permissionMode === "full-access"
-      ? { decision: "allow" as const, reason: "full-access skips TUI boundary confirmation" }
+    context.permissionMode === "full-access" || context.permissionMode === "auto-review"
+      ? { decision: "allow" as const, reason: `${context.permissionMode} skips TUI boundary confirmation` }
       : await runBoundaryEditPreflight(toolCall, toolName, context);
   if (boundaryPreflight.decision === "confirm") {
     clearRequestActivity(context);
@@ -2807,8 +2781,8 @@ export async function handleToolCommand(
     }
 
     const boundaryPreflight =
-      context.permissionMode === "full-access"
-        ? { decision: "allow" as const, reason: "full-access skips TUI boundary confirmation" }
+      context.permissionMode === "full-access" || context.permissionMode === "auto-review"
+        ? { decision: "allow" as const, reason: `${context.permissionMode} skips TUI boundary confirmation` }
         : await runBoundaryEditPreflight(
             { id: "slash-command-preflight", name, input },
             name,

@@ -380,11 +380,32 @@ async function bundleReleasedCodebaseMemory(platformArch) {
 }
 
 async function copyCodebaseMemory(source, sourceDir, platformArch) {
-  const targetDir = join(cliBundledRoot, "codebase-memory", platformArch);
+  const fileName = codebaseMemoryFileName(platformArch);
+  const cliTargetDir = join(cliBundledRoot, "codebase-memory", platformArch);
+  await copyCodebaseMemoryFiles(source, sourceDir, cliTargetDir, fileName);
+  console.log(
+    `[linghun] bundled codebase-memory ${platformArch}: ${relative(join(cliTargetDir, fileName))}`,
+  );
+
+  const pkgTargetDir = join(
+    repoRoot,
+    "packages",
+    `codebase-memory-${platformArch}`,
+    "bundled",
+    "codebase-memory",
+    platformArch,
+  );
+  await copyCodebaseMemoryFiles(source, sourceDir, pkgTargetDir, fileName);
+  console.log(
+    `[linghun] bundled codebase-memory pkg ${platformArch}: ${relative(join(pkgTargetDir, fileName))}`,
+  );
+}
+
+async function copyCodebaseMemoryFiles(source, sourceDir, targetDir, fileName) {
   await mkdir(targetDir, { recursive: true });
-  const target = join(targetDir, codebaseMemoryFileName(platformArch));
+  const target = join(targetDir, fileName);
   await copyFile(source, target);
-  if (!platformArch.startsWith("win32-")) {
+  if (!fileName.endsWith(".exe")) {
     await chmod(target, 0o755);
   }
 
@@ -394,7 +415,6 @@ async function copyCodebaseMemory(source, sourceDir, platformArch) {
       await copyTextMetadata(metadata, join(targetDir, name));
     }
   }
-  console.log(`[linghun] bundled codebase-memory ${platformArch}: ${relative(target)}`);
 }
 
 function findCodebaseMemoryBinary(platformArch) {

@@ -105,6 +105,13 @@ export function AgentProgressTree({
           </Box>
         );
       })}
+      {tree.hiddenPending > 0 ? (
+        <Box paddingLeft={2}>
+          <Text color={theme.muted} dimColor>
+            {`… +${tree.hiddenPending} ${text.r3PendingHiddenSuffix}`}
+          </Text>
+        </Box>
+      ) : null}
       {/* Keyboard hints when selection active */}
       {tree.cursor >= 0 ? (
         <Box paddingLeft={3}>

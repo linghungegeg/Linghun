@@ -18,7 +18,7 @@ import type { ShellInputEvent, TranscriptScrollView } from "../types.js";
  * (Phase 2) classifies terminal bytes before they reach this component.
  *
  * Event routing:
- *   - Wheel events → accelerator → pending delta accumulator → quantized dispatch
+ *   - Wheel events → accelerator → pending delta accumulator → microtask-batched dispatch
  *   - Mouse events → transcript-mouse for selection
  *   - Focus-out (key event) → lost-release recovery
  *   - Mouse fragments / unknown escapes → silently consumed by runtime (never leak)
@@ -26,17 +26,18 @@ import type { ShellInputEvent, TranscriptScrollView } from "../types.js";
  * Phase R5 scroll runtime: wheel events accumulate in a pending delta accumulator
  * with frame drain, preventing state-update explosion on high-frequency input.
  *
- * This component must NOT be rendered when mouse tracking is disabled
- * (non-alt-screen fallback). The parent (ShellApp TaskLayout) gates rendering
- * via the `active` prop.
+ * Wheel and mouse selection are gated separately so normal-screen/native
+ * scrollback mode can keep wheel scrolling without taking over drag selection.
  */
 export function MouseInputRouter({
-  active,
+  wheelActive,
+  mouseActive,
   scroll,
   selectionActive = true,
   onInput,
 }: {
-  active: boolean;
+  wheelActive: boolean;
+  mouseActive: boolean;
   selectionActive?: boolean;
   scroll: TranscriptScrollView | undefined;
   onInput: (event: ShellInputEvent) => void;
@@ -68,7 +69,7 @@ export function MouseInputRouter({
       },
       [accelerator, accumulateScroll],
     ),
-    { isActive: active },
+    { isActive: wheelActive },
   );
 
   // Mouse events → transcript-mouse for selection
@@ -88,7 +89,7 @@ export function MouseInputRouter({
       },
       [onInput, selectionActive],
     ),
-    { isActive: active },
+    { isActive: mouseActive },
   );
 
   useTerminalInput(
@@ -101,7 +102,7 @@ export function MouseInputRouter({
       },
       [onInput, selectionActive],
     ),
-    { isActive: active },
+    { isActive: mouseActive },
   );
 
   return null;

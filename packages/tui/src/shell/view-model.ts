@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import { type Language, type PermissionMode, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
 import { calculateContextPercentages } from "../context-window-runtime.js";
-import type { TuiContext } from "../index.js";
+import type { BackgroundTaskState, TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
 import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
 import { sanitizeMainScreenLeakage } from "../model-prompt-runtime.js";
@@ -24,21 +24,28 @@ import {
   selectionLineRangesForBlock,
 } from "./models/transcript-selection-state.js";
 import {
+  transcriptSourceToBlocks,
+  type TranscriptSource,
+} from "./models/transcript-source.js";
+import {
   buildAgentProgressTreeView,
   buildBackgroundTaskOverlayView,
   buildTaskListView,
   buildWorkflowProgressView,
 } from "./progress-views.js";
+import { shouldUseNativeScrollbackTaskFrame } from "./native-scrollback-frame.js";
 import { charWidth, truncateMiddle } from "./text-utils.js";
 import type {
   BackgroundTaskSummary,
   CommandPanelView,
   ConfigPanelView,
+  LegacyShellViewMode,
   NotificationView,
   PermissionAction,
   ProductBlockViewModel,
   ShellViewMode,
   ShellViewModel,
+  BottomPaneStatusView,
   TaskActivityView,
   TaskFooterView,
   TaskPermissionView,
@@ -152,10 +159,11 @@ export type ShellViewModelOptions = {
   width?: number;
   height?: number;
   noColor?: boolean;
-  viewMode?: ShellViewMode;
+  viewMode?: LegacyShellViewMode;
   activity?: TaskActivityView;
   permission?: TaskPermissionView;
   outputBlocks?: ProductBlockViewModel[];
+  transcriptSource?: TranscriptSource;
   backgroundSummaries?: BackgroundTaskSummary[];
   setupNeeded?: boolean;
   projectRouteProblem?: string;
@@ -172,6 +180,10 @@ export type ShellViewModelOptions = {
    * (read-only mirror, no keyboard focus).
    */
   slashCandidates?: { slash: string; label: string }[];
+  /** Rows required by Composer-owned transient overlays such as slash suggestions. */
+  composerOverlayRows?: number;
+  /** Current Composer draft, used to restore input across renderer remounts. */
+  composerDraftText?: string;
   /**
    * D.13E Step 2 — ConfigPanel state (panel_list / panel_detail / undefined).
    * View-model maps this to ShellViewModel.configPanel via mapConfigPanelState.
@@ -204,23 +216,16 @@ export function createShellViewModel(
   );
   const setupNeeded = options.setupNeeded ?? false;
   const text = shellText[language];
+  const sourceOutputBlocks = options.transcriptSource?.cells.length
+    ? transcriptSourceToBlocks(options.transcriptSource)
+    : undefined;
+  const staticHistoryBlocks = sourceOutputBlocks ?? options.outputBlocks ?? [];
 
-  // Determine effective view mode early to decide block filtering and setupHint visibility
-  // P1-4 — commandPanelState 也是 task 触发条件：高级 slash 面板（/model、/index
-  // doctor、/memory review 等）即使没有 output block，也应进入 TaskLayout 渲染
-  // CommandPanel，而不是停留在 Home（CommandPanel 只在 TaskLayout 渲染）。
-  const hasCommandPanel = Boolean((context as { commandPanelState?: unknown }).commandPanelState);
+  // Determine effective view mode early to decide block filtering and setupHint visibility.
+  // Runtime no longer enters HomeLayout; an idle Ink shell is still a TaskLayout.
+  const requestedViewMode = options.viewMode === "home" ? "task" : options.viewMode;
   const effectiveViewMode: ShellViewMode =
-    options.viewMode ??
-    (options.submitted
-      ? "pending"
-      : options.outputBlocks?.length ||
-          options.activity ||
-          options.permission ||
-          options.denialFeedback ||
-          hasCommandPanel
-        ? "task"
-        : "home");
+    requestedViewMode ?? (options.submitted ? "pending" : "task");
 
   // D.13Q-UX Real Smoke Fix v2 — A. submitted=true 且 options.activity 缺省时，
   // 合成一条 thinking fallback activity，避免任务页首帧空白（submittedPending
@@ -242,17 +247,16 @@ export function createShellViewModel(
         ? deriveBackgroundActivityFallback(context, language)
         : undefined);
 
-  // setup-needed: only surface as setupHint in task/pending mode (not home first-screen).
+  // setup-needed: surface as setupHint in the task surface.
   // While the model setup flow is actively running (pendingModelSetup), the
   // composer's step label + step placeholder is the single source of truth, so
   // we suppress the redundant setupHint to keep the task region clean.
   const setupActiveFlow = Boolean(context.pendingModelSetup?.step);
-  const setupHint =
-    setupNeeded && effectiveViewMode !== "home" && !setupActiveFlow ? text.setupHint : undefined;
+  const setupHint = setupNeeded && !setupActiveFlow ? text.setupHint : undefined;
 
   // blocks 只保留 project-route、background summaries 和 output（最多 3 条）
   // 当 permission pending 时，不显示 output block 以避免权限提示双重显示
-  // Home 首屏不显示 background blocks
+  // setup 进行中时不显示 background blocks
   // setup 进行中时，background / 最近输出噪音被收敛，让用户专注配置流程
   const blocks: ProductBlockViewModel[] = [];
   const ctrlOExpandState = (
@@ -265,7 +269,16 @@ export function createShellViewModel(
   }
   const taskRuntimeSummary = undefined;
   if (!options.permission && !setupActiveFlow) {
-    const allOutputBlocks = options.outputBlocks ?? [];
+    // Plan A single ownership: in native scrollback mode, committed rows are
+    // physically removed from options.outputBlocks and live in the terminal's
+    // own scrollback. The Ink bottom frame must render ONLY the live
+    // (uncommitted) blocks, otherwise blocks that already scrolled into
+    // terminal history would keep piling into the fixed-height frame and
+    // compress after a few turns. transcriptSource stays canonical for the
+    // non-native staticHistory replay path and Ctrl+O expansion.
+    const allOutputBlocks = shouldUseNativeScrollbackTaskFrame()
+      ? (options.outputBlocks ?? [])
+      : (sourceOutputBlocks ?? options.outputBlocks ?? []);
     // D.13Q-UX Real Smoke Fix v3 — transcript 必须严格按 append 时间顺序排列。
     // 旧实现 [...failBlocks, ...keepBlocks, ...ephemeralBlocks] 会按类型重排，
     // 让失败块插队到旧消息上方、ephemeral 推到 keep 后面，破坏 user → assistant
@@ -293,8 +306,17 @@ export function createShellViewModel(
         ? ephemeralIndices.slice(0, ephemeralIndices.length - maxEphemeral)
         : [],
     );
+    const activeStreamingAssistant = context.streamingAssistant;
+    const activeStreamingAssistantId = activeStreamingAssistant?.id;
     const selectedBlocks = allOutputBlocks.filter((b, i) => {
       if (isEmptyAssistantStreamBlock(b)) return false;
+      if (
+        activeStreamingAssistantId &&
+        b.id === activeStreamingAssistantId &&
+        b.messageKind === "assistant_text"
+      ) {
+        return (b.fullText ?? "").trim().length > 0;
+      }
       if (dropEphemeralIndices.has(i)) return false;
       return true;
     });
@@ -389,48 +411,45 @@ export function createShellViewModel(
   // dim/warning 语义；setup-needed 时 model 显示 dim "--"，避免兜底 deepseek-chat
   // 流到主屏。
   const cyclePermHint = language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）";
-  const taskFooter: TaskFooterView | undefined =
-    viewMode === "home"
-      ? undefined
-      : buildTaskFooterView({
-          language,
-          width,
-          permissionModeLabel: formatPermissionModeLabel(context.permissionMode, language),
-          permissionMode: context.permissionMode,
-          cyclePermHint,
-          effectiveModel: context.model,
-          setupNeeded,
-          cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
-          indexStatus: context.index.status,
-          reasoningLevel: options.reasoningLevel,
-          reasoningSent: options.reasoningSent,
-          estimatedCostCny: sumFiniteNumbers(
-            (context.roleUsage ?? []).map((usage) => usage.estimatedCny),
-          ),
-          contextUsageLabel: context.cache.compactPressure
-            ? calculateContextPercentages(
-                Math.ceil(context.cache.compactPressure.estimatedChars / 4),
-                Math.ceil(context.cache.compactPressure.maxChars / 4),
-              ).label
-            : undefined,
-          isRemoteMode: context.remote?.enabled ?? false,
-        });
+  const taskFooter: TaskFooterView | undefined = buildTaskFooterView({
+    language,
+    width,
+    permissionModeLabel: formatPermissionModeLabel(context.permissionMode, language),
+    permissionMode: context.permissionMode,
+    cyclePermHint,
+    effectiveModel: context.model,
+    setupNeeded,
+    cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
+    indexStatus: context.index.status,
+    reasoningLevel: options.reasoningLevel,
+    reasoningSent: options.reasoningSent,
+    estimatedCostCny: sumFiniteNumbers((context.roleUsage ?? []).map((usage) => usage.estimatedCny)),
+    contextUsageLabel: context.cache.compactPressure
+      ? calculateContextPercentages(
+          Math.ceil(context.cache.compactPressure.estimatedChars / 4),
+          Math.ceil(context.cache.compactPressure.maxChars / 4),
+        ).label
+      : undefined,
+    isRemoteMode: context.remote?.enabled ?? false,
+  });
 
   // D.13E Step 2 — TaskSuggestionBar 数据。
-  // 仅在 task / pending 模式渲染，避免 home 首屏被 suggestion 噪音污染。
-  const failBlocksForSuggestions = fullFittedBlocks.filter(
-    (b) => b.status === "fail" || b.status === "blocked",
+  // 在 task / pending 模式渲染。
+  const hasProviderFailureOutputBlock = fullFittedBlocks.some((b) =>
+    isProviderFailureOutputBlock(b, language),
   );
-  const taskSuggestions: TaskSuggestion[] | undefined =
-    viewMode === "home"
-      ? undefined
-      : buildTaskSuggestions({
-          language,
-          setupHint,
-          failBlocks: failBlocksForSuggestions,
-          slashCandidates: options.slashCandidates,
-          // 修正 v3 #6：不在 SuggestionBar 暴露 14 panel 作为 configHints
-        }).filter((item) => !context.handledTaskSuggestionIds?.has(item.id));
+  const failBlocksForSuggestions = fullFittedBlocks.filter(
+    (b) =>
+      (b.status === "fail" || b.status === "blocked") &&
+      !isProviderFailureOutputBlock(b, language),
+  );
+  const taskSuggestions: TaskSuggestion[] | undefined = buildTaskSuggestions({
+    language,
+    setupHint,
+    failBlocks: failBlocksForSuggestions,
+    slashCandidates: options.slashCandidates,
+    // 修正 v3 #6：不在 SuggestionBar 暴露 14 panel 作为 configHints
+  }).filter((item) => !context.handledTaskSuggestionIds?.has(item.id));
   const taskSuggestionCursor =
     taskSuggestions && taskSuggestions.length > 0
       ? Math.max(
@@ -450,14 +469,12 @@ export function createShellViewModel(
   // 只负责渲染 title/sections/actions/detailsText。空状态时 commandPanel 为 undefined。
   const commandPanel: CommandPanelView | undefined =
     (context as { commandPanelState?: CommandPanelView }).commandPanelState ?? undefined;
-  // Main transcript scroll：home 模式不暴露；task/pending 模式默认吸底。
+  // Main transcript scroll：task/pending 模式默认吸底。
   const transcriptScroll: TranscriptScrollView | undefined =
-    effectiveViewMode === "home"
-      ? undefined
-      : ((context as { transcriptScrollState?: TranscriptScrollView }).transcriptScrollState ?? {
-          scrollOffset: 0,
-          stickToBottom: true,
-        });
+    (context as { transcriptScrollState?: TranscriptScrollView }).transcriptScrollState ?? {
+      scrollOffset: 0,
+      stickToBottom: true,
+    };
   updateUnseenTranscriptCount(context, effectiveViewMode, transcriptScroll, fullFittedBlocks.length);
   const agentProgressTree = buildAgentProgressTreeView(context);
   const taskListView = buildTaskListView(context);
@@ -470,11 +487,20 @@ export function createShellViewModel(
     context,
     options.backgroundSummaries ?? [],
   );
-  const unseenMessageCount =
-    effectiveViewMode === "home" || !visibleWorkState.scrollDetached
-      ? 0
-      : visibleWorkState.unseenCount;
-  const streamingAssistantText = selectStreamingAssistantText(context, fullFittedBlocks);
+  const unseenMessageCount = !visibleWorkState.scrollDetached ? 0 : visibleWorkState.unseenCount;
+  const permissionView = options.permission
+    ? withPermissionActions(options.permission, language, context)
+    : undefined;
+  const visibleActivity = permissionView ? undefined : effectiveActivity;
+  const streamingAssistantText = permissionView
+    ? undefined
+    : selectStreamingAssistantText(context, fullFittedBlocks);
+  const bottomPaneStatus = mapBottomPaneStatusToView(context, {
+    activity: visibleActivity,
+    permission: permissionView,
+    visibleWorkState,
+    suppressProviderFailure: hasProviderFailureOutputBlock,
+  });
 
   return {
     language,
@@ -491,10 +517,9 @@ export function createShellViewModel(
     brand: text.brand,
     homeVision,
     setupHint,
-    activity: effectiveActivity,
-    permission: options.permission
-      ? withPermissionActions(options.permission, language, context)
-      : undefined,
+    activity: visibleActivity,
+    bottomPaneStatus,
+    permission: permissionView,
     status: {
       project: text.project(projectName),
       model: text.model(truncateMiddle(context.model || "--", width <= 40 ? 12 : 22)),
@@ -511,17 +536,18 @@ export function createShellViewModel(
       placeholder: composerPlaceholder,
       taskPlaceholder: text.taskPlaceholder,
       submittedHint: text.submittedHint,
+      draftText: options.composerDraftText,
       masking: context.pendingModelSetup?.step === "apiKey",
       setupActive,
       setupStep: composerSetupStepLabel,
       busy: computeComposerBusy({
         submitted: options.submitted,
-        activity: effectiveActivity,
+        activity: visibleActivity,
         context,
       }),
       busyHint: computeComposerBusy({
         submitted: options.submitted,
-        activity: effectiveActivity,
+        activity: visibleActivity,
         context,
       })
         ? language === "en-US"
@@ -530,6 +556,9 @@ export function createShellViewModel(
         : undefined,
     },
     blocks: fullFittedBlocks,
+    staticHistoryBlocks,
+    staticHistoryReplayGeneration: (context as { transcriptStaticReplayGeneration?: number })
+      .transcriptStaticReplayGeneration,
     transcriptVirtualRange: undefined,
     streamingAssistantText,
     ctrlOExpand: ctrlOExpandState?.active
@@ -537,6 +566,7 @@ export function createShellViewModel(
       : { active: false },
     limitations: options.limitations ?? [],
     taskFooter,
+    composerOverlayRows: Math.max(0, Math.floor(options.composerOverlayRows ?? 0)),
     taskRuntimeSummary: taskRuntimeSummary ? fitBlockToWidth(taskRuntimeSummary, width) : undefined,
     agentProgressTree,
     taskListView,
@@ -596,16 +626,22 @@ function selectStreamingAssistantText(
   blocks: ProductBlockViewModel[],
 ): string | undefined {
   if (context.briefMode) return undefined;
-  const streaming = (context as { streamingAssistant?: { id: string; text: string } })
-    .streamingAssistant;
+  const streaming = context.streamingAssistant;
   if (!streaming) return undefined;
-  const text = streaming.text.trimEnd();
-  if (!text) return undefined;
+  const previewText = streaming.text || streaming.tailText || "";
   const matchingFinalBlock = blocks.find(
     (block) => block.id === streaming.id && block.messageKind === "assistant_text",
   );
-  if ((matchingFinalBlock?.fullText ?? "").trimEnd() === text) return undefined;
-  return streaming.text;
+  const committedText = matchingFinalBlock?.fullText || streaming.committedText || "";
+  const tailText =
+    committedText && previewText.startsWith(committedText)
+      ? previewText.slice(committedText.length)
+      : (streaming.tailText ?? previewText);
+  const text = tailText.trimEnd();
+  if (!text) return undefined;
+  if ((matchingFinalBlock?.fullText ?? "").trimEnd() === previewText.trimEnd()) return undefined;
+  if (committedText.trim().length > 0) return tailText;
+  return previewText;
 }
 
 function groupTranscriptToolBlocks(
@@ -744,7 +780,7 @@ function formatToolGroupSummary(
 
 function updateUnseenTranscriptCount(
   context: TuiContext,
-  viewMode: "home" | "task" | "pending",
+  viewMode: "task" | "pending",
   scroll: TranscriptScrollView | undefined,
   blockCount: number,
 ): void {
@@ -754,7 +790,7 @@ function updateUnseenTranscriptCount(
   };
   const previousCount = state.lastTranscriptBlockCount ?? blockCount;
   const delta = Math.max(0, blockCount - previousCount);
-  const detached = viewMode !== "home" && scroll?.stickToBottom === false;
+  const detached = scroll?.stickToBottom === false;
 
   if (!detached) {
     state.unseenMessageCount = 0;
@@ -953,6 +989,7 @@ function computeComposerBusy(args: {
     (context as { activeAbortController?: { signal?: { aborted?: boolean } } })
       .activeAbortController,
   );
+  if (context.pendingLocalApproval) return true;
   const phase = activity?.phase;
   if (
     phase === "thinking" ||
@@ -1331,6 +1368,151 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     totalBytes: (context as { requestActivityToolBytes?: number }).requestActivityToolBytes,
     thinkingLabel: thinkingLabels[phase],
   };
+}
+
+export function mapBottomPaneStatusToView(
+  context: TuiContext,
+  input: {
+    activity?: TaskActivityView;
+    permission?: TaskPermissionView;
+    visibleWorkState?: VisibleWorkState;
+    suppressProviderFailure?: boolean;
+  } = {},
+): BottomPaneStatusView | undefined {
+  const language = context.language;
+  const isEn = language === "en-US";
+  const phase = (context as { requestActivityPhase?: string }).requestActivityPhase;
+
+  if (input.permission) {
+    return undefined;
+  }
+
+  if (phase === "verifying_final_answer") {
+    return {
+      kind: "verifying",
+      source: "final_gate",
+      text: isEn ? "Verifying final answer…" : "验证最终回答…",
+      nextAction: isEn ? "Keeping the draft out of scrollback until it is final." : "最终文本确认前不会写入 scrollback。",
+      elapsed: input.activity?.elapsed,
+    };
+  }
+
+  const compactFailure = context.cache?.compactFailure;
+  const compactCooldownUntil = Math.max(
+    context.cache?.compactCooldownUntil ?? 0,
+    context.cache?.deepCompactCooldownUntil ?? 0,
+    compactFailure ? Date.parse(compactFailure.cooldownUntil) || 0 : 0,
+  );
+  if (compactFailure && (compactFailure.blocked || compactCooldownUntil > Date.now())) {
+    return {
+      kind: "blocked",
+      source: "resource",
+      text: isEn ? "Context budget blocked" : "上下文预算受限",
+      reason: compactFailure.reason,
+      nextAction: isEn
+        ? "Retry after cooldown or reduce context pressure."
+        : "等待冷却后重试，或降低上下文压力。",
+    };
+  }
+
+  const fallback = context.lastProviderFallbackAttempt;
+  if (fallback?.status === "attempted" || fallback?.status === "failed") {
+    return {
+      kind: fallback.status === "failed" ? "failed" : "blocked",
+      source: "provider",
+      text: isEn ? "Provider fallback active" : "Provider fallback 生效中",
+      reason: fallback.summary,
+      nextAction: isEn ? "Use /model doctor if it does not recover." : "若未恢复，请用 /model doctor 排查。",
+      elapsed: input.activity?.elapsed,
+    };
+  }
+
+  const providerFailure = context.lastProviderFailure;
+  if (providerFailure && !input.activity && !input.suppressProviderFailure) {
+    const rateLimited = providerFailure.code === "PROVIDER_RATE_LIMITED";
+    return {
+      kind: rateLimited ? "blocked" : "failed",
+      source: "provider",
+      text: isEn ? "Provider request failed" : "Provider 请求失败",
+      reason: providerFailure.summary,
+      nextAction: isEn ? "Run /model doctor or retry after cooldown." : "运行 /model doctor，或冷却后重试。",
+    };
+  }
+
+  if (input.activity) {
+    if (input.activity.phase === "error") {
+      return {
+        kind: "failed",
+        source: input.activity.toolName ? "tool" : "provider",
+        text: input.activity.text,
+        nextAction: isEn ? "Retry or inspect details." : "请重试或查看详情。",
+      };
+    }
+    if (input.activity.phase === "completed") {
+      return {
+        kind: "completed_partial",
+        source: "request",
+        text: input.activity.text,
+        nextAction: isEn
+          ? "Completion is visible; verification evidence is tracked separately."
+          : "结果已可见；验证证据单独追踪。",
+      };
+    }
+    return {
+      kind: "running",
+      source: input.activity.phase === "tool_running" ? "tool" : "request",
+      text: input.activity.text,
+      reason:
+        input.activity.phase === "tool_running" && input.activity.toolName
+          ? `${input.activity.toolName}${input.activity.toolTarget ? `(${input.activity.toolTarget})` : ""}`
+          : input.activity.thinkingLabel,
+      elapsed: input.activity.elapsed,
+    };
+  }
+
+  const work = input.visibleWorkState;
+  if (work && (work.agentsRunning > 0 || work.explicitWorkflowRunning || work.multiAgentWorkflowRunning)) {
+    return {
+      kind: "running",
+      source: "agent_workflow",
+      text:
+        work.agentsRunning > 0
+          ? isEn
+            ? `${work.agentsRunning} agent(s) running`
+            : `${work.agentsRunning} 个智能体运行中`
+          : isEn
+            ? "Workflow running"
+            : "工作流运行中",
+      nextAction: isEn ? "Use /agents or /workflows for details." : "可用 /agents 或 /workflows 查看详情。",
+    };
+  }
+
+  const blockedBackground = (context.backgroundTasks ?? []).find((task) =>
+    isActionableBlockedBackgroundTask(task, context.dismissedBackgroundTaskIds),
+  );
+  if (blockedBackground) {
+    return {
+      kind: "blocked",
+      source: "resource",
+      text: isEn ? "Background work is blocked" : "后台任务受阻",
+      reason: blockedBackground.userVisibleSummary ?? blockedBackground.result,
+      nextAction: blockedBackground.nextAction ?? (isEn ? "Use /background for details." : "用 /background 查看详情。"),
+    };
+  }
+
+  return undefined;
+}
+
+function isActionableBlockedBackgroundTask(
+  task: BackgroundTaskState,
+  dismissedTaskIds?: Set<string>,
+): boolean {
+  if (dismissedTaskIds?.has(task.id)) return false;
+  if (task.status === "blocked" || task.status === "paused") return true;
+  if (task.status !== "running") return false;
+  return /resource\/concurrency cap|并发上限/iu.test(
+    `${task.result ?? ""} ${task.nextAction ?? ""} ${task.userVisibleSummary ?? ""}`,
+  );
 }
 
 /**
@@ -1864,6 +2046,15 @@ function isKnownSlashCommand(command: string): boolean {
   if (KNOWN_SLASH_COMMANDS.has(command)) return true;
   const head = command.split(/\s+/, 1)[0];
   return Boolean(head && KNOWN_SLASH_COMMANDS.has(head));
+}
+
+function isProviderFailureOutputBlock(block: ProductBlockViewModel, language: Language): boolean {
+  if (block.messageKind !== "tool_result_error") return false;
+  const title = block.title.trim().toLowerCase();
+  if (language === "en-US") {
+    return title === "model request failed" || title === "provider request failed";
+  }
+  return title === "模型请求失败" || title === "provider 请求失败";
 }
 
 function buildTaskSuggestions(inputs: {

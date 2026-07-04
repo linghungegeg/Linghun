@@ -31,10 +31,9 @@ describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
   it("model-tool permission prompt writeLine is gated behind !isInkSession", () => {
     // The formatModelToolPermissionPrompt writeLine must be reachable only when
     // NOT an ink session; ink mode renders the PermissionPanel instead.
-    expect(modelToolSrc).toContain("if (!(context.isInkSession && isAskWithPanel)) {");
+    expect(modelToolSrc).toContain("if (!context.isInkSession) {");
     // Guard precedes the writeLine(formatModelToolPermissionPrompt) call in the model-tool path.
-    // We need to find the occurrence that has isAskWithPanel in context.
-    const guardIdx = modelToolSrc.indexOf("if (!(context.isInkSession && isAskWithPanel)) {");
+    const guardIdx = modelToolSrc.indexOf("if (!context.isInkSession) {");
     expect(guardIdx).toBeGreaterThan(0);
     // Find the next formatModelToolPermissionPrompt after the guard.
     const promptIdx = modelToolSrc.indexOf(

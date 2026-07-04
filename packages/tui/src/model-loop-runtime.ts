@@ -637,24 +637,8 @@ export function createModelToolDefinitionsForTools(
 export function createModelToolDefinitionsForReportGuard(
   guard: ReportWriteGuard | undefined,
 ): ModelToolDefinition[] {
-  if (!guard || guard.completed) {
-    return createModelToolDefinitions();
-  }
-  if (!guard.evidenceRead) {
-    return createModelToolDefinitionsForTools([
-      builtInTools.Read,
-      builtInTools.Grep,
-      builtInTools.Glob,
-    ]);
-  }
-  if (guard.nonWriteToolRounds < 1) {
-    return createModelToolDefinitionsForTools(
-      (Object.values(builtInTools) as (typeof builtInTools)[ToolName][]).filter(
-        (tool) => tool.name !== "Bash",
-      ),
-    );
-  }
-  return createModelToolDefinitionsForTools([builtInTools.Write]);
+  void guard;
+  return createModelToolDefinitions();
 }
 
 // ---------------------------------------------------------------------------
@@ -1479,20 +1463,39 @@ export function buildDowngradedFinalAnswer(
 ): string {
   const missing =
     Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching evidence";
-  const kinds = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
+  const needed = formatUserFacingClaimKinds(verdict.unsupportedKinds, language);
   return language === "en-US"
     ? [
         "I cannot provide a verified final claim from the current evidence.",
         `Missing evidence: ${missing}.`,
-        `Blocked claim types: ${kinds}.`,
+        `Evidence needed: ${needed}.`,
         "I can continue by gathering evidence with tools, or give a limited answer that avoids verified-completion claims.",
       ].join("\n")
     : [
         "当前证据不足，不能给出已验证的最终结论。",
         `缺少证据：${missing}。`,
-        `被拦截的声明类型：${kinds}。`,
+        `需要补齐：${needed}。`,
         "我可以继续调用工具补齐证据，或只给出不包含已验证完成声明的有限结论。",
       ].join("\n");
+}
+
+function formatUserFacingClaimKinds(kinds: string[], language: Language): string {
+  const labels = new Set<string>();
+  for (const kind of kinds) {
+    if (/completion|pass|test|typecheck|build|lint|verification|verified/iu.test(kind)) {
+      labels.add(language === "en-US" ? "completion or verification claim" : "完成或验证声明");
+    } else if (/artifact|file|report|write/iu.test(kind)) {
+      labels.add(language === "en-US" ? "artifact or file claim" : "产物或文件声明");
+    } else if (/architecture|completeness|closure|drift/iu.test(kind)) {
+      labels.add(language === "en-US" ? "architecture or closure claim" : "架构或闭合声明");
+    } else if (/service|runtime|health|port/iu.test(kind)) {
+      labels.add(language === "en-US" ? "service runtime claim" : "服务运行声明");
+    } else {
+      labels.add(language === "en-US" ? "unsupported final claim" : "未受证据支持的最终声明");
+    }
+  }
+  return Array.from(labels).join(language === "en-US" ? ", " : "、") ||
+    (language === "en-US" ? "unsupported final claim" : "未受证据支持的最终声明");
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,18 +1610,18 @@ export function buildExtendedDowngradedFinalAnswer(
 ): string {
   const missing =
     Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching support";
-  const kinds = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
+  const needed = formatUserFacingClaimKinds(verdict.unsupportedKinds, language);
   return language === "en-US"
     ? [
         "I cannot provide a verified architecture or completeness claim from the current evidence.",
         `Missing support: ${missing}.`,
-        `Blocked claim types: ${kinds}.`,
+        `Evidence needed: ${needed}.`,
         "I can continue by gathering support, or give a limited answer that avoids closure claims.",
       ].join("\n")
     : [
         "当前证据不足，不能给出已验证的架构或完整性结论。",
         `缺少支撑：${missing}。`,
-        `被拦截的声明类型：${kinds}。`,
+        `需要补齐：${needed}。`,
         "我可以继续补齐支撑，或只给出不包含闭合性声明的有限结论。",
       ].join("\n");
 }

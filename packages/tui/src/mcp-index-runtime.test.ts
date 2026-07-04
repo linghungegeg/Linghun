@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
@@ -7,6 +7,7 @@ import { createIndexState } from "./index-runtime.js";
 import { summarizeIndexResult } from "./index-result-presenter.js";
 import {
   configureMcpIndexRuntime,
+  findBundledCodebaseMemoryBinary,
   refreshIndexStatus,
   isSupportiveIndexEvidence,
   runIndexRepository,
@@ -87,7 +88,58 @@ function createIndexContext(projectPath: string, mockPath?: string, enabled = tr
   };
 }
 
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
 describe("mcp-index-runtime", () => {
+  test("findBundledCodebaseMemoryBinary resolves platform optional package binaries", async () => {
+    const packageRoot = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-pkg-"));
+    const platformArch = "win32-x64";
+    const binary = join(
+      packageRoot,
+      "bundled",
+      "codebase-memory",
+      platformArch,
+      "codebase-memory-mcp.exe",
+    );
+    await mkdir(join(packageRoot, "bundled", "codebase-memory", platformArch), { recursive: true });
+    await writeFile(binary, "mock binary", "utf8");
+    await chmod(binary, 0o755);
+    const previousPlatform = process.env.LINGHUN_CODEBASE_MEMORY_PLATFORM_ARCH_TEST;
+    const previousBundledDir = process.env.LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR;
+    const previousCliBundledRoot = process.env.LINGHUN_CLI_BUNDLED_ROOT;
+    process.env.LINGHUN_CODEBASE_MEMORY_PLATFORM_ARCH_TEST = platformArch;
+    delete process.env.LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR;
+    delete process.env.LINGHUN_CLI_BUNDLED_ROOT;
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-test",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolveCodebaseMemoryPackageRoot: (packageName) =>
+        packageName === "@linghun/codebase-memory-win32-x64" ? packageRoot : undefined,
+    });
+
+    try {
+      const bundled = await findBundledCodebaseMemoryBinary();
+
+      expect(bundled?.detailPath).toBe(binary);
+      expect(bundled?.command).toBe(binary);
+    } finally {
+      restoreEnv("LINGHUN_CODEBASE_MEMORY_PLATFORM_ARCH_TEST", previousPlatform);
+      restoreEnv("LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR", previousBundledDir);
+      restoreEnv("LINGHUN_CLI_BUNDLED_ROOT", previousCliBundledRoot);
+    }
+  });
+
   test("refreshIndexStatus resolves real project status when settings enable codebase-memory and artifact exists", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-index-ready-"));
     await writeLocalArtifact(projectPath, { project: "F-Linghun", nodes: 5, edges: 4 });

@@ -156,21 +156,22 @@ export function formatBackgroundDetails(
   projectPath?: string,
 ): string {
   const progress = task.progress ? formatTaskProgress(task) : "none";
+  const fallbackTitle = language === "en-US" ? "Background task" : "后台任务";
   return [
-    language === "en-US" ? `Background ${task.id}` : `Background ${task.id}`,
-    `- kind: ${task.kind}`,
-    `- title: ${truncateLine(task.title, 72)}`,
-    `- status: ${task.status}; result ${task.result ?? "-"}`,
-    `- current step: ${truncateLine(task.currentStep ?? "-", 72)}`,
+    language === "en-US" ? `Background ${safeTaskId(task)}` : `Background ${safeTaskId(task)}`,
+    `- kind: ${safeTaskKind(task)}`,
+    `- title: ${truncateLine(safeText(task.title, fallbackTitle), 72)}`,
+    `- status: ${safeTaskStatus(task)}; result ${safeText(task.result, "-")}`,
+    `- current step: ${truncateLine(safeText(task.currentStep, "-"), 72)}`,
     `- progress: ${progress}`,
     `- why stale/blocked: ${formatBackgroundReason(task, language)}`,
-    `- resume/cancel: ${truncateLine(formatTaskText(task, task.nextAction ?? "-", projectPath), 96)}`,
+    `- resume/cancel: ${truncateLine(formatTaskText(task, task.nextAction, projectPath), 96)}`,
     `- summary: ${truncateLine(formatTaskText(task, task.userVisibleSummary, projectPath), 120)}`,
     `- log path: ${formatDisplayPath(task.logPath, projectPath)}`,
     `- output path: ${formatDisplayPath(task.outputPath, projectPath)}`,
-    `- has output: ${task.hasOutput}`,
-    `- started at: ${task.startedAt}`,
-    `- updated at: ${task.updatedAt}`,
+    `- has output: ${safeText(task.hasOutput, "false")}`,
+    `- started at: ${safeText(task.startedAt, "-")}`,
+    `- updated at: ${safeText(task.updatedAt, "-")}`,
   ].join("\n");
 }
 
@@ -182,16 +183,16 @@ export function formatBackgroundOutputDetails(
   const location = task.outputPath ?? task.logPath;
   if (!location) {
     return language === "en-US"
-      ? `Background ${task.id} has no output path yet.`
-      : `Background ${task.id} 尚无输出路径。`;
+      ? `Background ${safeTaskId(task)} has no output path yet.`
+      : `Background ${safeTaskId(task)} 尚无输出路径。`;
   }
   return [
-    `Background output ${task.id}`,
+    `Background output ${safeTaskId(task)}`,
     `- path: ${formatDisplayPath(location, projectPath)}`,
-    `- hasOutput: ${task.hasOutput}`,
-    `- status: ${task.status}`,
+    `- hasOutput: ${safeText(task.hasOutput, "false")}`,
+    `- status: ${safeTaskStatus(task)}`,
     `- summary: ${formatTaskText(task, task.userVisibleSummary, projectPath)}`,
-    `- slices: /details output ${task.id} --tail 40 | --grep <pattern> --context 2 | --errors`,
+    `- slices: /details output ${safeTaskId(task)} --tail 40 | --grep <pattern> --context 2 | --errors`,
   ].join("\n");
 }
 
@@ -202,10 +203,10 @@ export function formatBackgroundTask(task: BackgroundTaskState, language: Langua
     cleanPanelText(task.title, language === "en-US" ? "Background task" : "后台任务"),
     28,
   );
-  const step = truncateLine(cleanPanelText(task.currentStep ?? "-", "-"), 30);
+  const step = truncateLine(cleanPanelText(task.currentStep, "-"), 30);
   return language === "en-US"
-    ? `[background] ${title} · ${task.status} · ${step}${progress} · elapsed ${elapsed}`
-    : `[后台] ${title} · ${task.status} · ${step}${progress} · 耗时 ${elapsed}`;
+    ? `[background] ${title} · ${safeTaskStatus(task)} · ${step}${progress} · elapsed ${elapsed}`
+    : `[后台] ${title} · ${safeTaskStatus(task)} · ${step}${progress} · 耗时 ${elapsed}`;
 }
 
 export function formatBackgroundTaskPanelRow(
@@ -213,12 +214,12 @@ export function formatBackgroundTaskPanelRow(
   language: Language,
 ): string {
   const progress = formatPanelProgress(task);
-  const step = cleanPanelText(task.currentStep ?? "-", "-");
-  const nextAction = cleanPanelText(formatTaskText(task, task.nextAction ?? "-", undefined), "-");
+  const step = cleanPanelText(task.currentStep, "-");
+  const nextAction = cleanPanelText(formatTaskText(task, task.nextAction, undefined), "-");
   const title = cleanPanelText(task.title, language === "en-US" ? "Background task" : "后台任务");
   return [
     truncateLine(title, 28),
-    normalizePanelStatus(task.status, language),
+    normalizePanelStatus(safeTaskStatus(task), language),
     progress,
     truncateLine(step, 28),
     truncateLine(nextAction, 42),
@@ -233,12 +234,12 @@ export function formatBackgroundTaskPanelDetails(
   const progress = formatPanelProgress(task);
   return [
     cleanPanelText(task.title, language === "en-US" ? "Background task" : "后台任务"),
-    `- status: ${normalizePanelStatus(task.status, language)}`,
+    `- status: ${normalizePanelStatus(safeTaskStatus(task), language)}`,
     `- progress: ${progress}`,
-    `- current step: ${cleanPanelText(task.currentStep ?? "-", "-")}`,
-    `- next action: ${cleanPanelText(formatTaskText(task, task.nextAction ?? "-", projectPath), "-", true)}`,
-    `- details: /details background ${task.id}`,
-    task.hasOutput ? `- output: /details output ${task.id}` : undefined,
+    `- current step: ${cleanPanelText(task.currentStep, "-")}`,
+    `- next action: ${cleanPanelText(formatTaskText(task, task.nextAction, projectPath), "-", true)}`,
+    `- details: /details background ${safeTaskId(task)}`,
+    task.hasOutput ? `- output: /details output ${safeTaskId(task)}` : undefined,
     task.logPath ? `- log: ${formatDisplayPath(task.logPath, projectPath)}` : undefined,
   ]
     .filter((line): line is string => Boolean(line))
@@ -276,8 +277,8 @@ function formatBackgroundReason(task: BackgroundTaskState, language: Language): 
   return language === "en-US" ? "not stale" : "未 stale";
 }
 
-function truncateLine(value: string, max: number): string {
-  const normalized = value.replace(/\s+/gu, " ").trim();
+function truncateLine(value: unknown, max: number): string {
+  const normalized = safeText(value, "-").replace(/\s+/gu, " ").trim();
   if (normalized.length <= max) return normalized;
   if (max <= 1) return "…";
   return `${normalized.slice(0, max - 1)}…`;
@@ -295,7 +296,7 @@ function formatTaskProgress(task: BackgroundTaskState): string {
   return task.progress.label ? `${ratio} ${task.progress.label}` : ratio;
 }
 
-function normalizePanelStatus(status: BackgroundTaskState["status"], language: Language): string {
+function normalizePanelStatus(status: BackgroundTaskState["status"] | string, language: Language): string {
   const isEn = language === "en-US";
   if (status === "paused") return isEn ? "sleeping" : "sleeping";
   if (status === "blocked") return isEn ? "blocked" : "阻塞";
@@ -309,10 +310,10 @@ function normalizePanelStatus(status: BackgroundTaskState["status"], language: L
 
 function formatTaskText(
   task: BackgroundTaskState,
-  value: string,
+  value: unknown,
   projectPath: string | undefined,
 ): string {
-  const sanitized = sanitizeDisplayPaths(value, projectPath);
+  const sanitized = sanitizeDisplayPaths(safeText(value, "-"), projectPath);
   return task.kind === "job" ? normalizeJobPassWording(sanitized) : sanitized;
 }
 
@@ -330,8 +331,8 @@ function normalizeJobPassWording(value: string): string {
     .replace(/\bPASS evidence\b/giu, "evidence that verification passed");
 }
 
-function cleanPanelText(value: string, fallback: string, preserveRefs = false): string {
-  let cleaned = value
+function cleanPanelText(value: unknown, fallback: string, preserveRefs = false): string {
+  let cleaned = safeText(value, fallback)
     .replace(
       /\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|raw tool result|endpoint|runner=|evidenceRefs?|planId|runId|workflowId|forkId|threadId|system_event|provider abort|provider_abort|abort signal)\b/giu,
       "",
@@ -353,4 +354,22 @@ function cleanPanelText(value: string, fallback: string, preserveRefs = false): 
   cleaned = cleaned.replace(/\s+/gu, " ").trim();
   if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;
   return cleaned;
+}
+
+function safeText(value: unknown, fallback: string): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
+}
+
+function safeTaskId(task: BackgroundTaskState): string {
+  return cleanPanelText((task as unknown as { id?: unknown }).id, "background-task", true);
+}
+
+function safeTaskKind(task: BackgroundTaskState): string {
+  return cleanPanelText((task as unknown as { kind?: unknown }).kind, "background", true);
+}
+
+function safeTaskStatus(task: BackgroundTaskState): BackgroundTaskState["status"] | string {
+  return safeText((task as unknown as { status?: unknown }).status, "blocked");
 }

@@ -1,6 +1,6 @@
 {
   "name": "@linghun/tui",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -30,6 +30,12 @@
     "cli-highlight": "^2.1.11",
     "marked": "^18.0.5",
     "react": "^19.2.6"
+  },
+  "optionalDependencies": {
+    "@linghun/codebase-memory-darwin-arm64": "0.1.0",
+    "@linghun/codebase-memory-darwin-x64": "0.1.0",
+    "@linghun/codebase-memory-linux-x64": "0.1.0",
+    "@linghun/codebase-memory-win32-x64": "0.1.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.15"

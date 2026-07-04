@@ -31,6 +31,52 @@ export type StatusFooterProps = {
   gitBranch?: string;
 };
 
+export type StatusFooterSegment = {
+  key: string;
+  text: string;
+  tone?: "warning" | "dim" | "default";
+  priority: number;
+};
+
+export function statusFooterCollapseMode(width: number): "wide" | "narrow" | "minimal" {
+  if (width >= 80) return "wide";
+  if (width >= 48) return "narrow";
+  return "minimal";
+}
+
+export function selectStatusFooterSegments(input: {
+  footer: TaskFooterView;
+  width: number;
+  modelDim?: boolean;
+  cacheTone?: "default" | "warning" | "dim";
+  gitBranch?: string;
+}): StatusFooterSegment[] {
+  const segments: StatusFooterSegment[] = [
+    { key: "model", text: input.footer.model, tone: input.modelDim ? "dim" : "default", priority: 2 },
+    { key: "index", text: input.footer.index, tone: "default", priority: 3 },
+    {
+      key: "cache",
+      text: input.footer.cache,
+      tone: input.cacheTone === "warning" ? "warning" : input.cacheTone === "dim" ? "dim" : "default",
+      priority: 4,
+    },
+  ];
+  if (input.footer.isRemoteMode) {
+    segments.push({ key: "remote", text: "remote", tone: "dim", priority: 5 });
+  }
+  if (input.gitBranch) segments.push({ key: "branch", text: `⎇ ${input.gitBranch}`, tone: "dim", priority: 6 });
+  if (input.footer.contextUsage) {
+    segments.push({ key: "context", text: input.footer.contextUsage, tone: "dim", priority: 7 });
+  }
+  if (input.footer.reasoning) segments.push({ key: "reasoning", text: input.footer.reasoning, priority: 8 });
+
+  const mode = statusFooterCollapseMode(input.width);
+  const maxPriority = mode === "wide" ? 9 : mode === "narrow" ? 4 : 3;
+  return segments
+    .filter((segment) => segment.priority <= maxPriority)
+    .sort((a, b) => a.priority - b.priority);
+}
+
 export function StatusFooter({
   footer,
   theme,
@@ -41,34 +87,15 @@ export function StatusFooter({
   gitBranch,
 }: StatusFooterProps): React.ReactNode {
   void language;
-  // R1-8: 默认保留 权限模式 + 模型 + 缓存 + 索引 + 推理；费用估算避免误导，移入详情入口。
-  const rightSegments: { key: string; text: string; tone?: "warning" | "dim" | "default"; priority: number }[] = [
-    { key: "model", text: footer.model, tone: modelDim ? "dim" : "default", priority: 2 },
-    {
-      key: "cache",
-      text: footer.cache,
-      tone: cacheTone === "warning" ? "warning" : cacheTone === "dim" ? "dim" : "default",
-      priority: 4,
-    },
-    { key: "index", text: footer.index, tone: "default", priority: 3 },
-  ];
-  if (gitBranch) rightSegments.push({ key: "branch", text: `⎇ ${gitBranch}`, tone: "dim", priority: 5 });
-  if (footer.contextUsage)
-    rightSegments.push({ key: "context", text: footer.contextUsage, tone: "dim", priority: 6 });
-  if (footer.reasoning) rightSegments.push({ key: "reasoning", text: footer.reasoning, priority: 7 });
+  const rightSegments = selectStatusFooterSegments({
+    footer,
+    width,
+    modelDim,
+    cacheTone,
+    gitBranch,
+  });
 
-  // Narrow (<80 cols): filter to high-priority segments only (mode > model > index).
-  const narrow = width < 80;
-  const remoteSegment = footer.isRemoteMode
-    ? [{ key: "remote", text: "● remote", tone: "dim" as const, priority: 1 }]
-    : [];
-
-  // #8 narrow-screen priority: show only priority ≤ 3 (mode, model, index)
-  const visibleRight = narrow
-    ? rightSegments.filter((seg) => seg.priority <= 3)
-    : rightSegments;
-
-  if (narrow) {
+  if (statusFooterCollapseMode(width) !== "wide") {
     return (
       <Box flexDirection="column" width={width} paddingX={2} paddingTop={1}>
         <Text>
@@ -80,16 +107,10 @@ export function StatusFooter({
           </Text>
         </Text>
         <Text>
-          {remoteSegment.map((seg, idx) => (
+          {rightSegments.map((seg, idx) => (
             <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
               {idx > 0 ? <Text dimColor> · </Text> : null}
-              {seg.text}
-            </Text>
-          ))}
-          {visibleRight.map((seg, idx) => (
-            <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
-              {remoteSegment.length > 0 || idx > 0 ? <Text dimColor> · </Text> : null}
-              {seg.text}
+              {fitText(seg.text, Math.max(6, Math.floor((width - 4) / rightSegments.length) - 3))}
             </Text>
           ))}
         </Text>
@@ -99,8 +120,7 @@ export function StatusFooter({
 
   // Wide (≥80 cols): two-line — StatusLine on top, metadata row below.
   const hasStatusLine = !!(footer.workspaceStatus || footer.runtimeStatus);
-  const allRightSegments = [...remoteSegment, ...visibleRight];
-  const reservedRight = allRightSegments.reduce(
+  const reservedRight = rightSegments.reduce(
     (acc, seg, idx) => acc + (seg.text?.length ?? 0) + (idx > 0 ? 3 : 0),
     0,
   );
@@ -137,7 +157,7 @@ export function StatusFooter({
         </Box>
         <Box flexShrink={0}>
           <Text>
-            {allRightSegments.map((seg, idx) => (
+            {rightSegments.map((seg, idx) => (
               <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
                 {idx > 0 ? <Text dimColor> · </Text> : null}
                 {seg.text}

@@ -669,7 +669,7 @@ import {
   createCommandBlock,
   createUserTextBlock,
 } from "./shell/models/command-transcript-presenter.js";
-import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
+import { writePlainShell } from "./shell/plain-renderer.js";
 import type {
   BackgroundTaskSummary,
   ProductBlockViewModel,

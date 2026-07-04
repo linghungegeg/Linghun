@@ -139,6 +139,10 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
   return "模型请求未完成。可运行 /model doctor 查看详情后重试。";
 }
 
+export function formatProviderFailureTitle(language: Language): string {
+  return language === "en-US" ? "model request failed" : "模型请求失败";
+}
+
 export function formatProviderFallbackAttemptSummary(
   input: {
     fromProvider: string;
@@ -192,8 +196,8 @@ export function formatProviderThinkingOnlyResponsePrimary(language: Language): s
 
 export function formatReportEvidenceRequired(language: Language): string {
   return language === "en-US"
-    ? "Read key project evidence before writing the report. Mark missing README/package/config items as unconfirmed in the report."
-    : "写报告前需要先读取关键项目证据；未发现 README/package/config 时，请在报告中标记为未确认。";
+    ? "If the report depends on project facts, inspect the relevant evidence and mark missing README/package/config items as unconfirmed."
+    : "如果报告依赖项目事实，请检查相关证据；未发现 README/package/config 时，请在报告中标记为未确认。";
 }
 
 export function formatReportIncompletePrimary(path: string, language: Language): string {

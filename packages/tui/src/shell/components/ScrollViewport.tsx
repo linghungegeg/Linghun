@@ -74,7 +74,7 @@ export function TranscriptViewport({
     const viewportWidth = viewportNode.getComputedWidth();
     const measuredContentHeight = contentNode.getComputedHeight();
     const contentHeight = virtualRange?.estimatedContentHeight ?? measuredContentHeight;
-    const dimKey = `${viewportHeight}:${contentHeight}`;
+    const dimKey = `${viewportWidth}:${viewportHeight}:${contentHeight}`;
     if (dimKey === lastDimKey.current) return;
     lastDimKey.current = dimKey;
     const nextMax = Math.max(0, Math.floor(contentHeight - viewportHeight));
@@ -116,11 +116,14 @@ export function TranscriptViewport({
     virtualRange && virtualRange.estimatedContentHeight > 0
       ? marginTop + virtualRange.topSpacer
       : marginTop;
+  const justifyContent = scroll?.stickToBottom === false ? "flex-start" : "flex-end";
 
   return (
     <Box ref={viewportRef} flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
-      <Box ref={contentRef} flexDirection="column" flexShrink={0} marginTop={contentMarginTop}>
-        {children}
+      <Box flexDirection="column" flexGrow={1} minHeight={0} justifyContent={justifyContent}>
+        <Box ref={contentRef} flexDirection="column" flexShrink={0} marginTop={contentMarginTop}>
+          {children}
+        </Box>
       </Box>
     </Box>
   );

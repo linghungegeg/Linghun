@@ -1,15 +1,14 @@
 import type { Writable } from "node:stream";
+import { isDiffFenceLanguage, renderPlainDiffLines } from "./diff-renderer.js";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
-import { composerMaxWidth, displayWidth, taskComposerMaxWidth, wrapText } from "./text-utils.js";
-import { getStatusMarker } from "./theme.js";
+import { displayWidth, taskComposerMaxWidth, wrapText } from "./text-utils.js";
+import { getStatusMarker, createShellTheme } from "./theme.js";
+import type { ShellTheme } from "./theme.js";
 import type { ProductBlockStatus, ProductBlockViewModel, ShellViewModel } from "./types.js";
 
 export function renderPlainShell(view: ShellViewModel, capability?: TerminalCapability): string {
   const cap = capability ?? detectTerminalCapability();
-  if (view.viewMode === "task" || view.viewMode === "pending") {
-    return renderPlainTask(view, cap);
-  }
-  return renderPlainHome(view, cap);
+  return renderPlainTask(view, cap);
 }
 
 export function writePlainShell(output: Writable, view: ShellViewModel): void {
@@ -117,7 +116,7 @@ function messageBody(
   return (block.fullText ?? block.summary ?? "").trim();
 }
 
-function renderPlainMarkdownLines(
+export function renderPlainMarkdownLines(
   text: string,
   noColor: boolean,
   options: {
@@ -125,12 +124,14 @@ function renderPlainMarkdownLines(
     diagnostic?: boolean;
     error?: boolean;
     wrapWidth?: number;
+    theme?: ShellTheme;
   } = {},
 ): string[] {
   const lines = text.replace(/\r/g, "").split("\n");
   const out: string[] = [];
   let inCode = false;
   let codeLang: string | undefined;
+  let codeLines: string[] = [];
   const wrapWidth = Math.max(8, options.wrapWidth ?? 100);
   const applyTone = (line: string): string => {
     if (options.error) return colorRed(line, noColor);
@@ -138,115 +139,141 @@ function renderPlainMarkdownLines(
     if (options.dimAll) return dim(line, noColor);
     return line;
   };
+  const flushCodeBlock = (): void => {
+    if (isDiffFenceLanguage(codeLang)) {
+      out.push(...renderPlainDiffLines(codeLines, { noColor, wrapWidth, theme: options.theme }));
+      return;
+    }
+    for (const codeLine of codeLines) {
+      for (const wrapped of wrapText(
+        codeLine.length === 0 ? " " : codeLine,
+        Math.max(8, wrapWidth - 4),
+      )) {
+        out.push(`${dim("  | ", noColor)}${dim(wrapped, noColor)}`);
+      }
+    }
+  };
 
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i] ?? "";
     const fence = raw.match(/^\s*```\s*([A-Za-z0-9_+-]*)\s*$/u);
     if (fence) {
       if (inCode) {
+        flushCodeBlock();
         out.push(dim("  +", noColor));
         inCode = false;
         codeLang = undefined;
+        codeLines = [];
       } else {
         inCode = true;
         codeLang = fence[1] || undefined;
+        codeLines = [];
         out.push(dim(`  +${codeLang ? ` ${codeLang}` : ""}`, noColor));
       }
       continue;
     }
     if (!inCode) {
+      const table = readMarkdownTable(lines, i);
+      if (table) {
+        out.push(...renderMarkdownTableLines(table, noColor).map(applyTone));
+        i = table.endIndex;
+        continue;
+      }
       out.push(...wrapText(raw, wrapWidth).map(applyTone));
       continue;
     }
 
-    const isDiff = codeLang === "diff" || codeLang === "patch";
-    for (const wrapped of wrapText(raw.length === 0 ? " " : raw, Math.max(8, wrapWidth - 4))) {
-      const wrappedBody =
-        isDiff && wrapped.startsWith("+") && !wrapped.startsWith("+++")
-          ? colorGreen(wrapped, noColor)
-          : isDiff && wrapped.startsWith("-") && !wrapped.startsWith("---")
-            ? colorRed(wrapped, noColor)
-            : dim(wrapped, noColor);
-      out.push(`${dim("  | ", noColor)}${wrappedBody}`);
-    }
+    codeLines.push(raw);
   }
-  if (inCode) out.push(dim("  +", noColor));
+  if (inCode) {
+    flushCodeBlock();
+    out.push(dim("  +", noColor));
+  }
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Home view
-// ---------------------------------------------------------------------------
+type MarkdownTableAlign = "left" | "center" | "right";
 
-function renderPlainHome(view: ShellViewModel, capability: TerminalCapability): string {
-  const noColor = view.themeMode === "no-color";
-  const composerWidth = composerMaxWidth(view.width);
+type MarkdownTable = {
+  rows: string[][];
+  aligns: MarkdownTableAlign[];
+  endIndex: number;
+};
 
-  const content: string[] = [];
+function readMarkdownTable(lines: string[], startIndex: number): MarkdownTable | undefined {
+  const header = parseMarkdownTableRow(lines[startIndex] ?? "");
+  if (!header) return undefined;
+  const aligns = parseMarkdownTableSeparator(lines[startIndex + 1] ?? "");
+  if (!aligns || aligns.length !== header.length) return undefined;
 
-  // Brand title — bold bright white, centered
-  content.push(centerText(bold(colorBrightWhite("LingHun", noColor), noColor), composerWidth));
-
-  // Accent underline — short centered line (12-16 chars)
-  const accentLen = Math.min(16, Math.max(12, Math.floor(composerWidth * 0.2)));
-  const accentChar = capability.unicodeBox ? "─" : "-";
-  const accentLine = accentChar.repeat(accentLen);
-  content.push(centerText(dim(accentLine, noColor), composerWidth));
-  content.push("");
-
-  if (view.homeVision) {
-    content.push(centerText(dim(view.homeVision, noColor), composerWidth));
-    content.push("");
+  const rows = [header];
+  let endIndex = startIndex + 1;
+  for (let i = startIndex + 2; i < lines.length; i += 1) {
+    const row = parseMarkdownTableRow(lines[i] ?? "");
+    if (!row || row.length !== header.length) break;
+    rows.push(row);
+    endIndex = i;
   }
-
-  // Composer box: top cyan line, placeholder hint, bottom cyan line
-  // The placeholder is shown as a dim hint (no "> " prefix) because the real
-  // readline prompt "  > " follows immediately after this render.
-  // This avoids the "double input" visual where both a fake "> placeholder"
-  // and the real "> " prompt appear.
-  const lineChar = capability.unicodeBox ? "─" : "-";
-  const composerLine = lineChar.repeat(composerWidth);
-  content.push(colorCyan(composerLine, noColor));
-  const hintLine = `    ${view.composer.placeholder}`;
-  content.push(dim(hintLine, noColor));
-  content.push(colorCyan(composerLine, noColor));
-  content.push("");
-
-  // Status tray — centered, below composer
-  content.push(centerText(dim(formatStatusTray(view), noColor), composerWidth));
-
-  // Setup hint (if needed)
-  if (view.setupHint) {
-    content.push("");
-    content.push(centerText(dim(view.setupHint, noColor), composerWidth));
-  }
-
-  // Output blocks
-  const blockLines = formatBlockLines(view, noColor);
-  if (blockLines.length > 0) {
-    content.push("");
-    content.push(...blockLines);
-  }
-
-  // Limitations
-  if (view.limitations.length > 0) {
-    content.push("");
-    content.push(...view.limitations.map((item) => `  ${dim(item, noColor)}`));
-  }
-
-  // Vertical centering: pad top so content sits in upper-center area
-  const totalLines = content.length;
-  const topPad = Math.max(0, Math.floor((view.height - totalLines) / 3));
-  const padded = [...Array(topPad).fill(""), ...content];
-
-  return padded.join("\n");
+  return { rows, aligns, endIndex };
 }
 
-// ---------------------------------------------------------------------------
-// Task view
-// ---------------------------------------------------------------------------
+function parseMarkdownTableRow(line: string): string[] | undefined {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return undefined;
+  const body = trimmed.replace(/^\|/u, "").replace(/\|$/u, "");
+  const cells = body.split("|").map((cell) => cell.trim());
+  return cells.length >= 2 ? cells : undefined;
+}
+
+function parseMarkdownTableSeparator(line: string): MarkdownTableAlign[] | undefined {
+  const cells = parseMarkdownTableRow(line);
+  if (!cells) return undefined;
+  const aligns: MarkdownTableAlign[] = [];
+  for (const cell of cells) {
+    if (!/^:?-{3,}:?$/u.test(cell)) return undefined;
+    if (cell.startsWith(":") && cell.endsWith(":")) {
+      aligns.push("center");
+    } else if (cell.endsWith(":")) {
+      aligns.push("right");
+    } else {
+      aligns.push("left");
+    }
+  }
+  return aligns;
+}
+
+function renderMarkdownTableLines(table: MarkdownTable, noColor: boolean): string[] {
+  const widths = table.rows[0]?.map((_cell, column) =>
+    Math.max(...table.rows.map((row) => displayWidth(row[column] ?? ""))),
+  );
+  if (!widths || widths.length === 0) return [];
+  const separator = `| ${widths.map((width) => "-".repeat(Math.max(3, width))).join(" | ")} |`;
+  return table.rows.flatMap((row, rowIndex) => {
+    const isHeader = rowIndex === 0;
+    const rendered = `| ${row
+      .map((cell, column) => {
+        const align = isHeader ? "center" : table.aligns[column] ?? "left";
+        const padded = padTableCell(cell, widths[column] ?? 0, align);
+        return isHeader ? bold(padded, noColor) : padded;
+      })
+      .join(" | ")} |`;
+    return isHeader ? [rendered, dim(separator, noColor)] : [rendered];
+  });
+}
+
+function padTableCell(text: string, width: number, align: MarkdownTableAlign): string {
+  const remaining = Math.max(0, width - displayWidth(text));
+  if (align === "right") return `${" ".repeat(remaining)}${text}`;
+  if (align === "center") {
+    const left = Math.floor(remaining / 2);
+    return `${" ".repeat(left)}${text}${" ".repeat(remaining - left)}`;
+  }
+  return `${text}${" ".repeat(remaining)}`;
+}
 
 function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): string {
   const noColor = view.themeMode === "no-color";
+  const theme = createShellTheme(noColor);
   const composerWidth = taskComposerMaxWidth(view.width);
   const separator = separatorLine(capability, composerWidth, noColor);
 
@@ -296,7 +323,7 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
   }
 
   // Output blocks
-  const blockLines = formatBlockLines(view, noColor);
+  const blockLines = formatBlockLines(view, noColor, theme);
   if (blockLines.length > 0) {
     lines.push("");
     lines.push(...blockLines);
@@ -324,11 +351,11 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
+function formatBlockLines(view: ShellViewModel, noColor: boolean, theme: ShellTheme): string[] {
   const result: string[] = [];
   let prevKind: string | undefined;
   for (const block of view.blocks) {
-    const blockLines = formatSingleBlock(block, view, noColor);
+    const blockLines = formatSingleBlock(block, view, noColor, theme);
     if (blockLines.length === 0) continue;
     // Inter-block spacing: empty line between assistant_text ↔ tool_result
     // transitions and between consecutive tool_result blocks, giving visual
@@ -357,6 +384,7 @@ function formatSingleBlock(
   block: ProductBlockViewModel,
   view: ShellViewModel,
   noColor: boolean,
+  theme: ShellTheme,
 ): string[] {
     // Command transcript row — slash command 提交后作为独立 `❯ /command` 行进入
     // task transcript（plain 渲染同步 Ink ProductBlock 的 command 分支）。
@@ -397,6 +425,7 @@ function formatSingleBlock(
       const renderedMessage = renderPlainMarkdownLines(body, noColor, {
         dimAll,
         diagnostic: isDiagnostic,
+        theme,
         wrapWidth: Math.max(8, view.width - 6),
       });
       const out: string[] = isLocalOutput || isToolSuccess
@@ -435,16 +464,16 @@ function formatSingleBlock(
       if (body) {
         out.push(...renderPlainMarkdownLines(body, noColor, {
           error: true,
+          theme,
           wrapWidth: Math.max(8, view.width - 6),
         }));
       }
       if (nextAction) out.push(`  ${dim(nextAction, noColor)}`);
-      // Phase 15: retry hint (前 3 次降噪，对齐 CCB)
-      if (block.retrySeconds && block.retrySeconds > 0 && (block.retryAttempt ?? 0) >= 4) {
+      if (block.retryAttempt && block.retryAttempt > 0 && block.retryMax) {
         const hint =
           view.language === "en-US"
-            ? `Retrying in ${block.retrySeconds}s… (attempt ${block.retryAttempt}/${block.retryMax})`
-            : `正在重试 ${block.retrySeconds}s 后… (第 ${block.retryAttempt}/${block.retryMax} 次)`;
+            ? `Automatic retry finished (${block.retryAttempt}/${block.retryMax}); the request still did not complete.`
+            : `已自动重试 ${block.retryAttempt}/${block.retryMax} 后仍未完成。`;
         out.push(dim(hint, noColor));
       }
       return out;
@@ -462,60 +491,13 @@ function formatSingleBlock(
     ].filter((line): line is string => Boolean(line));
 }
 
-function formatStatusTray(view: ShellViewModel): string {
-  const items = [
-    view.status.project,
-    view.status.model,
-    view.status.permission,
-    view.status.index,
-    view.status.background,
-  ];
-  const line = items.join("  ");
-  if (line.length <= view.width) return line;
-  if (view.width >= 60) {
-    return fitStatusTrayLine(items, view.width);
-  }
-  const narrow = [items[0], items[1], items[2], items[4]];
-  const narrowLine = narrow.join("  ");
-  if (narrowLine.length <= view.width) return narrowLine;
-  return fitStatusTrayLine(narrow, view.width);
-}
-
-function fitStatusTrayLine(items: string[], maxWidth: number): string {
-  const sep = "  ";
-  const separatorTotal = sep.length * (items.length - 1);
-  const available = maxWidth - separatorTotal;
-  const perItem = Math.max(6, Math.floor(available / items.length));
-  return items
-    .map((item) => (item.length > perItem ? `${item.slice(0, perItem - 1)}...` : item))
-    .join(sep);
-}
-
 /** Separator line for sections. Dim in color mode. */
 function separatorLine(capability: TerminalCapability, width: number, noColor: boolean): string {
   const char = capability.unicodeBox ? "\u2500" : "-";
   return dim(char.repeat(width), noColor);
 }
 
-/**
- * Compute the leading spaces for the readline prompt so it aligns with the
- * composer prompt line position in the Home view.
- * The prompt "> " sits at indent 2 inside the composer box (matching "  > placeholder").
- */
-export function computeHomePromptPrefix(terminalWidth: number): string {
-  // "  > " — 2 spaces indent then "> " is the readline prompt
+export function computePlainPromptPrefix(terminalWidth: number): string {
+  void terminalWidth;
   return "  ";
-}
-
-/** Center text within a given width using spaces. */
-/** Strip ANSI escape sequences for visible length calculation. */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping requires matching ESC control character
-const ANSI_REGEX = /\x1B\[[0-9;]*m/g;
-
-function centerText(text: string, width: number): string {
-  const visible = text.replace(ANSI_REGEX, "");
-  const visibleWidth = displayWidth(visible);
-  if (visibleWidth >= width) return text;
-  const pad = Math.max(0, Math.floor((width - visibleWidth) / 2));
-  return " ".repeat(pad) + text;
 }

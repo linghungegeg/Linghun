@@ -242,12 +242,11 @@ export function ProductBlock({
     const previewBody = messageBody(block, block.nextAction);
     const nextAction = visibleNextAction(block, previewBody);
     const body = messageBody(block, nextAction);
-    const showRetry =
-      block.retrySeconds && block.retrySeconds > 0 && (block.retryAttempt ?? 0) >= 4;
+    const showRetry = Boolean(block.retryAttempt && block.retryAttempt > 0 && block.retryMax);
     const retryHint = showRetry
       ? language === "en-US"
-        ? `Retrying in ${block.retrySeconds}s… (attempt ${block.retryAttempt}/${block.retryMax})`
-        : `正在重试 ${block.retrySeconds}s 后… (第 ${block.retryAttempt}/${block.retryMax} 次)`
+        ? `Automatic retry finished (${block.retryAttempt}/${block.retryMax}); the request still did not complete.`
+        : `已自动重试 ${block.retryAttempt}/${block.retryMax} 后仍未完成。`
       : undefined;
     return (
       <Box flexDirection="column" marginBottom={1}>

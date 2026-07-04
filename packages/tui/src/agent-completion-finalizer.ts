@@ -25,7 +25,6 @@ export type AgentCompletionInput = {
 const MAX_AGENT_COMPLETION_NOTICES = 80;
 const MAX_AGENT_COMPLETION_BATCHES = 24;
 const MAX_REPORTED_NOTICE_IDS = 200;
-const NOTIFICATION_COOLDOWN_MS = 1_500;
 
 export function createAgentCompletionState(): AgentCompletionState {
   return {
@@ -74,7 +73,6 @@ export function enqueueAgentCompletionNotice(
   }
   state.notices = state.notices.slice(0, MAX_AGENT_COMPLETION_NOTICES);
   refreshAgentCompletionBatchSummaries(context, now);
-  pushAgentCompletionNotification(context, notice);
   return notice;
 }
 
@@ -134,6 +132,41 @@ export function formatAgentCompletionDigest(context: TuiContext): string | null 
   return lines.join("\n");
 }
 
+export function formatAgentCompletionMainChainContext(context: TuiContext): string | null {
+  const pending = collectPendingAgentCompletionNotices(context);
+  if (pending.length === 0) return null;
+  const state = ensureAgentCompletionState(context);
+  const latestBatch = state.batchSummaries[0];
+  const isEn = context.language === "en-US";
+  const lines = [
+    isEn
+      ? "AgentCompletionReturnsForMainChain=Child agent/workflow results returned to the main chain. Use them as structured context for your natural answer. Do not print this label or raw fields. Do not treat child-agent completion as final verification PASS unless evidence supports it."
+      : "AgentCompletionReturnsForMainChain=子智能体/workflow 结果已回流主链。请把它作为结构化上下文，自然消化后回复用户；不要原样输出本标签或字段；不要把子智能体完成直接等同最终验证 PASS。",
+  ];
+  if (latestBatch) {
+    lines.push(`batch=${latestBatch.summary}`);
+  }
+  for (const notice of pending.slice(0, 8)) {
+    lines.push(
+      JSON.stringify({
+        noticeId: notice.id,
+        agentId: notice.agentId,
+        label: formatAgentLabel(notice),
+        status: notice.status,
+        validity: notice.validity,
+        task: truncateDisplay(notice.task.replace(/\s+/g, " "), 120),
+        summary: notice.summary,
+        evidenceRefs: notice.evidenceRefs.slice(0, 8),
+        nextAction: notice.nextAction,
+      }),
+    );
+  }
+  if (pending.length > 8) {
+    lines.push(isEn ? `additional=${pending.length - 8}` : `另有=${pending.length - 8}`);
+  }
+  return lines.join("\n");
+}
+
 export function refreshAgentCompletionBatchSummaries(
   context: TuiContext,
   now: string = new Date().toISOString(),
@@ -185,48 +218,6 @@ function formatNoticeNextAction(
   return isEn
     ? `Inspect /agents show ${agentId} before retrying.`
     : `重试前查看 /agents show ${agentId}。`;
-}
-
-function pushAgentCompletionNotification(context: TuiContext, notice: AgentCompletionNotice): void {
-  const state = ensureAgentCompletionState(context);
-  const now = Date.now();
-  const key = `agent-completion:${notice.agentId}:${notice.status}`;
-  if (now - (state.lastNotificationAt[key] ?? 0) < NOTIFICATION_COOLDOWN_MS) return;
-  state.lastNotificationAt[key] = now;
-
-  const text = formatNotificationText(context, notice);
-  if (context.pushNotification) {
-    context.pushNotification(text, notice.validity === "invalid" ? "warning" : "success");
-    return;
-  }
-  context.notifications ??= [];
-  context.notifications.push({
-    key,
-    text,
-    priority: notice.validity === "invalid" ? "immediate" : "medium",
-    timeoutMs: 7000,
-    createdAt: now,
-    tone: notice.validity === "invalid" ? "warning" : "success",
-  });
-}
-
-function formatNotificationText(context: TuiContext, notice: AgentCompletionNotice): string {
-  const label = formatAgentLabel(notice);
-  const summary = notice.summary ? `: ${notice.summary}` : "";
-  if (context.language === "en-US") {
-    const verb =
-      notice.status === "completed" ? "completed" :
-      notice.status === "failed" ? "failed" :
-      notice.status === "blocked" ? "is blocked" :
-      notice.status === "cancelled" ? "was cancelled" : "finished";
-    return truncateDisplay(`Agent ${label} ${verb}${summary}`, 150);
-  }
-  const verb =
-    notice.status === "completed" ? "已完成" :
-    notice.status === "failed" ? "失败" :
-    notice.status === "blocked" ? "被阻塞" :
-    notice.status === "cancelled" ? "已取消" : "已结束";
-  return truncateDisplay(`子智能体 ${label} ${verb}${summary}`, 150);
 }
 
 function createBatchSummary(
