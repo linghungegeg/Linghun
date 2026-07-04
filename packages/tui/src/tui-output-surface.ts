@@ -236,8 +236,8 @@ export class ShellBlockOutput extends Writable {
       this.assistantPreviewText = assistantStreamVisibleTail(this.assistantStreamState);
       this.setStreamingPreview(id, this.assistantPreviewText);
     } else {
-      this.assistantPreviewText = "";
-      this.clearStreamingPreview(id);
+      this.assistantPreviewText = assistantStreamVisibleTail(this.assistantStreamState);
+      this.setStreamingPreview(id, this.assistantPreviewText);
     }
     this.onWrite();
   }

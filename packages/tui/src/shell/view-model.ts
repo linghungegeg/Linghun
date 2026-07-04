@@ -309,8 +309,12 @@ export function createShellViewModel(
     );
     const activeStreamingAssistant = context.streamingAssistant;
     const activeStreamingAssistantId = activeStreamingAssistant?.id;
+    const hasActiveProviderFailure = Boolean(context.lastProviderFailure);
     const selectedBlocks = allOutputBlocks.filter((b, i) => {
       if (isEmptyAssistantStreamBlock(b)) return false;
+      if (isProviderFailureOutputBlock(b, language) && !hasActiveProviderFailure) {
+        return false;
+      }
       if (
         activeStreamingAssistantId &&
         b.id === activeStreamingAssistantId &&

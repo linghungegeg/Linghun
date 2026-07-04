@@ -27549,7 +27549,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
       /assistantStreamBlockId\s*=\s*\n?\s*reuseAssistantStreamBlockId\s*\?\?/,
     );
     expect(runtimeSrc).toMatch(
-      /streamFinalModelAnswerWithoutTools\([\s\S]*?assistantStreamBlockId,\s*true,\s*\)/,
+      /streamFinalModelAnswerWithoutTools\([\s\S]*?assistantStreamBlockId,\s*true,/,
     );
     expect(runtimeSrc).toContain(
       "beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true })",

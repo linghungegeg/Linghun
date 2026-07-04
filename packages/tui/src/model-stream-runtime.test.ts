@@ -465,6 +465,59 @@ describe("final answer gate aggregation", () => {
     expect((context as { lastFullOutput?: string }).lastFullOutput ?? "").not.toContain(rawDraft);
   });
 
+  it("no-tool final gathers git evidence and returns to the model instead of downgrading", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-no-tool-git-final-"));
+    const { context, events } = makeDispatcherContext(projectPath);
+    Object.assign(context, {
+      config: defaultConfig,
+      providerBreaker: createProviderCircuitBreakerState(),
+      cache: { history: [], deepCompact: undefined },
+    });
+    const blocks: Array<{ id: string; fullText?: string; summary?: string }> = [];
+    const output = createShellBlockOutputForTest(context, blocks as never);
+    const calls = { count: 0 };
+    const rawDraft = withClaims("稳定点已经确认。", [
+      { kind: "git_operation", phrase: "稳定点已经确认" },
+    ]);
+    const repairedAnswer = "当前只是完成了 Git 状态检查，还没有创建提交。";
+
+    const finalText = await __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "确认 Git 状态后回答" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+      context,
+      gatewayByTurn(
+        [
+          [
+            { type: "assistant_text_delta", text: rawDraft },
+            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+          ],
+          [
+            { type: "assistant_text_delta", text: repairedAnswer },
+            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+          ],
+        ],
+        calls,
+      ),
+      "session-no-tool-git-final",
+      output,
+      new AbortController().signal,
+    );
+
+    const eventsText = JSON.stringify(events);
+    expect(calls.count).toBe(2);
+    expect(eventsText).toContain("GitStatusInspect");
+    expect(finalText).toContain("还没有创建提交");
+    expect(finalText).not.toContain("任务状态");
+    expect(finalText).not.toContain("当前证据");
+    expect(finalText).not.toContain("git_operation");
+    expect(JSON.stringify(blocks)).not.toContain(rawDraft);
+  });
+
   it("still plans evidence gathering or permission when no matching evidence exists", () => {
     const context = { ...makeGateContext(), permissionMode: "default", language: "zh-CN" };
     const result = evaluateAggregatedFinalAnswerGate(
@@ -508,6 +561,9 @@ describe("final answer gate aggregation", () => {
     expect(source).toContain("runFinalGateEvidenceAction");
     expect(source).toContain("executeModelToolUse(");
     expect(source).toContain("final_answer_gap_action dispatch");
+    expect(source).toContain("final_answer_gap_planner final_no_tools=yes");
+    expect(source).toContain("final_answer_gap_planner final_safety=yes");
+    expect(source).toContain("final_answer_gap_planner continuation_final_safety=yes");
     expect(source).not.toContain("content: createAggregatedFinalAnswerReminder");
   });
 

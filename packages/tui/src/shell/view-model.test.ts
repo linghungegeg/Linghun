@@ -5020,13 +5020,14 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
     expect(blocks.find((b) => b.id === "assistant-stream-held-final")).toBeUndefined();
     expect(ctx.lastFullOutput).toBeUndefined();
-    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(ctx.streamingAssistant?.text).toBe("原始最终回答\n第二行");
 
     output.discardAssistantBlock("assistant-stream-held-final");
     output.appendAssistantDelta("retry 后的原始回答\n");
     vi.advanceTimersByTime(64);
     expect(blocks.find((b) => b.id === "assistant-stream-held-final")).toBeUndefined();
     expect(ctx.lastFullOutput).toBeUndefined();
+    expect(ctx.streamingAssistant?.text).toBe("retry 后的原始回答\n");
 
     output.replaceAssistantBlockContent("assistant-stream-held-final", "清洗后的最终回答");
     output.endAssistantStream();
@@ -5105,7 +5106,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.appendAssistantDelta("new draft\n");
     vi.advanceTimersByTime(64);
     expect(blocks.find((b) => b.id === "assistant-held-new")).toBeUndefined();
-    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(ctx.streamingAssistant?.text).toBe("new draft\n");
   });
 
   it("terminal-first assistant gate discards held draft on direct end", () => {
@@ -5142,7 +5143,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(blocks.find((b) => b.id === "assistant-terminal-first")).toBeUndefined();
     const streamingView = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
     expect(streamingView.blocks.find((b) => b.id === "assistant-terminal-first")).toBeUndefined();
-    expect(streamingView.streamingAssistantText).toBeUndefined();
+    expect(streamingView.streamingAssistantText).toBe("A\nB");
 
     output.endAssistantStream();
     expect(terminalWrites).toEqual([]);
@@ -7324,8 +7325,47 @@ describe("TaskSuggestionBar executable state", () => {
     expect(view.bottomPaneStatus?.text).not.toBe("Provider 请求失败");
   });
 
-  it("renders provider retry outcome inside the same error block", () => {
+  it("hides stale provider request failure after the provider has recovered", () => {
     const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "provider-fail",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          messageKind: "tool_result_error",
+        },
+        {
+          id: "assistant-ok",
+          kind: "details",
+          status: "partial",
+          title: "assistant",
+          summary: "后续请求已经正常完成。",
+          fullText: "后续请求已经正常完成。",
+          messageKind: "assistant_text",
+        },
+      ],
+    });
+
+    expect(view.blocks.some((block) => block.title === "模型请求失败")).toBe(false);
+    expect(view.blocks.some((block) => block.summary?.includes("正常完成"))).toBe(true);
+  });
+
+  it("renders provider retry outcome inside the same error block", () => {
+    const view = createShellViewModel(createContext({
+      lastProviderFailure: {
+        code: "PROVIDER_STREAM_ERROR",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5",
+        endpointProfile: "default",
+        summary: "stream ended",
+      },
+    } as unknown as Partial<TuiContext>), {
       width: 80,
       viewMode: "task",
       outputBlocks: [

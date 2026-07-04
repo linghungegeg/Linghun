@@ -202,6 +202,7 @@ export type FinalGateEvidenceActionResult =
 const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 16;
 const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 24;
 const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 2;
+const MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES = 2;
 const SAME_TOOL_FAILURE_RETRY_GUARD_LIMIT = 4;
 const TOOL_FAILURE_NO_TOOL_RECOVERY_PROMPT_LIMIT = 4;
 
@@ -1346,7 +1347,7 @@ export async function sendMessage(
   beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
   let assistantText = "";
   let committedIntermediateAssistantText = "";
-  let finalAnswerClaimRetried = false;
+  let finalAnswerEvidenceActionRetries = 0;
   let finalAnswerClaimAlignmentRewrites = 0;
   let modelLoopCompleted = false;
   const controller = new AbortController();
@@ -1970,7 +1971,8 @@ export async function sendMessage(
               context,
               userText: text,
               assistantText,
-              retryBudgetRemaining: !finalAnswerClaimRetried,
+              retryBudgetRemaining:
+                finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
             });
             await appendSystemEvent(
               context,
@@ -2007,7 +2009,7 @@ export async function sendMessage(
             }
             if (actionResult.status === "evidence_recorded") {
               messagesForProvider = actionResult.messages;
-              finalAnswerClaimRetried = true;
+              finalAnswerEvidenceActionRetries += 1;
               continue;
             }
             await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
@@ -2222,17 +2224,88 @@ export async function sendMessage(
               assistantStreamBlockId,
               false,
               finalAnswerClaimAlignmentRewrites,
+              finalAnswerEvidenceActionRetries,
             );
+            if (context.pendingLocalApproval) return;
           } else {
             assistantText = buildFinalGateClaimAlignmentFallback(context.language);
           }
         } else {
-          await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-          assistantText = buildAggregatedDowngradedFinalAnswer(
-            gateResult,
-            context.language,
-            context.evidence,
+          const actionPlan = planFinalGateEvidenceGapAction({
+            result: gateResult,
+            context,
+            userText: text,
+            assistantText,
+            retryBudgetRemaining:
+              finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+          });
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `final_answer_gap_planner final_safety=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
+            actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+              ? "warning"
+              : "info",
           );
+          if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
+            replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+            const actionResult = await runFinalGateEvidenceAction({
+              actionPlan,
+              context,
+              output,
+              sessionId,
+              messages: messagesForProvider,
+              runtime: selectedRuntime,
+              ...(reportWriteGuard ? { reportWriteGuard } : {}),
+            });
+            if (actionResult.status === "permission_pending") {
+              return;
+            }
+            if (actionResult.status === "evidence_recorded") {
+              finalAnswerEvidenceActionRetries += 1;
+              assistantText = await streamFinalModelAnswerWithoutTools(
+                {
+                  messages: actionResult.messages,
+                  provider: selectedRuntime.provider,
+                  model: selectedRuntime.model,
+                  endpointProfile: selectedRuntime.endpointProfile,
+                  reasoningLevel: selectedRuntime.reasoningLevel,
+                  reasoningSent: selectedRuntime.reasoningSent,
+                  ...(reportWriteGuard ? { reportWriteGuard } : {}),
+                },
+                context,
+                gateway,
+                sessionId,
+                output,
+                controller.signal,
+                assistantStreamBlockId,
+                false,
+                finalAnswerClaimAlignmentRewrites,
+                finalAnswerEvidenceActionRetries,
+              );
+              if (context.pendingLocalApproval) return;
+            } else {
+              await appendSystemEvent(
+                context,
+                sessionId,
+                `final_answer_gap_action_${actionResult.status} final_safety=yes reason=${actionResult.reason}`,
+                "warning",
+              );
+              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              assistantText = buildAggregatedDowngradedFinalAnswer(
+                gateResult,
+                context.language,
+                context.evidence,
+              );
+            }
+          } else {
+            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+            assistantText = buildAggregatedDowngradedFinalAnswer(
+              gateResult,
+              context.language,
+              context.evidence,
+            );
+          }
         }
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
@@ -2330,6 +2403,7 @@ export async function __testStreamFinalModelAnswerWithoutTools(
   reuseAssistantStreamBlockId?: string,
   fallbackAttempted = false,
   claimAlignmentRewriteCount = 0,
+  evidenceActionRetryCount = 0,
 ): Promise<string> {
   return streamFinalModelAnswerWithoutTools(
     continuation,
@@ -2341,6 +2415,7 @@ export async function __testStreamFinalModelAnswerWithoutTools(
     reuseAssistantStreamBlockId,
     fallbackAttempted,
     claimAlignmentRewriteCount,
+    evidenceActionRetryCount,
   );
 }
 
@@ -2837,6 +2912,7 @@ async function streamFinalModelAnswerWithoutTools(
   reuseAssistantStreamBlockId?: string,
   fallbackAttempted = false,
   claimAlignmentRewriteCount = 0,
+  evidenceActionRetryCount = 0,
 ): Promise<string> {
   let assistantText = "";
   const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -2853,6 +2929,7 @@ async function streamFinalModelAnswerWithoutTools(
   let hadThinking = false;
   let ignoredRawToolProtocolText = false;
   let pendingAssistantPreviewText = "";
+  let lastAssistantPreviewFlushAt = 0;
   const originalProvider = continuation.provider;
   const originalModel = continuation.model;
   const runtime = runtimeFromContinuation(continuation);
@@ -2900,6 +2977,15 @@ async function streamFinalModelAnswerWithoutTools(
       const visibleText = textSanitizer.push(event.text);
       assistantText += visibleText;
       pendingAssistantPreviewText += visibleText;
+      if (shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)) {
+        const result = flushAssistantPreviewDelta(
+          output,
+          assistantStreamBlockId,
+          pendingAssistantPreviewText,
+        );
+        pendingAssistantPreviewText = result.text;
+        if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
+      }
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
@@ -2982,6 +3068,8 @@ async function streamFinalModelAnswerWithoutTools(
             signal,
             assistantStreamBlockId,
             true,
+            claimAlignmentRewriteCount,
+            evidenceActionRetryCount,
           ))
         );
       }
@@ -3059,11 +3147,64 @@ async function streamFinalModelAnswerWithoutTools(
           assistantStreamBlockId,
           fallbackAttempted,
           claimAlignmentRewriteCount + 1,
+          evidenceActionRetryCount,
         );
       }
       if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
         assistantText = buildFinalGateClaimAlignmentFallback(context.language);
       } else {
+        const actionPlan = planFinalGateEvidenceGapAction({
+          result: gateResult,
+          context,
+          userText: latestUserTextFromMessages(continuation.messages),
+          assistantText,
+          retryBudgetRemaining:
+            evidenceActionRetryCount < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+        });
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `final_answer_gap_planner final_no_tools=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
+          actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+            ? "warning"
+            : "info",
+        );
+        if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
+          replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+          const actionResult = await runFinalGateEvidenceAction({
+            actionPlan,
+            context,
+            output,
+            sessionId,
+            messages: continuation.messages,
+            runtime,
+            ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
+          });
+          if (actionResult.status === "permission_pending") {
+            return "";
+          }
+          if (actionResult.status === "evidence_recorded") {
+            continuation.messages = actionResult.messages;
+            return streamFinalModelAnswerWithoutTools(
+              continuation,
+              context,
+              gateway,
+              sessionId,
+              output,
+              signal,
+              assistantStreamBlockId,
+              fallbackAttempted,
+              claimAlignmentRewriteCount,
+              evidenceActionRetryCount + 1,
+            );
+          }
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `final_answer_gap_action_${actionResult.status} final_no_tools=yes reason=${actionResult.reason}`,
+            "warning",
+          );
+        }
         await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
         assistantText = buildAggregatedDowngradedFinalAnswer(
           gateResult,
@@ -3210,7 +3351,7 @@ export async function continueModelAfterToolResults(
   startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
   let committedIntermediateAssistantText = "";
-  let finalAnswerClaimRetried = false;
+  let finalAnswerEvidenceActionRetries = 0;
   let finalAnswerClaimAlignmentRewrites = 0;
   let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
@@ -3557,7 +3698,8 @@ export async function continueModelAfterToolResults(
               context,
               userText: latestUserTextFromMessages(continuation.messages),
               assistantText,
-              retryBudgetRemaining: !finalAnswerClaimRetried,
+              retryBudgetRemaining:
+                finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
             });
             await appendSystemEvent(
               context,
@@ -3594,7 +3736,7 @@ export async function continueModelAfterToolResults(
             }
             if (actionResult.status === "evidence_recorded") {
               continuation.messages = actionResult.messages;
-              finalAnswerClaimRetried = true;
+              finalAnswerEvidenceActionRetries += 1;
               continue;
             }
             await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
@@ -3750,17 +3892,81 @@ export async function continueModelAfterToolResults(
                 assistantStreamBlockId,
                 false,
                 finalAnswerClaimAlignmentRewrites,
+                finalAnswerEvidenceActionRetries,
               );
+              if (context.pendingLocalApproval) return;
             } else {
               assistantText = buildFinalGateClaimAlignmentFallback(context.language);
             }
           } else {
-            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-            assistantText = buildAggregatedDowngradedFinalAnswer(
-              gateResult,
-              context.language,
-              context.evidence,
+            const actionPlan = planFinalGateEvidenceGapAction({
+              result: gateResult,
+              context,
+              userText: latestUserTextFromMessages(continuation.messages),
+              assistantText,
+              retryBudgetRemaining:
+                finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+            });
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_planner continuation_final_safety=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
+              actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+                ? "warning"
+                : "info",
             );
+            if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
+              replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+              const actionResult = await runFinalGateEvidenceAction({
+                actionPlan,
+                context,
+                output,
+                sessionId,
+                messages: continuation.messages,
+                runtime: runtimeFromContinuation(continuation),
+                ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
+              });
+              if (actionResult.status === "permission_pending") {
+                return;
+              }
+              if (actionResult.status === "evidence_recorded") {
+                finalAnswerEvidenceActionRetries += 1;
+                continuation.messages = actionResult.messages;
+                assistantText = await streamFinalModelAnswerWithoutTools(
+                  continuation,
+                  context,
+                  gateway,
+                  sessionId,
+                  output,
+                  controller.signal,
+                  assistantStreamBlockId,
+                  false,
+                  finalAnswerClaimAlignmentRewrites,
+                  finalAnswerEvidenceActionRetries,
+                );
+                if (context.pendingLocalApproval) return;
+              } else {
+                await appendSystemEvent(
+                  context,
+                  sessionId,
+                  `final_answer_gap_action_${actionResult.status} continuation_final_safety=yes reason=${actionResult.reason}`,
+                  "warning",
+                );
+                await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+                assistantText = buildAggregatedDowngradedFinalAnswer(
+                  gateResult,
+                  context.language,
+                  context.evidence,
+                );
+              }
+            } else {
+              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              assistantText = buildAggregatedDowngradedFinalAnswer(
+                gateResult,
+                context.language,
+                context.evidence,
+              );
+            }
           }
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
