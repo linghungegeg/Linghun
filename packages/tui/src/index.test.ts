@@ -23,7 +23,10 @@ import type { ModelMessage } from "@linghun/providers";
 import { type ToolOutput, createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { enqueueAgentCompletionNotice } from "./agent-completion-finalizer.js";
-import { finishBackgroundTaskFromToolOutput } from "./background-control-runtime.js";
+import {
+  finishBackgroundTaskFromToolOutput,
+  handleInterruptCommand,
+} from "./background-control-runtime.js";
 import { formatCompactStatus } from "./cache-command-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
 import { createDeepCompactPacket, formatDeepCompactPromptSummary } from "./deep-compact-runtime.js";
@@ -5601,9 +5604,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(runtimeSrc).not.toMatch(/needsFreshnessLiteBoundary\s*\(/);
     expect(runtimeSrc).not.toMatch(/formatFreshnessLitePrimaryWarning\s*\(/);
     expect(runtimeSrc).toContain("evaluateAggregatedFinalAnswerGate(context, assistantText");
-    expect(runtimeSrc).toContain("createAggregatedFinalAnswerReminder(gateResult, context.language)");
+    expect(runtimeSrc).toContain("createFinalGateEvidenceTaskDirective");
     expect(runtimeSrc).toContain("evaluateFinalAnswerClaims(assistantText, context.evidence)");
-    expect(runtimeSrc).toContain("createFinalAnswerClaimReminder(result.claimVerdict, language)");
+    expect(runtimeSrc).toContain("buildEvidenceBackedFinalBoundaryAnswer");
     expect(runtimeSrc).not.toMatch(/"FinalAnswerClaimGate"/);
   });
 
@@ -27599,6 +27602,56 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(ctx.lastFullOutput).toBe(fullText);
   });
 
+  it("cancelAssistantStream 关闭 active id，后续迟到 delta 不会接回旧 draft", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+    output.beginAssistantStream("assistant-stream-cancelled", { holdStableCommit: true });
+    output.appendAssistantDelta("旧 attempt 半截内容");
+    expect(ctx.streamingAssistant?.text).toContain("旧 attempt");
+
+    output.cancelAssistantStream();
+    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(blocks).toHaveLength(0);
+
+    output.appendAssistantDelta("迟到 delta");
+    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).toContain(
+      "迟到 delta",
+    );
+    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
+      "旧 attempt",
+    );
+  });
+
+  it("handleInterruptCommand 立即清掉前台模型 streaming preview", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-interrupt-streaming-preview-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const controller = new AbortController();
+    context.activeAbortController = controller;
+    context.tools.abortSignal = controller.signal;
+
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(context, blocks);
+    output.beginAssistantStream("assistant-stream-interrupt-live", { holdStableCommit: true });
+    output.appendAssistantDelta("中断前的半截模型输出");
+    expect(context.streamingAssistant?.text).toContain("半截模型输出");
+
+    await handleInterruptCommand([], context, output);
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(context.activeAbortController).toBeUndefined();
+    expect(context.streamingAssistant).toBeUndefined();
+    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
+      "半截模型输出",
+    );
+    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).toContain(
+      "已请求中断",
+    );
+  });
+
   it("suppressLastFullOutputCapture=true 时 discard/replace 不会写穿 lastFullOutput", () => {
     const ctx = {
       language: "zh-CN" as const,
@@ -27641,6 +27694,11 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
       /discardAssistantBlock\(output, assistantStreamBlockId\)/g,
     );
     expect(occurrences?.length).toBeGreaterThanOrEqual(2);
+    expect(runtimeSrc).toContain("resetAssistantDraftForProviderRetry");
+    expect(runtimeSrc).toContain("resetFinalAssistantDraftForProviderRetry");
+    expect(runtimeSrc).toMatch(
+      /onRetry:\s*\(info\)\s*=>\s*{[\s\S]*?resetAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderRetryActivity\(context, info\);[\s\S]*?}/,
+    );
     const downgrade = runtimeSrc.match(
       /replaceAssistantBlockContent\(output, assistantStreamBlockId, assistantText\)/g,
     );
@@ -28511,13 +28569,13 @@ describe("D.13V-B/C source invariants", () => {
     const gate = await readFile(srcPath("final-answer-gate.ts"), "utf8");
     expect(gate).toContain("runArchitectureAndCompletenessFinalGate");
     expect(gate).toContain("evaluateArchitectureAndCompletenessClaims");
-    expect(text).toContain("createExtendedFinalAnswerReminder");
-    expect(text).toContain("buildExtendedDowngradedFinalAnswer");
-    // 与 D.13U evaluateFinalAnswerClaims 共享一次重试预算（finalAnswerClaimRetried）
+    expect(text).toContain("createFinalGateEvidenceTaskDirective");
+    expect(text).toContain("buildEvidenceBackedFinalBoundaryAnswer");
+    // 与 D.13U evaluateFinalAnswerClaims 共享一次重试预算（finalAnswerClaimAlignmentRewrites）
     const continuationStart = text.indexOf("async function continueModelAfterToolResults");
     expect(continuationStart).toBeGreaterThan(-1);
     const continuationBody = text.slice(continuationStart, continuationStart + 30000);
-    expect(continuationBody).toContain("finalAnswerClaimRetried");
+    expect(continuationBody).toContain("finalAnswerClaimAlignmentRewrites");
     expect(continuationBody).toContain("evaluateAggregatedFinalAnswerGate");
   });
 
@@ -28529,7 +28587,7 @@ describe("D.13V-B/C source invariants", () => {
     expect(end).toBeGreaterThan(start);
     const body = text.slice(start, end);
     expect(body).toContain("evaluateAggregatedFinalAnswerGate");
-    expect(body).toContain("buildAggregatedDowngradedFinalAnswer");
+    expect(body).toContain("buildEvidenceBackedFinalBoundaryAnswer");
     const gate = await readFile(srcPath("final-answer-gate.ts"), "utf8");
     expect(gate).toContain("runArchitectureAndCompletenessFinalGate");
     expect(gate).toContain("evaluateArchitectureAndCompletenessClaims");

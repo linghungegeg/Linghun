@@ -7355,6 +7355,46 @@ describe("TaskSuggestionBar executable state", () => {
     expect(view.blocks.some((block) => block.summary?.includes("正常完成"))).toBe(true);
   });
 
+  it("hides stale provider request failure after tool progress resumes", () => {
+    const view = createShellViewModel(createContext({
+      lastProviderFailure: {
+        code: "PROVIDER_STREAM_ERROR",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5",
+        endpointProfile: "default",
+        summary: "stream ended",
+      },
+    } as unknown as Partial<TuiContext>), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "provider-fail",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          messageKind: "tool_result_error",
+        },
+        {
+          id: "tool-progress",
+          kind: "details",
+          status: "info",
+          title: "ReadSnippets",
+          summary: "已读取 4 条结果。",
+          fullText: "已读取 4 条结果。",
+          messageKind: "tool_result_success",
+        },
+      ],
+    });
+
+    expect(view.blocks.some((block) => block.title === "模型请求失败")).toBe(false);
+    expect(view.blocks.some((block) => block.title === "ReadSnippets")).toBe(true);
+    expect(view.bottomPaneStatus?.text).not.toBe("Provider 请求失败");
+  });
+
   it("renders provider retry outcome inside the same error block", () => {
     const view = createShellViewModel(createContext({
       lastProviderFailure: {

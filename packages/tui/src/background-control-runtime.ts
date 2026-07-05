@@ -23,6 +23,7 @@ import {
 } from "./runner-runtime.js";
 import type { BackgroundTaskSummary } from "./shell/types.js";
 import { writeLine } from "./startup-runtime.js";
+import { cancelAssistantStream } from "./tui-output-surface.js";
 import {
   abortBackgroundTask,
   clearBackgroundAbortController,
@@ -442,6 +443,7 @@ export async function handleInterruptCommand(
     writeLine(output, t(context, "interruptIdle"));
     return;
   }
+  cancelAssistantStream(output);
   writeLine(
     output,
     context.language === "en-US"

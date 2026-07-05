@@ -3134,21 +3134,17 @@ export function evaluateChildAgentSummaryClaims(
   if (verdict.status === "passed") {
     return { status: "passed", text, missingEvidenceKinds: [], unsupportedKinds: [] };
   }
-  const missing =
-    Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching evidence";
-  const needed = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
+  const missing = formatChildAgentEvidenceBoundary(verdict.unsupportedKinds, language);
   const safeText =
     language === "en-US"
       ? [
-          "Child agent completed its run, but its high-risk claim was downgraded before reporting.",
-          `Missing evidence: ${missing}.`,
-          `Evidence needed: ${needed}.`,
+          "Child agent completed its run; its high-risk claim was cleaned against the current evidence boundary before reporting.",
+          `Evidence still needed: ${missing}.`,
           "Use the child transcript, tool results, or verification evidence before treating the original claim as proven.",
         ].join("\n")
       : [
-          "子 agent 已完成本次运行，但其高风险结论在回流前已被降级。",
-          `缺少证据：${missing}。`,
-          `需要补齐：${needed}。`,
+          "子 agent 已完成本次运行；其高风险结论已按当前证据边界清洗后回流。",
+          `仍需证据：${missing}。`,
           "请先查看子 transcript、工具结果或验证 evidence，再把原始结论当作已证明事实。",
         ].join("\n");
   return {
@@ -3157,6 +3153,28 @@ export function evaluateChildAgentSummaryClaims(
     missingEvidenceKinds: verdict.missingEvidenceKinds,
     unsupportedKinds: verdict.unsupportedKinds,
   };
+}
+
+function formatChildAgentEvidenceBoundary(
+  kinds: string[],
+  language: TuiContext["language"],
+): string {
+  const labels = new Set<string>();
+  for (const kind of kinds) {
+    if (/completion|pass|test|typecheck|build|lint|verification|verified/iu.test(kind)) {
+      labels.add(language === "en-US" ? "verification or test evidence" : "验证或测试证据");
+    } else if (/artifact|file|report|write/iu.test(kind)) {
+      labels.add(language === "en-US" ? "artifact or file-change evidence" : "产物或文件变更证据");
+    } else if (/workflow|agent/iu.test(kind)) {
+      labels.add(language === "en-US" ? "terminal workflow or agent evidence" : "终态 workflow 或 agent 证据");
+    } else if (/git|commit|branch|push/iu.test(kind)) {
+      labels.add(language === "en-US" ? "Git operation evidence" : "Git 操作证据");
+    } else {
+      labels.add(language === "en-US" ? "matching evidence" : "匹配证据");
+    }
+  }
+  return Array.from(labels).join(language === "en-US" ? ", " : "、") ||
+    (language === "en-US" ? "matching evidence" : "匹配证据");
 }
 
 function detectChildAgentSummaryClaims(text: string): FinalAnswerClaimMatch[] {

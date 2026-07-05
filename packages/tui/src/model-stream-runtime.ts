@@ -128,7 +128,7 @@ import { detectTerminalCapability } from "./shell/terminal-capability.js";
 import { addRoleUsage } from "./slash-command-runtime.js";
 import { handleSlashCommand } from "./slash-command-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
-import { formatFinalGateTaskStatus } from "./task-status-presenter.js";
+import { formatFinalGateTaskStatus, summarizeEvidenceRecords } from "./task-status-presenter.js";
 import { createAssistantPrimaryTextSanitizer } from "./tool-output-presenter.js";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 import { createVerificationPlan } from "./verification-command-runtime.js";
@@ -446,6 +446,7 @@ function evaluateEngineeringFinalBoundary(
     };
   }
   if (signal.failureCategory === "provider_error") {
+    if (!context.lastProviderFailure) return { status: "passed" };
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_provider_error"],
@@ -785,6 +786,75 @@ export function buildAggregatedDowngradedFinalAnswer(
   evidence: TuiContext["evidence"] = [],
 ): string {
   return buildFinalAnswerGapChecklist(result, language, evidence);
+}
+
+export function buildEvidenceBackedFinalBoundaryAnswer(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  language: Language,
+  evidence: TuiContext["evidence"] = [],
+): string {
+  const labels = mapFinalGateKindsToUserLabels(result.unsupportedKinds, language);
+  const missing = labels.length > 0
+    ? labels.join(language === "en-US" ? ", " : "、")
+    : language === "en-US" ? "matching evidence" : "匹配证据";
+  const evidenceScope = formatEvidenceBoundaryScope(evidence, language);
+  if (language === "en-US") {
+    return [
+      "Based on the evidence currently recorded, I can only confirm the verified scope below.",
+      `Evidence scope: ${evidenceScope}.`,
+      `Not yet supported by matching evidence: ${missing}.`,
+      "I will not present uncovered completion, verification, runtime, or artifact claims as confirmed facts.",
+    ].join("\n");
+  }
+  return [
+    "基于当前已记录证据，我只能确认下面这个已验证范围。",
+    `证据范围：${evidenceScope}。`,
+    `尚未被匹配证据支撑：${missing}。`,
+    "未覆盖的完成、验证、运行状态或产物结论不会作为已确认事实展示。",
+  ].join("\n");
+}
+
+function formatEvidenceBoundaryScope(evidence: TuiContext["evidence"], language: Language): string {
+  const summary = summarizeEvidenceRecords(evidence);
+  if (summary.total === 0) {
+    return language === "en-US"
+      ? "no evidence has been recorded in this turn"
+      : "本轮还没有记录到可支撑结论的证据";
+  }
+  const categories = Object.keys(summary.counts)
+    .map((kind) => formatEvidenceBoundaryCategory(kind, language))
+    .filter(Boolean);
+  const uniqueCategories = Array.from(new Set(categories));
+  const label = uniqueCategories.join(language === "en-US" ? ", " : "、");
+  return language === "en-US"
+    ? `${summary.total} recorded item(s), covering ${label || "runtime evidence"}`
+    : `已有 ${summary.total} 条记录，覆盖${label || "运行证据"}`;
+}
+
+function formatEvidenceBoundaryCategory(kind: string, language: Language): string {
+  const zh: Record<string, string> = {
+    verification: "验证记录",
+    source_read: "文件读取",
+    source_search: "搜索记录",
+    file_change: "文件变更",
+    artifact: "产物记录",
+    runtime: "运行状态记录",
+    workflow: "工作流记录",
+    permission: "权限记录",
+    other: "其他记录",
+  };
+  const en: Record<string, string> = {
+    verification: "verification",
+    source_read: "file reads",
+    source_search: "searches",
+    file_change: "file changes",
+    artifact: "artifacts",
+    runtime: "runtime checks",
+    workflow: "workflow records",
+    permission: "permission records",
+    other: "other records",
+  };
+  return (language === "en-US" ? en : zh)[kind] ?? (language === "en-US" ? "other records" : "其他记录");
 }
 
 function buildFinalAnswerGapChecklist(
@@ -1579,7 +1649,7 @@ export async function sendMessage(
       let roundAssistantText = "";
       let pendingAssistantPreviewText = "";
       let lastAssistantPreviewFlushAt = 0;
-      const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
+      let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       let roundChunkCount = 0;
       let roundHadUsage = false;
       let roundFinishReason: string | undefined;
@@ -1656,13 +1726,26 @@ export async function sendMessage(
           selectedRuntime.endpointProfile,
         );
       }
+      const resetAssistantDraftForProviderRetry = () => {
+        discardAssistantBlock(output, assistantStreamBlockId);
+        assistantText = committedIntermediateAssistantText;
+        roundAssistantText = "";
+        pendingAssistantPreviewText = "";
+        lastAssistantPreviewFlushAt = 0;
+        textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
+      };
       for await (const event of withProviderRetry(
         gateway,
         context.providerBreaker,
         selectedRuntime.provider,
         providerRequest,
         controller.signal,
-        { onRetry: (info) => showProviderRetryActivity(context, info) },
+        {
+          onRetry: (info) => {
+            resetAssistantDraftForProviderRetry();
+            showProviderRetryActivity(context, info);
+          },
+        },
       )) {
         if (controller.signal.aborted) {
           clearRequestActivity(context);
@@ -1931,6 +2014,7 @@ export async function sendMessage(
         }
         // D.13U — Final Answer Claim Gate 和 Extended Gate 聚合检查
         if (assistantText) {
+          await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
           const gateResult = evaluateAggregatedFinalAnswerGate(
             context,
             assistantText,
@@ -1984,7 +2068,7 @@ export async function sendMessage(
             );
             if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-              assistantText = buildAggregatedDowngradedFinalAnswer(
+              assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
                 context.evidence,
@@ -2013,7 +2097,7 @@ export async function sendMessage(
               continue;
             }
             await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-            assistantText = buildAggregatedDowngradedFinalAnswer(
+            assistantText = buildEvidenceBackedFinalBoundaryAnswer(
               gateResult,
               context.language,
               context.evidence,
@@ -2292,7 +2376,7 @@ export async function sendMessage(
                 "warning",
               );
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-              assistantText = buildAggregatedDowngradedFinalAnswer(
+              assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
                 context.evidence,
@@ -2300,7 +2384,7 @@ export async function sendMessage(
             }
           } else {
             await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-            assistantText = buildAggregatedDowngradedFinalAnswer(
+            assistantText = buildEvidenceBackedFinalBoundaryAnswer(
               gateResult,
               context.language,
               context.evidence,
@@ -2915,7 +2999,7 @@ async function streamFinalModelAnswerWithoutTools(
   evidenceActionRetryCount = 0,
 ): Promise<string> {
   let assistantText = "";
-  const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
+  let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
   // 与 sendMessage 一致的 assistant streaming block：避免最后一轮 assistant 文本
   // 被 _write 的 ephemeral splice 淘汰，保证完整正文落到 keep:true block。
   const assistantStreamBlockId =
@@ -2950,6 +3034,13 @@ async function streamFinalModelAnswerWithoutTools(
   }
   continuation.messages = preflight.messages;
   const promptCacheFields = await buildPromptCacheRequestFields(context);
+  const resetFinalAssistantDraftForProviderRetry = () => {
+    discardAssistantBlock(output, assistantStreamBlockId);
+    assistantText = "";
+    pendingAssistantPreviewText = "";
+    lastAssistantPreviewFlushAt = 0;
+    textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
+  };
   for await (const event of withProviderRetry(
     gateway,
     context.providerBreaker,
@@ -2963,7 +3054,12 @@ async function streamFinalModelAnswerWithoutTools(
       ...promptCacheFields,
     },
     signal,
-    { onRetry: (info) => showProviderRetryActivity(context, info) },
+    {
+      onRetry: (info) => {
+        resetFinalAssistantDraftForProviderRetry();
+        showProviderRetryActivity(context, info);
+      },
+    },
   )) {
     if (signal.aborted) {
       clearRequestActivity(context);
@@ -3206,7 +3302,7 @@ async function streamFinalModelAnswerWithoutTools(
           );
         }
         await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-        assistantText = buildAggregatedDowngradedFinalAnswer(
+        assistantText = buildEvidenceBackedFinalBoundaryAnswer(
           gateResult,
           context.language,
           context.evidence,
@@ -3388,7 +3484,7 @@ export async function continueModelAfterToolResults(
       let roundHadUsage = false;
       let roundFinishReason: string | undefined;
       let roundHadThinking = false;
-      const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
+      let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       const continuationRuntime = runtimeFromContinuation(continuation);
       const preflight = await prepareMessagesForProviderPreflight({
         messages: continuation.messages,
@@ -3428,13 +3524,26 @@ export async function continueModelAfterToolResults(
           continuation.endpointProfile,
         );
       }
+      const resetAssistantDraftForProviderRetry = () => {
+        discardAssistantBlock(output, assistantStreamBlockId);
+        assistantText = committedIntermediateAssistantText;
+        roundAssistantText = "";
+        pendingAssistantPreviewText = "";
+        lastAssistantPreviewFlushAt = 0;
+        textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
+      };
       for await (const event of withProviderRetry(
         gateway,
         context.providerBreaker,
         continuation.provider,
         providerRequest,
         controller.signal,
-        { onRetry: (info) => showProviderRetryActivity(context, info) },
+        {
+          onRetry: (info) => {
+            resetAssistantDraftForProviderRetry();
+            showProviderRetryActivity(context, info);
+          },
+        },
       )) {
         // D.13O — abort 后必须早返回，迟到的 SSE delta 不再写主屏 / transcript /
         // continuation messages。与 sendMessage 顶层的 controller.signal.aborted
@@ -3663,6 +3772,7 @@ export async function continueModelAfterToolResults(
         }
         // D.13U — Final Answer Claim Gate + Extended Gate 聚合（continuation 镜像）
         if (assistantText) {
+          await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
           const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
           if (gateResult.status === "needs_disclaimer") {
             await appendSystemEvent(
@@ -3711,7 +3821,7 @@ export async function continueModelAfterToolResults(
             );
             if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-              assistantText = buildAggregatedDowngradedFinalAnswer(
+              assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
                 context.evidence,
@@ -3740,7 +3850,7 @@ export async function continueModelAfterToolResults(
               continue;
             }
             await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-            assistantText = buildAggregatedDowngradedFinalAnswer(
+            assistantText = buildEvidenceBackedFinalBoundaryAnswer(
               gateResult,
               context.language,
               context.evidence,
@@ -3953,7 +4063,7 @@ export async function continueModelAfterToolResults(
                   "warning",
                 );
                 await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-                assistantText = buildAggregatedDowngradedFinalAnswer(
+                assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                   gateResult,
                   context.language,
                   context.evidence,
@@ -3961,7 +4071,7 @@ export async function continueModelAfterToolResults(
               }
             } else {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-              assistantText = buildAggregatedDowngradedFinalAnswer(
+              assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
                 context.evidence,

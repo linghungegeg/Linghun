@@ -82,11 +82,15 @@ describe("child agent summary claim gate", () => {
     expect(result.text).toContain("只读审计完成");
   });
 
-  it("downgrades unsupported test pass claims before agent summary returns", () => {
+  it("cleans unsupported test pass claims before agent summary returns", () => {
     const result = evaluateChildAgentSummaryClaims("测试通过，PASS。", [], "zh-CN");
 
     expect(result.status).toBe("downgraded");
-    expect(result.text).toContain("高风险结论");
+    expect(result.text).toContain("按当前证据边界清洗");
+    expect(result.text).toContain("验证或测试证据");
+    expect(result.text).not.toContain("降级");
+    expect(result.text).not.toContain("test_claim");
+    expect(result.text).not.toContain("completion_pass");
     expect(result.missingEvidenceKinds).toContain("test result evidence");
   });
 

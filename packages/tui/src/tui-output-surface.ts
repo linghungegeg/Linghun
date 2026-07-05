@@ -268,6 +268,27 @@ export class ShellBlockOutput extends Writable {
     this.onWrite();
   }
 
+  cancelAssistantStream(): void {
+    const id = this.assistantBlockId ?? this.context.streamingAssistant?.id;
+    if (id) {
+      this.discardAssistantBlock(id);
+    } else {
+      this.stopAssistantCommitTick();
+      this.context.streamingAssistant = undefined;
+      this.terminalFirstAssistantSink?.resetAssistantStream?.();
+      this.terminalFirstAssistantSink?.rollbackStableAssistantText();
+    }
+    this.assistantBlockId = undefined;
+    this.assistantHoldStableCommit = false;
+    this.assistantStreamText = "";
+    this.assistantPreviewText = "";
+    this.assistantStreamState = undefined;
+    this.assistantTerminalFirstText = "";
+    this.assistantTerminalFirstCommitted = false;
+    this.assistantTerminalFirstStaged = false;
+    this.onWrite();
+  }
+
   /**
    * D.13V — Final Answer Gate 在 retry 前丢弃当前 streaming block 的全部累计
    * 内容。保留 active id，让接下来的 delta 可以重新填回同一条 block；
@@ -1200,6 +1221,13 @@ export function endAssistantStream(output: Writable): void {
   }
 }
 
+export function cancelAssistantStream(output: Writable): void {
+  const candidate = output as { cancelAssistantStream?: () => void };
+  if (typeof candidate.cancelAssistantStream === "function") {
+    candidate.cancelAssistantStream();
+  }
+}
+
 /**
  * D.13V — Final Answer Gate retry 前调用，清空当前 streaming block 累计的
  * 违规原文与 lastFullOutput，避免 Ctrl+O/details 残留。Plain Writable / 测试
@@ -1280,6 +1308,7 @@ export function createShellBlockOutputForTest(
   beginAssistantStream(id: string, options?: AssistantStreamOptions): void;
   appendAssistantDelta(text: string): void;
   endAssistantStream(): void;
+  cancelAssistantStream(): void;
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
   writeLocalCommandOutputLine(text: string): void;

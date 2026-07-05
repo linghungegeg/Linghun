@@ -10,7 +10,7 @@ import {
   __testRunFinalGateEvidenceAction,
   __testStreamFinalModelAnswerWithoutTools,
   buildFinalGateClaimAlignmentFallback,
-  buildAggregatedDowngradedFinalAnswer,
+  buildEvidenceBackedFinalBoundaryAnswer,
   createToolFailureRecoveryFingerprint,
   createToolBatchFailFastSkippedResult,
   evaluateAggregatedFinalAnswerGate,
@@ -310,7 +310,7 @@ describe("final answer gate aggregation", () => {
     expect(result.status).toBe("passed");
   });
 
-  it("downgrades with a user-facing evidence gap instead of raw claim kinds", () => {
+  it("builds an evidence-backed boundary answer instead of a user-visible checklist", () => {
     const result = evaluateAggregatedFinalAnswerGate(
       makeGateContext() as never,
       withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
@@ -319,14 +319,17 @@ describe("final answer gate aggregation", () => {
 
     expect(result.status).toBe("needs_disclaimer");
     if (result.status !== "needs_disclaimer") return;
-    const answer = buildAggregatedDowngradedFinalAnswer(result, "zh-CN");
-    expect(answer).toContain("任务状态");
+    const answer = buildEvidenceBackedFinalBoundaryAnswer(result, "zh-CN");
+    expect(answer).toContain("基于当前已记录证据");
     expect(answer).toContain("验证或测试证据");
+    expect(answer).toContain("证据范围");
+    expect(answer).not.toContain("任务状态");
+    expect(answer).not.toContain("下一步");
     expect(answer).not.toContain("完成或验证声明");
     expect(answer).not.toContain("completion_pass");
   });
 
-  it("downgraded answer includes a compact evidence summary", () => {
+  it("evidence-backed boundary answer includes a compact evidence summary", () => {
     const result = evaluateAggregatedFinalAnswerGate(
       makeGateContext() as never,
       withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
@@ -335,7 +338,7 @@ describe("final answer gate aggregation", () => {
 
     expect(result.status).toBe("needs_disclaimer");
     if (result.status !== "needs_disclaimer") return;
-    const answer = buildAggregatedDowngradedFinalAnswer(result, "zh-CN", [
+    const answer = buildEvidenceBackedFinalBoundaryAnswer(result, "zh-CN", [
       {
         id: "evidence-1",
         kind: "test_result",
@@ -345,10 +348,11 @@ describe("final answer gate aggregation", () => {
         createdAt: new Date(0).toISOString(),
       },
     ]);
-    expect(answer).toContain("当前证据");
+    expect(answer).toContain("证据范围");
     expect(answer).toContain("已有 1 条记录");
     expect(answer).toContain("验证记录");
-    expect(answer).toContain("/details");
+    expect(answer).not.toContain("任务状态：最终回答等待证据确认");
+    expect(answer).not.toContain("下一步");
     expect(answer).not.toContain("verification=");
     expect(answer).not.toContain("focused tests passed");
     expect(answer).not.toContain("command_output:");
@@ -399,9 +403,10 @@ describe("final answer gate aggregation", () => {
     expect(result.status).toBe("needs_disclaimer");
     expect(shouldRewriteFinalGateClaimAlignment(result, context as never)).toBe(true);
     if (result.status !== "needs_disclaimer") return;
-    const checklist = buildAggregatedDowngradedFinalAnswer(result, "zh-CN", context.evidence);
-    expect(checklist).toContain("任务状态");
-    expect(checklist).toContain("当前证据");
+    const visibleFallback = buildEvidenceBackedFinalBoundaryAnswer(result, "zh-CN", context.evidence);
+    expect(visibleFallback).toContain("证据范围");
+    expect(visibleFallback).not.toContain("任务状态");
+    expect(visibleFallback).not.toContain("下一步");
   });
 
   it("no-tool final rewrites claim alignment through the model before committing", async () => {
@@ -537,8 +542,8 @@ describe("final answer gate aggregation", () => {
     expect(plan.action).toBe("verification_request");
   });
 
-  it("engineering downgrade uses user-facing wording instead of raw boundary hints", () => {
-    const answer = buildAggregatedDowngradedFinalAnswer(
+  it("engineering boundary answer uses user-facing wording instead of raw boundary hints", () => {
+    const answer = buildEvidenceBackedFinalBoundaryAnswer(
       {
         status: "needs_disclaimer",
         engineeringVerdict: {
@@ -552,8 +557,48 @@ describe("final answer gate aggregation", () => {
     );
 
     expect(answer).toContain("服务运行证据");
+    expect(answer).toContain("证据范围");
     expect(answer).not.toContain("final should state");
     expect(answer).not.toContain("service/port/log/health");
+  });
+
+  it("does not keep stale provider-error engineering signal after provider recovery", () => {
+    const context = {
+      ...makeGateContext(),
+      lastMetaSchedulerDecision: {
+        policyDecision: {
+          engineeringSignal: { failureCategory: "provider_error" },
+        },
+      },
+    };
+
+    const recovered = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      "已基于当前记录完成回复。",
+      false,
+    );
+    expect(recovered.status).toBe("passed");
+
+    const activeFailure = evaluateAggregatedFinalAnswerGate(
+      {
+        ...context,
+        lastProviderFailure: {
+          code: "PROVIDER_STREAM_ERROR",
+          kind: "transit",
+          provider: "openai-compatible",
+          model: "gpt-5.5",
+          endpointProfile: "responses",
+          summary: "provider stream interrupted",
+          evidenceId: "provider-failure",
+          createdAt: new Date().toISOString(),
+        },
+      } as never,
+      "已完成并验证通过。",
+      false,
+    );
+    expect(activeFailure.status).toBe("needs_disclaimer");
+    if (activeFailure.status !== "needs_disclaimer") return;
+    expect(activeFailure.unsupportedKinds).toContain("engineering_provider_error");
   });
 
   it("first final-gate retry runs the runtime evidence action dispatcher", async () => {

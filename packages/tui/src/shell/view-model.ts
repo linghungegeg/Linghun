@@ -269,6 +269,7 @@ export function createShellViewModel(
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
   const taskRuntimeSummary = undefined;
+  let hasRecoveredAfterProviderFailure = false;
   if (!options.permission && !setupActiveFlow) {
     // Plan A single ownership: in native scrollback mode, committed rows are
     // physically removed from options.outputBlocks and live in the terminal's
@@ -310,9 +311,25 @@ export function createShellViewModel(
     const activeStreamingAssistant = context.streamingAssistant;
     const activeStreamingAssistantId = activeStreamingAssistant?.id;
     const hasActiveProviderFailure = Boolean(context.lastProviderFailure);
+    const staleProviderFailureBlockIds = new Set<string>();
+    let latestProviderFailureBlockId: string | undefined;
+    for (const block of allOutputBlocks) {
+      if (isProviderFailureOutputBlock(block, language)) {
+        latestProviderFailureBlockId = block.id;
+        continue;
+      }
+      if (latestProviderFailureBlockId && isProviderRecoveryProgressBlock(block, language)) {
+        staleProviderFailureBlockIds.add(latestProviderFailureBlockId);
+        latestProviderFailureBlockId = undefined;
+      }
+    }
+    hasRecoveredAfterProviderFailure = staleProviderFailureBlockIds.size > 0;
     const selectedBlocks = allOutputBlocks.filter((b, i) => {
       if (isEmptyAssistantStreamBlock(b)) return false;
-      if (isProviderFailureOutputBlock(b, language) && !hasActiveProviderFailure) {
+      if (
+        isProviderFailureOutputBlock(b, language) &&
+        (!hasActiveProviderFailure || staleProviderFailureBlockIds.has(b.id))
+      ) {
         return false;
       }
       if (
@@ -507,7 +524,7 @@ export function createShellViewModel(
     activity: visibleActivity,
     permission: permissionView,
     visibleWorkState,
-    suppressProviderFailure: hasProviderFailureOutputBlock,
+    suppressProviderFailure: hasProviderFailureOutputBlock || hasRecoveredAfterProviderFailure,
   });
 
   return {
@@ -2089,6 +2106,16 @@ function isProviderFailureOutputBlock(block: ProductBlockViewModel, language: La
     return title === "model request failed" || title === "provider request failed";
   }
   return title === "模型请求失败" || title === "provider 请求失败";
+}
+
+function isProviderRecoveryProgressBlock(block: ProductBlockViewModel, language: Language): boolean {
+  if (isProviderFailureOutputBlock(block, language)) return false;
+  return (
+    block.messageKind === "assistant_text" ||
+    block.messageKind === "tool_result_success" ||
+    block.messageKind === "diagnostic" ||
+    block.messageKind === "local_command_output"
+  );
 }
 
 function buildTaskSuggestions(inputs: {

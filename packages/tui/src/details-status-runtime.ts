@@ -536,6 +536,7 @@ export function __testCreateShellBlockOutput(
   beginAssistantStream(id: string, options?: AssistantStreamOptions): void;
   appendAssistantDelta(text: string): void;
   endAssistantStream(): void;
+  cancelAssistantStream(): void;
   // D.13V — 暴露 retry/downgrade 路径上的 streaming block 操作，便于单测验证
   // unsupported first-pass final answer 不残留于 streaming block / lastFullOutput。
   discardAssistantBlock(id: string): void;
