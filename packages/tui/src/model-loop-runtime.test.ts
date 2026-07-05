@@ -202,6 +202,7 @@ describe("model-loop-runtime", () => {
       const startAgent = createModelToolDefinitions().find((d) => d.name === "StartAgent");
       const schema = startAgent?.inputSchema as {
         required?: string[];
+        anyOf?: Array<{ required?: string[] }>;
         properties?: {
           role?: { description?: string };
           subagent_type?: { description?: string };
@@ -211,6 +212,9 @@ describe("model-loop-runtime", () => {
       };
 
       expect(schema.required).toContain("task");
+      expect(schema.anyOf).toEqual(
+        expect.arrayContaining([{ required: ["role"] }, { required: ["subagent_type"] }]),
+      );
       expect(schema.properties?.role?.description).toContain("Required unless subagent_type");
       expect(schema.properties?.subagent_type?.description).toContain("Custom agent");
       expect(schema.properties?.cwd?.description).toContain("Do not send");
@@ -1355,7 +1359,9 @@ describe("model-loop-runtime", () => {
       const snippets = deriveToolSupportsClaims("ReadSnippets", {}, { text: "" });
       const pack = deriveToolSupportsClaims("SourcePack", { query: "needle" }, { text: "" });
 
-      expect(snippets).toEqual(expect.arrayContaining(["ReadSnippets", "local_read", "source_snippet"]));
+      expect(snippets).toEqual(
+        expect.arrayContaining(["ReadSnippets", "local_read", "source_snippet"]),
+      );
       expect(pack).toEqual(expect.arrayContaining(["SourcePack", "local_read", "source_snippet"]));
       expect([...snippets, ...pack]).not.toContain("test_passed");
       expect([...snippets, ...pack]).not.toContain("build_passed");

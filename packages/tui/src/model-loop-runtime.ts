@@ -25,8 +25,8 @@ import type { ModelToolDefinition } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 
-import { createGitToolDefinitions } from "./git-tool-runtime.js";
 import { stableHash } from "./cache-freshness.js";
+import { createGitToolDefinitions } from "./git-tool-runtime.js";
 import { createIndexToolDefinitions } from "./index-tool-runtime.js";
 import type { ReportWriteGuard } from "./permission-continuation-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
@@ -401,6 +401,7 @@ export function createStartAgentInputSchema(): unknown {
   return {
     type: "object",
     additionalProperties: false,
+    anyOf: [{ required: ["role"] }, { required: ["subagent_type"] }],
     properties: {
       role: {
         type: "string",
@@ -1537,8 +1538,10 @@ function formatUserFacingClaimKinds(kinds: string[], language: Language): string
       labels.add(language === "en-US" ? "unsupported final claim" : "未受证据支持的最终声明");
     }
   }
-  return Array.from(labels).join(language === "en-US" ? ", " : "、") ||
-    (language === "en-US" ? "unsupported final claim" : "未受证据支持的最终声明");
+  return (
+    Array.from(labels).join(language === "en-US" ? ", " : "、") ||
+    (language === "en-US" ? "unsupported final claim" : "未受证据支持的最终声明")
+  );
 }
 
 // ---------------------------------------------------------------------------
