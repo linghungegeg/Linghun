@@ -6543,6 +6543,34 @@ describe("StreamingMarkdown stable prefix", () => {
     expect(tableClosed.stablePrefix).toContain("| Rust | ✅ |");
     expect(tableClosed.unstableSuffix).toBe("表格后正文");
   });
+
+  it("advances stable prefix monotonically across long streaming markdown deltas", () => {
+    const state = { stablePrefix: "" };
+    const chunks = [
+      "# 长回答\n\n",
+      ...Array.from({ length: 24 }, (_, index) =>
+        [`## 步骤 ${index + 1}`, "", `- 已完成 ${index + 1}`, `- 继续 **处理中 ${index + 1}`].join("\n"),
+      ),
+      "**\n\n```ts\nconst stable = true;\n```\n\n",
+      "| 项目 | 状态 |\n| --- | --- |\n| A | 进行中 |\n",
+      "| B | 完成 |\n\n表格后正文",
+    ];
+
+    let text = "";
+    let previousStableLength = 0;
+    for (const chunk of chunks) {
+      text += chunk;
+      const result = splitStreamingMarkdownForRender(text, state);
+      expect(result.stablePrefix.length).toBeGreaterThanOrEqual(previousStableLength);
+      expect(text.startsWith(result.stablePrefix)).toBe(true);
+      expect(result.stablePrefix + result.unstableSuffix).toBe(text.replace(/\r/g, ""));
+      previousStableLength = result.stablePrefix.length;
+    }
+
+    expect(state.stablePrefix).toContain("const stable = true;");
+    expect(state.stablePrefix).toContain("| B | 完成 |");
+    expect(text.slice(state.stablePrefix.length)).toBe("表格后正文");
+  });
 });
 
 describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer setup-needed", () => {

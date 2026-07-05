@@ -31,6 +31,7 @@ export type MessageMarkdownProps = {
   dim?: boolean;
   tone?: "default" | "error" | "diagnostic";
   wrapWidth?: number;
+  useAsciiBorders?: boolean;
   selectionLineIndexes?: number[];
   selectionLineRanges?: ProductBlockSelectionRange[];
   isStreaming?: boolean;
@@ -45,6 +46,15 @@ type InlineToken =
 type WrappedInlineToken = InlineToken & { sourceStart: number; sourceEnd: number };
 
 type TableCell = { text: string; lines: string[]; width: number };
+type CodeBlockFrame = {
+  topLeft: string;
+  topRight: string;
+  bottomLeft: string;
+  bottomRight: string;
+  horizontal: string;
+  vertical: string;
+  gutter: string;
+};
 
 const INLINE_TOKEN_RE =
   /(`[^`\n]+`|\*\*[^*\n][^\n]*?\*\*|\*[^*\n][^\n]*?\*|\[[^\]\n]+\]\([^\s)\n]+\))/u;
@@ -57,6 +67,43 @@ const TABLE_MIN_ACCEPTABLE_COLUMN = 8;
 const MARKDOWN_TOKEN_CACHE_LIMIT = 128;
 const markdownTokenCache = new Map<string, Token[]>();
 const codeHighlightCache = new Map<string, string[]>();
+
+function codeBlockFrame(useAsciiBorders: boolean): CodeBlockFrame {
+  return useAsciiBorders
+    ? {
+        topLeft: "+",
+        topRight: "+",
+        bottomLeft: "+",
+        bottomRight: "+",
+        horizontal: "-",
+        vertical: "|",
+        gutter: "|",
+      }
+    : {
+        topLeft: "┌",
+        topRight: "┐",
+        bottomLeft: "└",
+        bottomRight: "┘",
+        horizontal: "─",
+        vertical: "│",
+        gutter: "│",
+      };
+}
+
+function codeBlockTopLine(frame: CodeBlockFrame, width: number, label?: string): string {
+  const innerWidth = Math.max(6, width - 2);
+  const title = label ? ` ${label.trim()} ` : "";
+  const clippedTitle =
+    title.length > innerWidth ? `${title.slice(0, Math.max(0, innerWidth - 3))}...` : title;
+  return `${frame.topLeft}${clippedTitle}${frame.horizontal.repeat(
+    Math.max(0, innerWidth - clippedTitle.length),
+  )}${frame.topRight}`;
+}
+
+function codeBlockBottomLine(frame: CodeBlockFrame, width: number): string {
+  const innerWidth = Math.max(6, width - 2);
+  return `${frame.bottomLeft}${frame.horizontal.repeat(innerWidth)}${frame.bottomRight}`;
+}
 
 type MarkdownRenderSegment = { kind: "markdown" | "diff"; text: string };
 
@@ -626,6 +673,7 @@ function renderCodeBlock({
   theme,
   dim,
   wrapWidth,
+  useAsciiBorders,
   blockKey,
 }: {
   code: string;
@@ -633,6 +681,7 @@ function renderCodeBlock({
   theme: ShellTheme;
   dim: boolean;
   wrapWidth: number;
+  useAsciiBorders: boolean;
   blockKey: string;
 }): React.ReactNode {
   // Phase 3: diff/patch blocks use StructuredDiff for visual diff rendering.
@@ -645,19 +694,21 @@ function renderCodeBlock({
   const highlighted = getCachedHighlightedCodeLines(code, lang);
   const lineCount = rawLines.length;
   const gutterWidth = String(lineCount).length;
+  const frame = codeBlockFrame(useAsciiBorders);
+  const frameWidth = Math.max(8, wrapWidth - 1);
+  const codeWrapWidth = Math.max(8, frameWidth - gutterWidth - 5);
+  const borderColor = theme.dim ?? theme.muted;
   return (
-    <Box key={blockKey} flexDirection="column" marginLeft={1}>
-      {lang ? (
-        <Text color={theme.dim ?? theme.muted} dimColor={dim}>
-          {`  ${lang}`}
-        </Text>
-      ) : null}
+    <Box key={blockKey} flexDirection="column" marginLeft={1} marginY={1}>
+      <Text color={borderColor} dimColor={dim}>
+        {codeBlockTopLine(frame, frameWidth, lang)}
+      </Text>
       {rawLines.map((line, lineIndex) => {
         const num = String(lineIndex + 1).padStart(gutterWidth, " ");
         return (
           <Box key={`${blockKey}-line-${lineIndex}-${line}`} flexDirection="row">
-            <Text color={theme.dim ?? theme.muted} dimColor>
-              {`${num} │ `}
+            <Text color={borderColor} dimColor={dim}>
+              {`${frame.vertical} ${num} ${frame.gutter} `}
             </Text>
             <CodeLine
               line={line}
@@ -665,11 +716,14 @@ function renderCodeBlock({
               lang={lang}
               theme={theme}
               dim={dim}
-              wrapWidth={Math.max(8, wrapWidth - gutterWidth - 4)}
+              wrapWidth={codeWrapWidth}
             />
           </Box>
         );
       })}
+      <Text color={borderColor} dimColor={dim}>
+        {codeBlockBottomLine(frame, frameWidth)}
+      </Text>
     </Box>
   );
 }
@@ -689,6 +743,7 @@ function renderToken({
   dim,
   tone,
   wrapWidth,
+  useAsciiBorders,
   keyPrefix,
 }: {
   token: Token;
@@ -696,6 +751,7 @@ function renderToken({
   dim: boolean;
   tone: MessageMarkdownProps["tone"];
   wrapWidth: number;
+  useAsciiBorders: boolean;
   keyPrefix: string;
 }): React.ReactNode {
   switch (token.type) {
@@ -745,6 +801,7 @@ function renderToken({
             dim={dim}
             tone={tone}
             wrapWidth={wrapWidth - 2}
+            useAsciiBorders={useAsciiBorders}
           />
         </Box>
       );
@@ -787,6 +844,7 @@ function renderToken({
         theme,
         dim,
         wrapWidth,
+        useAsciiBorders,
         blockKey: keyPrefix,
       });
     }
@@ -818,6 +876,7 @@ function renderMarkdownTokens({
   dim,
   tone,
   wrapWidth,
+  useAsciiBorders,
   keyPrefix,
 }: {
   text: string;
@@ -825,6 +884,7 @@ function renderMarkdownTokens({
   dim: boolean;
   tone: MessageMarkdownProps["tone"];
   wrapWidth: number;
+  useAsciiBorders: boolean;
   keyPrefix: string;
 }): React.ReactNode[] {
   const tokens = getCachedMarkdownTokens(text);
@@ -835,6 +895,7 @@ function renderMarkdownTokens({
       dim,
       tone,
       wrapWidth,
+      useAsciiBorders,
       keyPrefix: `${keyPrefix}-${index}-${token.type}-${token.raw.slice(0, 16)}`,
     }),
   );
@@ -999,6 +1060,7 @@ export function MessageMarkdown({
   dim = false,
   tone = "default",
   wrapWidth,
+  useAsciiBorders = theme.mode === "no-color",
   selectionLineIndexes,
   selectionLineRanges,
   isStreaming,
@@ -1011,6 +1073,7 @@ export function MessageMarkdown({
       dim,
       tone,
       wrapWidth,
+      useAsciiBorders,
       selectionLineIndexes,
       selectionLineRanges,
     });
@@ -1070,6 +1133,7 @@ export function MessageMarkdown({
                 dim,
                 tone,
                 wrapWidth: effectiveWrapWidth,
+                useAsciiBorders,
                 keyPrefix: `markdown-${index}`,
               })}
             </Box>
@@ -1088,6 +1152,7 @@ export function MessageMarkdown({
           dim,
           tone,
           wrapWidth: effectiveWrapWidth,
+          useAsciiBorders,
           keyPrefix: `${index}-${token.type}-${token.raw.slice(0, 16)}`,
         }),
       )}
@@ -1101,6 +1166,7 @@ function renderSelectablePlainMarkdown({
   dim,
   tone,
   wrapWidth,
+  useAsciiBorders = theme.mode === "no-color",
   selectionLineIndexes,
   selectionLineRanges,
 }: MessageMarkdownProps & { dim: boolean; tone: MessageMarkdownProps["tone"] }): React.ReactNode {
@@ -1113,6 +1179,7 @@ function renderSelectablePlainMarkdown({
     selectedRangesByLine.set(range.lineIndex, existing);
   }
   const effectiveWrapWidth = wrapWidth ?? 80;
+  const frame = codeBlockFrame(useAsciiBorders);
   let inCode = false;
   let codeLang: string | undefined;
   let codeLineNum = 0;
@@ -1133,7 +1200,7 @@ function renderSelectablePlainMarkdown({
       rendered.push(
         <Box key={`code-line-${lineIndex}-${raw}`} flexDirection="row">
           <Text color={theme.dim ?? theme.muted} dimColor>
-            {`${gutter} │ `}
+            {`${gutter} ${frame.gutter} `}
           </Text>
           <CodeLine
             line={raw}
@@ -1214,6 +1281,7 @@ export function StreamingMarkdown({
   dim = false,
   tone = "default",
   wrapWidth,
+  useAsciiBorders = theme.mode === "no-color",
 }: MessageMarkdownProps): React.ReactNode {
   const stateRef = useRef<StreamingMarkdownState>({ stablePrefix: "" });
   const { stablePrefix, unstableSuffix } = splitStreamingMarkdownForRender(text, stateRef.current);
@@ -1226,6 +1294,7 @@ export function StreamingMarkdown({
           dim={dim}
           tone={tone}
           wrapWidth={wrapWidth}
+          useAsciiBorders={useAsciiBorders}
         />
       ) : null}
       {unstableSuffix ? (
@@ -1235,6 +1304,7 @@ export function StreamingMarkdown({
           dim={dim}
           tone={tone}
           wrapWidth={wrapWidth}
+          useAsciiBorders={useAsciiBorders}
           isStreaming
         />
       ) : null}

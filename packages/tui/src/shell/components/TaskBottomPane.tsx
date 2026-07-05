@@ -218,6 +218,7 @@ export function TaskBottomPane({
             theme={theme}
             width={cw}
             language={view.language}
+            capability={capability}
           />
         </Box>
       ) : null}

@@ -592,6 +592,74 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("renders assistant markdown code blocks with terminal-safe borders while keeping diff fences structured", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
+    vi.stubEnv("FORCE_COLOR", "0");
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      themeMode: "no-color",
+      height: 34,
+      commandPanel: undefined,
+      blocks: [
+        {
+          id: "markdown-code",
+          kind: "details",
+          status: "pass",
+          title: "",
+          summary: "code sample",
+          fullText: [
+            "# Output",
+            "",
+            "查看 [文档](https://example.test/docs) 和 `inline` 标记。",
+            "",
+            "| 名称 | 说明 | 链接 |",
+            "| --- | --- | --- |",
+            "| 模块 | 包含中文宽字符 | https://example.test/docs |",
+            "",
+            "```ts",
+            "const answer = 42;",
+            "```",
+            "",
+            "```diff",
+            "--- a/file.ts",
+            "+++ b/file.ts",
+            "@@ -1 +1 @@",
+            "-const oldValue = 1;",
+            "+const newValue = 2;",
+            "```",
+          ].join("\n"),
+          messageKind: "assistant_text",
+          keep: true,
+        },
+      ],
+      staticHistoryBlocks: [],
+      streamingAssistantText: undefined,
+      activity: undefined,
+      taskSuggestions: undefined,
+      limitations: [],
+      transcriptScroll: { scrollOffset: 0, stickToBottom: true },
+    };
+    const { output, shell } = await renderWithEvents(() => view);
+
+    await shell.waitUntilRenderFlush();
+
+    const visible = finalScreenLinesFrom(output, view.height).join("\n");
+    expect(visible).toContain("查看 文档");
+    expect(visible).toContain("https://example.test/docs");
+    expect(visible).toContain("inline");
+    expect(visible).toContain("│  名称  │");
+    expect(visible).toContain("包含中文宽字符");
+    expect(visible).toContain("+ ts");
+    expect(visible).toContain("| 1 | const answer = 42;");
+    expect(visible).toContain("+---");
+    expect(visible).toContain("--- a/file.ts");
+    expect(visible).toContain("+ const newValue = 2;");
+    expect(visible).toContain("┈┈┈");
+    shell.unmount();
+  });
+
   it("first submit keeps the user message and pending activity visible in the native bottom frame", async () => {
     vi.unstubAllEnvs();
     const userBlock: ProductBlockViewModel = {

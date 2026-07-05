@@ -1,5 +1,6 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
+import type { TerminalCapability } from "../terminal-capability.js";
 import { fitText, wrapText } from "../text-utils.js";
 import { type ShellTheme, getStatusMarker } from "../theme.js";
 import type { MessageBlockKind, ProductBlockViewModel } from "../types.js";
@@ -75,14 +76,17 @@ export function ProductBlock({
   theme,
   width,
   language = "zh-CN",
+  capability,
 }: {
   block: ProductBlockViewModel;
   theme: ShellTheme;
   width: number;
   language?: "zh-CN" | "en-US";
+  capability?: Pick<TerminalCapability, "unicodeBox">;
 }): React.ReactNode {
   const compact = width < 60;
   const nextAction = visibleNextAction(block);
+  const useAsciiBorders = theme.mode === "no-color" || capability?.unicodeBox === false;
   // Command transcript row — slash command 提交后作为独立 `❯ /command` 行进入
   // task transcript，与下方 tool/output 块视觉分层。U+276F + accent 颜色，
   // 不带 status marker、不带 detail/nextAction，只显示一行命令。
@@ -152,6 +156,7 @@ export function ProductBlock({
               dim={dim}
               tone={tone}
               wrapWidth={messageResponseBodyWidth(width)}
+              useAsciiBorders={useAsciiBorders}
               selectionLineIndexes={block.selectionLineIndexes}
               selectionLineRanges={block.selectionLineRanges}
             />
@@ -163,6 +168,7 @@ export function ProductBlock({
             dim={dim}
             tone={tone}
             wrapWidth={Math.max(8, width)}
+            useAsciiBorders={useAsciiBorders}
             selectionLineIndexes={block.selectionLineIndexes}
             selectionLineRanges={block.selectionLineRanges}
           />
@@ -190,6 +196,7 @@ export function ProductBlock({
           theme={theme}
           dim
           wrapWidth={Math.max(8, width)}
+          useAsciiBorders={useAsciiBorders}
           selectionLineIndexes={block.selectionLineIndexes}
           selectionLineRanges={block.selectionLineRanges}
         />
@@ -265,6 +272,7 @@ export function ProductBlock({
               theme={theme}
               tone="error"
               wrapWidth={messageResponseBodyWidth(width)}
+              useAsciiBorders={useAsciiBorders}
               selectionLineIndexes={block.selectionLineIndexes}
               selectionLineRanges={block.selectionLineRanges}
             />

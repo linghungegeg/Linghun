@@ -178,6 +178,7 @@ function TaskLayout({
               transcriptBlocks={visibleTranscriptBlocks}
               viewWidth={view.width}
               contentWidth={contentWidth}
+              capability={capability}
             />
           </Box>
         ) : (
@@ -212,6 +213,7 @@ function TaskLayout({
                 transcriptBlocks={visibleTranscriptBlocks}
                 viewWidth={view.width}
                 contentWidth={contentWidth}
+                capability={capability}
               />
             </Box>
           </TranscriptViewport>
@@ -248,6 +250,7 @@ function taskContentWidth(viewWidth: number): number {
 function TaskActivityRegion({
   activity,
   contentWidth,
+  capability,
   expandedTranscriptBlock,
   framePulse,
   limitations,
@@ -262,6 +265,7 @@ function TaskActivityRegion({
 }: {
   activity: ShellViewModel["activity"];
   contentWidth: number;
+  capability: TerminalCapability;
   expandedTranscriptBlock: ShellViewModel["blocks"][number] | undefined;
   framePulse: number;
   limitations: ShellViewModel["limitations"];
@@ -286,6 +290,7 @@ function TaskActivityRegion({
             theme={theme}
             width={contentWidth}
             language={language}
+            capability={capability}
           />
         </Box>
       ) : transcriptBlocks.length > 0 ? (
@@ -297,6 +302,7 @@ function TaskActivityRegion({
               theme={theme}
               width={contentWidth}
               language={language}
+              capability={capability}
             />
           ))}
         </Box>
@@ -308,6 +314,7 @@ function TaskActivityRegion({
             text={streamingAssistantText}
             theme={theme}
             wrapWidth={contentWidth}
+            useAsciiBorders={noColor || !capability.unicodeBox}
           />
         </Box>
       ) : null}

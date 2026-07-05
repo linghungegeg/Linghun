@@ -175,7 +175,7 @@ export function renderPlainMarkdownLines(
     if (!inCode) {
       const table = readMarkdownTable(lines, i);
       if (table) {
-        out.push(...renderMarkdownTableLines(table, noColor).map(applyTone));
+        out.push(...renderMarkdownTableLines(table, noColor, wrapWidth).map(applyTone));
         i = table.endIndex;
         continue;
       }
@@ -242,12 +242,26 @@ function parseMarkdownTableSeparator(line: string): MarkdownTableAlign[] | undef
   return aligns;
 }
 
-function renderMarkdownTableLines(table: MarkdownTable, noColor: boolean): string[] {
+function renderMarkdownTableLines(table: MarkdownTable, noColor: boolean, wrapWidth: number): string[] {
   const widths = table.rows[0]?.map((_cell, column) =>
     Math.max(...table.rows.map((row) => displayWidth(row[column] ?? ""))),
   );
   if (!widths || widths.length === 0) return [];
   const separator = `| ${widths.map((width) => "-".repeat(Math.max(3, width))).join(" | ")} |`;
+  const tableWidth = Math.max(separator.length, displayWidth(separator));
+  if (tableWidth > wrapWidth) {
+    const headers = table.rows[0] ?? [];
+    return table.rows.slice(1).flatMap((row, rowIndex) => {
+      const rendered = row.flatMap((cell, column) => {
+        const label = headers[column] ?? `#${column + 1}`;
+        const prefix = `${label}: `;
+        return wrapText(cell || " ", Math.max(8, wrapWidth - displayWidth(prefix))).map(
+          (wrapped, lineIndex) => `${lineIndex === 0 ? prefix : " ".repeat(displayWidth(prefix))}${wrapped}`,
+        );
+      });
+      return rowIndex === 0 ? rendered : ["", ...rendered];
+    });
+  }
   return table.rows.flatMap((row, rowIndex) => {
     const isHeader = rowIndex === 0;
     const rendered = `| ${row
