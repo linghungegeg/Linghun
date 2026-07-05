@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 
 import { createModelToolDefinitions } from "./model-loop-runtime.js";
 import {
@@ -9,6 +10,13 @@ import { formatToolOutput } from "./tool-output-presenter.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 
 describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
+  it("keeps automatic final-gate evidence primary text out of the main screen", () => {
+    const source = readFileSync(new URL("./model-tool-runtime.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("shouldSuppressControlToolPrimaryText(toolCall)");
+    expect(source).toContain('toolCall.id.startsWith("final-gate-evidence-")');
+  });
+
   it("exposes ReadSnippets and SourcePack in model tool definitions", () => {
     const definitions = createModelToolDefinitions();
     const readSnippets = definitions.find((definition) => definition.name === "ReadSnippets");

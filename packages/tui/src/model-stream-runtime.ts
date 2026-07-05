@@ -614,6 +614,27 @@ export function planFinalGateEvidenceGapAction(input: {
       },
     };
   }
+  if (gap === "completion") {
+    return {
+      action: "readonly_check",
+      reason: "completion_gap_readonly",
+      directive: formatEvidenceGapToolDirective({
+        language,
+        action: "readonly_check",
+        missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
+        tools: ["GitStatusInspect"],
+        note:
+          language === "en-US"
+            ? "Inspect current changes only; do not write files, create commits, or rerun verification just to prove completion."
+            : "只检查当前变更范围；不要写文件，不要创建 commit，也不要为了证明完成而重复运行验证。",
+      }),
+      evidenceAction: {
+        toolName: "GitStatusInspect",
+        input: { includeDetails: true },
+        summary: "inspect current change scope for final-gate completion evidence",
+      },
+    };
+  }
   if (gap === "runtime") {
     const runtimeAction = createServiceRuntimeReadonlyEvidenceAction(
       [input.assistantText, input.userText].filter(Boolean).join("\n"),
@@ -635,6 +656,13 @@ export function planFinalGateEvidenceGapAction(input: {
     };
   }
   if (gap === "verification") {
+    if (hasFreshVerificationAttemptEvidence(context.evidence)) {
+      return {
+        action: "downgrade_only",
+        reason: "verification_evidence_already_recorded",
+        directive: formatEvidenceGapBlocker("retry_budget_exhausted", language),
+      };
+    }
     if (context.permissionMode === "plan") {
       return {
         action: "blocked_explanation",
@@ -961,16 +989,36 @@ function createFinalGateEvidenceTaskDirective(
       ].join("\n");
 }
 
-function classifyFinalGateEvidenceGap(kinds: string[]): "verification" | "artifact" | "git" | "runtime" | "other" {
+function classifyFinalGateEvidenceGap(kinds: string[]): "verification" | "completion" | "artifact" | "git" | "runtime" | "other" {
   if (kinds.some((kind) => /git|commit|branch|push|stable_point/iu.test(kind))) return "git";
+  if (kinds.some((kind) => /completion_claim|task_completion|task_completed/iu.test(kind))) {
+    return "completion";
+  }
   if (kinds.some((kind) => /artifact|file|report|write/iu.test(kind))) return "artifact";
   if (kinds.some((kind) => /service|runtime|port|health|log|daemon|server/iu.test(kind))) {
     return "runtime";
   }
-  if (kinds.some((kind) => /test|typecheck|build|lint|verification|completion|pass|full_suite/iu.test(kind))) {
+  if (kinds.some((kind) => /test|typecheck|build|lint|verification|pass|full_suite/iu.test(kind))) {
     return "verification";
   }
   return "other";
+}
+
+function hasFreshVerificationAttemptEvidence(evidence: TuiContext["evidence"]): boolean {
+  return evidence.some((record) => {
+    if (record.supportsClaims.includes("tool_failure")) return false;
+    if (isEvidenceStaleForClaim(record, "verification_claim")) return false;
+    return [
+      "verification_attempted",
+      "verification_passed",
+      "verification_self_check_passed",
+      "test_passed",
+      "typecheck_passed",
+      "build_passed",
+      "lint_passed",
+      "smoke_passed",
+    ].some((claim) => record.supportsClaims.includes(claim));
+  });
 }
 
 function createArtifactReadonlyEvidenceAction(text: string): NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
@@ -1755,6 +1803,7 @@ export async function sendMessage(
         }
         recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
+          await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
           clearRequestActivity(context);
           const visibleText = textSanitizer.push(event.text);
           assistantText += visibleText;
@@ -1772,6 +1821,7 @@ export async function sendMessage(
           continue;
         }
         if (event.type === "tool_use") {
+          await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
           const visibleText = textSanitizer.flush();
           assistantText += visibleText;
           roundAssistantText += visibleText;
@@ -1788,6 +1838,7 @@ export async function sendMessage(
           continue;
         }
         if (event.type === "assistant_thinking_delta") {
+          await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
           roundHadThinking = true;
           continue;
         }
@@ -3069,6 +3120,7 @@ async function streamFinalModelAnswerWithoutTools(
     }
     recordRequestFirstDelta(context, event.type);
     if (event.type === "assistant_text_delta") {
+      await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
       clearRequestActivity(context);
       const visibleText = textSanitizer.push(event.text);
       assistantText += visibleText;
@@ -3085,6 +3137,7 @@ async function streamFinalModelAnswerWithoutTools(
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
+      await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
       hadThinking = true;
       continue;
     }
@@ -3556,6 +3609,7 @@ export async function continueModelAfterToolResults(
         }
         recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
+          await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
           clearRequestActivity(context);
           const visibleText = textSanitizer.push(event.text);
           assistantText += visibleText;
@@ -3573,6 +3627,7 @@ export async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "tool_use") {
+          await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
           const visibleText = textSanitizer.flush();
           assistantText += visibleText;
           roundAssistantText += visibleText;
@@ -3589,6 +3644,7 @@ export async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "assistant_thinking_delta") {
+          await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
           roundHadThinking = true;
           continue;
         }

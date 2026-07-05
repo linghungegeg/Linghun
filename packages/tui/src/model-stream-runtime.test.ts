@@ -470,6 +470,56 @@ describe("final answer gate aggregation", () => {
     expect((context as { lastFullOutput?: string }).lastFullOutput ?? "").not.toContain(rawDraft);
   });
 
+  it("clears active provider failure as soon as a later stream recovers", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-provider-recovered-"));
+    const { context, events } = makeDispatcherContext(projectPath);
+    Object.assign(context, {
+      config: defaultConfig,
+      providerBreaker: createProviderCircuitBreakerState(),
+      lastProviderFailure: {
+        code: "PROVIDER_STREAM_ERROR",
+        kind: "gateway",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        summary: "provider failure: gateway",
+        evidenceId: "provider-failure-1",
+        createdAt: new Date().toISOString(),
+      },
+      cache: { history: [], deepCompact: undefined },
+    });
+    const blocks: Array<{ id: string; fullText?: string; summary?: string }> = [];
+    const output = createShellBlockOutputForTest(context, blocks as never);
+    const calls = { count: 0 };
+
+    const finalText = await __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "继续" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+      context,
+      gatewayByTurn(
+        [
+          [
+            { type: "assistant_text_delta", text: "网关已恢复，继续输出。" },
+            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+          ],
+        ],
+        calls,
+      ),
+      "session-provider-recovered",
+      output,
+      new AbortController().signal,
+    );
+
+    expect(finalText).toContain("网关已恢复");
+    expect((context as { lastProviderFailure?: unknown }).lastProviderFailure).toBeUndefined();
+    expect(JSON.stringify(events)).toContain("provider failure recovered");
+  });
+
   it("no-tool final gathers git evidence and returns to the model instead of downgrading", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-no-tool-git-final-"));
     const { context, events } = makeDispatcherContext(projectPath);
@@ -523,7 +573,7 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(blocks)).not.toContain(rawDraft);
   });
 
-  it("still plans evidence gathering or permission when no matching evidence exists", () => {
+  it("plans completion gaps as readonly scope checks instead of rerunning verification", () => {
     const context = { ...makeGateContext(), permissionMode: "default", language: "zh-CN" };
     const result = evaluateAggregatedFinalAnswerGate(
       context as never,
@@ -539,7 +589,44 @@ describe("final answer gate aggregation", () => {
       context: context as never,
       userText: "继续修复",
     });
-    expect(plan.action).toBe("verification_request");
+    expect(plan.action).toBe("readonly_check");
+    expect(plan.reason).toBe("completion_gap_readonly");
+    expect(plan.directive).toContain("GitStatusInspect");
+    expect(plan.directive).toContain("不要为了证明完成而重复运行验证");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "GitStatusInspect",
+      input: { includeDetails: true },
+    });
+  });
+
+  it("does not run the same verification evidence action again after fresh verification evidence exists", () => {
+    const context = {
+      ...makeGateContext(),
+      permissionMode: "full-access",
+      language: "zh-CN",
+      evidence: [
+        makeEvidence({
+          summary: "RunVerification: Verification PASS",
+          supportsClaims: ["verification_result", "verification_attempted"],
+        }),
+      ],
+    };
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("已验证。", [{ kind: "verification_claim", phrase: "已验证" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续修复",
+    });
+    expect(plan.action).toBe("downgrade_only");
+    expect(plan.reason).toBe("verification_evidence_already_recorded");
+    expect(plan.evidenceAction).toBeUndefined();
   });
 
   it("engineering boundary answer uses user-facing wording instead of raw boundary hints", () => {

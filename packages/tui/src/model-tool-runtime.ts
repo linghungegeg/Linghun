@@ -1917,8 +1917,14 @@ async function finishControlToolResult(
     isError,
     evidence?.id,
   );
-  writeLine(output, formatControlToolPrimaryText(toolCall.name, text, isError, data, context));
+  if (!shouldSuppressControlToolPrimaryText(toolCall)) {
+    writeLine(output, formatControlToolPrimaryText(toolCall.name, text, isError, data, context));
+  }
   return { ok: !isError, tool: toolCall.name, text, data, evidenceId: evidence?.id };
+}
+
+function shouldSuppressControlToolPrimaryText(toolCall: ModelToolCall): boolean {
+  return toolCall.id.startsWith("final-gate-evidence-");
 }
 
 function formatControlToolPrimaryText(
