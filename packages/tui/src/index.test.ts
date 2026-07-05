@@ -11734,12 +11734,6 @@ describe("Phase 06 TUI slash commands", () => {
       realInput: { action: "cancel_all" },
     },
     {
-      prompt: "生成报告",
-      proposed: "/report generated-summary.txt",
-      realTool: "WriteReport",
-      realInput: { path: "generated-summary.txt", content: "summary\n" },
-    },
-    {
       prompt: "刷新索引",
       proposed: "/index refresh",
       realTool: "IndexOperation",

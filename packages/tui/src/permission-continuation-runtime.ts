@@ -71,6 +71,11 @@ export type ModelToolCallLike = {
   input?: unknown;
 };
 
+function readToolPath(input: Record<string, unknown>): string | undefined {
+  const path = input.path ?? input.file_path ?? input.filePath;
+  return typeof path === "string" ? path : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Permission decision helpers
 // ---------------------------------------------------------------------------
@@ -260,12 +265,24 @@ export function createReportWriteGuard(text: string): ReportWriteGuard | undefin
     return undefined;
   }
   const requestedPath = extractRequestedReportPath(text);
-  if (!requestedPath) {
+  if (requestedPath) {
+    return {
+      requestedPath,
+      pathExplicit: true,
+      completed: false,
+      reminderSent: false,
+      evidenceReminderSent: false,
+      finalReferenceReminderSent: false,
+      nonWriteToolRounds: 0,
+      evidenceRead: false,
+    };
+  }
+  if (/\.md\b/iu.test(text)) {
     return undefined;
   }
   return {
-    requestedPath,
-    pathExplicit: true,
+    requestedPath: "",
+    pathExplicit: false,
     completed: false,
     reminderSent: false,
     evidenceReminderSent: false,
@@ -276,10 +293,6 @@ export function createReportWriteGuard(text: string): ReportWriteGuard | undefin
 }
 
 export function isReportFileWriteRequest(text: string): boolean {
-  const hasExplicitPath = /\.md\b/iu.test(text);
-  if (!hasExplicitPath) {
-    return false;
-  }
   const asksForReport = /报告|report/iu.test(text);
   const asksToWrite = /生成|写入|创建|保存|写到|写在|保存为|generate|write|create|save|save as/iu.test(
     text,
@@ -346,12 +359,22 @@ export function createReportFinalReferenceReminder(
 }
 
 export function createReportTaskGuard(guard: ReportWriteGuard, language: Language): string {
+  if (!guard.pathExplicit) {
+    return language === "en-US"
+      ? "Task-specific completion requirement for this turn only: the user asked for a saved report/document. Choose an appropriate Markdown file path for this task, write it with Write or Edit before the final answer, then reference the actual written path and separate confirmed facts from unconfirmed items."
+      : "仅本轮任务的完成要求：用户要求保存报告/文档。请根据任务选择合适的 Markdown 文件路径，最终回答前必须调用 Write 或 Edit 写入该文件，然后引用实际写入路径，并准确区分已确认事实和未确认项。";
+  }
   return language === "en-US"
     ? `Task-specific completion requirement for this turn only: the user explicitly asked for a saved report file. Before final answer, call Write or Edit with path ${guard.requestedPath}. If you inspect the project first, keep it minimal and still finish by writing ${guard.requestedPath}. The final answer must reference ${guard.requestedPath} and accurately separate confirmed facts from unconfirmed items.`
     : `仅本轮任务的完成要求：用户明确要求保存报告文件。最终回答前必须调用 Write 或 Edit，path 使用 ${guard.requestedPath}。如需先检查项目，请保持最小必要检查，并仍以写入 ${guard.requestedPath} 收口。最终回答必须引用 ${guard.requestedPath}，并准确区分已确认事实和未确认项。`;
 }
 
 export function createReportWriteReminder(guard: ReportWriteGuard, language: Language): string {
+  if (!guard.pathExplicit) {
+    return language === "en-US"
+      ? "The user asked you to save a report/document, but no Markdown file has been written yet. Choose an appropriate Markdown path, call Write or Edit now, then reference the actual written path in the final answer."
+      : "用户要求保存报告/文档，但当前还没有写入 Markdown 文件。请先选择合适的 Markdown 路径并调用 Write 或 Edit 写入，然后在最终回答中引用实际写入路径。";
+  }
   return language === "en-US"
     ? `The user explicitly asked you to generate and save a report file. No saved report exists yet. Call Write or Edit now with path ${guard.requestedPath}, then give a final answer that references ${guard.requestedPath}.`
     : `用户明确要求生成并保存报告文件，但当前还没有保存报告。现在请调用 Write 或 Edit 写入 ${guard.requestedPath}，然后在最终回答中引用 ${guard.requestedPath}。`;
@@ -392,16 +415,16 @@ export function hasReportWriteToolCall(
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       continue;
     }
-    const path = (input as { path?: unknown }).path;
-    if (typeof path !== "string") {
+    const path = readToolPath(input as Record<string, unknown>);
+    if (!path) {
       continue;
     }
     const normalizedPath = normalizeReportPath(path);
     if (guard.pathExplicit && normalizedPath === guard.requestedPath) {
       return true;
     }
-    const matchesDefaultReport = /(?:^|\/)\w*[\w-]*report[\w-]*\.md$/iu.test(normalizedPath);
-    if (!guard.pathExplicit && matchesDefaultReport) {
+    const matchesMarkdownDocument = /\.md$/iu.test(normalizedPath);
+    if (!guard.pathExplicit && matchesMarkdownDocument) {
       guard.requestedPath = normalizedPath;
       return true;
     }

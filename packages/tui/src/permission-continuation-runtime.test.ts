@@ -409,6 +409,13 @@ describe("permission-continuation-runtime", () => {
       it("does not invent report.md when the markdown target is not parseable", () => {
         expect(createReportWriteGuard("生成报告保存为 .md")).toBeUndefined();
       });
+
+      it("creates a non-explicit guard so the model can choose the report filename", () => {
+        const guard = createReportWriteGuard("生成报告在根目录");
+        expect(guard).toBeDefined();
+        expect(guard?.pathExplicit).toBe(false);
+        expect(guard?.requestedPath).toBe("");
+      });
     });
 
     describe("isReportFileWriteRequest", () => {
@@ -424,9 +431,9 @@ describe("permission-continuation-runtime", () => {
         expect(isReportFileWriteRequest("read the file")).toBe(false);
       });
 
-      it("rejects request without .md path", () => {
-        expect(isReportFileWriteRequest("生成报告")).toBe(false);
-        expect(isReportFileWriteRequest("保存报告")).toBe(false);
+      it("detects report write requests without forcing a filename", () => {
+        expect(isReportFileWriteRequest("生成报告")).toBe(true);
+        expect(isReportFileWriteRequest("保存报告")).toBe(true);
       });
 
       it("rejects false positives like 汇报改动文件", () => {
@@ -600,6 +607,22 @@ describe("permission-continuation-runtime", () => {
         };
         expect(createReportTaskGuard(guard, "en-US")).toContain("report.md");
       });
+
+      it("lets the model choose a Markdown path when none was explicit", () => {
+        const guard: ReportWriteGuard = {
+          requestedPath: "",
+          pathExplicit: false,
+          completed: false,
+          reminderSent: false,
+          evidenceReminderSent: false,
+          finalReferenceReminderSent: false,
+          nonWriteToolRounds: 0,
+          evidenceRead: false,
+        };
+        const text = createReportTaskGuard(guard, "zh-CN");
+        expect(text).toContain("选择合适的 Markdown 文件路径");
+        expect(text).not.toContain("report.md");
+      });
     });
 
     describe("createReportWriteReminder", () => {
@@ -615,6 +638,22 @@ describe("permission-continuation-runtime", () => {
           evidenceRead: true,
         };
         expect(createReportWriteReminder(guard, "zh-CN")).toContain("result.md");
+      });
+
+      it("asks for an actual Markdown write without inventing a path", () => {
+        const guard: ReportWriteGuard = {
+          requestedPath: "",
+          pathExplicit: false,
+          completed: false,
+          reminderSent: false,
+          evidenceReminderSent: true,
+          finalReferenceReminderSent: false,
+          nonWriteToolRounds: 0,
+          evidenceRead: false,
+        };
+        const text = createReportWriteReminder(guard, "zh-CN");
+        expect(text).toContain("选择合适的 Markdown 路径");
+        expect(text).not.toContain("report.md");
       });
     });
 
@@ -755,6 +794,48 @@ describe("permission-continuation-runtime", () => {
           { id: "tc1", name: "WriteReport", input: { path: "report.md", content: "x" } },
         ];
         expect(hasReportWriteToolCall(guard, calls)).toBe(true);
+      });
+
+      it("matches write path aliases used by tool adapters", () => {
+        const guard: ReportWriteGuard = {
+          requestedPath: "report.md",
+          pathExplicit: true,
+          completed: false,
+          reminderSent: false,
+          evidenceReminderSent: false,
+          finalReferenceReminderSent: false,
+          nonWriteToolRounds: 0,
+          evidenceRead: false,
+        };
+        expect(
+          hasReportWriteToolCall(guard, [
+            { id: "tc1", name: "Write", input: { file_path: "report.md", content: "x" } },
+          ]),
+        ).toBe(true);
+        expect(
+          hasReportWriteToolCall(guard, [
+            { id: "tc2", name: "Write", input: { filePath: "report.md", content: "x" } },
+          ]),
+        ).toBe(true);
+      });
+
+      it("binds a model-chosen Markdown path from aliases", () => {
+        const guard: ReportWriteGuard = {
+          requestedPath: "",
+          pathExplicit: false,
+          completed: false,
+          reminderSent: false,
+          evidenceReminderSent: false,
+          finalReferenceReminderSent: false,
+          nonWriteToolRounds: 0,
+          evidenceRead: false,
+        };
+        expect(
+          hasReportWriteToolCall(guard, [
+            { id: "tc1", name: "Write", input: { file_path: "deploy-report.md", content: "x" } },
+          ]),
+        ).toBe(true);
+        expect(guard.requestedPath).toBe("deploy-report.md");
       });
 
       it("rejects non-Write tool", () => {

@@ -629,6 +629,29 @@ describe("final answer gate aggregation", () => {
     });
   });
 
+  it("chases test evidence for a tests-passed completion claim", () => {
+    const context = { ...makeGateContext(), permissionMode: "full-access", language: "zh-CN" };
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续修复",
+      evidenceActionRetryCount: 1,
+    });
+    expect(plan.action).toBe("verification_request");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "RunVerification",
+      input: { level: "test" },
+    });
+  });
+
   it("keeps gathering verification evidence after an attempt that did not prove pass", () => {
     const context = {
       ...makeGateContext(),

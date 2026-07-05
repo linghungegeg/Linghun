@@ -190,6 +190,8 @@ type AggregatedFinalAnswerGateResult =
       unsupportedKinds: string[];
     };
 
+type FinalGateVerificationLevel = "typecheck" | "test" | "build" | "lint" | "smoke";
+
 export type FinalGateEvidenceGapActionPlan = {
   action: "readonly_check" | "verification_request" | "blocked_explanation" | "downgrade_only";
   reason: string;
@@ -653,6 +655,7 @@ export function planFinalGateEvidenceGapAction(input: {
             ? "completion_gap_verification_requires_permission"
             : "completion_gap_verification_allowed_by_mode",
         missingKinds: result.unsupportedKinds,
+        level: selectFinalGateVerificationLevel(result),
       });
     }
     return {
@@ -708,6 +711,7 @@ export function planFinalGateEvidenceGapAction(input: {
       permissionMode: context.permissionMode,
       reason: context.permissionMode === "default" ? "verification_requires_permission" : "verification_allowed_by_mode",
       missingKinds: result.unsupportedKinds,
+      level: selectFinalGateVerificationLevel(result),
     });
   }
   return {
@@ -722,7 +726,9 @@ function createVerificationEvidenceGapPlan(input: {
   permissionMode: TuiContext["permissionMode"];
   reason: string;
   missingKinds: string[];
+  level?: FinalGateVerificationLevel;
 }): FinalGateEvidenceGapActionPlan {
+  const level = input.level ?? "typecheck";
   return {
     action: "verification_request",
     reason: input.reason,
@@ -744,15 +750,45 @@ function createVerificationEvidenceGapPlan(input: {
       input.permissionMode === "default"
         ? {
             toolName: "Bash",
+            input: { level },
             strategy: "minimal_bash_verification",
             summary: "run one minimal verification command through Bash permission flow",
           }
         : {
             toolName: "RunVerification",
-            input: { level: "typecheck" },
-            summary: "run minimal typecheck verification through RunVerification",
+            input: { level },
+            summary: `run minimal ${level} verification through RunVerification`,
           },
   };
+}
+
+function selectFinalGateVerificationLevel(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+): FinalGateVerificationLevel {
+  const claimVerdict = result.claimVerdict;
+  const phrases = claimVerdict?.matchedClaims
+    .filter((claim) => claimVerdict.unsupportedKinds.includes(claim.kind))
+    .map((claim) => claim.phrase.toLowerCase()) ?? [];
+  const joined = phrases.join(" ");
+  if (
+    result.unsupportedKinds.includes("test_claim") ||
+    /(?:测试|tests?\s+passed|vitest|jest|pytest|go\s+test|cargo\s+test)/iu.test(joined)
+  ) {
+    return "test";
+  }
+  if (
+    /(?:build|构建)/iu.test(joined) ||
+    result.unsupportedKinds.includes("engineering_full_suite_unverified")
+  ) {
+    return "build";
+  }
+  if (/(?:lint|eslint|静态检查)/iu.test(joined)) {
+    return "lint";
+  }
+  if (/(?:smoke|冒烟)/iu.test(joined)) {
+    return "smoke";
+  }
+  return "typecheck";
 }
 
 async function runFinalGateEvidenceAction(input: {
@@ -842,7 +878,11 @@ async function createFinalGateEvidenceToolCall(
   const action = actionPlan.evidenceAction;
   if (!action) return undefined;
   if (action.strategy === "minimal_bash_verification") {
-    const command = await selectMinimalBashVerificationCommand(context);
+    const actionInput = isFinalGateRecord(action.input) ? action.input : {};
+    const command = await selectMinimalBashVerificationCommand(
+      context,
+      readFinalGateVerificationLevel(actionInput.level),
+    );
     if (!command) return undefined;
     return {
       id: `final-gate-evidence-${randomUUID()}`,
@@ -861,12 +901,32 @@ async function createFinalGateEvidenceToolCall(
   };
 }
 
-async function selectMinimalBashVerificationCommand(context: TuiContext): Promise<string | undefined> {
+async function selectMinimalBashVerificationCommand(
+  context: TuiContext,
+  preferredKind?: FinalGateVerificationLevel,
+): Promise<string | undefined> {
   const plan = await createVerificationPlan(context.projectPath, "focused");
   const step =
+    (preferredKind
+      ? plan.find((item) => item.kind === preferredKind && item.synthetic !== true)
+      : undefined) ??
     plan.find((item) => item.kind === "typecheck" && item.synthetic !== true) ??
     plan.find((item) => item.synthetic !== true);
   return step?.command;
+}
+
+function readFinalGateVerificationLevel(value: unknown): FinalGateVerificationLevel | undefined {
+  return value === "typecheck" ||
+    value === "test" ||
+    value === "build" ||
+    value === "lint" ||
+    value === "smoke"
+    ? value
+    : undefined;
+}
+
+function isFinalGateRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function buildAggregatedDowngradedFinalAnswer(

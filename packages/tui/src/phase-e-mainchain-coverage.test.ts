@@ -315,6 +315,27 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
     expect(index.tool).toBe(INDEX_STATUS_INSPECT);
   }, 60_000);
 
+  it("records passed RunVerification claims for final-answer evidence", async () => {
+    const context = await createTestContext();
+    await writeFile(
+      join(context.projectPath, "package.json"),
+      JSON.stringify({ scripts: { test: "node -e \"console.log('test pass')\"" } }),
+    );
+    const output = new MemoryOutput();
+    const result = await executeLinghunControlToolUse(
+      call(RUN_VERIFICATION_TOOL_NAME, { level: "test" }),
+      context,
+      context.sessionId ?? "session",
+      output,
+    );
+
+    expect(result.ok).toBe(true);
+    const evidence = context.evidence.find((item) => item.source === "verification-result");
+    expect(evidence?.supportsClaims).toEqual(
+      expect.arrayContaining(["verification_passed", "test_passed"]),
+    );
+  }, 60_000);
+
   it("returns status for an existing workflow run id instead of treating it as unknown", async () => {
     const context = await createTestContext();
     context.workflows.activeRun = {

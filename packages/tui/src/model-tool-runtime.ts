@@ -1094,7 +1094,7 @@ export async function executePreEngineToolUse(
         evidence.id,
       );
       clearRequestActivity(context);
-      writeLine(output, `pre-engine ${toolName} failed.`);
+      writeLine(output, formatPreEnginePrimaryText(toolName, false, context));
       return { ok: false, tool: toolName, text: result.text, evidenceId: evidence.id };
     }
     rememberSourcePackCandidatesFromToolData(context, toolName, result.data);
@@ -1112,7 +1112,7 @@ export async function executePreEngineToolUse(
       evidence?.id,
     );
     clearRequestActivity(context);
-    writeLine(output, `pre-engine ${toolName} finished.`);
+    writeLine(output, formatPreEnginePrimaryText(toolName, true, context));
     return {
       ok: true,
       tool: toolName,
@@ -1140,6 +1140,25 @@ export async function executePreEngineToolUse(
     );
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
+}
+
+function formatPreEnginePrimaryText(toolName: string, ok: boolean, context: TuiContext): string {
+  const zh = context.language === "zh-CN";
+  const verify = toolName === "pre_verify";
+  if (!ok) {
+    if (verify) {
+      return zh
+        ? "验证检查失败，诊断记录可在 /details 查看。"
+        : "Verification check failed. Use /details for diagnostics.";
+    }
+    return zh
+      ? "代码分析未完成，诊断记录可在 /details 查看。"
+      : "Code analysis did not finish. Use /details for diagnostics.";
+  }
+  if (verify) {
+    return zh ? "验证检查完成。" : "Verification check finished.";
+  }
+  return zh ? "代码分析完成。" : "Code analysis finished.";
 }
 
 export async function executeLinghunControlToolUse(
@@ -1410,6 +1429,13 @@ export async function executeLinghunControlToolUse(
       return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
         status: report?.status ?? "partial",
         reportId: report?.id,
+        level: input.level,
+        commands:
+          report?.commands.map((command) => ({
+            kind: command.kind,
+            status: command.status,
+            synthetic: command.synthetic === true,
+          })) ?? [],
       });
     }
     if (toolCall.name === WRITE_REPORT_TOOL_NAME) {
@@ -1858,7 +1884,7 @@ function controlToolEvidenceSpec(
       source: "verification-result",
       supportsClaims: isError
         ? ["tool_failure", "verification_result"]
-        : ["verification_result", "verification_attempted"],
+        : deriveRunVerificationSupportsClaims(data),
     };
   }
   if (toolName === WRITE_REPORT_TOOL_NAME) {
@@ -1873,6 +1899,41 @@ function controlToolEvidenceSpec(
     source: `control-tool:${toolName}`,
     supportsClaims: isError ? ["tool_failure", toolName] : [toolName, "action_executed"],
   };
+}
+
+function deriveRunVerificationSupportsClaims(data: unknown): string[] {
+  const record = isRecord(data) ? data : {};
+  const claims = new Set(["verification_result", "verification_attempted"]);
+  if (record.status !== "pass") {
+    return [...claims];
+  }
+  const commands = Array.isArray(record.commands)
+    ? record.commands.filter((item): item is Record<string, unknown> => isRecord(item))
+    : [];
+  const passedCommands = commands.filter((command) => command.status === "pass");
+  if (passedCommands.length === 0 || passedCommands.some((command) => command.synthetic !== true)) {
+    claims.add("verification_passed");
+  } else {
+    claims.add("verification_self_check_passed");
+    claims.add("verification_not_run");
+  }
+  for (const command of passedCommands) {
+    if (command.kind === "test") claims.add("test_passed");
+    else if (command.kind === "typecheck") claims.add("typecheck_passed");
+    else if (command.kind === "build") claims.add("build_passed");
+    else if (command.kind === "lint") claims.add("lint_passed");
+    else if (command.kind === "smoke") {
+      claims.add(command.synthetic === true ? "smoke_ran" : "smoke_passed");
+    }
+  }
+  if (passedCommands.length === 0) {
+    if (record.level === "test") claims.add("test_passed");
+    else if (record.level === "typecheck") claims.add("typecheck_passed");
+    else if (record.level === "build") claims.add("build_passed");
+    else if (record.level === "lint") claims.add("lint_passed");
+    else if (record.level === "smoke") claims.add("smoke_passed");
+  }
+  return [...claims];
 }
 
 function isTerminalAgentToolResult(data: unknown): boolean {
