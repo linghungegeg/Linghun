@@ -984,8 +984,11 @@ function renderTerminalFirstStableBlock(
     return `${dimAnsi("\u276F ", noColor)}${cyanAnsi(text, noColor)}\r\n`;
   }
   if (messageKind === "assistant_text") {
-    const state = createTerminalFirstMarkdownState();
-    return withTerminalFirstRows(renderTerminalFirstMarkdownDeltaLines(text, noColor, wrapWidth, state));
+    if (hasTerminalFirstCodeFence(text)) {
+      const state = createTerminalFirstMarkdownState();
+      return withTerminalFirstRows(renderTerminalFirstMarkdownDeltaLines(text, noColor, wrapWidth, state));
+    }
+    return renderTerminalFirstAssistantText(text, options);
   }
   if (messageKind === "tool_result_success") {
     const prefix = dimAnsi("  \u23BF  ", noColor);
@@ -1135,6 +1138,10 @@ function highlightTerminalFirstCodeLine(
 function withTerminalFirstRows(lines: string[]): string {
   const rendered = lines.join("\n").replace(/\n/g, "\r\n");
   return rendered ? `${rendered}\r\n` : "";
+}
+
+function hasTerminalFirstCodeFence(text: string): boolean {
+  return /^\s*```\s*(?!markdown\b|md\b)[A-Za-z0-9_+-]+\s*$/imu.test(text);
 }
 
 export function commitTerminalFirstUserBlock(

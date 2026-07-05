@@ -1,4 +1,5 @@
 import type { Writable } from "node:stream";
+import { type Token, type Tokens, lexer } from "marked";
 import { isDiffFenceLanguage, renderPlainDiffLines } from "./diff-renderer.js";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
 import { displayWidth, taskComposerMaxWidth, wrapText } from "./text-utils.js";
@@ -116,80 +117,221 @@ function messageBody(
   return (block.fullText ?? block.summary ?? "").trim();
 }
 
+type PlainMarkdownRenderOptions = {
+  dimAll?: boolean;
+  diagnostic?: boolean;
+  error?: boolean;
+  wrapWidth?: number;
+  theme?: ShellTheme;
+};
+
 export function renderPlainMarkdownLines(
   text: string,
   noColor: boolean,
-  options: {
-    dimAll?: boolean;
-    diagnostic?: boolean;
-    error?: boolean;
-    wrapWidth?: number;
-    theme?: ShellTheme;
-  } = {},
+  options: PlainMarkdownRenderOptions = {},
 ): string[] {
-  const lines = text.replace(/\r/g, "").split("\n");
-  const out: string[] = [];
-  let inCode = false;
-  let codeLang: string | undefined;
-  let codeLines: string[] = [];
+  const normalized = text.replace(/\r/g, "");
+  if (!normalized) return [];
   const wrapWidth = Math.max(8, options.wrapWidth ?? 100);
-  const applyTone = (line: string): string => {
+  const tone = createPlainTone(noColor, options);
+  const rendered = renderPlainMarkdownTokens(lexer(normalized), noColor, wrapWidth, options);
+  return trimOuterBlankLines(rendered).map(tone);
+}
+
+function createPlainTone(
+  noColor: boolean,
+  options: PlainMarkdownRenderOptions,
+): (line: string) => string {
+  return (line: string): string => {
     if (options.error) return colorRed(line, noColor);
     if (options.diagnostic) return colorCyan(line, noColor);
     if (options.dimAll) return dim(line, noColor);
     return line;
   };
-  const flushCodeBlock = (): void => {
-    if (isDiffFenceLanguage(codeLang)) {
-      out.push(...renderPlainDiffLines(codeLines, { noColor, wrapWidth, theme: options.theme }));
-      return;
-    }
-    for (const codeLine of codeLines) {
-      for (const wrapped of wrapText(
-        codeLine.length === 0 ? " " : codeLine,
-        Math.max(8, wrapWidth - 4),
-      )) {
-        out.push(`${dim("  | ", noColor)}${dim(wrapped, noColor)}`);
-      }
-    }
-  };
+}
 
-  for (let i = 0; i < lines.length; i += 1) {
-    const raw = lines[i] ?? "";
-    const fence = raw.match(/^\s*```\s*([A-Za-z0-9_+-]*)\s*$/u);
-    if (fence) {
-      if (inCode) {
-        flushCodeBlock();
-        out.push(dim("  +", noColor));
-        inCode = false;
-        codeLang = undefined;
-        codeLines = [];
-      } else {
-        inCode = true;
-        codeLang = fence[1] || undefined;
-        codeLines = [];
-        out.push(dim(`  +${codeLang ? ` ${codeLang}` : ""}`, noColor));
-      }
-      continue;
-    }
-    if (!inCode) {
-      const table = readMarkdownTable(lines, i);
-      if (table) {
-        out.push(...renderMarkdownTableLines(table, noColor, wrapWidth).map(applyTone));
-        i = table.endIndex;
-        continue;
-      }
-      out.push(...wrapText(raw, wrapWidth).map(applyTone));
-      continue;
-    }
-
-    codeLines.push(raw);
-  }
-  if (inCode) {
-    flushCodeBlock();
-    out.push(dim("  +", noColor));
-  }
+function renderPlainMarkdownTokens(
+  tokens: Token[],
+  noColor: boolean,
+  wrapWidth: number,
+  options: PlainMarkdownRenderOptions,
+): string[] {
+  const out: string[] = [];
+  tokens.forEach((token) => {
+    const next = renderPlainMarkdownToken(token, noColor, wrapWidth, options);
+    appendBlockLines(out, next);
+  });
   return out;
+}
+
+function appendBlockLines(out: string[], next: string[]): void {
+  if (next.length === 0) return;
+  if (out.length > 0 && out[out.length - 1] !== "" && next[0] !== "") out.push("");
+  out.push(...next);
+}
+
+function renderPlainMarkdownToken(
+  token: Token,
+  noColor: boolean,
+  wrapWidth: number,
+  options: PlainMarkdownRenderOptions,
+): string[] {
+  switch (token.type) {
+    case "space":
+      return [""];
+    case "heading": {
+      const heading = token as Tokens.Heading;
+      return wrapText(`${"#".repeat(heading.depth)} ${plainInlineText(heading.text, noColor)}`, wrapWidth).map(
+        (line) => bold(colorCyan(line, noColor), noColor),
+      );
+    }
+    case "paragraph":
+    case "text":
+      return wrapText(plainTokenText(token, noColor), wrapWidth);
+    case "blockquote":
+      return renderPlainBlockquote(token as Tokens.Blockquote, noColor, wrapWidth, options);
+    case "list":
+      return renderPlainList(token as Tokens.List, noColor, wrapWidth);
+    case "code":
+      return renderPlainCodeToken(token as Tokens.Code, noColor, wrapWidth, options);
+    case "table":
+      return renderPlainTableToken(token as Tokens.Table, noColor, wrapWidth);
+    case "hr":
+      return [dim("-".repeat(Math.min(wrapWidth, 40)), noColor)];
+    default:
+      return wrapText(plainTokenText(token, noColor), wrapWidth);
+  }
+}
+
+function plainTokenText(token: Token, noColor: boolean): string {
+  const maybeInline = token as { text?: unknown; tokens?: unknown };
+  const text = typeof maybeInline.text === "string" ? maybeInline.text : token.raw ?? "";
+  return plainInlineText(text, noColor, maybeInline.tokens);
+}
+
+function plainInlineText(text: string, noColor: boolean, tokens?: unknown): string {
+  if (Array.isArray(tokens)) return tokens.map((token) => renderPlainInlineToken(token, noColor)).join("");
+  return text;
+}
+
+function renderPlainInlineToken(token: unknown, noColor: boolean): string {
+  if (!isInlineRecord(token)) return "";
+  switch (token.type) {
+    case "text":
+      return plainInlineText(token.text ?? token.raw ?? "", noColor, token.tokens);
+    case "codespan":
+      return colorCyan(`\`${token.text ?? token.raw ?? ""}\``, noColor);
+    case "strong":
+      return bold(plainInlineText(token.text ?? "", noColor, token.tokens), noColor);
+    case "em":
+      return plainInlineText(token.text ?? "", noColor, token.tokens);
+    case "link": {
+      const label = plainInlineText(token.text ?? "", noColor, token.tokens);
+      const href = typeof token.href === "string" ? token.href : "";
+      return href && href !== label ? colorCyan(`${label} (${href})`, noColor) : colorCyan(label, noColor);
+    }
+    case "br":
+      return "\n";
+    default:
+      return plainInlineText(token.text ?? token.raw ?? "", noColor, token.tokens);
+  }
+}
+
+type InlineRecord = {
+  type?: string;
+  raw?: string;
+  text?: string;
+  href?: string;
+  tokens?: unknown;
+};
+
+function isInlineRecord(value: unknown): value is InlineRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function renderPlainBlockquote(
+  token: Tokens.Blockquote,
+  noColor: boolean,
+  wrapWidth: number,
+  options: PlainMarkdownRenderOptions,
+): string[] {
+  const quoteWidth = Math.max(8, wrapWidth - 2);
+  const quoteLines = renderPlainMarkdownTokens(token.tokens ?? lexer(token.text), noColor, quoteWidth, options);
+  return trimOuterBlankLines(quoteLines).map((line) => `${dim("> ", noColor)}${line}`);
+}
+
+function renderPlainList(token: Tokens.List, noColor: boolean, wrapWidth: number): string[] {
+  const out: string[] = [];
+  token.items.forEach((item, index) => {
+    const marker = token.ordered
+      ? `${Number(token.start || 1) + index}.`
+      : item.task
+        ? item.checked
+          ? "[x]"
+          : "[ ]"
+        : "-";
+    const prefix = `${marker} `;
+    const body = plainInlineText(item.text.replace(/\n+/gu, " "), noColor, item.tokens);
+    const wrapped = wrapText(body || " ", Math.max(8, wrapWidth - displayWidth(prefix)));
+    wrapped.forEach((line, lineIndex) => {
+      out.push(`${lineIndex === 0 ? dim(prefix, noColor) : " ".repeat(displayWidth(prefix))}${line}`);
+    });
+  });
+  return out;
+}
+
+function renderPlainCodeToken(
+  token: Tokens.Code,
+  noColor: boolean,
+  wrapWidth: number,
+  options: PlainMarkdownRenderOptions,
+): string[] {
+  const lang = normalizeFenceLanguage(token.lang);
+  if (isMarkdownFenceLanguage(lang) && hasMarkdownStructure(token.text)) {
+    return renderPlainMarkdownLines(token.text, noColor, { ...options, wrapWidth });
+  }
+  if (isDiffFenceLanguage(lang)) {
+    return renderPlainDiffLines(token.text.split("\n"), { noColor, wrapWidth, theme: options.theme });
+  }
+  const out = [dim(`  +${lang ? ` ${lang}` : ""}`, noColor)];
+  for (const codeLine of token.text.split("\n")) {
+    for (const wrapped of wrapText(codeLine.length === 0 ? " " : codeLine, Math.max(8, wrapWidth - 4))) {
+      out.push(`${dim("  | ", noColor)}${dim(wrapped, noColor)}`);
+    }
+  }
+  out.push(dim("  +", noColor));
+  return out;
+}
+
+function normalizeFenceLanguage(lang: string | undefined): string | undefined {
+  const normalized = lang?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function isMarkdownFenceLanguage(lang: string | undefined): boolean {
+  const normalized = lang?.toLowerCase();
+  return normalized === "markdown" || normalized === "md";
+}
+
+function hasMarkdownStructure(text: string): boolean {
+  return /(^|\n)\s*(#{1,6}\s+|[-*+]\s+|\d+\.\s+|>\s+|\|.+\|\s*$|```)/u.test(text);
+}
+
+function renderPlainTableToken(table: Tokens.Table, noColor: boolean, wrapWidth: number): string[] {
+  const rows = [
+    table.header.map((cell) => plainInlineText(cell.text, noColor, cell.tokens)),
+    ...table.rows.map((row) => row.map((cell) => plainInlineText(cell.text, noColor, cell.tokens))),
+  ];
+  const aligns = table.align.map((align) => align || "left") as MarkdownTableAlign[];
+  return renderMarkdownTableLines({ rows, aligns }, noColor, wrapWidth);
+}
+
+function trimOuterBlankLines(lines: string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && lines[start] === "") start += 1;
+  while (end > start && lines[end - 1] === "") end -= 1;
+  return lines.slice(start, end);
 }
 
 type MarkdownTableAlign = "left" | "center" | "right";
@@ -197,50 +339,7 @@ type MarkdownTableAlign = "left" | "center" | "right";
 type MarkdownTable = {
   rows: string[][];
   aligns: MarkdownTableAlign[];
-  endIndex: number;
 };
-
-function readMarkdownTable(lines: string[], startIndex: number): MarkdownTable | undefined {
-  const header = parseMarkdownTableRow(lines[startIndex] ?? "");
-  if (!header) return undefined;
-  const aligns = parseMarkdownTableSeparator(lines[startIndex + 1] ?? "");
-  if (!aligns || aligns.length !== header.length) return undefined;
-
-  const rows = [header];
-  let endIndex = startIndex + 1;
-  for (let i = startIndex + 2; i < lines.length; i += 1) {
-    const row = parseMarkdownTableRow(lines[i] ?? "");
-    if (!row || row.length !== header.length) break;
-    rows.push(row);
-    endIndex = i;
-  }
-  return { rows, aligns, endIndex };
-}
-
-function parseMarkdownTableRow(line: string): string[] | undefined {
-  const trimmed = line.trim();
-  if (!trimmed.includes("|")) return undefined;
-  const body = trimmed.replace(/^\|/u, "").replace(/\|$/u, "");
-  const cells = body.split("|").map((cell) => cell.trim());
-  return cells.length >= 2 ? cells : undefined;
-}
-
-function parseMarkdownTableSeparator(line: string): MarkdownTableAlign[] | undefined {
-  const cells = parseMarkdownTableRow(line);
-  if (!cells) return undefined;
-  const aligns: MarkdownTableAlign[] = [];
-  for (const cell of cells) {
-    if (!/^:?-{3,}:?$/u.test(cell)) return undefined;
-    if (cell.startsWith(":") && cell.endsWith(":")) {
-      aligns.push("center");
-    } else if (cell.endsWith(":")) {
-      aligns.push("right");
-    } else {
-      aligns.push("left");
-    }
-  }
-  return aligns;
-}
 
 function renderMarkdownTableLines(table: MarkdownTable, noColor: boolean, wrapWidth: number): string[] {
   const widths = table.rows[0]?.map((_cell, column) =>

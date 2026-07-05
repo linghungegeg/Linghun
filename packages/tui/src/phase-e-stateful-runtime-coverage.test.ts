@@ -9,11 +9,13 @@ import { createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
 import type { CompactBoundary } from "./compact-context.js";
 import {
+  getAutoCompactTriggerChars,
   getProviderContextMaxChars,
   inspectToolPairingSafety,
   prepareMessagesForProviderPreflight,
   sanitizeCompactSummaryText,
 } from "./compact-preflight-runtime.js";
+import { estimateModelMessageChars } from "./context-estimator.js";
 import { executeBreakCacheMutation, getCurrentFreshness, refreshCacheFreshness } from "./compact-cache-command-runtime.js";
 import { createCacheState, createMemoryState, createMcpState, createRemoteState } from "./tui-state-runtime.js";
 import { createIndexState } from "./index-runtime.js";
@@ -79,9 +81,85 @@ describe("Phase E MCP stdio runtime coverage", () => {
 });
 
 describe("Phase E compact preflight and deep compact coverage", () => {
+  it("locks auto compact trigger thresholds and provider preflight boundaries", async () => {
+    const context = await createTestContext();
+
+    setExecutorMaxInputTokens(context, 399_999);
+    expect(getAutoCompactTriggerChars(context, runtime()) / 4).toBe(386_999);
+
+    setExecutorMaxInputTokens(context, 400_000);
+    expect(getAutoCompactTriggerChars(context, runtime()) / 4).toBe(370_000);
+
+    setExecutorMaxInputTokens(context, 800_000);
+    expect(getAutoCompactTriggerChars(context, runtime()) / 4).toBe(750_000);
+
+    setExecutorMaxInputTokens(context, 1_000_000);
+    expect(getAutoCompactTriggerChars(context, runtime()) / 4).toBe(950_000);
+
+    setExecutorMaxInputTokens(context, 20_000);
+    const deps = compactDeps();
+    const triggerChars = getAutoCompactTriggerChars(context, runtime());
+    const belowTrigger: ModelMessage[] = [
+      { role: "system", content: "s" },
+      { role: "user", content: "x".repeat(triggerChars - 2) },
+    ];
+
+    const below = await prepareMessagesForProviderPreflight({
+      messages: belowTrigger,
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+    expect(below.blocked).toBe(false);
+    if (!below.blocked) expect(below.messages).toEqual(belowTrigger);
+    expect(context.cache.compactProjection).toBeUndefined();
+
+    const oldOversized = "OVERSIZED_OLD_CONTEXT".repeat(1_600);
+    const overLimit: ModelMessage[] = [
+      { role: "system", content: "s" },
+      { role: "user", content: oldOversized },
+      { role: "assistant", content: oldOversized },
+      { role: "user", content: oldOversized },
+      { role: "user", content: "keep the latest request" },
+    ];
+    expect(estimateModelMessageChars(overLimit)).toBeGreaterThan(
+      getProviderContextMaxChars(context, runtime()),
+    );
+
+    const compacted = await prepareMessagesForProviderPreflight({
+      messages: overLimit,
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+
+    expect(compacted.blocked).toBe(false);
+    if (!compacted.blocked) {
+      expect(estimateModelMessageChars(compacted.messages)).toBeLessThanOrEqual(
+        getProviderContextMaxChars(context, runtime()),
+      );
+      expect(compacted.messages.map((message) => message.content).join("\n")).not.toContain(
+        "OVERSIZED_OLD_CONTEXT",
+      );
+    }
+    expect(context.cache.compactProjection?.preCompactChars).toBeGreaterThan(
+      context.cache.compactProjection?.postCompactChars ?? 0,
+    );
+  });
+
   it("covers tool pairing safety and compact cooldown/blocking branches", async () => {
     const context = await createTestContext();
-    const deps = compactDeps();
+    const events: string[] = [];
+    const deps = {
+      ...compactDeps(),
+      appendSystemEvent: async (_context: TuiContext, _sessionId: string, message: string) => {
+        events.push(message);
+      },
+    };
     const unsafe: ModelMessage[] = [
       { role: "assistant", content: "", toolCalls: [{ id: "tc1", name: "Read", input: {} }] },
     ];
@@ -102,7 +180,9 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(blocked.blocked).toBe(true);
     if (blocked.blocked) {
       expect(blocked.message).toContain("冷却");
+      expect(blocked.message).toContain("不会把超压的半截上下文继续发给 provider");
     }
+    expect(events).toContain("context_compact_cooldown_active");
 
     context.cache.compactCooldownUntil = undefined;
     const unsafeBlocked = await prepareMessagesForProviderPreflight({
@@ -148,7 +228,10 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       ],
       runtime: runtime(),
       trigger: "manual",
-      gateway: gateway([{ type: "assistant_text_delta", text: "summary", id: "a1" }]),
+      gateway: gateway([
+        { type: "assistant_text_delta", text: "summary", id: "a1" },
+        { type: "message_stop", id: "a1", chunkCount: 1, hadUsage: false },
+      ]),
       deps: deepDeps(),
     });
     expect(success.ok).toBe(true);
@@ -162,12 +245,14 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       transcript: [],
       runtime: runtime(),
       trigger: "manual",
-      gateway: gateway([{ type: "assistant_text_delta", text: "late summary", id: "a2" }]),
+      gateway: gateway([
+        { type: "assistant_text_delta", text: "late summary", id: "a2" },
+        { type: "message_stop", id: "a2", chunkCount: 1, hadUsage: false },
+      ]),
       signal: cancelledController.signal,
       deps: deepDeps(),
     });
-    expect(cancelled).toMatchObject({ ok: false });
-    if (!cancelled.ok) expect(cancelled.message).toContain("取消");
+    expect(cancelled).toMatchObject({ ok: false, message: expect.stringContaining("取消") });
 
     const toolUseFailure = await runDeepCompact({
       context: await createTestContext(),
@@ -358,6 +443,18 @@ function runtime() {
     endpointProfile: "chat_completions" as const,
     reasoningStatus: "off",
     reasoningSent: false,
+  };
+}
+
+function setExecutorMaxInputTokens(context: TuiContext, maxInputTokens: number): void {
+  context.config = {
+    ...context.config,
+    modelRoutes: {
+      ...context.config.modelRoutes,
+      routes: context.config.modelRoutes.routes.map((route) =>
+        route.role === "executor" ? { ...route, maxInputTokens } : route,
+      ),
+    },
   };
 }
 

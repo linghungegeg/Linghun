@@ -6127,6 +6127,46 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(read()).toContain("\r\n\x1B[K");
   });
 
+  it("native scrollback stable assistant blocks use plain markdown fallback for non-code structure", () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const block: ProductBlockViewModel = {
+      id: "assistant-markdown-structure",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "markdown",
+      fullText: [
+        "## Scope",
+        "",
+        "> stable fallback",
+        "",
+        "- Use `plain-renderer`",
+        "",
+        "```markdown",
+        "| Path | State |",
+        "| --- | --- |",
+        "| plain | readable |",
+        "```",
+      ].join("\n"),
+      messageKind: "assistant_text",
+    };
+
+    expect(sink?.commitStableTranscriptBlock?.(block)).toBe(true);
+    expect(read()).toContain("## Scope");
+    expect(read()).toContain("> stable fallback");
+    expect(read()).toContain("- Use `plain-renderer`");
+    expect(read()).toContain("| Path");
+    expect(read()).not.toContain("  + markdown");
+  });
+
   it("native scrollback terminal-first code keeps syntax color when color is enabled", () => {
     vi.unstubAllEnvs();
     vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");

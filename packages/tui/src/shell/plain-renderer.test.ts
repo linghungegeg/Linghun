@@ -36,4 +36,48 @@ describe("plain markdown renderer", () => {
     expect(narrowLines.some((line) => line.startsWith("链接: https://example"))).toBe(true);
     expect(narrowLines.some((line) => line.startsWith("| "))).toBe(false);
   });
+
+  it("keeps no-color fallback structure for headings, lists, quotes, links, and inline code", () => {
+    const lines = renderPlainMarkdownLines(
+      [
+        "## Scope",
+        "",
+        "> keep fallback readable",
+        "",
+        "- Use `plain-renderer`",
+        "- Share [docs](packages/tui/src/shell/plain-renderer.ts)",
+      ].join("\n"),
+      true,
+      { wrapWidth: 80 },
+    );
+
+    expect(lines).toEqual([
+      "## Scope",
+      "",
+      "> keep fallback readable",
+      "",
+      "- Use `plain-renderer`",
+      "- Share docs (packages/tui/src/shell/plain-renderer.ts)",
+    ]);
+    expect(lines.join("\n")).not.toContain("\x1B[");
+  });
+
+  it("renders markdown-fenced tables as tables in the plain fallback", () => {
+    const output = renderPlainMarkdownLines(
+      [
+        "```markdown",
+        "| Path | State |",
+        "| --- | --- |",
+        "| plain | readable |",
+        "```",
+      ].join("\n"),
+      true,
+      { wrapWidth: 80 },
+    ).join("\n");
+
+    expect(output).toContain("| Path");
+    expect(output).toContain("| plain");
+    expect(output).not.toContain("  + markdown");
+    expect(output).not.toContain("  | | Path");
+  });
 });
