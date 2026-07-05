@@ -48,8 +48,9 @@ export function nativeScrollbackTaskFrameHeight(view: ShellViewModel): number {
   const maxNonFullscreenHeight = Math.max(1, view.height - 2);
   if ((view.composerOverlayRows ?? 0) > 0) {
     const compactComposerAndFooterRows = COMPACT_FRAME_ROWS;
-    const cappedOverlayRows = Math.min(7, Math.max(1, Math.floor(view.composerOverlayRows ?? 0)));
-    const requiredRows = compactComposerAndFooterRows + cappedOverlayRows;
+    const stableOverlayRows = 7;
+    const statusRows = view.bottomPaneStatus || view.activity ? 1 : 0;
+    const requiredRows = compactComposerAndFooterRows + stableOverlayRows + statusRows;
     return Math.max(1, Math.min(maxNonFullscreenHeight, requiredRows));
   }
 

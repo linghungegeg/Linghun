@@ -2383,6 +2383,66 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("keeps slash suggestions stable when a bottom status row is visible", async () => {
+    let composerOverlayRows = 0;
+    let composerDraftText = "";
+    const view = (): ShellViewModel => ({
+      ...baseTaskView(),
+      composer: { ...baseTaskView().composer, draftText: composerDraftText },
+      commandPanel: undefined,
+      activity: undefined,
+      bottomPaneStatus: {
+        kind: "blocked",
+        source: "resource",
+        text: "上下文预算受限",
+      },
+      blocks: [],
+      taskSuggestions: undefined,
+      composerOverlayRows,
+    });
+    const input = createTtyInput();
+    const output = new TestTtyOutput();
+    const events: ShellInputEvent[] = [];
+    let shell: ReturnType<typeof renderInkShell>;
+    const controller: ShellController = {
+      getViewModel: view,
+      onInput: (event) => {
+        events.push(event);
+        if (event.type === "composer-draft-change") {
+          composerDraftText = event.text;
+        }
+        if (event.type === "composer-overlay-rows-change") {
+          composerOverlayRows = event.rows;
+          shell?.rerender();
+        }
+      },
+    };
+    shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+
+    await writeInput(input, shell, "/");
+    for (let i = 0; i < 6; i += 1) {
+      await shell.waitUntilRenderFlush();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    const visible = finalScreenLinesFrom(output, view().height).join("\n");
+    const singleColumnRows = Math.min(getCoreSlashCandidates().length + 1, 7);
+    const overlayRows = events
+      .filter((event) => event.type === "composer-overlay-rows-change")
+      .map((event) => (event.type === "composer-overlay-rows-change" ? event.rows : 0))
+      .filter((rows) => rows > 0);
+    expect(visible).toContain("/model");
+    expect(visible).toContain("/mode");
+    expect([...new Set(overlayRows)]).toEqual([singleColumnRows]);
+    expect(overlayRows.length).toBeLessThanOrEqual(3);
+    shell.unmount();
+  });
+
   it("keeps wheel active but suppresses click selection when LINGHUN_TUI_MOUSE_SELECTION=0", async () => {
     vi.stubEnv("LINGHUN_TUI_MOUSE_SELECTION", "0");
     const view = {

@@ -150,6 +150,21 @@ describe("TaskBottomPane budget allocation", () => {
     expect(height).toBe(COMPACT_FRAME_ROWS + 7);
   });
 
+  it("reserves bottom status room while slash overlay rows are measured", () => {
+    const height = nativeScrollbackTaskFrameHeight({
+      height: 24,
+      composerOverlayRows: 1,
+      bottomPaneStatus: {
+        kind: "blocked",
+        source: "resource",
+        text: "上下文预算受限",
+      },
+      blocks: [],
+    } as never);
+
+    expect(height).toBe(COMPACT_FRAME_ROWS + 7 + 1);
+  });
+
   it("exports the same budget function used by the pane", () => {
     expect(taskBottomPaneBudget(6)).toBe(6 - MIN_TRANSCRIPT_ROWS);
     expect(taskBottomPaneBudget(10)).toBe(10 - MIN_TRANSCRIPT_ROWS);
