@@ -198,6 +198,25 @@ describe("model-loop-runtime", () => {
       expect(names.indexOf("RunWorkflow")).toBeLessThan(names.indexOf("CommandProposal"));
     });
 
+    it("documents StartAgent role and worktree cwd requirements in the schema", () => {
+      const startAgent = createModelToolDefinitions().find((d) => d.name === "StartAgent");
+      const schema = startAgent?.inputSchema as {
+        required?: string[];
+        properties?: {
+          role?: { description?: string };
+          subagent_type?: { description?: string };
+          cwd?: { description?: string };
+          isolation?: { description?: string };
+        };
+      };
+
+      expect(schema.required).toContain("task");
+      expect(schema.properties?.role?.description).toContain("Required unless subagent_type");
+      expect(schema.properties?.subagent_type?.description).toContain("Custom agent");
+      expect(schema.properties?.cwd?.description).toContain("Do not send");
+      expect(schema.properties?.isolation?.description).toContain("omit cwd");
+    });
+
     it("allows AgentControl to stop all running agents through structured actions", () => {
       const agentControl = createModelToolDefinitions().find((d) => d.name === "AgentControl");
       const schema = agentControl?.inputSchema as {

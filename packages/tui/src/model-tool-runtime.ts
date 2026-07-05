@@ -1568,6 +1568,7 @@ function parseStartAgentToolInput(
     };
   }
   const isolation = obj.isolation === "worktree" ? "worktree" : undefined;
+  const cwd = typeof obj.cwd === "string" && obj.cwd.trim() ? obj.cwd.trim() : undefined;
   return {
     ok: true,
     role,
@@ -1579,7 +1580,7 @@ function parseStartAgentToolInput(
         ? { teamName: obj.team_name.trim() }
         : {}),
     runInBackground: obj.runInBackground === true || obj.run_in_background === true,
-    ...(typeof obj.cwd === "string" && obj.cwd.trim() ? { cwd: obj.cwd.trim() } : {}),
+    ...(cwd && !isolation ? { cwd } : {}),
     ...(isolation ? { isolation } : {}),
     ...(registryAgent ? { registryAgentId: registryAgent.id } : {}),
   };
@@ -1628,9 +1629,16 @@ function buildForkArgsFromStartAgentInput(
   if (input.runInBackground) args.push("--background");
   if (input.name) args.push("--name", input.name);
   if (input.teamName) args.push("--team", input.teamName);
-  if (input.cwd) args.push("--cwd", input.cwd);
+  if (input.cwd && !input.isolation) args.push("--cwd", input.cwd);
   if (input.isolation) args.push("--isolation", input.isolation);
   return args;
+}
+
+export function __testBuildForkArgsFromStartAgentInput(
+  input: Extract<ReturnType<typeof parseStartAgentToolInput>, { ok: true }>,
+  context: TuiContext,
+): string[] {
+  return buildForkArgsFromStartAgentInput(input, context);
 }
 
 function parseAgentControlToolInput(

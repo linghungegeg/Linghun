@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { createModelToolDefinitions } from "./model-loop-runtime.js";
 import {
+  __testBuildForkArgsFromStartAgentInput,
   rememberSourcePackCandidatesFromToolData,
   rememberToolFiles,
 } from "./model-tool-runtime.js";
@@ -116,5 +117,34 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
         confidence: 0.82,
       },
     ]);
+  });
+
+  it("does not pass cwd to slash fork when StartAgent requests managed worktree isolation", () => {
+    const args = __testBuildForkArgsFromStartAgentInput(
+      {
+        ok: true,
+        role: "explorer",
+        task: "inspect renderer paths",
+        name: "renderer-explorer",
+        teamName: "renderer-team",
+        runInBackground: true,
+        cwd: "F:/Linghun",
+        isolation: "worktree",
+      },
+      {} as TuiContext,
+    );
+
+    expect(args).toEqual([
+      "explorer",
+      "inspect renderer paths",
+      "--background",
+      "--name",
+      "renderer-explorer",
+      "--team",
+      "renderer-team",
+      "--isolation",
+      "worktree",
+    ]);
+    expect(args).not.toContain("--cwd");
   });
 });

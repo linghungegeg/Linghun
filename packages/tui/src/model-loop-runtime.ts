@@ -283,7 +283,7 @@ export const COMMAND_PROPOSAL_DESCRIPTION =
   "Fallback only: propose an explicit Linghun slash command when the requested capability cannot be executed by an available structured tool. Do not use this as the default path for agent, workflow, index, verification, or report-writing requests.";
 
 export const START_AGENT_DESCRIPTION =
-  "Start a real Linghun agent runtime for user requests such as multi-agent work, explorer/planner/worker/verifier delegation, or /fork-style role work. Supports addressable name/team, safe cwd/worktree isolation, and true background launch. Runs through validation, start/background guard, permission pipeline, sidechain transcript, evidence, and final agent status.";
+  "Start a real Linghun agent runtime for user requests such as multi-agent work, explorer/planner/worker/verifier delegation, or /fork-style role work. Always provide role or subagent_type plus task. For isolation=worktree, omit cwd because the runtime creates the managed worktree cwd. Supports addressable name/team, safe cwd/worktree isolation, and true background launch. Runs through validation, start/background guard, permission pipeline, sidechain transcript, evidence, and final agent status.";
 
 export const AGENT_CONTROL_DESCRIPTION =
   "Inspect or cancel existing Linghun agents through the real agent runtime. Use action=cancel when the user asks to stop, close, interrupt, kill, or cancel one background/sub-agent; use action=cancel_all or stop_all when the user asks to stop all agents. This performs the same durable cancellation as /agents cancel and must be preferred over replying with instructions when a matching agent exists.";
@@ -402,16 +402,30 @@ export function createStartAgentInputSchema(): unknown {
     type: "object",
     additionalProperties: false,
     properties: {
-      role: { type: "string", enum: ["explorer", "planner", "worker", "verifier"] },
-      subagent_type: { type: "string" },
+      role: {
+        type: "string",
+        enum: ["explorer", "planner", "worker", "verifier"],
+        description: "Built-in agent role. Required unless subagent_type names a custom agent.",
+      },
+      subagent_type: {
+        type: "string",
+        description: "Custom agent id/name, or a built-in role alias.",
+      },
       task: { type: "string" },
       name: { type: "string" },
       teamName: { type: "string" },
       team_name: { type: "string" },
       runInBackground: { type: "boolean" },
       run_in_background: { type: "boolean" },
-      cwd: { type: "string" },
-      isolation: { type: "string", enum: ["worktree"] },
+      cwd: {
+        type: "string",
+        description: "Workspace-relative cwd. Do not send when isolation is worktree.",
+      },
+      isolation: {
+        type: "string",
+        enum: ["worktree"],
+        description: "Create a managed worktree for the agent; omit cwd with this option.",
+      },
     },
     required: ["task"],
   };
