@@ -38,7 +38,7 @@ describe("tool_result budget", () => {
     expect(result.records).toHaveLength(1);
     const artifact = result.records[0]?.artifact;
     expect(artifact?.relativePath).toContain(".linghun/session/tool-results/session-a/");
-    expect(artifact?.sha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(artifact?.sha256).toMatch(/^[a-f0-9]{64}$/);
     await expect(stat(artifact?.path ?? "")).resolves.toBeTruthy();
     await expect(readFile(artifact?.path ?? "", "utf8")).resolves.toBe(large);
   });
@@ -88,7 +88,7 @@ describe("tool_result budget", () => {
       tools.some((message) => message.role === "tool" && message.content.includes("artifactPath:")),
     ).toBe(true);
     for (const record of result.records) {
-      await expect(readFile(record.artifact.path, "utf8")).resolves.toMatch(/^[A-Z]+_AGG:/u);
+      await expect(readFile(record.artifact.path, "utf8")).resolves.toMatch(/^[A-Z]+_AGG:/);
     }
   });
 
@@ -200,6 +200,41 @@ describe("tool_result budget", () => {
     expect(retry.messages[1]?.role === "tool" ? retry.messages[1].content : "").toContain(
       "<persisted-tool-result>",
     );
+  });
+
+  it("reuses the same persisted artifact for repeated large content with a new tool id", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const state: ToolResultBudgetState = { seenIds: new Set(), replacements: new Map() };
+    const large = `SAME_CONTENT_START\n${"r".repeat(55_000)}\nSAME_CONTENT_END`;
+    const makeMessages = (toolUseId: string) => [
+      {
+        role: "assistant" as const,
+        content: "",
+        toolCalls: [{ id: toolUseId, name: "Read", input: { path: "same.txt" } }],
+      },
+      { role: "tool" as const, tool_call_id: toolUseId, content: large },
+    ];
+
+    const first = await applyToolResultBudgetToMessages(makeMessages("call-read-first"), {
+      projectPath: project,
+      sessionId: "session-same-content",
+      state,
+    });
+    const second = await applyToolResultBudgetToMessages(makeMessages("call-read-second"), {
+      projectPath: project,
+      sessionId: "session-same-content",
+      state,
+    });
+
+    expect(first.records).toHaveLength(1);
+    expect(second.records).toHaveLength(0);
+    const firstContent = first.messages[1]?.role === "tool" ? first.messages[1].content : "";
+    const secondContent = second.messages[1]?.role === "tool" ? second.messages[1].content : "";
+    expect(firstContent).toContain("toolUseId: call-read-first");
+    expect(secondContent).toContain("toolUseId: call-read-second");
+    expect(secondContent).toContain(first.records[0]?.artifact.relativePath);
+    expect(secondContent).not.toContain("SAME_CONTENT_END");
+    expect(state.contentReplacements?.size).toBe(1);
   });
 
   it("does not reuse a cached replacement when the same tool id has new content", async () => {

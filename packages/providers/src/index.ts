@@ -277,6 +277,7 @@ export type AnthropicToolDefinition = {
   name: string;
   description: string;
   input_schema: unknown;
+  cache_control?: AnthropicCacheControl;
 };
 
 export type AnthropicToolChoice =
@@ -772,12 +773,16 @@ export class OpenAiCompatibleProvider implements Provider {
           headers["anthropic-beta"] = filteredBetaHeaders.join(",");
         }
       }
-      const response = await fetchWithProviderRetry(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: requestSignal,
-      }, request.requestContext);
+      const response = await fetchWithProviderRetry(
+        url,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: requestSignal,
+        },
+        request.requestContext,
+      );
 
       if (!response.ok) {
         const responseText = await safeReadResponseText(response);
@@ -840,16 +845,20 @@ export class OpenAiCompatibleProvider implements Provider {
       contract.endpointProfile === "responses"
         ? this.createResponsesRequest(request)
         : this.createChatRequest(request);
-    const response = await fetchWithProviderRetry(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...LINGHUN_REQUEST_IDENTITY_HEADERS,
-        authorization: `Bearer ${this.config.apiKey}`,
+    const response = await fetchWithProviderRetry(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+          authorization: `Bearer ${this.config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: requestSignal,
       },
-      body: JSON.stringify(body),
-      signal: requestSignal,
-    }, request.requestContext);
+      request.requestContext,
+    );
 
     if (!response.ok) {
       const responseText = await safeReadResponseText(response);
@@ -1378,12 +1387,16 @@ async function tryNonStreamingFallback(input: {
         ? "/v1/messages"
         : "/chat/completions";
   const body = createNonStreamingFallbackBody(input.request, input.providerConfig, input.contract);
-  const response = await fetchWithProviderRetry(joinBaseUrlAndEndpoint(input.baseUrl, endpoint), {
-    method: "POST",
-    headers: createProviderRequestHeaders(input.providerConfig, input.contract),
-    body: JSON.stringify(body),
-    signal: input.requestSignal,
-  }, input.request.requestContext);
+  const response = await fetchWithProviderRetry(
+    joinBaseUrlAndEndpoint(input.baseUrl, endpoint),
+    {
+      method: "POST",
+      headers: createProviderRequestHeaders(input.providerConfig, input.contract),
+      body: JSON.stringify(body),
+      signal: input.requestSignal,
+    },
+    input.request.requestContext,
+  );
   if (!response.ok) {
     return undefined;
   }
@@ -1688,7 +1701,11 @@ function createAnthropicMessagesProfileRequest(
       if (blocks.length > 0) {
         conversation.push({
           role: "user",
-          content: request.promptCacheEnabled ? blocks : blocks.length === 1 ? message.content : blocks,
+          content: request.promptCacheEnabled
+            ? blocks
+            : blocks.length === 1
+              ? message.content
+              : blocks,
         });
       }
       continue;
@@ -1795,9 +1812,7 @@ function createAnthropicMessagesProfileRequest(
         ? { type: "none" }
         : {
             type: "auto",
-            ...(request.parallelToolCalls === false
-              ? { disable_parallel_tool_use: true }
-              : {}),
+            ...(request.parallelToolCalls === false ? { disable_parallel_tool_use: true } : {}),
           };
   }
   if (request.promptCacheEnabled) {
@@ -1849,23 +1864,24 @@ function findStableUserMessageCacheBreakpoint(
 }
 
 function createAnthropicCacheControl(request: ModelRequest): AnthropicCacheControl {
-  return request.promptCacheTtl === "1h"
-    ? { type: "ephemeral", ttl: "1h" }
-    : { type: "ephemeral" };
+  return request.promptCacheTtl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
 }
 
 function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] | undefined {
   // D.13G：tools 数组按 name 字典序稳定排序，与 OpenAI chat/responses 路径一致；
-  // 用于稳定 Anthropic prompt cache 的前缀 hash（cache_control 与 tools 共存时，
-  // tools 顺序变化会破坏前缀 hash 命中率）。
+  // D.13L：启用 prompt cache 时在稳定 tool schema block 末尾挂 cache_control，
+  // 让 Anthropic 同时缓存长 system prefix 与稳定工具定义，减少大工具集反复写入。
   const tools = request.tools ?? [];
-  return [...tools]
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema,
-    }));
+  const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+  const lastToolIndex = sortedTools.length - 1;
+  return sortedTools.map((tool, index) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+    ...(request.promptCacheEnabled && index === lastToolIndex
+      ? { cache_control: createAnthropicCacheControl(request) }
+      : {}),
+  }));
 }
 
 function resolveMaxOutputTokens(
@@ -2827,11 +2843,17 @@ function parseResponsesEvent(
       },
     ];
   }
-  if (parsed.type === "response.output_item.done" && parsed.item?.type === "message" && !state.hadText) {
+  if (
+    parsed.type === "response.output_item.done" &&
+    parsed.item?.type === "message" &&
+    !state.hadText
+  ) {
     const text = extractResponsesOutputText(parsed.item.content);
     if (text) {
       state.hadText = true;
-      return [{ type: "assistant_text_delta", id: parsed.item.id ?? parsed.id ?? state.lastId, text }];
+      return [
+        { type: "assistant_text_delta", id: parsed.item.id ?? parsed.id ?? state.lastId, text },
+      ];
     }
   }
   const response = parsed.response;
@@ -2845,20 +2867,18 @@ function parseResponsesEvent(
     }
     if (usage) {
       state.hadUsage = true;
-      events.push(
-        {
-          type: "usage",
-          usage: {
-            inputTokens: usage.input_tokens ?? 0,
-            outputTokens: usage.output_tokens ?? 0,
-            totalTokens: usage.total_tokens ?? 0,
-            cacheReadTokens: usage.input_tokens_details?.cached_tokens,
-            cacheWriteTokens: readCacheWriteTokens(usage) ?? undefined,
-            rawUsage: usage,
-            endpoint,
-          },
+      events.push({
+        type: "usage",
+        usage: {
+          inputTokens: usage.input_tokens ?? 0,
+          outputTokens: usage.output_tokens ?? 0,
+          totalTokens: usage.total_tokens ?? 0,
+          cacheReadTokens: usage.input_tokens_details?.cached_tokens,
+          cacheWriteTokens: readCacheWriteTokens(usage) ?? undefined,
+          rawUsage: usage,
+          endpoint,
         },
-      );
+      });
     }
     return events;
   }
@@ -2936,7 +2956,8 @@ function isCompleteJsonObject(value: string): boolean {
 }
 
 function normalizeAnthropicCacheWriteTokens(usage: AnthropicUsage): number | undefined {
-  if (typeof usage.cache_creation_input_tokens === "number") return usage.cache_creation_input_tokens;
+  if (typeof usage.cache_creation_input_tokens === "number")
+    return usage.cache_creation_input_tokens;
   const ephemeral5m = usage.cache_creation?.ephemeral_5m_input_tokens;
   const ephemeral1h = usage.cache_creation?.ephemeral_1h_input_tokens;
   if (typeof ephemeral5m !== "number" && typeof ephemeral1h !== "number") return undefined;

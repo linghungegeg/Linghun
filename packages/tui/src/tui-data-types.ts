@@ -16,7 +16,10 @@ import type { CacheFreshness, CacheTurnStats } from "@linghun/core";
 import type { PermissionMode } from "@linghun/shared";
 import type { DiffSummary, TodoItem, ToolName } from "@linghun/tools";
 import type { ArchitectureCardSummary } from "./architecture-runtime.js";
-import type { CacheRequestObservation } from "./cache-policy-runtime.js";
+import type {
+  CacheRequestObservation,
+  CacheRequestShapeLatch,
+} from "./cache-policy-runtime.js";
 import type { CompactBoundary } from "./compact-context.js";
 import type {
   EngineeringFailureCategory,
@@ -194,6 +197,7 @@ export type CacheState = {
   lastFreshness?: CacheFreshness;
   lastRequestObservation?: CacheRequestObservation;
   lastRequestObservationByKind?: Partial<Record<CacheRequestObservation["kind"], CacheRequestObservation>>;
+  cacheRequestShapeLatch?: CacheRequestShapeLatch;
   hintLastShownAt: Record<string, number>;
   compacted: boolean;
   compactBoundaries: CompactBoundary[];

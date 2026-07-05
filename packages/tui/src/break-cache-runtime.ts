@@ -4,6 +4,10 @@ import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CacheFreshness } from "@linghun/core";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
+import {
+  diagnoseCacheBreak,
+  formatCacheBreakDiagnosis,
+} from "./cache-break-diagnostics-runtime.js";
 import { diffFreshness } from "./cache-freshness.js";
 import type { TuiContext } from "./index.js";
 
@@ -313,6 +317,12 @@ export function formatBreakCacheStatus(context: TuiContext, current: CacheFreshn
   // D.13F：standalone marker mode 与最近事件摘要，仅作只读展示。
   const marker = readBreakCacheMarkerSync(context);
   const recentEvents = readRecentBreakCacheEventsSync(context, 3);
+  const diagnosis = diagnoseCacheBreak({
+    latest: context.cache.history.at(-1),
+    observation: context.cache.lastRequestObservation,
+    freshnessChangedKeys: keys,
+    warnBelowHitRate: context.cache.config.warnBelowHitRate,
+  });
   return [
     "Break-cache status",
     `- systemPromptHash: ${current.systemPromptHash}`,
@@ -331,6 +341,7 @@ export function formatBreakCacheStatus(context: TuiContext, current: CacheFreshn
     `- mode: ${marker.mode}${marker.nonce ? `; nonce ${marker.nonce.slice(0, 8)}…` : ""}${marker.mode === "always" ? "（固定 break-cache namespace；不会每次请求都破坏缓存）" : ""}`,
     `- recent break-cache events: ${recentEvents.length === 0 ? "none" : recentEvents.map((event) => `${event.action}@${event.createdAt}`).join("; ")}`,
     `- changed keys: ${keys.length > 0 ? keys.join(", ") : "none"}`,
+    `- diagnosis: ${formatCacheBreakDiagnosis(diagnosis)}`,
     "- usage: /break-cache status | once | always | off | --clear；marker 与 event 仅记录动作，不记录 prompt/key/raw request/response。always=固定 nonce 切到新 cache namespace（stable nonce），不是每次请求都破坏缓存。",
     "- suggestion: 如 system prompt / tool schema / MCP list / model/provider / memory / compact / plugin list / endpoint profile / cacheControl / cacheTtl 变化，可运行 /cache warmup 或 /cache refresh；不会替你自动执行。",
   ].join("\n");

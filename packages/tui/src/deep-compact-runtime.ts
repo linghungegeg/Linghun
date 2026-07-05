@@ -5,6 +5,8 @@ import { redactCommonSecrets } from "@linghun/shared";
 import { type CompactBoundary, createManualCompactBoundary } from "./compact-context.js";
 import {
   applyCacheWritePolicyToRequest,
+  recordCacheRequestObservation,
+  recordCacheUsageObservation,
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
 import type { CompactPreflightRuntime } from "./compact-preflight-runtime.js";
@@ -106,6 +108,12 @@ export async function runDeepCompact(input: {
     },
     resolveCachePolicy("deep-compact"),
   );
+  recordCacheRequestObservation(
+    input.context.cache,
+    "deep-compact",
+    input.runtime.provider,
+    providerRequest,
+  );
   let summary = "";
   try {
     for await (const event of withProviderRetry(
@@ -133,6 +141,10 @@ export async function runDeepCompact(input: {
           input.context,
           "Deep compact failed because compact agent attempted tool_use while tools are disabled.",
         );
+      }
+      if (event.type === "usage") {
+        recordCacheUsageObservation(input.context.cache, event.usage);
+        continue;
       }
       if (event.type === "error") {
         await recordDeepCompactFailure(

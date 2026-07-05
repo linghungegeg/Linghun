@@ -925,7 +925,7 @@ describe("OpenAI stream parser", () => {
 
   it("combines multi-line OpenAI SSE data fields before JSON parsing", async () => {
     const events = await collectOpenAiEvents([
-      'event: completion\n',
+      "event: completion\n",
       'data: {"id":"chatcmpl-multidata",\n',
       'data: "choices":[{"delta":{"content":"AB"}}]}\n\n',
       "data: [DONE]\n\n",
@@ -2279,6 +2279,50 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     });
     expect(body.tools?.[0].function).toBeUndefined();
     expect(body.tool_choice).toEqual({ type: "auto" });
+  });
+
+  it("D.13L: adds Anthropic tool schema cache_control only when prompt cache is enabled", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+
+    const cached = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: true,
+      promptCacheTtl: "1h",
+      tools: [
+        { name: "Read", description: "Read file", inputSchema: { type: "object" } },
+        { name: "Bash", description: "Run command", inputSchema: { type: "object" } },
+      ],
+      toolChoice: "auto",
+    });
+
+    expect(cached.tools?.map((tool) => tool.name)).toEqual(["Bash", "Read"]);
+    expect(cached.tools?.[0]).toMatchObject({
+      name: "Bash",
+      input_schema: { type: "object" },
+    });
+    expect(cached.tools?.[0].cache_control).toBeUndefined();
+    expect(cached.tools?.[1]).toMatchObject({
+      name: "Read",
+      input_schema: { type: "object" },
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    });
+
+    const uncached = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      promptCacheEnabled: false,
+      tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+    });
+    expect(uncached.tools?.[0].cache_control).toBeUndefined();
   });
 
   it("D.13G(real path): createAnthropicMessagesRequest does NOT throw PROFILE_MISMATCH when Claude placeholder + request.endpointProfile=chat_completions", () => {

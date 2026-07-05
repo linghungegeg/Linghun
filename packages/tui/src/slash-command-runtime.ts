@@ -137,6 +137,10 @@ import {
   writeLightHints,
 } from "./cache-command-runtime.js";
 import {
+  recordCacheRequestObservation,
+  recordCacheUsageObservation,
+} from "./cache-policy-runtime.js";
+import {
   createCacheFreshness,
   createConfigFreshnessSummary,
   diffFreshness,
@@ -1890,6 +1894,11 @@ export async function handleBtwCommand(
     controller.signal,
     context.providerBreaker,
     contextSnapshot,
+    {
+      onRequest: (request) =>
+        recordCacheRequestObservation(context.cache, "side-question", runtime.provider, request),
+      onUsage: (usage) => recordCacheUsageObservation(context.cache, usage),
+    },
   );
   if (context.activeBtwAbortController === controller) {
     context.activeBtwAbortController = undefined;

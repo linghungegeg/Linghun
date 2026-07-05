@@ -27,8 +27,8 @@ import { stableStringify } from "./cache-freshness.js";
 import {
   applyCacheWritePolicyToRequest,
   type CacheRequestKind,
-  observeCacheSafeRequest,
-  observeCacheUsage,
+  recordCacheRequestObservation as recordCacheRequestObservationState,
+  recordCacheUsageObservation as recordCacheUsageObservationState,
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
 import {
@@ -331,26 +331,11 @@ function recordCacheRequestObservation(
   provider: string,
   request: ModelRequest,
 ): void {
-  const previous = context.cache.lastRequestObservation;
-  const observation = observeCacheSafeRequest({ previous, kind, provider, request });
-  context.cache.lastRequestObservation = observation;
-  context.cache.lastRequestObservationByKind = {
-    ...context.cache.lastRequestObservationByKind,
-    [kind]: observation,
-  };
+  recordCacheRequestObservationState(context.cache, kind, provider, request);
 }
 
 function recordCacheUsageObservation(context: TuiContext, usage: ModelUsage): void {
-  const updated = observeCacheUsage({
-    observation: context.cache.lastRequestObservation,
-    usage,
-  });
-  if (!updated) return;
-  context.cache.lastRequestObservation = updated;
-  context.cache.lastRequestObservationByKind = {
-    ...context.cache.lastRequestObservationByKind,
-    [updated.kind]: updated,
-  };
+  recordCacheUsageObservationState(context.cache, usage);
 }
 
 function injectAgentCompletionMainChainContext(
@@ -1813,6 +1798,7 @@ export async function sendMessage(
       providerRequest = applyCacheWritePolicyToRequest(
         providerRequest,
         resolveCachePolicy("main"),
+        context.cache,
       );
       recordCacheRequestObservation(context, "main", selectedRuntime.provider, providerRequest);
       const resetAssistantDraftForProviderRetry = () => {
@@ -3137,6 +3123,7 @@ async function streamFinalModelAnswerWithoutTools(
       ...promptCacheFields,
     },
     resolveCachePolicy("final"),
+    context.cache,
   );
   recordCacheRequestObservation(context, "final", continuation.provider, providerRequest);
   const resetFinalAssistantDraftForProviderRetry = () => {
@@ -3628,6 +3615,7 @@ export async function continueModelAfterToolResults(
       providerRequest = applyCacheWritePolicyToRequest(
         providerRequest,
         resolveCachePolicy("continuation"),
+        context.cache,
       );
       recordCacheRequestObservation(context, "continuation", continuation.provider, providerRequest);
       const resetAssistantDraftForProviderRetry = () => {

@@ -43,6 +43,7 @@ export type ToolResultBudgetReplacement = {
 export type ToolResultBudgetState = {
   seenIds: Set<string>;
   replacements: Map<string, ToolResultBudgetReplacement>;
+  contentReplacements?: Map<string, ToolResultBudgetReplacement>;
 };
 
 const TOOL_RESULTS_DIR = "tool-results";
@@ -66,19 +67,37 @@ export async function applyToolResultBudgetToMessages(
     state?: ToolResultBudgetState;
   },
 ): Promise<ToolResultBudgetResult> {
-  const candidates = collectToolResultCandidates(messages, options.state);
+  const state = options.state;
+  if (state) state.contentReplacements ??= new Map();
+  const candidates = collectToolResultCandidates(messages, state);
   if (candidates.length === 0) return { messages, records: [] };
 
   const cachedReplacements = new Map<string, string>();
   const freshCandidates: Candidate[] = [];
   for (const candidate of candidates) {
-    const stateKey = options.state ? getCandidateStateKey(candidate, options.sessionId) : undefined;
-    const existing = stateKey ? options.state?.replacements.get(stateKey) : undefined;
+    const stateKey = state ? getCandidateStateKey(candidate, options.sessionId) : undefined;
+    const existing = stateKey ? state?.replacements.get(stateKey) : undefined;
     if (existing) {
       cachedReplacements.set(candidate.toolUseId, existing.summary);
       continue;
     }
-    if (stateKey && options.state?.seenIds.has(stateKey)) {
+    const contentKey = state ? getCandidateContentKey(candidate, options.sessionId) : undefined;
+    const existingByContent = state && contentKey
+      ? getContentReplacements(state).get(contentKey)
+      : undefined;
+    if (existingByContent) {
+      cachedReplacements.set(
+        candidate.toolUseId,
+        buildToolResultBudgetSummary(
+          existingByContent.record.artifact,
+          existingByContent.record.reason,
+          candidate.toolUseId,
+        ),
+      );
+      state?.seenIds.add(getCandidateStateKey(candidate, options.sessionId));
+      continue;
+    }
+    if (stateKey && state?.seenIds.has(stateKey)) {
       continue;
     }
     freshCandidates.push(candidate);
@@ -127,7 +146,7 @@ export async function applyToolResultBudgetToMessages(
 
   const replacements = new Map(cachedReplacements);
   const records: ToolResultBudgetRecord[] = [];
-  for (const candidate of selected.values()) {
+  for (const candidate of Array.from(selected.values())) {
     const artifact = await writeToolResultArtifact(candidate, options);
     const replacement = buildToolResultBudgetSummary(artifact, candidate.reason);
     replacements.set(candidate.toolUseId, replacement);
@@ -144,6 +163,13 @@ export async function applyToolResultBudgetToMessages(
       summary: replacement,
       record,
       fingerprint: stateKey,
+    });
+    const contentKey = getCandidateContentKey(candidate, options.sessionId);
+    const contentReplacements = options.state ? getContentReplacements(options.state) : undefined;
+    contentReplacements?.set(contentKey, {
+      summary: replacement,
+      record,
+      fingerprint: contentKey,
     });
   }
   for (const candidate of freshCandidates) {
@@ -182,9 +208,24 @@ function getCandidateStateKey(candidate: Candidate, sessionId: string): string {
     candidate.toolUseId,
     candidate.chars,
     candidate.bytes,
-    createHash("sha256").update(candidate.content).digest("hex"),
+    getCandidateContentHash(candidate),
   ].join("\0");
   return candidate.stateKey;
+}
+
+function getCandidateContentKey(candidate: Candidate, sessionId: string): string {
+  return [sessionId, candidate.chars, candidate.bytes, getCandidateContentHash(candidate)].join("\0");
+}
+
+function getCandidateContentHash(candidate: Candidate): string {
+  return createHash("sha256").update(candidate.content).digest("hex");
+}
+
+function getContentReplacements(
+  state: ToolResultBudgetState,
+): Map<string, ToolResultBudgetReplacement> {
+  state.contentReplacements ??= new Map();
+  return state.contentReplacements;
 }
 
 function groupCandidatesByAssistantToolUse(
@@ -248,11 +289,12 @@ async function writeToolResultArtifact(
 function buildToolResultBudgetSummary(
   artifact: ToolResultBudgetArtifact,
   reason: ToolResultBudgetRecord["reason"],
+  toolUseId = artifact.toolUseId,
 ): string {
   return [
     "<persisted-tool-result>",
     `reason: ${reason}`,
-    `toolUseId: ${artifact.toolUseId}`,
+    `toolUseId: ${toolUseId}`,
     `artifactId: ${artifact.id}`,
     `artifactPath: ${artifact.relativePath}`,
     `originalChars: ${artifact.chars}`,
@@ -285,7 +327,7 @@ function replaceToolResults(
 }
 
 function sanitizeId(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]+/gu, "-").slice(0, 64);
+  return value.replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 64);
 }
 
 function isBudgetSummary(content: string): boolean {

@@ -11,7 +11,7 @@
 // session store 记录由 index.ts 的 handleBtwCommand 协调（保持 index.ts 只做
 // glue，本模块承载逻辑）。
 
-import type { EndpointProfile, ModelGateway, ModelRequest } from "@linghun/providers";
+import type { EndpointProfile, ModelGateway, ModelRequest, ModelUsage } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import {
   applyCacheWritePolicyToRequest,
@@ -27,6 +27,11 @@ export type BtwSideQuestionRuntime = {
   endpointProfile: EndpointProfile;
   reasoningLevel?: string;
   reasoningSent: boolean;
+};
+
+export type BtwTelemetryObserver = {
+  onRequest?: (request: ModelRequest) => void;
+  onUsage?: (usage: ModelUsage) => void;
 };
 
 export type BtwSideQuestionResult =
@@ -116,6 +121,7 @@ export async function runBtwSideQuestion(
   signal: AbortSignal,
   breakerState?: ProviderCircuitBreakerState,
   contextSnapshot?: string,
+  telemetry?: BtwTelemetryObserver,
 ): Promise<BtwSideQuestionResult> {
   const messages = buildBtwMessages(question, language, contextSnapshot);
   let text = "";
@@ -132,6 +138,7 @@ export async function runBtwSideQuestion(
       },
       resolveCachePolicy("side-question"),
     );
+    telemetry?.onRequest?.(providerRequest);
     const stream = breakerState
       ? withProviderRetry(
           gateway,
@@ -158,6 +165,10 @@ export async function runBtwSideQuestion(
       }
       if (event.type === "assistant_thinking_delta") {
         hadThinking = true;
+        continue;
+      }
+      if (event.type === "usage") {
+        telemetry?.onUsage?.(event.usage);
         continue;
       }
       if (event.type === "error") {

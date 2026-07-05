@@ -1,0 +1,327 @@
+import type { EndpointProfile, ModelRequest, ModelUsage } from "@linghun/providers";
+import { stableHash } from "./cache-freshness.js";
+
+export type CacheRequestKind =
+  | "main"
+  | "continuation"
+  | "final"
+  | "agent-child"
+  | "side-question"
+  | "deep-compact";
+
+export type CacheWritePolicy = {
+  allowWrite: boolean;
+  reason: string;
+};
+
+export type CachePolicyDecision = {
+  kind: CacheRequestKind;
+  write: CacheWritePolicy;
+};
+
+export type CacheRequestFingerprint = {
+  requestHash: string;
+  messagePrefixHash: string;
+  systemPrefixHash: string;
+  conversationPrefixHash: string;
+  latestMessageHash: string;
+  toolSchemaHash: string;
+  stableToolSchemaHash: string;
+  dynamicToolSchemaHash: string;
+  modelHash: string;
+  reasoningHash: string;
+  cacheConfigHash: string;
+  changedKeys: string[];
+};
+
+export type CacheRequestObservation = {
+  id: string;
+  kind: CacheRequestKind;
+  provider: string;
+  model: string;
+  endpointProfile?: EndpointProfile;
+  messageCount: number;
+  toolCount: number;
+  promptCacheEnabled: boolean;
+  promptCacheTtl?: "1h";
+  hasCacheBreakNonce: boolean;
+  createdAt: string;
+  fingerprint: CacheRequestFingerprint;
+  usage?: CacheUsageObservation;
+};
+
+export type CacheUsageObservation = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheWriteTokensEstimated: boolean;
+  cacheCreationEphemeral5mTokens?: number;
+  cacheCreationEphemeral1hTokens?: number;
+  endpoint?: string;
+  source: "api_usage" | "estimated";
+};
+
+export function resolveCachePolicy(kind: CacheRequestKind): CachePolicyDecision {
+  if (kind === "agent-child" || kind === "side-question" || kind === "deep-compact") {
+    return {
+      kind,
+      write: {
+        allowWrite: false,
+        reason: "sidechain requests must not create or refresh main-chain prompt cache entries",
+      },
+    };
+  }
+  return {
+    kind,
+    write: {
+      allowWrite: true,
+      reason: "main-chain request shape may refresh the shared prompt cache prefix",
+    },
+  };
+}
+
+export function applyCacheWritePolicyToRequest(
+  request: ModelRequest,
+  policy: CachePolicyDecision,
+  state?: CacheRequestObservationState,
+): ModelRequest {
+  if (policy.write.allowWrite) return applyMainChainRequestShapeLatch(request, state);
+  if (!request.promptCacheEnabled && !request.promptCacheTtl && !request.cacheBreakNonce)
+    return request;
+  const next: ModelRequest = { ...request };
+  next.promptCacheEnabled = undefined;
+  next.promptCacheTtl = undefined;
+  next.cacheBreakNonce = undefined;
+  return next;
+}
+
+type PromptCacheTtlShape = "5m" | "1h";
+
+export type CacheRequestShapeLatch = {
+  promptCacheTtl: PromptCacheTtlShape;
+};
+
+function applyMainChainRequestShapeLatch(
+  request: ModelRequest,
+  state: CacheRequestObservationState | undefined,
+): ModelRequest {
+  if (!state || request.promptCacheEnabled !== true) return request;
+  const requestedTtl: PromptCacheTtlShape = request.promptCacheTtl === "1h" ? "1h" : "5m";
+  const latched = state.cacheRequestShapeLatch;
+  if (!latched) {
+    state.cacheRequestShapeLatch = { promptCacheTtl: requestedTtl };
+    return request;
+  }
+  if (latched.promptCacheTtl === requestedTtl) return request;
+  return {
+    ...request,
+    promptCacheTtl: latched.promptCacheTtl === "1h" ? "1h" : undefined,
+  };
+}
+
+export function observeCacheSafeRequest(input: {
+  previous?: CacheRequestObservation;
+  kind: CacheRequestKind;
+  provider: string;
+  request: ModelRequest;
+  now?: Date;
+}): CacheRequestObservation {
+  const fingerprintWithoutChangedKeys = createCacheRequestFingerprint(input.request);
+  const changedKeys = diffCacheRequestFingerprint(
+    input.previous?.fingerprint,
+    fingerprintWithoutChangedKeys,
+  );
+  const fingerprint = { ...fingerprintWithoutChangedKeys, changedKeys };
+  return {
+    id: stableHash({ createdAt: input.now?.toISOString() ?? Date.now(), fingerprint }),
+    kind: resolveCachePolicy(input.kind).kind,
+    provider: input.provider,
+    model: input.request.model ?? "unknown",
+    endpointProfile: input.request.endpointProfile,
+    messageCount: input.request.messages.length,
+    toolCount: input.request.tools?.length ?? 0,
+    promptCacheEnabled: input.request.promptCacheEnabled === true,
+    promptCacheTtl: input.request.promptCacheTtl,
+    hasCacheBreakNonce: Boolean(input.request.cacheBreakNonce),
+    createdAt: (input.now ?? new Date()).toISOString(),
+    fingerprint,
+  };
+}
+
+export function observeCacheUsage(input: {
+  observation: CacheRequestObservation | undefined;
+  usage: ModelUsage;
+}): CacheRequestObservation | undefined {
+  if (!input.observation) return undefined;
+  return {
+    ...input.observation,
+    usage: normalizeCacheUsageObservation(input.usage),
+  };
+}
+
+export type CacheRequestObservationState = {
+  lastRequestObservation?: CacheRequestObservation;
+  lastRequestObservationByKind?: Partial<
+    Record<CacheRequestObservation["kind"], CacheRequestObservation>
+  >;
+  cacheRequestShapeLatch?: CacheRequestShapeLatch;
+};
+
+export function recordCacheRequestObservation(
+  state: CacheRequestObservationState,
+  kind: CacheRequestKind,
+  provider: string,
+  request: ModelRequest,
+): CacheRequestObservation {
+  const observation = observeCacheSafeRequest({
+    previous: state.lastRequestObservation,
+    kind,
+    provider,
+    request,
+  });
+  state.lastRequestObservation = observation;
+  state.lastRequestObservationByKind = {
+    ...state.lastRequestObservationByKind,
+    [kind]: observation,
+  };
+  return observation;
+}
+
+export function recordCacheUsageObservation(
+  state: CacheRequestObservationState,
+  usage: ModelUsage,
+): CacheRequestObservation | undefined {
+  const updated = observeCacheUsage({ observation: state.lastRequestObservation, usage });
+  if (!updated) return undefined;
+  state.lastRequestObservation = updated;
+  state.lastRequestObservationByKind = {
+    ...state.lastRequestObservationByKind,
+    [updated.kind]: updated,
+  };
+  return updated;
+}
+
+export function normalizeCacheUsageObservation(usage: ModelUsage): CacheUsageObservation {
+  return {
+    inputTokens: Math.max(0, usage.inputTokens),
+    outputTokens: Math.max(0, usage.outputTokens),
+    totalTokens: Math.max(0, usage.totalTokens),
+    cacheReadTokens: Math.max(0, usage.cacheReadTokens ?? 0),
+    cacheWriteTokens: Math.max(0, usage.cacheWriteTokens ?? 0),
+    cacheWriteTokensEstimated: usage.cacheWriteTokensEstimated === true,
+    cacheCreationEphemeral5mTokens: usage.cacheCreationEphemeral5mTokens,
+    cacheCreationEphemeral1hTokens: usage.cacheCreationEphemeral1hTokens,
+    endpoint: usage.endpoint,
+    source:
+      usage.cacheReadTokens === undefined && usage.cacheWriteTokens === undefined
+        ? "estimated"
+        : "api_usage",
+  };
+}
+
+function createCacheRequestFingerprint(
+  request: ModelRequest,
+): Omit<CacheRequestFingerprint, "changedKeys"> {
+  const toolSchema = normalizeToolSchema(request.tools ?? []);
+  const toolBoundary = splitToolSchemaBoundary(toolSchema);
+  const cacheConfig = {
+    promptCacheEnabled: request.promptCacheEnabled === true,
+    promptCacheTtl: request.promptCacheTtl ?? "5m",
+    hasCacheBreakNonce: Boolean(request.cacheBreakNonce),
+  };
+  const modelShape = {
+    model: request.model ?? "unknown",
+    endpointProfile: request.endpointProfile ?? "default",
+    toolChoice: request.toolChoice ?? "default",
+    parallelToolCalls: request.parallelToolCalls ?? "default",
+  };
+  const reasoningShape = {
+    reasoningLevel: request.reasoningLevel ?? "default",
+  };
+  const messageBoundary = splitCacheMessageBoundary(request.messages);
+  return {
+    requestHash: stableHash({
+      messages: request.messages,
+      toolSchema,
+      modelShape,
+      reasoningShape,
+      cacheConfig,
+    }),
+    messagePrefixHash: stableHash({
+      system: messageBoundary.systemPrefix,
+      conversationPrefix: messageBoundary.conversationPrefix,
+    }),
+    systemPrefixHash: stableHash(messageBoundary.systemPrefix),
+    conversationPrefixHash: stableHash(messageBoundary.conversationPrefix),
+    latestMessageHash: stableHash(messageBoundary.latestMessage ?? null),
+    toolSchemaHash: stableHash(toolSchema),
+    stableToolSchemaHash: stableHash(toolBoundary.stable),
+    dynamicToolSchemaHash: stableHash(toolBoundary.dynamic),
+    modelHash: stableHash(modelShape),
+    reasoningHash: stableHash(reasoningShape),
+    cacheConfigHash: stableHash(cacheConfig),
+  };
+}
+
+function normalizeToolSchema(tools: NonNullable<ModelRequest["tools"]>): Array<{
+  name: string;
+  description: string;
+  inputSchema: unknown;
+}> {
+  return tools
+    .map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function splitToolSchemaBoundary(
+  tools: ReturnType<typeof normalizeToolSchema>,
+): { stable: ReturnType<typeof normalizeToolSchema>; dynamic: ReturnType<typeof normalizeToolSchema> } {
+  const stable = tools.filter((tool) => !isDynamicToolName(tool.name));
+  const dynamic = tools.filter((tool) => isDynamicToolName(tool.name));
+  return { stable, dynamic };
+}
+
+function isDynamicToolName(name: string): boolean {
+  return name.startsWith("mcp__") || name.startsWith("skill__") || name.startsWith("plugin__");
+}
+
+function splitCacheMessageBoundary(messages: ModelRequest["messages"]): {
+  systemPrefix: ModelRequest["messages"];
+  conversationPrefix: ModelRequest["messages"];
+  latestMessage: ModelRequest["messages"][number] | undefined;
+} {
+  const systemPrefix = messages.filter((message) => message.role === "system");
+  const conversation = messages.filter((message) => message.role !== "system");
+  return {
+    systemPrefix,
+    conversationPrefix: conversation.slice(0, -1),
+    latestMessage: conversation.at(-1),
+  };
+}
+
+function diffCacheRequestFingerprint(
+  previous: CacheRequestFingerprint | undefined,
+  current: Omit<CacheRequestFingerprint, "changedKeys">,
+): string[] {
+  if (!previous) return [];
+  const keys: Array<keyof Omit<CacheRequestFingerprint, "changedKeys">> = [
+    "requestHash",
+    "messagePrefixHash",
+    "systemPrefixHash",
+    "conversationPrefixHash",
+    "latestMessageHash",
+    "toolSchemaHash",
+    "stableToolSchemaHash",
+    "dynamicToolSchemaHash",
+    "modelHash",
+    "reasoningHash",
+    "cacheConfigHash",
+  ];
+  return keys.filter((key) => previous[key] !== current[key]);
+}

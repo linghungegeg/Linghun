@@ -24,6 +24,8 @@ import {
 } from "./agent-completion-finalizer.js";
 import {
   applyCacheWritePolicyToRequest,
+  recordCacheRequestObservation,
+  recordCacheUsageObservation,
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
@@ -2928,6 +2930,12 @@ export async function runModelBackedAgent(
         },
         resolveCachePolicy("agent-child"),
       );
+      recordCacheRequestObservation(
+        context.cache,
+        "agent-child",
+        currentRuntime.provider,
+        providerRequest,
+      );
       for await (const event of withProviderRetry(
         continuation.gateway,
         context.providerBreaker,
@@ -2946,6 +2954,7 @@ export async function runModelBackedAgent(
         if (event.type === "usage") {
           agent.cost.inputTokens += event.usage.inputTokens;
           agent.cost.outputTokens += event.usage.outputTokens;
+          recordCacheUsageObservation(context.cache, event.usage);
           continue;
         }
         if (event.type === "error") {

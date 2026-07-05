@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import type { CacheFreshness } from "@linghun/core";
 import { redactCommonSecrets } from "@linghun/shared";
+import {
+  diagnoseCacheBreak,
+  formatCacheBreakDiagnosis,
+} from "./cache-break-diagnostics-runtime.js";
 import { diffFreshness } from "./cache-freshness.js";
 import type { CacheRequestObservation } from "./cache-policy-runtime.js";
 import { calculateContextPercentages, formatContextProgressBar, getContextWindowForModel } from "./context-window-runtime.js";
@@ -79,6 +83,12 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     latest?.freshness.changedKeys ?? diffFreshness(context.cache.lastFreshness, freshness);
   const source = latest?.cacheWriteTokensSource ?? "missing";
   const latestObservation = context.cache.lastRequestObservation;
+  const diagnosis = diagnoseCacheBreak({
+    latest,
+    observation: latestObservation,
+    freshnessChangedKeys: changed,
+    warnBelowHitRate: context.cache.config.warnBelowHitRate,
+  });
   const zeroNote =
     source === "zero_reported"
       ? "provider 当前返回 cache_creation/cache write 为 0；这只是字段口径，不代表零写入成本。"
@@ -98,6 +108,7 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     `- latest telemetry: ${formatCacheTelemetryObservation(latestObservation)}`,
     `- telemetry by kind: ${formatCacheTelemetryByKind(context.cache.lastRequestObservationByKind)}`,
     `- drift reason: ${formatCacheTelemetryDrift(latestObservation)}`,
+    `- break diagnosis: ${formatCacheBreakDiagnosis(diagnosis)}`,
     `- note: ${zeroNote}`,
   ].join("\n");
 }
@@ -157,9 +168,19 @@ function formatCacheFingerprintChangedKey(key: string): string {
     case "requestHash":
       return "request shape changed";
     case "messagePrefixHash":
-      return "message prefix changed";
+      return "stable message prefix changed";
+    case "systemPrefixHash":
+      return "system prefix changed";
+    case "conversationPrefixHash":
+      return "conversation prefix changed";
+    case "latestMessageHash":
+      return "latest message changed";
     case "toolSchemaHash":
       return "tools changed";
+    case "stableToolSchemaHash":
+      return "stable tools changed";
+    case "dynamicToolSchemaHash":
+      return "dynamic tools changed";
     case "modelHash":
       return "model/toolChoice changed";
     case "reasoningHash":
@@ -218,8 +239,8 @@ export function formatCompactStatus(context: TuiContext): string {
     "- deep scope: full transcript semantic compact",
     "- projection scope: provider-visible recent context projection",
     `- deep packet: ${deep ? `${deep.id}; trigger ${deep.trigger}; events ${deep.transcriptEventCount}` : "none"}`,
-    `- deep summary: ${deep ? sanitizeCompactStatusText(deep.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
-    `- projection summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
+    `- deep summary: ${deep ? sanitizeCompactStatusText(deep.summary.split(/\r?\n/).slice(0, 4).join(" | ")) : "none"}`,
+    `- projection summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/).slice(0, 4).join(" | ")) : "none"}`,
     `- discarded/degraded scope: ${projection ? sanitizeCompactStatusText(projection.discardedRange) : "none"}`,
     `- tool pairing safe: ${projection ? (projection.toolPairingSafe ? "yes" : "no") : pressure ? (pressure.toolPairingSafe ? "yes" : "no") : "unknown"}`,
     `- failure/cooldown: ${failure ? `${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactStatusText(failure.reason)}; cooldown until ${failure.cooldownUntil}` : "none"}`,
