@@ -196,7 +196,7 @@ export type FinalGateEvidenceGapActionPlan = {
   evidenceAction?: {
     toolName: string;
     input?: unknown;
-    strategy?: "minimal_bash_verification" | "artifact_readonly_check";
+    strategy?: "minimal_bash_verification" | "artifact_readonly_check" | "service_runtime_readonly_check";
     summary: string;
   };
 };
@@ -791,6 +791,13 @@ async function runFinalGateEvidenceAction(input: {
     toolCall,
     result,
   });
+  await recordFinalGateServiceProbeEvidence({
+    context: input.context,
+    sessionId: input.sessionId,
+    actionPlan: input.actionPlan,
+    toolCall,
+    result,
+  });
   if (result.pendingApproval) {
     return { status: "permission_pending" };
   }
@@ -1179,6 +1186,73 @@ async function recordFinalGateArtifactProbeEvidence(input: {
   }
 }
 
+async function recordFinalGateServiceProbeEvidence(input: {
+  context: TuiContext;
+  sessionId: string;
+  actionPlan: FinalGateEvidenceGapActionPlan;
+  toolCall: ModelToolCall;
+  result: ModelToolExecutionResult;
+}): Promise<void> {
+  if (input.actionPlan.reason !== "service_runtime_gap_readonly") return;
+  if (input.actionPlan.evidenceAction?.strategy !== "service_runtime_readonly_check") return;
+  if (input.toolCall.name !== "Read" && input.toolCall.name !== "Grep") return;
+  if (input.result.ok !== true || !serviceProbeHasReadySignal(input.result.text)) return;
+  const path = readToolCallPath(input.toolCall.input);
+  const target = extractServiceProbeTarget(input.result.text) ?? path ?? "service";
+  if (hasServiceProbeEvidenceForTarget(input.context.evidence, target)) return;
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `final gate service probe: ${target} ready`,
+    "final-gate:service-probe",
+    ["runtime", "service", "service_ready", "readonly_low_noise_evidence"],
+  );
+  evidence.data = { serviceHint: { target, ready: true } };
+  rememberEvidence(input.context, evidence);
+  await input.context.store.appendEvent(input.sessionId, { type: "evidence_record", ...evidence });
+  await appendSystemEvent(
+    input.context,
+    input.sessionId,
+    `final_answer_gap_service_probe evidence=${evidence.id} target=${target}`,
+    "info",
+  );
+}
+
+function serviceProbeHasReadySignal(text: string): boolean {
+  const lines = text.split(/\r?\n/u);
+  return lines.some((line) => {
+    const normalized = line.trim();
+    if (!normalized) return false;
+    if (/(?:not\s+ready|unhealthy|error|failed|failure|timeout|refused|crash|panic|异常|失败|错误|拒绝|超时)/iu.test(normalized)) {
+      return false;
+    }
+    return /(?:\bready\b|\blistening\b|\bstarted\b|\brunning\b|\bhealthy\b|health\s*(?:check)?\s*(?:ok|pass)|server.{0,24}(?:up|ready|running)|port.{0,24}(?:open|ready|listening)|正常|已启动|启动完成|监听|就绪|健康)/iu.test(
+      normalized,
+    );
+  });
+}
+
+function extractServiceProbeTarget(text: string): string | undefined {
+  const hostPort = text.match(/\b(?:https?:\/\/)?((?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[[0-9a-f:]+\]|[A-Za-z0-9.-]+):\d{2,5})\b/iu);
+  if (hostPort?.[1]) return hostPort[1];
+  const port = text.match(/\bport\s+(\d{2,5})\b/iu) ?? text.match(/\b端口\s*(\d{2,5})\b/iu);
+  if (port?.[1]) return `port:${port[1]}`;
+  return undefined;
+}
+
+function hasServiceProbeEvidenceForTarget(evidence: TuiContext["evidence"], target: string): boolean {
+  return evidence.some((item) => {
+    const service = readEvidenceDataRecord(item, "service");
+    const serviceHint = readEvidenceDataRecord(item, "serviceHint");
+    return serviceProbeTargetMatches(service, target) || serviceProbeTargetMatches(serviceHint, target);
+  });
+}
+
+function serviceProbeTargetMatches(data: Record<string, unknown> | undefined, target: string): boolean {
+  if (data?.ready !== true) return false;
+  const existing = typeof data.target === "string" ? data.target : "";
+  return existing === target || (existing !== "" && target !== "" && existing.includes(target));
+}
+
 function artifactProbeMatchesRequestedTarget(context: TuiContext, path: string): boolean {
   const targets = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
   if (targets.length === 0) return true;
@@ -1209,6 +1283,7 @@ function createServiceRuntimeReadonlyEvidenceAction(text: string): NonNullable<F
     return {
       toolName: "Read",
       input: { path, limit: 200 },
+      strategy: "service_runtime_readonly_check",
       summary: `read claimed runtime evidence ${path}`,
     };
   }
@@ -1219,6 +1294,7 @@ function createServiceRuntimeReadonlyEvidenceAction(text: string): NonNullable<F
       path: ".",
       limit: 30,
     },
+    strategy: "service_runtime_readonly_check",
     summary: "grep existing files for service/runtime health evidence",
   };
 }

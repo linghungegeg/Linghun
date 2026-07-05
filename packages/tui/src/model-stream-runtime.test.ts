@@ -1015,6 +1015,87 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(plan.evidenceAction?.input)).toContain("health");
   });
 
+  it("records serviceHint evidence from final-gate service Read when the log shows ready", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-service-read-"));
+    await writeFile(join(project, "server.log"), "server listening on 127.0.0.1:3000\n", "utf8");
+    const { context, events } = makeDispatcherContext(project);
+    const testContext = context as { evidence: EvidenceRecord[] };
+    const output = new MemoryOutput();
+
+    const result = await __testRunFinalGateEvidenceAction({
+      actionPlan: {
+        action: "readonly_check",
+        reason: "service_runtime_gap_readonly",
+        directive: "test",
+        evidenceAction: {
+          toolName: "Read",
+          input: { path: "server.log", limit: 200 },
+          strategy: "service_runtime_readonly_check",
+          summary: "read claimed runtime evidence server.log",
+        },
+      },
+      context: context as never,
+      output,
+      sessionId: "session-service-read",
+      messages: [{ role: "user", content: "确认服务状态" }],
+      runtime: {
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+    });
+
+    expect(result.status).toBe("evidence_recorded");
+    expect(
+      testContext.evidence.some((item) => {
+        const data = item.data as { serviceHint?: { target?: string; ready?: boolean } } | undefined;
+        return data?.serviceHint?.target === "127.0.0.1:3000" && data.serviceHint.ready === true;
+      }),
+    ).toBe(true);
+    expect(JSON.stringify(events)).toContain("final_answer_gap_service_probe");
+  });
+
+  it("does not mark final-gate service Read as ready when the log only shows failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-service-failed-read-"));
+    await writeFile(join(project, "server.log"), "server failed to listen on 127.0.0.1:3000\n", "utf8");
+    const { context } = makeDispatcherContext(project);
+    const testContext = context as { evidence: EvidenceRecord[] };
+    const output = new MemoryOutput();
+
+    const result = await __testRunFinalGateEvidenceAction({
+      actionPlan: {
+        action: "readonly_check",
+        reason: "service_runtime_gap_readonly",
+        directive: "test",
+        evidenceAction: {
+          toolName: "Read",
+          input: { path: "server.log", limit: 200 },
+          strategy: "service_runtime_readonly_check",
+          summary: "read claimed runtime evidence server.log",
+        },
+      },
+      context: context as never,
+      output,
+      sessionId: "session-service-failed-read",
+      messages: [{ role: "user", content: "确认服务状态" }],
+      runtime: {
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+    });
+
+    expect(result.status).toBe("evidence_recorded");
+    expect(
+      testContext.evidence.some((item) => {
+        const data = item.data as { serviceHint?: { ready?: boolean } } | undefined;
+        return data?.serviceHint?.ready === true;
+      }),
+    ).toBe(false);
+  });
+
   it("dispatches default verification evidence through Bash permission approval without committing held draft", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-dispatch-"));
     await writeFile(
