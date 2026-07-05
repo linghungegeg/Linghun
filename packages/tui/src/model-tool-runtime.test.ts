@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { createModelToolDefinitions } from "./model-loop-runtime.js";
 import {
   __testBuildForkArgsFromStartAgentInput,
+  __testFormatPreEnginePrimaryText,
   rememberSourcePackCandidatesFromToolData,
   rememberToolFiles,
 } from "./model-tool-runtime.js";
@@ -117,6 +118,39 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
         confidence: 0.82,
       },
     ]);
+  });
+
+  it("formats pre_context success with the requested symbol", () => {
+    const text = __testFormatPreEnginePrimaryText(
+      "pre_context",
+      true,
+      { language: "zh-CN" } as TuiContext,
+      { symbol: "classifyVerificationLevel" },
+    );
+
+    expect(text).toBe("代码上下文分析完成：classifyVerificationLevel");
+  });
+
+  it("formats pre_context success without undefined when symbol is missing", () => {
+    const text = __testFormatPreEnginePrimaryText(
+      "pre_context",
+      true,
+      { language: "zh-CN" } as TuiContext,
+      {},
+    );
+
+    expect(text).toBe("代码上下文分析完成。");
+  });
+
+  it("formats pre_plan success without the generic code analysis message", () => {
+    const text = __testFormatPreEnginePrimaryText(
+      "pre_plan",
+      true,
+      { language: "zh-CN" } as TuiContext,
+    );
+
+    expect(text).toBe("代码规划分析完成。");
+    expect(text).not.toBe("代码分析完成。");
   });
 
   it("does not pass cwd to slash fork when StartAgent requests managed worktree isolation", () => {

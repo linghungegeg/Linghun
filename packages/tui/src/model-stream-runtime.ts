@@ -216,6 +216,17 @@ const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 2;
 const MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES = 3;
 const SAME_TOOL_FAILURE_RETRY_GUARD_LIMIT = 4;
 const TOOL_FAILURE_NO_TOOL_RECOVERY_PROMPT_LIMIT = 4;
+const MAX_PARALLEL_READONLY_TOOL_CALLS = 2;
+
+const PARALLEL_READONLY_TOOL_NAMES = new Set([
+  "Grep",
+  "Glob",
+  "Diff",
+  "pre_context",
+  "pre_impact",
+  "pre_plan",
+  "pre_verify",
+]);
 
 export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok">): boolean {
   return result.ok !== true;
@@ -318,6 +329,191 @@ function pushToolResultMessage(
     tool_call_id: toolCall.id,
     content: JSON.stringify(result),
   });
+}
+
+type ToolExecutionBatch =
+  | { mode: "parallel_readonly"; toolCalls: ModelToolCall[] }
+  | { mode: "serial"; toolCalls: [ModelToolCall] };
+
+type ToolBatchExecutionState = {
+  roundHadProgress: boolean;
+  batchFailureCount: number;
+  lastBatchFailureReason?: string;
+  roundFailureFingerprints: string[];
+  stoppedByFailFast: boolean;
+};
+
+type ToolBatchExecutionOptions = {
+  continuation: PendingModelContinuation;
+  failFastContext: string;
+  collectFailureFingerprints?: boolean;
+};
+
+export function canRunToolCallInParallelReadonlyBatch(toolCall: Pick<ModelToolCall, "name" | "input">): boolean {
+  if (PARALLEL_READONLY_TOOL_NAMES.has(toolCall.name)) return true;
+  if (toolCall.name !== "Read") return false;
+  const path = readToolCallPath(toolCall.input);
+  return !!path && isWorkspaceRelativeNonSensitiveReadPath(path);
+}
+
+export function createToolExecutionBatches(toolCalls: ModelToolCall[]): ToolExecutionBatch[] {
+  const batches: ToolExecutionBatch[] = [];
+  let index = 0;
+  while (index < toolCalls.length) {
+    const current = toolCalls[index]!;
+    if (!canRunToolCallInParallelReadonlyBatch(current)) {
+      batches.push({ mode: "serial", toolCalls: [current] });
+      index += 1;
+      continue;
+    }
+
+    const group: ModelToolCall[] = [current];
+    let cursor = index + 1;
+    while (
+      cursor < toolCalls.length &&
+      group.length < MAX_PARALLEL_READONLY_TOOL_CALLS &&
+      canRunToolCallInParallelReadonlyBatch(toolCalls[cursor]!)
+    ) {
+      group.push(toolCalls[cursor]!);
+      cursor += 1;
+    }
+
+    batches.push(group.length > 1 ? { mode: "parallel_readonly", toolCalls: group } : { mode: "serial", toolCalls: [current] });
+    index = cursor;
+  }
+  return batches;
+}
+
+function isWorkspaceRelativeNonSensitiveReadPath(path: string): boolean {
+  const normalized = path.split("\\").join("/").trim();
+  if (!normalized || normalized.startsWith("/") || normalized.startsWith("~")) return false;
+  if (/^[a-z]:\//i.test(normalized)) return false;
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.some((segment) => segment === "..")) return false;
+  const lower = normalized.toLowerCase();
+  return !/(^|\/)(\.env|\.npmrc|\.netrc|id_rsa|id_dsa|id_ed25519|.*secret.*|.*token.*|.*credential.*|.*key.*)(\.|$|\/)/.test(lower);
+}
+
+async function executeToolCallsWithReadonlyParallelism(
+  toolCalls: ModelToolCall[],
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  options: ToolBatchExecutionOptions,
+): Promise<ToolBatchExecutionState & { pendingApproval: boolean }> {
+  const state: ToolBatchExecutionState = {
+    roundHadProgress: false,
+    batchFailureCount: 0,
+    roundFailureFingerprints: [],
+    stoppedByFailFast: false,
+  };
+  const batches = createToolExecutionBatches(toolCalls);
+
+  for (const batch of batches) {
+    const canUseParallelBatch = batch.mode === "parallel_readonly" && state.batchFailureCount === 0;
+    const calls = canUseParallelBatch ? batch.toolCalls : batch.toolCalls.slice(0, 1);
+    const results = canUseParallelBatch
+      ? await Promise.all(
+          calls.map((toolCall) =>
+            executeModelToolUse(toolCall, context, sessionId, output, options.continuation),
+          ),
+        )
+      : [await executeModelToolUse(calls[0]!, context, sessionId, output, options.continuation)];
+
+    for (let resultIndex = 0; resultIndex < results.length; resultIndex += 1) {
+      const toolCall = calls[resultIndex]!;
+      const result = results[resultIndex]!;
+      await recordModelToolFailureForMetaScheduler(context, sessionId, result);
+      if (result.pendingApproval) {
+        return { ...state, pendingApproval: true };
+      }
+      updateToolBatchExecutionState(state, toolCall, result, options);
+      pushToolResultMessage(options.continuation.messages, toolCall, result);
+      if (state.stoppedByFailFast) {
+        await appendSkippedToolResultsAfterFailFast(
+          toolCalls,
+          toolCall,
+          options.continuation.messages,
+          state.lastBatchFailureReason,
+        );
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `tool_batch_fail_fast: stopped after ${state.batchFailureCount} consecutive failures in ${options.failFastContext}; last: ${state.lastBatchFailureReason}`,
+          "warning",
+        );
+        return { ...state, pendingApproval: false };
+      }
+    }
+
+    if (!canUseParallelBatch && batch.mode === "parallel_readonly") {
+      for (const remaining of batch.toolCalls.slice(1)) {
+        const result = await executeModelToolUse(remaining, context, sessionId, output, options.continuation);
+        await recordModelToolFailureForMetaScheduler(context, sessionId, result);
+        if (result.pendingApproval) {
+          return { ...state, pendingApproval: true };
+        }
+        updateToolBatchExecutionState(state, remaining, result, options);
+        pushToolResultMessage(options.continuation.messages, remaining, result);
+        if (state.stoppedByFailFast) {
+          await appendSkippedToolResultsAfterFailFast(
+            toolCalls,
+            remaining,
+            options.continuation.messages,
+            state.lastBatchFailureReason,
+          );
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `tool_batch_fail_fast: stopped after ${state.batchFailureCount} consecutive failures in ${options.failFastContext}; last: ${state.lastBatchFailureReason}`,
+            "warning",
+          );
+          return { ...state, pendingApproval: false };
+        }
+      }
+    }
+  }
+
+  return { ...state, pendingApproval: false };
+}
+
+function updateToolBatchExecutionState(
+  state: ToolBatchExecutionState,
+  toolCall: ModelToolCall,
+  result: ModelToolExecutionResult,
+  options: ToolBatchExecutionOptions,
+): void {
+  if (doesWriteSatisfyReportGuard(options.continuation.reportWriteGuard, toolCall, result)) {
+    options.continuation.reportWriteGuard.completed = true;
+  }
+  if (!isToolBatchFailure(result)) {
+    state.roundHadProgress = true;
+    state.batchFailureCount = 0;
+    return;
+  }
+  if (options.collectFailureFingerprints) {
+    state.roundFailureFingerprints.push(createToolFailureRecoveryFingerprint(toolCall, result));
+  }
+  state.batchFailureCount += 1;
+  state.lastBatchFailureReason = result.text;
+  state.stoppedByFailFast = state.batchFailureCount >= 3;
+}
+
+async function appendSkippedToolResultsAfterFailFast(
+  toolCalls: ModelToolCall[],
+  failedToolCall: ModelToolCall,
+  messages: ModelMessage[],
+  lastFailureReason: string | undefined,
+): Promise<void> {
+  const failedIndex = toolCalls.indexOf(failedToolCall);
+  if (failedIndex < 0) return;
+  for (const skippedToolCall of toolCalls.slice(failedIndex + 1)) {
+    pushToolResultMessage(
+      messages,
+      skippedToolCall,
+      createToolBatchFailFastSkippedResult(skippedToolCall, lastFailureReason ?? "unknown failure"),
+    );
+  }
 }
 
 function latestUserTextFromMessages(messages: ModelMessage[]): string | undefined {
@@ -2481,62 +2677,30 @@ export async function sendMessage(
         consecutiveTodoOnlyRounds = 0;
         evidenceRounds += 1;
       }
-      let roundHadProgress = false;
-      let batchFailureCount = 0;
-      let lastBatchFailureReason: string | undefined;
-      const roundFailureFingerprints: string[] = [];
-      for (const toolCall of toolCalls) {
-        const result = await executeModelToolUse(toolCall, context, sessionId, output, {
-          messages: messagesForProvider,
-          provider: selectedRuntime.provider,
-          model: selectedRuntime.model,
-          endpointProfile: selectedRuntime.endpointProfile,
-          reasoningLevel: selectedRuntime.reasoningLevel,
-          reasoningSent: selectedRuntime.reasoningSent,
-          ...(reportWriteGuard ? { reportWriteGuard } : {}),
-        });
-        await recordModelToolFailureForMetaScheduler(context, sessionId, result);
-        if (result.pendingApproval) {
-          return;
-        }
-        if (!isToolBatchFailure(result)) {
-          roundHadProgress = true;
-          batchFailureCount = 0;
-        } else {
-          roundFailureFingerprints.push(createToolFailureRecoveryFingerprint(toolCall, result));
-          batchFailureCount += 1;
-          lastBatchFailureReason = result.text;
-          if (batchFailureCount >= 3) {
-            await appendSystemEvent(
-              context,
-              sessionId,
-              `tool_batch_fail_fast: stopped after ${batchFailureCount} consecutive failures in this batch; last: ${lastBatchFailureReason}`,
-              "warning",
-            );
-            messagesForProvider.push({
-              role: "tool",
-              tool_call_id: toolCall.id,
-              content: JSON.stringify(result),
-            });
-            for (const skippedToolCall of toolCalls.slice(toolCalls.indexOf(toolCall) + 1)) {
-              pushToolResultMessage(
-                messagesForProvider,
-                skippedToolCall,
-                createToolBatchFailFastSkippedResult(skippedToolCall, lastBatchFailureReason),
-              );
-            }
-            break;
-          }
-        }
-        if (doesWriteSatisfyReportGuard(reportWriteGuard, toolCall, result)) {
-          reportWriteGuard.completed = true;
-        }
-        messagesForProvider.push({
-          role: "tool",
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result),
-        });
+      const toolBatchResult = await executeToolCallsWithReadonlyParallelism(
+        toolCalls,
+        context,
+        sessionId,
+        output,
+        {
+          continuation: {
+            messages: messagesForProvider,
+            provider: selectedRuntime.provider,
+            model: selectedRuntime.model,
+            endpointProfile: selectedRuntime.endpointProfile,
+            reasoningLevel: selectedRuntime.reasoningLevel,
+            reasoningSent: selectedRuntime.reasoningSent,
+            ...(reportWriteGuard ? { reportWriteGuard } : {}),
+          },
+          failFastContext: "this batch",
+          collectFailureFingerprints: true,
+        },
+      );
+      if (toolBatchResult.pendingApproval) {
+        return;
       }
+      const roundHadProgress = toolBatchResult.roundHadProgress;
+      const roundFailureFingerprints = toolBatchResult.roundFailureFingerprints;
       const roundHadToolFailure = toolCalls.length > 0 && !roundHadProgress;
       if (roundHadToolFailure && metaSchedulerDecision.shouldUseRetryGuard) {
         const recovery = updateToolFailureRecoveryState(
@@ -4318,58 +4482,17 @@ export async function continueModelAfterToolResults(
         consecutiveTodoOnlyRounds = 0;
         evidenceRounds += 1;
       }
-      let roundHadProgress = false;
-      let batchFailureCount = 0;
-      let lastBatchFailureReason: string | undefined;
-      for (const toolCall of toolCalls) {
-        const result = await executeModelToolUse(
-          toolCall,
-          context,
-          sessionId,
-          output,
-          continuation,
-        );
-        await recordModelToolFailureForMetaScheduler(context, sessionId, result);
-        if (result.pendingApproval) {
-          return;
-        }
-        if (!isToolBatchFailure(result)) {
-          roundHadProgress = true;
-          batchFailureCount = 0;
-        } else {
-          batchFailureCount += 1;
-          lastBatchFailureReason = result.text;
-          if (batchFailureCount >= 3) {
-            await appendSystemEvent(
-              context,
-              sessionId,
-              `tool_batch_fail_fast: stopped after ${batchFailureCount} consecutive failures in continuation batch; last: ${lastBatchFailureReason}`,
-              "warning",
-            );
-            continuation.messages.push({
-              role: "tool",
-              tool_call_id: toolCall.id,
-              content: JSON.stringify(result),
-            });
-            for (const skippedToolCall of toolCalls.slice(toolCalls.indexOf(toolCall) + 1)) {
-              pushToolResultMessage(
-                continuation.messages,
-                skippedToolCall,
-                createToolBatchFailFastSkippedResult(skippedToolCall, lastBatchFailureReason),
-              );
-            }
-            break;
-          }
-        }
-        if (doesWriteSatisfyReportGuard(continuation.reportWriteGuard, toolCall, result)) {
-          continuation.reportWriteGuard.completed = true;
-        }
-        continuation.messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result),
-        });
+      const toolBatchResult = await executeToolCallsWithReadonlyParallelism(
+        toolCalls,
+        context,
+        sessionId,
+        output,
+        { continuation, failFastContext: "continuation batch" },
+      );
+      if (toolBatchResult.pendingApproval) {
+        return;
       }
+      const roundHadProgress = toolBatchResult.roundHadProgress;
       if (todoOnly && consecutiveTodoOnlyRounds >= _hintThreshold) {
         if (!todoOnlyHintSent) {
           const todoHint =

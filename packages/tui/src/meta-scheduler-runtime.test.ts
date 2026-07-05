@@ -184,7 +184,7 @@ describe("Meta scheduler runtime", () => {
       },
     });
     expect(decision.policyDecision.executionPlan.preferSourceFirst).toBe(true);
-    expect(decision.policyDecision.verificationSignal.recommendedLevel).toBe("full");
+    expect(decision.policyDecision.verificationSignal.recommendedLevel).toBe("basic");
     expect(decision.policyDecision.verificationSignal.route.commands).toEqual(
       expect.arrayContaining(["source-facts", "focused-test"]),
     );
@@ -511,6 +511,9 @@ describe("Meta scheduler runtime", () => {
     });
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("windows-safe");
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("architecture-guard");
+    const directive = formatMetaSchedulerDirective(decision);
+    expect(directive).toContain("Windows shell boundary");
+    expect(directive).toContain("Edit/MultiEdit/Write structured tools");
   });
 
   it("projects latest verification, pending approval, and background occupancy signals", () => {

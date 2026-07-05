@@ -10,8 +10,10 @@ import {
   __testRunFinalGateEvidenceAction,
   __testStreamFinalModelAnswerWithoutTools,
   buildEvidenceBackedFinalBoundaryAnswer,
+  canRunToolCallInParallelReadonlyBatch,
   createToolFailureRecoveryFingerprint,
   createToolBatchFailFastSkippedResult,
+  createToolExecutionBatches,
   evaluateAggregatedFinalAnswerGate,
   handleNaturalInput,
   isToolBatchFailure,
@@ -172,6 +174,45 @@ describe("tool batch fail-fast helpers", () => {
       tool: "Read",
       data: { skipped: true, reason: "tool_batch_fail_fast", lastFailure: "Read failed" },
     });
+  });
+
+  it("groups only bounded readonly tools into parallel execution batches", () => {
+    const calls = [
+      { id: "call-read", name: "Read", input: { path: "packages/tui/src/a.ts" } },
+      { id: "call-grep", name: "Grep", input: { pattern: "x", path: "packages/tui/src" } },
+      { id: "call-write", name: "Write", input: { path: "out.txt", content: "x" } },
+      { id: "call-pre", name: "pre_context", input: { symbol: "run", path: "src/a.ts" } },
+      { id: "call-glob", name: "Glob", input: { pattern: "*.ts" } },
+      { id: "call-diff", name: "Diff", input: {} },
+    ];
+
+    expect(createToolExecutionBatches(calls as never)).toEqual([
+      { mode: "parallel_readonly", toolCalls: calls.slice(0, 2) },
+      { mode: "serial", toolCalls: [calls[2]] },
+      { mode: "parallel_readonly", toolCalls: calls.slice(3, 5) },
+      { mode: "serial", toolCalls: [calls[5]] },
+    ]);
+  });
+
+  it("keeps sensitive or outside Read calls out of parallel readonly batches", () => {
+    expect(canRunToolCallInParallelReadonlyBatch({ name: "Read", input: { path: "src/index.ts" } })).toBe(true);
+    expect(canRunToolCallInParallelReadonlyBatch({ name: "Read", input: { path: "../secret.txt" } })).toBe(false);
+    expect(canRunToolCallInParallelReadonlyBatch({ name: "Read", input: { path: "C:/Users/me/key.txt" } })).toBe(false);
+    expect(canRunToolCallInParallelReadonlyBatch({ name: "Read", input: { path: ".env" } })).toBe(false);
+    expect(canRunToolCallInParallelReadonlyBatch({ name: "Bash", input: { command: "pwd" } })).toBe(false);
+  });
+
+  it("caps readonly parallel batches below the fail-fast threshold", () => {
+    const calls = [
+      { id: "call-read", name: "Read", input: { path: "packages/tui/src/a.ts" } },
+      { id: "call-grep", name: "Grep", input: { pattern: "x", path: "packages/tui/src" } },
+      { id: "call-glob", name: "Glob", input: { pattern: "*.ts" } },
+    ];
+
+    expect(createToolExecutionBatches(calls as never)).toEqual([
+      { mode: "parallel_readonly", toolCalls: calls.slice(0, 2) },
+      { mode: "serial", toolCalls: [calls[2]] },
+    ]);
   });
 });
 

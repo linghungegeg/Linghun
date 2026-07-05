@@ -62,6 +62,8 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(segments.stable).toContain("OutputStyle=");
     expect(segments.stable).toContain("EngineeringStructure=");
     expect(segments.stable).toContain("CommandCapabilitySummary=");
+    expect(segments.stable).toContain("shell apply_patch");
+    expect(segments.stable).toContain("Edit/MultiEdit/Write");
     expect(segments.dynamic).toContain("RuntimeStatusForModel=");
     expect(segments.dynamic).toContain("EvidenceSummary=");
     expect(segments.dynamic).toContain("SolutionCompleteness=");

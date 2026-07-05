@@ -1094,7 +1094,7 @@ export async function executePreEngineToolUse(
         evidence.id,
       );
       clearRequestActivity(context);
-      writeLine(output, formatPreEnginePrimaryText(toolName, false, context));
+      writeLine(output, formatPreEnginePrimaryText(toolName, false, context, toolCall.input));
       return { ok: false, tool: toolName, text: result.text, evidenceId: evidence.id };
     }
     rememberSourcePackCandidatesFromToolData(context, toolName, result.data);
@@ -1112,7 +1112,7 @@ export async function executePreEngineToolUse(
       evidence?.id,
     );
     clearRequestActivity(context);
-    writeLine(output, formatPreEnginePrimaryText(toolName, true, context));
+    writeLine(output, formatPreEnginePrimaryText(toolName, true, context, toolCall.input));
     return {
       ok: true,
       tool: toolName,
@@ -1142,7 +1142,14 @@ export async function executePreEngineToolUse(
   }
 }
 
-function formatPreEnginePrimaryText(toolName: string, ok: boolean, context: TuiContext): string {
+const PRE_ENGINE_SYMBOL_MAX_LENGTH = 80;
+
+function formatPreEnginePrimaryText(
+  toolName: string,
+  ok: boolean,
+  context: TuiContext,
+  input?: unknown,
+): string {
   const zh = context.language === "zh-CN";
   const verify = toolName === "pre_verify";
   if (!ok) {
@@ -1158,7 +1165,49 @@ function formatPreEnginePrimaryText(toolName: string, ok: boolean, context: TuiC
   if (verify) {
     return zh ? "验证检查完成。" : "Verification check finished.";
   }
+  if (toolName === "pre_context") {
+    const symbol = getPreEngineSymbol(input);
+    if (symbol) {
+      return zh
+        ? `代码上下文分析完成：${symbol}`
+        : `Code context analysis finished: ${symbol}`;
+    }
+    return zh ? "代码上下文分析完成。" : "Code context analysis finished.";
+  }
+  if (toolName === "pre_impact") {
+    return zh ? "代码影响分析完成。" : "Code impact analysis finished.";
+  }
+  if (toolName === "pre_plan") {
+    return zh ? "代码规划分析完成。" : "Code planning analysis finished.";
+  }
   return zh ? "代码分析完成。" : "Code analysis finished.";
+}
+
+function getPreEngineSymbol(input: unknown): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+  const symbol = (input as { symbol?: unknown }).symbol;
+  if (typeof symbol !== "string") {
+    return undefined;
+  }
+  const trimmed = symbol.trim().replace(/\s+/g, " ");
+  if (!trimmed) {
+    return undefined;
+  }
+  if (trimmed.length <= PRE_ENGINE_SYMBOL_MAX_LENGTH) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, PRE_ENGINE_SYMBOL_MAX_LENGTH - 3)}...`;
+}
+
+export function __testFormatPreEnginePrimaryText(
+  toolName: string,
+  ok: boolean,
+  context: TuiContext,
+  input?: unknown,
+): string {
+  return formatPreEnginePrimaryText(toolName, ok, context, input);
 }
 
 export async function executeLinghunControlToolUse(

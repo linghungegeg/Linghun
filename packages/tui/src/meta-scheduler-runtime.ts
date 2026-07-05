@@ -757,6 +757,9 @@ export function formatMetaSchedulerDirective(decision: MetaSchedulerDecision): s
     ...decision.directives.map((item) => `- ${item}`),
     `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; budget ${decision.suggestedMaxTodoRounds} rounds; agent-max-turns ${decision.suggestedMaxAgentChildTurns}; agent-tool-rounds ${decision.suggestedMaxAgentToolRounds}; bg-concurrency ${decision.suggestedBackgroundConcurrency}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}; capability ${decision.policyDecision.capabilitySignal.active ? "candidate" : "none"}.`,
     `- EngineeringTaskProfile: profile=${decision.policyDecision.engineeringSignal.profile}; strategy=${decision.policyDecision.engineeringSignal.strategyHint}; failure=${decision.policyDecision.engineeringSignal.failureCategory ?? "none"}; final-boundary=${decision.policyDecision.engineeringSignal.finalBoundaryHint ?? "normal"}.`,
+    ...(decision.policyDecision.platformSignal.windowsSafeHint
+      ? ["- Windows shell boundary: do not use shell apply_patch, heredoc, cat redirects, or tee redirects for file writes; use Edit/MultiEdit/Write structured tools instead."]
+      : []),
     ...(decision.policyDecision.executionPlan.preferAgent || decision.policyDecision.executionPlan.preferWorkflow
       ? ["- Action: this is an agent/workflow-classified task. Delegate execution via StartAgent or RunWorkflow tools. Do not serial-Todo-plan every step yourself; use the extended planning budget to set up delegation, then call the tool."]
       : []),
@@ -1352,7 +1355,6 @@ function classifyVerificationLevel(input: {
   userStateDecision: UserStateDecision;
 }): PolicyDecision["verificationSignal"]["recommendedLevel"] {
   if (input.userStateDecision.verificationPlan.strength === "release") return "full";
-  if (input.userStateDecision.verificationPlan.strength === "strengthened") return "full";
   if (input.highRiskClaim || input.blockedRuntime) return "full";
   if (
     input.lastStatus === "fail" ||
