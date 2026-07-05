@@ -11,8 +11,12 @@
 // session store 记录由 index.ts 的 handleBtwCommand 协调（保持 index.ts 只做
 // glue，本模块承载逻辑）。
 
-import type { EndpointProfile, ModelGateway } from "@linghun/providers";
+import type { EndpointProfile, ModelGateway, ModelRequest } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
+import {
+  applyCacheWritePolicyToRequest,
+  resolveCachePolicy,
+} from "./cache-policy-runtime.js";
 import type { NaturalIntent } from "./natural-command-bridge.js";
 import type { ProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import { withProviderRetry } from "./provider-circuit-breaker.js";
@@ -118,29 +122,27 @@ export async function runBtwSideQuestion(
   let hadThinking = false;
   let providerError: string | undefined;
   try {
+    const providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
+      {
+        messages,
+        model: runtime.model,
+        endpointProfile: runtime.endpointProfile,
+        ...(runtime.reasoningSent ? { reasoningLevel: runtime.reasoningLevel } : {}),
+        toolChoice: "none",
+      },
+      resolveCachePolicy("side-question"),
+    );
     const stream = breakerState
       ? withProviderRetry(
           gateway,
           breakerState,
           runtime.provider,
-          {
-            messages,
-            model: runtime.model,
-            endpointProfile: runtime.endpointProfile,
-            ...(runtime.reasoningSent ? { reasoningLevel: runtime.reasoningLevel } : {}),
-            toolChoice: "none",
-          },
+          providerRequest,
           signal,
         )
       : gateway.stream(
           runtime.provider,
-          {
-            messages,
-            model: runtime.model,
-            endpointProfile: runtime.endpointProfile,
-            ...(runtime.reasoningSent ? { reasoningLevel: runtime.reasoningLevel } : {}),
-            toolChoice: "none",
-          },
+          providerRequest,
           signal,
         );
     for await (const event of stream) {

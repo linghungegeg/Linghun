@@ -6,6 +6,7 @@ import type {
   ModelMessage,
   ModelRequest,
   ModelToolCall,
+  ModelUsage,
 } from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
@@ -23,6 +24,13 @@ import { RESOURCE_GUARD_KIND, checkResourceGuard } from "./background-control-ru
 import { buildPromptCacheRequestFields } from "./break-cache-runtime.js";
 import { writeLightHints } from "./cache-command-runtime.js";
 import { stableStringify } from "./cache-freshness.js";
+import {
+  applyCacheWritePolicyToRequest,
+  type CacheRequestKind,
+  observeCacheSafeRequest,
+  observeCacheUsage,
+  resolveCachePolicy,
+} from "./cache-policy-runtime.js";
 import {
   appendUsageEvents,
   compactPreflightDeps,
@@ -315,6 +323,34 @@ function latestUserTextFromMessages(messages: ModelMessage[]): string | undefine
     if (message?.role === "user" && message.content.trim()) return message.content;
   }
   return undefined;
+}
+
+function recordCacheRequestObservation(
+  context: TuiContext,
+  kind: CacheRequestKind,
+  provider: string,
+  request: ModelRequest,
+): void {
+  const previous = context.cache.lastRequestObservation;
+  const observation = observeCacheSafeRequest({ previous, kind, provider, request });
+  context.cache.lastRequestObservation = observation;
+  context.cache.lastRequestObservationByKind = {
+    ...context.cache.lastRequestObservationByKind,
+    [kind]: observation,
+  };
+}
+
+function recordCacheUsageObservation(context: TuiContext, usage: ModelUsage): void {
+  const updated = observeCacheUsage({
+    observation: context.cache.lastRequestObservation,
+    usage,
+  });
+  if (!updated) return;
+  context.cache.lastRequestObservation = updated;
+  context.cache.lastRequestObservationByKind = {
+    ...context.cache.lastRequestObservationByKind,
+    [updated.kind]: updated,
+  };
 }
 
 function injectAgentCompletionMainChainContext(
@@ -1774,6 +1810,11 @@ export async function sendMessage(
           selectedRuntime.endpointProfile,
         );
       }
+      providerRequest = applyCacheWritePolicyToRequest(
+        providerRequest,
+        resolveCachePolicy("main"),
+      );
+      recordCacheRequestObservation(context, "main", selectedRuntime.provider, providerRequest);
       const resetAssistantDraftForProviderRetry = () => {
         discardAssistantBlock(output, assistantStreamBlockId);
         assistantText = committedIntermediateAssistantText;
@@ -1844,6 +1885,7 @@ export async function sendMessage(
         }
         if (event.type === "usage") {
           roundHadUsage = true;
+          recordCacheUsageObservation(context, event.usage);
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
           await recordApiTokenCountIfAvailable(
@@ -3085,6 +3127,18 @@ async function streamFinalModelAnswerWithoutTools(
   }
   continuation.messages = preflight.messages;
   const promptCacheFields = await buildPromptCacheRequestFields(context);
+  const providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
+    {
+      messages: preflight.messages,
+      model: continuation.model,
+      endpointProfile: continuation.endpointProfile,
+      ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
+      toolChoice: "none",
+      ...promptCacheFields,
+    },
+    resolveCachePolicy("final"),
+  );
+  recordCacheRequestObservation(context, "final", continuation.provider, providerRequest);
   const resetFinalAssistantDraftForProviderRetry = () => {
     discardAssistantBlock(output, assistantStreamBlockId);
     assistantText = "";
@@ -3096,14 +3150,7 @@ async function streamFinalModelAnswerWithoutTools(
     gateway,
     context.providerBreaker,
     continuation.provider,
-    {
-      messages: preflight.messages,
-      model: continuation.model,
-      endpointProfile: continuation.endpointProfile,
-      ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
-      toolChoice: "none",
-      ...promptCacheFields,
-    },
+    providerRequest,
     signal,
     {
       onRetry: (info) => {
@@ -3143,6 +3190,7 @@ async function streamFinalModelAnswerWithoutTools(
     }
     if (event.type === "usage") {
       hadUsage = true;
+      recordCacheUsageObservation(context, event.usage);
       const stats = recordModelUsage(context, event.usage);
       await appendUsageEvents(context, sessionId, stats);
       await recordApiTokenCountIfAvailable(
@@ -3577,6 +3625,11 @@ export async function continueModelAfterToolResults(
           continuation.endpointProfile,
         );
       }
+      providerRequest = applyCacheWritePolicyToRequest(
+        providerRequest,
+        resolveCachePolicy("continuation"),
+      );
+      recordCacheRequestObservation(context, "continuation", continuation.provider, providerRequest);
       const resetAssistantDraftForProviderRetry = () => {
         discardAssistantBlock(output, assistantStreamBlockId);
         assistantText = committedIntermediateAssistantText;
@@ -3650,6 +3703,7 @@ export async function continueModelAfterToolResults(
         }
         if (event.type === "usage") {
           roundHadUsage = true;
+          recordCacheUsageObservation(context, event.usage);
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
           await recordApiTokenCountIfAvailable(

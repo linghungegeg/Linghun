@@ -236,7 +236,11 @@ type PendingResponsesToolCall = {
 // D.13F：system 字段支持 string 与 block-array 两种形态，block 形态用于挂 cache_control。
 // 默认 5m：cache_control 只传 { type: "ephemeral" }，不传 ttl: "5m" 字面量。
 // 1h 仅在用户显式 promptCache.systemTtl="1h" 时设 ttl: "1h"，不附加 beta header。
-export type AnthropicTextBlock = { type: "text"; text: string };
+export type AnthropicTextBlock = {
+  type: "text";
+  text: string;
+  cache_control?: AnthropicCacheControl;
+};
 
 export type AnthropicToolUseBlock = {
   type: "tool_use";
@@ -336,7 +340,8 @@ type AnthropicUsage = {
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
   // D.13F：Anthropic explicit cache_control 时，cache_creation 会按 ttl 拆分到这两个子字段。
-  // 不传 ttl 时仍只看 cache_creation_input_tokens；ephemeral_5m / 1h 字段为只读统计。
+  // 有些 Anthropic-compatible gateways only expose these split fields; we fold them into
+  // cacheWriteTokens while preserving the split values for diagnostics.
   cache_creation?: {
     ephemeral_5m_input_tokens?: number;
     ephemeral_1h_input_tokens?: number;
@@ -1677,12 +1682,13 @@ function createAnthropicMessagesProfileRequest(
     if (message.role === "user") {
       const blocks: AnthropicContentBlock[] = [];
       if (message.content) {
-        blocks.push({ type: "text", text: message.content });
+        const textBlock: AnthropicTextBlock = { type: "text", text: message.content };
+        blocks.push(textBlock);
       }
       if (blocks.length > 0) {
         conversation.push({
           role: "user",
-          content: blocks.length === 1 && blocks[0].type === "text" ? message.content : blocks,
+          content: request.promptCacheEnabled ? blocks : blocks.length === 1 ? message.content : blocks,
         });
       }
       continue;
@@ -1794,6 +1800,12 @@ function createAnthropicMessagesProfileRequest(
               : {}),
           };
   }
+  if (request.promptCacheEnabled) {
+    const messageBreakpoint = findStableUserMessageCacheBreakpoint(conversation);
+    if (messageBreakpoint) {
+      messageBreakpoint.cache_control = createAnthropicCacheControl(request);
+    }
+  }
   if (systemSegments.length > 0) {
     // D.13F：promptCacheEnabled=true 时，system 写为 block array，并在最后一个 block 上挂
     // cache_control（5m 默认不写 ttl 字面量；1h 显式时才写 ttl: "1h"）。
@@ -1810,11 +1822,7 @@ function createAnthropicMessagesProfileRequest(
         if (!isLast) {
           return { type: "text", text };
         }
-        const cacheControl: AnthropicCacheControl =
-          request.promptCacheTtl === "1h"
-            ? { type: "ephemeral", ttl: "1h" }
-            : { type: "ephemeral" };
-        return { type: "text", text, cache_control: cacheControl };
+        return { type: "text", text, cache_control: createAnthropicCacheControl(request) };
       });
       body.system = blocks;
     } else {
@@ -1822,6 +1830,28 @@ function createAnthropicMessagesProfileRequest(
     }
   }
   return body;
+}
+
+function findStableUserMessageCacheBreakpoint(
+  conversation: AnthropicMessage[],
+): AnthropicTextBlock | undefined {
+  // Cache the latest provider-visible user text. The next turn can then read this
+  // prefix instead of waiting one extra turn before a message-level cache point exists.
+  for (let index = conversation.length - 1; index >= 0; index -= 1) {
+    const message = conversation[index];
+    if (!message || message.role !== "user" || !Array.isArray(message.content)) continue;
+    for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = message.content[blockIndex];
+      if (block?.type === "text") return block;
+    }
+  }
+  return undefined;
+}
+
+function createAnthropicCacheControl(request: ModelRequest): AnthropicCacheControl {
+  return request.promptCacheTtl === "1h"
+    ? { type: "ephemeral", ttl: "1h" }
+    : { type: "ephemeral" };
 }
 
 function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] | undefined {
@@ -2366,7 +2396,7 @@ function parseAnthropicMessagesEventBlock(
     if (usage) {
       state.inputTokens = usage.input_tokens ?? 0;
       state.cacheReadTokens = usage.cache_read_input_tokens;
-      state.cacheWriteTokens = usage.cache_creation_input_tokens;
+      state.cacheWriteTokens = normalizeAnthropicCacheWriteTokens(usage);
       state.rawUsage = usage;
     }
     return [];
@@ -2493,8 +2523,8 @@ function parseAnthropicMessagesEventBlock(
     const inputTokens = merged.input_tokens ?? state.inputTokens ?? 0;
     const outputTokens = merged.output_tokens ?? 0;
     const cacheReadTokens = merged.cache_read_input_tokens ?? state.cacheReadTokens;
-    const cacheWriteTokens = merged.cache_creation_input_tokens ?? state.cacheWriteTokens;
-    // D.13F：cache_creation 拆分到 ephemeral_5m / ephemeral_1h，仅作只读统计透出。
+    const cacheWriteTokens = normalizeAnthropicCacheWriteTokens(merged) ?? state.cacheWriteTokens;
+    // D.13F：cache_creation 拆分到 ephemeral_5m / ephemeral_1h，既合并为 write 总量，也透出拆分字段。
     const ephemeral5m = merged.cache_creation?.ephemeral_5m_input_tokens;
     const ephemeral1h = merged.cache_creation?.ephemeral_1h_input_tokens;
     return [
@@ -2570,7 +2600,12 @@ type ResponsesUsage = {
   input_tokens?: number;
   output_tokens?: number;
   total_tokens?: number;
-  input_tokens_details?: { cached_tokens?: number };
+  input_tokens_details?: {
+    cached_tokens?: number;
+    cache_creation_tokens?: number;
+  };
+  cache_creation_input_tokens?: number;
+  cache_creation_tokens?: number;
 };
 
 function parseOpenAiStreamLine(
@@ -2818,7 +2853,7 @@ function parseResponsesEvent(
             outputTokens: usage.output_tokens ?? 0,
             totalTokens: usage.total_tokens ?? 0,
             cacheReadTokens: usage.input_tokens_details?.cached_tokens,
-            cacheWriteTokens: undefined,
+            cacheWriteTokens: readCacheWriteTokens(usage) ?? undefined,
             rawUsage: usage,
             endpoint,
           },
@@ -2900,13 +2935,25 @@ function isCompleteJsonObject(value: string): boolean {
   }
 }
 
+function normalizeAnthropicCacheWriteTokens(usage: AnthropicUsage): number | undefined {
+  if (typeof usage.cache_creation_input_tokens === "number") return usage.cache_creation_input_tokens;
+  const ephemeral5m = usage.cache_creation?.ephemeral_5m_input_tokens;
+  const ephemeral1h = usage.cache_creation?.ephemeral_1h_input_tokens;
+  if (typeof ephemeral5m !== "number" && typeof ephemeral1h !== "number") return undefined;
+  return Math.max(0, ephemeral5m ?? 0) + Math.max(0, ephemeral1h ?? 0);
+}
+
 function readCacheWriteTokens(usage: {
   prompt_tokens_details?: { cache_creation_tokens?: number };
+  input_tokens_details?: { cache_creation_tokens?: number };
   cache_creation_input_tokens?: number;
   cache_creation_tokens?: number;
 }): number | null {
   if (typeof usage.prompt_tokens_details?.cache_creation_tokens === "number") {
     return usage.prompt_tokens_details.cache_creation_tokens;
+  }
+  if (typeof usage.input_tokens_details?.cache_creation_tokens === "number") {
+    return usage.input_tokens_details.cache_creation_tokens;
   }
   if (typeof usage.cache_creation_input_tokens === "number") {
     return usage.cache_creation_input_tokens;

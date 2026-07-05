@@ -7,6 +7,7 @@ import {
   type EndpointProfile,
   type ModelGateway,
   type ModelMessage,
+  type ModelRequest,
   type ModelToolCall,
   type ModelToolDefinition,
   resolveEffectiveEndpointProfile,
@@ -21,6 +22,10 @@ import {
   formatAgentCompletionDigest,
   markAgentCompletionNoticeReported,
 } from "./agent-completion-finalizer.js";
+import {
+  applyCacheWritePolicyToRequest,
+  resolveCachePolicy,
+} from "./cache-policy-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import type {
   CompactPreflightRuntime,
@@ -2909,10 +2914,7 @@ export async function runModelBackedAgent(
       }
       messages.splice(0, messages.length, ...preflight.messages);
       let retryWithFallback = false;
-      for await (const event of withProviderRetry(
-        continuation.gateway,
-        context.providerBreaker,
-        currentRuntime.provider,
+      const providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
         {
           messages: preflight.messages,
           model: currentRuntime.model,
@@ -2924,6 +2926,13 @@ export async function runModelBackedAgent(
           tools: createAgentToolDefinitions(agent),
           toolChoice: "auto",
         },
+        resolveCachePolicy("agent-child"),
+      );
+      for await (const event of withProviderRetry(
+        continuation.gateway,
+        context.providerBreaker,
+        currentRuntime.provider,
+        providerRequest,
         signal,
       )) {
         if (event.type === "assistant_text_delta") {

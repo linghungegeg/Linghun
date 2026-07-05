@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { TranscriptEvent } from "@linghun/core";
-import type { ModelGateway, ModelMessage } from "@linghun/providers";
+import type { ModelGateway, ModelMessage, ModelRequest } from "@linghun/providers";
 import { redactCommonSecrets } from "@linghun/shared";
 import { type CompactBoundary, createManualCompactBoundary } from "./compact-context.js";
+import {
+  applyCacheWritePolicyToRequest,
+  resolveCachePolicy,
+} from "./cache-policy-runtime.js";
 import type { CompactPreflightRuntime } from "./compact-preflight-runtime.js";
 import { estimateTranscriptContextChars } from "./context-estimator.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
@@ -94,17 +98,21 @@ export async function runDeepCompact(input: {
     input.trigger,
   );
   const signal = input.signal ?? new AbortController().signal;
+  const providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
+    {
+      messages: requestMessages,
+      model: input.runtime.model,
+      toolChoice: "none",
+    },
+    resolveCachePolicy("deep-compact"),
+  );
   let summary = "";
   try {
     for await (const event of withProviderRetry(
       input.gateway,
       input.context.providerBreaker,
       input.runtime.provider,
-      {
-        messages: requestMessages,
-        model: input.runtime.model,
-        toolChoice: "none",
-      },
+      providerRequest,
       signal,
     )) {
       if (signal.aborted) {

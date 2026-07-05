@@ -3,6 +3,7 @@ import type { Writable } from "node:stream";
 import type { CacheFreshness } from "@linghun/core";
 import { redactCommonSecrets } from "@linghun/shared";
 import { diffFreshness } from "./cache-freshness.js";
+import type { CacheRequestObservation } from "./cache-policy-runtime.js";
 import { calculateContextPercentages, formatContextProgressBar, getContextWindowForModel } from "./context-window-runtime.js";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelView } from "./shell/types.js";
@@ -77,6 +78,7 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
   const changed =
     latest?.freshness.changedKeys ?? diffFreshness(context.cache.lastFreshness, freshness);
   const source = latest?.cacheWriteTokensSource ?? "missing";
+  const latestObservation = context.cache.lastRequestObservation;
   const zeroNote =
     source === "zero_reported"
       ? "provider 当前返回 cache_creation/cache write 为 0；这只是字段口径，不代表零写入成本。"
@@ -93,8 +95,80 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     `- workspace reference: hits ${context.cache.workspaceReference.hits}; misses ${context.cache.workspaceReference.misses}; failures ${context.cache.workspaceReference.failures}; latest ${context.cache.workspaceReference.latest?.source ?? "none"}`,
     `- workspace snapshot lite: ${formatWorkspaceSnapshotLiteStatus(context)}`,
     `- freshness changedKeys: ${changed.length > 0 ? changed.join(", ") : "none"}`,
+    `- latest telemetry: ${formatCacheTelemetryObservation(latestObservation)}`,
+    `- telemetry by kind: ${formatCacheTelemetryByKind(context.cache.lastRequestObservationByKind)}`,
+    `- drift reason: ${formatCacheTelemetryDrift(latestObservation)}`,
     `- note: ${zeroNote}`,
   ].join("\n");
+}
+
+const CACHE_REQUEST_KIND_ORDER: CacheRequestObservation["kind"][] = [
+  "main",
+  "continuation",
+  "final",
+  "agent-child",
+  "side-question",
+  "deep-compact",
+];
+
+function formatCacheTelemetryObservation(
+  observation: CacheRequestObservation | undefined,
+): string {
+  if (!observation) return "none";
+  const usage = observation.usage;
+  const usageText = usage
+    ? `usage ${usage.source}; read/write ${usage.cacheReadTokens}/${usage.cacheWriteTokens}; input/output ${usage.inputTokens}/${usage.outputTokens}; endpoint ${usage.endpoint ?? "unknown"}`
+    : "usage pending";
+  return [
+    `${observation.kind}`,
+    `provider ${observation.provider}`,
+    `model ${observation.model}`,
+    `profile ${observation.endpointProfile ?? "default"}`,
+    `messages/tools ${observation.messageCount}/${observation.toolCount}`,
+    `cache ${observation.promptCacheEnabled ? "enabled" : "disabled"}${observation.promptCacheTtl ? ` ttl ${observation.promptCacheTtl}` : ""}${observation.hasCacheBreakNonce ? " break-nonce" : ""}`,
+    usageText,
+  ].join("; ");
+}
+
+function formatCacheTelemetryByKind(
+  byKind: Partial<Record<CacheRequestObservation["kind"], CacheRequestObservation>> | undefined,
+): string {
+  if (!byKind) return "none";
+  const parts = CACHE_REQUEST_KIND_ORDER.map((kind) => {
+    const observation = byKind[kind];
+    if (!observation) return undefined;
+    const usage = observation.usage;
+    const usageText = usage
+      ? `r/w ${usage.cacheReadTokens}/${usage.cacheWriteTokens} ${usage.source}`
+      : "usage pending";
+    return `${kind}:${observation.provider}/${observation.endpointProfile ?? "default"}/${usageText}`;
+  }).filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" | ") : "none";
+}
+
+function formatCacheTelemetryDrift(observation: CacheRequestObservation | undefined): string {
+  const changedKeys = observation?.fingerprint.changedKeys ?? [];
+  if (changedKeys.length === 0) return "none";
+  return changedKeys.map(formatCacheFingerprintChangedKey).join(", ");
+}
+
+function formatCacheFingerprintChangedKey(key: string): string {
+  switch (key) {
+    case "requestHash":
+      return "request shape changed";
+    case "messagePrefixHash":
+      return "message prefix changed";
+    case "toolSchemaHash":
+      return "tools changed";
+    case "modelHash":
+      return "model/toolChoice changed";
+    case "reasoningHash":
+      return "reasoning changed";
+    case "cacheConfigHash":
+      return "cache config changed";
+    default:
+      return key;
+  }
 }
 
 export function formatWorkspaceSnapshotLiteStatus(context: TuiContext): string {

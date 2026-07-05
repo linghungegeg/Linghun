@@ -1092,6 +1092,34 @@ describe("OpenAI stream parser", () => {
     ]);
   });
 
+  it("converts Responses cache write usage fields for compatible providers", async () => {
+    const events = await collectOpenAiEvents(
+      [
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            id: "resp-cache",
+            usage: {
+              input_tokens: 20,
+              output_tokens: 3,
+              total_tokens: 23,
+              input_tokens_details: { cached_tokens: 11, cache_creation_tokens: 5 },
+            },
+          },
+        })}\n\n`,
+        "data: [DONE]\n\n",
+      ],
+      "/v1/responses",
+    );
+
+    const usage = events.find(
+      (event): event is Extract<LinghunEvent, { type: "usage" }> => event.type === "usage",
+    );
+    expect(usage?.usage.cacheReadTokens).toBe(11);
+    expect(usage?.usage.cacheWriteTokens).toBe(5);
+    expect(usage?.usage.endpoint).toBe("/v1/responses");
+  });
+
   it("uses Responses completed message text when the gateway omits output_text deltas", async () => {
     const events = await collectOpenAiEvents(
       [
@@ -2095,6 +2123,36 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     });
   });
 
+  it("adds prompt cache markers to the latest Anthropic user message", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      maxOutputTokens: 1024,
+    });
+
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "You are Linghun." },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: true,
+    });
+
+    expect(body.messages).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }],
+      },
+    ]);
+    expect(body.system).toEqual([
+      { type: "text", text: "You are Linghun.", cache_control: { type: "ephemeral" } },
+    ]);
+  });
+
   it("sends x-api-key + anthropic-version headers and POSTs to /v1/messages", async () => {
     const encoder = new TextEncoder();
     const fetchMock = vi.fn(async () => {
@@ -2725,6 +2783,76 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
     expect(blocks[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
+  it("attaches a message breakpoint to the current single-turn user request", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "alpha" },
+        { role: "user", content: "current dynamic request" },
+      ],
+      promptCacheEnabled: true,
+    });
+    const userBlocks = body.messages.at(-1)?.content as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    expect(userBlocks[0]).toEqual({
+      type: "text",
+      text: "current dynamic request",
+      cache_control: { type: "ephemeral" },
+    });
+  });
+
+  it("attaches a message breakpoint to the latest user message", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "alpha" },
+        { role: "user", content: "stable user prefix" },
+        { role: "assistant", content: "ack" },
+        { role: "user", content: "current dynamic request" },
+      ],
+      promptCacheEnabled: true,
+    });
+    const stableUserBlocks = body.messages[0]?.content as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    const currentUserBlocks = body.messages.at(-1)?.content as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    expect(stableUserBlocks[0]).toEqual({
+      type: "text",
+      text: "stable user prefix",
+    });
+    expect(currentUserBlocks[0]).toEqual({
+      type: "text",
+      text: "current dynamic request",
+      cache_control: { type: "ephemeral" },
+    });
+  });
+
+  it("does not append cacheBreakNonce to the current user message", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "stable user prefix" }],
+      promptCacheEnabled: true,
+      cacheBreakNonce: "nonce-user-1",
+    });
+    expect(body.system).toBeUndefined();
+    const userBlocks = body.messages[0]?.content as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    expect(userBlocks[0]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(userBlocks[0]?.text).not.toContain("linghun-break-cache");
+  });
+
   it("appends linghun-break-cache nonce to last system block when cacheBreakNonce provided", () => {
     const provider = buildAnthropicProvider();
     const body = provider.createAnthropicMessagesRequest({
@@ -2754,6 +2882,7 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
     });
     expect(typeof body.system).toBe("string");
     expect(body.system as string).not.toContain("linghun-break-cache");
+    expect(body.messages[0]?.content).toBe("hi");
   });
 });
 
@@ -2768,6 +2897,21 @@ describe("D.13F Anthropic ephemeral cache_creation usage parsing", () => {
     const usage = events.find(
       (event): event is Extract<LinghunEvent, { type: "usage" }> => event.type === "usage",
     );
+    expect(usage?.usage.cacheCreationEphemeral5mTokens).toBe(120);
+    expect(usage?.usage.cacheCreationEphemeral1hTokens).toBe(7);
+    expect(usage?.usage.cacheWriteTokens).toBe(127);
+  });
+
+  it("prefers provider-reported cache_creation_input_tokens over split ephemeral totals", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_2b","usage":{"input_tokens":10}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":120,"ephemeral_1h_input_tokens":7}}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const usage = events.find(
+      (event): event is Extract<LinghunEvent, { type: "usage" }> => event.type === "usage",
+    );
+    expect(usage?.usage.cacheWriteTokens).toBe(300);
     expect(usage?.usage.cacheCreationEphemeral5mTokens).toBe(120);
     expect(usage?.usage.cacheCreationEphemeral1hTokens).toBe(7);
   });
