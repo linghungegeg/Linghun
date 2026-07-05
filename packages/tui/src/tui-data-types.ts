@@ -197,7 +197,9 @@ export type CacheState = {
   nextTurn: number;
   lastFreshness?: CacheFreshness;
   lastRequestObservation?: CacheRequestObservation;
-  lastRequestObservationByKind?: Partial<Record<CacheRequestObservation["kind"], CacheRequestObservation>>;
+  lastRequestObservationByKind?: Partial<
+    Record<CacheRequestObservation["kind"], CacheRequestObservation>
+  >;
   cacheRequestShapeLatch?: CacheRequestShapeLatch;
   lastCacheSafePrefix?: CacheSafePrefixSnapshot;
   lastCacheSafePrefixSkipReason?: string;
@@ -221,6 +223,8 @@ export type CompactProjection = {
   pressureRatio: number;
   preCompactChars: number;
   postCompactChars: number;
+  postCompactTargetChars?: number;
+  savingsRatio?: number;
   discardedRange: string;
   toolPairingSafe: boolean;
   risks: string[];

@@ -1,6 +1,5 @@
 import type { ModelRole } from "@linghun/config";
 import type { ModelMessage } from "@linghun/providers";
-import { findKnownModel } from "@linghun/providers";
 import { redactCommonSecrets } from "@linghun/shared";
 import { type CompactBoundary, compactMessagesToFit } from "./compact-context.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
@@ -71,6 +70,9 @@ const HUGE_CONTEXT_WINDOW_TOKENS = 800_000;
 const COMPACT_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
 const COMPACT_SUMMARY_MAX_CHARS = 3_200;
 const COMPACT_SUMMARY_TARGET_RESERVE_CHARS = 4_000;
+const POST_COMPACT_TARGET_RATIO = 0.3;
+const POST_COMPACT_TARGET_MIN_TOKENS = 40_000;
+const POST_COMPACT_TARGET_MAX_TOKENS = 80_000;
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
 const MAX_COMPACT_BOUNDARIES = 20;
 
@@ -160,8 +162,16 @@ export async function prepareMessagesForProviderPreflight(input: {
         return { blocked: true, messages: budgeted, message: deep.message };
       }
     }
+    const postCompactTargetChars = getPostCompactTargetChars(input.context, input.runtime, {
+      contextMaxChars,
+      triggerChars,
+    });
+    const compactPayloadTargetChars = Math.max(
+      1,
+      postCompactTargetChars - COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
+    );
     const compacted = compactMessagesToFit(budgeted, {
-      maxChars: Math.max(1, triggerChars - COMPACT_SUMMARY_TARGET_RESERVE_CHARS),
+      maxChars: compactPayloadTargetChars,
       preserveRecentMessages: MAX_CONTEXT_MESSAGES,
       kind: "micro",
     });
@@ -174,6 +184,7 @@ export async function prepareMessagesForProviderPreflight(input: {
       compactedMessages: compacted.messages,
       contextMaxChars,
       triggerChars,
+      postCompactTargetChars,
       trigger: input.trigger,
       pairingSafe: pairing.safe,
     });
@@ -277,6 +288,42 @@ function getAutoCompactBufferTokens(context: TuiContext, runtime: CompactPreflig
   return AUTOCOMPACT_BUFFER_TOKENS;
 }
 
+function getCompactBudgetTokens(
+  context: TuiContext,
+  runtime: CompactPreflightRuntime,
+): {
+  contextWindowTokens: number;
+  postCompactTargetTokens: number;
+} {
+  const route = getRoleRoute(context.config, runtime.role);
+  const contextWindowTokens = getContextWindowForModel(runtime.model, route);
+  const ratioTargetTokens = Math.ceil(contextWindowTokens * POST_COMPACT_TARGET_RATIO);
+  return {
+    contextWindowTokens,
+    postCompactTargetTokens: Math.min(
+      POST_COMPACT_TARGET_MAX_TOKENS,
+      Math.max(POST_COMPACT_TARGET_MIN_TOKENS, ratioTargetTokens),
+    ),
+  };
+}
+
+export function getPostCompactTargetChars(
+  context: TuiContext,
+  runtime: CompactPreflightRuntime,
+  input?: { contextMaxChars?: number; triggerChars?: number },
+): number {
+  const { postCompactTargetTokens } = getCompactBudgetTokens(context, runtime);
+  const stableTargetChars = postCompactTargetTokens * CONTEXT_CHARS_PER_TOKEN_ESTIMATE;
+  const contextMaxChars = input?.contextMaxChars ?? getProviderContextMaxChars(context, runtime);
+  const triggerChars = input?.triggerChars ?? getAutoCompactTriggerChars(context, runtime);
+  const providerSafeTargetChars = Math.max(
+    1,
+    contextMaxChars - COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
+  );
+  const triggerSafeTargetChars = Math.max(1, triggerChars - COMPACT_SUMMARY_TARGET_RESERVE_CHARS);
+  return Math.max(1, Math.min(stableTargetChars, providerSafeTargetChars, triggerSafeTargetChars));
+}
+
 export function getAutoCompactTriggerChars(
   context: TuiContext,
   runtime: CompactPreflightRuntime,
@@ -337,12 +384,16 @@ function createCompactProjection(
     compactedMessages: ModelMessage[];
     contextMaxChars: number;
     triggerChars: number;
+    postCompactTargetChars: number;
     trigger: "request" | "continuation" | "final" | "agent-child";
     pairingSafe: boolean;
   },
 ): CompactProjection {
   const preCompactChars = estimateModelMessageChars(input.originalMessages);
   const postCompactChars = estimateModelMessageChars(input.compactedMessages);
+  const savingsRatio = Number(
+    ((preCompactChars - postCompactChars) / Math.max(1, preCompactChars)).toFixed(3),
+  );
   const removedMessages = Math.max(
     0,
     input.originalMessages.length - input.compactedMessages.length,
@@ -429,6 +480,9 @@ function createCompactProjection(
       "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
       `index/cache/memory freshness: index ${context.index.status}; cache freshness ${context.cache.lastFreshness?.changedKeys?.join(",") || "stable-or-unknown"}; memory ${context.memory.accepted.length} accepted`,
       `discarded scope ${risks.join("; ") || "older provider-visible recent context summarized"}`,
+      `target budget chars ${input.postCompactTargetChars}`,
+      `target budget tokens ${Math.ceil(input.postCompactTargetChars / CONTEXT_CHARS_PER_TOKEN_ESTIMATE)}`,
+      `projected savings ${(savingsRatio * 100).toFixed(1)}%`,
       `tool pairing safe ${input.pairingSafe ? "yes" : "no"}`,
     ].join("\n"),
     COMPACT_SUMMARY_MAX_CHARS,
@@ -440,6 +494,8 @@ function createCompactProjection(
     pressureRatio: Number((preCompactChars / Math.max(1, input.contextMaxChars)).toFixed(3)),
     preCompactChars,
     postCompactChars,
+    postCompactTargetChars: input.postCompactTargetChars,
+    savingsRatio,
     discardedRange: risks.join("; ") || "older provider-visible recent context summarized",
     toolPairingSafe: input.pairingSafe,
     risks,

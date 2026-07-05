@@ -8,7 +8,11 @@ import {
 } from "./cache-break-diagnostics-runtime.js";
 import { diffFreshness } from "./cache-freshness.js";
 import type { CacheRequestObservation } from "./cache-policy-runtime.js";
-import { calculateContextPercentages, formatContextProgressBar, getContextWindowForModel } from "./context-window-runtime.js";
+import {
+  calculateContextPercentages,
+  formatContextProgressBar,
+  getContextWindowForModel,
+} from "./context-window-runtime.js";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelView } from "./shell/types.js";
 import { sanitizeDiagnosticText } from "./startup-runtime.js";
@@ -122,9 +126,7 @@ const CACHE_REQUEST_KIND_ORDER: CacheRequestObservation["kind"][] = [
   "deep-compact",
 ];
 
-function formatCacheTelemetryObservation(
-  observation: CacheRequestObservation | undefined,
-): string {
+function formatCacheTelemetryObservation(observation: CacheRequestObservation | undefined): string {
   if (!observation) return "none";
   const usage = observation.usage;
   const usageText = usage
@@ -241,6 +243,7 @@ export function formatCompactStatus(context: TuiContext): string {
     `- deep packet: ${deep ? `${deep.id}; trigger ${deep.trigger}; events ${deep.transcriptEventCount}` : "none"}`,
     `- deep summary: ${deep ? sanitizeCompactStatusText(deep.summary.split(/\r?\n/).slice(0, 4).join(" | ")) : "none"}`,
     `- projection summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/).slice(0, 4).join(" | ")) : "none"}`,
+    `- projection budget: ${projection?.postCompactTargetChars !== undefined ? `target ${projection.postCompactTargetChars} chars; post ${projection.postCompactChars} chars; saved ${((projection.savingsRatio ?? 0) * 100).toFixed(1)}%` : "none"}`,
     `- discarded/degraded scope: ${projection ? sanitizeCompactStatusText(projection.discardedRange) : "none"}`,
     `- tool pairing safe: ${projection ? (projection.toolPairingSafe ? "yes" : "no") : pressure ? (pressure.toolPairingSafe ? "yes" : "no") : "unknown"}`,
     `- failure/cooldown: ${failure ? `${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactStatusText(failure.reason)}; cooldown until ${failure.cooldownUntil}` : "none"}`,

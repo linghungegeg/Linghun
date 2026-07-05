@@ -6,6 +6,7 @@ import { summarizeArchitectureCard } from "./architecture-runtime.js";
 import { isDeepCompactPacket } from "./deep-compact-runtime.js";
 import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
+import { recordHandoffInRuntimeLedger } from "./runtime-storage.js";
 import type {
   CompactProjection,
   HandoffPacket,
@@ -14,7 +15,6 @@ import type {
 } from "./tui-data-types.js";
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
-import { recordHandoffInRuntimeLedger } from "./runtime-storage.js";
 import { isRecord } from "./tui-state-runtime.js";
 
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
@@ -325,6 +325,9 @@ function isCompactProjection(value: unknown): value is CompactProjection {
     typeof value.pressureRatio === "number" &&
     typeof value.preCompactChars === "number" &&
     typeof value.postCompactChars === "number" &&
+    (value.postCompactTargetChars === undefined ||
+      typeof value.postCompactTargetChars === "number") &&
+    (value.savingsRatio === undefined || typeof value.savingsRatio === "number") &&
     typeof value.discardedRange === "string" &&
     typeof value.toolPairingSafe === "boolean" &&
     Array.isArray(value.risks) &&

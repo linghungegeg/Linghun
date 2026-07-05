@@ -7,37 +7,47 @@ import { SessionStore } from "@linghun/core";
 import type { ModelGateway, ModelMessage } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
+import { breakCacheTestHooks } from "./break-cache-runtime.js";
+import {
+  executeBreakCacheMutation,
+  getCurrentFreshness,
+  refreshCacheFreshness,
+} from "./compact-cache-command-runtime.js";
 import type { CompactBoundary } from "./compact-context.js";
 import {
   getAutoCompactTriggerChars,
+  getPostCompactTargetChars,
   getProviderContextMaxChars,
   inspectToolPairingSafety,
   prepareMessagesForProviderPreflight,
   sanitizeCompactSummaryText,
 } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
-import { executeBreakCacheMutation, getCurrentFreshness, refreshCacheFreshness } from "./compact-cache-command-runtime.js";
-import { createCacheState, createMemoryState, createMcpState, createRemoteState } from "./tui-state-runtime.js";
-import { createIndexState } from "./index-runtime.js";
-import { createFailureLearningState } from "./failure-learning-runtime.js";
-import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
-import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
-import {
-  captureFailureLearning,
-  recordProviderFailureEvidence,
-  recordVerificationEvidence,
-} from "./evidence-runtime.js";
 import {
   createDeepCompactPacket,
   maybeRunDeepCompactBeforeProvider,
   runDeepCompact,
   shouldRunDeepCompact,
 } from "./deep-compact-runtime.js";
-import { breakCacheTestHooks } from "./break-cache-runtime.js";
+import {
+  captureFailureLearning,
+  recordProviderFailureEvidence,
+  recordVerificationEvidence,
+} from "./evidence-runtime.js";
+import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { hydrateResumeContext, loadOrCreateHandoffPacket } from "./handoff-session-runtime.js";
+import { createIndexState } from "./index-runtime.js";
 import { runMcpStdioToolCall } from "./mcp-stdio-runtime.js";
+import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type { VerificationReport } from "./tui-data-types.js";
+import {
+  createCacheState,
+  createMcpState,
+  createMemoryState,
+  createRemoteState,
+} from "./tui-state-runtime.js";
 
 describe("Phase E MCP stdio runtime coverage", () => {
   it("covers tools/call ok, tool-not-found, timeout, and spawn error paths", async () => {
@@ -97,6 +107,15 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(getAutoCompactTriggerChars(context, runtime()) / 4).toBe(950_000);
 
     setExecutorMaxInputTokens(context, 20_000);
+    expect(getPostCompactTargetChars(context, runtime()) / 4).toBe(6_000);
+
+    setExecutorMaxInputTokens(context, 200_000);
+    expect(getPostCompactTargetChars(context, runtime()) / 4).toBe(60_000);
+
+    setExecutorMaxInputTokens(context, 1_000_000);
+    expect(getPostCompactTargetChars(context, runtime()) / 4).toBe(80_000);
+
+    setExecutorMaxInputTokens(context, 20_000);
     const deps = compactDeps();
     const triggerChars = getAutoCompactTriggerChars(context, runtime());
     const belowTrigger: ModelMessage[] = [
@@ -140,7 +159,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(compacted.blocked).toBe(false);
     if (!compacted.blocked) {
       expect(estimateModelMessageChars(compacted.messages)).toBeLessThanOrEqual(
-        getProviderContextMaxChars(context, runtime()),
+        context.cache.compactProjection?.postCompactTargetChars ?? Number.POSITIVE_INFINITY,
       );
       expect(compacted.messages.map((message) => message.content).join("\n")).not.toContain(
         "OVERSIZED_OLD_CONTEXT",
@@ -148,6 +167,54 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     }
     expect(context.cache.compactProjection?.preCompactChars).toBeGreaterThan(
       context.cache.compactProjection?.postCompactChars ?? 0,
+    );
+    expect(context.cache.compactProjection?.postCompactTargetChars).toBe(
+      getPostCompactTargetChars(context, runtime()),
+    );
+    expect(context.cache.compactProjection?.savingsRatio).toBeGreaterThan(0);
+    expect(context.cache.compactProjection?.summary).toContain("target budget tokens");
+  });
+
+  it("stress compacts huge provider windows to the retained target", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 1_000_000);
+    const oldChunk = `STALE_STRESS_CONTEXT_${"x".repeat(31_980)}`;
+    const latestRequest = "LATEST_STRESS_REQUEST keep this";
+    const stressMessages: ModelMessage[] = [
+      { role: "system", content: "system guard" },
+      ...Array.from(
+        { length: 130 },
+        (_, index): ModelMessage => ({
+          role: "user",
+          content: `${oldChunk}_${index}`,
+        }),
+      ),
+      { role: "user", content: latestRequest },
+    ];
+
+    expect(estimateModelMessageChars(stressMessages)).toBeGreaterThan(
+      getProviderContextMaxChars(context, runtime()),
+    );
+
+    const compacted = await prepareMessagesForProviderPreflight({
+      messages: stressMessages,
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+
+    expect(compacted.blocked).toBe(false);
+    if (!compacted.blocked) {
+      expect(estimateModelMessageChars(compacted.messages)).toBeLessThanOrEqual(
+        context.cache.compactProjection?.postCompactTargetChars ?? 0,
+      );
+      expect(compacted.messages.some((message) => message.content === latestRequest)).toBe(true);
+    }
+    expect((context.cache.compactProjection?.postCompactTargetChars ?? 0) / 4).toBe(80_000);
+    expect(context.cache.compactProjection?.postCompactChars).toBeLessThanOrEqual(
+      (context.cache.compactProjection?.postCompactTargetChars ?? 0) - 4_000,
     );
   });
 
@@ -195,9 +262,9 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     });
     expect(unsafeBlocked.blocked).toBe(false);
 
-    expect(sanitizeCompactSummaryText(context, `${context.projectPath}\\secret sk-abc123`, 200)).not.toContain(
-      "sk-abc123",
-    );
+    expect(
+      sanitizeCompactSummaryText(context, `${context.projectPath}\\secret sk-abc123`, 200),
+    ).not.toContain("sk-abc123");
   });
 
   it("covers deep compact should-run, success, tool_use failure, and missing gateway paths", async () => {
@@ -284,10 +351,15 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
     await recordProviderFailureEvidence(
       context,
       sessionId,
-      Object.assign(new Error("eventstream CRC mismatch sk-secret endpoint=https://api.example.com/v1/messages?api_key=raw-token content-type=text/html"), {
-        code: "PROVIDER_STREAM_ERROR",
-        status: 502,
-      }),
+      Object.assign(
+        new Error(
+          "eventstream CRC mismatch sk-secret endpoint=https://api.example.com/v1/messages?api_key=raw-token content-type=text/html",
+        ),
+        {
+          code: "PROVIDER_STREAM_ERROR",
+          status: 502,
+        },
+      ),
       {
         role: "executor",
         provider: "deepseek",
@@ -298,7 +370,9 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
       },
     );
     expect(context.lastProviderFailure?.kind).toBe("transit");
-    expect(context.lastProviderFailure?.endpointSummary).toBe("https://api.example.com/v1/messages");
+    expect(context.lastProviderFailure?.endpointSummary).toBe(
+      "https://api.example.com/v1/messages",
+    );
     expect(context.lastProviderFailure?.httpStatus).toBe(502);
     expect(context.lastProviderFailure?.contentType).toBe("text/html");
     expect(context.evidence[0]?.summary).toContain("status 502");
@@ -333,19 +407,26 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
 
     const output = new MemoryOutput();
     await executeBreakCacheMutation("once", context, output);
-    const once = await breakCacheTestHooks.buildPromptCacheFields(
-      context.projectPath,
-      true,
-      "1h",
-    );
+    const once = await breakCacheTestHooks.buildPromptCacheFields(context.projectPath, true, "1h");
     expect(once.promptCacheEnabled).toBe(true);
     expect(once.promptCacheTtl).toBe("1h");
     expect(once.cacheBreakNonce).toBeTruthy();
-    expect((await breakCacheTestHooks.buildPromptCacheFields(context.projectPath, true, "1h")).cacheBreakNonce).toBeUndefined();
+    expect(
+      (await breakCacheTestHooks.buildPromptCacheFields(context.projectPath, true, "1h"))
+        .cacheBreakNonce,
+    ).toBeUndefined();
 
     await executeBreakCacheMutation("always", context, output);
-    const alwaysA = await breakCacheTestHooks.buildPromptCacheFields(context.projectPath, true, "5m");
-    const alwaysB = await breakCacheTestHooks.buildPromptCacheFields(context.projectPath, true, "5m");
+    const alwaysA = await breakCacheTestHooks.buildPromptCacheFields(
+      context.projectPath,
+      true,
+      "5m",
+    );
+    const alwaysB = await breakCacheTestHooks.buildPromptCacheFields(
+      context.projectPath,
+      true,
+      "5m",
+    );
     expect(alwaysA.cacheBreakNonce).toBe(alwaysB.cacheBreakNonce);
     await executeBreakCacheMutation("clear", context, output);
     expect(breakCacheTestHooks.readMarker(context.projectPath).mode).toBe("off");
@@ -428,7 +509,9 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
   });
 });
 
-async function createMcpServerScript(source: string): Promise<{ command: string; args: string[]; cwd: string }> {
+async function createMcpServerScript(
+  source: string,
+): Promise<{ command: string; args: string[]; cwd: string }> {
   const cwd = await mkdtemp(join(tmpdir(), "linghun-phase-e-mcp-"));
   const script = join(cwd, "server.cjs");
   await writeFile(script, source, "utf8");
