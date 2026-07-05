@@ -639,7 +639,7 @@ export const defaultConfig: LinghunConfig = {
   index: {
     enabled: true,
     mode: "fast",
-    ignoreFile: ".linghunignore",
+    ignoreFile: ".cbmignore",
   },
   promptCache: {
     enabled: true,

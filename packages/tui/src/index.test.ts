@@ -1170,6 +1170,8 @@ if (tool === "list_projects") {
   console.log(JSON.stringify(${JSON.stringify(changes)}));
 } else if (tool === "index_repository") {
   console.log(JSON.stringify({ ok: true }));
+} else if (tool === "delete_project") {
+  console.log(JSON.stringify({ ok: true }));
 } else if (tool === "search_code") {
   console.log(JSON.stringify({
     total_results: 7,
@@ -15409,7 +15411,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(toolMessage?.content).toContain('"evidenceId"');
   });
 
-  it("Run 3: /index refresh auto-skips large files and keeps repair details out of main output", async () => {
+  it("Run 3: /index refresh records large-file repair suggestions out of main output", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(
       join(project, "large.json"),
@@ -15431,14 +15433,15 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("索引已刷新，已自动跳过 1 项大文件/生成物。");
-    expect(output.text).toContain("如需持久化忽略规则，可运行索引修复。");
-    expect(output.text).not.toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).toContain("已在索引前补齐 .cbmignore");
+    expect(output.text).toContain("索引刷新完成");
+    expect(output.text).not.toContain("运行索引修复可写入 .cbmignore");
+    expect(output.text).not.toContain("transient exclude");
     expect(output.text).not.toContain("large.json");
     expect(output.text).not.toContain("索引安全门");
     expect(output.text).not.toContain("阻塞原因");
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
-    await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toContain("large.json");
   }, 30_000);
 
   it("P0: /index status/doctor/refresh/check closes the stdin user path with permission and transcript evidence", async () => {
@@ -15481,7 +15484,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain('"type":"permission_result"');
   }, 10_000);
 
-  it("Run 3: index refresh passes transient excludes and records full skipped details", async () => {
+  it("Run 3: index refresh writes .cbmignore before real indexing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "debug.log"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -15494,22 +15497,20 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
 
-    expect(output.text).toContain("索引已刷新，已自动跳过 1 项大文件/生成物。");
-    expect(output.text).not.toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).toContain("已在索引前补齐 .cbmignore");
+    expect(output.text).toContain("索引刷新完成");
+    expect(output.text).not.toContain("transient exclude");
     expect(output.text).not.toContain("索引安全门");
-    expect(context.index.safetyRiskyFiles?.some((file) => file.path === "debug.log")).toBe(true);
-    expect(context.lastFullOutput).toContain("本次 /index refresh 使用 transient exclude");
-    expect(context.lastFullOutput).toContain("debug.log");
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toContain("debug.log");
+    expect(context.index.safetyRiskyFiles).toBeUndefined();
     const refresh = (await readMockCallRecords(callsPath)).find(
       (call) => call.tool === "index_repository",
     );
-    expect(refresh?.input.transient_exclude_paths).toEqual(["debug.log"]);
-    expect(refresh?.input.skip_paths).toEqual(["debug.log"]);
+    expect(refresh?.input.transient_exclude_paths).toBeUndefined();
+    expect(refresh?.input.skip_paths).toBeUndefined();
     expect(
       context.evidence.some(
-        (item) =>
-          item.supportsClaims.includes("skipped_file:debug.log") &&
-          item.summary.includes("debug.log"),
+        (item) => item.supportsClaims.includes("ignored_before_index:debug.log"),
       ),
     ).toBe(true);
   });
@@ -15568,7 +15569,7 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
-  it("Run 3: Ink auto-skip success keeps explicit details without opening CommandPanel", async () => {
+  it("Run 3: Ink index risk warning keeps explicit details without opening CommandPanel", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -15585,15 +15586,14 @@ describe("Phase 06 TUI slash commands", () => {
     const detailsPanel = __testBuildExplicitDetailsCommandPanel(context);
     const summary = output.text;
     expect(context.commandPanelState).toBeUndefined();
-    expect(summary).toContain("已自动跳过 1 项大文件/生成物");
+    expect(summary).toContain("已在索引前补齐 .cbmignore");
     expect(summary).not.toContain(".linghunignore");
-    expect(summary).not.toContain(".cbmignore");
+    expect(summary).toContain(".cbmignore");
     expect(summary).not.toContain("/index repair");
     expect(summary).not.toContain("/index refresh");
     expect(summary).not.toContain("--force");
-    expect(detailsPanel?.detailsText).toContain("large.json");
-    expect(detailsPanel?.detailsText).toContain("1.1 MB");
-    expect(detailsPanel?.detailsText).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toContain("large.json");
+    expect(detailsPanel).toBeUndefined();
   });
 
   it("Run 3: stale refresh does not claim completion", async () => {
@@ -15611,8 +15611,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
 
-    expect(context.index.safetyWarning).toContain("索引刷新已执行");
-    expect(context.index.safetyWarning).toContain("当前状态仍为 stale");
+    expect(context.index.status).toBe("stale");
+    expect(output.text).toContain("已在索引前补齐 .cbmignore");
     expect(output.text).not.toContain("索引刷新完成");
     expect(output.text).not.toContain("索引已刷新，已自动跳过");
   });
@@ -15665,17 +15665,21 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
     context.permissionMode = "full-access";
-    await handleSlashCommand("/index refresh", context, output);
+    context.index.safetyWarning = "索引刷新已执行；1 项大文件/生成物需要写入 .cbmignore 后才会被跳过。";
+    context.index.safetyRiskyFiles = [{ path: "large.json", size: 1_100_000, reason: ".json file" }];
+    context.index.safetyAction = "refresh";
+    context.index.projectName = "test-project";
     context.permissionMode = "default";
     await handleSlashCommand("/index repair", context, output);
     await handleNaturalInput("确认", context, output);
 
-    expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
-    expect(output.text).toContain("索引已刷新，已自动跳过 1 项大文件/生成物。");
-    expect(output.text).not.toContain("本次 /index refresh 使用 transient exclude");
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toContain("large.json");
+    expect(output.text).not.toContain("transient exclude");
     expect(output.text).toContain("索引安全修复续跑");
     expect(output.text).toContain("需要先确认权限");
-    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    const calls = await readMockCalls(callsPath);
+    expect(calls).toContain("delete_project");
+    expect(calls).toContain("index_repository");
   });
 
   it("D.14D: /index repair writes ignore then refreshes after Write is allowed", async () => {
@@ -15689,17 +15693,22 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/permissions add allow Write medium", context, output);
-    await handleSlashCommand("/index refresh", context, output);
+    context.index.safetyWarning = "索引刷新已执行；1 项大文件/生成物需要写入 .cbmignore 后才会被跳过。";
+    context.index.safetyRiskyFiles = [{ path: "large.json", size: 1_100_000, reason: ".json file" }];
+    context.index.safetyAction = "refresh";
+    context.index.projectName = "test-project";
     await handleSlashCommand("/index repair", context, output);
 
-    expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toContain("large.json");
     expect(output.text).toContain("索引安全修复续跑");
-    expect(output.text).toContain("ignore 文件：.linghunignore");
-    expect(output.text).toContain("ignore 写入完成：.linghunignore；条目数量=1");
+    expect(output.text).toContain("ignore 文件：.cbmignore");
+    expect(output.text).toContain("ignore 写入完成：.cbmignore；条目数量=1");
     expect(output.text).toContain("索引刷新完成");
     expect(output.text).not.toContain("索引刷新：正在执行...");
     expect(output.text).not.toContain("索引安全门");
-    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    const calls = await readMockCalls(callsPath);
+    expect(calls).toContain("delete_project");
+    expect(calls).toContain("index_repository");
   });
 
   it("D.14D: English /index repair writes ignore then refreshes after Write is allowed", async () => {
@@ -15714,14 +15723,18 @@ describe("Phase 06 TUI slash commands", () => {
     context.language = "en-US";
 
     await handleSlashCommand("/permissions add allow Write medium", context, output);
-    await handleSlashCommand("/index refresh", context, output);
+    context.index.safetyWarning = "Index refresh ran; 1 large/generated item needs .cbmignore.";
+    context.index.safetyRiskyFiles = [{ path: "large.json", size: 1_100_000, reason: ".json file" }];
+    context.index.safetyAction = "refresh";
     await handleSlashCommand("/index repair", context, output);
 
-    expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toContain("large.json");
     expect(output.text).toContain("Index safety repair continuation");
-    expect(output.text).toContain("ignore file: .linghunignore");
-    expect(output.text).toContain("Ignore write completed: .linghunignore; entries=1.");
-    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    expect(output.text).toContain("ignore file: .cbmignore");
+    expect(output.text).toContain("Ignore write completed: .cbmignore; entries=1.");
+    const calls = await readMockCalls(callsPath);
+    expect(calls).toContain("delete_project");
+    expect(calls).toContain("index_repository");
   });
 
   it("D.14D: /index repair does not duplicate existing ignore entries before refresh", async () => {
@@ -15735,13 +15748,18 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
     context.permissionMode = "full-access";
 
-    await handleSlashCommand("/index refresh", context, output);
-    await writeFile(join(project, ".linghunignore"), "large.json\n", "utf8");
+    await writeFile(join(project, ".cbmignore"), "large.json\n", "utf8");
+    context.index.safetyWarning = "索引刷新已执行；1 项大文件/生成物需要写入 .cbmignore 后才会被跳过。";
+    context.index.safetyRiskyFiles = [{ path: "large.json", size: 1_100_000, reason: ".json file" }];
+    context.index.safetyAction = "refresh";
+    context.index.projectName = "test-project";
     await handleSlashCommand("/index repair", context, output);
 
-    expect(await readFile(join(project, ".linghunignore"), "utf8")).toBe("large.json\n");
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toBe("large.json\n");
     expect(output.text).toContain("ignore 写入跳过");
-    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    const calls = await readMockCalls(callsPath);
+    expect(calls).toContain("delete_project");
+    expect(calls).toContain("index_repository");
   });
 
   it("D.14D-R P0-1: /index repair in ink mode sets pendingLocalApproval and does not leak prompt text", async () => {
@@ -15768,11 +15786,11 @@ describe("Phase 06 TUI slash commands", () => {
     // ink 主屏不再出现文本提权提示（PermissionPanel 是唯一提权 UI）。
     expect(output.text).not.toContain("需要先确认权限");
     // 文件尚未写入（等待确认）。
-    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
     // PermissionPanel 视图可由 pendingLocalApproval 装配（Write 语义）。
     const view = mapPendingApprovalToPermission(context);
     expect(view?.toolName).toBe("Write");
-    expect(view?.scope).toContain(".linghunignore");
+    expect(view?.scope).toContain(".cbmignore");
   });
 
   it("D.14D-R P0-2: model IndexRefresh tool routes through permission panel and refreshes after approval", async () => {
@@ -15817,7 +15835,9 @@ describe("Phase 06 TUI slash commands", () => {
     // 第一轮模型请求触发 IndexRefresh → 权限确认（plain 文本 yes/no）→ yes → 真实刷新 → 续轮。
     expect(requests.length).toBeGreaterThanOrEqual(2);
     // 真实调用了 index_repository（受控刷新路径），不是文本冒充。
-    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    const calls = await readMockCalls(callsPath);
+    expect(calls).toContain("delete_project");
+    expect(calls).toContain("index_repository");
     // 主屏出现"已刷新"成熟摘要。
     expect(output.text).toContain("索引");
     // final answer 后未把工具结果伪装；transcript 含 index_operation evidence。
@@ -15985,13 +16005,16 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
     context.permissionMode = "full-access";
 
-    await handleSlashCommand("/index refresh", context, output);
+    context.index.safetyWarning = "索引刷新已执行；1 项大文件/生成物需要写入 .cbmignore 后才会被跳过。";
+    context.index.safetyRiskyFiles = [{ path: "large.json", size: 1_100_000, reason: ".json file" }];
+    context.index.safetyAction = "refresh";
+    context.index.projectName = "test-project";
     context.permissionMode = "default";
     const callsBeforeDeny = await readMockCalls(callsPath);
     await handleSlashCommand("/index repair", context, output);
     await handleNaturalInput("no", context, output);
 
-    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
     expect(output.text).toContain("需要先确认权限");
     expect(output.text).toContain("已拒绝权限。本轮未写入文件，也未刷新索引。");
     expect(await readMockCalls(callsPath)).toEqual(callsBeforeDeny);
@@ -16008,16 +16031,21 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
     context.permissionMode = "full-access";
 
-    await handleSlashCommand("/index refresh", context, output);
+    context.index.safetyWarning = "索引刷新已执行；1 项大文件/生成物需要写入 .cbmignore 后才会被跳过。";
+    context.index.safetyRiskyFiles = [{ path: "large.json", size: 1_100_000, reason: ".json file" }];
+    context.index.safetyAction = "refresh";
+    context.index.projectName = "test-project";
     context.permissionMode = "default";
     await handleSlashCommand("/index repair", context, output);
-    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
     await handleNaturalInput("确认", context, output);
 
-    expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toContain("large.json");
     expect(output.text).toContain("需要先确认权限");
-    expect(output.text).toContain("ignore 写入完成：.linghunignore；条目数量=1");
-    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    expect(output.text).toContain("ignore 写入完成：.cbmignore；条目数量=1");
+    const calls = await readMockCalls(callsPath);
+    expect(calls).toContain("delete_project");
+    expect(calls).toContain("index_repository");
   });
 
   it("D.14D: /index repair with no persisted skip suggestions explains how to trigger it", async () => {
@@ -16032,9 +16060,9 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/index repair", context, output);
 
     expect(output.text).toContain(
-      "当前没有可持久化的索引跳过建议。先运行索引刷新；如刷新时自动跳过了大文件/生成物，可再运行索引修复把规则写入 ignore。",
+      "当前没有可持久化的索引跳过建议。先运行索引刷新；如刷新时发现大文件/生成物，可再运行索引修复把规则写入 .cbmignore。",
     );
-    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
     expect(await readMockCalls(callsPath)).toEqual([]);
   });
 
@@ -17017,7 +17045,7 @@ describe("Phase 06 TUI slash commands", () => {
     context.pendingLocalApproval = {
       kind: "index_ignore_write",
       plan: {
-        path: ".linghunignore",
+        path: ".cbmignore",
         content: "secret.json\n",
         expectedHash: "key-hash-secret",
         missingEntries: ["secret.json"],
@@ -17025,7 +17053,7 @@ describe("Phase 06 TUI slash commands", () => {
     } as NonNullable<TuiContext["pendingLocalApproval"]>;
     await handleTuiKeypress("escape", context, output);
     expect(context.pendingLocalApproval).toBeUndefined();
-    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
 
     await handleSlashCommand("/plan", context, output);
     expect(context.activePlan).toBeTruthy();
@@ -17132,7 +17160,7 @@ describe("Phase 06 TUI slash commands", () => {
     context.pendingLocalApproval = {
       kind: "index_ignore_write",
       plan: {
-        path: ".linghunignore",
+        path: ".cbmignore",
         content: "raw-schema sk-test-secret request-secret\n",
         expectedHash: "hash-secret",
         missingEntries: ["secret.json"],
@@ -17146,7 +17174,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("hash-secret");
     await handleSlashCommand("/esc", context, output);
     expect(context.pendingLocalApproval).toBeUndefined();
-    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
 
     await handleSlashCommand("/plan", context, output);
     expect(context.activePlan).toBeTruthy();
@@ -21051,7 +21079,7 @@ describe("Phase 06 TUI slash commands", () => {
     }
   });
 
-  it("Run 3: default index commands auto-skip generated directories", async () => {
+  it("Run 3: default index commands record generated-directory repair suggestions", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, "node_modules", "large-package"), { recursive: true });
     await writeFile(
@@ -21070,19 +21098,22 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/index init fast", context, output);
     await handleSlashCommand("/index refresh", context, output);
 
-    expect(output.text).toContain("索引已初始化，已自动跳过 1 项大文件/生成物。");
-    expect(output.text).toContain("索引已刷新，已自动跳过 1 项大文件/生成物。");
-    expect(output.text).not.toContain("本次 /index init fast 使用 transient exclude");
-    expect(output.text).not.toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).toContain("已在索引前补齐 .cbmignore");
+    expect(output.text).toContain("索引初始化完成");
+    expect(output.text).toContain("索引刷新完成");
+    expect(await readFile(join(project, ".cbmignore"), "utf8")).toContain("node_modules/");
+    expect(output.text).not.toContain("transient exclude");
     expect(output.text).not.toContain("索引安全门");
     expect(
-      context.evidence.some((item) => item.supportsClaims.includes("skipped_file:node_modules/")),
+      context.evidence.some((item) =>
+        item.supportsClaims.includes("ignored_before_index:node_modules/"),
+      ),
     ).toBe(true);
     const refreshCalls = (await readMockCallRecords(callsPath)).filter(
       (call) => call.tool === "index_repository",
     );
     expect(refreshCalls).toHaveLength(2);
-    expect(refreshCalls.every((call) => Array.isArray(call.input.transient_exclude_paths))).toBe(
+    expect(refreshCalls.every((call) => call.input.transient_exclude_paths === undefined)).toBe(
       true,
     );
   });
@@ -26441,7 +26472,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     context.pendingLocalApproval = {
       kind: "index_ignore_write",
       plan: {
-        path: ".linghunignore",
+        path: ".cbmignore",
         content: "dist\n",
         expectedHash: "hash",
         missingEntries: ["dist"],

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, extname, join, relative } from "node:path";
 import { stableStringify } from "./cache-freshness.js";
@@ -122,6 +123,13 @@ export type IndexSafetyResult = {
   truncated: boolean;
 };
 
+export type IndexSafetyRepairPlan = {
+  path: ".linghunignore" | ".cbmignore";
+  content: string;
+  expectedHash?: string;
+  missingEntries: string[];
+};
+
 export async function scanIndexSafety(projectPath: string): Promise<IndexSafetyResult> {
   const ignorePatterns = await readIndexIgnorePatterns(projectPath);
   const riskyFiles: IndexSafetyFile[] = [];
@@ -152,11 +160,12 @@ export async function scanIndexSafety(projectPath: string): Promise<IndexSafetyR
         if (INDEX_SCAN_SKIP_DIRS.has(entry.name)) {
           continue;
         }
-        if (LARGE_INDEX_RISK_DIRS.has(entry.name)) {
+        const directoryRisk = getIndexDirectoryRisk(relativePath, entry.name);
+        if (directoryRisk) {
           riskyFiles.push({
             path: `${relativePath}/`,
             size: 0,
-            reason: "generated/dependency directory",
+            reason: directoryRisk,
           });
           continue;
         }
@@ -189,21 +198,59 @@ export async function scanIndexSafety(projectPath: string): Promise<IndexSafetyR
 
 export async function readIndexIgnorePatterns(projectPath: string): Promise<string[]> {
   const patterns: string[] = [];
-  for (const fileName of [".linghunignore", ".cbmignore"]) {
-    try {
-      const text = await readFile(join(projectPath, fileName), "utf8");
-      patterns.push(
-        ...text
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter((line) => line.length > 0 && !line.startsWith("#"))
-          .map((line) => normalizePath(line)),
-      );
-    } catch {
-      // Ignore file is optional; missing or unreadable files must not break /index commands.
-    }
+  try {
+    const text = await readFile(join(projectPath, ".cbmignore"), "utf8");
+    patterns.push(
+      ...text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("#"))
+        .map((line) => normalizePath(line)),
+    );
+  } catch {
+    // .cbmignore is optional; missing or unreadable files must not break /index commands.
   }
   return patterns;
+}
+
+export async function createIndexSafetyRepairPlan(
+  projectPath: string,
+  riskyFiles: IndexSafetyFile[],
+): Promise<IndexSafetyRepairPlan> {
+  const path = ".cbmignore";
+  let current = "";
+  let currentExists = true;
+  try {
+    current = await readFile(join(projectPath, path), "utf8");
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null ? (error as { code?: string }).code : "";
+    if (code !== "ENOENT") {
+      throw error;
+    }
+    current = "";
+    currentExists = false;
+  }
+  const existing = current
+    .split(/\r?\n/u)
+    .map((line) => normalizePath(line.trim()))
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  const missingEntries = uniqueStrings(riskyFiles.map((file) => file.path)).filter(
+    (entry) => !isIgnoredIndexPath(entry, existing),
+  );
+  const needsTrailingNewline = current.length > 0 && !current.endsWith("\n");
+  const content =
+    missingEntries.length === 0
+      ? current
+      : `${current}${needsTrailingNewline ? "\n" : ""}${missingEntries.join("\n")}\n`;
+  return {
+    path,
+    content,
+    expectedHash: currentExists
+      ? createHash("sha256").update(current, "utf8").digest("hex")
+      : undefined,
+    missingEntries,
+  };
 }
 
 export function isIgnoredIndexPath(relativePath: string, patterns: string[]): boolean {
@@ -230,6 +277,9 @@ function getIndexFileRisk(relativePath: string): string | null {
   const fileName = basename(relativePath);
   const extension = extname(relativePath).toLowerCase();
   const segments = relativePath.split("/");
+  if (isBundledCodebaseMemoryPath(segments)) {
+    return "bundled codebase-memory runtime";
+  }
   if (fileName.endsWith(".min.js")) {
     return "minified javascript";
   }
@@ -240,6 +290,22 @@ function getIndexFileRisk(relativePath: string): string | null {
     return "generated/resource directory";
   }
   return null;
+}
+
+function getIndexDirectoryRisk(relativePath: string, directoryName: string): string | null {
+  if (LARGE_INDEX_RISK_DIRS.has(directoryName)) {
+    return "generated/dependency directory";
+  }
+  if (isBundledCodebaseMemoryPath(relativePath.split("/"))) {
+    return "bundled codebase-memory runtime";
+  }
+  return null;
+}
+
+function isBundledCodebaseMemoryPath(segments: string[]): boolean {
+  return segments.some(
+    (segment, index) => segment === "bundled" && segments[index + 1] === "codebase-memory",
+  );
 }
 
 export function createIndexTransientExcludes(safety: IndexSafetyResult): string[] {
@@ -256,22 +322,22 @@ export function formatIndexAutoSkipPrimary(
   const isRefresh = actionLabel === "refresh";
   if (language === "en-US") {
     if (status === "stale") {
-      return `Index ${isRefresh ? "refresh" : "init"} ran and skipped ${count} large/generated item${count === 1 ? "" : "s"}; current status is still stale.`;
+      return `Index ${isRefresh ? "refresh" : "init"} ran; ${count} large/generated item${count === 1 ? "" : "s"} still need .cbmignore before they are skipped. Current status is still stale.`;
     }
-    return `Index ${isRefresh ? "refreshed" : "initialized"}; automatically skipped ${count} large/generated item${count === 1 ? "" : "s"}.`;
+    return `Index ${isRefresh ? "refreshed" : "initialized"}; ${count} large/generated item${count === 1 ? "" : "s"} need .cbmignore before they are skipped.`;
   }
   if (status === "stale") {
-    return `索引${isRefresh ? "刷新" : "初始化"}已执行，已跳过 ${count} 项大文件/生成物；当前状态仍为 stale。`;
+    return `索引${isRefresh ? "刷新" : "初始化"}已执行；${count} 项大文件/生成物需要写入 .cbmignore 后才会被跳过；当前状态仍为 stale。`;
   }
   return isRefresh
-    ? `索引已刷新，已自动跳过 ${count} 项大文件/生成物。`
-    : `索引已初始化，已自动跳过 ${count} 项大文件/生成物。`;
+    ? `索引已刷新；${count} 项大文件/生成物需要写入 .cbmignore 后才会被跳过。`
+    : `索引已初始化；${count} 项大文件/生成物需要写入 .cbmignore 后才会被跳过。`;
 }
 
 export function formatIndexAutoSkipNextAction(language: "zh-CN" | "en-US"): string {
   return language === "en-US"
-    ? "To persist ignore rules, run index repair."
-    : "如需持久化忽略规则，可运行索引修复。";
+    ? "Run index repair to write .cbmignore and refresh with real skips."
+    : "运行索引修复可写入 .cbmignore，并用真实跳过重新刷新。";
 }
 
 export function formatIndexAutoSkipDetails(
@@ -286,15 +352,15 @@ export function formatIndexAutoSkipDetails(
   const ignoreEntries = safety.riskyFiles.map((file) => `  ${file.path}`);
   if (language === "en-US") {
     return [
-      `Index ${actionLabel} used transient excludes for this run only.`,
-      "Skipped files/directories:",
+      `Index ${actionLabel} found large/generated items that codebase-memory will only skip after .cbmignore is updated.`,
+      "Files/directories needing .cbmignore:",
       ...files,
       safety.truncated
         ? `- Only the first ${LARGE_INDEX_FILE_LIMIT} risky items were recorded.`
         : "",
-      "Persistent ignore suggestions:",
-      "- Write these entries only via /index repair; normal refresh does not edit repository files.",
-      "- Suggested ignore files: .linghunignore or .cbmignore",
+      "Persistent ignore fix:",
+      "- If index preflight could not cover these entries automatically, run /index repair.",
+      "- Effective ignore file: .cbmignore",
       "Suggested entries:",
       ...ignoreEntries,
     ]
@@ -302,13 +368,13 @@ export function formatIndexAutoSkipDetails(
       .join("\n");
   }
   return [
-    `本次 /index ${actionLabel} 使用 transient exclude，仅对本次刷新生效。`,
-    "已跳过清单：",
+    `本次 /index ${actionLabel} 发现大文件/生成物；codebase-memory 只有在 .cbmignore 更新后才会跳过它们。`,
+    "需要写入 .cbmignore 的清单：",
     ...files,
     safety.truncated ? `- 仅记录前 ${LARGE_INDEX_FILE_LIMIT} 项风险文件。` : "",
-    "持久化忽略建议：",
-    "- 只有 /index repair 会写入这些条目；普通 refresh 不修改仓库文件。",
-    "- 建议 ignore 文件：.linghunignore 或 .cbmignore",
+    "持久化忽略修复：",
+    "- 如果索引前置检查未能自动覆盖这些条目，可运行 /index repair。",
+    "- 生效的 ignore 文件：.cbmignore",
     "建议加入条目：",
     ...ignoreEntries,
   ]

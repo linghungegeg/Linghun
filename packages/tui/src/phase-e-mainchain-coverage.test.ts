@@ -530,7 +530,7 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       },
       {
         kind: "index_ignore_write",
-        plan: { path: ".linghunignore", content: "dist/\n", missingEntries: ["dist/"] },
+        plan: { path: ".cbmignore", content: "dist/\n", missingEntries: ["dist/"] },
       },
       {
         kind: "architecture_drift",
@@ -824,7 +824,7 @@ function rewriteApprovalSession(
   if (approval.kind === "index_ignore_write") {
     return {
       ...approval,
-      plan: { ...approval.plan, path: ".linghunignore" },
+      plan: { ...approval.plan, path: ".cbmignore" },
     };
   }
   if (approval.kind === "image_generation") {

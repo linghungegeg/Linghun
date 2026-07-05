@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
@@ -27,11 +27,12 @@ import {
   validateCodebaseMemoryToolExecution,
 } from "./deferred-tools-catalog.js";
 import {
-  createIndexTransientExcludes,
+  createIndexSafetyRepairPlan,
   formatIndexAutoSkipDetails,
   formatIndexAutoSkipNextAction,
   formatIndexAutoSkipPrimary,
   scanIndexSafety,
+  type IndexSafetyResult,
   summarizeIndexResult,
 } from "./index-result-presenter.js";
 import {
@@ -72,6 +73,7 @@ const CLI_BUNDLED_ROOT_ENV = "LINGHUN_CLI_BUNDLED_ROOT";
 const CODEBASE_MEMORY_BUNDLED_ENV = "LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR";
 const PRE_ENGINE_BUNDLED_ENV = "LINGHUN_PRE_ENGINE_BUNDLED_DIR";
 const INDEX_REPOSITORY_TIMEOUT_MS = 600_000;
+const INDEX_IGNORE_PREFLIGHT_MAX_PASSES = 8;
 const CODEBASE_MEMORY_BUNDLED_PLATFORM_ARCHES = new Set([
   "win32-x64",
   "linux-x64",
@@ -1222,20 +1224,23 @@ export async function runIndexRepository(
       return;
     }
   }
-  const safety = await scanIndexSafety(context.projectPath);
-  const transientExcludes =
-    !force && safety.riskyFiles.length > 0 ? createIndexTransientExcludes(safety) : [];
+  const prepared = await prepareIndexIgnoreBeforeRepository(context, actionLabel, force, output);
+  if (!prepared.ok) {
+    return;
+  }
+  const safety = prepared.safety;
+  const indexRiskFiles = !force && safety.riskyFiles.length > 0 ? safety.riskyFiles : [];
   context.index.safetyWarning = undefined;
   context.index.safetyRiskyFiles = safety.riskyFiles.length > 0 ? safety.riskyFiles : undefined;
   context.index.safetyAction = safety.riskyFiles.length > 0 ? actionLabel : undefined;
   context.index.error = undefined;
   context.index.status = "indexing";
-  if (transientExcludes.length > 0) {
+  if (indexRiskFiles.length > 0) {
     await recordIndexEvidence(
       context,
-      `auto-skip:${actionLabel}`,
+      `index-risk:${actionLabel}`,
       formatIndexAutoSkipDetails(safety, actionLabel, context.language),
-      transientExcludes.map((file) => `skipped_file:${file}`),
+      indexRiskFiles.map((file) => `index_risk_file:${file.path}`),
     );
   }
   const now = new Date().toISOString();
@@ -1264,12 +1269,6 @@ export async function runIndexRepository(
       repo_path: context.projectPath,
       mode,
       persistence: true,
-      ...(transientExcludes.length > 0
-        ? {
-            transient_exclude_paths: transientExcludes,
-            skip_paths: transientExcludes,
-          }
-        : {}),
     },
     context.projectPath,
     INDEX_REPOSITORY_TIMEOUT_MS,
@@ -1319,7 +1318,7 @@ export async function runIndexRepository(
   task.userVisibleSummary = `Index ${actionLabel} completed: ${context.index.status}`;
   task.nextAction = "用 /index status 查看详情；需要新鲜度检查时用 /index status --fresh。";
   await deps().appendBackgroundTaskEvent(context, sessionId, task);
-  if (transientExcludes.length > 0) {
+  if (indexRiskFiles.length > 0) {
     const detailsText = formatIndexAutoSkipDetails(safety, actionLabel, context.language);
     context.index.safetyWarning = formatIndexAutoSkipPrimary(
       safety,
@@ -1331,14 +1330,106 @@ export async function runIndexRepository(
     context.index.safetyAction = actionLabel;
     await recordIndexEvidence(
       context,
-      `auto-skip-result:${actionLabel}`,
+      `index-risk-result:${actionLabel}`,
       detailsText,
-      transientExcludes.map((file) => `skipped_file:${file}`),
+      indexRiskFiles.map((file) => `index_risk_file:${file.path}`),
     );
     context.lastFullOutput = detailsText;
     writeLine(output, context.index.safetyWarning);
     writeLine(output, formatIndexAutoSkipNextAction(context.language));
   }
+}
+
+async function prepareIndexIgnoreBeforeRepository(
+  context: TuiContext,
+  actionLabel: "init fast" | "refresh",
+  force: boolean,
+  output: Writable,
+): Promise<{ ok: true; safety: IndexSafetyResult } | { ok: false }> {
+  let latestSafety = await scanIndexSafety(context.projectPath);
+  if (force || latestSafety.riskyFiles.length === 0) {
+    return { ok: true, safety: latestSafety };
+  }
+
+  let wroteIgnore = false;
+  for (let pass = 0; pass < INDEX_IGNORE_PREFLIGHT_MAX_PASSES; pass += 1) {
+    const plan = await createIndexSafetyRepairPlan(context.projectPath, latestSafety.riskyFiles);
+    if (plan.missingEntries.length === 0) {
+      return { ok: true, safety: latestSafety };
+    }
+    await writeFile(join(context.projectPath, plan.path), plan.content, "utf8");
+    wroteIgnore = true;
+    await recordIndexEvidence(
+      context,
+      `index-ignore-preflight:${actionLabel}`,
+      context.language === "en-US"
+        ? `Updated ${plan.path} before indexing; entries=${plan.missingEntries.length}.`
+        : `索引前已更新 ${plan.path}；条目数量=${plan.missingEntries.length}。`,
+      [
+        `ignore_file:${plan.path}`,
+        ...plan.missingEntries.map((entry) => `ignored_before_index:${entry}`),
+      ],
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Updated ${plan.path} before indexing; refreshing with real skips now.`
+        : `已在索引前补齐 ${plan.path}，现在使用真实跳过刷新索引。`,
+    );
+
+    latestSafety = await scanIndexSafety(context.projectPath);
+    if (latestSafety.riskyFiles.length === 0) {
+      break;
+    }
+  }
+
+  if (wroteIgnore) {
+    const resetOk = await resetIndexAfterIgnorePreflight(context, output);
+    if (!resetOk) {
+      return { ok: false };
+    }
+    latestSafety = await scanIndexSafety(context.projectPath);
+  }
+  return { ok: true, safety: latestSafety };
+}
+
+async function resetIndexAfterIgnorePreflight(
+  context: TuiContext,
+  output: Writable,
+): Promise<boolean> {
+  try {
+    await rm(join(context.projectPath, ".codebase-memory"), { recursive: true, force: true });
+  } catch (error) {
+    context.index.status = "error";
+    context.index.error =
+      context.language === "en-US"
+        ? `Could not remove old local codebase-memory artifact before rebuild: ${formatError(error, context.language)}`
+        : `无法在重建前移除旧本地 codebase-memory artifact：${formatError(error, context.language)}`;
+    writeLine(output, context.index.error);
+    return false;
+  }
+
+  if (!context.index.projectName) {
+    await refreshIndexStatus(context);
+  }
+  if (!context.index.projectName) {
+    return true;
+  }
+  const resetResult = await deleteCodebaseMemoryProjectIndex(
+    context,
+    context.index.projectName,
+    context.projectPath,
+  );
+  if (!resetResult.ok) {
+    context.index.status = "error";
+    context.index.error =
+      context.language === "en-US"
+        ? `Could not reset old codebase-memory project before rebuild: ${resetResult.summary}`
+        : `无法在重建前重置旧 codebase-memory 项目：${resetResult.summary}`;
+    writeLine(output, context.index.error);
+    return false;
+  }
+  return true;
 }
 
 export async function runIndexQuery(
@@ -1454,6 +1545,41 @@ export async function runCodebaseMemoryCli(
   } catch (error) {
     return { ok: false, summary: `无法解析 codebase-memory-mcp 输出：${formatError(error)}` };
   }
+}
+
+export async function deleteCodebaseMemoryProjectIndex(
+  context: TuiContext,
+  project: string,
+  cwd: string,
+  timeoutMs = 30_000,
+): Promise<{ ok: true } | { ok: false; summary: string; errorCode?: string }> {
+  const resolution = await getCodebaseMemoryResolution(context);
+  if (resolution.status !== "ready") {
+    return { ok: false, summary: resolution.summary, errorCode: resolution.status };
+  }
+  const result = await runCommandCapture(
+    resolution.command,
+    [...resolution.args, "cli", "delete_project", JSON.stringify({ project })],
+    cwd,
+    timeoutMs,
+  );
+  if (result.exitCode !== 0) {
+    const jsonLine = [...result.stdout.trim().split(/\r?\n/)]
+      .reverse()
+      .find((line) => line.trim().startsWith("{"));
+    if (jsonLine) {
+      try {
+        const data = JSON.parse(jsonLine) as { status?: string };
+        if (data.status === "not_found") {
+          return { ok: true };
+        }
+      } catch {
+        // Fall through to the original command failure summary.
+      }
+    }
+    return { ok: false, summary: result.summary, errorCode: result.errorCode };
+  }
+  return { ok: true };
 }
 
 export function executeSearchExtraTools(

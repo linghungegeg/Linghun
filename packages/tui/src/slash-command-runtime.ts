@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants, accessSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -306,7 +306,8 @@ import {
   writeHandoffPacket,
 } from "./handoff-session-runtime.js";
 import {
-  isIgnoredIndexPath,
+  type IndexSafetyRepairPlan,
+  createIndexSafetyRepairPlan as createIndexSafetyRepairPlanForProject,
   scanIndexSafety,
   summarizeIndexResult,
 } from "./index-result-presenter.js";
@@ -316,8 +317,8 @@ import {
   type IndexSafetyFile,
   type IndexState,
   createIndexState,
-  findCurrentIndexProject,
   formatIndexRuntimeRef,
+  getCodebaseMemoryArtifactDir,
 } from "./index-runtime.js";
 import {
   INDEX_REFRESH,
@@ -406,6 +407,7 @@ import {
 } from "./mcp-index-command-runtime.js";
 import {
   configureMcpIndexRuntime,
+  deleteCodebaseMemoryProjectIndex,
   executeExtraTool,
   executeSearchExtraTools,
   handleIndexCommand,
@@ -2608,8 +2610,8 @@ export async function runIndexSafetyRepair(context: TuiContext, output: Writable
     writeLine(
       output,
       context.language === "en-US"
-        ? "No index skip suggestions can be persisted right now. Run index refresh first; if refresh automatically skipped large/generated files, run index repair to write the rules to ignore."
-        : "当前没有可持久化的索引跳过建议。先运行索引刷新；如刷新时自动跳过了大文件/生成物，可再运行索引修复把规则写入 ignore。",
+        ? "No index skip suggestions can be persisted right now. Run index refresh first; if refresh finds large/generated files, run index repair to write .cbmignore."
+        : "当前没有可持久化的索引跳过建议。先运行索引刷新；如刷新时发现大文件/生成物，可再运行索引修复把规则写入 .cbmignore。",
     );
     writeStatus(output, context);
     return;
@@ -2648,13 +2650,59 @@ export async function runIndexSafetyRepair(context: TuiContext, output: Writable
     );
   }
 
-  await runIndexRepository(context, context.config.index.mode, "refresh", false, output, {
+  const refreshed = await runIndexRepairRefresh(context, output, {
     guardAlreadyChecked: true,
+  });
+  if (!refreshed) {
+    writeStatus(output, context);
+    return;
+  }
+  if (!context.isInkSession) writeStatus(output, context);
+}
+
+export async function runIndexRepairRefresh(
+  context: TuiContext,
+  output: Writable,
+  options: { guardAlreadyChecked?: boolean } = {},
+): Promise<boolean> {
+  const artifactDir = getCodebaseMemoryArtifactDir(context.projectPath);
+  try {
+    await rm(artifactDir, { recursive: true, force: true });
+  } catch (error) {
+    writeErrorLine(
+      output,
+      context.language === "en-US"
+        ? `Index repair could not remove the old local codebase-memory artifact before rebuild: ${formatError(error, context.language)}`
+        : `索引修复无法在重建前移除旧本地 codebase-memory artifact：${formatError(error, context.language)}`,
+    );
+    return false;
+  }
+
+  const projectName = context.index.projectName;
+  if (projectName) {
+    const resetResult = await deleteCodebaseMemoryProjectIndex(
+      context,
+      projectName,
+      context.projectPath,
+    );
+    if (!resetResult.ok) {
+      writeErrorLine(
+        output,
+        context.language === "en-US"
+          ? `Index repair could not reset the old codebase-memory project before rebuild: ${resetResult.summary}`
+          : `索引修复无法在重建前重置旧 codebase-memory 项目：${resetResult.summary}`,
+      );
+      return false;
+    }
+  }
+
+  await runIndexRepository(context, context.config.index.mode, "refresh", false, output, {
+    guardAlreadyChecked: Boolean(options.guardAlreadyChecked),
   });
   if (!context.index.safetyWarning) {
     writeLine(output, formatIndexRefreshSummary(context));
   }
-  if (!context.isInkSession) writeStatus(output, context);
+  return true;
 }
 
 export async function requestIndexRefreshApproval(
@@ -2803,66 +2851,11 @@ async function requestIndexActionApproval(
   if (!context.isInkSession) writeStatus(output, context);
 }
 
-type IndexSafetyRepairPlan = {
-  path: ".linghunignore" | ".cbmignore";
-  content: string;
-  expectedHash?: string;
-  missingEntries: string[];
-};
-
 async function createIndexSafetyRepairPlan(
   context: TuiContext,
   riskyFiles: IndexSafetyFile[],
 ): Promise<IndexSafetyRepairPlan> {
-  const path = await chooseIndexIgnoreFile(context.projectPath);
-  let current = "";
-  let currentExists = true;
-  try {
-    current = await readFile(join(context.projectPath, path), "utf8");
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT")) {
-      throw error;
-    }
-    current = "";
-    currentExists = false;
-  }
-  const existing = current
-    .split(/\r?\n/u)
-    .map((line) => normalizePath(line.trim()))
-    .filter((line) => line.length > 0 && !line.startsWith("#"));
-  const missingEntries = uniqueStrings(riskyFiles.map((file) => file.path)).filter(
-    (entry) => !isIgnoredIndexPath(entry, existing),
-  );
-  const needsTrailingNewline = current.length > 0 && !current.endsWith("\n");
-  const content =
-    missingEntries.length === 0
-      ? current
-      : `${current}${needsTrailingNewline ? "\n" : ""}${missingEntries.join("\n")}\n`;
-  return {
-    path,
-    content,
-    expectedHash: currentExists ? hashFileContent(current) : undefined,
-    missingEntries,
-  };
-}
-
-function normalizePath(path: string): string {
-  return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
-}
-
-function hashFileContent(content: string): string {
-  return createHash("sha256").update(content, "utf8").digest("hex");
-}
-
-async function chooseIndexIgnoreFile(
-  projectPath: string,
-): Promise<".linghunignore" | ".cbmignore"> {
-  const linghunPath = join(projectPath, ".linghunignore");
-  const cbmPath = join(projectPath, ".cbmignore");
-  if (!(await pathExists(linghunPath)) && (await pathExists(cbmPath))) {
-    return ".cbmignore";
-  }
-  return ".linghunignore";
+  return createIndexSafetyRepairPlanForProject(context.projectPath, riskyFiles);
 }
 
 async function runIndexIgnoreWritePlan(

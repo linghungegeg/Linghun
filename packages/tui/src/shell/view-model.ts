@@ -1730,7 +1730,7 @@ export function mapPendingApprovalToPermission(
   // P0-1 — /index repair 的 ignore 写入也是一次 Write 提权；ink 主屏必须走
   // PermissionPanel，而不是 writeLine 文本。映射成 Write 语义的权限视图。
   if (approval.kind === "index_ignore_write") {
-    const path = approval.plan?.path ?? ".linghunignore";
+    const path = approval.plan?.path ?? ".cbmignore";
     const isEn = context.language === "en-US";
     return {
       toolName: "Write",

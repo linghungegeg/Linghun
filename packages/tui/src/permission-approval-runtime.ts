@@ -26,8 +26,6 @@ import {
 import { denyAgentToolUse, executeApprovedAgentToolUse } from "./job-agent-command-runtime.js";
 import { handleJobCommand } from "./job-agent-command-runtime.js";
 import { parseJobRunOptions } from "./job-runtime.js";
-import { formatIndexRefreshSummary } from "./mcp-index-command-runtime.js";
-import { runIndexRepository } from "./mcp-index-runtime.js";
 import { executeMemoryMutation } from "./memory-command-runtime.js";
 import { WRITE_REPORT_TOOL_NAME } from "./model-loop-runtime.js";
 import { continueModelAfterToolResults, handleNaturalInput } from "./model-stream-runtime.js";
@@ -53,6 +51,7 @@ import {
   createWorktreeRemoveResolveDeps,
   executeImageGeneration,
   executeIndexIgnoreWritePlan,
+  runIndexRepairRefresh,
   startPendingAutopilot,
 } from "./slash-command-runtime.js";
 import { writeLine } from "./startup-runtime.js";
@@ -429,7 +428,7 @@ export async function handlePlanCommand(
 // 保留在 index.ts 的协调器：executePermissionApprove / executePermissionDeny /
 // handlePermissionsCommand / setPermissionMode / getModeChangeGuard，因为它们
 // 依赖 i18n（t）/ ensureSession / executeIndexIgnoreWritePlan /
-// runIndexRepository / executeApprovedModelToolUse /
+// runIndexRepairRefresh / executeApprovedModelToolUse /
 // continueModelAfterToolResults / writeLightHints / writeStatus 等
 // index.ts 内部协调函数，跨模块迁移会引入循环依赖。
 // ---------------------------------------------------------------------------
@@ -505,10 +504,7 @@ export async function executePermissionApprove(
   if (approval.kind === "index_ignore_write") {
     const written = await executeIndexIgnoreWritePlan(approval.plan, context, output);
     if (written) {
-      await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
-      if (!context.index.safetyWarning) {
-        writeLine(output, formatIndexRefreshSummary(context));
-      }
+      await runIndexRepairRefresh(context, output);
     }
     if (!context.isInkSession) writeStatus(output, context);
     return;

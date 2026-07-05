@@ -19,7 +19,12 @@ import {
   classifyProviderFailure,
   formatProviderFailurePrimary,
 } from "./request-lifecycle-presenter.js";
-import { createIndexTransientExcludes, scanIndexSafety, summarizeIndexResult } from "./index-result-presenter.js";
+import {
+  createIndexSafetyRepairPlan,
+  createIndexTransientExcludes,
+  scanIndexSafety,
+  summarizeIndexResult,
+} from "./index-result-presenter.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type { RemoteInboundMessage } from "./tui-data-types.js";
 import { describe, expect, it } from "vitest";
@@ -209,16 +214,25 @@ describe("Phase E index result presenter coverage", () => {
 
     const project = await mkdtemp(join(tmpdir(), "linghun-phase-e-index-"));
     await mkdir(join(project, "dist"), { recursive: true });
+    await mkdir(join(project, "apps", "cli", "bundled", "codebase-memory"), { recursive: true });
     await writeFile(join(project, "big.log"), "x".repeat(1_000_010), "utf8");
-    await writeFile(join(project, ".linghunignore"), "ignored.log\n", "utf8");
+    await writeFile(
+      join(project, "apps", "cli", "bundled", "codebase-memory", "codebase-memory-mcp.exe"),
+      "x".repeat(1_000_010),
+      "utf8",
+    );
+    await writeFile(join(project, ".cbmignore"), "ignored.log\n", "utf8");
     await writeFile(join(project, "ignored.log"), "x".repeat(1_000_010), "utf8");
 
     const safety = await scanIndexSafety(project);
     expect(safety.riskyFiles.map((file) => file.path)).toEqual(
-      expect.arrayContaining(["dist/", "big.log"]),
+      expect.arrayContaining(["dist/", "big.log", "apps/cli/bundled/codebase-memory/"]),
     );
     expect(safety.riskyFiles.map((file) => file.path)).not.toContain("ignored.log");
     expect(createIndexTransientExcludes(safety)).toEqual([...new Set(createIndexTransientExcludes(safety))]);
+    await expect(createIndexSafetyRepairPlan(project, safety.riskyFiles)).resolves.toMatchObject({
+      missingEntries: expect.arrayContaining(["apps/cli/bundled/codebase-memory/"]),
+    });
   });
 });
 

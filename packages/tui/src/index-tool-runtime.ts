@@ -81,7 +81,7 @@ export function createIndexToolDefinitions(): ModelToolDefinition[] {
     {
       name: INDEX_REPAIR,
       description:
-        "Persist index skip suggestions after a refresh automatically skipped large/generated files: append the missing ignore entries (.linghunignore/.cbmignore) and then refresh, reusing the controlled /index repair path. Permission behavior: default asks before writing; auto-review can proceed only when the workspace-local ignore/index write is low risk; plan refuses mutating execution; dangerous or path-boundary changes still ask/deny through the permission pipeline. Only meaningful when skip suggestions exist. Call this tool to actually repair-and-refresh; do NOT claim it succeeded without a success result.",
+        "Persist index skip suggestions after a refresh found large/generated files: append the missing entries to .cbmignore and then refresh, reusing the controlled /index repair path. Permission behavior: default asks before writing; auto-review can proceed only when the workspace-local ignore/index write is low risk; plan refuses mutating execution; dangerous or path-boundary changes still ask/deny through the permission pipeline. Only meaningful when skip suggestions exist. Call this tool to actually repair-and-refresh; do NOT claim real skips succeeded without a success result.",
       inputSchema: {
         type: "object",
         additionalProperties: false,

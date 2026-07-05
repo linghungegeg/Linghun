@@ -150,7 +150,7 @@ describe("config directories", () => {
     expect(paths.sessions.replaceAll("\\", "/")).toBe("/tmp/home/.linghun/data/sessions");
     expect(config.index.enabled).toBe(true);
     expect(config.index.mode).toBe("fast");
-    expect(config.index.ignoreFile).toBe(".linghunignore");
+    expect(config.index.ignoreFile).toBe(".cbmignore");
     expect(config.skills.projectDir).toBe(".linghun/skills");
     expect(config.skills.disabledIds).toEqual([]);
     expect(config.workflows.enabled).toBe(true);

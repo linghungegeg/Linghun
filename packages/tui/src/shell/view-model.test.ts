@@ -1494,15 +1494,15 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     const ctx = createContext({
       pendingLocalApproval: {
         kind: "index_ignore_write",
-        plan: { path: ".linghunignore" },
+        plan: { path: ".cbmignore" },
       },
     } as unknown as Partial<TuiContext>);
     const result = mapPendingApprovalToPermission(ctx);
     expect(result).toBeDefined();
     expect(result?.toolName).toBe("Write");
     expect(result?.risk).toBe("medium");
-    expect(result?.scope).toContain(".linghunignore");
-    expect(result?.actionSummary).toContain(".linghunignore");
+    expect(result?.scope).toContain(".cbmignore");
+    expect(result?.actionSummary).toContain(".cbmignore");
     expect(result?.actionSummary).toContain("修改文件");
     expect(result?.actions?.map((item) => item.id)).toEqual(["allow_once", "deny", "details"]);
     expect(result?.actions?.map((item) => item.id)).not.toContain("allow_always_tool");
