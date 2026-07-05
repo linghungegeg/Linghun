@@ -458,13 +458,13 @@ describe("model-loop-runtime", () => {
   // 反幻觉边界改放 system prompt + evidence rule，不再由 regex 拦截普通输入。
 
   describe("isNaturalReadFileRequest", () => {
-    it("detects Chinese read requests", () => {
+    it("detects Chinese read requests with explicit paths", () => {
       expect(isNaturalReadFileRequest("读取一下 src/a.ts")).toBe(true);
-      expect(isNaturalReadFileRequest("看看这个文件")).toBe(true);
+      expect(isNaturalReadFileRequest("看看这个文件")).toBe(false);
     });
 
-    it("detects English read requests", () => {
-      expect(isNaturalReadFileRequest("show me the file")).toBe(true);
+    it("detects English read requests with explicit paths", () => {
+      expect(isNaturalReadFileRequest("show me the file")).toBe(false);
       expect(isNaturalReadFileRequest("read src/a.ts")).toBe(true);
     });
 
@@ -1941,7 +1941,7 @@ describe("model-loop-runtime", () => {
       expect(out).toContain("扩展工具");
     });
 
-    it("ExecuteExtraTool 成功 → 主屏只显示完成", async () => {
+    it("ExecuteExtraTool 成功 → 主屏显示目标名但不显示内部 wrapper", async () => {
       const { sanitizeDeferredToolPrimaryText } = await import("./model-loop-runtime.js");
       const out = sanitizeDeferredToolPrimaryText(
         "ExecuteExtraTool(codebase-memory:search_code) 完成。",
@@ -1950,6 +1950,7 @@ describe("model-loop-runtime", () => {
       );
       expect(out).not.toContain("ExecuteExtraTool");
       expect(out).not.toContain("codebase-memory:search_code");
+      expect(out).toContain("search_code");
       expect(out).toContain("扩展工具");
       expect(out).toContain("完成");
     });

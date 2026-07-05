@@ -642,6 +642,18 @@ export function planFinalGateEvidenceGapAction(input: {
     };
   }
   if (gap === "completion") {
+    const retryCount = input.evidenceActionRetryCount ?? 0;
+    if (retryCount > 0) {
+      return createVerificationEvidenceGapPlan({
+        language,
+        permissionMode: context.permissionMode,
+        reason:
+          context.permissionMode === "default"
+            ? "completion_gap_verification_requires_permission"
+            : "completion_gap_verification_allowed_by_mode",
+        missingKinds: result.unsupportedKinds,
+      });
+    }
     return {
       action: "readonly_check",
       reason: "completion_gap_readonly",
@@ -652,8 +664,8 @@ export function planFinalGateEvidenceGapAction(input: {
         tools: ["GitStatusInspect"],
         note:
           language === "en-US"
-            ? "Inspect current changes only; do not write files, create commits, or rerun verification just to prove completion."
-            : "只检查当前变更范围；不要写文件，不要创建 commit，也不要为了证明完成而重复运行验证。",
+            ? "Inspect current changes first; if this still does not support the final claim, the next evidence pass will run the smallest verification."
+            : "先检查当前变更范围；若仍不足以支撑最终声明，下一轮补证据会运行最小验证。",
       }),
       evidenceAction: {
         toolName: "GitStatusInspect",
@@ -683,13 +695,6 @@ export function planFinalGateEvidenceGapAction(input: {
     };
   }
   if (gap === "verification") {
-    if (hasFreshVerificationAttemptEvidence(context.evidence)) {
-      return {
-        action: "downgrade_only",
-        reason: "verification_evidence_already_recorded",
-        directive: formatEvidenceGapBlocker("retry_budget_exhausted", language),
-      };
-    }
     if (context.permissionMode === "plan") {
       return {
         action: "blocked_explanation",
@@ -697,41 +702,55 @@ export function planFinalGateEvidenceGapAction(input: {
         directive: formatEvidenceGapBlocker("readonly_mode_blocks_verification", language),
       };
     }
-    return {
-      action: "verification_request",
+    return createVerificationEvidenceGapPlan({
+      language,
+      permissionMode: context.permissionMode,
       reason: context.permissionMode === "default" ? "verification_requires_permission" : "verification_allowed_by_mode",
-      directive: formatEvidenceGapToolDirective({
-        language,
-        action: "verification_request",
-        missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
-        tools: context.permissionMode === "default" ? ["Bash"] : ["RunVerification"],
-        note:
-          context.permissionMode === "default"
-            ? language === "en-US"
-              ? "Use one minimal focused/typecheck Bash command so decidePermission can route approval through pendingLocalApproval/PermissionPanel; do not use RunVerification to bypass ask mode."
-              : "使用一条最小 focused/typecheck Bash 命令，让 decidePermission 通过 pendingLocalApproval/PermissionPanel 处理授权；不要用 RunVerification 绕过 ask 模式。"
-            : language === "en-US"
-              ? "Run the smallest focused/typecheck verification first; do not run a full suite unless focused evidence is insufficient."
-              : "先运行最小 focused/typecheck 验证；除非 focused 证据不足，不要直接跑全量套件。",
-      }),
-      evidenceAction:
-        context.permissionMode === "default"
-          ? {
-              toolName: "Bash",
-              strategy: "minimal_bash_verification",
-              summary: "run one minimal verification command through Bash permission flow",
-            }
-          : {
-              toolName: "RunVerification",
-              input: { level: "typecheck" },
-              summary: "run minimal typecheck verification through RunVerification",
-            },
-    };
+      missingKinds: result.unsupportedKinds,
+    });
   }
   return {
     action: "downgrade_only",
     reason: "unsupported_gap",
     directive: createFinalGateEvidenceTaskDirective(result, language),
+  };
+}
+
+function createVerificationEvidenceGapPlan(input: {
+  language: Language;
+  permissionMode: TuiContext["permissionMode"];
+  reason: string;
+  missingKinds: string[];
+}): FinalGateEvidenceGapActionPlan {
+  return {
+    action: "verification_request",
+    reason: input.reason,
+    directive: formatEvidenceGapToolDirective({
+      language: input.language,
+      action: "verification_request",
+      missing: mapFinalGateKindsToUserLabels(input.missingKinds, input.language),
+      tools: input.permissionMode === "default" ? ["Bash"] : ["RunVerification"],
+      note:
+        input.permissionMode === "default"
+          ? input.language === "en-US"
+            ? "Use one minimal focused/typecheck Bash command so decidePermission can route approval through pendingLocalApproval/PermissionPanel; do not use RunVerification to bypass ask mode."
+            : "使用一条最小 focused/typecheck Bash 命令，让 decidePermission 通过 pendingLocalApproval/PermissionPanel 处理授权；不要用 RunVerification 绕过 ask 模式。"
+          : input.language === "en-US"
+            ? "Run the smallest focused/typecheck verification first; do not run a full suite unless focused evidence is insufficient."
+            : "先运行最小 focused/typecheck 验证；除非 focused 证据不足，不要直接跑全量套件。",
+    }),
+    evidenceAction:
+      input.permissionMode === "default"
+        ? {
+            toolName: "Bash",
+            strategy: "minimal_bash_verification",
+            summary: "run one minimal verification command through Bash permission flow",
+          }
+        : {
+            toolName: "RunVerification",
+            input: { level: "typecheck" },
+            summary: "run minimal typecheck verification through RunVerification",
+          },
   };
 }
 
@@ -869,13 +888,13 @@ export function buildEvidenceBackedFinalBoundaryAnswer(
   const evidenceScope = formatEvidenceBoundaryScope(evidence, language);
   if (language === "en-US") {
     return [
-      `I can only confirm the scope that has actually been checked so far: ${evidenceScope}.`,
-      `I still do not have matching evidence for ${missing}, so I cannot confirm the full closure yet.`,
+      `I have confirmed the part covered by the checks so far: ${evidenceScope}.`,
+      `I still need more evidence for ${missing}; if we continue, I will gather that evidence first.`,
     ].join("\n");
   }
   return [
-    `我只能确认已检查到的范围：${evidenceScope}。`,
-    `还没有拿到能支撑${missing}的匹配证据，所以暂时不能确认完整闭环。`,
+    `我已确认目前检查覆盖到的部分：${evidenceScope}。`,
+    `还需要补充${missing}；如果继续，我会先补这部分证据。`,
   ].join("\n");
 }
 
@@ -988,21 +1007,6 @@ function createFinalGateClaimAlignmentRewritePrompt(language: Language): string 
   ].join("\n");
 }
 
-export function buildFinalGateClaimAlignmentFallback(language: Language): string {
-  if (language === "en-US") {
-    return [
-      "I can only confirm the verified portion from the recorded checks.",
-      "Those checks support a verification or test result, but they do not by themselves cover full task completion.",
-      "To give a broader final conclusion, I need a completion record that states scope, validation, and remaining risk.",
-    ].join("\n");
-  }
-  return [
-    "我只能确认已记录检查覆盖到的验证范围。",
-    "这些检查可以支撑验证或测试结果通过，但不能单独概括为整个任务完成。",
-    "若要给出更完整的最终结论，还需要补充覆盖范围、验证方式和剩余风险记录。",
-  ].join("\n");
-}
-
 function createFinalGateEvidenceTaskDirective(
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
   language: Language,
@@ -1039,23 +1043,6 @@ function classifyFinalGateEvidenceGap(kinds: string[]): "verification" | "comple
     return "verification";
   }
   return "other";
-}
-
-function hasFreshVerificationAttemptEvidence(evidence: TuiContext["evidence"]): boolean {
-  return evidence.some((record) => {
-    if (record.supportsClaims.includes("tool_failure")) return false;
-    if (isEvidenceStaleForClaim(record, "verification_claim")) return false;
-    return [
-      "verification_attempted",
-      "verification_passed",
-      "verification_self_check_passed",
-      "test_passed",
-      "typecheck_passed",
-      "build_passed",
-      "lint_passed",
-      "smoke_passed",
-    ].some((claim) => record.supportsClaims.includes(claim));
-  });
 }
 
 function createArtifactReadonlyEvidenceAction(input: {
@@ -2330,27 +2317,25 @@ export async function sendMessage(
               `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
               "warning",
             );
-            if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
-              if (finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES) {
-                finalAnswerClaimAlignmentRewrites += 1;
-                await appendSystemEvent(
-                  context,
-                  sessionId,
-                  `final_answer_claim_alignment_rewrite attempt=${finalAnswerClaimAlignmentRewrites}`,
-                  "warning",
-                );
-                discardAssistantBlock(output, assistantStreamBlockId);
-                assistantText = "";
-                roundAssistantText = "";
-                messagesForProvider.push({
-                  role: "user",
-                  content: createFinalGateClaimAlignmentRewritePrompt(context.language),
-                });
-                continue;
-              }
-              assistantText = buildFinalGateClaimAlignmentFallback(context.language);
-              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-              break;
+            if (
+              shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
+              finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
+            ) {
+              finalAnswerClaimAlignmentRewrites += 1;
+              await appendSystemEvent(
+                context,
+                sessionId,
+                `final_answer_claim_alignment_rewrite attempt=${finalAnswerClaimAlignmentRewrites}`,
+                "warning",
+              );
+              discardAssistantBlock(output, assistantStreamBlockId);
+              assistantText = "";
+              roundAssistantText = "";
+              messagesForProvider.push({
+                role: "user",
+                content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+              });
+              continue;
             }
             const actionPlan = planFinalGateEvidenceGapAction({
               result: gateResult,
@@ -2575,7 +2560,9 @@ export async function sendMessage(
     {
       const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
       if (gateResult.status === "needs_disclaimer") {
-        if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
+        const shouldRewriteClaimAlignment = shouldRewriteFinalGateClaimAlignment(gateResult, context);
+        let retriedClaimAlignment = false;
+        if (shouldRewriteClaimAlignment) {
           if (finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES) {
             finalAnswerClaimAlignmentRewrites += 1;
             await appendSystemEvent(
@@ -2614,10 +2601,10 @@ export async function sendMessage(
               finalAnswerEvidenceActionRetries,
             );
             if (context.pendingLocalApproval) return;
-          } else {
-            assistantText = buildFinalGateClaimAlignmentFallback(context.language);
+            retriedClaimAlignment = true;
           }
-        } else {
+        }
+        if (!retriedClaimAlignment) {
           const actionPlan = planFinalGateEvidenceGapAction({
             result: gateResult,
             context,
@@ -3583,69 +3570,65 @@ async function streamFinalModelAnswerWithoutTools(
           evidenceActionRetryCount,
         );
       }
-      if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
-        assistantText = buildFinalGateClaimAlignmentFallback(context.language);
-      } else {
-        const actionPlan = planFinalGateEvidenceGapAction({
-          result: gateResult,
+      const actionPlan = planFinalGateEvidenceGapAction({
+        result: gateResult,
+        context,
+        userText: latestUserTextFromMessages(continuation.messages),
+        assistantText,
+        retryBudgetRemaining:
+          evidenceActionRetryCount < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+        evidenceActionRetryCount,
+      });
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `final_answer_gap_planner final_no_tools=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
+        actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+          ? "warning"
+          : "info",
+      );
+      if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
+        replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+        const actionResult = await runFinalGateEvidenceAction({
+          actionPlan,
           context,
-          userText: latestUserTextFromMessages(continuation.messages),
-          assistantText,
-          retryBudgetRemaining:
-            evidenceActionRetryCount < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
-          evidenceActionRetryCount,
+          output,
+          sessionId,
+          messages: continuation.messages,
+          runtime,
+          ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
         });
+        if (actionResult.status === "permission_pending") {
+          return "";
+        }
+        if (actionResult.status === "evidence_recorded") {
+          continuation.messages = actionResult.messages;
+          return streamFinalModelAnswerWithoutTools(
+            continuation,
+            context,
+            gateway,
+            sessionId,
+            output,
+            signal,
+            assistantStreamBlockId,
+            fallbackAttempted,
+            claimAlignmentRewriteCount,
+            evidenceActionRetryCount + 1,
+          );
+        }
         await appendSystemEvent(
           context,
           sessionId,
-          `final_answer_gap_planner final_no_tools=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
-          actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
-            ? "warning"
-            : "info",
-        );
-        if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
-          replaceAssistantBlockContent(output, assistantStreamBlockId, "");
-          const actionResult = await runFinalGateEvidenceAction({
-            actionPlan,
-            context,
-            output,
-            sessionId,
-            messages: continuation.messages,
-            runtime,
-            ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
-          });
-          if (actionResult.status === "permission_pending") {
-            return "";
-          }
-          if (actionResult.status === "evidence_recorded") {
-            continuation.messages = actionResult.messages;
-            return streamFinalModelAnswerWithoutTools(
-              continuation,
-              context,
-              gateway,
-              sessionId,
-              output,
-              signal,
-              assistantStreamBlockId,
-              fallbackAttempted,
-              claimAlignmentRewriteCount,
-              evidenceActionRetryCount + 1,
-            );
-          }
-          await appendSystemEvent(
-            context,
-            sessionId,
-            `final_answer_gap_action_${actionResult.status} final_no_tools=yes reason=${actionResult.reason}`,
-            "warning",
-          );
-        }
-        await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-        assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-          gateResult,
-          context.language,
-          context.evidence,
+          `final_answer_gap_action_${actionResult.status} final_no_tools=yes reason=${actionResult.reason}`,
+          "warning",
         );
       }
+      await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+      assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+        gateResult,
+        context.language,
+        context.evidence,
+      );
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
     const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -4129,27 +4112,25 @@ export async function continueModelAfterToolResults(
               `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
               "warning",
             );
-            if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
-              if (finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES) {
-                finalAnswerClaimAlignmentRewrites += 1;
-                await appendSystemEvent(
-                  context,
-                  sessionId,
-                  `final_answer_claim_alignment_rewrite continuation=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
-                  "warning",
-                );
-                discardAssistantBlock(output, assistantStreamBlockId);
-                assistantText = "";
-                roundAssistantText = "";
-                continuation.messages.push({
-                  role: "user",
-                  content: createFinalGateClaimAlignmentRewritePrompt(context.language),
-                });
-                continue;
-              }
-              assistantText = buildFinalGateClaimAlignmentFallback(context.language);
-              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-              break;
+            if (
+              shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
+              finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
+            ) {
+              finalAnswerClaimAlignmentRewrites += 1;
+              await appendSystemEvent(
+                context,
+                sessionId,
+                `final_answer_claim_alignment_rewrite continuation=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
+                "warning",
+              );
+              discardAssistantBlock(output, assistantStreamBlockId);
+              assistantText = "";
+              roundAssistantText = "";
+              continuation.messages.push({
+                role: "user",
+                content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+              });
+              continue;
             }
             const actionPlan = planFinalGateEvidenceGapAction({
               result: gateResult,
@@ -4323,7 +4304,9 @@ export async function continueModelAfterToolResults(
       {
         const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
         if (gateResult.status === "needs_disclaimer") {
-          if (shouldRewriteFinalGateClaimAlignment(gateResult, context)) {
+          const shouldRewriteClaimAlignment = shouldRewriteFinalGateClaimAlignment(gateResult, context);
+          let retriedClaimAlignment = false;
+          if (shouldRewriteClaimAlignment) {
             if (finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES) {
               finalAnswerClaimAlignmentRewrites += 1;
               await appendSystemEvent(
@@ -4354,10 +4337,10 @@ export async function continueModelAfterToolResults(
                 finalAnswerEvidenceActionRetries,
               );
               if (context.pendingLocalApproval) return;
-            } else {
-              assistantText = buildFinalGateClaimAlignmentFallback(context.language);
+              retriedClaimAlignment = true;
             }
-          } else {
+          }
+          if (!retriedClaimAlignment) {
             const actionPlan = planFinalGateEvidenceGapAction({
               result: gateResult,
               context,

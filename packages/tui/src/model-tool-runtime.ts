@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import type { ModelGateway, ModelToolCall } from "@linghun/providers";
 import { type Language, isNodeErrorWithCode } from "@linghun/shared";
@@ -91,14 +91,11 @@ import {
   WRITE_REPORT_TOOL_NAME,
   createToolUseDriftSummary,
   extractFileMentions,
-  extractFileSearchKeywords,
   extractNaturalReadPath,
-  formatFileCandidates,
   hasModelSynthesisIntent,
   isPreEngineToolName,
   isNaturalReadFileRequest,
   looksLikeFilePath,
-  matchesFileKeywords,
   normalizeRelativePath,
   readToolInputString,
   sanitizeDeferredToolPrimaryText,
@@ -2609,8 +2606,7 @@ function extractPathsFromToolData(data: unknown): string[] {
 
 type NaturalFileReadResult =
   | { status: "none" }
-  | { status: "resolved"; path: string }
-  | { status: "ambiguous"; candidates: string[] };
+  | { status: "resolved"; path: string };
 
 async function resolveNaturalFileRead(
   text: string,
@@ -2629,18 +2625,6 @@ async function resolveNaturalFileRead(
     return { status: "resolved", path: explicit };
   }
 
-  const recent = context.recentlyMentionedFiles.filter(Boolean);
-  if (/这个|刚才|上面|最近|this|that|previous|recent/i.test(text) && recent.length > 0) {
-    return { status: "resolved", path: recent[0] };
-  }
-
-  const candidates = await findNaturalFileCandidates(text, context.projectPath, recent);
-  if (candidates.length === 1) {
-    return { status: "resolved", path: candidates[0] };
-  }
-  if (candidates.length > 1) {
-    return { status: "ambiguous", candidates };
-  }
   return { status: "none" };
 }
 
@@ -2678,63 +2662,6 @@ export async function recordReportIncompleteEvidence(
     severity: "medium",
   });
   return formatReportIncompletePrimary(guard.requestedPath, context.language);
-}
-
-async function findNaturalFileCandidates(
-  text: string,
-  projectPath: string,
-  recent: string[],
-): Promise<string[]> {
-  const keywords = extractFileSearchKeywords(text);
-  const recentMatches = recent.filter((file) => matchesFileKeywords(file, keywords));
-  if (recentMatches.length > 0) {
-    return uniqueStrings(recentMatches).slice(0, 5);
-  }
-  if (keywords.length === 0) {
-    return [];
-  }
-
-  const files = await listProjectFiles(projectPath, 300);
-  return files.filter((file) => matchesFileKeywords(file, keywords)).slice(0, 5);
-}
-
-async function listProjectFiles(projectPath: string, limit: number): Promise<string[]> {
-  const files: string[] = [];
-  await collectProjectFiles(projectPath, projectPath, files, limit);
-  return files;
-}
-
-async function collectProjectFiles(
-  root: string,
-  current: string,
-  files: string[],
-  limit: number,
-): Promise<void> {
-  if (files.length >= limit) {
-    return;
-  }
-  let entries: { name: string; isDirectory(): boolean; isFile(): boolean }[];
-  try {
-    entries = await readdir(current, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (files.length >= limit) {
-      return;
-    }
-    if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") {
-      continue;
-    }
-    const fullPath = join(current, entry.name);
-    if (entry.isDirectory()) {
-      await collectProjectFiles(root, fullPath, files, limit);
-      continue;
-    }
-    if (entry.isFile()) {
-      files.push(relative(root, fullPath).replaceAll("\\", "/"));
-    }
-  }
 }
 
 export async function handleToolCommand(

@@ -9,7 +9,6 @@ import { createToolContext } from "@linghun/tools";
 import {
   __testRunFinalGateEvidenceAction,
   __testStreamFinalModelAnswerWithoutTools,
-  buildFinalGateClaimAlignmentFallback,
   buildEvidenceBackedFinalBoundaryAnswer,
   createToolFailureRecoveryFingerprint,
   createToolBatchFailFastSkippedResult,
@@ -320,9 +319,11 @@ describe("final answer gate aggregation", () => {
     expect(result.status).toBe("needs_disclaimer");
     if (result.status !== "needs_disclaimer") return;
     const answer = buildEvidenceBackedFinalBoundaryAnswer(result, "zh-CN");
-    expect(answer).toContain("我只能确认已检查到的范围");
+    expect(answer).toContain("我已确认目前检查覆盖到的部分");
     expect(answer).toContain("验证或测试证据");
     expect(answer).not.toContain("证据范围");
+    expect(answer).not.toContain("完整闭环");
+    expect(answer).not.toContain("匹配证据");
     expect(answer).not.toContain("尚未被匹配证据支撑");
     expect(answer).not.toContain("任务状态");
     expect(answer).not.toContain("下一步");
@@ -349,10 +350,12 @@ describe("final answer gate aggregation", () => {
         createdAt: new Date(0).toISOString(),
       },
     ]);
-    expect(answer).toContain("我只能确认已检查到的范围");
+    expect(answer).toContain("我已确认目前检查覆盖到的部分");
     expect(answer).toContain("已有 1 条记录");
     expect(answer).toContain("验证记录");
     expect(answer).not.toContain("证据范围");
+    expect(answer).not.toContain("完整闭环");
+    expect(answer).not.toContain("匹配证据");
     expect(answer).not.toContain("尚未被匹配证据支撑");
     expect(answer).not.toContain("任务状态：最终回答等待证据确认");
     expect(answer).not.toContain("下一步");
@@ -361,7 +364,7 @@ describe("final answer gate aggregation", () => {
     expect(answer).not.toContain("command_output:");
   });
 
-  it("rewrites claim alignment instead of showing the checklist when fresh test_passed evidence exists", () => {
+  it("rewrites claim alignment instead of using the old visible fallback when fresh test_passed evidence exists", async () => {
     const context = {
       ...makeGateContext(),
       evidence: [
@@ -380,10 +383,9 @@ describe("final answer gate aggregation", () => {
 
     expect(result.status).toBe("needs_disclaimer");
     expect(shouldRewriteFinalGateClaimAlignment(result, context as never)).toBe(true);
-    const fallback = buildFinalGateClaimAlignmentFallback("zh-CN");
-    expect(fallback).not.toMatch(
-      /当前证据不足|任务状态|缺少证据|当前证据|下一步|LinghunFinalAnswerClaims|completion_claim|task completion evidence|unsupportedKinds|retry|downgrade|被拦截的声明类型/iu,
-    );
+    const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("buildFinalGateClaimAlignmentFallback");
+    expect(source).not.toContain("我只能确认已记录检查覆盖到的验证范围");
   });
 
   it("rewrites claim alignment instead of showing the checklist when fresh verification_passed evidence exists", () => {
@@ -407,7 +409,7 @@ describe("final answer gate aggregation", () => {
     expect(shouldRewriteFinalGateClaimAlignment(result, context as never)).toBe(true);
     if (result.status !== "needs_disclaimer") return;
     const visibleFallback = buildEvidenceBackedFinalBoundaryAnswer(result, "zh-CN", context.evidence);
-    expect(visibleFallback).toContain("我只能确认已检查到的范围");
+    expect(visibleFallback).toContain("我已确认目前检查覆盖到的部分");
     expect(visibleFallback).not.toContain("证据范围");
     expect(visibleFallback).not.toContain("任务状态");
     expect(visibleFallback).not.toContain("下一步");
@@ -577,7 +579,7 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(blocks)).not.toContain(rawDraft);
   });
 
-  it("plans completion gaps as readonly scope checks instead of rerunning verification", () => {
+  it("plans completion gaps as readonly scope checks before verification", () => {
     const context = { ...makeGateContext(), permissionMode: "default", language: "zh-CN" };
     const result = evaluateAggregatedFinalAnswerGate(
       context as never,
@@ -596,14 +598,38 @@ describe("final answer gate aggregation", () => {
     expect(plan.action).toBe("readonly_check");
     expect(plan.reason).toBe("completion_gap_readonly");
     expect(plan.directive).toContain("GitStatusInspect");
-    expect(plan.directive).toContain("不要为了证明完成而重复运行验证");
+    expect(plan.directive).toContain("下一轮补证据会运行最小验证");
     expect(plan.evidenceAction).toMatchObject({
       toolName: "GitStatusInspect",
       input: { includeDetails: true },
     });
   });
 
-  it("does not run the same verification evidence action again after fresh verification evidence exists", () => {
+  it("continues with minimal verification after a completion scope check miss", () => {
+    const context = { ...makeGateContext(), permissionMode: "full-access", language: "zh-CN" };
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("已完成。", [{ kind: "completion_claim", phrase: "已完成" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续修复",
+      evidenceActionRetryCount: 1,
+    });
+    expect(plan.action).toBe("verification_request");
+    expect(plan.reason).toBe("completion_gap_verification_allowed_by_mode");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "RunVerification",
+      input: { level: "typecheck" },
+    });
+  });
+
+  it("keeps gathering verification evidence after an attempt that did not prove pass", () => {
     const context = {
       ...makeGateContext(),
       permissionMode: "full-access",
@@ -628,9 +654,12 @@ describe("final answer gate aggregation", () => {
       context: context as never,
       userText: "继续修复",
     });
-    expect(plan.action).toBe("downgrade_only");
-    expect(plan.reason).toBe("verification_evidence_already_recorded");
-    expect(plan.evidenceAction).toBeUndefined();
+    expect(plan.action).toBe("verification_request");
+    expect(plan.reason).toBe("verification_allowed_by_mode");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "RunVerification",
+      input: { level: "typecheck" },
+    });
   });
 
   it("engineering boundary answer uses user-facing wording instead of raw boundary hints", () => {
@@ -648,8 +677,10 @@ describe("final answer gate aggregation", () => {
     );
 
     expect(answer).toContain("服务运行证据");
-    expect(answer).toContain("我只能确认已检查到的范围");
+    expect(answer).toContain("我已确认目前检查覆盖到的部分");
     expect(answer).not.toContain("证据范围");
+    expect(answer).not.toContain("完整闭环");
+    expect(answer).not.toContain("匹配证据");
     expect(answer).not.toContain("final should state");
     expect(answer).not.toContain("service/port/log/health");
   });

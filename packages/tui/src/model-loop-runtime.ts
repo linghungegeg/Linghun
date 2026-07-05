@@ -704,9 +704,14 @@ export function readToolInputString(input: unknown, key: string): string | undef
 // ---------------------------------------------------------------------------
 
 export function isNaturalReadFileRequest(text: string): boolean {
-  return /(?:\u8bfb|\u8bfb\u53d6|\u6253\u5f00|\u770b\u770b|\u67e5\u770b|show|read|open|view)\s*(?:\u4e00\u4e0b|\u4e0b)?/iu.test(
-    text,
-  );
+  if (
+    !/(?:\u8bfb|\u8bfb\u53d6|\u6253\u5f00|\u67e5\u770b|show|read|open|view)\s*(?:\u4e00\u4e0b|\u4e0b)?/iu.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  return extractNaturalReadPath(text) !== null;
 }
 
 export function hasModelSynthesisIntent(text: string): boolean {
@@ -1790,9 +1795,10 @@ export function sanitizeDeferredToolPrimaryText(
       : `\u5df2\u53d1\u73b0 ${count} \u4e2a\u6269\u5c55\u5de5\u5177\u3002`;
   }
   if (options.dispatchKind === "ExecuteExtraTool" && options.ok) {
+    const target = extractDeferredToolTarget(rawText);
     return language === "en-US"
-      ? "Extension tool finished."
-      : "\u6269\u5c55\u5de5\u5177\u8c03\u7528\u5b8c\u6210\u3002";
+      ? `Extension tool finished${target ? `: ${target}` : ""}.`
+      : `\u6269\u5c55\u5de5\u5177\u8c03\u7528\u5b8c\u6210${target ? `\uff1a${target}` : ""}\u3002`;
   }
   // \u5931\u8d25\uff1a\u53bb\u6389\u524d\u7f00\u5b57\u9762\uff0c\u53ea\u4fdd\u7559\u53ef\u8bfb\u539f\u56e0\u3002raw text \u4ecd\u5199\u5165 tool_result store\u3002
   const reason = stripDeferredInternalTokens(rawText);
@@ -1804,6 +1810,14 @@ export function sanitizeDeferredToolPrimaryText(
 function extractMatchedCount(text: string): number {
   const m = /matched\s+(\d+)/iu.exec(text);
   return m?.[1] ? Number.parseInt(m[1], 10) : 0;
+}
+
+function extractDeferredToolTarget(text: string): string | undefined {
+  const match = /^ExecuteExtraTool\(([^)]+)\)\s+/iu.exec(text.trim());
+  if (!match?.[1]) return undefined;
+  const raw = match[1].trim();
+  const parts = raw.split(":").filter(Boolean);
+  return parts.at(-1) ?? raw;
 }
 
 function stripDeferredInternalTokens(text: string): string {

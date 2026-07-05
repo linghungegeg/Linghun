@@ -315,16 +315,16 @@ export function createShellViewModel(
     const hasActiveRequestActivity = isActiveRequestActivityPhase(activeRequestPhase);
     const staleProviderFailureBlockIds = new Set<string>();
     const staleCompactBoundaryBlockIds = new Set<string>();
+    const activeCompactBoundaryBlockIds = new Set<string>();
     let latestProviderFailureBlockId: string | undefined;
-    let latestCompactBoundaryBlockId: string | undefined;
     for (const block of allOutputBlocks) {
       if (block.messageKind === "compact_boundary") {
-        latestCompactBoundaryBlockId = block.id;
+        activeCompactBoundaryBlockIds.add(block.id);
         continue;
       }
-      if (latestCompactBoundaryBlockId && isCompactBoundarySupersededBy(block)) {
-        staleCompactBoundaryBlockIds.add(latestCompactBoundaryBlockId);
-        latestCompactBoundaryBlockId = undefined;
+      if (activeCompactBoundaryBlockIds.size > 0 && isCompactBoundarySupersededBy(block)) {
+        for (const id of activeCompactBoundaryBlockIds) staleCompactBoundaryBlockIds.add(id);
+        activeCompactBoundaryBlockIds.clear();
       }
       if (isProviderFailureOutputBlock(block, language)) {
         latestProviderFailureBlockId = block.id;
