@@ -237,6 +237,7 @@ const SOURCE_PACK_MAX_LIMIT = 12;
 const SOURCE_PACK_CONTEXT_LINES = 8;
 const SOURCE_PACK_MAX_TERMS = 6;
 const BASH_PREVIEW_LIMIT = 30_000;
+const BASH_OUTPUT_TRUNCATION_NOTICE = "\n...（输出已截断，完整日志见 fullOutputPath）";
 const BASH_TIMEOUT_MS = 120_000;
 // Removed: headless auto-background is unsafe (foreground-to-background transition unreliable)
 const MAX_TODO_ITEMS = 100;
@@ -1383,10 +1384,13 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   const diagnostics = createBashOutcomeDiagnostics(result.outcome);
   const fullText = rawFullText;
   await writeFile(fullOutputPath, fullText, "utf8");
-  const truncated = fullText.length > BASH_PREVIEW_LIMIT;
+  const truncated = sanitizedShellOutput.length > BASH_PREVIEW_LIMIT;
   const preview = truncated
-    ? `${fullText.slice(0, BASH_PREVIEW_LIMIT)}\n...（输出已截断，完整日志见 fullOutputPath）`
-    : fullText;
+    ? `${sanitizedShellOutput.slice(
+        0,
+        Math.max(0, BASH_PREVIEW_LIMIT - BASH_OUTPUT_TRUNCATION_NOTICE.length),
+      )}${BASH_OUTPUT_TRUNCATION_NOTICE}`
+    : sanitizedShellOutput;
   const details = createBashDetails(fullOutputPath, fullText);
   const data =
     adapted.adapter === "native"

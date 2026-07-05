@@ -97,8 +97,9 @@ describe("Bash background execution (Stage 7+8)", () => {
     );
 
     expect(result.output.data).not.toHaveProperty("backgroundTaskId");
-    expect(result.output.text).toContain("exit code 0");
     expect(result.output.text).toContain("no_auto_bg");
+    expect(result.output.text).not.toContain("exit code 0");
+    expect(result.output.fullOutputPath).toBeTruthy();
     expect(completions).toHaveLength(0);
   });
 

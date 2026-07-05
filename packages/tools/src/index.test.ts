@@ -132,8 +132,10 @@ describe("Phase 05 core tools", () => {
     expect(todoAdd.output.data).toMatchObject({ createdId: "1" });
     expect(context.todos[0]?.status).toBe("completed");
     expect(context.todos[0]?.evidence).toBe("测试通过");
-    expect(bash.output.text).toContain("exit code 0");
     expect(bash.output.fullOutputPath).toBeTruthy();
+    expect(bash.output.text).toMatch(/^v\d+\./u);
+    expect(bash.output.text).not.toContain("exit code 0");
+    expect(await readFile(String(bash.output.fullOutputPath), "utf8")).toContain("exit code 0");
     expect(diff.output.text).toContain("sample.txt");
   });
 
