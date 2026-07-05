@@ -258,10 +258,16 @@ export function injectDeepCompactSummary(
     role: "user",
     content: summary,
   };
-  if (messages[0]?.role === "system") {
-    return [messages[0], summaryMessage, ...messages.slice(1)];
-  }
-  return [summaryMessage, ...messages];
+  return insertAfterLeadingSystemMessages(messages, summaryMessage);
+}
+
+export function insertAfterLeadingSystemMessages(
+  messages: ModelMessage[],
+  message: ModelMessage,
+): ModelMessage[] {
+  let index = 0;
+  while (messages[index]?.role === "system") index += 1;
+  return [...messages.slice(0, index), message, ...messages.slice(index)];
 }
 
 export function createDeepCompactPacket(input: {

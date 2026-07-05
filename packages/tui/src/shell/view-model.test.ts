@@ -7495,6 +7495,27 @@ describe("TaskSuggestionBar executable state", () => {
     expect(view.blocks.some((block) => block.messageKind === "compact_boundary")).toBe(false);
   });
 
+  it("hides compact boundary during submitted fallback activity", () => {
+    const view = createShellViewModel(createContext({ language: "zh-CN" }), {
+      width: 80,
+      viewMode: "pending",
+      submitted: true,
+      outputBlocks: [
+        {
+          id: "compact-1",
+          kind: "details",
+          status: "info",
+          title: "对话已压缩 · 释放约 74K 字符 (10%)",
+          summary: "",
+          messageKind: "compact_boundary",
+        },
+      ],
+    });
+
+    expect(view.activity?.text).toBe("提交请求…");
+    expect(view.blocks.some((block) => block.messageKind === "compact_boundary")).toBe(false);
+  });
+
   it("hides compact boundary after later transcript progress", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,

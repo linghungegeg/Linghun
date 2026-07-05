@@ -8,6 +8,7 @@ import { getContextWindowForModel } from "./context-window-runtime.js";
 import {
   type DeepCompactRuntimeDeps,
   injectDeepCompactSummary,
+  insertAfterLeadingSystemMessages,
   maybeRunDeepCompactBeforeProvider,
 } from "./deep-compact-runtime.js";
 import { createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
@@ -464,10 +465,7 @@ function injectCompactProjectionMessage(
     role: "user",
     content: `[Context compact boundary ${projection.boundaryId}]\n${projection.summary}`,
   };
-  if (messages[0]?.role === "system") {
-    return [messages[0], summaryMessage, ...messages.slice(1)];
-  }
-  return [summaryMessage, ...messages];
+  return insertAfterLeadingSystemMessages(messages, summaryMessage);
 }
 
 async function appendCompactProjectionEvents(

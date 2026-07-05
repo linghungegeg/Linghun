@@ -313,6 +313,7 @@ export function createShellViewModel(
     const hasActiveProviderFailure = Boolean(context.lastProviderFailure);
     const activeRequestPhase = (context as { requestActivityPhase?: string }).requestActivityPhase;
     const hasActiveRequestActivity = isActiveRequestActivityPhase(activeRequestPhase);
+    const hasActiveTaskActivity = isActiveTaskActivity(effectiveActivity);
     const staleProviderFailureBlockIds = new Set<string>();
     const staleCompactBoundaryBlockIds = new Set<string>();
     const activeCompactBoundaryBlockIds = new Set<string>();
@@ -346,7 +347,7 @@ export function createShellViewModel(
       }
       if (
         b.messageKind === "compact_boundary" &&
-        (hasActiveRequestActivity || staleCompactBoundaryBlockIds.has(b.id))
+        (hasActiveRequestActivity || hasActiveTaskActivity || staleCompactBoundaryBlockIds.has(b.id))
       ) {
         return false;
       }
@@ -1033,18 +1034,20 @@ function computeComposerBusy(args: {
       .activeAbortController,
   );
   if (context.pendingLocalApproval) return true;
+  if (isActiveTaskActivity(activity)) return true;
+  if (submitted) return true;
+  if (hasActiveAbort) return true;
+  return false;
+}
+
+function isActiveTaskActivity(activity: TaskActivityView | undefined): boolean {
   const phase = activity?.phase;
-  if (
+  return (
     phase === "thinking" ||
     phase === "tool_running" ||
     phase === "continuing" ||
     phase === "permission_waiting"
-  ) {
-    return true;
-  }
-  if (submitted) return true;
-  if (hasActiveAbort) return true;
-  return false;
+  );
 }
 
 function withPermissionActions(
