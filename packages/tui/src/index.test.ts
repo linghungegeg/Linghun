@@ -20758,6 +20758,84 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
+  it("normalizes cache-inclusive OpenAI-compatible usage before computing hit rate", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+
+    const deepSeekSession = await store.create({ model: "deepseek-chat" });
+    const deepSeekContext = await createTestContext(project, store, deepSeekSession);
+    const deepSeekStats = recordModelUsage(deepSeekContext, {
+      inputTokens: 30011,
+      outputTokens: 190,
+      totalTokens: 30201,
+      cacheReadTokens: 19904,
+      cacheWriteTokens: 0,
+      endpoint: "/v1/chat/completions",
+      rawUsage: {
+        prompt_tokens: 30011,
+        completion_tokens: 190,
+        total_tokens: 30201,
+        prompt_tokens_details: { cached_tokens: 19904 },
+      },
+    });
+
+    expect(deepSeekStats.provider).toBe("deepseek");
+    expect(deepSeekStats.inputTokens).toBe(10107);
+    expect(deepSeekStats.hitRate).toBeCloseTo(19904 / 30011);
+    expect(deepSeekContext.roleUsage[0]?.inputTokens).toBe(10107);
+    expect(deepSeekContext.roleUsage[0]?.cacheReadTokens).toBe(19904);
+
+    const openAiSession = await store.create({ model: "gpt-4.1" });
+    const openAiContext = await createTestContext(project, store, openAiSession, {
+      ...defaultConfig,
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          apiKey: "test-openai-key",
+          baseUrl: "https://example.test/v1",
+          model: "gpt-4.1",
+          endpointProfile: "responses",
+        },
+      },
+    });
+    const responsesStats = recordModelUsage(openAiContext, {
+      inputTokens: 1000,
+      outputTokens: 20,
+      totalTokens: 1020,
+      cacheReadTokens: 800,
+      cacheWriteTokens: 0,
+      endpoint: "/v1/responses",
+      rawUsage: {
+        input_tokens: 1000,
+        output_tokens: 20,
+        total_tokens: 1020,
+        input_tokens_details: { cached_tokens: 800 },
+      },
+    });
+
+    expect(responsesStats.provider).toBe("openai-compatible");
+    expect(responsesStats.inputTokens).toBe(200);
+    expect(responsesStats.hitRate).toBe(0.8);
+
+    const anthropicStats = recordModelUsage(openAiContext, {
+      inputTokens: 1000,
+      outputTokens: 20,
+      totalTokens: 1020,
+      cacheReadTokens: 800,
+      cacheWriteTokens: 0,
+      endpoint: "/v1/messages",
+      rawUsage: {
+        input_tokens: 1000,
+        output_tokens: 20,
+        cache_read_input_tokens: 800,
+      },
+    });
+
+    expect(anthropicStats.inputTokens).toBe(1000);
+    expect(anthropicStats.hitRate).toBeCloseTo(800 / 1800);
+  });
+
   it("shows cache status, break-cache status, usage, and endpoint stats conservatively", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

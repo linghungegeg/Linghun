@@ -8,7 +8,7 @@ export function formatUsage(context: TuiContext): string {
   const totalEstimatedCny = sumRoleUsageEstimatedCny(context);
   const latest = context.cache.history.at(-1);
   return [
-    "Usage（本会话原始 token/cache usage）",
+    "Usage（本会话归一化 token/cache usage；raw usage 保留在记录中）",
     `- input tokens: ${totals.inputTokens}`,
     `- output tokens: ${totals.outputTokens}`,
     `- cache read tokens: ${totals.cacheReadTokens}`,

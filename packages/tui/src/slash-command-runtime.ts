@@ -3008,6 +3008,7 @@ export function addRoleUsage(
   inputTokens: number,
   outputTokens: number,
   contributionSummary = "role contribution recorded",
+  cacheTokens: { cacheReadTokens?: number; cacheWriteTokens?: number } = {},
 ): void {
   const latestDecision = context.routeDecisions.find(
     (decision) =>
@@ -3022,9 +3023,13 @@ export function addRoleUsage(
       usage.model === (route.primaryModel || "unconfigured"),
   );
   const estimatedCny = calculateEstimatedCny(route.primaryModel, inputTokens, outputTokens);
+  const cacheReadTokens = cacheTokens.cacheReadTokens ?? 0;
+  const cacheWriteTokens = cacheTokens.cacheWriteTokens ?? 0;
   if (existing) {
     existing.inputTokens += inputTokens;
     existing.outputTokens += outputTokens;
+    existing.cacheReadTokens += cacheReadTokens;
+    existing.cacheWriteTokens += cacheWriteTokens;
     existing.estimatedCny = sumEstimatedCny(existing.estimatedCny, estimatedCny);
     existing.fallbackUsed = existing.fallbackUsed || Boolean(latestDecision?.fallbackUsed);
     existing.budgetStop = existing.budgetStop || Boolean(latestDecision?.budgetStop);
@@ -3037,8 +3042,8 @@ export function addRoleUsage(
     model: route.primaryModel || "unconfigured",
     inputTokens,
     outputTokens,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
+    cacheReadTokens,
+    cacheWriteTokens,
     estimatedCny,
     createdAt: new Date().toISOString(),
     fallbackUsed: Boolean(latestDecision?.fallbackUsed),

@@ -54,7 +54,9 @@ describe("usage-stats-presenter estimated cost", () => {
 
   it("/usage and /stats include estimated cost without claiming billing", () => {
     const context = createUsageContext();
-    expect(formatUsage(context as never)).toContain("estimated cost: CNY 0.0100");
+    const usage = formatUsage(context as never);
+    expect(usage).toContain("归一化 token/cache usage");
+    expect(usage).toContain("estimated cost: CNY 0.0100");
     const stats = formatStats([], context as never);
     expect(stats).toContain("cost: estimated CNY 0.0100");
     expect(stats).toContain("not billing");

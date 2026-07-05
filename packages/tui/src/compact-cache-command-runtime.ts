@@ -522,18 +522,27 @@ export async function executeBreakCacheMutation(
 
 export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheTurnStats {
   const executorRoute = getRoleRoute(context.config, "executor");
-  addRoleUsage(context, "executor", executorRoute, usage.inputTokens, usage.outputTokens);
   const freshness = getCurrentFreshness(context);
   const changedKeys = diffFreshness(context.cache.lastFreshness, freshness);
   const cacheReadTokens = usage.cacheReadTokens ?? 0;
   const cacheWriteTokensSource = classifyCacheWriteTokensSource(usage);
   const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
   const provider = getRuntimeStatusProvider(context);
+  const inputTokens = normalizeCacheInputTokens(usage, provider, cacheReadTokens, cacheWriteTokens);
+  addRoleUsage(
+    context,
+    "executor",
+    executorRoute,
+    inputTokens,
+    usage.outputTokens,
+    "provider usage",
+    { cacheReadTokens, cacheWriteTokens },
+  );
   const stats: CacheTurnStats = {
     turn: context.cache.nextTurn,
     timestamp: Date.now(),
     hitRate: computePromptCacheHitRate({
-      inputTokens: usage.inputTokens,
+      inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens,
       cacheWriteTokens,
@@ -543,7 +552,7 @@ export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheT
     cacheReadTokens,
     cacheWriteTokens,
     cacheWriteTokensSource,
-    inputTokens: usage.inputTokens,
+    inputTokens,
     outputTokens: usage.outputTokens,
     model: context.model,
     provider,
@@ -561,6 +570,30 @@ export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheT
   context.cache.history.push(stats);
   trimCacheHistory(context.cache);
   return stats;
+}
+
+function normalizeCacheInputTokens(
+  usage: ModelUsage,
+  provider: string,
+  cacheReadTokens: number,
+  cacheWriteTokens: number,
+): number {
+  const inputTokens = Number.isFinite(usage.inputTokens) ? Math.max(0, usage.inputTokens) : 0;
+  if (!isCacheInclusiveOpenAiUsage(usage, provider)) return inputTokens;
+  return Math.max(0, inputTokens - cacheReadTokens - cacheWriteTokens);
+}
+
+function isCacheInclusiveOpenAiUsage(usage: ModelUsage, provider: string): boolean {
+  const endpoint = usage.endpoint ?? CHAT_COMPLETIONS_ENDPOINT;
+  if (endpoint === "/v1/messages") return false;
+  if (provider !== "deepseek" && provider !== "openai-compatible") return false;
+  if (!usage.rawUsage || typeof usage.rawUsage !== "object") return false;
+
+  const rawUsage = usage.rawUsage as Record<string, unknown>;
+  return (
+    typeof rawUsage.prompt_tokens === "number" ||
+    (typeof rawUsage.input_tokens === "number" && rawUsage.input_tokens_details !== undefined)
+  );
 }
 
 export async function appendUsageEvents(
