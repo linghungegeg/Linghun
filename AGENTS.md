@@ -9,7 +9,7 @@ repository.
 - Do not bundle unrelated cleanup, refactors, dependency changes, or formatting.
 - Prefer existing project patterns over new abstractions.
 - Use `rg` / `rg --files` first when locating code.
-- Use `apply_patch` for manual file edits.
+- For manual file edits, use the editing mechanism supported by the current runtime. On Windows/PowerShell, do not use shell `apply_patch`, heredocs, `cat` redirects, or `tee` redirects for writes; use structured edit/write tools instead.
 - Do not delete, rename, or move files unless the task explicitly requires it.
 - Do not claim a fix is complete without running the most relevant verification.
 - If verification cannot be run, say why and describe the remaining risk.
