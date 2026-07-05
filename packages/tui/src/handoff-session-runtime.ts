@@ -322,6 +322,12 @@ function isCompactProjection(value: unknown): value is CompactProjection {
     typeof value.boundaryId === "string" &&
     typeof value.createdAt === "string" &&
     typeof value.summary === "string" &&
+    (value.windowId === undefined || typeof value.windowId === "string") &&
+    (value.replacementKind === undefined || value.replacementKind === "provider-visible") &&
+    (value.replacedMessageCount === undefined || typeof value.replacedMessageCount === "number") &&
+    (value.replacementMessageCount === undefined || typeof value.replacementMessageCount === "number") &&
+    (value.terminalVisibleBeforeCount === undefined || typeof value.terminalVisibleBeforeCount === "number") &&
+    (value.terminalVisibleAfterCount === undefined || typeof value.terminalVisibleAfterCount === "number") &&
     typeof value.pressureRatio === "number" &&
     typeof value.preCompactChars === "number" &&
     typeof value.postCompactChars === "number" &&

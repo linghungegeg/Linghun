@@ -541,7 +541,7 @@ export function __testCreateShellBlockOutput(
   // unsupported first-pass final answer 不残留于 streaming block / lastFullOutput。
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
-  compactOutputMemory(): Promise<void>;
+  compactOutputMemory(options?: { projectMainScreen?: boolean }): Promise<{ beforeCount: number; afterCount: number }>;
 } {
   return createShellBlockOutputForTest(context, blocks, onWrite, terminalFirstAssistantSink);
 }

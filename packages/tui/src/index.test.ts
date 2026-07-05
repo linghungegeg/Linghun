@@ -164,7 +164,8 @@ import {
 import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
-import { createOutputBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
+import { findTranscriptSourceCell } from "./shell/models/transcript-source.js";
+import { createOutputBlock, createCompactBoundaryBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
 import {
   type TerminalReadinessView,
   createReadinessItems,
@@ -27888,6 +27889,32 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     if (!compacted?.fullText) throw new Error("missing compacted streaming block text");
     expect(compacted.fullText.length).toBeLessThan(3_000);
     expect(compacted.fullText).toMatch(/compacted-tui-block-output|persisted-tui-block-output/);
+  });
+
+  it("projects compacted main-screen blocks while preserving transcript source", async () => {
+    const { createShellBlockOutputForTest } = await import("../src/tui-output-surface.js");
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 30 }, (_, i) => ({
+      id: `visible-${i}`,
+      kind: "details",
+      status: "info",
+      title: `visible block ${i}`,
+      summary: `visible block ${i}`,
+      fullText: `visible block ${i}`,
+      messageKind: "assistant_text",
+    }));
+    const ctx = makeFakeContext();
+    const output = createShellBlockOutputForTest(ctx, blocks);
+    const firstId = blocks[0]?.id;
+    expect(firstId).toBeTruthy();
+    blocks.push(createCompactBoundaryBlock(20_000, 4_000, "zh-CN"));
+
+    const counts = await output.compactOutputMemory({ projectMainScreen: true });
+
+    expect(counts.beforeCount).toBeGreaterThan(counts.afterCount);
+    expect(blocks).toHaveLength(13);
+    expect(blocks[0]?.messageKind).toBe("compact_boundary");
+    expect(ctx.transcriptSource?.cells.length).toBeGreaterThanOrEqual(30);
+    expect(findTranscriptSourceCell(ctx.transcriptSource!, firstId!)).toBeTruthy();
   });
 
   it("Phase 7.17: final assistant summary 首行超过 MAX_STREAMING_SUMMARY_CHARS 时被截断", async () => {

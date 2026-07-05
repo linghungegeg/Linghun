@@ -515,7 +515,9 @@ export type TuiContext = {
    */
   shellRerender?: () => void;
   /** Optional Ink output memory cleanup hook, invoked after context compaction succeeds. */
-  compactOutputMemory?: () => Promise<void> | void;
+  compactOutputMemory?: (options?: {
+    projectMainScreen?: boolean;
+  }) => Promise<{ beforeCount: number; afterCount: number }> | { beforeCount: number; afterCount: number } | void;
   /**
    * D.13Q-UX Task Surface — 通用 CommandPanel 状态。高级 slash 命令的结果
    * 由命令处理器 set 进这里，view-model 透传给 view.commandPanel。

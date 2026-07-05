@@ -221,7 +221,6 @@ export async function prepareMessagesForProviderPreflight(input: {
       return { blocked: true, messages: budgeted, message };
     }
     recordCompactBoundary(input.context, compacted.boundary);
-    input.context.cache.compactProjection = projection;
     input.context.cache.compactFailure = undefined;
     input.context.cache.compactCooldownUntil = undefined;
     input.deps.refreshCacheFreshness(input.context);
@@ -232,6 +231,14 @@ export async function prepareMessagesForProviderPreflight(input: {
         input.context.language,
       ),
     );
+    const terminalProjection = await input.context.compactOutputMemory?.({
+      projectMainScreen: true,
+    });
+    if (terminalProjection) {
+      projection.terminalVisibleBeforeCount = terminalProjection.beforeCount;
+      projection.terminalVisibleAfterCount = terminalProjection.afterCount;
+    }
+    input.context.cache.compactProjection = projection;
     await appendCompactProjectionEvents(input.context, input.sessionId, projection, input.deps);
     return { blocked: false, messages: providerMessages };
   } catch (error) {
@@ -491,6 +498,10 @@ function createCompactProjection(
     boundaryId: input.boundary.id,
     createdAt: input.boundary.createdAt,
     summary,
+    windowId: input.boundary.id,
+    replacementKind: "provider-visible",
+    replacedMessageCount: removedMessages,
+    replacementMessageCount: input.compactedMessages.length,
     pressureRatio: Number((preCompactChars / Math.max(1, input.contextMaxChars)).toFixed(3)),
     preCompactChars,
     postCompactChars,
@@ -538,7 +549,7 @@ async function appendCompactProjectionEvents(
   );
   const evidence = createEvidenceRecord(
     "user_provided",
-    `compact boundary ${projection.boundaryId}; scope provider-visible recent context projection; pressure ${projection.pressureRatio}; tool pairing safe ${projection.toolPairingSafe ? "yes" : "no"}`,
+    `compact boundary ${projection.boundaryId}; scope provider-visible recent context projection; pressure ${projection.pressureRatio}; replacement ${projection.replacedMessageCount ?? "unknown"}->${projection.replacementMessageCount ?? "unknown"}; visible ${projection.terminalVisibleBeforeCount ?? "unknown"}->${projection.terminalVisibleAfterCount ?? "unknown"}; tool pairing safe ${projection.toolPairingSafe ? "yes" : "no"}`,
     `compact:${projection.boundaryId}`,
     ["context_compact_boundary"],
   );

@@ -35,6 +35,7 @@ import { stripAnsi, writeLine } from "./startup-runtime.js";
 
 const MAX_OUTPUT_BLOCKS = 80;
 const PRESERVE_RECENT_EPHEMERAL_BLOCKS = 12;
+const POST_COMPACT_VISIBLE_BLOCKS = 12;
 const MAX_LAST_FULL_OUTPUT_CHARS = 12_000;
 const MAX_BLOCK_FULL_TEXT_CHARS = 12_000;
 const LAST_FULL_OUTPUT_PREVIEW_CHARS = 2_000;
@@ -109,7 +110,8 @@ export class ShellBlockOutput extends Writable {
    * 否则只会留下最后一片 chunk 而非完整文本。
    */
   private assistantBlockId: string | undefined;
-  private compactOutputMemoryQueue: Promise<void> = Promise.resolve();
+  private compactOutputMemoryQueue: Promise<{ beforeCount: number; afterCount: number }> =
+    Promise.resolve({ beforeCount: 0, afterCount: 0 });
   private assistantStreamText = "";
   private assistantPreviewText = "";
   private assistantStreamState: AssistantStreamDisplayState | undefined;
@@ -488,9 +490,11 @@ export class ShellBlockOutput extends Writable {
     this.onWrite();
   }
 
-  async compactOutputMemory(): Promise<void> {
+  async compactOutputMemory(
+    options: { projectMainScreen?: boolean } = {},
+  ): Promise<{ beforeCount: number; afterCount: number }> {
     this.compactOutputMemoryQueue = this.compactOutputMemoryQueue.then(() =>
-      this.compactOutputMemoryOnce(),
+      this.compactOutputMemoryOnce(options),
     );
     return this.compactOutputMemoryQueue;
   }
@@ -631,7 +635,9 @@ export class ShellBlockOutput extends Writable {
     }
   }
 
-  private async compactOutputMemoryOnce(): Promise<void> {
+  private async compactOutputMemoryOnce(
+    options: { projectMainScreen?: boolean } = {},
+  ): Promise<{ beforeCount: number; afterCount: number }> {
     trimOutputBlocks(this.blocks);
     try {
       const compactedBlocks = await compactBlockFullText(this.context, this.blocks);
@@ -642,6 +648,10 @@ export class ShellBlockOutput extends Writable {
       for (const block of compactedBlocks) this.appendTranscriptSourceBlock(block);
       compactLastFullOutputInMemory(this.context, error);
     }
+    if (options.projectMainScreen) {
+      return projectMainScreenAfterCompact(this.context, this.blocks);
+    }
+    return { beforeCount: this.blocks.length, afterCount: this.blocks.length };
   }
 
   private stageTerminalFirstAssistantText(text: string): string | undefined {
@@ -701,6 +711,33 @@ export class ShellBlockOutput extends Writable {
     });
   }
 
+}
+
+function projectMainScreenAfterCompact(
+  context: TuiContext,
+  blocks: ProductBlockViewModel[],
+): { beforeCount: number; afterCount: number } {
+  const beforeCount = blocks.length;
+  if (beforeCount === 0) return { beforeCount, afterCount: 0 };
+  context.transcriptSource ??= createTranscriptSource();
+  for (const block of blocks) {
+    const kind = transcriptSourceKindForBlock(block);
+    if (!kind) continue;
+    upsertTranscriptSourceCell(context.transcriptSource, {
+      id: block.id,
+      kind,
+      block,
+      rawText: transcriptSourceRawTextForBlock(block),
+    });
+  }
+  const boundaries = blocks.filter((block) => block.messageKind === "compact_boundary");
+  const latestBoundary = boundaries.at(-1);
+  const recent = blocks
+    .filter((block) => block !== latestBoundary)
+    .slice(-POST_COMPACT_VISIBLE_BLOCKS);
+  const selected = latestBoundary ? [latestBoundary, ...recent] : recent;
+  blocks.splice(0, blocks.length, ...selected);
+  return { beforeCount, afterCount: blocks.length };
 }
 
 function trimOutputBlocks(blocks: ProductBlockViewModel[]): void {
@@ -1319,7 +1356,7 @@ export function createShellBlockOutputForTest(
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
   writeLocalCommandOutputLine(text: string): void;
-  compactOutputMemory(): Promise<void>;
+  compactOutputMemory(options?: { projectMainScreen?: boolean }): Promise<{ beforeCount: number; afterCount: number }>;
 } {
   return new ShellBlockOutput(context, blocks, onWrite, terminalFirstAssistantSink);
 }

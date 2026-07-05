@@ -220,6 +220,12 @@ export type CompactProjection = {
   boundaryId: string;
   createdAt: string;
   summary: string;
+  windowId?: string;
+  replacementKind?: "provider-visible";
+  replacedMessageCount?: number;
+  replacementMessageCount?: number;
+  terminalVisibleBeforeCount?: number;
+  terminalVisibleAfterCount?: number;
   pressureRatio: number;
   preCompactChars: number;
   postCompactChars: number;

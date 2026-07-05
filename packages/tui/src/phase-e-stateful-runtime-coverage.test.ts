@@ -172,6 +172,11 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       getPostCompactTargetChars(context, runtime()),
     );
     expect(context.cache.compactProjection?.savingsRatio).toBeGreaterThan(0);
+    expect(context.cache.compactProjection?.replacementKind).toBe("provider-visible");
+    expect(context.cache.compactProjection?.replacedMessageCount).toBe(
+      overLimit.length - (compacted.blocked ? 0 : compacted.messages.length - 1),
+    );
+    expect(context.cache.compactProjection?.replacementMessageCount).toBeGreaterThan(0);
     expect(context.cache.compactProjection?.summary).toContain("target budget tokens");
   });
 
