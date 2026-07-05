@@ -158,8 +158,10 @@ export type DiffSummary = {
 export type PatchHunk = {
   oldStart: number;
   newStart: number;
+  contextBefore?: string[];
   oldLines: string[];
   newLines: string[];
+  contextAfter?: string[];
   oldLineCount: number;
   newLineCount: number;
   truncated?: boolean;
@@ -624,11 +626,12 @@ function normalizeToolOutput(output: ToolOutput, tool: ToolDefinition): ToolOutp
     return output;
   }
   const preview = `${output.text.slice(0, tool.lifecycle.maxResultSizeChars)}\n...（输出已截断，完整内容见 details/fullOutputPath 或 transcript）`;
+  const details = output.truncated ? output.details : output.details ?? output.text;
   return {
     ...output,
     text: preview,
     preview: output.preview ?? preview,
-    details: output.details ?? output.text,
+    details,
     truncated: true,
   };
 }
@@ -888,15 +891,20 @@ async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOut
   const offset = Math.max(input.offset ?? 0, 0);
   const limit = Math.max(input.limit ?? DEFAULT_LIMIT, 1);
   const selected = lines.slice(offset, offset + limit);
-  const truncated = offset > 0 || offset + limit < lines.length;
+  const windowTruncated = offset > 0 || offset + limit < lines.length;
   const textLines = selected.map((line, index) => `${offset + index + 1}\t${line}`);
-  if (truncated) {
-    textLines.push(
-      `...（只显示读取窗口：选中 ${selected.length} 行 / 全文 ${lines.length} 行；不是完整文件）`,
-    );
+  let text = textLines.join("\n");
+  const budgetTruncated = text.length > DEFAULT_TOOL_TEXT_LIMIT;
+  if (windowTruncated || budgetTruncated) {
+    const marker = `...（只显示读取窗口：选中 ${selected.length} 行 / 全文 ${lines.length} 行；不是完整文件）`;
+    if (budgetTruncated) {
+      text = `${text.slice(0, DEFAULT_TOOL_TEXT_LIMIT - marker.length - 1)}\n${marker}`;
+    } else {
+      text = `${text}\n${marker}`;
+    }
   }
   return {
-    text: textLines.join("\n"),
+    text,
     data: {
       path: relativePath(context.workspaceRoot, filePath),
       lines: selected.length,
@@ -907,7 +915,7 @@ async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOut
       hash: hashText(content),
       newline: detectNewlineStyle(content),
     },
-    truncated,
+    truncated: windowTruncated || budgetTruncated,
   };
 }
 
@@ -2745,6 +2753,7 @@ function createEditOutput(
 }
 
 const STRUCTURED_PATCH_LINE_LIMIT = 120;
+const STRUCTURED_PATCH_CONTEXT_LINES = 3;
 
 function createStructuredPatch(path: string, before: string, after: string): StructuredPatch {
   const beforeLines = splitPatchLines(before);
@@ -2780,12 +2789,22 @@ function createPatchHunk(beforeLines: string[], afterLines: string[]): PatchHunk
   const oldLines = beforeLines.slice(prefix, beforeLines.length - suffix);
   const newLines = afterLines.slice(prefix, afterLines.length - suffix);
   if (oldLines.length === 0 && newLines.length === 0) return undefined;
+  const contextBefore = beforeLines.slice(
+    Math.max(0, prefix - STRUCTURED_PATCH_CONTEXT_LINES),
+    prefix,
+  );
+  const contextAfter = beforeLines.slice(
+    beforeLines.length - suffix,
+    Math.min(beforeLines.length - suffix + STRUCTURED_PATCH_CONTEXT_LINES, beforeLines.length),
+  );
 
   return {
     oldStart: oldLines.length > 0 ? prefix + 1 : prefix,
     newStart: newLines.length > 0 ? prefix + 1 : prefix,
+    contextBefore,
     oldLines: oldLines.slice(0, STRUCTURED_PATCH_LINE_LIMIT),
     newLines: newLines.slice(0, STRUCTURED_PATCH_LINE_LIMIT),
+    contextAfter,
     oldLineCount: oldLines.length,
     newLineCount: newLines.length,
     truncated: oldLines.length > STRUCTURED_PATCH_LINE_LIMIT || newLines.length > STRUCTURED_PATCH_LINE_LIMIT,

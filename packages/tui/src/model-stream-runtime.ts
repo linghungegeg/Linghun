@@ -210,7 +210,7 @@ export type FinalGateEvidenceActionResult =
 const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 16;
 const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 24;
 const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 2;
-const MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES = 2;
+const MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES = 3;
 const SAME_TOOL_FAILURE_RETRY_GUARD_LIMIT = 4;
 const TOOL_FAILURE_NO_TOOL_RECOVERY_PROMPT_LIMIT = 4;
 
@@ -574,10 +574,12 @@ function uniqueArtifactTargets(targets: string[]): string[] {
 
 export function planFinalGateEvidenceGapAction(input: {
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
-  context: Pick<TuiContext, "permissionMode" | "evidence" | "language">;
+  context: Pick<TuiContext, "permissionMode" | "evidence" | "language"> &
+    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision">>;
   userText?: string;
   assistantText?: string;
   retryBudgetRemaining?: boolean;
+  evidenceActionRetryCount?: number;
 }): FinalGateEvidenceGapActionPlan {
   const { result, context } = input;
   const language = context.language;
@@ -597,7 +599,11 @@ export function planFinalGateEvidenceGapAction(input: {
   }
   const gap = classifyFinalGateEvidenceGap(result.unsupportedKinds);
   if (gap === "artifact") {
-    const artifactAction = createArtifactReadonlyEvidenceAction(input.assistantText ?? input.userText ?? "");
+    const artifactAction = createArtifactReadonlyEvidenceAction({
+      text: input.assistantText ?? input.userText ?? "",
+      context,
+      retryCount: input.evidenceActionRetryCount ?? 0,
+    });
     return {
       action: "readonly_check",
       reason: "artifact_gap_readonly",
@@ -778,6 +784,13 @@ async function runFinalGateEvidenceAction(input: {
     continuation,
   );
   await recordModelToolFailureForMetaScheduler(input.context, input.sessionId, result);
+  await recordFinalGateArtifactProbeEvidence({
+    context: input.context,
+    sessionId: input.sessionId,
+    actionPlan: input.actionPlan,
+    toolCall,
+    result,
+  });
   if (result.pendingApproval) {
     return { status: "permission_pending" };
   }
@@ -849,17 +862,13 @@ export function buildEvidenceBackedFinalBoundaryAnswer(
   const evidenceScope = formatEvidenceBoundaryScope(evidence, language);
   if (language === "en-US") {
     return [
-      "Based on the evidence currently recorded, I can only confirm the verified scope below.",
-      `Evidence scope: ${evidenceScope}.`,
-      `Not yet supported by matching evidence: ${missing}.`,
-      "I will not present uncovered completion, verification, runtime, or artifact claims as confirmed facts.",
+      `I can only confirm the scope that has actually been checked so far: ${evidenceScope}.`,
+      `I still do not have matching evidence for ${missing}, so I cannot confirm the full closure yet.`,
     ].join("\n");
   }
   return [
-    "基于当前已记录证据，我只能确认下面这个已验证范围。",
-    `证据范围：${evidenceScope}。`,
-    `尚未被匹配证据支撑：${missing}。`,
-    "未覆盖的完成、验证、运行状态或产物结论不会作为已确认事实展示。",
+    `我只能确认已检查到的范围：${evidenceScope}。`,
+    `还没有拿到能支撑${missing}的匹配证据，所以暂时不能确认完整闭环。`,
   ].join("\n");
 }
 
@@ -1042,21 +1051,156 @@ function hasFreshVerificationAttemptEvidence(evidence: TuiContext["evidence"]): 
   });
 }
 
-function createArtifactReadonlyEvidenceAction(text: string): NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
-  const path = extractLikelyArtifactPath(text);
+function createArtifactReadonlyEvidenceAction(input: {
+  text: string;
+  context: Pick<TuiContext, "evidence"> &
+    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision">>;
+  retryCount: number;
+}): NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
+  const path = extractLikelyArtifactPath(input.text);
   if (path) {
     return {
       toolName: "Read",
       input: { path, limit: 200 },
+      strategy: "artifact_readonly_check",
       summary: `read claimed artifact ${path}`,
+    };
+  }
+  const candidate = collectArtifactProbeCandidatePaths(input.context)
+    .find((item) => !hasArtifactProbeEvidenceForPath(input.context.evidence, item));
+  if (candidate) {
+    return {
+      toolName: "Read",
+      input: { path: candidate, limit: 200 },
+      strategy: "artifact_readonly_check",
+      summary: `read artifact candidate ${candidate}`,
+    };
+  }
+  if (input.retryCount > 0) {
+    return {
+      toolName: "Grep",
+      input: {
+        pattern: "artifact|report|output|generated|created|产物|报告|输出|生成|创建",
+        path: ".",
+        limit: 30,
+      },
+      strategy: "artifact_readonly_check",
+      summary: "grep for likely artifact references",
     };
   }
   return {
     toolName: "Glob",
-    input: { pattern: "**/*.{md,txt,json,log}", path: ".", limit: 20 },
+    input: { pattern: "**/*.{md,txt,json,log,html,csv,xml,yaml,yml,pdf,png,jpg,jpeg,zip}", path: ".", limit: 20 },
     strategy: "artifact_readonly_check",
     summary: "glob for likely report/artifact files",
   };
+}
+
+function collectArtifactProbeCandidatePaths(
+  context: Pick<TuiContext, "evidence"> &
+    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision">>,
+): string[] {
+  const targets =
+    context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
+  const toolChanged = context.tools?.changedFiles ?? [];
+  const mentioned = context.recentlyMentionedFiles ?? [];
+  const evidencePaths = context.evidence.flatMap((item) => [
+    item.outputPath,
+    item.fullOutputPath,
+    item.logPath,
+    ...extractLikelyFilePathsFromText(`${item.summary} ${item.source}`),
+  ]);
+  return uniqueArtifactTargets([
+    ...targets,
+    ...toolChanged,
+    ...mentioned,
+    ...evidencePaths.filter((item): item is string => Boolean(item)),
+  ]).filter((item) => !item.includes("*"));
+}
+
+function hasArtifactProbeEvidenceForPath(evidence: TuiContext["evidence"], path: string): boolean {
+  return evidence.some((item) => {
+    const artifactHint = readEvidenceDataRecord(item, "artifactHint");
+    return (
+      artifactHint?.exists === true &&
+      typeof artifactHint.path === "string" &&
+      pathsReferToSameArtifact(artifactHint.path, path)
+    );
+  });
+}
+
+function extractLikelyFilePathsFromText(text: string): string[] {
+  return Array.from(
+    text.matchAll(
+      /(?:^|[\s"'`：（(])((?:\.{1,2}[\\/]|[A-Za-z]:[\\/]|\/)?[\w .@()-]+(?:[\\/][\w .@()-]+)*\.[A-Za-z0-9._-]+)(?:$|[\s"'`，。；:）)])/giu,
+    ),
+  )
+    .map((match) => match[1]?.trim())
+    .filter((item): item is string => Boolean(item));
+}
+
+async function recordFinalGateArtifactProbeEvidence(input: {
+  context: TuiContext;
+  sessionId: string;
+  actionPlan: FinalGateEvidenceGapActionPlan;
+  toolCall: ModelToolCall;
+  result: ModelToolExecutionResult;
+}): Promise<void> {
+  if (input.actionPlan.reason !== "artifact_gap_readonly") return;
+  if (input.actionPlan.evidenceAction?.strategy !== "artifact_readonly_check") return;
+  if (input.toolCall.name !== "Read" || input.result.ok !== true) return;
+  const path = readToolCallPath(input.toolCall.input);
+  if (!path || !artifactProbeMatchesRequestedTarget(input.context, path)) return;
+  if (hasArtifactProbeEvidenceForPath(input.context.evidence, path)) return;
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `final gate artifact probe: ${path} exists`,
+    "final-gate:artifact-probe",
+    ["artifact", "artifact_exists", "readonly_low_noise_evidence"],
+  );
+  evidence.outputPath = path;
+  evidence.data = { artifactHint: { path, exists: true } };
+  rememberEvidence(input.context, evidence);
+  await input.context.store.appendEvent(input.sessionId, { type: "evidence_record", ...evidence });
+  await appendSystemEvent(
+    input.context,
+    input.sessionId,
+    `final_answer_gap_artifact_probe evidence=${evidence.id} path=${path}`,
+    "info",
+  );
+  if (isMissingArtifactToolFailure(input.context.lastToolFailure)) {
+    input.context.lastToolFailure = undefined;
+    await appendSystemEvent(
+      input.context,
+      input.sessionId,
+      "final_answer_gap_artifact_probe cleared stale missing-artifact tool failure",
+      "info",
+    );
+  }
+}
+
+function artifactProbeMatchesRequestedTarget(context: TuiContext, path: string): boolean {
+  const targets = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
+  if (targets.length === 0) return true;
+  return uniqueArtifactTargets(targets).some((target) => pathsReferToSameArtifact(path, target));
+}
+
+function readToolCallPath(input: unknown): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const record = input as Record<string, unknown>;
+  const value = record.path ?? record.file_path;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function isMissingArtifactToolFailure(
+  failure: TuiContext["lastToolFailure"] | undefined,
+): boolean {
+  return Boolean(
+    failure &&
+      /missing artifact|missing required artifact|no such file|not found|找不到|未找到/iu.test(
+        failure.summary,
+      ),
+  );
 }
 
 function createServiceRuntimeReadonlyEvidenceAction(text: string): NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
@@ -1600,6 +1744,7 @@ export async function sendMessage(
       text.length,
     ].slice(-5);
   }
+  await clearStaleMissingArtifactToolFailure(context, sessionId);
 
   const _tMsInput0 = Date.now();
   const _msInput = createMetaSchedulerInput(context, selectedRuntime, text, false);
@@ -1610,7 +1755,9 @@ export async function sendMessage(
     userText: text,
     engineeringProfile,
     messages: createPolicyContextPressureMessages(runtimeStatus, text),
-    ...(context.lastToolFailure ? { lastToolFailure: context.lastToolFailure } : {}),
+    ...(shouldCarryLastToolFailureIntoScheduler(context)
+      ? { lastToolFailure: context.lastToolFailure }
+      : {}),
     ...(context.lastProviderFailure
       ? {
           providerFailure: {
@@ -2136,6 +2283,7 @@ export async function sendMessage(
               assistantText,
               retryBudgetRemaining:
                 finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+              evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
             });
             await appendSystemEvent(
               context,
@@ -2401,6 +2549,7 @@ export async function sendMessage(
             assistantText,
             retryBudgetRemaining:
               finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+            evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
           });
           await appendSystemEvent(
             context,
@@ -2689,6 +2838,30 @@ function createMetaSchedulerInput(
     trustScore: context.turnContinuity?.trustScore ?? 50,
     totalTurns: context.turnContinuity?.totalTurns ?? 0,
   };
+}
+
+function shouldCarryLastToolFailureIntoScheduler(context: TuiContext): boolean {
+  if (!context.lastToolFailure) return false;
+  if (isMissingArtifactToolFailure(context.lastToolFailure)) {
+    if (hasArtifactEvidence(context)) return false;
+    if (context.turnContinuity?.taskDomainSwitched) return false;
+  }
+  return true;
+}
+
+async function clearStaleMissingArtifactToolFailure(
+  context: TuiContext,
+  sessionId: string,
+): Promise<void> {
+  if (!isMissingArtifactToolFailure(context.lastToolFailure)) return;
+  if (!hasArtifactEvidence(context) && context.turnContinuity?.taskDomainSwitched !== true) return;
+  context.lastToolFailure = undefined;
+  await appendSystemEvent(
+    context,
+    sessionId,
+    "meta_scheduler:cleared_stale_missing_artifact_tool_failure",
+    "info",
+  );
 }
 
 function detectShellFamily(
@@ -3344,6 +3517,7 @@ async function streamFinalModelAnswerWithoutTools(
           assistantText,
           retryBudgetRemaining:
             evidenceActionRetryCount < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+          evidenceActionRetryCount,
         });
         await appendSystemEvent(
           context,
@@ -3908,6 +4082,7 @@ export async function continueModelAfterToolResults(
               assistantText,
               retryBudgetRemaining:
                 finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+              evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
             });
             await appendSystemEvent(
               context,
@@ -4114,6 +4289,7 @@ export async function continueModelAfterToolResults(
               assistantText,
               retryBudgetRemaining:
                 finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+              evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
             });
             await appendSystemEvent(
               context,

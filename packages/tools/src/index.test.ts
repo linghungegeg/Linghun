@@ -1315,6 +1315,27 @@ describe("Phase 05 core tools", () => {
     expect(edit.output.summary).toContain("+1 -1");
     expect(edit.output.details).toContain("read protection: enabled");
     expect(edit.output.details).not.toContain("readGuard");
+    expect(edit.output.data).toMatchObject({
+      structuredPatch: {
+        files: [
+          {
+            path: "sample.txt",
+            hunks: [
+              {
+                oldStart: 2,
+                newStart: 2,
+                contextBefore: ["alpha"],
+                oldLines: ["beta"],
+                newLines: ["gamma"],
+                contextAfter: [],
+                oldLineCount: 1,
+                newLineCount: 1,
+              },
+            ],
+          },
+        ],
+      },
+    });
     expect(multi.output.data).toMatchObject({ operation: "MultiEdit", editCount: 2 });
     expect(diff.output.data).toMatchObject({
       changedFiles: ["sample.txt"],
@@ -1322,6 +1343,42 @@ describe("Phase 05 core tools", () => {
       removedLines: 2,
     });
     expect(await readFile(filePath, "utf8")).toBe("ALPHA\nGAMMA\n");
+  });
+
+  it("marks large structured edit hunks as truncated while keeping original line counts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const filePath = join(project, "large.txt");
+    const before = Array.from({ length: 130 }, (_, index) => `old-${index + 1}`).join("\n");
+    const after = Array.from({ length: 130 }, (_, index) => `new-${index + 1}`).join("\n");
+    await writeFile(filePath, before, "utf8");
+    const context = createToolContext(project);
+    const read = await runTool("Read", { path: "large.txt" }, context);
+    const expectedHash = (read.output.data as { hash: string }).hash;
+
+    const edit = await runTool("Write", { path: "large.txt", content: after, expectedHash }, context);
+
+    expect(edit.output.data).toMatchObject({
+      structuredPatch: {
+        files: [
+          {
+            path: "large.txt",
+            hunks: [
+              {
+                oldStart: 1,
+                newStart: 1,
+                oldLineCount: 130,
+                newLineCount: 130,
+                truncated: true,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const hunk = (edit.output.data as { patchHunks: Array<{ oldLines: string[]; newLines: string[] }> })
+      .patchHunks[0];
+    expect(hunk.oldLines).toHaveLength(120);
+    expect(hunk.newLines).toHaveLength(120);
   });
 
   it("reports Read line counts without counting a trailing newline as an extra content line", async () => {
@@ -1803,9 +1860,10 @@ describe("Phase 05 core tools", () => {
     expect(read.output.truncated).toBe(true);
     expect(read.output.details).toBeUndefined();
     expect(read.output.data).toMatchObject({
-      totalLines: 260,
-      contentLines: 260,
+      totalLines: 1200,
+      contentLines: 1200,
     });
+    expect(read.output.text.length).toBeLessThanOrEqual(50_000);
     expect(read.output.text).toContain("不是完整文件");
   });
 
@@ -1927,7 +1985,7 @@ describe("Phase 05 core tools", () => {
 
     const multiline = adaptShellCommandForPlatform("cat <<EOF\nsecret raw script\nEOF", "win32");
     expect(multiline.adapter).toBe("blocked");
-    expect(multiline.command).toContain("Unsupported POSIX shell syntax");
+    expect(multiline.command).toContain("Unsupported multi-line Unix shell syntax");
     expect(multiline.command).not.toContain("secret raw script");
     expect(multiline.logCommand).not.toContain("secret raw script");
   });

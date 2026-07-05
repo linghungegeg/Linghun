@@ -1872,16 +1872,38 @@ function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] 
   // D.13L：启用 prompt cache 时在稳定 tool schema block 末尾挂 cache_control，
   // 让 Anthropic 同时缓存长 system prefix 与稳定工具定义，减少大工具集反复写入。
   const tools = request.tools ?? [];
-  const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
-  const lastToolIndex = sortedTools.length - 1;
+  const { stableTools, dynamicTools } = partitionAnthropicCacheTools(tools);
+  const sortedTools = [...stableTools, ...dynamicTools];
+  const cacheControlToolIndex = stableTools.length - 1;
   return sortedTools.map((tool, index) => ({
     name: tool.name,
     description: tool.description,
     input_schema: tool.inputSchema,
-    ...(request.promptCacheEnabled && index === lastToolIndex
+    ...(request.promptCacheEnabled && index === cacheControlToolIndex
       ? { cache_control: createAnthropicCacheControl(request) }
       : {}),
   }));
+}
+
+function partitionAnthropicCacheTools(tools: ModelToolDefinition[]): {
+  stableTools: ModelToolDefinition[];
+  dynamicTools: ModelToolDefinition[];
+} {
+  const stableTools: ModelToolDefinition[] = [];
+  const dynamicTools: ModelToolDefinition[] = [];
+  for (const tool of tools) {
+    if (isDynamicToolName(tool.name)) dynamicTools.push(tool);
+    else stableTools.push(tool);
+  }
+  const byName = (a: ModelToolDefinition, b: ModelToolDefinition) => a.name.localeCompare(b.name);
+  return {
+    stableTools: stableTools.sort(byName),
+    dynamicTools: dynamicTools.sort(byName),
+  };
+}
+
+function isDynamicToolName(name: string): boolean {
+  return name.startsWith("mcp__") || name.startsWith("skill__") || name.startsWith("plugin__");
 }
 
 function resolveMaxOutputTokens(

@@ -320,9 +320,10 @@ describe("final answer gate aggregation", () => {
     expect(result.status).toBe("needs_disclaimer");
     if (result.status !== "needs_disclaimer") return;
     const answer = buildEvidenceBackedFinalBoundaryAnswer(result, "zh-CN");
-    expect(answer).toContain("基于当前已记录证据");
+    expect(answer).toContain("我只能确认已检查到的范围");
     expect(answer).toContain("验证或测试证据");
-    expect(answer).toContain("证据范围");
+    expect(answer).not.toContain("证据范围");
+    expect(answer).not.toContain("尚未被匹配证据支撑");
     expect(answer).not.toContain("任务状态");
     expect(answer).not.toContain("下一步");
     expect(answer).not.toContain("完成或验证声明");
@@ -348,9 +349,11 @@ describe("final answer gate aggregation", () => {
         createdAt: new Date(0).toISOString(),
       },
     ]);
-    expect(answer).toContain("证据范围");
+    expect(answer).toContain("我只能确认已检查到的范围");
     expect(answer).toContain("已有 1 条记录");
     expect(answer).toContain("验证记录");
+    expect(answer).not.toContain("证据范围");
+    expect(answer).not.toContain("尚未被匹配证据支撑");
     expect(answer).not.toContain("任务状态：最终回答等待证据确认");
     expect(answer).not.toContain("下一步");
     expect(answer).not.toContain("verification=");
@@ -404,7 +407,8 @@ describe("final answer gate aggregation", () => {
     expect(shouldRewriteFinalGateClaimAlignment(result, context as never)).toBe(true);
     if (result.status !== "needs_disclaimer") return;
     const visibleFallback = buildEvidenceBackedFinalBoundaryAnswer(result, "zh-CN", context.evidence);
-    expect(visibleFallback).toContain("证据范围");
+    expect(visibleFallback).toContain("我只能确认已检查到的范围");
+    expect(visibleFallback).not.toContain("证据范围");
     expect(visibleFallback).not.toContain("任务状态");
     expect(visibleFallback).not.toContain("下一步");
   });
@@ -644,7 +648,8 @@ describe("final answer gate aggregation", () => {
     );
 
     expect(answer).toContain("服务运行证据");
-    expect(answer).toContain("证据范围");
+    expect(answer).toContain("我只能确认已检查到的范围");
+    expect(answer).not.toContain("证据范围");
     expect(answer).not.toContain("final should state");
     expect(answer).not.toContain("service/port/log/health");
   });
@@ -840,7 +845,50 @@ describe("final answer gate aggregation", () => {
     expect(plan.directive).toContain("Read, Grep, Glob");
     expect(plan.directive).toContain("不要运行 Bash");
     expect(plan.evidenceAction?.toolName).toBe("Glob");
-    expect(plan.evidenceAction?.input).toMatchObject({ pattern: "**/*.{md,txt,json,log}" });
+    expect(JSON.stringify(plan.evidenceAction?.input)).toContain("md,txt,json,log");
+  });
+
+  it("plans artifact gaps from changed files before broad globbing", () => {
+    const context = {
+      ...makeGateContext(),
+      permissionMode: "default",
+      language: "zh-CN",
+      tools: { changedFiles: ["reports/final-audit.md"] },
+      recentlyMentionedFiles: [],
+    };
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["engineering_missing_artifact"],
+      },
+      context: context as never,
+      userText: "继续确认产物",
+    });
+
+    expect(plan.action).toBe("readonly_check");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "Read",
+      input: { path: "reports/final-audit.md" },
+      strategy: "artifact_readonly_check",
+    });
+  });
+
+  it("continues artifact evidence search with grep after a miss retry", () => {
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["engineering_missing_artifact"],
+      },
+      context: { ...makeGateContext(), permissionMode: "default", language: "zh-CN" } as never,
+      userText: "继续确认产物",
+      evidenceActionRetryCount: 1,
+    });
+
+    expect(plan.action).toBe("readonly_check");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "Grep",
+      strategy: "artifact_readonly_check",
+    });
   });
 
   it("plans artifact gaps with a direct Read when the draft names a file", () => {
@@ -857,7 +905,56 @@ describe("final answer gate aggregation", () => {
     expect(plan.evidenceAction).toMatchObject({
       toolName: "Read",
       input: { path: "reports/final-audit.md" },
+      strategy: "artifact_readonly_check",
     });
+  });
+
+  it("records artifactHint evidence from final-gate artifact Read and clears stale artifact failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-artifact-read-"));
+    await writeFile(join(project, "final-audit.md"), "ok\n", "utf8");
+    const { context, events } = makeDispatcherContext(project);
+    const testContext = context as {
+      lastToolFailure?: { toolName: string; summary: string };
+      evidence: EvidenceRecord[];
+    };
+    Object.assign(testContext, {
+      lastToolFailure: { toolName: "Read", summary: "missing artifact final-audit.md not found" },
+    });
+    const output = new MemoryOutput();
+
+    const result = await __testRunFinalGateEvidenceAction({
+      actionPlan: {
+        action: "readonly_check",
+        reason: "artifact_gap_readonly",
+        directive: "test",
+        evidenceAction: {
+          toolName: "Read",
+          input: { path: "final-audit.md", limit: 200 },
+          strategy: "artifact_readonly_check",
+          summary: "read claimed artifact final-audit.md",
+        },
+      },
+      context: context as never,
+      output,
+      sessionId: "session-artifact-read",
+      messages: [{ role: "user", content: "确认产物" }],
+      runtime: {
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+    });
+
+    expect(result.status).toBe("evidence_recorded");
+    expect(testContext.lastToolFailure).toBeUndefined();
+    expect(
+      testContext.evidence.some((item) => {
+        const data = item.data as { artifactHint?: { path?: string; exists?: boolean } } | undefined;
+        return data?.artifactHint?.path === "final-audit.md" && data.artifactHint.exists === true;
+      }),
+    ).toBe(true);
+    expect(JSON.stringify(events)).toContain("final_answer_gap_artifact_probe");
   });
 
   it("plans git gaps as readonly GitStatusInspect first", () => {

@@ -377,8 +377,10 @@ describe("tool-output-presenter", () => {
                   {
                     oldStart: 7,
                     newStart: 7,
+                    contextBefore: ["const id = 1;"],
                     oldLines: ["const label = 'old';"],
                     newLines: ["const label = 'new';"],
+                    contextAfter: ["return label;"],
                     oldLineCount: 1,
                     newLineCount: 1,
                   },
@@ -395,11 +397,52 @@ describe("tool-output-presenter", () => {
 
       expect(formatted).toContain("```diff");
       expect(formatted).toContain("--- src/app.ts");
-      expect(formatted).toContain("@@ -7,1 +7,1 @@");
+      expect(formatted).toContain("@@ -6,3 +6,3 @@");
+      expect(formatted).toContain(" const id = 1;");
       expect(formatted).toContain("-const label = 'old';");
       expect(formatted).toContain("+const label = 'new';");
+      expect(formatted).toContain(" return label;");
       expect(layered.details).toContain("legacy detail");
       expect(layered.details).toContain("```diff");
+    });
+
+    it("large structured edit diffs degrade to a bounded preview with an explicit marker", () => {
+      const output = {
+        text: "edited",
+        data: {
+          addedLines: 40,
+          removedLines: 40,
+          changedFiles: ["src/large.ts"],
+          structuredPatch: {
+            files: [
+              {
+                path: "src/large.ts",
+                hunks: [
+                  {
+                    oldStart: 1,
+                    newStart: 1,
+                    oldLines: Array.from({ length: 30 }, (_, index) => `old-${index + 1}`),
+                    newLines: Array.from({ length: 30 }, (_, index) => `new-${index + 1}`),
+                    oldLineCount: 40,
+                    newLineCount: 40,
+                    truncated: true,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        truncated: true,
+      };
+
+      const formatted = formatToolOutput("MultiEdit", output, "en-US");
+
+      expect(formatted).toContain("```diff");
+      expect(formatted).toContain("--- src/large.ts");
+      expect(formatted).toContain("@@ -1,40 +1,40 @@");
+      expect(formatted).toContain("... diff preview truncated; open details for the full patch ...");
+      expect(formatted).not.toContain("old-30");
+      expect(formatted).not.toContain("new-30");
     });
 
     it("主屏 summary 将半机器字段改成人话", () => {

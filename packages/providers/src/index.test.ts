@@ -2325,6 +2325,44 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     expect(uncached.tools?.[0].cache_control).toBeUndefined();
   });
 
+  it("D.13L: keeps Anthropic cache_control on the stable tool boundary before dynamic tools", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      promptCacheEnabled: true,
+      tools: [
+        { name: "skill__notes", description: "Skill", inputSchema: { type: "object" } },
+        { name: "Read", description: "Read file", inputSchema: { type: "object" } },
+        { name: "mcp__search", description: "MCP search", inputSchema: { type: "object" } },
+        { name: "Bash", description: "Run command", inputSchema: { type: "object" } },
+        { name: "plugin__deploy", description: "Plugin", inputSchema: { type: "object" } },
+      ],
+    });
+
+    expect(body.tools?.map((tool) => tool.name)).toEqual([
+      "Bash",
+      "Read",
+      "mcp__search",
+      "plugin__deploy",
+      "skill__notes",
+    ]);
+    expect(body.tools?.map((tool) => tool.cache_control)).toEqual([
+      undefined,
+      { type: "ephemeral" },
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
   it("D.13G(real path): createAnthropicMessagesRequest does NOT throw PROFILE_MISMATCH when Claude placeholder + request.endpointProfile=chat_completions", () => {
     // builder guard 必须先 resolve effective profile，placeholder 不应抛 PROFILE_MISMATCH。
     const provider = new OpenAiCompatibleProvider({

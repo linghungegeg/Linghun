@@ -952,8 +952,10 @@ const EDIT_DIFF_PREVIEW_LINES = 24;
 type StructuredPatchHunk = {
   oldStart: number;
   newStart: number;
+  contextBefore: string[];
   oldLines: string[];
   newLines: string[];
+  contextAfter: string[];
   oldLineCount: number;
   newLineCount: number;
   truncated?: boolean;
@@ -1014,8 +1016,10 @@ function normalizePatchHunks(value: unknown): StructuredPatchHunk[] {
       {
         oldStart,
         newStart,
+        contextBefore: readStringList(item, "contextBefore"),
         oldLines,
         newLines,
+        contextAfter: readStringList(item, "contextAfter"),
         oldLineCount: readNumber(item, "oldLineCount") ?? oldLines.length,
         newLineCount: readNumber(item, "newLineCount") ?? newLines.length,
         truncated: Boolean((item as { truncated?: unknown }).truncated),
@@ -1029,23 +1033,42 @@ function structuredPatchToDiffFence(
   maxLines = EDIT_DIFF_PREVIEW_LINES,
 ): string {
   const diffLines: string[] = [];
-  for (const file of patch.files) {
-    diffLines.push(`--- ${file.path}`);
-    diffLines.push(`+++ ${file.path}`);
-    for (const hunk of file.hunks) {
-      const oldCount = Math.max(hunk.oldLineCount, hunk.oldLines.length);
-      const newCount = Math.max(hunk.newLineCount, hunk.newLines.length);
-      diffLines.push(`@@ -${hunk.oldStart},${oldCount} +${hunk.newStart},${newCount} @@`);
-      for (const line of hunk.oldLines) diffLines.push(`-${line}`);
-      for (const line of hunk.newLines) diffLines.push(`+${line}`);
-      if (hunk.truncated) diffLines.push("... structured patch truncated ...");
-      if (diffLines.length >= maxLines) break;
+  const hasFiniteBudget = Number.isFinite(maxLines);
+  const contentBudget = hasFiniteBudget ? Math.max(1, maxLines - 1) : Number.POSITIVE_INFINITY;
+  let omitted = false;
+  const pushLine = (line: string): void => {
+    if (diffLines.length < contentBudget) {
+      diffLines.push(line);
+      return;
     }
-    if (diffLines.length >= maxLines) break;
+    omitted = true;
+  };
+
+  for (const file of patch.files) {
+    pushLine(`--- ${file.path}`);
+    pushLine(`+++ ${file.path}`);
+    for (const hunk of file.hunks) {
+      const contextBefore = hunk.contextBefore ?? [];
+      const contextAfter = hunk.contextAfter ?? [];
+      const oldCount = contextBefore.length + Math.max(hunk.oldLineCount, hunk.oldLines.length) + contextAfter.length;
+      const newCount = contextBefore.length + Math.max(hunk.newLineCount, hunk.newLines.length) + contextAfter.length;
+      const oldStart = Math.max(1, hunk.oldStart - contextBefore.length);
+      const newStart = Math.max(1, hunk.newStart - contextBefore.length);
+      pushLine(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+      for (const line of contextBefore) pushLine(` ${line}`);
+      for (const line of hunk.oldLines) pushLine(`-${line}`);
+      for (const line of hunk.newLines) pushLine(`+${line}`);
+      for (const line of contextAfter) pushLine(` ${line}`);
+      if (hunk.truncated) {
+        pushLine(
+          `... hunk truncated: showing ${hunk.oldLines.length}/${hunk.oldLineCount} removed and ${hunk.newLines.length}/${hunk.newLineCount} added lines ...`,
+        );
+      }
+    }
   }
-  const compact = diffLines.slice(0, maxLines);
-  if (compact.length === 0) return "";
-  return `\`\`\`diff\n${compact.join("\n")}\n\`\`\``;
+  if (omitted) diffLines.push("... diff preview truncated; open details for the full patch ...");
+  if (diffLines.length === 0) return "";
+  return `\`\`\`diff\n${diffLines.join("\n")}\n\`\`\``;
 }
 
 function extractCompactDiffFence(details: string | undefined): string {
