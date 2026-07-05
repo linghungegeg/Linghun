@@ -7395,6 +7395,119 @@ describe("TaskSuggestionBar executable state", () => {
     expect(view.bottomPaneStatus?.text).not.toBe("Provider 请求失败");
   });
 
+  it("hides stale provider request failure while a new provider request is active", () => {
+    const view = createShellViewModel(createContext({
+      requestActivityPhase: "request_started",
+      lastProviderFailure: {
+        code: "PROVIDER_STREAM_ERROR",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5",
+        endpointProfile: "default",
+        summary: "stream ended",
+      },
+    } as unknown as Partial<TuiContext>), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "provider-fail",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          messageKind: "tool_result_error",
+        },
+      ],
+    });
+
+    expect(view.blocks.some((block) => block.title === "模型请求失败")).toBe(false);
+    expect(view.bottomPaneStatus?.text).not.toBe("Provider 请求失败");
+  });
+
+  it("hides stale provider request failure while provider retry activity is active", () => {
+    const view = createShellViewModel(createContext({
+      requestActivityPhase: "provider_retrying",
+      retryInfo: { attempt: 1, max: 3, delaySec: 2 },
+      lastProviderFailure: {
+        code: "PROVIDER_STREAM_ERROR",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5",
+        endpointProfile: "default",
+        summary: "stream ended",
+      },
+    } as unknown as Partial<TuiContext>), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "provider-fail",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
+          messageKind: "tool_result_error",
+        },
+      ],
+    });
+
+    expect(view.blocks.some((block) => block.title === "模型请求失败")).toBe(false);
+    expect(view.bottomPaneStatus?.text).not.toBe("Provider 请求失败");
+  });
+
+  it("hides compact boundary while work continues after compact", () => {
+    const view = createShellViewModel(createContext({
+      requestActivityPhase: "request_started",
+    } as Partial<TuiContext>), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "compact-1",
+          kind: "details",
+          status: "info",
+          title: "对话已压缩 · 释放约 74K 字符 (10%)",
+          summary: "",
+          messageKind: "compact_boundary",
+        },
+      ],
+    });
+
+    expect(view.blocks.some((block) => block.messageKind === "compact_boundary")).toBe(false);
+  });
+
+  it("hides compact boundary after later transcript progress", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "compact-1",
+          kind: "details",
+          status: "info",
+          title: "对话已压缩 · 释放约 74K 字符 (10%)",
+          summary: "",
+          messageKind: "compact_boundary",
+        },
+        {
+          id: "tool-progress",
+          kind: "details",
+          status: "info",
+          title: "ReadSnippets",
+          summary: "已读取 4 条结果。",
+          fullText: "已读取 4 条结果。",
+          messageKind: "tool_result_success",
+        },
+      ],
+    });
+
+    expect(view.blocks.some((block) => block.messageKind === "compact_boundary")).toBe(false);
+    expect(view.blocks.some((block) => block.title === "ReadSnippets")).toBe(true);
+  });
+
   it("renders provider retry outcome inside the same error block", () => {
     const view = createShellViewModel(createContext({
       lastProviderFailure: {

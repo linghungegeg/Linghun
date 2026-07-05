@@ -311,9 +311,21 @@ export function createShellViewModel(
     const activeStreamingAssistant = context.streamingAssistant;
     const activeStreamingAssistantId = activeStreamingAssistant?.id;
     const hasActiveProviderFailure = Boolean(context.lastProviderFailure);
+    const activeRequestPhase = (context as { requestActivityPhase?: string }).requestActivityPhase;
+    const hasActiveRequestActivity = isActiveRequestActivityPhase(activeRequestPhase);
     const staleProviderFailureBlockIds = new Set<string>();
+    const staleCompactBoundaryBlockIds = new Set<string>();
     let latestProviderFailureBlockId: string | undefined;
+    let latestCompactBoundaryBlockId: string | undefined;
     for (const block of allOutputBlocks) {
+      if (block.messageKind === "compact_boundary") {
+        latestCompactBoundaryBlockId = block.id;
+        continue;
+      }
+      if (latestCompactBoundaryBlockId && isCompactBoundarySupersededBy(block)) {
+        staleCompactBoundaryBlockIds.add(latestCompactBoundaryBlockId);
+        latestCompactBoundaryBlockId = undefined;
+      }
       if (isProviderFailureOutputBlock(block, language)) {
         latestProviderFailureBlockId = block.id;
         continue;
@@ -328,7 +340,13 @@ export function createShellViewModel(
       if (isEmptyAssistantStreamBlock(b)) return false;
       if (
         isProviderFailureOutputBlock(b, language) &&
-        (!hasActiveProviderFailure || staleProviderFailureBlockIds.has(b.id))
+        (!hasActiveProviderFailure || hasActiveRequestActivity || staleProviderFailureBlockIds.has(b.id))
+      ) {
+        return false;
+      }
+      if (
+        b.messageKind === "compact_boundary" &&
+        (hasActiveRequestActivity || staleCompactBoundaryBlockIds.has(b.id))
       ) {
         return false;
       }
@@ -1479,7 +1497,12 @@ export function mapBottomPaneStatusToView(
   }
 
   const providerFailure = context.lastProviderFailure;
-  if (providerFailure && !input.activity && !input.suppressProviderFailure) {
+  if (
+    providerFailure &&
+    !input.activity &&
+    !input.suppressProviderFailure &&
+    !isActiveRequestActivityPhase(phase)
+  ) {
     const rateLimited = providerFailure.code === "PROVIDER_RATE_LIMITED";
     return {
       kind: rateLimited ? "blocked" : "failed",
@@ -2116,6 +2139,32 @@ function isProviderRecoveryProgressBlock(block: ProductBlockViewModel, language:
     block.messageKind === "diagnostic" ||
     block.messageKind === "local_command_output"
   );
+}
+
+function isActiveRequestActivityPhase(phase: string | undefined): boolean {
+  return (
+    phase === "request_started" ||
+    phase === "request_started_report" ||
+    phase === "waiting_first_delta" ||
+    phase === "provider_retrying" ||
+    phase === "tool_running" ||
+    phase === "continuing_after_tool" ||
+    phase === "verifying_final_answer" ||
+    phase === "permission_waiting"
+  );
+}
+
+function isCompactBoundarySupersededBy(block: ProductBlockViewModel): boolean {
+  if (block.messageKind === "compact_boundary") return false;
+  if (
+    block.keep === true &&
+    block.kind === "details" &&
+    (block.fullText ?? "").trim().length === 0 &&
+    !block.title
+  ) {
+    return false;
+  }
+  return Boolean(block.messageKind || block.kind === "command");
 }
 
 function buildTaskSuggestions(inputs: {
