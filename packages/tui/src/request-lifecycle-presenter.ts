@@ -92,6 +92,15 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
     if (kind === "gateway") {
       return "The upstream model service or gateway is temporarily unavailable, so this request did not complete. Retry later or run /model doctor for details.";
     }
+    if (kind === "compatibility") {
+      return "The endpoint returned a non-SSE stream. Check whether the endpoint/base URL supports streaming SSE and whether the endpoint profile matches this gateway. Run /model doctor for details.";
+    }
+    if (kind === "stream_parse") {
+      return "The gateway returned malformed SSE stream data. This points to an SSE compatibility-layer format issue, not ordinary network instability. Run /model doctor or inspect /details evidence.";
+    }
+    if (kind === "tool_stream") {
+      return "The tool-call stream ended incomplete. This can be a model/gateway interruption or a local stream parsing boundary issue. Run /model doctor or inspect /details evidence.";
+    }
     if (kind === "transit") {
       return "The response stream failed in transit, so this request did not complete. This is a service or network transport issue, not a local Linghun bug. Retry later or run /model doctor for details.";
     }
@@ -123,6 +132,15 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
   }
   if (kind === "gateway") {
     return "上游模型服务或网关暂时异常，本次请求未完成。请稍后重试，或运行 /model doctor 查看详情。";
+  }
+  if (kind === "compatibility") {
+    return "接口返回的不是 SSE 流。本次请求未完成；请检查 endpoint/baseUrl 是否支持 SSE，以及 endpointProfile 是否和网关匹配。可运行 /model doctor 查看详情。";
+  }
+  if (kind === "stream_parse") {
+    return "网关返回的 SSE 流格式异常。本次请求未完成；这更像是 SSE 兼容层格式问题，不是普通网络抖动。可运行 /model doctor 或 /details evidence 查看详情。";
+  }
+  if (kind === "tool_stream") {
+    return "工具调用流不完整，本次请求未完成。可能是模型/网关中断，也可能是流解析边界问题。可运行 /model doctor 或 /details evidence 查看详情。";
   }
   if (kind === "transit") {
     return "响应流传输失败，本次请求未完成。可能是模型服务、网关传输或本地兼容层问题；请稍后重试，或运行 /model doctor 和 /details evidence 查看详情。";
@@ -170,6 +188,9 @@ export function formatProviderFailureKindLabel(
     auth: { zh: "密钥或权限问题", en: "API key or permission" },
     not_found: { zh: "接口或模型不存在", en: "endpoint or model not found" },
     gateway: { zh: "服务端或网关异常", en: "server or gateway failure" },
+    compatibility: { zh: "SSE/接口兼容问题", en: "SSE/endpoint compatibility" },
+    stream_parse: { zh: "SSE 流格式异常", en: "malformed SSE stream" },
+    tool_stream: { zh: "工具调用流不完整", en: "incomplete tool-call stream" },
     transit: { zh: "传输失败", en: "stream or transit failure" },
     timeout: { zh: "响应超时", en: "timeout" },
     abort: { zh: "请求已中断", en: "interrupted request" },
@@ -213,6 +234,9 @@ export type ProviderFailureKind =
   | "auth"
   | "not_found"
   | "gateway"
+  | "compatibility"
+  | "stream_parse"
+  | "tool_stream"
   | "transit"
   | "timeout"
   | "abort"
@@ -225,17 +249,20 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
   const status = readNumberField(error, "status") ?? readNumberField(error, "statusCode");
   const message = error instanceof Error ? error.message : (readStringField(error, "message") ?? String(error ?? ""));
   const text = `${code ?? ""} ${name ?? ""} ${status ?? ""} ${message}`;
-  // Decode / malformed transport envelopes are transit failures. Plain provider
+  // Decode transport envelopes are transit failures. Plain provider
   // SSE `error` events may carry quota, schema, or gateway text, so classify
   // those by message below instead of treating every PROVIDER_STREAM_ERROR as
   // a transport problem.
-  if (
-    code === "PROVIDER_STREAM_DECODE_ERROR" ||
-    code === "PROVIDER_RETRY_EXHAUSTED" ||
-    code === "PROVIDER_NON_SSE_STREAM" ||
-    code === "PROVIDER_MALFORMED_STREAM" ||
-    code === "PROVIDER_PARTIAL_TOOL_CALL"
-  ) {
+  if (code === "PROVIDER_NON_SSE_STREAM") {
+    return "compatibility";
+  }
+  if (code === "PROVIDER_MALFORMED_STREAM") {
+    return "stream_parse";
+  }
+  if (code === "PROVIDER_PARTIAL_TOOL_CALL") {
+    return "tool_stream";
+  }
+  if (code === "PROVIDER_STREAM_DECODE_ERROR" || code === "PROVIDER_RETRY_EXHAUSTED") {
     return "transit";
   }
   if (

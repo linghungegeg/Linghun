@@ -2320,6 +2320,7 @@ export async function handleForkCommand(
       effectiveModel,
       cooldown.remainingMs,
       context.language,
+      cooldown.reasonCode,
     );
     writeLine(output, message);
     return;
@@ -2997,6 +2998,7 @@ export async function runModelBackedAgent(
                 fallback.runtime.model,
                 fallbackCooldown.remainingMs,
                 context.language,
+                fallbackCooldown.reasonCode,
               );
               await context.store.appendEvent(agent.transcriptSessionId, {
                 type: "system_event",

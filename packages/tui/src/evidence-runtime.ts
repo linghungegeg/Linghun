@@ -100,19 +100,30 @@ export async function recordProviderFailureEvidence(
   error: unknown,
   runtime: SelectedModelRuntime,
 ): Promise<EvidenceRecord> {
-  const code =
-    error instanceof Error && "code" in error && typeof error.code === "string"
-      ? error.code
-      : "PROVIDER_ERROR";
+  const code = readProviderFailureString(error, "code") ?? "PROVIDER_ERROR";
   const message = error instanceof Error ? error.message : String(error);
   const failureKind = classifyProviderFailure(error);
   const transitFailure = failureKind === "transit";
-  const summary = `provider failure: kind ${failureKind}; code ${code}; provider ${runtime.provider}; model ${runtime.model}; endpoint profile ${runtime.endpointProfile}; message ${sanitizeProviderFailureText(message)}`;
+  const endpointSummary = summarizeProviderEndpoint(error, message);
+  const httpStatus = readProviderFailureNumber(error, "status") ?? readProviderFailureNumber(error, "statusCode");
+  const contentType = summarizeProviderContentType(error, message);
+  const diagnosticParts = [
+    `provider failure: kind ${failureKind}`,
+    `code ${code}`,
+    `provider ${runtime.provider}`,
+    `model ${runtime.model}`,
+    `endpointProfile ${runtime.endpointProfile}`,
+    `status ${httpStatus ?? "unknown"}`,
+    `content-type ${contentType}`,
+    `endpoint ${endpointSummary}`,
+    `message ${sanitizeProviderFailureText(message)}`,
+  ];
+  const summary = diagnosticParts.join("; ");
   const evidence = createEvidenceRecord(
     "command_output",
     summary,
     `provider:${runtime.provider}:failure`,
-    ["provider_failure", code, runtime.provider, runtime.model, runtime.endpointProfile],
+    ["provider_failure", code, failureKind, runtime.provider, runtime.model, runtime.endpointProfile],
   );
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
@@ -126,13 +137,16 @@ export async function recordProviderFailureEvidence(
     provider: runtime.provider,
     model: runtime.model,
     endpointProfile: runtime.endpointProfile,
+    endpointSummary,
+    httpStatus,
+    contentType,
     summary: evidence.summary,
     evidenceId: evidence.id,
     createdAt: evidence.createdAt,
   };
   await captureFailureLearning(context, sessionId, {
     category: "provider_failure",
-    failureSummary: `provider request failed kind=${failureKind} code=${code} message=${sanitizeProviderFailureText(message)}`,
+    failureSummary: `provider request failed kind=${failureKind} code=${code} endpoint=${endpointSummary} status=${httpStatus ?? "unknown"} content-type=${contentType} message=${sanitizeProviderFailureText(message)}`,
     rootCauseGuess: transitFailure
       ? `provider/network transit failure with ${code}`
       : `model/provider request failed with ${code}`,
@@ -146,6 +160,50 @@ export async function recordProviderFailureEvidence(
     severity: "high",
   });
   return evidence;
+}
+
+function readProviderFailureString(error: unknown, key: string): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const value = (error as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function readProviderFailureNumber(error: unknown, key: string): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const value = (error as Record<string, unknown>)[key];
+  return typeof value === "number" ? value : undefined;
+}
+
+function summarizeProviderEndpoint(error: unknown, message: string): string {
+  const direct =
+    readProviderFailureString(error, "endpoint") ??
+    readProviderFailureString(error, "baseUrl") ??
+    readProviderFailureString(error, "baseURL") ??
+    readProviderFailureString(error, "url");
+  const fromMessage = /\b(?:endpoint|baseUrl|base_url|url)=([^，,\s]+)/iu.exec(message)?.[1];
+  return sanitizeEndpointSummary(direct ?? fromMessage ?? "unknown");
+}
+
+function summarizeProviderContentType(error: unknown, message: string): string {
+  const direct =
+    readProviderFailureString(error, "contentType") ??
+    readProviderFailureString(error, "content-type");
+  const fromMessage = /content-type=([^，,]+?)(?:，|,|\s不是|\sis\snot|$)/iu.exec(message)?.[1];
+  return sanitizeProviderFailureText((direct ?? fromMessage ?? "unknown").trim());
+}
+
+function sanitizeEndpointSummary(value: string): string {
+  const sanitized = sanitizeProviderFailureText(value.trim());
+  try {
+    const parsed = new URL(sanitized);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/u, "") || "unknown";
+  } catch {
+    return sanitized.replace(/[?&][^\s]+/gu, "?***") || "unknown";
+  }
 }
 
 export async function recordModelToolFailureForMetaScheduler(

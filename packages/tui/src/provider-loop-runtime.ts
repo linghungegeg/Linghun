@@ -165,6 +165,7 @@ export function checkAndWriteProviderCooldown(
       runtime.model,
       cooldownCheck.remainingMs,
       context.language,
+      cooldownCheck.reasonCode,
     ),
   );
   return true;

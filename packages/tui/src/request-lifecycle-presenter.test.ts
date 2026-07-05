@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { formatRequestActivity, type RequestActivityPhase } from "./request-lifecycle-presenter.js";
+import {
+  classifyProviderFailure,
+  formatProviderFailurePrimary,
+  formatRequestActivity,
+  type RequestActivityPhase,
+} from "./request-lifecycle-presenter.js";
 
 describe("formatRequestActivity", () => {
   const phases: RequestActivityPhase[] = [
@@ -55,5 +60,27 @@ describe("formatRequestActivity", () => {
   it("request_started falls through to default thinking text", () => {
     expect(formatRequestActivity("request_started", "zh-CN")).toContain("思考");
     expect(formatRequestActivity("request_started", "en-US")).toContain("Thinking");
+  });
+});
+
+describe("provider failure classification", () => {
+  it("splits protocol, malformed stream, and tool stream failures out of transit", () => {
+    expect(classifyProviderFailure({ code: "PROVIDER_NON_SSE_STREAM" })).toBe("compatibility");
+    expect(classifyProviderFailure({ code: "PROVIDER_MALFORMED_STREAM" })).toBe("stream_parse");
+    expect(classifyProviderFailure({ code: "PROVIDER_PARTIAL_TOOL_CALL" })).toBe("tool_stream");
+    expect(classifyProviderFailure({ code: "PROVIDER_STREAM_DECODE_ERROR" })).toBe("transit");
+  });
+
+  it("formats distinct primary messages for compatibility and tool stream failures", () => {
+    const nonSse = formatProviderFailurePrimary({ code: "PROVIDER_NON_SSE_STREAM" }, "zh-CN");
+    const malformed = formatProviderFailurePrimary({ code: "PROVIDER_MALFORMED_STREAM" }, "zh-CN");
+    const partialTool = formatProviderFailurePrimary({ code: "PROVIDER_PARTIAL_TOOL_CALL" }, "zh-CN");
+
+    expect(nonSse).toContain("SSE");
+    expect(nonSse).toContain("endpointProfile");
+    expect(malformed).toContain("SSE 流格式异常");
+    expect(partialTool).toContain("工具调用流不完整");
+    expect(nonSse).not.toContain("暂时异常");
+    expect(malformed).not.toContain("请稍后重试");
   });
 });

@@ -199,8 +199,9 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
     await recordProviderFailureEvidence(
       context,
       sessionId,
-      Object.assign(new Error("eventstream CRC mismatch sk-secret"), {
+      Object.assign(new Error("eventstream CRC mismatch sk-secret endpoint=https://api.example.com/v1/messages?api_key=raw-token content-type=text/html"), {
         code: "PROVIDER_STREAM_ERROR",
+        status: 502,
       }),
       {
         role: "executor",
@@ -212,7 +213,13 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
       },
     );
     expect(context.lastProviderFailure?.kind).toBe("transit");
+    expect(context.lastProviderFailure?.endpointSummary).toBe("https://api.example.com/v1/messages");
+    expect(context.lastProviderFailure?.httpStatus).toBe(502);
+    expect(context.lastProviderFailure?.contentType).toBe("text/html");
+    expect(context.evidence[0]?.summary).toContain("status 502");
+    expect(context.evidence[0]?.summary).toContain("content-type text/html");
     expect(context.evidence[0]?.summary).not.toContain("sk-secret");
+    expect(context.evidence[0]?.summary).not.toContain("raw-token");
 
     await captureFailureLearning(context, sessionId, {
       category: "tool_failure",

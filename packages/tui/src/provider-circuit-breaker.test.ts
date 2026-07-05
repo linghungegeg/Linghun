@@ -95,6 +95,19 @@ describe("provider-circuit-breaker", () => {
       expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
     });
 
+    it("does not count protocol or stream-boundary failures toward cooldown", () => {
+      for (const code of [
+        "PROVIDER_NON_SSE_STREAM",
+        "PROVIDER_MALFORMED_STREAM",
+        "PROVIDER_PARTIAL_TOOL_CALL",
+      ]) {
+        recordProviderFailure(state, "openai", "gpt-4o", code);
+      }
+
+      expect(state.entries.size).toBe(0);
+      expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
+    });
+
     it("records first recoverable failure without entering cooldown", () => {
       recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
       const entry = state.entries.get("openai::gpt-4o");
@@ -246,10 +259,17 @@ describe("provider-circuit-breaker", () => {
       expect(msg).toContain("2s");
     });
 
-    it("does not leak API keys or raw URLs", () => {
-      const msg = formatCooldownMessage("openai", "gpt-4o", 10_000, "en-US");
-      expect(msg).not.toMatch(/sk-[A-Za-z0-9]/);
-      expect(msg).not.toMatch(/https?:\/\//);
+    it("formats cooldown cause for non-SSE compatibility without generic instability", () => {
+      const msg = formatCooldownMessage(
+        "openai",
+        "gpt-4o",
+        10_000,
+        "zh-CN",
+        "PROVIDER_NON_SSE_STREAM",
+      );
+      expect(msg).toContain("SSE");
+      expect(msg).toContain("endpointProfile");
+      expect(msg).not.toContain("暂时不稳定");
     });
   });
 
@@ -458,7 +478,7 @@ describe("provider-circuit-breaker", () => {
       }
     });
 
-    it("notifies callers before retrying recoverable stream failures", async () => {
+    it("surfaces partial tool-call stream failures without same-provider retry", async () => {
       const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
       try {
         let calls = 0;
@@ -483,22 +503,13 @@ describe("provider-circuit-breaker", () => {
           },
           async *stream() {
             calls += 1;
-            if (calls === 1) {
-              yield {
-                type: "error",
-                error: new LinghunError({
-                  code: "PROVIDER_PARTIAL_TOOL_CALL",
-                  message: "unfinished tool call",
-                  recoverable: true,
-                }),
-              } satisfies LinghunEvent;
-              return;
-            }
             yield {
-              type: "message_stop",
-              id: "stop-retry",
-              chunkCount: 1,
-              hadUsage: false,
+              type: "error",
+              error: new LinghunError({
+                code: "PROVIDER_PARTIAL_TOOL_CALL",
+                message: "unfinished tool call",
+                recoverable: true,
+              }),
             } satisfies LinghunEvent;
           },
         };
@@ -521,11 +532,11 @@ describe("provider-circuit-breaker", () => {
         await vi.advanceTimersByTimeAsync(500);
         await run;
 
-        expect(calls).toBe(2);
-        expect(retryEvents).toMatchObject([
-          { attempt: 1, maxAttempts: 1, code: "PROVIDER_PARTIAL_TOOL_CALL" },
-        ]);
-        expect(events.some((event) => event.type === "message_stop")).toBe(true);
+        expect(calls).toBe(1);
+        expect(retryEvents).toEqual([]);
+        expect(events).toHaveLength(1);
+        expect(events[0]?.type).toBe("error");
+        expect(state.entries.size).toBe(0);
       } finally {
         randomSpy.mockRestore();
       }
@@ -541,8 +552,8 @@ describe("provider-circuit-breaker", () => {
       expect(BREAKER_CONSTANTS.COOLDOWN_MS).toBe(120_000);
     });
 
-    it("recoverable codes set covers server, rate limit, timeout, network, and stream failures", () => {
-      expect([...BREAKER_CONSTANTS.RECOVERABLE_CODES]).toEqual(
+    it("recoverable codes exclude protocol and stream-boundary compatibility failures", () => {
+      expect(Array.from(BREAKER_CONSTANTS.RECOVERABLE_CODES)).toEqual(
         expect.arrayContaining([
           "PROVIDER_SERVER_ERROR",
           "PROVIDER_RATE_LIMITED",
@@ -552,11 +563,21 @@ describe("provider-circuit-breaker", () => {
           "PROVIDER_STREAM_ERROR",
           "PROVIDER_STREAM_DECODE_ERROR",
           "PROVIDER_RETRY_EXHAUSTED",
-          "PROVIDER_NON_SSE_STREAM",
-          "PROVIDER_MALFORMED_STREAM",
-          "PROVIDER_PARTIAL_TOOL_CALL",
         ]),
       );
+      expect(BREAKER_CONSTANTS.RECOVERABLE_CODES.has("PROVIDER_NON_SSE_STREAM")).toBe(false);
+      expect(BREAKER_CONSTANTS.RECOVERABLE_CODES.has("PROVIDER_MALFORMED_STREAM")).toBe(false);
+      expect(BREAKER_CONSTANTS.RECOVERABLE_CODES.has("PROVIDER_PARTIAL_TOOL_CALL")).toBe(false);
+    });
+
+    it("same-provider retry is limited to real transient errors", () => {
+      expect(Array.from(BREAKER_CONSTANTS.SAME_PROVIDER_RETRY_CODES)).toEqual([
+        "PROVIDER_NETWORK_ERROR",
+        "PROVIDER_REQUEST_TIMEOUT",
+        "PROVIDER_STREAM_TIMEOUT",
+        "PROVIDER_SERVER_ERROR",
+        "PROVIDER_RATE_LIMITED",
+      ]);
     });
   });
 });

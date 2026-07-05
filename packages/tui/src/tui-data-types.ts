@@ -1156,6 +1156,9 @@ export type ProviderFailureSummary = {
   provider: string;
   model: string;
   endpointProfile: string;
+  endpointSummary?: string;
+  httpStatus?: number;
+  contentType?: string;
   summary: string;
   evidenceId: string;
   createdAt: string;

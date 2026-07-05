@@ -49,10 +49,15 @@ const RECOVERABLE_CODES = new Set([
   "PROVIDER_STREAM_ERROR",
   "PROVIDER_STREAM_DECODE_ERROR",
   "PROVIDER_RETRY_EXHAUSTED",
-  "PROVIDER_NON_SSE_STREAM",
-  "PROVIDER_MALFORMED_STREAM",
-  "PROVIDER_PARTIAL_TOOL_CALL",
   "PROVIDER_QUOTA_EXHAUSTED",
+]);
+
+const SAME_PROVIDER_RETRY_CODES = new Set([
+  "PROVIDER_NETWORK_ERROR",
+  "PROVIDER_REQUEST_TIMEOUT",
+  "PROVIDER_STREAM_TIMEOUT",
+  "PROVIDER_SERVER_ERROR",
+  "PROVIDER_RATE_LIMITED",
 ]);
 
 export function createProviderCircuitBreakerState(): ProviderCircuitBreakerState {
@@ -280,20 +285,55 @@ export function formatCooldownMessage(
   model: string,
   remainingMs: number,
   language: Language,
+  reasonCode?: string,
 ): string {
   const seconds = Math.ceil(remainingMs / 1000);
   if (language === "en-US") {
+    const cause = formatCooldownCause(reasonCode, language);
     return [
-      `Model service ${providerId}/${model} is temporarily unstable and waiting before retry.`,
+      `Model service ${providerId}/${model} is waiting before retry.`,
+      cause,
       `Retry available in ~${seconds}s.`,
       "You can run /model doctor to diagnose, or switch provider/model with /model.",
     ].join(" ");
   }
+  const cause = formatCooldownCause(reasonCode, language);
   return [
-    `模型服务 ${providerId}/${model} 暂时不稳定，正在等待恢复。`,
+    `模型服务 ${providerId}/${model} 正在等待恢复。`,
+    cause,
     `约 ${seconds} 秒后可重试。`,
     "可运行 /model doctor 诊断，或用 /model 切换服务商或模型。",
   ].join("");
+}
+
+function formatCooldownCause(reasonCode: string | undefined, language: Language): string {
+  if (reasonCode === "PROVIDER_NON_SSE_STREAM") {
+    return language === "en-US"
+      ? "Cause: endpoint/base URL or endpoint profile may not support SSE streaming."
+      : "原因：endpoint/baseUrl 或 endpointProfile 可能不支持 SSE 流。";
+  }
+  if (reasonCode === "PROVIDER_MALFORMED_STREAM") {
+    return language === "en-US"
+      ? "Cause: the gateway SSE compatibility layer returned malformed stream data."
+      : "原因：网关 SSE 兼容层返回格式异常。";
+  }
+  if (reasonCode === "PROVIDER_PARTIAL_TOOL_CALL") {
+    return language === "en-US"
+      ? "Cause: the tool-call stream ended incomplete, possibly from gateway/model interruption or a parsing boundary."
+      : "原因：工具调用流不完整，可能是模型/网关中断或解析边界问题。";
+  }
+  if (reasonCode === "PROVIDER_RATE_LIMITED") {
+    return language === "en-US" ? "Cause: the upstream service is rate limited." : "原因：上游服务触发限流。";
+  }
+  if (reasonCode === "PROVIDER_REQUEST_TIMEOUT" || reasonCode === "PROVIDER_STREAM_TIMEOUT") {
+    return language === "en-US" ? "Cause: the upstream request or response stream timed out." : "原因：上游请求或响应流超时。";
+  }
+  if (reasonCode === "PROVIDER_NETWORK_ERROR") {
+    return language === "en-US" ? "Cause: upstream network transport failed." : "原因：上游网络传输失败。";
+  }
+  return language === "en-US"
+    ? "Cause: the upstream model service or gateway is temporarily unavailable."
+    : "原因：上游模型服务或网关暂时异常。";
 }
 
 /**
@@ -327,25 +367,19 @@ export const BREAKER_CONSTANTS = {
   COOLDOWN_MS: BREAKER_COOLDOWN_MS,
   PROVIDER_ACTIVE_LIMIT,
   RECOVERABLE_CODES,
+  SAME_PROVIDER_RETRY_CODES,
 } as const;
 
 // ─── Provider Retry Wrapper ────────────────────────────────────────────
 
 /**
- * Provider failure kinds eligible for same-provider retry.
- * These are transient failures where retrying the same provider has a
- * reasonable chance of success. Quota/auth/schema/not_found/abort are
- * excluded — retrying won't help.
+ * Provider failure codes eligible for same-provider retry.
+ * Only real transient transport/upstream errors are retried on the same
+ * provider. Protocol, compatibility, and local stream-boundary failures are
+ * surfaced directly so they do not look like gateway instability.
  */
-const RETRYABLE_KINDS: Set<ProviderFailureKind> = new Set([
-  "gateway",
-  "transit",
-  "timeout",
-  "rate_limit",
-]);
-
-function shouldAttemptSameProviderRetry(kind: ProviderFailureKind): boolean {
-  return RETRYABLE_KINDS.has(kind);
+function shouldAttemptSameProviderRetry(code: string): boolean {
+  return SAME_PROVIDER_RETRY_CODES.has(code);
 }
 
 function getProviderErrorCode(error: unknown): string {
@@ -525,7 +559,7 @@ export async function* withProviderRetry(
     const code = getProviderErrorCode(streamError);
     recordProviderFailure(state, provider, model, code);
 
-    if (!shouldAttemptSameProviderRetry(kind) || attempt >= maxRetries) {
+    if (!shouldAttemptSameProviderRetry(code) || attempt >= maxRetries) {
       // Non-retryable or retries exhausted — yield the error as-is.
       const error =
         streamError instanceof LinghunError
