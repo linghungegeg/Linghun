@@ -8,7 +8,13 @@ import {
 import type { TuiContext } from "./index.js";
 import type { AgentRun } from "./tui-data-types.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
-import type { ToolResultBudgetState } from "./tool-result-budget.js";
+import type { ToolResultBudgetReplacement, ToolResultBudgetState } from "./tool-result-budget.js";
+import {
+  createTranscriptSource,
+  snapshotTranscriptSourceCells,
+  transcriptSourceRawTextForBlock,
+  upsertTranscriptSourceCell,
+} from "./shell/models/transcript-source.js";
 
 describe("memory-eviction-runtime", () => {
   describe("evictCompletedAgents", () => {
@@ -136,6 +142,31 @@ describe("memory-eviction-runtime", () => {
         expect(blocks[i]?.fullText).toBe(i < 10 ? "Short" : "Y".repeat(300));
       }
     });
+
+    it("同步淘汰 transcriptSource 中同 id block 的 rawText", () => {
+      const marker = "source-raw-retention-marker";
+      const blocks: ProductBlockViewModel[] = [];
+      const source = createTranscriptSource();
+      for (let i = 0; i < 80; i++) {
+        const block = createBlock(`${i}`, `${marker}-${i} ${"Y".repeat(300)}`, "assistant_text");
+        blocks.push(block);
+        upsertTranscriptSourceCell(source, {
+          id: block.id,
+          kind: "assistant",
+          block,
+          rawText: transcriptSourceRawTextForBlock(block),
+        });
+      }
+
+      evictCommittedBlocks(blocks, source);
+
+      const cells = snapshotTranscriptSourceCells(source);
+      expect(blocks[0]?.fullText).toContain("…[evicted]");
+      expect(cells[0]?.block.fullText).toBe(blocks[0]?.fullText);
+      expect(cells[0]?.rawText).toBe(blocks[0]?.fullText);
+      expect(JSON.stringify(cells[0])).not.toContain(`${marker}-0 ${"Y".repeat(300)}`);
+      expect(cells[79]?.block.fullText).toContain(`${marker}-79`);
+    });
   });
 
   describe("pruneToolResultBudgetState", () => {
@@ -145,6 +176,7 @@ describe("memory-eviction-runtime", () => {
       pruneToolResultBudgetState(context);
       expect(state.seenIds.size).toBe(200);
       expect(state.replacements.size).toBe(200);
+      expect(state.contentReplacements?.size).toBe(200);
     });
 
     it("保留最近 200 条，裁剪更早的", () => {
@@ -153,15 +185,18 @@ describe("memory-eviction-runtime", () => {
       pruneToolResultBudgetState(context);
       expect(state.seenIds.size).toBe(200);
       expect(state.replacements.size).toBe(200);
+      expect(state.contentReplacements?.size).toBe(200);
       // 前 100 个 ID 应该被删除（id-0 到 id-99）
       for (let i = 0; i < 100; i++) {
         expect(state.seenIds.has(`id-${i}`)).toBe(false);
         expect(state.replacements.has(`id-${i}`)).toBe(false);
+        expect(state.contentReplacements?.has(createContentReplacementKey(i))).toBe(false);
       }
       // 后 200 个保留（id-100 到 id-299）
       for (let i = 100; i < 300; i++) {
         expect(state.seenIds.has(`id-${i}`)).toBe(true);
         expect(state.replacements.has(`id-${i}`)).toBe(true);
+        expect(state.contentReplacements?.has(createContentReplacementKey(i))).toBe(true);
       }
     });
 
@@ -197,6 +232,7 @@ describe("memory-eviction-runtime", () => {
 
       // 验证 toolResultBudgetState 被裁剪
       expect(state.seenIds.size).toBe(200);
+      expect(state.contentReplacements?.size).toBe(200);
     });
   });
 });
@@ -237,6 +273,7 @@ function createAgent(
 function createBlock(
   id: string,
   fullText: string,
+  messageKind?: ProductBlockViewModel["messageKind"],
 ): ProductBlockViewModel {
   return {
     id,
@@ -245,6 +282,7 @@ function createBlock(
     title: `Block ${id}`,
     summary: `Summary ${id}`,
     fullText,
+    ...(messageKind ? { messageKind } : {}),
   };
 }
 
@@ -255,12 +293,12 @@ function createContext(agents: AgentRun[]): TuiContext {
 function createToolResultBudgetState(count: number): ToolResultBudgetState {
   const seenIds = new Set<string>();
   const replacements: ToolResultBudgetState["replacements"] = new Map();
+  const contentReplacements: NonNullable<ToolResultBudgetState["contentReplacements"]> = new Map();
   for (let i = 0; i < count; i++) {
     const id = `id-${i}`;
-    seenIds.add(id);
-    replacements.set(id, {
+    const replacement: ToolResultBudgetReplacement = {
       summary: `replacement-${i}`,
-      fingerprint: `fingerprint-${i}`,
+      fingerprint: createStateReplacementKey(id, i),
       record: {
         toolUseId: id,
         originalChars: 1000,
@@ -279,9 +317,20 @@ function createToolResultBudgetState(count: number): ToolResultBudgetState {
         },
         reason: "single_result",
       },
-    });
+    };
+    seenIds.add(id);
+    replacements.set(id, replacement);
+    contentReplacements.set(createContentReplacementKey(i), replacement);
   }
-  return { seenIds, replacements };
+  return { seenIds, replacements, contentReplacements };
+}
+
+function createStateReplacementKey(id: string, index: number): string {
+  return ["session", id, 1000, 1000, `sha256-${index}`].join("\0");
+}
+
+function createContentReplacementKey(index: number): string {
+  return ["session", 1000, 1000, `sha256-${index}`].join("\0");
 }
 
 function createContextWithBudgetState(
