@@ -158,6 +158,17 @@ describe("model-loop-runtime", () => {
       );
     });
 
+    it("adds compact source and schema hash metadata to built-in tool definitions", () => {
+      const read = createModelToolDefinitions().find((def) => def.name === "Read");
+      const bash = createModelToolDefinitions().find((def) => def.name === "Bash");
+
+      expect(read?.source).toBe("built-in");
+      expect(bash?.source).toBe("built-in");
+      expect(read?.schemaHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(bash?.schemaHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(read?.schemaHash).not.toBe(bash?.schemaHash);
+    });
+
     it("D.14G: exposes structured Git tools to the model (full-tool mode)", () => {
       const names = createModelToolDefinitions().map((d) => d.name);
       expect(names).toContain("GitStablePointCreate");

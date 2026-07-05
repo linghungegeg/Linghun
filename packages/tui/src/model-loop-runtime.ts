@@ -26,6 +26,7 @@ import type { Language } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 
 import { createGitToolDefinitions } from "./git-tool-runtime.js";
+import { stableHash } from "./cache-freshness.js";
 import { createIndexToolDefinitions } from "./index-tool-runtime.js";
 import type { ReportWriteGuard } from "./permission-continuation-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
@@ -568,7 +569,7 @@ export function createModelToolDefinitions(): ModelToolDefinition[] {
   // reportGuard 受限子集走 createModelToolDefinitionsForTools，不附加。
   // D.14G：full-tool 模式附加结构化 Git 能力（stable point / status / managed worktree），
   // 让模型需要执行 Git 时调用真实工具，而不是靠本地自然语言 regex 拦截。
-  return [
+  return createBuiltInToolIdentityDefinitions([
     ...createPreEngineToolDefinitions(),
     ...createDeferredToolDispatchDefinitions(),
     ...createModelToolDefinitionsForTools(
@@ -618,20 +619,43 @@ export function createModelToolDefinitions(): ModelToolDefinition[] {
       description: COMMAND_PROPOSAL_DESCRIPTION,
       inputSchema: createCommandProposalInputSchema(),
     },
-  ];
+  ]);
 }
 
 export function createModelToolDefinitionsForTools(
   tools: (typeof builtInTools)[ToolName][],
 ): ModelToolDefinition[] {
-  return tools.map((tool) => ({
-    name: tool.name,
-    description:
+  return tools.map((tool) => {
+    const description =
       typeof tool.prompt === "function"
         ? `${tool.description}\n${tool.prompt()}`
-        : tool.description,
-    inputSchema: createToolInputSchema(tool.name),
-  }));
+        : tool.description;
+    return createBuiltInToolIdentityDefinition({
+      name: tool.name,
+      description,
+      inputSchema: createToolInputSchema(tool.name),
+    });
+  });
+}
+
+function createBuiltInToolIdentityDefinitions(
+  definitions: ModelToolDefinition[],
+): ModelToolDefinition[] {
+  return definitions.map((definition) => createBuiltInToolIdentityDefinition(definition));
+}
+
+function createBuiltInToolIdentityDefinition(definition: ModelToolDefinition): ModelToolDefinition {
+  const source = "built-in";
+  return {
+    ...definition,
+    source,
+    schemaHash: stableHash({
+      name: definition.name,
+      description: definition.description,
+      inputSchema: definition.inputSchema,
+      source,
+    }),
+  };
 }
 
 export function createModelToolDefinitionsForReportGuard(

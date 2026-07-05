@@ -87,7 +87,7 @@ export function applyCacheWritePolicyToRequest(
   policy: CachePolicyDecision,
   state?: CacheRequestObservationState,
 ): ModelRequest {
-  if (policy.write.allowWrite) return applyMainChainRequestShapeLatch(request, state);
+  if (policy.write.allowWrite) return applyMainChainRequestShapeLatch(request, policy.kind, state);
   if (!request.promptCacheEnabled && !request.promptCacheTtl && !request.cacheBreakNonce)
     return request;
   const next: ModelRequest = { ...request };
@@ -100,25 +100,55 @@ export function applyCacheWritePolicyToRequest(
 type PromptCacheTtlShape = "5m" | "1h";
 
 export type CacheRequestShapeLatch = {
+  promptCacheEnabled: boolean;
   promptCacheTtl: PromptCacheTtlShape;
+  cacheBreakNonce?: string;
+  endpointProfile?: EndpointProfile;
+  reasoningLevel?: string;
 };
 
 function applyMainChainRequestShapeLatch(
   request: ModelRequest,
+  kind: CacheRequestKind,
   state: CacheRequestObservationState | undefined,
 ): ModelRequest {
-  if (!state || request.promptCacheEnabled !== true) return request;
-  const requestedTtl: PromptCacheTtlShape = request.promptCacheTtl === "1h" ? "1h" : "5m";
+  if (!state) return request;
   const latched = state.cacheRequestShapeLatch;
-  if (!latched) {
-    state.cacheRequestShapeLatch = { promptCacheTtl: requestedTtl };
+  if (kind === "main" || !latched) {
+    state.cacheRequestShapeLatch = createCacheRequestShapeLatch(request);
     return request;
   }
-  if (latched.promptCacheTtl === requestedTtl) return request;
+  return applyCacheRequestShapeLatch(request, latched);
+}
+
+function createCacheRequestShapeLatch(request: ModelRequest): CacheRequestShapeLatch {
+  const promptCacheEnabled = request.promptCacheEnabled === true;
   return {
-    ...request,
-    promptCacheTtl: latched.promptCacheTtl === "1h" ? "1h" : undefined,
+    promptCacheEnabled,
+    promptCacheTtl: request.promptCacheTtl === "1h" ? "1h" : "5m",
+    cacheBreakNonce: promptCacheEnabled ? request.cacheBreakNonce : undefined,
+    endpointProfile: request.endpointProfile,
+    reasoningLevel: request.reasoningLevel,
   };
+}
+
+function applyCacheRequestShapeLatch(
+  request: ModelRequest,
+  latched: CacheRequestShapeLatch,
+): ModelRequest {
+  const next: ModelRequest = { ...request };
+  next.endpointProfile = latched.endpointProfile;
+  next.reasoningLevel = latched.reasoningLevel;
+  if (!latched.promptCacheEnabled) {
+    next.promptCacheEnabled = undefined;
+    next.promptCacheTtl = undefined;
+    next.cacheBreakNonce = undefined;
+    return next;
+  }
+  next.promptCacheEnabled = true;
+  next.promptCacheTtl = latched.promptCacheTtl === "1h" ? "1h" : undefined;
+  next.cacheBreakNonce = latched.cacheBreakNonce;
+  return next;
 }
 
 export function observeCacheSafeRequest(input: {
@@ -267,28 +297,51 @@ function createCacheRequestFingerprint(
 
 function normalizeToolSchema(tools: NonNullable<ModelRequest["tools"]>): Array<{
   name: string;
-  description: string;
-  inputSchema: unknown;
+  source: string;
+  schemaHash: string;
 }> {
   return tools
-    .map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      inputSchema: tool.inputSchema,
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .map((tool) => {
+      const source = resolveToolSource(tool);
+      return {
+        name: tool.name,
+        source,
+        schemaHash:
+          tool.schemaHash ??
+          stableHash({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+            source,
+          }),
+      };
+    })
+    .sort(
+      (a, b) =>
+        a.name.localeCompare(b.name) ||
+        a.source.localeCompare(b.source) ||
+        a.schemaHash.localeCompare(b.schemaHash),
+    );
 }
 
 function splitToolSchemaBoundary(
   tools: ReturnType<typeof normalizeToolSchema>,
 ): { stable: ReturnType<typeof normalizeToolSchema>; dynamic: ReturnType<typeof normalizeToolSchema> } {
-  const stable = tools.filter((tool) => !isDynamicToolName(tool.name));
-  const dynamic = tools.filter((tool) => isDynamicToolName(tool.name));
+  const stable = tools.filter((tool) => !isDynamicToolSource(tool.source));
+  const dynamic = tools.filter((tool) => isDynamicToolSource(tool.source));
   return { stable, dynamic };
 }
 
-function isDynamicToolName(name: string): boolean {
-  return name.startsWith("mcp__") || name.startsWith("skill__") || name.startsWith("plugin__");
+function resolveToolSource(tool: NonNullable<ModelRequest["tools"]>[number]): string {
+  if (tool.source) return tool.source;
+  if (tool.name.startsWith("mcp__")) return "mcp";
+  if (tool.name.startsWith("skill__")) return "skill";
+  if (tool.name.startsWith("plugin__")) return "plugin";
+  return "unknown";
+}
+
+function isDynamicToolSource(source: string): boolean {
+  return source === "mcp" || source === "skill" || source === "plugin";
 }
 
 function splitCacheMessageBoundary(messages: ModelRequest["messages"]): {

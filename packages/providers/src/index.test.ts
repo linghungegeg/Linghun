@@ -2363,6 +2363,48 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     ]);
   });
 
+  it("D.13L: uses tool source and schema hash for the Anthropic cache boundary without sending metadata", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      promptCacheEnabled: true,
+      tools: [
+        {
+          name: "Read",
+          description: "MCP override with built-in name",
+          inputSchema: { type: "object", properties: { remote: { type: "boolean" } } },
+          source: "mcp",
+          schemaHash: "mcp-read-hash",
+        },
+        {
+          name: "Read",
+          description: "Built-in read",
+          inputSchema: { type: "object", properties: { path: { type: "string" } } },
+          source: "built-in",
+          schemaHash: "builtin-read-hash",
+        },
+      ],
+    });
+
+    expect(body.tools?.map((tool) => tool.name)).toEqual(["Read", "Read"]);
+    expect(body.tools?.map((tool) => tool.cache_control)).toEqual([
+      { type: "ephemeral" },
+      undefined,
+    ]);
+    expect(JSON.stringify(body.tools)).not.toContain("schemaHash");
+    expect(JSON.stringify(body.tools)).not.toContain("source");
+    expect(body.tools?.[0].description).toBe("Built-in read");
+    expect(body.tools?.[1].description).toBe("MCP override with built-in name");
+  });
+
   it("D.13G(real path): createAnthropicMessagesRequest does NOT throw PROFILE_MISMATCH when Claude placeholder + request.endpointProfile=chat_completions", () => {
     // builder guard 必须先 resolve effective profile，placeholder 不应抛 PROFILE_MISMATCH。
     const provider = new OpenAiCompatibleProvider({
@@ -3054,7 +3096,7 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
     expect(names).toEqual(["Alpha", "Mike", "Zeta"]);
   });
 
-  it("does not include OpenAI-side prompt_cache_key or prompt_cache_retention", () => {
+  it("keeps OpenAI chat/responses bodies free of Anthropic-only cache fields", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
       type: "openai-compatible",
@@ -3062,12 +3104,18 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
       apiKey: "test-key",
       model: "gpt-x",
     });
-    const chat = provider.createChatRequest({
-      messages: [{ role: "user", content: "hi" }],
+    const request: ModelRequest = {
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "hi" },
+      ],
       promptCacheEnabled: true,
       promptCacheTtl: "1h",
       cacheBreakNonce: "nonce-abc",
-    });
+      tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+      toolChoice: "auto",
+    };
+    const chat = provider.createChatRequest(request);
     const responses = new OpenAiCompatibleProvider({
       id: "openai-compatible",
       type: "openai-compatible",
@@ -3075,11 +3123,16 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
       apiKey: "test-key",
       model: "gpt-x",
       endpointProfile: "responses",
-    }).createResponsesRequest({
-      messages: [{ role: "user", content: "hi" }],
-      promptCacheEnabled: true,
-      promptCacheTtl: "1h",
-      cacheBreakNonce: "nonce-abc",
+    }).createResponsesRequest(request);
+
+    expect(chat.tools?.[0]).toMatchObject({
+      type: "function",
+      function: { name: "Read", parameters: { type: "object" } },
+    });
+    expect(responses.tools?.[0]).toMatchObject({
+      type: "function",
+      name: "Read",
+      parameters: { type: "object" },
     });
     for (const body of [chat, responses] as unknown[]) {
       const serialized = JSON.stringify(body);
@@ -3087,6 +3140,7 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
       expect(serialized).not.toContain("prompt_cache_retention");
       expect(serialized).not.toContain("cache_control");
       expect(serialized).not.toContain("linghun-break-cache");
+      expect(serialized).not.toContain("input_schema");
     }
   });
 });

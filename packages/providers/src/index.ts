@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { LinghunError } from "@linghun/core";
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
@@ -31,10 +32,14 @@ export type ModelUsage = {
   endpoint?: string;
 };
 
+export type ModelToolDefinitionSource = "built-in" | "mcp" | "skill" | "plugin" | "unknown";
+
 export type ModelToolDefinition = {
   name: string;
   description: string;
   inputSchema: unknown;
+  source?: ModelToolDefinitionSource;
+  schemaHash?: string;
 };
 
 export type LinghunEvent =
@@ -1892,18 +1897,69 @@ function partitionAnthropicCacheTools(tools: ModelToolDefinition[]): {
   const stableTools: ModelToolDefinition[] = [];
   const dynamicTools: ModelToolDefinition[] = [];
   for (const tool of tools) {
-    if (isDynamicToolName(tool.name)) dynamicTools.push(tool);
+    if (isDynamicToolDefinition(tool)) dynamicTools.push(tool);
     else stableTools.push(tool);
   }
-  const byName = (a: ModelToolDefinition, b: ModelToolDefinition) => a.name.localeCompare(b.name);
   return {
-    stableTools: stableTools.sort(byName),
-    dynamicTools: dynamicTools.sort(byName),
+    stableTools: stableTools.sort(compareToolCacheIdentity),
+    dynamicTools: dynamicTools.sort(compareToolCacheIdentity),
   };
 }
 
-function isDynamicToolName(name: string): boolean {
-  return name.startsWith("mcp__") || name.startsWith("skill__") || name.startsWith("plugin__");
+function compareToolCacheIdentity(a: ModelToolDefinition, b: ModelToolDefinition): number {
+  return (
+    a.name.localeCompare(b.name) ||
+    resolveToolSource(a).localeCompare(resolveToolSource(b)) ||
+    resolveToolSchemaHash(a).localeCompare(resolveToolSchemaHash(b))
+  );
+}
+
+function isDynamicToolDefinition(tool: ModelToolDefinition): boolean {
+  const source = resolveToolSource(tool);
+  return source === "mcp" || source === "skill" || source === "plugin";
+}
+
+function resolveToolSource(tool: ModelToolDefinition): ModelToolDefinitionSource {
+  if (tool.source) return tool.source;
+  if (tool.name.startsWith("mcp__")) return "mcp";
+  if (tool.name.startsWith("skill__")) return "skill";
+  if (tool.name.startsWith("plugin__")) return "plugin";
+  return "unknown";
+}
+
+function resolveToolSchemaHash(tool: ModelToolDefinition): string {
+  return tool.schemaHash ?? createStableToolIdentityHash(createToolCacheIdentity(tool));
+}
+
+function createToolCacheIdentity(tool: ModelToolDefinition): {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  source: ModelToolDefinitionSource;
+} {
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    source: resolveToolSource(tool),
+  };
+}
+
+function createStableToolIdentityHash(value: unknown): string {
+  return createHash("sha256").update(stableToolIdentityString(value)).digest("hex").slice(0, 12);
+}
+
+function stableToolIdentityString(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableToolIdentityString(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${key}:${stableToolIdentityString(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? String(value);
 }
 
 function resolveMaxOutputTokens(

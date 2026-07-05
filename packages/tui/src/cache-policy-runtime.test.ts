@@ -1,7 +1,8 @@
-import type { ModelRequest, ModelUsage } from "@linghun/providers";
+import { OpenAiCompatibleProvider, type ModelRequest, type ModelUsage } from "@linghun/providers";
 import { describe, expect, it } from "vitest";
 import {
   applyCacheWritePolicyToRequest,
+  type CacheRequestKind,
   type CacheRequestObservationState,
   normalizeCacheUsageObservation,
   observeCacheSafeRequest,
@@ -106,6 +107,61 @@ describe("cache-policy-runtime", () => {
     expect(second.fingerprint.dynamicToolSchemaHash).not.toBe(
       first.fingerprint.dynamicToolSchemaHash,
     );
+    expect(second.fingerprint.changedKeys).toEqual([
+      "requestHash",
+      "toolSchemaHash",
+      "dynamicToolSchemaHash",
+    ]);
+  });
+
+  it("separates same-name tool identities by source and compact schema hash", () => {
+    const first = observeCacheSafeRequest({
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        tools: [
+          {
+            name: "Read",
+            description: "built-in read",
+            inputSchema: { type: "object", properties: { path: { type: "string" } } },
+            source: "built-in",
+            schemaHash: "builtin-read-hash",
+          },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    const second = observeCacheSafeRequest({
+      previous: first,
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        tools: [
+          {
+            name: "Read",
+            description: "built-in read",
+            inputSchema: { type: "object", properties: { path: { type: "string" } } },
+            source: "built-in",
+            schemaHash: "builtin-read-hash",
+          },
+          {
+            name: "Read",
+            description: "mcp read",
+            inputSchema: { type: "object", properties: { remote: { type: "boolean" } } },
+            source: "mcp",
+            schemaHash: "mcp-read-hash",
+          },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:01.000Z"),
+    });
+
+    expect(second.fingerprint.stableToolSchemaHash).toBe(first.fingerprint.stableToolSchemaHash);
+    expect(second.fingerprint.dynamicToolSchemaHash).not.toBe(
+      first.fingerprint.dynamicToolSchemaHash,
+    );
+    expect(second.fingerprint.toolSchemaHash).not.toContain("remote");
+    expect(second.fingerprint.toolSchemaHash).toMatch(/^[0-9a-f]{12}$/);
     expect(second.fingerprint.changedKeys).toEqual([
       "requestHash",
       "toolSchemaHash",
@@ -260,6 +316,102 @@ describe("cache-policy-runtime", () => {
     expect(resolveCachePolicy("deep-compact").write.allowWrite).toBe(false);
   });
 
+  it("covers the Phase 4 request-shape and cache-write route matrix", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+    const state: CacheRequestObservationState = {};
+    const routeInputs: Array<{
+      kind: CacheRequestKind;
+      expectedWrite: boolean;
+      request: ModelRequest;
+    }> = [
+      {
+        kind: "main",
+        expectedWrite: true,
+        request: makeRequest({ promptCacheTtl: "1h", cacheBreakNonce: "main-nonce" }),
+      },
+      {
+        kind: "continuation",
+        expectedWrite: true,
+        request: makeRequest({
+          promptCacheTtl: undefined,
+          cacheBreakNonce: "continuation-nonce",
+          endpointProfile: "chat_completions",
+          reasoningLevel: "low",
+        }),
+      },
+      {
+        kind: "final",
+        expectedWrite: true,
+        request: makeRequest({
+          promptCacheTtl: undefined,
+          cacheBreakNonce: "final-nonce",
+          endpointProfile: "chat_completions",
+          reasoningLevel: "minimal",
+        }),
+      },
+      {
+        kind: "agent-child",
+        expectedWrite: false,
+        request: makeRequest({ requestContext: "agent", cacheBreakNonce: "agent-nonce" }),
+      },
+      {
+        kind: "side-question",
+        expectedWrite: false,
+        request: makeRequest({ toolChoice: "none", cacheBreakNonce: "btw-nonce" }),
+      },
+      {
+        kind: "deep-compact",
+        expectedWrite: false,
+        request: makeRequest({ toolChoice: "none", cacheBreakNonce: "compact-nonce" }),
+      },
+    ];
+
+    for (const { kind, expectedWrite, request } of routeInputs) {
+      const policy = resolveCachePolicy(kind);
+      const shaped = applyCacheWritePolicyToRequest(request, policy, state);
+      const body = provider.createAnthropicMessagesRequest({
+        ...shaped,
+        tools: [
+          { name: "Read", description: "Read file", inputSchema: { type: "object" } },
+          { name: "mcp__search", description: "MCP search", inputSchema: { type: "object" } },
+        ],
+      });
+
+      expect(policy.write.allowWrite, kind).toBe(expectedWrite);
+      expect(shaped.promptCacheEnabled === true, kind).toBe(expectedWrite);
+      expect(body.tools?.map((tool) => tool.name), kind).toEqual(["Read", "mcp__search"]);
+
+      if (expectedWrite) {
+        expect(shaped.promptCacheTtl, kind).toBe("1h");
+        expect(shaped.cacheBreakNonce, kind).toBe("main-nonce");
+        expect(shaped.endpointProfile, kind).toBe("anthropic_messages");
+        expect(shaped.reasoningLevel, kind).toBe("high");
+        expect(Array.isArray(body.system), kind).toBe(true);
+        expect(body.tools?.map((tool) => tool.cache_control), kind).toEqual([
+          { type: "ephemeral", ttl: "1h" },
+          undefined,
+        ]);
+        expect(JSON.stringify(body), kind).toContain("linghun-break-cache:main-nonce");
+      } else {
+        expect(shaped.promptCacheTtl, kind).toBeUndefined();
+        expect(shaped.cacheBreakNonce, kind).toBeUndefined();
+        expect(typeof body.system, kind).toBe("string");
+        expect(body.tools?.map((tool) => tool.cache_control), kind).toEqual([
+          undefined,
+          undefined,
+        ]);
+        expect(JSON.stringify(body), kind).not.toContain("linghun-break-cache");
+      }
+    }
+  });
+
   it("keeps main-chain cache fields unchanged without a request-shape latch", () => {
     const request = makeRequest({ promptCacheTtl: "1h", cacheBreakNonce: "nonce" });
     const next = applyCacheWritePolicyToRequest(request, resolveCachePolicy("main"));
@@ -270,15 +422,20 @@ describe("cache-policy-runtime", () => {
     expect(next.cacheBreakNonce).toBe("nonce");
   });
 
-  it("latches main-chain prompt cache TTL shape once enabled", () => {
+  it("latches main-chain prompt cache request shape for continuations", () => {
     const state: CacheRequestObservationState = {};
     const first = applyCacheWritePolicyToRequest(
-      makeRequest({ promptCacheTtl: "1h" }),
+      makeRequest({ promptCacheTtl: "1h", cacheBreakNonce: "nonce-a", reasoningLevel: "High" }),
       resolveCachePolicy("main"),
       state,
     );
     const second = applyCacheWritePolicyToRequest(
-      makeRequest({ promptCacheTtl: undefined }),
+      makeRequest({
+        promptCacheTtl: undefined,
+        cacheBreakNonce: "nonce-b",
+        endpointProfile: "chat_completions",
+        reasoningLevel: "Low",
+      }),
       resolveCachePolicy("continuation"),
       state,
     );
@@ -287,10 +444,19 @@ describe("cache-policy-runtime", () => {
     expect(second).not.toBe(first);
     expect(second.promptCacheEnabled).toBe(true);
     expect(second.promptCacheTtl).toBe("1h");
-    expect(state.cacheRequestShapeLatch).toEqual({ promptCacheTtl: "1h" });
+    expect(second.cacheBreakNonce).toBe("nonce-a");
+    expect(second.endpointProfile).toBe("anthropic_messages");
+    expect(second.reasoningLevel).toBe("High");
+    expect(state.cacheRequestShapeLatch).toEqual({
+      promptCacheEnabled: true,
+      promptCacheTtl: "1h",
+      cacheBreakNonce: "nonce-a",
+      endpointProfile: "anthropic_messages",
+      reasoningLevel: "High",
+    });
   });
 
-  it("does not let later main-chain requests promote a 5m cache shape to 1h", () => {
+  it("does not let final requests promote a latched 5m cache shape to 1h", () => {
     const state: CacheRequestObservationState = {};
     applyCacheWritePolicyToRequest(
       makeRequest({ promptCacheTtl: undefined }),
@@ -305,22 +471,52 @@ describe("cache-policy-runtime", () => {
 
     expect(next.promptCacheEnabled).toBe(true);
     expect(next.promptCacheTtl).toBeUndefined();
-    expect(state.cacheRequestShapeLatch).toEqual({ promptCacheTtl: "5m" });
+    expect(state.cacheRequestShapeLatch).toEqual({
+      promptCacheEnabled: true,
+      promptCacheTtl: "5m",
+      cacheBreakNonce: undefined,
+      endpointProfile: "anthropic_messages",
+      reasoningLevel: "high",
+    });
   });
 
-  it("does not re-enable prompt cache when a later request disables it", () => {
+  it("latches disabled prompt cache shape for continuations without re-enabling writes", () => {
+    const state: CacheRequestObservationState = {};
+    applyCacheWritePolicyToRequest(
+      makeRequest({ promptCacheEnabled: false, promptCacheTtl: "1h", cacheBreakNonce: "nonce" }),
+      resolveCachePolicy("main"),
+      state,
+    );
+    const next = applyCacheWritePolicyToRequest(
+      makeRequest({ promptCacheEnabled: true, promptCacheTtl: "1h", cacheBreakNonce: "new-nonce" }),
+      resolveCachePolicy("continuation"),
+      state,
+    );
+
+    expect(next.promptCacheEnabled).toBeUndefined();
+    expect(next.promptCacheTtl).toBeUndefined();
+    expect(next.cacheBreakNonce).toBeUndefined();
+  });
+
+  it("refreshes request-shape latch for a new main request", () => {
     const state: CacheRequestObservationState = {};
     applyCacheWritePolicyToRequest(
       makeRequest({ promptCacheTtl: "1h" }),
       resolveCachePolicy("main"),
       state,
     );
-    const disabled = makeRequest({ promptCacheEnabled: false, promptCacheTtl: undefined });
-    const next = applyCacheWritePolicyToRequest(disabled, resolveCachePolicy("main"), state);
+    const next = applyCacheWritePolicyToRequest(
+      makeRequest({ promptCacheEnabled: false, promptCacheTtl: undefined }),
+      resolveCachePolicy("main"),
+      state,
+    );
 
-    expect(next).toBe(disabled);
     expect(next.promptCacheEnabled).toBe(false);
     expect(next.promptCacheTtl).toBeUndefined();
+    expect(state.cacheRequestShapeLatch).toMatchObject({
+      promptCacheEnabled: false,
+      promptCacheTtl: "5m",
+    });
   });
 
   it("removes cache write fields from sidechain requests while preserving request shape", () => {
