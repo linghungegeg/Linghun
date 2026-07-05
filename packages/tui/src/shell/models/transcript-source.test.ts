@@ -78,7 +78,7 @@ describe("transcript source", () => {
     expect(cells[0]?.block.fullText).toBe("alpha beta");
   });
 
-  it("keeps raw source text when later block compaction rewrites fullText", () => {
+  it("replaces raw source text when later block compaction rewrites fullText", () => {
     const source = createTranscriptSource();
     const block: ProductBlockViewModel = {
       id: "assistant-raw",
@@ -108,7 +108,42 @@ describe("transcript source", () => {
 
     const cell = snapshotTranscriptSourceCells(source)[0];
     expect(cell?.block.fullText).toContain("<persisted-tui-block-output>");
-    expect(cell?.rawText).toBe("alpha beta gamma");
+    expect(cell?.rawText).toContain("<persisted-tui-block-output>");
+    expect(cell?.rawText).not.toBe("alpha beta gamma");
+  });
+
+  it("drops old raw source text when compacted block upsert omits rawText", () => {
+    const source = createTranscriptSource();
+    const marker = "raw-text-retention-marker";
+    const largeText = `alpha ${marker} ${"beta ".repeat(2_000)}`;
+    const block: ProductBlockViewModel = {
+      id: "assistant-raw-missing",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "alpha",
+      fullText: largeText,
+      messageKind: "assistant_text",
+    };
+
+    upsertTranscriptSourceCell(source, {
+      id: block.id,
+      kind: "assistant",
+      block,
+      rawText: transcriptSourceRawTextForBlock(block),
+    });
+    upsertTranscriptSourceCell(source, {
+      id: block.id,
+      kind: "assistant",
+      block: {
+        ...block,
+        fullText: "<compacted-tui-block-output>\npreview only\n</compacted-tui-block-output>",
+      },
+    });
+
+    const cells = snapshotTranscriptSourceCells(source);
+    expect(cells[0]?.rawText).toBeUndefined();
+    expect(JSON.stringify(cells)).not.toContain(marker);
   });
 
   it("projects source cells back to current Ink block snapshots without mutating source", () => {

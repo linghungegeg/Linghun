@@ -49,7 +49,7 @@ export function upsertTranscriptSourceCell(
     const previous = source.cells[index];
     source.cells[index] = {
       ...next,
-      rawText: shouldKeepPreviousRawText(previous?.rawText, cell.rawText)
+      rawText: shouldKeepPreviousRawText(previous?.rawText, cell.rawText, cell.block.fullText)
         ? previous?.rawText
         : cell.rawText,
     };
@@ -101,20 +101,26 @@ export function transcriptSourceRawTextForBlock(block: ProductBlockViewModel): s
   }
 }
 
-function shouldKeepPreviousRawText(previous: string | undefined, next: string | undefined): boolean {
-  return Boolean(previous && (!next || isCompactedTranscriptText(next)));
+function shouldKeepPreviousRawText(
+  previous: string | undefined,
+  next: string | undefined,
+  nextBlockText: string | undefined,
+): boolean {
+  if (!previous || next) return false;
+  return !isCompactedTranscriptText(nextBlockText);
 }
 
 function cloneTranscriptSourceBlock(block: ProductBlockViewModel): ProductBlockViewModel {
   return { ...block };
 }
 
-function isCompactedTranscriptText(value: string): boolean {
-  return (
-    value.startsWith("<persisted-tui-output>") ||
-    value.startsWith("<compacted-tui-output>") ||
-    value.startsWith("<persisted-tui-block-output>") ||
-    value.startsWith("<compacted-tui-block-output>")
+function isCompactedTranscriptText(value: string | undefined): boolean {
+  return Boolean(
+    value &&
+      (value.startsWith("<persisted-tui-output>") ||
+        value.startsWith("<compacted-tui-output>") ||
+        value.startsWith("<persisted-tui-block-output>") ||
+        value.startsWith("<compacted-tui-block-output>")),
   );
 }
 
