@@ -147,6 +147,7 @@ export type ModelRequest = {
   promptCacheEnabled?: boolean;
   promptCacheTtl?: "1h";
   cacheBreakNonce?: string;
+  promptCacheKey?: string;
   /** Request context for retry differentiation. "foreground" = user waiting (default); "agent" = sub-agent. */
   requestContext?: "foreground" | "agent";
 };
@@ -193,6 +194,7 @@ export type OpenAiResponsesRequest = {
   model: string;
   input: OpenAiResponsesInputItem[];
   stream: true;
+  prompt_cache_key?: string;
   max_output_tokens?: number;
   tools?: OpenAiResponsesToolDefinition[];
   tool_choice?: "auto" | "none";
@@ -1635,6 +1637,7 @@ function createResponsesProfileRequest(
     model,
     input: repaired.messages.flatMap(toOpenAiResponsesInputItem),
     stream: true,
+    ...(request.promptCacheKey ? { prompt_cache_key: request.promptCacheKey } : {}),
     ...createOptionalMaxTokens("max_output_tokens", request, config),
     ...(tools && tools.length > 0
       ? {
@@ -1834,19 +1837,19 @@ function createAnthropicMessagesProfileRequest(
     }
   }
   if (systemSegments.length > 0) {
-    // D.13F：promptCacheEnabled=true 时，system 写为 block array，并在最后一个 block 上挂
-    // cache_control（5m 默认不写 ttl 字面量；1h 显式时才写 ttl: "1h"）。
+    // D.13F：promptCacheEnabled=true 时，system 写为 block array，并在稳定 system 边界挂
+    // cache_control（两段时挂第一个稳定段；5m 默认不写 ttl 字面量；1h 显式时才写 ttl: "1h"）。
     // 关闭时仍走 string 形态，request body 不会出现 cache_control 字段，避免误触发缓存计费。
-    // cacheBreakNonce 仅在 enabled 且非空时附加为最后一个 block 的注释式后缀，破坏前缀 hash。
+    // cacheBreakNonce 仅在 enabled 且非空时附加到同一个 cache 边界 block，破坏前缀 hash。
     if (request.promptCacheEnabled) {
-      const lastIndex = systemSegments.length - 1;
+      const cacheControlIndex = systemSegments.length > 1 ? 0 : systemSegments.length - 1;
       const blocks: AnthropicSystemBlock[] = systemSegments.map((segment, index) => {
-        const isLast = index === lastIndex;
+        const isCacheBoundary = index === cacheControlIndex;
         const text =
-          isLast && request.cacheBreakNonce
+          isCacheBoundary && request.cacheBreakNonce
             ? `${segment}\n<!-- linghun-break-cache:${request.cacheBreakNonce} -->`
             : segment;
-        if (!isLast) {
+        if (!isCacheBoundary) {
           return { type: "text", text };
         }
         return { type: "text", text, cache_control: createAnthropicCacheControl(request) };
@@ -2039,8 +2042,8 @@ function createOpenAiChatTools(
 ): OpenAiToolDefinition[] | undefined {
   assertToolCapability(request, contract);
   // D.13F：tools 数组按 name 字典序稳定排序，避免上层迭代顺序波动破坏 OpenAI 隐式
-  // prompt cache 的前缀 hash。Linghun 不传 prompt_cache_key/prompt_cache_retention，
-  // 仅靠稳定顺序和 cached_tokens 观察隐式缓存命中。
+  // prompt cache 的前缀 hash。chat profile 不传 prompt_cache_key；Responses profile
+  // 可由 TUI 注入稳定 promptCacheKey。
   const tools = request.tools;
   if (!tools) return undefined;
   return [...tools]

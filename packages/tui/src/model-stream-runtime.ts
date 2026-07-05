@@ -23,7 +23,7 @@ import {
 import { RESOURCE_GUARD_KIND, checkResourceGuard } from "./background-control-runtime.js";
 import { buildPromptCacheRequestFields } from "./break-cache-runtime.js";
 import { writeLightHints } from "./cache-command-runtime.js";
-import { stableStringify } from "./cache-freshness.js";
+import { stableHash, stableStringify } from "./cache-freshness.js";
 import {
   applyCacheWritePolicyToRequest,
   type CacheRequestKind,
@@ -84,7 +84,7 @@ import {
 } from "./model-loop-runtime.js";
 import type { FinalAnswerClaimVerdict, FinalAnswerExtendedVerdict } from "./model-loop-runtime.js";
 import { stripStructuredFinalAnswerClaims } from "./model-loop-runtime.js";
-import { createModelSystemPrompt, sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
+import { createModelSystemPromptSegments, sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
 import { looksLikeModelSetupInput, parseModelSetupPrefill } from "./model-setup-runtime.js";
 import { executeModelToolUse, recordReportIncompleteEvidence } from "./model-tool-runtime.js";
 import {
@@ -1873,7 +1873,7 @@ export async function sendMessage(
     (notice) => notice.id,
   );
   const _tSysPrompt0 = Date.now();
-  const systemPrompt = createModelSystemPrompt(
+  const systemPrompt = createModelSystemPromptSegments(
     text,
     context,
     runtimeStatus,
@@ -1895,7 +1895,7 @@ export async function sendMessage(
   const messages = await buildModelMessagesWithRecentContext(
     context,
     sessionId,
-    systemPrompt,
+    [systemPrompt.stable, systemPrompt.dynamic],
     text,
     selectedRuntime,
   );
@@ -2011,6 +2011,7 @@ export async function sendMessage(
         resolveCachePolicy("main"),
         context.cache,
       );
+      providerRequest = applyPromptCacheKey(providerRequest, context, sessionId);
       rememberCacheSafePrefix(context.cache, providerRequest);
       recordCacheRequestObservation(context, "main", selectedRuntime.provider, providerRequest);
       const resetAssistantDraftForProviderRetry = () => {
@@ -3187,11 +3188,14 @@ export async function handleRemoteInboundMessage(
 export async function buildModelMessagesWithRecentContext(
   context: TuiContext,
   sessionId: string,
-  systemPrompt: string,
+  systemPrompt: string | readonly string[],
   currentUserText: string,
   runtime = getSelectedModelRuntime(context),
 ): Promise<ModelMessage[]> {
-  const messages: ModelMessage[] = [{ role: "system", content: systemPrompt }];
+  const systemPrompts = Array.isArray(systemPrompt) ? systemPrompt : [systemPrompt];
+  const messages: ModelMessage[] = systemPrompts
+    .filter((content) => content.trim().length > 0)
+    .map((content) => ({ role: "system", content }));
   try {
     const recentTranscript = await context.store.readRecentTranscriptEvents(sessionId, {
       limit: MAX_CONTEXT_MESSAGES * 2 + 1,
@@ -3284,6 +3288,38 @@ export async function buildModelMessagesWithRecentContext(
   return messages;
 }
 
+function applyPromptCacheKey(
+  request: ModelRequest,
+  context: TuiContext,
+  sessionId: string,
+): ModelRequest {
+  if (request.endpointProfile !== "responses" || request.promptCacheEnabled !== true) {
+    return request;
+  }
+  return {
+    ...request,
+    promptCacheKey: `linghun:${stableHash({
+      version: "v1",
+      projectPath: context.projectPath,
+      sessionId,
+      model: request.model ?? context.model,
+      endpointProfile: request.endpointProfile,
+      toolSchema: (request.tools ?? []).map((tool) => ({
+        name: tool.name,
+        source: tool.source ?? "unknown",
+        schemaHash:
+          tool.schemaHash ??
+          stableHash({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+            source: tool.source ?? "unknown",
+          }),
+      })),
+    })}`,
+  };
+}
+
 async function budgetRecentContextToolResults(
   context: TuiContext,
   sessionId: string,
@@ -3351,17 +3387,21 @@ async function streamFinalModelAnswerWithoutTools(
   }
   continuation.messages = preflight.messages;
   const promptCacheFields = await buildPromptCacheRequestFields(context);
-  const providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
-    {
-      messages: preflight.messages,
-      model: continuation.model,
-      endpointProfile: continuation.endpointProfile,
-      ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
-      toolChoice: "none",
-      ...promptCacheFields,
-    },
-    resolveCachePolicy("final"),
-    context.cache,
+  const providerRequest: ModelRequest = applyPromptCacheKey(
+    applyCacheWritePolicyToRequest(
+      {
+        messages: preflight.messages,
+        model: continuation.model,
+        endpointProfile: continuation.endpointProfile,
+        ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
+        toolChoice: "none",
+        ...promptCacheFields,
+      },
+      resolveCachePolicy("final"),
+      context.cache,
+    ),
+    context,
+    sessionId,
   );
   recordCacheRequestObservation(context, "final", continuation.provider, providerRequest);
   const resetFinalAssistantDraftForProviderRetry = () => {
@@ -3852,6 +3892,7 @@ export async function continueModelAfterToolResults(
         resolveCachePolicy("continuation"),
         context.cache,
       );
+      providerRequest = applyPromptCacheKey(providerRequest, context, sessionId);
       rememberCacheSafePrefix(context.cache, providerRequest);
       recordCacheRequestObservation(context, "continuation", continuation.provider, providerRequest);
       const resetAssistantDraftForProviderRetry = () => {

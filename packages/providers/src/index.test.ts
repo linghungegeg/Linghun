@@ -2915,11 +2915,11 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
       cache_control?: { type: "ephemeral"; ttl?: string };
     }>;
     expect(blocks).toHaveLength(2);
-    expect(blocks[0]?.cache_control).toBeUndefined();
-    expect(blocks[1]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(blocks[0]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(blocks[1]?.cache_control).toBeUndefined();
     // 5m 默认禁止 ttl 字面量
-    expect(JSON.stringify(blocks[1])).not.toContain('"ttl"');
-    expect(JSON.stringify(blocks[1])).not.toContain('"5m"');
+    expect(JSON.stringify(blocks[0])).not.toContain('"ttl"');
+    expect(JSON.stringify(blocks[0])).not.toContain('"5m"');
   });
 
   it('sets ttl: "1h" only when promptCacheTtl is explicitly 1h', () => {
@@ -3010,7 +3010,7 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
     expect(userBlocks[0]?.text).not.toContain("linghun-break-cache");
   });
 
-  it("appends linghun-break-cache nonce to last system block when cacheBreakNonce provided", () => {
+  it("appends linghun-break-cache nonce to the system cache boundary when cacheBreakNonce provided", () => {
     const provider = buildAnthropicProvider();
     const body = provider.createAnthropicMessagesRequest({
       messages: [
@@ -3022,9 +3022,9 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
       cacheBreakNonce: "nonce-xyz-123",
     });
     const blocks = body.system as Array<{ type: "text"; text: string }>;
-    expect(blocks[0]?.text).toBe("alpha");
-    expect(blocks[1]?.text).toContain("beta");
-    expect(blocks[1]?.text).toContain("<!-- linghun-break-cache:nonce-xyz-123 -->");
+    expect(blocks[0]?.text).toContain("alpha");
+    expect(blocks[0]?.text).toContain("<!-- linghun-break-cache:nonce-xyz-123 -->");
+    expect(blocks[1]?.text).toBe("beta");
   });
 
   it("does not append nonce when promptCacheEnabled is false", () => {
@@ -3167,19 +3167,46 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
       name: "Read",
       parameters: { type: "object" },
     });
+    expect(JSON.stringify(chat)).not.toContain("prompt_cache_key");
+    expect(JSON.stringify(responses)).not.toContain("prompt_cache_key");
     for (const body of [chat, responses] as unknown[]) {
       const serialized = JSON.stringify(body);
-      expect(serialized).not.toContain("prompt_cache_key");
       expect(serialized).not.toContain("prompt_cache_retention");
       expect(serialized).not.toContain("cache_control");
       expect(serialized).not.toContain("linghun-break-cache");
       expect(serialized).not.toContain("input_schema");
     }
   });
+
+  it("sends prompt_cache_key only on OpenAI Responses when explicitly provided", () => {
+    const request: ModelRequest = {
+      messages: [{ role: "user", content: "hi" }],
+      promptCacheEnabled: true,
+      promptCacheKey: "linghun:test-cache-key",
+    };
+    const chat = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-x",
+    }).createChatRequest(request);
+    const responses = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-x",
+      endpointProfile: "responses",
+    }).createResponsesRequest(request);
+
+    expect(JSON.stringify(chat)).not.toContain("prompt_cache_key");
+    expect(responses.prompt_cache_key).toBe("linghun:test-cache-key");
+  });
 });
 
 describe("D.13F end-to-end Anthropic POST body with cache_control", () => {
-  it("sends cache_control on last system block over the wire", async () => {
+  it("sends cache_control on the system cache boundary over the wire", async () => {
     const encoder = new TextEncoder();
     const fetchMock = vi.fn(async () => {
       const stream = new ReadableStream<Uint8Array>({
@@ -3212,6 +3239,7 @@ describe("D.13F end-to-end Anthropic POST body with cache_control", () => {
     const request: ModelRequest = {
       messages: [
         { role: "system", content: "You are Linghun." },
+        { role: "system", content: "Dynamic turn context." },
         { role: "user", content: "hi" },
       ],
       promptCacheEnabled: true,
@@ -3228,8 +3256,9 @@ describe("D.13F end-to-end Anthropic POST body with cache_control", () => {
       system: Array<{ text: string; cache_control?: { type: string; ttl?: string } }>;
     };
     expect(Array.isArray(sent.system)).toBe(true);
-    expect(sent.system.at(-1)?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-    expect(sent.system.at(-1)?.text).toContain("<!-- linghun-break-cache:wire-nonce-9 -->");
+    expect(sent.system[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(sent.system[0]?.text).toContain("<!-- linghun-break-cache:wire-nonce-9 -->");
+    expect(sent.system[1]?.cache_control).toBeUndefined();
   });
 });
 
@@ -3444,7 +3473,7 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
     });
     expect(Array.isArray(body.system)).toBe(true);
     const systemBlocks = body.system as Array<{ type: string; cache_control?: unknown }>;
-    expect(systemBlocks.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+    expect(systemBlocks[0]?.cache_control).toEqual({ type: "ephemeral" });
     expect(body.tools?.[0]).toMatchObject({ name: "Read", input_schema: { type: "object" } });
     expect(body.tool_choice).toEqual({ type: "auto" });
   });
@@ -3799,15 +3828,14 @@ describe("D.13H Anthropic context editing hard-disabled closure", () => {
       name: "Read",
       input_schema: { type: "object" },
     });
-    // D.13F：system 末块仍挂 cache_control: { type: "ephemeral" }。
+    // D.13F：system cache 边界仍挂 cache_control: { type: "ephemeral" }。
     expect(Array.isArray(body.system)).toBe(true);
     const systemBlocks = body.system as Array<{
       type: string;
       text: string;
       cache_control?: { type: string; ttl?: string };
     }>;
-    const lastBlock = systemBlocks[systemBlocks.length - 1];
-    expect(lastBlock?.cache_control).toEqual({ type: "ephemeral" });
+    expect(systemBlocks[0]?.cache_control).toEqual({ type: "ephemeral" });
     // body 不能包含 cache_edits / cache_reference。
     const bodyText = init.body as string;
     expect(bodyText).not.toContain("cache_edits");

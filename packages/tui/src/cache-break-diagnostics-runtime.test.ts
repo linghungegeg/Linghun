@@ -30,6 +30,7 @@ function observation(overrides: Partial<CacheRequestObservation> = {}): CacheReq
       modelHash: "model",
       reasoningHash: "reasoning",
       cacheConfigHash: "cache-config",
+      promptCacheKeyHash: "none",
       changedKeys: [],
     },
     ...overrides,

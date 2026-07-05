@@ -1,7 +1,90 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
+import type { TuiContext } from "./index.js";
+import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+import {
+  createModelSystemPromptSegments,
+  sanitizeMainScreenLeakage,
+} from "./model-prompt-runtime.js";
+
+function createPromptTestContext(overrides: Partial<TuiContext> = {}): TuiContext {
+  return {
+    language: "zh-CN",
+    projectPath: "F:\\synthetic-project",
+    model: "gpt-test",
+    permissions: { recentDenied: [] },
+    evidence: [
+      {
+        id: "ev-1",
+        kind: "command",
+        source: "test",
+        summary: "focused verification passed",
+        supportsClaims: ["test_claim"],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ],
+    solutionCompleteness: createSolutionCompletenessStatus(),
+    mcp: { enabled: false, servers: [], tools: [] },
+    skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [], errors: [] },
+    plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [], errors: [] },
+    config: { mcp: { servers: {} } },
+    memory: {
+      projectRulesPath: "",
+      projectRulesExists: false,
+      projectRulesSummary: "",
+      projectDir: "",
+      userDir: "",
+      sessionDir: "",
+      candidates: [],
+      accepted: [],
+      rejected: [],
+      disabled: [],
+      retired: [],
+      learningMode: "off",
+    },
+    discoveredDeferredToolNames: new Set<string>(),
+    ...overrides,
+  } as unknown as TuiContext;
+}
 
 describe("D.14D sanitizeMainScreenLeakage", () => {
+  it("keeps dynamic runtime context out of the stable system prompt segment", () => {
+    const segments = createModelSystemPromptSegments(
+      "检查缓存机制",
+      createPromptTestContext(),
+      { index: { status: "ready" } },
+      "ArchitectureDirective=dynamic architecture note",
+      { isWorktree: true, branch: "codex/cache" },
+      { count: 1, text: "historical failure hint" },
+      "MetaSchedulerForModel=dynamic scheduler note",
+      "clean",
+    );
+
+    expect(segments.stable).toContain("OutputStyle=");
+    expect(segments.stable).toContain("EngineeringStructure=");
+    expect(segments.stable).toContain("CommandCapabilitySummary=");
+    expect(segments.dynamic).toContain("RuntimeStatusForModel=");
+    expect(segments.dynamic).toContain("EvidenceSummary=");
+    expect(segments.dynamic).toContain("SolutionCompleteness=");
+    expect(segments.dynamic).toContain("GitStatus=clean");
+    expect(segments.dynamic).toContain("MetaSchedulerForModel=dynamic scheduler note");
+
+    for (const token of [
+      "RuntimeStatusForModel=",
+      "ControlledMemorySummary=",
+      "MemoryBoundary=",
+      "EvidenceSummary=",
+      "SolutionCompleteness=",
+      "DeferredToolsReminder=",
+      "WorktreeContext=",
+      "GitStatus=",
+      "AgentCompletionReturnsForMainChain",
+      "FailureLearningSummary=",
+      "MetaSchedulerForModel=",
+    ]) {
+      expect(segments.stable).not.toContain(token);
+    }
+  });
+
   it("returns text unchanged when no internal tokens are present", () => {
     const text = "这是给用户的人话回答，没有内部字段。";
     expect(sanitizeMainScreenLeakage(text, "zh-CN")).toBe(text);

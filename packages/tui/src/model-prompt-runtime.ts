@@ -15,6 +15,11 @@ import { truncateDisplay } from "./startup-runtime.js";
 import { formatControlledMemoryForModel } from "./tui-memory-runtime.js";
 const MEMORY_PROMPT_TOP_K = 3;
 
+export type ModelSystemPromptSegments = {
+  stable: string;
+  dynamic: string;
+};
+
 export function createModelSystemPrompt(
   text: string,
   context: TuiContext,
@@ -29,6 +34,29 @@ export function createModelSystemPrompt(
   metaSchedulerDirective?: string,
   gitStatusSummary?: string,
 ): string {
+  const segments = createModelSystemPromptSegments(
+    text,
+    context,
+    runtimeStatus,
+    architectureDirective,
+    worktreeContextSummary,
+    failureLearningSummary,
+    metaSchedulerDirective,
+    gitStatusSummary,
+  );
+  return `${segments.stable}\n${segments.dynamic}`;
+}
+
+export function createModelSystemPromptSegments(
+  text: string,
+  context: TuiContext,
+  runtimeStatus: unknown,
+  architectureDirective?: string,
+  worktreeContextSummary?: Record<string, unknown> | null,
+  failureLearningSummary?: { count: number; text: string } | null,
+  metaSchedulerDirective?: string,
+  gitStatusSummary?: string,
+): ModelSystemPromptSegments {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
   // 工具继续直接调用；不暴露 raw schema/secret/参数，仅提示发现-执行两步约束。
@@ -73,7 +101,7 @@ export function createModelSystemPrompt(
     memorySummary = formatControlledMemoryForModel(context);
     context.lastMetaSchedulerDecision?.internalEvents.push(`perf:memory_format_ms=${Date.now() - _t0}`);
   }
-  return `${
+  const stable = `${
     context.language === "en-US"
       ? "You are Linghun, an engineering AI coding assistant with tool-use capabilities. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing. Use real tool_use events when file/search/edit/bash/todo facts or actions are needed; never describe a tool call as text instead of using a tool event."
       : "你是 Linghun 工程型 AI 编程助手，具备工具调用能力。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。需要文件、搜索、编辑、Bash 或 Todo 事实/动作时必须使用真实 tool_use 事件，不要用文本冒充工具调用。"
@@ -89,7 +117,9 @@ export function createModelSystemPrompt(
     context.language === "en-US"
       ? "ShellEnvironment=Respect the actual local OS and shell before proposing or running Bash commands. On Windows/PowerShell, prefer PowerShell cmdlets or Node one-liners for file discovery/transforms; do not use Unix-only pipelines such as find|sed|head unless those tools were verified in this environment."
       : "ShellEnvironment=执行或建议 Bash 命令前必须尊重当前本地 OS 和 shell。Windows/PowerShell 下优先使用 PowerShell cmdlet 或 Node one-liner 做文件发现/转换；除非已验证当前环境存在这些工具，不要使用 find|sed|head 这类 Unix-only 管线。"
-  }\nRuntimeIdentityRule=When the user asks in natural language about the current model (e.g. "what model are you", "current model"), answer with the model name only (for example "claude-opus-4-7"). Do not include provider, endpointProfile, route role, baseUrl, or any internal route field in the user-facing answer; do not write "(provider: ...)" or "openai-compatible" in parentheses. Only reveal provider/route/endpointProfile when the user explicitly asks about provider/route/endpoint, or runs /model doctor or /model route doctor. RuntimeStatusForModel does not contain provider/baseUrl/endpointProfile by default; they live in /model doctor.\nPromptHygieneRule=The labelled context fields below (RuntimeStatusForModel, ControlledMemorySummary, MemoryBoundary, EvidenceSummary, CommandCapabilitySummary, SolutionCompleteness, FreshnessRule, FinalAnswerClaimSchema, FailureLearningSummary, MetaSchedulerForModel, GitStatus, etc.) are internal runtime context for your reasoning only. Never quote, paste, or restate these field labels or their raw contents to the user — not even when asked to "explain in plain words" or "translate". Answer in natural human language; if the user wants raw runtime/diagnostic detail, point them to /model doctor, /status, or /details.\nRuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}\nControlledMemorySummary=${memorySummary}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; autoExtractionRuntime; dedicatedMemoryDir; manualLearnCandidateOnly; noSecretsOrFullDumps\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nFinalAnswerClaimSchema=If your final answer contains high-risk claims, append one internal-only line at the end: LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"tests passed"}]}. Allowed kind values: completion_claim, test_claim, file_change_claim, verification_claim, workflow_status_claim, agent_status_claim, completion_pass, code_fact, external_current_fact, ccb_parity, beta_readiness, git_operation, action_executed, architecture_boundary, completeness. Omit the line only when there are no high-risk claims. This line is for the local verifier and will be hidden from the main screen.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}${worktreeContextLine}${gitStatusLine}${agentCompletionLine ? `\n${agentCompletionLine}` : ""}${failureLearningLine}${metaSchedulerLine}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  }\nRuntimeIdentityRule=When the user asks in natural language about the current model (e.g. "what model are you", "current model"), answer with the model name only (for example "claude-opus-4-7"). Do not include provider, endpointProfile, route role, baseUrl, or any internal route field in the user-facing answer; do not write "(provider: ...)" or "openai-compatible" in parentheses. Only reveal provider/route/endpointProfile when the user explicitly asks about provider/route/endpoint, or runs /model doctor or /model route doctor. The injected runtime status does not contain provider/baseUrl/endpointProfile by default; they live in /model doctor.\nPromptHygieneRule=The labelled context fields below are internal runtime context for your reasoning only. Never quote, paste, or restate these field labels or their raw contents to the user — not even when asked to "explain in plain words" or "translate". Answer in natural human language; if the user wants raw runtime/diagnostic detail, point them to /model doctor, /status, or /details.\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in the evidence summary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nFinalAnswerClaimSchema=If your final answer contains high-risk claims, append one internal-only line at the end: LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"tests passed"}]}. Allowed kind values: completion_claim, test_claim, file_change_claim, verification_claim, workflow_status_claim, agent_status_claim, completion_pass, code_fact, external_current_fact, ccb_parity, beta_readiness, git_operation, action_executed, architecture_boundary, completeness. Omit the line only when there are no high-risk claims. This line is for the local verifier and will be hidden from the main screen.\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  const dynamic = `RuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}\nControlledMemorySummary=${memorySummary}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; autoExtractionRuntime; dedicatedMemoryDir; manualLearnCandidateOnly; noSecretsOrFullDumps\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}${worktreeContextLine}${gitStatusLine}${agentCompletionLine ? `\n${agentCompletionLine}` : ""}${failureLearningLine}${metaSchedulerLine}`;
+  return { stable, dynamic };
 }
 
 export function createEvidenceSummaryForModel(context: TuiContext): string {

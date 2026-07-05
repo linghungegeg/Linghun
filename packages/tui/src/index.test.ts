@@ -28665,10 +28665,9 @@ describe("D.13V-B/C source invariants", () => {
   it("source: createModelSystemPrompt 用 projectRuntimeStatusForPrompt 投影 runtimeStatus", async () => {
     const text = await readSrc("model-prompt-runtime.ts");
     expect(text).toContain("projectRuntimeStatusForPrompt(runtimeStatus)");
-    // RuntimeIdentityRule 不再依赖软约束：硬声明 RuntimeStatusForModel 不含 provider
-    expect(text).toMatch(
-      /RuntimeStatusForModel does not contain provider\/baseUrl\/endpointProfile by default/,
-    );
+    // RuntimeIdentityRule 仍声明 provider/baseUrl/endpointProfile 只在 doctor 里展示，
+    // 但稳定 prompt 段不再携带动态字段标签。
+    expect(text).toMatch(/provider\/baseUrl\/endpointProfile by default/);
   });
 
   it("source: deferred tool 主屏 writeLine 走 sanitizeDeferredToolPrimaryText", async () => {

@@ -31,6 +31,7 @@ export type CacheRequestFingerprint = {
   modelHash: string;
   reasoningHash: string;
   cacheConfigHash: string;
+  promptCacheKeyHash: string;
   changedKeys: string[];
 };
 
@@ -370,6 +371,8 @@ function createCacheRequestFingerprint(
     promptCacheEnabled: request.promptCacheEnabled === true,
     promptCacheTtl: request.promptCacheTtl ?? "5m",
     hasCacheBreakNonce: Boolean(request.cacheBreakNonce),
+    hasPromptCacheKey: Boolean(request.promptCacheKey),
+    promptCacheKeyHash: request.promptCacheKey ? stableHash(request.promptCacheKey) : "none",
   };
   const modelShape = {
     model: request.model ?? "unknown",
@@ -402,6 +405,7 @@ function createCacheRequestFingerprint(
     modelHash: stableHash(modelShape),
     reasoningHash: stableHash(reasoningShape),
     cacheConfigHash: stableHash(cacheConfig),
+    promptCacheKeyHash: cacheConfig.promptCacheKeyHash,
   };
 }
 
@@ -485,6 +489,7 @@ function diffCacheRequestFingerprint(
     "modelHash",
     "reasoningHash",
     "cacheConfigHash",
+    "promptCacheKeyHash",
   ];
   return keys.filter((key) => previous[key] !== current[key]);
 }

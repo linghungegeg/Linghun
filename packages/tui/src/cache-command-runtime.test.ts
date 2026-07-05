@@ -39,6 +39,7 @@ function makeObservation(
       modelHash: "model",
       reasoningHash: "reasoning",
       cacheConfigHash: "cache",
+      promptCacheKeyHash: "none",
       changedKeys: ["messagePrefixHash", "reasoningHash"],
     },
     usage: {

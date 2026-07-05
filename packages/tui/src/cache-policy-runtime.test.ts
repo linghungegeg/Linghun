@@ -245,6 +245,34 @@ describe("cache-policy-runtime", () => {
     expect(JSON.stringify(second)).not.toContain("hello");
   });
 
+  it("fingerprints prompt cache keys by hash without storing the raw key", () => {
+    const first = observeCacheSafeRequest({
+      kind: "main",
+      provider: "openai-compatible",
+      request: makeRequest({ endpointProfile: "responses" }),
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    const second = observeCacheSafeRequest({
+      previous: first,
+      kind: "continuation",
+      provider: "openai-compatible",
+      request: makeRequest({
+        endpointProfile: "responses",
+        promptCacheKey: "linghun:secret-session-cache-key",
+      }),
+      now: new Date("2026-01-01T00:00:01.000Z"),
+    });
+
+    expect(second.fingerprint.promptCacheKeyHash).toMatch(/^[0-9a-f]{12}$/);
+    expect(second.fingerprint.promptCacheKeyHash).not.toBe(first.fingerprint.promptCacheKeyHash);
+    expect(second.fingerprint.changedKeys).toEqual([
+      "requestHash",
+      "cacheConfigHash",
+      "promptCacheKeyHash",
+    ]);
+    expect(JSON.stringify(second)).not.toContain("secret-session-cache-key");
+  });
+
   it("normalizes provider usage and attaches it to the latest observation", () => {
     const observation = observeCacheSafeRequest({
       kind: "continuation",
