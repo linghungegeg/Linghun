@@ -15,6 +15,8 @@ import type { EndpointProfile, ModelGateway, ModelRequest, ModelUsage } from "@l
 import type { Language } from "@linghun/shared";
 import {
   applyCacheWritePolicyToRequest,
+  applyLastCacheSafePrefix,
+  type CacheRequestObservationState,
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
 import type { NaturalIntent } from "./natural-command-bridge.js";
@@ -122,20 +124,32 @@ export async function runBtwSideQuestion(
   breakerState?: ProviderCircuitBreakerState,
   contextSnapshot?: string,
   telemetry?: BtwTelemetryObserver,
+  cacheState?: CacheRequestObservationState,
 ): Promise<BtwSideQuestionResult> {
   const messages = buildBtwMessages(question, language, contextSnapshot);
   let text = "";
   let hadThinking = false;
   let providerError: string | undefined;
   try {
-    const providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
-      {
-        messages,
-        model: runtime.model,
-        endpointProfile: runtime.endpointProfile,
-        ...(runtime.reasoningSent ? { reasoningLevel: runtime.reasoningLevel } : {}),
-        toolChoice: "none",
-      },
+    let providerRequest: ModelRequest = {
+      messages,
+      model: runtime.model,
+      endpointProfile: runtime.endpointProfile,
+      ...(runtime.reasoningSent ? { reasoningLevel: runtime.reasoningLevel } : {}),
+      toolChoice: "none",
+    };
+    if (cacheState) {
+      const inherited = applyLastCacheSafePrefix({
+        state: cacheState,
+        request: providerRequest,
+        inheritMessages: true,
+      });
+      providerRequest = inherited.request;
+      providerRequest.tools = undefined;
+      providerRequest.toolChoice = "none";
+    }
+    providerRequest = applyCacheWritePolicyToRequest(
+      providerRequest,
       resolveCachePolicy("side-question"),
     );
     telemetry?.onRequest?.(providerRequest);

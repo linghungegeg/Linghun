@@ -2,6 +2,7 @@ import { OpenAiCompatibleProvider, type ModelRequest, type ModelUsage } from "@l
 import { describe, expect, it } from "vitest";
 import {
   applyCacheWritePolicyToRequest,
+  applyLastCacheSafePrefix,
   type CacheRequestKind,
   type CacheRequestObservationState,
   normalizeCacheUsageObservation,
@@ -9,6 +10,7 @@ import {
   observeCacheUsage,
   recordCacheRequestObservation,
   recordCacheUsageObservation,
+  rememberCacheSafePrefix,
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
 
@@ -293,6 +295,108 @@ describe("cache-policy-runtime", () => {
     expect(state.lastRequestObservationByKind?.["side-question"]?.id).toBe(observation.id);
     expect(updated?.usage?.cacheReadTokens).toBe(8);
     expect(state.lastRequestObservationByKind?.["side-question"]?.usage?.cacheReadTokens).toBe(8);
+  });
+
+  it("lets side questions reuse the parent message prefix without inheriting tools", () => {
+    const state: CacheRequestObservationState = {};
+    rememberCacheSafePrefix(
+      state,
+      makeRequest({
+        promptCacheTtl: "1h",
+        cacheBreakNonce: "parent-nonce",
+      }),
+    );
+
+    const result = applyLastCacheSafePrefix({
+      state,
+      inheritMessages: true,
+      request: makeRequest({
+        messages: [{ role: "user", content: "btw" }],
+        tools: undefined,
+        toolChoice: "none",
+        promptCacheEnabled: undefined,
+      }),
+    });
+    const shaped = applyCacheWritePolicyToRequest(result.request, resolveCachePolicy("side-question"));
+
+    expect(result.status).toBe("applied");
+    expect(shaped.messages.map((message) => message.content)).toEqual(["system", "hello", "btw"]);
+    expect(shaped.tools).toBeUndefined();
+    expect(shaped.toolChoice).toBe("none");
+    expect(shaped.promptCacheEnabled).toBeUndefined();
+    expect(shaped.cacheBreakNonce).toBeUndefined();
+  });
+
+  it("skips cache-safe inheritance when child tool schema differs from parent", () => {
+    const state: CacheRequestObservationState = {};
+    rememberCacheSafePrefix(state, makeRequest());
+
+    const result = applyLastCacheSafePrefix({
+      state,
+      inheritTools: true,
+      request: makeRequest({
+        tools: [{ name: "Read", description: "read file", inputSchema: { type: "object" } }],
+      }),
+    });
+
+    expect(result.status).toBe("skipped");
+    expect(state.lastCacheSafePrefixSkipReason).toBe("tool schema differs from parent prefix");
+    expect(result.request.tools).toHaveLength(1);
+  });
+
+  it("lets child agents inherit only parent system prefix and matching tool shape", () => {
+    const state: CacheRequestObservationState = {};
+    rememberCacheSafePrefix(
+      state,
+      makeRequest({
+        messages: [
+          { role: "system", content: "stable runtime" },
+          { role: "user", content: "parent task" },
+          { role: "assistant", content: "parent reply" },
+        ],
+      }),
+    );
+
+    const result = applyLastCacheSafePrefix({
+      state,
+      inheritSystemPrefix: true,
+      inheritTools: true,
+      request: makeRequest({
+        messages: [{ role: "user", content: "child task" }],
+      }),
+    });
+
+    expect(result.status).toBe("applied");
+    expect(result.request.messages.map((message) => message.content)).toEqual([
+      "stable runtime",
+      "child task",
+    ]);
+    expect(result.request.tools).toEqual(makeRequest().tools);
+    expect(result.request.toolChoice).toBe("auto");
+  });
+
+  it("skips system-prefix inheritance when parent has no stable system message", () => {
+    const state: CacheRequestObservationState = {};
+    rememberCacheSafePrefix(
+      state,
+      makeRequest({
+        messages: [{ role: "user", content: "parent task" }],
+      }),
+    );
+
+    const result = applyLastCacheSafePrefix({
+      state,
+      inheritSystemPrefix: true,
+      request: makeRequest({
+        messages: [{ role: "user", content: "child task" }],
+      }),
+    });
+
+    expect(result.status).toBe("skipped");
+    if (result.status === "skipped") {
+      expect(result.reason).toBe("parent prefix has no stable system messages");
+    }
+    expect(result.request.messages.map((message) => message.content)).toEqual(["child task"]);
   });
 
   it("marks usage as estimated when provider returns no cache fields", () => {

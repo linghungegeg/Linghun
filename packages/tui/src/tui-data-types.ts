@@ -19,6 +19,7 @@ import type { ArchitectureCardSummary } from "./architecture-runtime.js";
 import type {
   CacheRequestObservation,
   CacheRequestShapeLatch,
+  CacheSafePrefixSnapshot,
 } from "./cache-policy-runtime.js";
 import type { CompactBoundary } from "./compact-context.js";
 import type {
@@ -198,6 +199,8 @@ export type CacheState = {
   lastRequestObservation?: CacheRequestObservation;
   lastRequestObservationByKind?: Partial<Record<CacheRequestObservation["kind"], CacheRequestObservation>>;
   cacheRequestShapeLatch?: CacheRequestShapeLatch;
+  lastCacheSafePrefix?: CacheSafePrefixSnapshot;
+  lastCacheSafePrefixSkipReason?: string;
   hintLastShownAt: Record<string, number>;
   compacted: boolean;
   compactBoundaries: CompactBoundary[];

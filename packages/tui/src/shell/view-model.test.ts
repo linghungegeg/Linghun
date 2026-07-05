@@ -6911,7 +6911,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     expect(view.taskFooter?.cacheTone).toBe("warning");
   });
 
-  it("task footer cache uses recent 20-turn aggregate instead of the last turn only", () => {
+  it("task footer cache uses recent 20-turn aggregate", () => {
     const ctx = createContext();
     const history = Array.from({ length: 19 }, (_, index) => ({
       turn: index + 1,
@@ -6944,6 +6944,22 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     });
 
     expect(view.taskFooter?.cache).toBe("缓存 76%");
+    expect(view.taskFooter?.cacheTone).toBe("default");
+  });
+
+  it("task footer cache uses English recent average label", () => {
+    const ctx = createContext({ language: "en-US" });
+    (ctx as unknown as { cache: { history: { hitRate: number; inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }[] } }).cache.history = [
+      { hitRate: 0.8, inputTokens: 20, cacheReadTokens: 80, cacheWriteTokens: 0 },
+      { hitRate: 0.25, inputTokens: 75, cacheReadTokens: 25, cacheWriteTokens: 0 },
+    ];
+
+    const view = createShellViewModel(ctx, {
+      width: 120,
+      viewMode: "task",
+    });
+
+    expect(view.taskFooter?.cache).toBe("Cache 53%");
     expect(view.taskFooter?.cacheTone).toBe("default");
   });
 

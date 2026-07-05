@@ -1901,6 +1901,7 @@ export async function handleBtwCommand(
         recordCacheRequestObservation(context.cache, "side-question", runtime.provider, request),
       onUsage: (usage) => recordCacheUsageObservation(context.cache, usage),
     },
+    context.cache,
   );
   if (context.activeBtwAbortController === controller) {
     context.activeBtwAbortController = undefined;

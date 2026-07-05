@@ -2249,7 +2249,6 @@ export function computeRecentCacheHitRate(
 ): number | null {
   const recent = history.slice(-Math.max(1, windowSize));
   if (recent.length === 0) return null;
-
   const totals = recent.reduce(
     (acc, item) => {
       const inputTokens = Number.isFinite(item.inputTokens) ? Math.max(0, item.inputTokens) : 0;
@@ -2317,12 +2316,16 @@ function formatFooterModel(
 function formatFooterCache(language: Language, hitRate: number | null): string {
   const label = language === "en-US" ? "Cache" : "缓存";
   if (hitRate === null || hitRate === undefined) return `${label}?`;
-  return `${label} ${Math.max(0, Math.min(100, Math.round(hitRate * 100)))}%`;
+  return `${label} ${formatCachePercent(hitRate)}`;
 }
 
 function formatFooterCacheTone(hitRate: number | null): "default" | "warning" | "dim" {
   if (hitRate === null || hitRate === undefined) return "dim";
   return Math.max(0, Math.min(100, Math.round(hitRate * 100))) < 50 ? "warning" : "default";
+}
+
+function formatCachePercent(hitRate: number): string {
+  return `${Math.max(0, Math.min(100, Math.round(hitRate * 100)))}%`;
 }
 
 function formatFooterIndex(language: Language, status: string): string {

@@ -24,6 +24,7 @@ import {
 } from "./agent-completion-finalizer.js";
 import {
   applyCacheWritePolicyToRequest,
+  applyLastCacheSafePrefix,
   recordCacheRequestObservation,
   recordCacheUsageObservation,
   resolveCachePolicy,
@@ -2916,7 +2917,7 @@ export async function runModelBackedAgent(
       }
       messages.splice(0, messages.length, ...preflight.messages);
       let retryWithFallback = false;
-      const providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
+      let providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
         {
           messages: preflight.messages,
           model: currentRuntime.model,
@@ -2928,6 +2929,16 @@ export async function runModelBackedAgent(
           tools: createAgentToolDefinitions(agent),
           toolChoice: "auto",
         },
+        resolveCachePolicy("agent-child"),
+      );
+      providerRequest = applyLastCacheSafePrefix({
+        state: context.cache,
+        request: providerRequest,
+        inheritSystemPrefix: true,
+        inheritTools: true,
+      }).request;
+      providerRequest = applyCacheWritePolicyToRequest(
+        providerRequest,
         resolveCachePolicy("agent-child"),
       );
       recordCacheRequestObservation(

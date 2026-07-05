@@ -2363,6 +2363,39 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     ]);
   });
 
+  it("keeps stable Anthropic tool base bytes while cache_control overlay can change", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+    const request: ModelRequest = {
+      messages: [{ role: "user", content: "hi" }],
+      promptCacheEnabled: true,
+      tools: [
+        { name: "Read", description: "Read file", inputSchema: { type: "object" } },
+        { name: "Bash", description: "Run command", inputSchema: { type: "object" } },
+      ],
+    };
+
+    const fiveMinute = provider.createAnthropicMessagesRequest(request);
+    const oneHour = provider.createAnthropicMessagesRequest({ ...request, promptCacheTtl: "1h" });
+    const stripOverlay = (tool: { cache_control?: unknown; [key: string]: unknown }) => {
+      const { cache_control: _cacheControl, ...base } = tool;
+      return base;
+    };
+
+    expect(JSON.stringify(fiveMinute.tools?.map(stripOverlay))).toBe(
+      JSON.stringify(oneHour.tools?.map(stripOverlay)),
+    );
+    expect(fiveMinute.tools?.map((tool) => tool.cache_control)).not.toEqual(
+      oneHour.tools?.map((tool) => tool.cache_control),
+    );
+  });
+
   it("D.13L: uses tool source and schema hash for the Anthropic cache boundary without sending metadata", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "claude-relay",

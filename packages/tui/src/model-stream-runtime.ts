@@ -29,6 +29,7 @@ import {
   type CacheRequestKind,
   recordCacheRequestObservation as recordCacheRequestObservationState,
   recordCacheUsageObservation as recordCacheUsageObservationState,
+  rememberCacheSafePrefix,
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
 import {
@@ -2010,6 +2011,7 @@ export async function sendMessage(
         resolveCachePolicy("main"),
         context.cache,
       );
+      rememberCacheSafePrefix(context.cache, providerRequest);
       recordCacheRequestObservation(context, "main", selectedRuntime.provider, providerRequest);
       const resetAssistantDraftForProviderRetry = () => {
         discardAssistantBlock(output, assistantStreamBlockId);
@@ -3850,6 +3852,7 @@ export async function continueModelAfterToolResults(
         resolveCachePolicy("continuation"),
         context.cache,
       );
+      rememberCacheSafePrefix(context.cache, providerRequest);
       recordCacheRequestObservation(context, "continuation", continuation.provider, providerRequest);
       const resetAssistantDraftForProviderRetry = () => {
         discardAssistantBlock(output, assistantStreamBlockId);

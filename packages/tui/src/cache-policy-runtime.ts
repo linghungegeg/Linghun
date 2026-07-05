@@ -50,6 +50,30 @@ export type CacheRequestObservation = {
   usage?: CacheUsageObservation;
 };
 
+export type CacheSafePrefixSnapshot = {
+  messages: ModelRequest["messages"];
+  tools?: ModelRequest["tools"];
+  toolChoice?: ModelRequest["toolChoice"];
+  endpointProfile?: EndpointProfile;
+  reasoningLevel?: string;
+  promptCacheEnabled?: boolean;
+  promptCacheTtl?: "1h";
+  cacheBreakNonce?: string;
+  fingerprint: Pick<
+    CacheRequestFingerprint,
+    | "messagePrefixHash"
+    | "systemPrefixHash"
+    | "conversationPrefixHash"
+    | "stableToolSchemaHash"
+    | "modelHash"
+    | "reasoningHash"
+  >;
+};
+
+export type CacheSafePrefixApplyResult =
+  | { status: "applied"; request: ModelRequest }
+  | { status: "skipped"; request: ModelRequest; reason: string };
+
 export type CacheUsageObservation = {
   inputTokens: number;
   outputTokens: number;
@@ -197,7 +221,93 @@ export type CacheRequestObservationState = {
     Record<CacheRequestObservation["kind"], CacheRequestObservation>
   >;
   cacheRequestShapeLatch?: CacheRequestShapeLatch;
+  lastCacheSafePrefix?: CacheSafePrefixSnapshot;
+  lastCacheSafePrefixSkipReason?: string;
 };
+
+export function rememberCacheSafePrefix(
+  state: CacheRequestObservationState,
+  request: ModelRequest,
+): CacheSafePrefixSnapshot {
+  const fingerprint = createCacheRequestFingerprint(request);
+  const snapshot: CacheSafePrefixSnapshot = {
+    messages: request.messages,
+    tools: request.tools,
+    toolChoice: request.toolChoice,
+    endpointProfile: request.endpointProfile,
+    reasoningLevel: request.reasoningLevel,
+    promptCacheEnabled: request.promptCacheEnabled,
+    promptCacheTtl: request.promptCacheTtl,
+    cacheBreakNonce: request.cacheBreakNonce,
+    fingerprint: {
+      messagePrefixHash: fingerprint.messagePrefixHash,
+      systemPrefixHash: fingerprint.systemPrefixHash,
+      conversationPrefixHash: fingerprint.conversationPrefixHash,
+      stableToolSchemaHash: fingerprint.stableToolSchemaHash,
+      modelHash: fingerprint.modelHash,
+      reasoningHash: fingerprint.reasoningHash,
+    },
+  };
+  state.lastCacheSafePrefix = snapshot;
+  state.lastCacheSafePrefixSkipReason = undefined;
+  return snapshot;
+}
+
+export function applyLastCacheSafePrefix(input: {
+  state: CacheRequestObservationState;
+  request: ModelRequest;
+  inheritMessages?: boolean;
+  inheritSystemPrefix?: boolean;
+  inheritTools?: boolean;
+}): CacheSafePrefixApplyResult {
+  const snapshot = input.state.lastCacheSafePrefix;
+  if (!snapshot) return cacheSafePrefixSkipped(input.state, input.request, "no parent cache-safe prefix");
+  const next: ModelRequest = {
+    ...input.request,
+    endpointProfile: snapshot.endpointProfile,
+    reasoningLevel: snapshot.reasoningLevel,
+    promptCacheEnabled: snapshot.promptCacheEnabled,
+    promptCacheTtl: snapshot.promptCacheTtl,
+    cacheBreakNonce: snapshot.cacheBreakNonce,
+  };
+  if (input.inheritMessages) {
+    const latest = input.request.messages.at(-1);
+    if (!latest || latest.role === "tool") {
+      return cacheSafePrefixSkipped(
+        input.state,
+        input.request,
+        "request has no safe latest user/assistant message",
+      );
+    }
+    next.messages = [...snapshot.messages, latest];
+  } else if (input.inheritSystemPrefix) {
+    const parentSystemPrefix = snapshot.messages.filter((message) => message.role === "system");
+    if (parentSystemPrefix.length === 0) {
+      return cacheSafePrefixSkipped(input.state, input.request, "parent prefix has no stable system messages");
+    }
+    next.messages = [...parentSystemPrefix, ...input.request.messages];
+  }
+  if (input.inheritTools) {
+    const requestedTools = normalizeToolSchema(input.request.tools ?? []);
+    const parentTools = normalizeToolSchema(snapshot.tools ?? []);
+    if (stableHash(requestedTools) !== stableHash(parentTools)) {
+      return cacheSafePrefixSkipped(input.state, input.request, "tool schema differs from parent prefix");
+    }
+    next.tools = snapshot.tools;
+    next.toolChoice = snapshot.toolChoice ?? input.request.toolChoice;
+  }
+  input.state.lastCacheSafePrefixSkipReason = undefined;
+  return { status: "applied", request: next };
+}
+
+function cacheSafePrefixSkipped(
+  state: CacheRequestObservationState,
+  request: ModelRequest,
+  reason: string,
+): CacheSafePrefixApplyResult {
+  state.lastCacheSafePrefixSkipReason = reason;
+  return { status: "skipped", request, reason };
+}
 
 export function recordCacheRequestObservation(
   state: CacheRequestObservationState,

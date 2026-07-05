@@ -232,6 +232,13 @@ type PendingResponsesToolCall = {
   arguments: string;
 };
 
+type CachedAnthropicToolBase = Omit<AnthropicToolDefinition, "cache_control">;
+type CachedOpenAiChatToolBase = OpenAiToolDefinition;
+type CachedOpenAiResponsesToolBase = OpenAiResponsesToolDefinition;
+
+const TOOL_SCHEMA_BASE_CACHE_LIMIT = 256;
+const toolSchemaBaseCache = new Map<string, unknown>();
+
 // ---------------------------------------------------------------------------
 // Anthropic Messages (/v1/messages) — request / stream event shapes
 // ---------------------------------------------------------------------------
@@ -1881,9 +1888,7 @@ function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] 
   const sortedTools = [...stableTools, ...dynamicTools];
   const cacheControlToolIndex = stableTools.length - 1;
   return sortedTools.map((tool, index) => ({
-    name: tool.name,
-    description: tool.description,
-    input_schema: tool.inputSchema,
+    ...getCachedAnthropicToolBase(tool),
     ...(request.promptCacheEnabled && index === cacheControlToolIndex
       ? { cache_control: createAnthropicCacheControl(request) }
       : {}),
@@ -1929,6 +1934,46 @@ function resolveToolSource(tool: ModelToolDefinition): ModelToolDefinitionSource
 
 function resolveToolSchemaHash(tool: ModelToolDefinition): string {
   return tool.schemaHash ?? createStableToolIdentityHash(createToolCacheIdentity(tool));
+}
+
+function getCachedAnthropicToolBase(tool: ModelToolDefinition): CachedAnthropicToolBase {
+  return getCachedToolSchemaBase(`anthropic:${resolveToolSchemaHash(tool)}`, () => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+  }));
+}
+
+function getCachedOpenAiChatToolBase(tool: ModelToolDefinition): CachedOpenAiChatToolBase {
+  return getCachedToolSchemaBase(`openai-chat:${resolveToolSchemaHash(tool)}`, () => ({
+    type: "function" as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+    },
+  }));
+}
+
+function getCachedOpenAiResponsesToolBase(tool: ModelToolDefinition): CachedOpenAiResponsesToolBase {
+  return getCachedToolSchemaBase(`openai-responses:${resolveToolSchemaHash(tool)}`, () => ({
+    type: "function" as const,
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.inputSchema,
+  }));
+}
+
+function getCachedToolSchemaBase<T>(key: string, create: () => T): T {
+  const cached = toolSchemaBaseCache.get(key) as T | undefined;
+  if (cached) return cached;
+  const value = create();
+  if (toolSchemaBaseCache.size >= TOOL_SCHEMA_BASE_CACHE_LIMIT) {
+    const firstKey = toolSchemaBaseCache.keys().next().value;
+    if (typeof firstKey === "string") toolSchemaBaseCache.delete(firstKey);
+  }
+  toolSchemaBaseCache.set(key, value);
+  return value;
 }
 
 function createToolCacheIdentity(tool: ModelToolDefinition): {
@@ -1999,15 +2044,8 @@ function createOpenAiChatTools(
   const tools = request.tools;
   if (!tools) return undefined;
   return [...tools]
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((tool) => ({
-      type: "function" as const,
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema,
-      },
-    }));
+    .sort(compareToolCacheIdentity)
+    .map((tool) => getCachedOpenAiChatToolBase(tool));
 }
 
 function createOpenAiResponsesTools(
@@ -2019,13 +2057,8 @@ function createOpenAiResponsesTools(
   const tools = request.tools;
   if (!tools) return undefined;
   return [...tools]
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((tool) => ({
-      type: "function" as const,
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.inputSchema,
-    }));
+    .sort(compareToolCacheIdentity)
+    .map((tool) => getCachedOpenAiResponsesToolBase(tool));
 }
 
 function assertToolCapability(request: ModelRequest, contract: ProviderRuntimeContract): void {
