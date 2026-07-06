@@ -710,7 +710,7 @@ function createCompactProjection(
     [
       "Linghun compact summary",
       "scope provider-visible recent context projection",
-      `trigger ${input.trigger}`,
+      "role compacted recent provider context",
       `user goal ${restoreContext.goal}`,
       `current task ${restoreContext.currentTask}`,
       `decisions ${restoreContext.decisions.join("; ") || "none recorded"}`,
@@ -721,6 +721,9 @@ function createCompactProjection(
       `pending permissions/tool calls ${restoreContext.pendingItems.join("; ") || "none"}`,
       `failure learning ${failureLearning.join("; ") || "none"}`,
       "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
+      "",
+      "[Compact projection diagnostics]",
+      `trigger ${input.trigger}`,
       `index/cache/memory freshness: index ${restoreContext.indexStatus}; cache freshness ${restoreContext.cacheFreshness}; memory ${restoreContext.memoryStatus}`,
       `discarded scope ${restoreContext.risks.join("; ") || "older provider-visible recent context summarized"}`,
       `target budget chars ${input.postCompactTargetChars}`,
@@ -853,7 +856,7 @@ function injectCompactProjectionMessage(
 ): ModelMessage[] {
   const summaryMessage: ModelMessage = {
     role: "user",
-    content: `[Context compact boundary ${projection.boundaryId}]\n${projection.summary}${formatCompactRestoreContext(projection)}`,
+    content: `Context compact projection\n${projection.summary}\n\n[Compact boundary diagnostics]\nboundary ${projection.boundaryId}\ncreated at ${projection.createdAt}${formatCompactRestoreContext(projection)}`,
   };
   return insertAfterLeadingSystemMessages(messages, summaryMessage);
 }

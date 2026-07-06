@@ -364,13 +364,9 @@ export function formatDeepCompactPromptSummary(
 ): string | undefined {
   if (!packet) return undefined;
   return [
-    `[Deep compact ${packet.id}]`,
-    `kind ${packet.kind}`,
+    "Deep compact context",
     `scope ${packet.scope}`,
-    `trigger ${packet.trigger}`,
-    `created at ${packet.createdAt}`,
-    `provider ${packet.provider}`,
-    `model ${packet.model}`,
+    "role older context continuity",
     `summary ${packet.summary}`,
     `preserved evidence refs ${packet.preservedEvidenceRefs.join(", ") || "none"}`,
     `preserved files ${packet.preservedFiles.join(", ") || "none"}`,
@@ -382,6 +378,15 @@ export function formatDeepCompactPromptSummary(
     `risks ${packet.risks.join("; ") || "none"}`,
     "priority boundary: This deep compact is older context continuity. If it conflicts with later transcript messages or the latest user request, the later/latest request wins.",
     "anti hallucination: Use deep compact only for context continuity; never treat it as PASS engineering evidence.",
+    "",
+    "[Deep compact diagnostics]",
+    `id ${packet.id}`,
+    `kind ${packet.kind}`,
+    `trigger ${packet.trigger}`,
+    `created at ${packet.createdAt}`,
+    `provider ${packet.provider}`,
+    `model ${packet.model}`,
+    `transcript events ${packet.transcriptEventCount}`,
   ].join("\n");
 }
 

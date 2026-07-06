@@ -1,6 +1,7 @@
 import type { ModelMessage } from "@linghun/providers";
 import { describe, expect, it } from "vitest";
 import {
+  formatDeepCompactPromptSummary,
   injectDeepCompactSummary,
   insertAfterLeadingSystemMessages,
 } from "./deep-compact-runtime.js";
@@ -41,9 +42,24 @@ describe("deep compact prompt insertion", () => {
     expect(result.map((message) => message.role)).toEqual(["system", "system", "user", "user"]);
     expect(result[0]?.content).toBe("stable system");
     expect(result[1]?.content).toBe("dynamic system");
-    expect(result[2]?.content).toContain("[Deep compact deep-test]");
+    expect(result[2]?.content).toContain("Deep compact context");
     expect(result[2]?.content).toContain("latest user request");
+    expect(result[2]?.content).toContain("[Deep compact diagnostics]");
+    expect(result[2]?.content).toContain("id deep-test");
     expect(result[3]?.content).toBe("current request");
+  });
+
+  it("keeps dynamic packet diagnostics out of the stable provider prefix", () => {
+    const text = formatDeepCompactPromptSummary(makePacket()) ?? "";
+    const prefix = text.split("\n").slice(0, 6).join("\n");
+
+    expect(prefix).toContain("Deep compact context");
+    expect(prefix).toContain("scope full transcript semantic compact");
+    expect(prefix).not.toContain("deep-test");
+    expect(prefix).not.toContain("created at");
+    expect(text).toContain("[Deep compact diagnostics]");
+    expect(text).toContain("id deep-test");
+    expect(text).toContain("created at 2026-01-01T00:00:00.000Z");
   });
 
   it("still inserts at the front when no system prefix exists", () => {

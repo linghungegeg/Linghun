@@ -4510,8 +4510,18 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(result.blocked).toBe(false);
     const providerText = JSON.stringify(result.messages);
-    expect(providerText).toContain("[Context compact boundary");
+    expect(providerText).toContain("Context compact projection");
     expect(providerText).toContain("scope provider-visible recent context projection");
+    const projectionMessage = result.messages.find(
+      (message) => typeof message.content === "string" && message.content.includes("Context compact projection"),
+    );
+    expect(projectionMessage?.content).toContain("[Compact boundary diagnostics]");
+    const projectionPrefix = String(projectionMessage?.content ?? "")
+      .split("\n")
+      .slice(0, 8)
+      .join("\n");
+    expect(projectionPrefix).not.toContain("boundary");
+    expect(projectionPrefix).not.toContain("created at");
     const transcript = JSON.stringify((await store.resume(session.id)).transcript);
     const status = formatCompactStatus(context);
     const detailsText = __testBuildExplicitDetailsCommandPanel(context)?.detailsText ?? "";
@@ -4720,7 +4730,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(result.blocked).toBe(false);
     const providerText = JSON.stringify(result.messages);
-    expect(providerText).toContain("[Deep compact deep-final-test]");
+    expect(providerText).toContain("Deep compact context");
+    expect(providerText).toContain("id deep-final-test");
     expect(providerText).toContain("scope full transcript semantic compact");
     expect(providerText).toContain("never treat it as PASS engineering evidence");
     const verdict = createPhase15BetaVerdictScope(
@@ -12205,9 +12216,9 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const request = mainRequests[1] as { messages?: Array<{ role?: string; content?: string }> };
     const requestText = JSON.stringify(request.messages ?? []);
-    expect(requestText).toContain("[Deep compact");
+    expect(requestText).toContain("Deep compact context");
     expect(requestText).toContain("scope full transcript semantic compact");
-    expect(requestText).toContain("[Context compact boundary");
+    expect(requestText).toContain("Context compact projection");
     expect(requestText).toContain("Linghun compact summary");
     expect(requestText).toContain("files or evidence refs");
     expect(requestText).toContain("failure learning");
@@ -14205,14 +14216,14 @@ describe("Phase 06 TUI slash commands", () => {
     expect(mainRequests.length).toBeGreaterThan(2);
     const compactedRequest = mainRequests.find((request) =>
       JSON.stringify((request as { messages?: unknown[] }).messages ?? []).includes(
-        "[Context compact boundary",
+        "Context compact projection",
       ),
     );
     expect(compactedRequest).toBeTruthy();
     const requestText = JSON.stringify(
       (compactedRequest as { messages?: unknown[] }).messages ?? [],
     );
-    expect(requestText).toContain("[Deep compact");
+    expect(requestText).toContain("Deep compact context");
     expect(requestText).toContain("scope full transcript semantic compact");
     expect(requestText).toContain("scope provider-visible recent context projection");
     expect(context.cache.compactProjection?.summary).toContain(

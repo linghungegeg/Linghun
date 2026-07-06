@@ -320,7 +320,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     );
     if (!compacted.blocked) {
       const text = compacted.messages.map((message) => message.content).join("\n");
-      expect(text).not.toContain("[Context compact boundary");
+      expect(text).not.toContain("Context compact projection");
       expect(text).not.toContain("LEGACY_ROLLBACK_CONTEXT");
     }
   });
