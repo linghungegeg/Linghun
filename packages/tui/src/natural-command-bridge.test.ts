@@ -119,6 +119,28 @@ describe("Phase 15 Natural Intent Router", () => {
     ]).toContain(intent.action);
   });
 
+  it("splits compact run and compact status natural capabilities", () => {
+    const run = routeNaturalIntent("压缩上下文");
+    expect(run.capability?.id).toBe("compact-run");
+    expect(run.command).toBe("/compact");
+    expect(run.action).toBe("start_gate");
+    expect(run.riskHandler).toBe("start_gate");
+
+    const cleanup = routeNaturalIntent("清理长对话");
+    expect(cleanup.capability?.id).toBe("compact-run");
+    expect(cleanup.command).toBe("/compact");
+
+    const status = routeNaturalIntent("查看 compact 状态");
+    expect(status.capability?.id).toBe("compact-status");
+    expect(status.command).toBe("/compact status");
+    expect(status.action).toBe("execute_readonly");
+    expect(status.riskHandler).toBe("readonly");
+
+    const explicitStatus = routeNaturalIntent("解释 /compact status");
+    expect(explicitStatus.capability?.id).toBe("compact-status");
+    expect(explicitStatus.command).toBe("/compact status");
+  });
+
   it.each(firstBatch)(
     "keeps Chinese and English first-batch risk handler consistent for %s",
     (id) => {

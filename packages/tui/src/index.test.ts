@@ -3952,6 +3952,28 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.cache.deepCompact?.summary).toContain("RAW_BARE_COMPACT_CONTRACT");
   });
 
+  it("blocks compact before provider calls when another heavy task is running", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-guard-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deep-compact-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("verification", { id: "verification-compact-guard" }),
+    ];
+
+    await handleSlashCommand("/compact", context, output);
+
+    expect(output.text).toContain("已有 verification 重任务正在运行");
+    expect(output.text).toContain("/background");
+    expect(output.text).toContain("/interrupt");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.cache.compactProgress).toBeUndefined();
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+  });
+
   it("runs manual deep compact with tools disabled and records a full transcript packet", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

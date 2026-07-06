@@ -199,8 +199,8 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   },
   { slash: "/cache-log", capabilityId: "cache-log", userVisible: true },
   { slash: "/cache", capabilityId: "cache", userVisible: true },
-  { slash: "/compact", capabilityId: "compact", userVisible: true },
-  { slash: "/context", capabilityId: "context", userVisible: true },
+  { slash: "/compact", capabilityId: "compact-run", userVisible: true },
+  { slash: "/context", capabilityId: "compact-status", userVisible: true },
   { slash: "/break-cache", capabilityId: "break-cache", userVisible: true },
   { slash: "/mcp", capabilityId: "mcp", userVisible: true },
   { slash: "/index", capabilityId: "index", userVisible: true },
@@ -915,9 +915,9 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "start_gate",
   ),
   cap(
-    "compact",
+    "compact-run",
     "/compact",
-    ["compact", "压缩", "上下文压缩", "microcompact"],
+    ["compact", "压缩", "上下文压缩", "清理上下文", "microcompact"],
     "执行上下文压缩",
     "Run compact",
     "执行受控 Context Compact：provider 请求前可写入脱敏摘要和边界，不执行工具、不写项目文件、不写长期记忆。",
@@ -927,9 +927,9 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "start_gate",
   ),
   cap(
-    "context",
+    "compact-status",
     "/context",
-    ["context", "上下文", "上下文状态", "context status", "compact status"],
+    ["context", "上下文", "上下文状态", "context status", "compact status", "查看 compact 状态"],
     "上下文状态",
     "Context status",
     "只读查看上下文压力、compact 摘要、pairing 安全和 compact 边界。",
@@ -1261,7 +1261,7 @@ function inferCommandGroup(id: string, slash: string): CommandGroup {
       "review",
       "cache",
       "cache-log",
-      "context",
+      "compact-status",
       "break-cache",
       "usage",
       "stats",
@@ -2047,6 +2047,9 @@ function findExplicitSlashCapability(
   if (slash === "/doctor" && /hook|hooks|钩子/u.test(normalized)) {
     return catalog.find((item) => item.id === "hooks");
   }
+  if (slash === "/compact" && /status|状态/u.test(normalized)) {
+    return catalog.find((item) => item.id === "compact-status");
+  }
   const registryEntry = SLASH_COMMAND_REGISTRY.find(
     (item) => item.slash === slash && item.userVisible,
   );
@@ -2131,6 +2134,8 @@ function isNaturalControlPlaneIntent(
       text,
     );
   }
+  if (id === "compact-run") return /compact|压缩|清理.*上下文|长对话/u.test(text);
+  if (id === "compact-status") return /context|上下文|compact.*status|compact 状态|状态/u.test(text);
   return (
     ["model", "cache", "memory", "mode", "readiness"].includes(id) && !classification.actionRequest
   );
@@ -2151,12 +2156,13 @@ function isFirstBatchStatusCapability(id: string): boolean {
     "sessions",
     "resume",
     "branch",
+    "compact-status",
   ].includes(id);
 }
 
 function isActionRequest(text: string): boolean {
   if (/好了没|好了么|已经.*是吧|已经.*了吗|ready/u.test(text)) return false;
-  return /帮我|请|直接|打开|建立|恢复|停止|停掉|取消|build|start|create|run|enable|accept|force|switch|set|resume|stop|cancel|kill|interrupt/u.test(
+  return /帮我|请|直接|打开|建立|恢复|停止|停掉|取消|压缩|清理|build|start|create|run|enable|accept|force|switch|set|resume|stop|cancel|kill|interrupt/u.test(
     text,
   );
 }
@@ -2198,6 +2204,10 @@ function scoreCapability(
   )
     score += 5;
   if (capability.id === "cache" && /缓存|命中|hit rate|cache/u.test(normalized)) score += 3;
+  if (capability.id === "compact-run" && /compact|压缩|清理.*上下文|长对话/u.test(normalized))
+    score += 6;
+  if (capability.id === "compact-status" && /compact.*status|compact 状态|上下文状态|context status/u.test(normalized))
+    score += 7;
   if (capability.id === "memory" && /记忆|memory/u.test(normalized)) score += 3;
   if (
     capability.id === "index" &&
@@ -2345,6 +2355,10 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
     if (/停止|停掉|取消|interrupt|cancel|stop|kill/u.test(normalized)) return "/agents cancel <id>";
     return "/agents";
   }
+  if (capability.id === "compact-status") {
+    return /compact|压缩/u.test(normalized) ? "/compact status" : "/context";
+  }
+  if (capability.id === "compact-run") return "/compact";
   if (capability.id === "permissions" && /add|remove|添加|删除/u.test(normalized))
     return "/permissions add|remove ...";
   if (capability.id === "mode") {

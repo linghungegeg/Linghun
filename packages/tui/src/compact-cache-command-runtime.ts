@@ -6,6 +6,7 @@ import type { CacheFreshness, CacheTurnStats, CacheWriteTokensSource } from "@li
 import { computePromptCacheHitRate } from "@linghun/core";
 import type { ModelMessage, ModelUsage } from "@linghun/providers";
 import { type ToolName, builtInTools } from "@linghun/tools";
+import { checkResourceGuard } from "./background-control-runtime.js";
 import {
   appendBreakCacheEvent,
   buildPromptCacheRequestFields,
@@ -249,6 +250,11 @@ export async function handleCompactCommand(
     return;
   }
   if (action === "manual" || action === "run" || action === "deep") {
+    const resourceGuard = checkResourceGuard(context, "compact") ?? checkResourceGuard(context, "heavy");
+    if (resourceGuard) {
+      writeLine(output, resourceGuard);
+      return;
+    }
     const sessionId = await ensureSession(context);
     const resumed = await context.store.resume(sessionId);
     const runtime = getSelectedModelRuntime(context);
