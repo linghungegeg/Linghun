@@ -170,6 +170,7 @@ import {
 } from "./tui-model-runtime.js";
 import {
   beginAssistantStream,
+  cancelAssistantStream,
   discardAssistantBlock,
   endAssistantStream,
   replaceAssistantBlockContent,
@@ -2337,7 +2338,7 @@ export async function sendMessage(
       )) {
         if (controller.signal.aborted) {
           clearRequestActivity(context);
-          endAssistantStream(output);
+          cancelAssistantStream(output);
           writeLine(output, t(context, "toolInterrupted"));
           return;
         }
@@ -2421,6 +2422,7 @@ export async function sendMessage(
               return;
             }
             messagesForProvider = appendLatestUserRequestAnchor(reactivePreflight.messages);
+            resetAssistantDraftForProviderRetry();
             showProviderRecoveryActivity(context);
             await appendSystemEvent(
               context,
@@ -2441,6 +2443,7 @@ export async function sendMessage(
               code: fallback.code,
               status: "attempted",
             });
+            resetAssistantDraftForProviderRetry();
             showProviderSwitchActivity(context);
             await appendRuntimePolicyHint(context, sessionId, text, {
               providerFailure: {
@@ -3728,7 +3731,7 @@ async function streamFinalModelAnswerWithoutTools(
   )) {
     if (signal.aborted) {
       clearRequestActivity(context);
-      endAssistantStream(output);
+      cancelAssistantStream(output);
       writeLine(output, t(context, "toolInterrupted"));
       return assistantText;
     }
@@ -3804,6 +3807,7 @@ async function streamFinalModelAnswerWithoutTools(
           code: fallback.code,
           status: "attempted",
         });
+        resetFinalAssistantDraftForProviderRetry();
         showProviderSwitchActivity(context);
         await appendRuntimePolicyHint(context, sessionId, "continuation", {
           providerFailure: {
@@ -4229,7 +4233,7 @@ export async function continueModelAfterToolResults(
         // 早返回保持一致。
         if (controller.signal.aborted) {
           clearRequestActivity(context);
-          endAssistantStream(output);
+          cancelAssistantStream(output);
           writeLine(output, t(context, "toolInterrupted"));
           return;
         }
@@ -4315,6 +4319,7 @@ export async function continueModelAfterToolResults(
               return;
             }
             continuation.messages = appendLatestUserRequestAnchor(reactivePreflight.messages);
+            resetAssistantDraftForProviderRetry();
             showProviderRecoveryActivity(context);
             await appendSystemEvent(
               context,
@@ -4338,6 +4343,7 @@ export async function continueModelAfterToolResults(
               code: fallback.code,
               status: "attempted",
             });
+            resetAssistantDraftForProviderRetry();
             showProviderSwitchActivity(context);
             await appendRuntimePolicyHint(context, sessionId, "continuation", {
               providerFailure: {

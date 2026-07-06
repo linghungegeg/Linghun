@@ -27956,10 +27956,32 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(runtimeSrc).toMatch(
       /onRetry:\s*\(info\)\s*=>\s*{[\s\S]*?resetAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderRetryActivity\(context, info\);[\s\S]*?}/,
     );
+    expect(runtimeSrc).toMatch(
+      /messagesForProvider = appendLatestUserRequestAnchor\(reactivePreflight\.messages\);[\s\S]*?resetAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderRecoveryActivity\(context\);/,
+    );
+    expect(runtimeSrc).toMatch(
+      /recordProviderFallbackAttempt\(context, sessionId,[\s\S]*?status: "attempted",[\s\S]*?\}\);[\s\S]*?resetAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderSwitchActivity\(context\);/,
+    );
+    expect(runtimeSrc).toMatch(
+      /recordProviderFallbackAttempt\(context, sessionId,[\s\S]*?status: "attempted",[\s\S]*?\}\);[\s\S]*?resetFinalAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderSwitchActivity\(context\);/,
+    );
     const downgrade = runtimeSrc.match(
       /replaceAssistantBlockContent\(output, assistantStreamBlockId, assistantText\)/g,
     );
     expect(downgrade?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("源码：abort/ESC 停止只取消 streaming preview，不提交半截 assistant block", async () => {
+    const fs = await import("node:fs/promises");
+    const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
+    const abortBranches = runtimeSrc.match(
+      /if \((?:controller\.signal|signal)\.aborted\) \{[\s\S]*?writeLine\(output, t\(context, "toolInterrupted"\)\);[\s\S]*?\}/g,
+    );
+    expect(abortBranches?.length).toBeGreaterThanOrEqual(3);
+    for (const branch of abortBranches ?? []) {
+      expect(branch).toContain("cancelAssistantStream(output)");
+      expect(branch).not.toContain("endAssistantStream(output)");
+    }
   });
 
   it("源码：流式预览小批次刷新且 Ink rerender 合帧", async () => {
@@ -28142,8 +28164,14 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const counts = await output.compactOutputMemory({ projectMainScreen: true });
 
     expect(counts.beforeCount).toBeGreaterThan(counts.afterCount);
-    expect(blocks).toHaveLength(13);
+    expect(blocks).toHaveLength(5);
     expect(blocks[0]?.messageKind).toBe("compact_boundary");
+    expect(blocks.slice(1).map((block) => block.id)).toEqual([
+      "visible-26",
+      "visible-27",
+      "visible-28",
+      "visible-29",
+    ]);
     expect(ctx.transcriptSource?.cells.length).toBeGreaterThanOrEqual(30);
     const transcriptSource = ctx.transcriptSource;
     if (!transcriptSource || !firstId) throw new Error("missing transcript source cell input");
