@@ -101,6 +101,7 @@ export function createCacheState(
     compacted: false,
     compactBoundaries: [],
     compactProjection: undefined,
+    compactStrategy: undefined,
     deepCompact: undefined,
     compactPressure: undefined,
     compactFailure: undefined,

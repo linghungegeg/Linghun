@@ -207,6 +207,7 @@ export type CacheState = {
   compacted: boolean;
   compactBoundaries: CompactBoundary[];
   compactProjection?: CompactProjection;
+  compactStrategy?: CompactStrategySnapshot;
   deepCompact?: DeepCompactPacket;
   compactPressure?: CompactPressureSnapshot;
   compactFailure?: CompactFailureState;
@@ -235,6 +236,29 @@ export type CompactProjection = {
   toolPairingSafe: boolean;
   risks: string[];
   evidenceRefs: string[];
+};
+
+export type CompactStrategyLayer = "payload_trim" | "semantic_deep" | "full_summary" | "reactive";
+
+export type CompactStrategyStep = {
+  layer: CompactStrategyLayer;
+  status: "skipped" | "applied" | "failed";
+  reason: string;
+  beforeChars: number;
+  afterChars: number;
+};
+
+export type CompactPreflightTrigger = DeepCompactTrigger | "reactive";
+
+export type CompactStrategySnapshot = {
+  trigger: CompactPreflightTrigger;
+  createdAt: string;
+  contextMaxChars: number;
+  triggerChars: number;
+  postCompactTargetChars: number;
+  finalChars: number;
+  cacheStablePrefixRisk: "low" | "medium" | "high";
+  steps: CompactStrategyStep[];
 };
 
 export type DeepCompactTrigger =

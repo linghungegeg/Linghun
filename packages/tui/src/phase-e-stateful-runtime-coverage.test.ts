@@ -134,6 +134,15 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(below.blocked).toBe(false);
     if (!below.blocked) expect(below.messages).toEqual(belowTrigger);
     expect(context.cache.compactProjection).toBeUndefined();
+    expect(context.cache.compactStrategy?.steps.map((step) => step.layer)).toEqual([
+      "payload_trim",
+      "semantic_deep",
+      "full_summary",
+    ]);
+    expect(context.cache.compactStrategy?.steps.at(-1)).toMatchObject({
+      layer: "full_summary",
+      status: "skipped",
+    });
 
     const oldOversized = "OVERSIZED_OLD_CONTEXT".repeat(1_600);
     const overLimit: ModelMessage[] = [
@@ -178,6 +187,43 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     );
     expect(context.cache.compactProjection?.replacementMessageCount).toBeGreaterThan(0);
     expect(context.cache.compactProjection?.summary).toContain("target budget tokens");
+    expect(context.cache.compactStrategy?.cacheStablePrefixRisk).toBe("medium");
+    expect(context.cache.compactStrategy?.steps).toContainEqual(
+      expect.objectContaining({ layer: "full_summary", status: "applied" }),
+    );
+  });
+
+  it("records reactive compact as a bounded retry layer", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 20_000);
+    const oldOversized = "REACTIVE_OLD_CONTEXT".repeat(1_600);
+    const messages: ModelMessage[] = [
+      { role: "system", content: "s" },
+      { role: "user", content: oldOversized },
+      { role: "assistant", content: oldOversized },
+      { role: "user", content: oldOversized },
+      { role: "user", content: "keep after provider context error" },
+    ];
+
+    const compacted = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "reactive",
+      deps: compactDeps(),
+    });
+
+    expect(compacted.blocked).toBe(false);
+    expect(context.cache.compactStrategy?.trigger).toBe("reactive");
+    expect(context.cache.compactStrategy?.steps).toContainEqual(
+      expect.objectContaining({ layer: "reactive", status: "applied" }),
+    );
+    if (!compacted.blocked) {
+      expect(compacted.messages.map((message) => message.content).join("\n")).not.toContain(
+        "REACTIVE_OLD_CONTEXT",
+      );
+    }
   });
 
   it("stress compacts huge provider windows to the retained target", async () => {

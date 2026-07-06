@@ -25,7 +25,12 @@ import {
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
 } from "./tool-result-budget.js";
-import type { CompactProjection } from "./tui-data-types.js";
+import type {
+  CompactPreflightTrigger,
+  CompactProjection,
+  CompactStrategyStep,
+  DeepCompactTrigger,
+} from "./tui-data-types.js";
 
 export type CompactPreflightRuntime = {
   role: ModelRole;
@@ -81,9 +86,10 @@ export async function prepareMessagesForProviderPreflight(input: {
   context: TuiContext;
   sessionId: string;
   runtime: CompactPreflightRuntime;
-  trigger: "request" | "continuation" | "final" | "agent-child";
+  trigger: CompactPreflightTrigger;
   deps: CompactPreflightDeps;
 }): Promise<ProviderPreflightCompactResult> {
+  const originalChars = estimateModelMessageChars(input.messages);
   const budgeted = await prepareMessagesForProviderWithToolResultBudget(
     input.messages,
     input.context,
@@ -92,10 +98,46 @@ export async function prepareMessagesForProviderPreflight(input: {
   );
   const contextMaxChars = getProviderContextMaxChars(input.context, input.runtime);
   const triggerChars = getAutoCompactTriggerChars(input.context, input.runtime);
-  const currentChars = estimateModelMessageChars(budgeted);
-  if (currentChars <= triggerChars) {
+  const postCompactTargetChars = getPostCompactTargetChars(input.context, input.runtime, {
+    contextMaxChars,
+    triggerChars,
+  });
+  const budgetedChars = estimateModelMessageChars(budgeted);
+  const strategySteps: CompactStrategyStep[] = [
+    {
+      layer: "payload_trim",
+      status: budgetedChars < originalChars ? "applied" : "skipped",
+      reason: budgetedChars < originalChars ? "tool_result_payload_budget" : "no_large_tool_payloads",
+      beforeChars: originalChars,
+      afterChars: budgetedChars,
+    },
+  ];
+  if (input.trigger !== "reactive" && budgetedChars <= triggerChars) {
     const withDeep = injectDeepCompactSummary(budgeted, input.context.cache.deepCompact);
-    if (estimateModelMessageChars(withDeep) <= contextMaxChars) {
+    const withDeepChars = estimateModelMessageChars(withDeep);
+    strategySteps.push({
+      layer: "semantic_deep",
+      status: input.context.cache.deepCompact ? "applied" : "skipped",
+      reason: input.context.cache.deepCompact ? "reuse_existing_deep_compact" : "below_trigger",
+      beforeChars: budgetedChars,
+      afterChars: withDeepChars,
+    });
+    if (withDeepChars <= contextMaxChars) {
+      strategySteps.push({
+        layer: "full_summary",
+        status: "skipped",
+        reason: "payload_trim_or_existing_deep_compact_within_trigger",
+        beforeChars: withDeepChars,
+        afterChars: withDeepChars,
+      });
+      recordCompactStrategy(input.context, {
+        trigger: input.trigger,
+        contextMaxChars,
+        triggerChars,
+        postCompactTargetChars,
+        finalChars: withDeepChars,
+        steps: strategySteps,
+      });
       return { blocked: false, messages: withDeep };
     }
   }
@@ -123,7 +165,31 @@ export async function prepareMessagesForProviderPreflight(input: {
       `context_compact_skipped_tool_pairing: pending=${pairing.pending} orphan=${pairing.orphan} duplicate=${pairing.duplicate}`,
       "warning",
     );
-    if (currentChars > contextMaxChars) {
+    recordCompactStrategy(input.context, {
+      trigger: input.trigger,
+      contextMaxChars,
+      triggerChars,
+      postCompactTargetChars,
+      finalChars: budgetedChars,
+      steps: [
+        ...strategySteps,
+        {
+          layer: "semantic_deep",
+          status: "skipped",
+          reason: "tool_pairing_unsafe",
+          beforeChars: budgetedChars,
+          afterChars: budgetedChars,
+        },
+        {
+          layer: "full_summary",
+          status: "skipped",
+          reason: "tool_pairing_unsafe",
+          beforeChars: budgetedChars,
+          afterChars: budgetedChars,
+        },
+      ],
+    });
+    if (budgetedChars > contextMaxChars) {
       await recordCompactFailure(
         input.context,
         input.sessionId,
@@ -141,31 +207,64 @@ export async function prepareMessagesForProviderPreflight(input: {
   }
 
   try {
-    if (input.deps.runDeepCompact) {
+    if (input.deps.runDeepCompact && (input.context.modelGateway || input.context.cache.deepCompact)) {
       const deep = await maybeRunDeepCompactBeforeProvider({
         context: input.context,
         sessionId: input.sessionId,
         runtime: input.runtime,
-        trigger: input.trigger,
+        trigger: toDeepCompactTrigger(input.trigger),
         gateway: input.context.modelGateway,
         signal: input.context.activeAbortController?.signal,
         deps: input.deps.runDeepCompact,
       });
+      const afterDeep = estimateModelMessageChars(
+        injectDeepCompactSummary(budgeted, input.context.cache.deepCompact),
+      );
       if (!deep.ok) {
+        const deepMessage = "message" in deep ? deep.message : "Deep compact failed.";
+        strategySteps.push({
+          layer: "semantic_deep",
+          status: "failed",
+          reason: `deep_compact_failed:${deepMessage}`,
+          beforeChars: budgetedChars,
+          afterChars: afterDeep,
+        });
+        recordCompactStrategy(input.context, {
+          trigger: input.trigger,
+          contextMaxChars,
+          triggerChars,
+          postCompactTargetChars,
+          finalChars: afterDeep,
+          steps: strategySteps,
+        });
         await recordCompactFailure(
           input.context,
           input.sessionId,
-          `deep_compact_failed:${deep.message}`,
+          `deep_compact_failed:${deepMessage}`,
           true,
           input.deps,
         );
-        return { blocked: true, messages: budgeted, message: deep.message };
+        return { blocked: true, messages: budgeted, message: deepMessage };
       }
+      strategySteps.push({
+        layer: "semantic_deep",
+        status: "applied",
+        reason: "semantic_compact_ready",
+        beforeChars: budgetedChars,
+        afterChars: afterDeep,
+      });
+    } else {
+      const afterDeep = estimateModelMessageChars(
+        injectDeepCompactSummary(budgeted, input.context.cache.deepCompact),
+      );
+      strategySteps.push({
+        layer: "semantic_deep",
+        status: input.context.cache.deepCompact ? "applied" : "skipped",
+        reason: input.context.cache.deepCompact ? "reuse_existing_deep_compact" : "deep_compact_unavailable",
+        beforeChars: budgetedChars,
+        afterChars: afterDeep,
+      });
     }
-    const postCompactTargetChars = getPostCompactTargetChars(input.context, input.runtime, {
-      contextMaxChars,
-      triggerChars,
-    });
     const compactPayloadTargetChars = Math.max(
       1,
       postCompactTargetChars - COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
@@ -176,6 +275,21 @@ export async function prepareMessagesForProviderPreflight(input: {
       kind: "micro",
     });
     if (!compacted.changed || !compacted.boundary) {
+      strategySteps.push({
+        layer: "full_summary",
+        status: "skipped",
+        reason: "recent_context_already_within_compact_target",
+        beforeChars: budgetedChars,
+        afterChars: budgetedChars,
+      });
+      recordCompactStrategy(input.context, {
+        trigger: input.trigger,
+        contextMaxChars,
+        triggerChars,
+        postCompactTargetChars,
+        finalChars: budgetedChars,
+        steps: strategySteps,
+      });
       return { blocked: false, messages: budgeted };
     }
     const projection = createCompactProjection(input.context, {
@@ -192,7 +306,32 @@ export async function prepareMessagesForProviderPreflight(input: {
       injectCompactProjectionMessage(compacted.messages, projection),
       input.context.cache.deepCompact,
     );
-    if (estimateModelMessageChars(providerMessages) > contextMaxChars) {
+    const providerMessageChars = estimateModelMessageChars(providerMessages);
+    strategySteps.push({
+      layer: "full_summary",
+      status: "applied",
+      reason: "provider_visible_replacement_projection",
+      beforeChars: budgetedChars,
+      afterChars: providerMessageChars,
+    });
+    if (input.trigger === "reactive") {
+      strategySteps.push({
+        layer: "reactive",
+        status: "applied",
+        reason: "provider_context_error_retry_once",
+        beforeChars: budgetedChars,
+        afterChars: providerMessageChars,
+      });
+    }
+    recordCompactStrategy(input.context, {
+      trigger: input.trigger,
+      contextMaxChars,
+      triggerChars,
+      postCompactTargetChars,
+      finalChars: providerMessageChars,
+      steps: strategySteps,
+    });
+    if (providerMessageChars > contextMaxChars) {
       await recordCompactFailure(
         input.context,
         input.sessionId,
@@ -392,7 +531,7 @@ function createCompactProjection(
     contextMaxChars: number;
     triggerChars: number;
     postCompactTargetChars: number;
-    trigger: "request" | "continuation" | "final" | "agent-child";
+    trigger: CompactPreflightTrigger;
     pairingSafe: boolean;
   },
 ): CompactProjection {
@@ -447,13 +586,13 @@ function createCompactProjection(
       (record) => `${record.id}:${sanitizeCompactSummaryText(context, record.failureSummary, 100)}`,
     );
   const evidenceRefs = context.evidence.slice(0, 8).map((item) => item.id);
-  const files = [
-    ...new Set([
+  const files = Array.from(
+    new Set([
       ...context.recentlyMentionedFiles.slice(0, 8),
       ...context.tools.changedFiles.slice(0, 8),
       ...input.boundary.preservedFiles.slice(0, 8),
     ]),
-  ]
+  )
     .map((file) => sanitizeCompactSummaryText(context, file, 120))
     .slice(0, 12);
   const risks = [
@@ -555,6 +694,36 @@ async function appendCompactProjectionEvents(
   );
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+}
+
+function recordCompactStrategy(
+  context: TuiContext,
+  input: {
+    trigger: CompactPreflightTrigger;
+    contextMaxChars: number;
+    triggerChars: number;
+    postCompactTargetChars: number;
+    finalChars: number;
+    steps: CompactStrategyStep[];
+  },
+): void {
+  const appliedLayers = input.steps
+    .filter((step) => step.status === "applied")
+    .map((step) => step.layer);
+  context.cache.compactStrategy = {
+    trigger: input.trigger,
+    createdAt: new Date().toISOString(),
+    contextMaxChars: input.contextMaxChars,
+    triggerChars: input.triggerChars,
+    postCompactTargetChars: input.postCompactTargetChars,
+    finalChars: input.finalChars,
+    cacheStablePrefixRisk: appliedLayers.includes("full_summary") ? "medium" : "low",
+    steps: input.steps,
+  };
+}
+
+function toDeepCompactTrigger(trigger: CompactPreflightTrigger): DeepCompactTrigger {
+  return trigger === "reactive" ? "request" : trigger;
 }
 
 async function recordCompactFailure(

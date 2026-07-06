@@ -2173,6 +2173,7 @@ export async function sendMessage(
     let toolFailureRecoveryState: ToolFailureRecoveryState = { repeatedFailureRounds: 0 };
     let toolFailureNoToolRecoveryPrompts = 0;
     let highReasoningToolsEmptyRetried = false;
+    let reactiveCompactRetried = false;
     const _suggestedMax = metaSchedulerDecision.suggestedMaxTodoRounds;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
@@ -2361,6 +2362,30 @@ export async function sendMessage(
         if (event.type === "error") {
           clearRequestActivity(context);
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
+          if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
+            reactiveCompactRetried = true;
+            const reactivePreflight = await prepareMessagesForProviderPreflight({
+              messages: messagesForProvider,
+              context,
+              sessionId,
+              runtime: selectedRuntime,
+              trigger: "reactive",
+              deps: compactPreflightDeps,
+            });
+            if (reactivePreflight.blocked) {
+              writeLine(output, reactivePreflight.message);
+              writeStatus(output, context);
+              return;
+            }
+            messagesForProvider = reactivePreflight.messages;
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `reactive_compact_retry: provider=${selectedRuntime.provider} model=${selectedRuntime.model} messages=${messagesForProvider.length}`,
+              "warning",
+            );
+            continue modelRoundLoop;
+          }
           // withProviderRetry already handled same-provider retries, concurrency gating,
           // and breaker transitions. Only fallback to a different model remains.
           const fallback = resolveRuntimeFallback(context, selectedRuntime, event.error);
@@ -4055,6 +4080,7 @@ export async function continueModelAfterToolResults(
     let rawToolProtocolTextRetries = 0;
     let runtimeFallbackAttempted = false;
     let highReasoningToolsEmptyRetried = false;
+    let reactiveCompactRetried = false;
     const _suggestedMax = context.lastMetaSchedulerDecision?.suggestedMaxTodoRounds ?? MAX_TODO_ONLY_CODE_FACT;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
@@ -4215,6 +4241,30 @@ export async function continueModelAfterToolResults(
           pendingContinuationToolUses.length = 0;
           const currentRuntime = runtimeFromContinuation(continuation);
           await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
+          if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
+            reactiveCompactRetried = true;
+            const reactivePreflight = await prepareMessagesForProviderPreflight({
+              messages: continuation.messages,
+              context,
+              sessionId,
+              runtime: currentRuntime,
+              trigger: "reactive",
+              deps: compactPreflightDeps,
+            });
+            if (reactivePreflight.blocked) {
+              writeLine(output, reactivePreflight.message);
+              writeStatus(output, context);
+              return;
+            }
+            continuation.messages = reactivePreflight.messages;
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `reactive_compact_retry: provider=${currentRuntime.provider} model=${currentRuntime.model} messages=${continuation.messages.length}`,
+              "warning",
+            );
+            continue continuationRoundLoop;
+          }
           // withProviderRetry already handled same-provider retries, concurrency gating,
           // and breaker transitions. Only fallback to a different model remains.
           const fallback = runtimeFallbackAttempted
@@ -4845,6 +4895,30 @@ function sanitizeGitPromptLine(value: string): string {
 function truncateForGitPrompt(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
   return `${value.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function isReactiveCompactProviderError(error: unknown): boolean {
+  const code = readErrorStringField(error, "code");
+  const name = readErrorStringField(error, "name");
+  const status = readErrorNumberField(error, "status") ?? readErrorNumberField(error, "statusCode");
+  const message =
+    error instanceof Error ? error.message : (readErrorStringField(error, "message") ?? String(error ?? ""));
+  const text = `${code ?? ""} ${name ?? ""} ${status ?? ""} ${message}`;
+  return /prompt[_\s-]?too[_\s-]?long|context[_\s-]?(?:length|exceeded)|maximum context|input too large|tokens?\s+exceed|上下文.*(?:过长|超限)|提示词.*过长/i.test(
+    text,
+  );
+}
+
+function readErrorStringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" ? field : undefined;
+}
+
+function readErrorNumberField(value: unknown, key: string): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "number" ? field : undefined;
 }
 
 function createRawToolProtocolReminder(language: Language): string {
