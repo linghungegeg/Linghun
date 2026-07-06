@@ -903,7 +903,7 @@ describe("final answer gate aggregation", () => {
     expect(source).toContain("final_answer_claim_alignment_rewrite continuation=yes");
     expect(source).toContain("final_answer_claim_alignment_rewrite final_safety=yes");
     expect(source).toContain("final_answer_claim_alignment_rewrite continuation_final_safety=yes");
-    expect(source).toContain("actionResult.status === \"evidence_recorded\"");
+    expect(source).toContain("shouldContinueAfterFinalGateEvidenceAction(actionResult)");
   });
 
   it("plans verification gaps in plan mode without Bash or automatic test execution", () => {
@@ -1279,13 +1279,62 @@ describe("final answer gate aggregation", () => {
       },
     });
 
-    expect(result.status).toBe("evidence_recorded");
+    expect(result.status).toBe("attempt_recorded");
+    if (result.status === "attempt_recorded") {
+      expect(result.reason).toBe("service_not_proven");
+      expect(result.messages.some((message) => message.role === "tool")).toBe(true);
+    }
     expect(
       testContext.evidence.some((item) => {
         const data = item.data as { serviceHint?: { ready?: boolean } } | undefined;
         return data?.serviceHint?.ready === true;
       }),
     ).toBe(false);
+  });
+
+  it("requires the current final-gate service probe to produce ready evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-service-stale-read-"));
+    await writeFile(join(project, "server.log"), "server failed to listen on 127.0.0.1:3000\n", "utf8");
+    const { context } = makeDispatcherContext(project);
+    const testContext = context as { evidence: EvidenceRecord[] };
+    testContext.evidence.push(
+      makeEvidence({
+        kind: "command_output",
+        summary: "old service probe: 127.0.0.1:3000 ready",
+        supportsClaims: ["runtime", "service", "service_ready"],
+        data: { serviceHint: { target: "127.0.0.1:3000", ready: true } },
+      }),
+    );
+    const output = new MemoryOutput();
+
+    const result = await __testRunFinalGateEvidenceAction({
+      actionPlan: {
+        action: "readonly_check",
+        reason: "service_runtime_gap_readonly",
+        directive: "test",
+        evidenceAction: {
+          toolName: "Read",
+          input: { path: "server.log", limit: 200 },
+          strategy: "service_runtime_readonly_check",
+          summary: "read claimed runtime evidence server.log",
+        },
+      },
+      context: context as never,
+      output,
+      sessionId: "session-service-stale-read",
+      messages: [{ role: "user", content: "确认服务状态" }],
+      runtime: {
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+    });
+
+    expect(result.status).toBe("attempt_recorded");
+    if (result.status === "attempt_recorded") {
+      expect(result.reason).toBe("service_not_proven");
+    }
   });
 
   it("dispatches default verification evidence through Bash permission approval without committing held draft", async () => {

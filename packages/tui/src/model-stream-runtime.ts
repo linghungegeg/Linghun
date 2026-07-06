@@ -215,6 +215,7 @@ export type FinalGateEvidenceGapActionPlan = {
 
 export type FinalGateEvidenceActionResult =
   | { status: "evidence_recorded"; messages: ModelMessage[]; result: ModelToolExecutionResult }
+  | { status: "attempt_recorded"; messages: ModelMessage[]; result: ModelToolExecutionResult; reason: string }
   | { status: "permission_pending" }
   | { status: "blocked"; reason: string }
   | { status: "unsupported"; reason: string };
@@ -755,12 +756,50 @@ function hasFullVerificationEvidence(context: TuiContext): boolean {
   );
 }
 
-function hasServiceVerificationEvidence(context: TuiContext): boolean {
+function hasServiceVerificationEvidence(context: Pick<TuiContext, "evidence">): boolean {
   return context.evidence.some((item) => {
     const service = readEvidenceDataRecord(item, "service");
     const serviceHint = readEvidenceDataRecord(item, "serviceHint");
     return service?.ready === true || serviceHint?.ready === true;
   });
+}
+
+function isFinalGateEvidenceActionSatisfied(
+  actionPlan: FinalGateEvidenceGapActionPlan,
+  newEvidence: TuiContext["evidence"],
+  result: ModelToolExecutionResult,
+): boolean {
+  if (result.ok !== true) return false;
+  if (actionPlan.action === "verification_request") {
+    return hasFreshVerificationEvidenceForFinalClaimAlignment(newEvidence);
+  }
+  if (actionPlan.reason === "artifact_gap_readonly") {
+    return newEvidence.some((item) => {
+      const artifactHint = readEvidenceDataRecord(item, "artifactHint");
+      return artifactHint?.exists === true;
+    });
+  }
+  if (actionPlan.reason === "service_runtime_gap_readonly") {
+    return hasServiceVerificationEvidence({ evidence: newEvidence });
+  }
+  return false;
+}
+
+function classifyFinalGateEvidenceAttemptGap(
+  actionPlan: FinalGateEvidenceGapActionPlan,
+  result: ModelToolExecutionResult,
+): string {
+  if (result.ok !== true) return "tool_failed";
+  if (actionPlan.action === "verification_request") return "verification_not_proven";
+  if (actionPlan.reason === "artifact_gap_readonly") return "artifact_not_proven";
+  if (actionPlan.reason === "service_runtime_gap_readonly") return "service_not_proven";
+  return "evidence_not_proven";
+}
+
+function shouldContinueAfterFinalGateEvidenceAction(
+  result: FinalGateEvidenceActionResult,
+): result is Extract<FinalGateEvidenceActionResult, { status: "evidence_recorded" | "attempt_recorded" }> {
+  return result.status === "evidence_recorded" || result.status === "attempt_recorded";
 }
 
 export function planFinalGateEvidenceGapAction(input: {
@@ -1042,6 +1081,7 @@ async function runFinalGateEvidenceAction(input: {
     `final_answer_gap_action dispatch tool=${toolCall.name} reason=${input.actionPlan.reason}`,
     "info",
   );
+  const existingEvidenceIds = new Set(input.context.evidence.map((item) => item.id));
   const result = await executeModelToolUse(
     toolCall,
     input.context,
@@ -1072,7 +1112,23 @@ async function runFinalGateEvidenceAction(input: {
     tool_call_id: toolCall.id,
     content: JSON.stringify(result),
   });
-  return { status: "evidence_recorded", messages: continuation.messages, result };
+  const newEvidence = input.context.evidence.filter((item) => !existingEvidenceIds.has(item.id));
+  const evidenceSatisfied = isFinalGateEvidenceActionSatisfied(
+    input.actionPlan,
+    newEvidence,
+    result,
+  );
+  if (evidenceSatisfied) {
+    return { status: "evidence_recorded", messages: continuation.messages, result };
+  }
+  const reason = classifyFinalGateEvidenceAttemptGap(input.actionPlan, result);
+  await appendSystemEvent(
+    input.context,
+    input.sessionId,
+    `final_answer_gap_action_attempt_recorded reason=${reason} tool=${toolCall.name} ok=${result.ok ? "yes" : "no"}`,
+    result.ok ? "info" : "warning",
+  );
+  return { status: "attempt_recorded", messages: continuation.messages, result, reason };
 }
 
 export async function __testRunFinalGateEvidenceAction(
@@ -2712,7 +2768,7 @@ export async function sendMessage(
             if (actionResult.status === "permission_pending") {
               return;
             }
-            if (actionResult.status === "evidence_recorded") {
+            if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
               messagesForProvider = actionResult.messages;
               finalAnswerEvidenceActionRetries += 1;
               continue;
@@ -2937,7 +2993,7 @@ export async function sendMessage(
             if (actionResult.status === "permission_pending") {
               return;
             }
-            if (actionResult.status === "evidence_recorded") {
+            if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
               finalAnswerEvidenceActionRetries += 1;
               assistantText = await streamFinalModelAnswerWithoutTools(
                 {
@@ -3953,7 +4009,7 @@ async function streamFinalModelAnswerWithoutTools(
         if (actionResult.status === "permission_pending") {
           return "";
         }
-        if (actionResult.status === "evidence_recorded") {
+        if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
           continuation.messages = actionResult.messages;
           startRequestActivity(output, context, "rewriting_final_answer");
           return streamFinalModelAnswerWithoutTools(
@@ -4559,7 +4615,7 @@ export async function continueModelAfterToolResults(
             if (actionResult.status === "permission_pending") {
               return;
             }
-            if (actionResult.status === "evidence_recorded") {
+            if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
               continuation.messages = actionResult.messages;
               finalAnswerEvidenceActionRetries += 1;
               continue;
@@ -4716,7 +4772,7 @@ export async function continueModelAfterToolResults(
               if (actionResult.status === "permission_pending") {
                 return;
               }
-              if (actionResult.status === "evidence_recorded") {
+              if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
                 finalAnswerEvidenceActionRetries += 1;
                 continuation.messages = actionResult.messages;
                 assistantText = await streamFinalModelAnswerWithoutTools(
