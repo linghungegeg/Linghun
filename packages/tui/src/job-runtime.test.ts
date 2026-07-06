@@ -354,6 +354,9 @@ describe("formatJobReport/List/Status", () => {
       pauseReason: "needs_handoff_repair:index",
     });
     const stale = createMinimalJob({ status: "stale", pauseReason: "heartbeat_stale" });
+    const timeout = createMinimalJob({ status: "timeout" });
+    const cancelled = createMinimalJob({ status: "cancelled" });
+    const completed = createMinimalJob({ status: "completed" });
     const failed = createMinimalJob({
       result: {
         status: "failed",
@@ -365,13 +368,30 @@ describe("formatJobReport/List/Status", () => {
     });
 
     const summary = formatJobPanelSummary(blocked, "en-US", "status").join("\n");
+    const completedSummary = formatJobPanelSummary(completed, "en-US", "report").join("\n");
 
     expect(summary).toContain("needs_handoff_repair:index");
     expect(summary).toContain("/job resume job-test1234");
     expect(summary).toContain("Ctrl+O opens the full status");
+    expect(completedSummary).toContain("Job job-test1234 · completed · result pending");
+    expect(completedSummary).toContain("Ctrl+O opens the full report");
     expect(getJobPanelTone(blocked)).toBe("warning");
     expect(getJobPanelTone(stale)).toBe("warning");
+    expect(getJobPanelTone(timeout)).toBe("warning");
+    expect(getJobPanelTone(cancelled)).toBe("error");
     expect(getJobPanelTone(failed)).toBe("error");
+    expect(getJobPanelTone(completed)).toBe("neutral");
+  });
+
+  it("job logs surface empty output without implying success", async () => {
+    const job = createMinimalJob({ status: "completed" });
+
+    const logs = await formatJobLogs(job, "en-US");
+
+    expect(logs).toContain("- status: completed (lifecycle ended; review evidence separately)");
+    expect(logs).toContain("result partial (incomplete or unverified evidence)");
+    expect(logs).toContain("Logs are empty; the job may not have written output yet.");
+    expect(logs).not.toContain("verification PASS");
   });
 
   it("localizes job status, report, and empty logs for zh-CN", async () => {

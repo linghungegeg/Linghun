@@ -830,6 +830,13 @@ const HEADLESS_DEADLINE_CLOSURE_WINDOW_MS = 60_000;
 type HeadlessPhase =
   | "starting"
   | "waiting_first_delta"
+  | "tool_running"
+  | "permission_waiting"
+  | "provider_retrying"
+  | "checking_final_evidence"
+  | "collecting_final_evidence"
+  | "rewriting_final_answer"
+  | "verifying_final_answer"
   | "continuing"
   | "validating"
   | "done"
@@ -844,6 +851,57 @@ function emitHeadlessPhase(
   if (options?.suppress) return;
   const suffix = detail ? `: ${detail}` : "";
   writeLine(output, `[headless] ${phase}${suffix}`);
+}
+
+type HeadlessActivitySnapshot = { phase: HeadlessPhase; detail?: string };
+
+function createHeadlessActivityEmitter(
+  output: Writable,
+  context: TuiContext,
+  options?: { suppress?: boolean },
+): () => void {
+  let lastKey = "";
+  return () => {
+    const snapshot = snapshotHeadlessActivity(context);
+    if (!snapshot) return;
+    const key = `${snapshot.phase}:${snapshot.detail ?? ""}`;
+    if (key === lastKey) return;
+    lastKey = key;
+    emitHeadlessPhase(output, snapshot.phase, snapshot.detail, options);
+  };
+}
+
+function snapshotHeadlessActivity(context: TuiContext): HeadlessActivitySnapshot | undefined {
+  if (context.pendingLocalApproval) {
+    return { phase: "permission_waiting", detail: context.pendingLocalApproval.kind };
+  }
+  const phase = (context as { requestActivityPhase?: RequestActivityPhase }).requestActivityPhase;
+  if (!phase) return undefined;
+  if (phase === "tool_running") {
+    return {
+      phase: "tool_running",
+      detail: context.requestActivityToolName,
+    };
+  }
+  if (phase === "permission_waiting") return { phase };
+  if (phase === "provider_retrying") {
+    const retryInfo = (context as { retryInfo?: { attempt: number; max: number; delaySec: number } })
+      .retryInfo;
+    return {
+      phase,
+      detail: retryInfo ? `attempt=${retryInfo.attempt}/${retryInfo.max}` : undefined,
+    };
+  }
+  if (
+    phase === "checking_final_evidence" ||
+    phase === "collecting_final_evidence" ||
+    phase === "rewriting_final_answer" ||
+    phase === "verifying_final_answer"
+  ) {
+    return { phase };
+  }
+  if (phase === "continuing_after_tool") return { phase: "continuing", detail: "after_tool" };
+  return undefined;
 }
 
 export type {
@@ -1678,6 +1736,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       });
       const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
       const deferredApprovals: HeadlessDeferredApproval[] = [];
+      const emitActivity = createHeadlessActivityEmitter(output, context, {
+        suppress: suppressGenericHeadlessPhases,
+      });
       const messagePromise = sendHeadlessMessage(text, context, gateway, output);
       const pump = createHeadlessApprovalPump({
         context,
@@ -1693,7 +1754,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         deferredApprovals,
         onPermissionRequest,
       });
-      const messageResult = await runWithHeadlessApprovalPump(messagePromise, pump);
+      const messageResult = await runWithHeadlessApprovalPump(messagePromise, pump, emitActivity);
       if (messageResult.exitCode !== undefined) {
         return { exitCode: messageResult.exitCode };
       }
@@ -2075,14 +2136,17 @@ function createHeadlessApprovalPump(input: {
 async function runWithHeadlessApprovalPump(
   messagePromise: Promise<void>,
   pump: () => Promise<HeadlessApprovalPumpResult>,
+  onActivity?: () => void,
 ): Promise<{ exitCode?: number }> {
   let settled = false;
   let exitCode: number | undefined;
   const loop = (async () => {
     while (!settled && exitCode === undefined) {
+      onActivity?.();
       const result = await pump();
       exitCode = result.exitCode;
       if (exitCode !== undefined) break;
+      onActivity?.();
       await sleep(50);
     }
   })();
@@ -2090,6 +2154,7 @@ async function runWithHeadlessApprovalPump(
     await messagePromise;
   } finally {
     settled = true;
+    onActivity?.();
     await loop;
   }
   return exitCode !== undefined ? { exitCode } : {};

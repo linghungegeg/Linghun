@@ -1819,6 +1819,40 @@ describe("runHeadlessTask", () => {
     expect(stderr.text).toBe("");
   });
 
+  it("prints ordinary headless activity phases from request lifecycle state", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-activity-phases-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const output = new MemoryOutput();
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: output,
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.requestActivityPhase = "tool_running";
+        context.requestActivityToolName = "Bash";
+        await new Promise((resolve) => setTimeout(resolve, 70));
+        context.requestActivityPhase = "checking_final_evidence";
+        context.requestActivityToolName = undefined;
+        await new Promise((resolve) => setTimeout(resolve, 70));
+        context.requestActivityPhase = undefined;
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(output.text).toContain("[headless] tool_running: Bash");
+    expect(output.text).toContain("[headless] checking_final_evidence");
+    expect(output.text.match(/\[headless\] tool_running: Bash/g)?.length).toBe(1);
+    expect(stderr.text).toBe("");
+  });
+
   it("auto-approves pending local approval while sendMessage is still running", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-approve-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

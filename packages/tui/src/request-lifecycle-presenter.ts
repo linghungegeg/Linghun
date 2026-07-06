@@ -7,6 +7,9 @@ export type RequestActivityPhase =
   | "tool_running"
   | "continuing_after_tool"
   | "permission_waiting"
+  | "checking_final_evidence"
+  | "collecting_final_evidence"
+  | "rewriting_final_answer"
   | "verifying_final_answer"
   | "provider_retrying";
 
@@ -33,6 +36,15 @@ export function formatRequestActivity(
     if (phase === "permission_waiting") {
       return "Waiting for your approval; the model request is paused.";
     }
+    if (phase === "checking_final_evidence") {
+      return "Checking final answer evidence before showing it.";
+    }
+    if (phase === "collecting_final_evidence") {
+      return "Collecting missing final answer evidence.";
+    }
+    if (phase === "rewriting_final_answer") {
+      return "Rewriting the final answer from recorded evidence.";
+    }
     if (phase === "verifying_final_answer") {
       return "Verifying the final answer before showing it.";
     }
@@ -58,6 +70,15 @@ export function formatRequestActivity(
   }
   if (phase === "permission_waiting") {
     return "正在等待你的批准；模型请求已暂停。";
+  }
+  if (phase === "checking_final_evidence") {
+    return "正在检查最终回答证据。";
+  }
+  if (phase === "collecting_final_evidence") {
+    return "正在补齐最终回答缺失证据。";
+  }
+  if (phase === "rewriting_final_answer") {
+    return "正在根据已有证据重写最终回答。";
   }
   if (phase === "verifying_final_answer") {
     return "正在验证最终回答，验证后再显示。";

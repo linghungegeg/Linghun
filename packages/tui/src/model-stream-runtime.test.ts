@@ -70,9 +70,13 @@ type TestStreamEvent =
   | { type: "assistant_text_delta"; text: string }
   | { type: "message_stop"; chunkCount: number; hadUsage: boolean; finishReason?: string };
 
-function gatewayByTurn(turns: TestStreamEvent[][], calls: { count: number }): ModelGateway {
+function gatewayByTurn(
+  turns: TestStreamEvent[][],
+  calls: { count: number; requests?: Array<{ messages?: unknown }> },
+): ModelGateway {
   return {
-    async *stream() {
+    async *stream(_providerId: string, request?: { messages?: unknown }) {
+      calls.requests?.push({ messages: request?.messages });
       const events = turns[calls.count] ?? [];
       calls.count += 1;
       for (const event of events) yield event;
@@ -454,6 +458,55 @@ describe("final answer gate aggregation", () => {
     expect(visibleFallback).not.toContain("证据范围");
     expect(visibleFallback).not.toContain("任务状态");
     expect(visibleFallback).not.toContain("下一步");
+  });
+
+  it("adds a final evidence preflight prompt before no-tool final generation", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-final-preflight-"));
+    const { context } = makeDispatcherContext(projectPath);
+    Object.assign(context, {
+      config: defaultConfig,
+      providerBreaker: createProviderCircuitBreakerState(),
+      evidence: [
+        makeEvidence({
+          kind: "command_output",
+          summary: "focused tests passed",
+          supportsClaims: ["test_passed"],
+        }),
+      ],
+      cache: { history: [], deepCompact: undefined },
+    });
+    const calls: { count: number; requests: Array<{ messages?: unknown }> } = {
+      count: 0,
+      requests: [],
+    };
+
+    const finalText = await __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "请给最终结论" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+      context,
+      gatewayByTurn(
+        [
+          [
+            { type: "assistant_text_delta", text: "验证通过。" },
+            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+          ],
+        ],
+        calls,
+      ),
+      "session-final-preflight",
+      new MemoryOutput(),
+      new AbortController().signal,
+    );
+
+    expect(finalText).toContain("验证通过");
+    expect(JSON.stringify(calls.requests[0]?.messages ?? [])).toContain("最终回答证据前置检查");
+    expect(JSON.stringify(calls.requests[0]?.messages ?? [])).toContain("已有 1 条记录");
+    expect((context as { requestActivityPhase?: string }).requestActivityPhase).toBeUndefined();
   });
 
   it("no-tool final rewrites claim alignment through the model before committing", async () => {

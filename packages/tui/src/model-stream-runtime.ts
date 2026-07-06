@@ -1231,6 +1231,31 @@ function hasFreshVerificationEvidenceForFinalClaimAlignment(evidence: TuiContext
   });
 }
 
+function createFinalAnswerEvidencePreflightPrompt(
+  language: Language,
+  evidence: TuiContext["evidence"],
+): string {
+  const evidenceScope = formatEvidenceBoundaryScope(evidence, language);
+  if (language === "en-US") {
+    return [
+      "Final answer evidence preflight:",
+      `- Current recorded evidence: ${evidenceScope}.`,
+      "- Before writing the final answer, align any high-risk claims to the recorded evidence.",
+      "- Use LinghunFinalAnswerClaims only for claims supported by fresh evidence.",
+      "- If evidence is missing, state the boundary plainly instead of claiming completion.",
+      "- Do not call tools in this final-answer rewrite pass.",
+    ].join("\n");
+  }
+  return [
+    "最终回答证据前置检查：",
+    `- 当前已记录证据：${evidenceScope}。`,
+    "- 写最终回答前，请把高风险声明收敛到已有证据能支撑的范围。",
+    "- LinghunFinalAnswerClaims 只声明 fresh 证据能支撑的类型。",
+    "- 如果证据不足，直接说明边界，不要宣称已完成。",
+    "- 本次最终回答整理不要调用工具。",
+  ].join("\n");
+}
+
 function createFinalGateClaimAlignmentRewritePrompt(language: Language): string {
   if (language === "en-US") {
     return [
@@ -3601,7 +3626,13 @@ async function streamFinalModelAnswerWithoutTools(
   const originalModel = continuation.model;
   const runtime = runtimeFromContinuation(continuation);
   const preflight = await prepareMessagesForProviderPreflight({
-    messages: continuation.messages,
+    messages: [
+      ...continuation.messages,
+      {
+        role: "user",
+        content: createFinalAnswerEvidencePreflightPrompt(context.language, context.evidence),
+      },
+    ],
     context,
     sessionId,
     runtime,
@@ -3616,6 +3647,7 @@ async function streamFinalModelAnswerWithoutTools(
     return "";
   }
   continuation.messages = preflight.messages;
+  startRequestActivity(output, context, "checking_final_evidence");
   const promptCacheFields = await buildPromptCacheRequestFields(context);
   const providerRequest: ModelRequest = applyPromptCacheKey(
     applyCacheWritePolicyToRequest(
@@ -3813,7 +3845,7 @@ async function streamFinalModelAnswerWithoutTools(
       clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
     }
     await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
-    startRequestActivity(output, context, "verifying_final_answer");
+    startRequestActivity(output, context, "checking_final_evidence");
     const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
     if (gateResult.status === "needs_disclaimer") {
       if (
@@ -3828,6 +3860,7 @@ async function streamFinalModelAnswerWithoutTools(
           role: "user",
           content: createFinalGateClaimAlignmentRewritePrompt(context.language),
         });
+        startRequestActivity(output, context, "rewriting_final_answer");
         replaceAssistantBlockContent(output, assistantStreamBlockId, "");
         return streamFinalModelAnswerWithoutTools(
           continuation,
@@ -3860,6 +3893,7 @@ async function streamFinalModelAnswerWithoutTools(
           : "info",
       );
       if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
+        startRequestActivity(output, context, "collecting_final_evidence");
         replaceAssistantBlockContent(output, assistantStreamBlockId, "");
         const actionResult = await runFinalGateEvidenceAction({
           actionPlan,
@@ -3875,6 +3909,7 @@ async function streamFinalModelAnswerWithoutTools(
         }
         if (actionResult.status === "evidence_recorded") {
           continuation.messages = actionResult.messages;
+          startRequestActivity(output, context, "rewriting_final_answer");
           return streamFinalModelAnswerWithoutTools(
             continuation,
             context,

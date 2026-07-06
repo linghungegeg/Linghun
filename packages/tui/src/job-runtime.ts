@@ -827,10 +827,11 @@ export function formatJobPanelSummary(
       : mode === "report"
         ? "Ctrl+O 查看完整报告。"
         : "Ctrl+O 查看完整状态。";
+  const panelResult = job.result?.status ?? "pending";
   return [
     language === "en-US"
-      ? `Job ${job.id} · ${job.status} · result ${job.result?.status ?? "partial"}`
-      : `Job ${job.id} · ${job.status} · result ${job.result?.status ?? "partial"}`,
+      ? `Job ${job.id} · ${job.status} · result ${panelResult}`
+      : `Job ${job.id} · ${job.status} · result ${panelResult}`,
     language === "en-US" ? `- pause reason: ${pauseReason}` : `- pause reason：${pauseReason}`,
     language === "en-US" ? `- next: ${nextAction}` : `- next：${nextAction}`,
     `- ${detailHint}`,
