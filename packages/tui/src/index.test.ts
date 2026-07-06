@@ -50,8 +50,8 @@ import {
   collectHeadlessArtifactChecklist,
   createHeadlessBenchInitialPrompt,
   createHeadlessBenchRepairPrompt,
-  detectHeadlessBenchTaskProfile,
   detectEngineeringTaskProfile,
+  detectHeadlessBenchTaskProfile,
 } from "./headless-bench-runtime.js";
 import {
   type BackgroundTaskState,
@@ -137,18 +137,18 @@ import {
   writeLightHintsForTest,
 } from "./index.js";
 import {
+  recoverDurableJobForContext,
+  resumeDurableJob,
+  runDurableJobLiteTick,
+} from "./job-agent-command-runtime.js";
+import {
   getDurableJobStatePath,
   listDurableJobs as listDurableJobsFromRuntime,
   persistDurableJob,
   readDurableJobState,
 } from "./job-runtime.js";
-import {
-  recoverDurableJobForContext,
-  resumeDurableJob,
-  runDurableJobLiteTick,
-} from "./job-agent-command-runtime.js";
-import { createToolInputSchema } from "./model-loop-runtime.js";
 import { evaluateMetaScheduler } from "./meta-scheduler-runtime.js";
+import { createToolInputSchema } from "./model-loop-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
@@ -163,9 +163,13 @@ import {
 } from "./provider-circuit-breaker.js";
 import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
-import type { ProductBlockViewModel } from "./shell/types.js";
 import { findTranscriptSourceCell } from "./shell/models/transcript-source.js";
-import { createOutputBlock, createCompactBoundaryBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
+import type { ProductBlockViewModel } from "./shell/types.js";
+import {
+  createCompactBoundaryBlock,
+  createOutputBlock,
+  mapPendingApprovalToPermission,
+} from "./shell/view-model.js";
 import {
   type TerminalReadinessView,
   createReadinessItems,
@@ -19203,7 +19207,7 @@ describe("Phase 06 TUI slash commands", () => {
     await waitForTestCondition(() => Boolean(context.backgroundAbortControllers?.size), 5_000);
 
     // Controller exists while bash is running (not prematurely cleared).
-    expect(context.backgroundAbortControllers!.size).toBe(1);
+    expect(context.backgroundAbortControllers?.size).toBe(1);
 
     await handleSlashCommand("/interrupt", context, output);
     await running;
@@ -19310,7 +19314,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(context.backgroundBashTaskMap.size).toBe(0);
-    expect(context.backgroundAbortControllers!.size).toBe(0);
+    expect(context.backgroundAbortControllers?.size).toBe(0);
     expect(task.cancelState).toBe("confirmed_exited");
     expect(task.confirmedExitedAt).toBeTruthy();
   });
@@ -19371,7 +19375,7 @@ describe("Phase 06 TUI slash commands", () => {
     // Evidence is recorded.
     const bashEvidence = context.evidence.find((e) => e.summary?.includes("Bash(background)"));
     expect(bashEvidence).toBeDefined();
-    expect(bashEvidence!.supportsClaims).toContain("background_bash_fail");
+    expect(bashEvidence?.supportsClaims).toContain("background_bash_fail");
 
     // Transcript gets background_task_update.
     await new Promise((r) => setTimeout(r, 50));
@@ -19430,7 +19434,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(task.status).toBe("completed");
     expect(task.result).toBe("pass");
     expect(context.backgroundBashTaskMap.size).toBe(0);
-    expect(context.backgroundAbortControllers!.size).toBe(0);
+    expect(context.backgroundAbortControllers?.size).toBe(0);
     expect(context.evidence[0]?.supportsClaims).toContain("background_bash_pass");
   });
 
@@ -27841,7 +27845,10 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const output = __testCreateShellBlockOutput(ctx, blocks);
     output.beginAssistantStream("assistant-stream-cancelled", { holdStableCommit: true });
     output.appendAssistantDelta("旧 attempt 半截内容");
-    expect(ctx.streamingAssistant?.text).toContain("旧 attempt");
+    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
+      "旧 attempt",
+    );
 
     output.cancelAssistantStream();
     expect(ctx.streamingAssistant).toBeUndefined();
@@ -27870,7 +27877,10 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const output = __testCreateShellBlockOutput(context, blocks);
     output.beginAssistantStream("assistant-stream-interrupt-live", { holdStableCommit: true });
     output.appendAssistantDelta("中断前的半截模型输出");
-    expect(context.streamingAssistant?.text).toContain("半截模型输出");
+    expect(context.streamingAssistant).toBeUndefined();
+    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
+      "半截模型输出",
+    );
 
     await handleInterruptCommand([], context, output);
 
@@ -27957,7 +27967,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(runtimeSrc).not.toContain("[stdout] ... 更多输出已隐藏");
   });
 
-  it("no-tool provider final answer stays mutable before final gate commit", async () => {
+  it("no-tool provider final answer stays hidden before final gate commit", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-no-tool-final-preview-"));
     const config: LinghunConfig = {
       ...defaultConfig,
@@ -28001,7 +28011,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const pending = __testSendMessage("普通纯文本回答", context, gateway, output);
     await deltaProcessed;
 
-    expect(context.streamingAssistant?.text ?? "").toContain(finalText);
+    expect(context.streamingAssistant).toBeUndefined();
     expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
       finalText,
     );
@@ -28014,7 +28024,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(finalBlocks).toHaveLength(1);
   });
 
-  it("tool-capable pure text answer keeps only mutable Ink preview before final gate commit", async () => {
+  it("tool-capable pure text answer stays hidden before final gate commit", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-text-preview-"));
     const config: LinghunConfig = {
       ...defaultConfig,
@@ -28058,7 +28068,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const pending = __testSendMessage("普通纯文本回答", context, gateway, output);
     await deltaProcessed;
 
-    expect(context.streamingAssistant?.text ?? "").toContain(previewText);
+    expect(context.streamingAssistant).toBeUndefined();
     expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
       previewText,
     );
@@ -28121,7 +28131,9 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(blocks).toHaveLength(13);
     expect(blocks[0]?.messageKind).toBe("compact_boundary");
     expect(ctx.transcriptSource?.cells.length).toBeGreaterThanOrEqual(30);
-    expect(findTranscriptSourceCell(ctx.transcriptSource!, firstId!)).toBeTruthy();
+    const transcriptSource = ctx.transcriptSource;
+    if (!transcriptSource || !firstId) throw new Error("missing transcript source cell input");
+    expect(findTranscriptSourceCell(transcriptSource, firstId)).toBeTruthy();
   });
 
   it("Phase 7.17: final assistant summary 首行超过 MAX_STREAMING_SUMMARY_CHARS 时被截断", async () => {
@@ -31145,7 +31157,7 @@ describe("Phase A correctness focused guards", () => {
     }
 
     console.log("\n=== sendMessage HEAVY perf stress results (5 rounds) ===");
-    console.log(`Session events: ~500 | Accepted memories: 60 | Failure records: 25`);
+    console.log("Session events: ~500 | Accepted memories: 60 | Failure records: 25");
     console.log(`Rounds with perf data: ${allPerfEvents.length}/${ROUNDS}`);
 
     for (const [key, vals] of Object.entries(stat).sort()) {
