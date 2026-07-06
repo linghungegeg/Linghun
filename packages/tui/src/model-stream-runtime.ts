@@ -145,7 +145,7 @@ import { detectTerminalCapability } from "./shell/terminal-capability.js";
 import { addRoleUsage } from "./slash-command-runtime.js";
 import { handleSlashCommand } from "./slash-command-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
-import { formatFinalGateTaskStatus, summarizeEvidenceRecords } from "./task-status-presenter.js";
+import { summarizeEvidenceRecords } from "./task-status-presenter.js";
 import { createAssistantPrimaryTextSanitizer } from "./tool-output-presenter.js";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 import { createVerificationPlan } from "./verification-command-runtime.js";
@@ -1143,7 +1143,7 @@ export function buildAggregatedDowngradedFinalAnswer(
   language: Language,
   evidence: TuiContext["evidence"] = [],
 ): string {
-  return buildFinalAnswerGapChecklist(result, language, evidence);
+  return buildEvidenceBackedFinalBoundaryAnswer(result, language, evidence);
 }
 
 export function buildEvidenceBackedFinalBoundaryAnswer(
@@ -1211,18 +1211,6 @@ function formatEvidenceBoundaryCategory(kind: string, language: Language): strin
   return (language === "en-US" ? en : zh)[kind] ?? (language === "en-US" ? "other records" : "其他记录");
 }
 
-function buildFinalAnswerGapChecklist(
-  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
-  language: Language,
-  evidence: TuiContext["evidence"],
-): string {
-  const labels = mapFinalGateKindsToUserLabels(result.unsupportedKinds, language);
-  return formatFinalGateTaskStatus({
-    language,
-    missingLabels: labels,
-    evidence,
-  });
-}
 
 export function shouldRewriteFinalGateClaimAlignment(
   result: AggregatedFinalAnswerGateResult,

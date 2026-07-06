@@ -9,6 +9,7 @@ import { createToolContext } from "@linghun/tools";
 import {
   __testRunFinalGateEvidenceAction,
   __testStreamFinalModelAnswerWithoutTools,
+  buildAggregatedDowngradedFinalAnswer,
   buildEvidenceBackedFinalBoundaryAnswer,
   canRunToolCallInParallelReadonlyBatch,
   createToolFailureRecoveryFingerprint,
@@ -374,6 +375,22 @@ describe("final answer gate aggregation", () => {
     expect(answer).not.toContain("下一步");
     expect(answer).not.toContain("完成或验证声明");
     expect(answer).not.toContain("completion_pass");
+  });
+
+  it("routes the legacy downgraded final answer helper through the evidence-backed boundary", () => {
+    const result = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const answer = buildAggregatedDowngradedFinalAnswer(result, "zh-CN");
+    expect(answer).toContain("我已确认目前检查覆盖到的部分");
+    expect(answer).not.toContain("任务状态");
+    expect(answer).not.toContain("当前证据");
+    expect(answer).not.toContain("下一步");
   });
 
   it("evidence-backed boundary answer includes a compact evidence summary", () => {
