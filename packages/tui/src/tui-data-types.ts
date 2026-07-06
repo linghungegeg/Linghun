@@ -207,6 +207,7 @@ export type CacheState = {
   compacted: boolean;
   compactBoundaries: CompactBoundary[];
   compactProjection?: CompactProjection;
+  compactProgress?: CompactProgressSnapshot;
   compactStrategy?: CompactStrategySnapshot;
   deepCompact?: DeepCompactPacket;
   compactPressure?: CompactPressureSnapshot;
@@ -237,6 +238,35 @@ export type CompactRestoreContext = {
   verificationRequirement: string;
 };
 
+export type CompactAcceptanceSnapshot = {
+  budget: "hit" | "miss";
+  replacementProjection: "active" | "missing" | "disabled";
+  terminalVisibleProjection: "reduced" | "not-reduced" | "unknown";
+  uiNotice: "quiet-success" | "needs-attention";
+  rollback: "available" | "active" | "legacy-compact-behavior-available";
+  featureFlags?: {
+    replacementProjection: boolean;
+    terminalVisibleProjection: boolean;
+    retainedBudget: boolean;
+  };
+};
+
+export type CompactProgressStage =
+  | "scan_context"
+  | "generate_summary"
+  | "trim_old_records"
+  | "restore_context"
+  | "complete";
+
+export type CompactProgressSnapshot = {
+  status: "running" | "complete";
+  stages: CompactProgressStage[];
+  preCompactChars: number;
+  postCompactChars: number;
+  targetChars?: number;
+  savingsRatio?: number;
+};
+
 export type CompactProjection = {
   boundaryId: string;
   createdAt: string;
@@ -253,6 +283,8 @@ export type CompactProjection = {
   postCompactChars: number;
   postCompactTargetChars?: number;
   savingsRatio?: number;
+  acceptance?: CompactAcceptanceSnapshot;
+  progress?: CompactProgressSnapshot;
   discardedRange: string;
   toolPairingSafe: boolean;
   risks: string[];

@@ -78,7 +78,7 @@ import {
   MIN_CACHE_HISTORY_SIZE,
   PROJECT_RULES_STATUS_WIDTH,
 } from "./tui-context-runtime.js";
-import type { CacheState, MemoryCandidate } from "./tui-data-types.js";
+import type { CacheState, CompactProgressSnapshot, MemoryCandidate } from "./tui-data-types.js";
 import {
   countMemoryScopes,
   createControlledMemoryInjection,
@@ -260,23 +260,39 @@ export async function handleCompactCommand(
       );
       return;
     }
-    const result = await runDeepCompact({
-      context,
-      sessionId,
-      transcript: resumed.transcript,
-      runtime,
-      trigger: "manual",
-      gateway: context.modelGateway,
-      deps: compactPreflightDeps.runDeepCompact,
-    });
-    if (!result.ok) {
+    const progress = createRunningCompactProgress();
+    context.cache.compactProgress = progress;
+    context.shellRerender?.();
+    let result: Awaited<ReturnType<typeof runDeepCompact>> | undefined;
+    try {
+      result = await runDeepCompact({
+        context,
+        sessionId,
+        transcript: resumed.transcript,
+        runtime,
+        trigger: "manual",
+        gateway: context.modelGateway,
+        deps: compactPreflightDeps.runDeepCompact,
+      });
+    } finally {
+      if (context.cache.compactProgress === progress) {
+        context.cache.compactProgress = undefined;
+      }
+      context.shellRerender?.();
+    }
+    if (!result) {
+      return;
+    }
+    if (result.ok === false) {
       writeLine(output, result.message);
       writeStatus(output, context);
       return;
     }
     writeLine(
       output,
-      `Deep compact completed: ${result.packet.id}；scope full transcript semantic compact；tools disabled/tool choice none；不写项目文件、不写长期记忆、不启动后台任务。`,
+      context.language === "en-US"
+        ? "Deep compact completed. Details are available in /compact status or /details."
+        : "Deep compact 完成。详情可用 /compact status 或 /details 查看。",
     );
     writeStatus(output, context);
     return;
@@ -289,6 +305,15 @@ export async function handleCompactCommand(
     return;
   }
   writeLine(output, "用法：/compact status | /compact manual | /compact deep | /compact auto");
+}
+
+function createRunningCompactProgress(): CompactProgressSnapshot {
+  return {
+    status: "running",
+    stages: ["scan_context", "generate_summary", "trim_old_records", "restore_context"],
+    preCompactChars: 0,
+    postCompactChars: 0,
+  };
 }
 
 export async function refreshCompactPressureSnapshot(context: TuiContext): Promise<void> {

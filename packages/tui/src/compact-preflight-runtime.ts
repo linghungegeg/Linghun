@@ -11,6 +11,7 @@ import {
   maybeRunDeepCompactBeforeProvider,
 } from "./deep-compact-runtime.js";
 import { createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
+import { isFeatureEnabled } from "./feature-flag-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import type { TuiContext } from "./index.js";
 import { getRoleRoute } from "./model-doctor-runtime.js";
@@ -309,15 +310,28 @@ export async function prepareMessagesForProviderPreflight(input: {
       trigger: input.trigger,
       pairingSafe: pairing.safe,
     });
+    const replacementProjectionEnabled = isFeatureEnabled(
+      "compactReplacementProjection",
+      input.context,
+    );
+    const terminalVisibleProjectionEnabled = isFeatureEnabled(
+      "compactTerminalVisibleProjection",
+      input.context,
+    );
+    refreshCompactProjectionAcceptance(projection, input.context);
     const providerMessages = injectDeepCompactSummary(
-      injectCompactProjectionMessage(compacted.messages, projection),
+      replacementProjectionEnabled
+        ? injectCompactProjectionMessage(compacted.messages, projection)
+        : compacted.messages,
       input.context.cache.deepCompact,
     );
     const providerMessageChars = estimateModelMessageChars(providerMessages);
     strategySteps.push({
       layer: "full_summary",
       status: "applied",
-      reason: "provider_visible_replacement_projection",
+      reason: replacementProjectionEnabled
+        ? "provider_visible_replacement_projection"
+        : "legacy_compacted_window_feature_flag",
       beforeChars: budgetedChars,
       afterChars: providerMessageChars,
     });
@@ -377,15 +391,20 @@ export async function prepareMessagesForProviderPreflight(input: {
         input.context.language,
       ),
     );
-    const terminalProjection = await input.context.compactOutputMemory?.({
-      projectMainScreen: true,
-    });
-    if (terminalProjection) {
-      projection.terminalVisibleBeforeCount = terminalProjection.beforeCount;
-      projection.terminalVisibleAfterCount = terminalProjection.afterCount;
+    if (terminalVisibleProjectionEnabled) {
+      const terminalProjection = await input.context.compactOutputMemory?.({
+        projectMainScreen: true,
+      });
+      if (terminalProjection) {
+        projection.terminalVisibleBeforeCount = terminalProjection.beforeCount;
+        projection.terminalVisibleAfterCount = terminalProjection.afterCount;
+      }
     }
+    refreshCompactProjectionAcceptance(projection, input.context);
     input.context.cache.compactProjection = projection;
-    await appendCompactProjectionEvents(input.context, input.sessionId, projection, input.deps);
+    if (replacementProjectionEnabled) {
+      await appendCompactProjectionEvents(input.context, input.sessionId, projection, input.deps);
+    }
     return { blocked: false, messages: providerMessages };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -711,7 +730,7 @@ function createCompactProjection(
     ].join("\n"),
     COMPACT_SUMMARY_MAX_CHARS,
   );
-  return {
+  const projection: CompactProjection = {
     boundaryId: input.boundary.id,
     createdAt: input.boundary.createdAt,
     summary,
@@ -729,6 +748,73 @@ function createCompactProjection(
     toolPairingSafe: input.pairingSafe,
     risks,
     evidenceRefs,
+  };
+  refreshCompactProjectionAcceptance(projection, context);
+  return projection;
+}
+
+function refreshCompactProjectionAcceptance(
+  projection: CompactProjection,
+  context: Pick<TuiContext, "config">,
+): void {
+  const retainedBudgetEnabled = isFeatureEnabled("compactRetainedBudget", context);
+  const replacementProjectionEnabled = isFeatureEnabled("compactReplacementProjection", context);
+  const terminalVisibleProjectionEnabled = isFeatureEnabled(
+    "compactTerminalVisibleProjection",
+    context,
+  );
+  const budgetHit =
+    !retainedBudgetEnabled ||
+    projection.postCompactTargetChars === undefined ||
+    projection.postCompactChars <= projection.postCompactTargetChars;
+  const replacementActive =
+    replacementProjectionEnabled &&
+    projection.replacementKind === "provider-visible" &&
+    (projection.replacedMessageCount ?? 0) > 0 &&
+    (projection.replacementMessageCount ?? 0) > 0;
+  const terminalVisibleProjection =
+    !terminalVisibleProjectionEnabled ||
+    projection.terminalVisibleBeforeCount === undefined ||
+    projection.terminalVisibleAfterCount === undefined
+      ? "unknown"
+      : projection.terminalVisibleAfterCount < projection.terminalVisibleBeforeCount
+        ? "reduced"
+        : "not-reduced";
+  const needsAttention =
+    !budgetHit ||
+    (replacementProjectionEnabled && !replacementActive) ||
+    terminalVisibleProjection === "not-reduced" ||
+    !projection.toolPairingSafe;
+
+  projection.acceptance = {
+    budget: budgetHit ? "hit" : "miss",
+    replacementProjection: replacementActive
+      ? "active"
+      : replacementProjectionEnabled
+        ? "missing"
+        : "disabled",
+    terminalVisibleProjection,
+    uiNotice: needsAttention ? "needs-attention" : "quiet-success",
+    rollback: replacementProjectionEnabled ? "available" : "active",
+    featureFlags: {
+      replacementProjection: replacementProjectionEnabled,
+      terminalVisibleProjection: terminalVisibleProjectionEnabled,
+      retainedBudget: retainedBudgetEnabled,
+    },
+  };
+  projection.progress = {
+    status: "complete",
+    stages: [
+      "scan_context",
+      "generate_summary",
+      "trim_old_records",
+      "restore_context",
+      "complete",
+    ],
+    preCompactChars: projection.preCompactChars,
+    postCompactChars: projection.postCompactChars,
+    targetChars: projection.postCompactTargetChars,
+    savingsRatio: projection.savingsRatio,
   };
 }
 

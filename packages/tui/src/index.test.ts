@@ -3909,7 +3909,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Context Compact status");
     expect(output.text).toContain("deep scope: full transcript semantic compact");
     expect(output.text).toContain("projection scope: provider-visible recent context projection");
-    expect(output.text).toContain("tools disabled/toolChoice none");
+    expect(output.text).toContain("Deep compact 完成。详情可用 /compact status 或 /details 查看。");
+    expect(output.text).not.toContain("Deep compact completed:");
+    expect(context.cache.compactProgress).toBeUndefined();
     expect(context.cache.compactBoundaries).toHaveLength(1);
     expect(context.cache.compactBoundaries[0]?.kind).toBe("manual");
     expect(context.cache.compactBoundaries[0]?.preservedEvidenceRefs).toEqual(["ev-compact"]);
@@ -4096,6 +4098,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/compact deep", context, output);
 
+    expect(context.cache.compactProgress).toBeUndefined();
     expect(requests.length).toBeGreaterThanOrEqual(1);
     const request = requests[0] as {
       messages?: Array<{ role?: string; content?: string }>;
@@ -4179,6 +4182,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/compact deep", context, output);
 
     expect(output.text).toContain("Deep compact 失败");
+    expect(context.cache.compactProgress).toBeUndefined();
     expect(context.cache.deepCompact).toBeUndefined();
     expect(context.cache.compactFailure?.blocked).toBe(true);
     expect(context.cache.compactFailure?.reason).toContain("compact_agent_tool_use_blocked");

@@ -239,15 +239,29 @@ describe("Phase G remote REPL bridge, dedupe, and JWT refresh", () => {
 describe("Phase G feature flags and deferred gating", () => {
   it("keeps risky experimental execution disabled by default", () => {
     expect(DEFAULT_FEATURE_FLAGS.experimentalDeferredPluginExecution).toBe(false);
+    expect(DEFAULT_FEATURE_FLAGS.compactReplacementProjection).toBe(true);
+    expect(DEFAULT_FEATURE_FLAGS.compactTerminalVisibleProjection).toBe(true);
+    expect(DEFAULT_FEATURE_FLAGS.compactRetainedBudget).toBe(true);
     expect(isFeatureEnabled("localReplBridge", { config: defaultConfig })).toBe(true);
     expect(
       getFeatureFlags({
         config: {
           ...defaultConfig,
-          features: { experimentalDeferredSkillExecution: true },
-        } as typeof defaultConfig & { features: { experimentalDeferredSkillExecution: boolean } },
+          features: {
+            experimentalDeferredSkillExecution: true,
+            compactReplacementProjection: false,
+          },
+        } as typeof defaultConfig & {
+          features: {
+            experimentalDeferredSkillExecution: boolean;
+            compactReplacementProjection: boolean;
+          };
+        },
       }),
-    ).toMatchObject({ experimentalDeferredSkillExecution: true });
+    ).toMatchObject({
+      experimentalDeferredSkillExecution: true,
+      compactReplacementProjection: false,
+    });
   });
 });
 

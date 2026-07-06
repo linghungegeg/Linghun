@@ -1,6 +1,7 @@
 import type { CacheFreshness } from "@linghun/core";
+import { defaultConfig } from "@linghun/config";
 import { describe, expect, it } from "vitest";
-import { formatCacheStatus } from "./cache-command-runtime.js";
+import { formatCacheStatus, formatCompactStatus } from "./cache-command-runtime.js";
 import type { CacheRequestObservation } from "./cache-policy-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 
@@ -61,6 +62,7 @@ function makeContext(): TuiContext {
   return {
     language: "zh-CN",
     model: "gpt-5.5",
+    config: defaultConfig,
     cache: {
       config: { maxTurns: 8, warnBelowHitRate: 0.3, persistPath: "", hintsMuted: false },
       history: [
@@ -107,6 +109,52 @@ function makeContext(): TuiContext {
       hintLastShownAt: {},
       compacted: false,
       compactBoundaries: [],
+      compactProjection: {
+        boundaryId: "boundary-1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        summary: "Linghun compact summary\nscope provider-visible recent context projection",
+        windowId: "boundary-1",
+        replacementKind: "provider-visible",
+        replacedMessageCount: 8,
+        replacementMessageCount: 3,
+        terminalVisibleBeforeCount: 30,
+        terminalVisibleAfterCount: 8,
+        pressureRatio: 0.91,
+        preCompactChars: 120_000,
+        postCompactChars: 40_000,
+        postCompactTargetChars: 60_000,
+        savingsRatio: 0.667,
+        acceptance: {
+          budget: "hit",
+          replacementProjection: "active",
+          terminalVisibleProjection: "reduced",
+          uiNotice: "quiet-success",
+          rollback: "available",
+          featureFlags: {
+            replacementProjection: true,
+            terminalVisibleProjection: true,
+            retainedBudget: true,
+          },
+        },
+        progress: {
+          status: "complete",
+          stages: [
+            "scan_context",
+            "generate_summary",
+            "trim_old_records",
+            "restore_context",
+            "complete",
+          ],
+          preCompactChars: 120_000,
+          postCompactChars: 40_000,
+          targetChars: 60_000,
+          savingsRatio: 0.667,
+        },
+        discardedRange: "older provider-visible recent context summarized",
+        toolPairingSafe: true,
+        risks: [],
+        evidenceRefs: ["ev-1"],
+      },
       workspaceReference: {
         hits: 0,
         misses: 0,
@@ -129,5 +177,32 @@ describe("cache-command-runtime", () => {
     expect(text).toContain("side-question:deepseek/chat_completions/r/w 0/0 estimated");
     expect(text).toContain("drift reason: stable message prefix changed, reasoning changed");
     expect(text).toContain("break diagnosis: ok");
+  });
+
+  it("shows compact acceptance, progress, and rollback status", () => {
+    const text = formatCompactStatus(makeContext());
+
+    expect(text).toContain(
+      "acceptance: budget hit; replacement active; terminal reduced; notice quiet-success",
+    );
+    expect(text).not.toContain("progress: compact");
+    expect(text).toContain("rollback: available");
+    expect(text).toContain(
+      "feature flags: replacement on; terminal projection on; retained budget on",
+    );
+  });
+
+  it("shows transient compact progress while a compact run is active", () => {
+    const context = makeContext();
+    context.cache.compactProgress = {
+      status: "running",
+      stages: ["scan_context", "generate_summary"],
+      preCompactChars: 0,
+      postCompactChars: 0,
+    };
+
+    const text = formatCompactStatus(context);
+
+    expect(text).toContain("progress: compact");
   });
 });

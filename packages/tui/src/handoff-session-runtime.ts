@@ -337,11 +337,52 @@ function isCompactProjection(value: unknown): value is CompactProjection {
     (value.postCompactTargetChars === undefined ||
       typeof value.postCompactTargetChars === "number") &&
     (value.savingsRatio === undefined || typeof value.savingsRatio === "number") &&
+    (value.acceptance === undefined || isCompactAcceptanceSnapshot(value.acceptance)) &&
+    (value.progress === undefined || isCompactProgressSnapshot(value.progress)) &&
     (value.restoreContext === undefined || isCompactRestoreContext(value.restoreContext)) &&
     typeof value.discardedRange === "string" &&
     typeof value.toolPairingSafe === "boolean" &&
     Array.isArray(value.risks) &&
     Array.isArray(value.evidenceRefs)
+  );
+}
+
+function isCompactAcceptanceSnapshot(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value.budget === "hit" || value.budget === "miss") &&
+    (value.replacementProjection === "active" ||
+      value.replacementProjection === "missing" ||
+      value.replacementProjection === "disabled") &&
+    (value.terminalVisibleProjection === "reduced" ||
+      value.terminalVisibleProjection === "not-reduced" ||
+      value.terminalVisibleProjection === "unknown") &&
+    (value.uiNotice === "quiet-success" || value.uiNotice === "needs-attention") &&
+    (value.rollback === "available" ||
+      value.rollback === "active" ||
+      value.rollback === "legacy-compact-behavior-available") &&
+    (value.featureFlags === undefined || isCompactFeatureFlagSnapshot(value.featureFlags))
+  );
+}
+
+function isCompactFeatureFlagSnapshot(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.replacementProjection === "boolean" &&
+    typeof value.terminalVisibleProjection === "boolean" &&
+    typeof value.retainedBudget === "boolean"
+  );
+}
+
+function isCompactProgressSnapshot(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.status === "complete" &&
+    stringArray(value.stages) &&
+    typeof value.preCompactChars === "number" &&
+    typeof value.postCompactChars === "number" &&
+    (value.targetChars === undefined || typeof value.targetChars === "number") &&
+    (value.savingsRatio === undefined || typeof value.savingsRatio === "number")
   );
 }
 

@@ -222,6 +222,28 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       overLimit.length - (compacted.blocked ? 0 : compacted.messages.length - 1),
     );
     expect(context.cache.compactProjection?.replacementMessageCount).toBeGreaterThan(0);
+    expect(context.cache.compactProjection?.acceptance).toMatchObject({
+      budget: "hit",
+      replacementProjection: "active",
+      terminalVisibleProjection: "unknown",
+      uiNotice: "quiet-success",
+      rollback: "available",
+      featureFlags: {
+        replacementProjection: true,
+        terminalVisibleProjection: true,
+        retainedBudget: true,
+      },
+    });
+    expect(context.cache.compactProjection?.progress).toMatchObject({
+      status: "complete",
+      stages: [
+        "scan_context",
+        "generate_summary",
+        "trim_old_records",
+        "restore_context",
+        "complete",
+      ],
+    });
     expect(context.cache.compactProjection?.restoreContext).toMatchObject({
       currentTask: "keep the latest request",
       keyFiles: expect.arrayContaining(["src/mentioned.ts", "src/changed.ts"]),
@@ -241,10 +263,65 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       expect(compactMessage).toContain('"keyFiles":["src/mentioned.ts","src/changed.ts"]');
     }
     expect(context.cache.compactProjection?.summary).toContain("target budget tokens");
+    expect(context.cache.compactProjection?.progress?.targetChars).toBe(
+      context.cache.compactProjection?.postCompactTargetChars,
+    );
+    expect(context.cache.compactProjection?.progress?.savingsRatio).toBe(
+      context.cache.compactProjection?.savingsRatio,
+    );
     expect(context.cache.compactStrategy?.cacheStablePrefixRisk).toBe("medium");
     expect(context.cache.compactStrategy?.steps).toContainEqual(
       expect.objectContaining({ layer: "full_summary", status: "applied" }),
     );
+  });
+
+  it("can roll back provider-visible replacement projection with a feature flag", async () => {
+    const context = await createTestContext();
+    context.config = {
+      ...context.config,
+      features: { compactReplacementProjection: false },
+    } as typeof defaultConfig & { features: { compactReplacementProjection: boolean } };
+    setExecutorMaxInputTokens(context, 20_000);
+    const oldOversized = "LEGACY_ROLLBACK_CONTEXT".repeat(1_600);
+    const messages: ModelMessage[] = [
+      { role: "system", content: "s" },
+      { role: "user", content: oldOversized },
+      { role: "assistant", content: oldOversized },
+      { role: "user", content: oldOversized },
+      { role: "user", content: "keep latest after rollback" },
+    ];
+
+    const compacted = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+
+    expect(compacted.blocked).toBe(false);
+    expect(context.cache.compactProjection?.acceptance).toMatchObject({
+      replacementProjection: "disabled",
+      rollback: "active",
+      featureFlags: {
+        replacementProjection: false,
+        terminalVisibleProjection: true,
+        retainedBudget: true,
+      },
+    });
+    expect(context.cache.compactStrategy?.steps).toContainEqual(
+      expect.objectContaining({
+        layer: "full_summary",
+        status: "applied",
+        reason: "legacy_compacted_window_feature_flag",
+      }),
+    );
+    if (!compacted.blocked) {
+      const text = compacted.messages.map((message) => message.content).join("\n");
+      expect(text).not.toContain("[Context compact boundary");
+      expect(text).not.toContain("LEGACY_ROLLBACK_CONTEXT");
+    }
   });
 
   it("records reactive compact as a bounded retry layer", async () => {

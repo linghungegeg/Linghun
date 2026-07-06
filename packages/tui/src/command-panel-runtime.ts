@@ -1,4 +1,5 @@
 import type { Writable } from "node:stream";
+import { formatCompactProgressBar } from "./cache-command-runtime.js";
 import { isSilentOutput } from "./details-status-runtime.js";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelRow, CommandPanelView } from "./shell/types.js";
@@ -118,19 +119,24 @@ export function buildExplicitDetailsCommandPanel(
     }
   }
 
-  if (context.cache.compactProjection || context.cache.compactFailure) {
+  if (context.cache.compactProjection || context.cache.compactFailure || context.cache.compactProgress) {
     const projection = context.cache.compactProjection;
+    const progress = context.cache.compactProgress ?? projection?.progress;
     const failure = context.cache.compactFailure;
     sections.push({
       title: isEn ? "Context compact" : "上下文压缩",
       rows: [
-        projection
+        progress
           ? isEn
-            ? `Last compact ${projection.createdAt}; pairing ${projection.toolPairingSafe ? "safe" : "unsafe"}`
-            : `最近压缩 ${projection.createdAt}；pairing ${projection.toolPairingSafe ? "安全" : "不安全"}`
-          : isEn
-            ? "No successful compact projection"
-            : "没有成功的 compact projection",
+            ? "Compact is running"
+            : "正在压缩上下文"
+          : projection
+            ? isEn
+              ? `Last compact ${projection.createdAt}; ${projection.acceptance?.uiNotice ?? "notice unknown"}; pairing ${projection.toolPairingSafe ? "safe" : "unsafe"}`
+              : `最近压缩 ${projection.createdAt}；${projection.acceptance?.uiNotice ?? "notice unknown"}；pairing ${projection.toolPairingSafe ? "安全" : "不安全"}`
+            : isEn
+              ? "No successful compact projection"
+              : "没有成功的 compact projection",
         failure
           ? isEn
             ? `Failure cooldown until ${failure.cooldownUntil}`
@@ -142,6 +148,10 @@ export function buildExplicitDetailsCommandPanel(
     });
     detailsParts.push("");
     detailsParts.push(isEn ? "## Context compact" : "## 上下文压缩");
+    const compactProgress = formatCompactProgressBar(progress);
+    if (compactProgress && !projection) {
+      detailsParts.push(`- progress: ${compactProgress}`);
+    }
     if (context.cache.deepCompact) {
       detailsParts.push(
         [
@@ -156,19 +166,27 @@ export function buildExplicitDetailsCommandPanel(
       );
     }
     if (projection) {
-      detailsParts.push(
-        [
-          `- boundary: ${projection.boundaryId}`,
-          `- pressure: ${projection.pressureRatio}`,
-          "- scope: provider-visible recent context projection",
-          `- discarded: ${sanitizeCompactDetailsText(projection.discardedRange, context.projectPath)}`,
-          `- restore task: ${projection.restoreContext ? sanitizeCompactDetailsText(projection.restoreContext.currentTask, context.projectPath) : "none"}`,
-          `- restore files: ${projection.restoreContext?.keyFiles.join(", ") || "none"}`,
-          `- restore pending: ${projection.restoreContext?.pendingItems.join(", ") || "none"}`,
-          `- evidence refs: ${(projection.restoreContext?.evidenceRefs ?? projection.evidenceRefs).join(", ") || "none"}`,
-          `- summary: ${sanitizeCompactDetailsText(projection.summary, context.projectPath)}`,
-        ].join("\n"),
+      const projectionDetails = [
+        `- boundary: ${projection.boundaryId}`,
+        `- pressure: ${projection.pressureRatio}`,
+        "- scope: provider-visible recent context projection",
+        `- acceptance: ${projection.acceptance ? `budget ${projection.acceptance.budget}; replacement ${projection.acceptance.replacementProjection}; terminal ${projection.acceptance.terminalVisibleProjection}; notice ${projection.acceptance.uiNotice}` : "none"}`,
+      ];
+      const compactProgress = formatCompactProgressBar(progress);
+      if (compactProgress) {
+        projectionDetails.push(`- progress: ${compactProgress}`);
+      }
+      projectionDetails.push(
+        `- rollback: ${projection.acceptance?.rollback ?? "none"}`,
+        `- feature flags: ${projection.acceptance?.featureFlags ? `replacement ${projection.acceptance.featureFlags.replacementProjection ? "on" : "off"}; terminal projection ${projection.acceptance.featureFlags.terminalVisibleProjection ? "on" : "off"}; retained budget ${projection.acceptance.featureFlags.retainedBudget ? "on" : "off"}` : "unknown"}`,
+        `- discarded: ${sanitizeCompactDetailsText(projection.discardedRange, context.projectPath)}`,
+        `- restore task: ${projection.restoreContext ? sanitizeCompactDetailsText(projection.restoreContext.currentTask, context.projectPath) : "none"}`,
+        `- restore files: ${projection.restoreContext?.keyFiles.join(", ") || "none"}`,
+        `- restore pending: ${projection.restoreContext?.pendingItems.join(", ") || "none"}`,
+        `- evidence refs: ${(projection.restoreContext?.evidenceRefs ?? projection.evidenceRefs).join(", ") || "none"}`,
+        `- summary: ${sanitizeCompactDetailsText(projection.summary, context.projectPath)}`,
       );
+      detailsParts.push(projectionDetails.join("\n"));
     }
     if (failure) {
       detailsParts.push(

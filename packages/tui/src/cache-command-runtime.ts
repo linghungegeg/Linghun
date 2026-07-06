@@ -16,7 +16,7 @@ import {
 import type { TuiContext } from "./index.js";
 import type { CommandPanelView } from "./shell/types.js";
 import { sanitizeDiagnosticText } from "./startup-runtime.js";
-import type { LightHint } from "./tui-data-types.js";
+import type { LightHint, CompactProgressSnapshot } from "./tui-data-types.js";
 import { getSelectedModelRuntime } from "./tui-model-runtime.js";
 import { formatPercent } from "./usage-stats-presenter.js";
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
@@ -216,6 +216,7 @@ export function formatCompactStatus(context: TuiContext): string {
       )
     : undefined;
   const projection = context.cache.compactProjection;
+  const activeProgress = context.cache.compactProgress ?? projection?.progress;
   const deep = context.cache.deepCompact;
   const failure = context.cache.compactFailure;
   const lines = [
@@ -244,6 +245,15 @@ export function formatCompactStatus(context: TuiContext): string {
     `- deep summary: ${deep ? sanitizeCompactStatusText(deep.summary.split(/\r?\n/).slice(0, 4).join(" | ")) : "none"}`,
     `- projection summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/).slice(0, 4).join(" | ")) : "none"}`,
     `- projection budget: ${projection?.postCompactTargetChars !== undefined ? `target ${projection.postCompactTargetChars} chars; post ${projection.postCompactChars} chars; saved ${((projection.savingsRatio ?? 0) * 100).toFixed(1)}%` : "none"}`,
+    `- acceptance: ${projection?.acceptance ? `budget ${projection.acceptance.budget}; replacement ${projection.acceptance.replacementProjection}; terminal ${projection.acceptance.terminalVisibleProjection}; notice ${projection.acceptance.uiNotice}` : "none"}`,
+  );
+  const compactProgress = formatCompactProgressBar(activeProgress);
+  if (compactProgress) {
+    lines.push(`- progress: ${compactProgress}`);
+  }
+  lines.push(
+    `- rollback: ${projection?.acceptance ? projection.acceptance.rollback : "none"}`,
+    `- feature flags: ${projection?.acceptance?.featureFlags ? `replacement ${projection.acceptance.featureFlags.replacementProjection ? "on" : "off"}; terminal projection ${projection.acceptance.featureFlags.terminalVisibleProjection ? "on" : "off"}; retained budget ${projection.acceptance.featureFlags.retainedBudget ? "on" : "off"}` : "unknown"}`,
     `- restore context: ${projection?.restoreContext ? `goal ${sanitizeCompactStatusText(projection.restoreContext.goal)}; task ${sanitizeCompactStatusText(projection.restoreContext.currentTask)}; files ${projection.restoreContext.keyFiles.length}; evidence ${projection.restoreContext.evidenceRefs.length}; pending ${projection.restoreContext.pendingItems.length}` : "none"}`,
     `- discarded/degraded scope: ${projection ? sanitizeCompactStatusText(projection.discardedRange) : "none"}`,
     `- tool pairing safe: ${projection ? (projection.toolPairingSafe ? "yes" : "no") : pressure ? (pressure.toolPairingSafe ? "yes" : "no") : "unknown"}`,
@@ -258,6 +268,11 @@ export function formatCompactStatus(context: TuiContext): string {
     lines.push("", ...suggestions);
   }
   return lines.join("\n");
+}
+
+export function formatCompactProgressBar(progress: CompactProgressSnapshot | undefined): string | undefined {
+  if (!progress || progress.status === "complete") return undefined;
+  return `compact ${formatContextProgressBar(0.35, 12)}`;
 }
 
 function buildCompactSuggestions(

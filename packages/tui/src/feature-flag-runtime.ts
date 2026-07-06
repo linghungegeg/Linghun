@@ -5,7 +5,10 @@ export type FeatureFlagName =
   | "experimentalDeferredPluginExecution"
   | "localReplBridge"
   | "memoryIncludes"
-  | "customKeybindings";
+  | "customKeybindings"
+  | "compactReplacementProjection"
+  | "compactTerminalVisibleProjection"
+  | "compactRetainedBudget";
 
 export type FeatureFlagState = Record<FeatureFlagName, boolean>;
 
@@ -15,6 +18,9 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlagState = {
   localReplBridge: true,
   memoryIncludes: true,
   customKeybindings: true,
+  compactReplacementProjection: true,
+  compactTerminalVisibleProjection: true,
+  compactRetainedBudget: true,
 };
 
 export function getFeatureFlags(context?: Pick<TuiContext, "config">): FeatureFlagState {
