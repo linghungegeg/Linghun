@@ -25,6 +25,7 @@ const COMPACT_COMPOSER_VISIBLE_LINES = 1;
 const FULL_FOOTER_ROWS = 2;
 const COMPACT_FOOTER_ROWS = 1;
 const WORKING_ROWS = 1;
+const TASK_LIST_TOP_GAP_ROWS = 1;
 const TASK_STATUS_GAP_ROWS = 1;
 const FULL_SLASH_ROWS = 9;
 const COMPACT_SLASH_ROWS = 7;
@@ -276,7 +277,7 @@ function estimateTaskListRows(
   hasFollowingStatus = false,
 ): number {
   if (!taskListView || taskListView.rows.length === 0) return 0;
-  return 1 + (hasFollowingStatus ? TASK_STATUS_GAP_ROWS : 0);
+  return 1 + TASK_LIST_TOP_GAP_ROWS + (hasFollowingStatus ? TASK_STATUS_GAP_ROWS : 0);
 }
 
 function legacyStatusFromActivity(

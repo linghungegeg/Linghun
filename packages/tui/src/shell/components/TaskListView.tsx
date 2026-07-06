@@ -25,7 +25,7 @@ export function TaskListView({
   const current = list.rows[0];
   const blocked = current.status === "blocked";
   const inProgress = current.status === "in_progress";
-  const color = blocked ? theme.status.blocked : inProgress ? theme.brand : theme.muted;
+  const color = blocked ? theme.status.blocked : inProgress ? theme.accent : theme.muted;
   const title = text.r3TasksTitle;
   const progress = `${progressBar(list.currentIndex, list.totalCount, noColor)} ${list.currentIndex}/${list.totalCount}`;
   const currentLabel = language === "en-US" ? "Current" : "当前";

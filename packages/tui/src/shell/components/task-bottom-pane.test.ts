@@ -54,10 +54,10 @@ describe("TaskBottomPane budget allocation", () => {
     );
   });
 
-  it("keeps compact footer and progress rows ahead of the one-line task summary", () => {
-    const allocation = allocateBottomPaneBudget(10, {
+  it("shows the one-line task summary only when its real spacing fits the compact budget", () => {
+    const allocation = allocateBottomPaneBudget(13, {
       workingRows: 1,
-      taskListRows: 1,
+      taskListRows: 2,
       agentProgressRows: 2,
       workflowProgressRows: 2,
     });
@@ -66,14 +66,14 @@ describe("TaskBottomPane budget allocation", () => {
     expect(allocation.footerRows).toBe(1);
     expect(allocation.workingRows).toBe(1);
     expect(allocation.showAgentProgress).toBe(true);
-    expect(allocation.showWorkflowProgress).toBe(false);
+    expect(allocation.showWorkflowProgress).toBe(true);
     expect(allocation.showTaskList).toBe(true);
   });
 
   it("does not show the task summary when higher-priority progress rows use the compact budget", () => {
     const allocation = allocateBottomPaneBudget(13, {
       workingRows: 1,
-      taskListRows: 1,
+      taskListRows: 3,
       agentProgressRows: 2,
       workflowProgressRows: 2,
       backgroundOverlayRows: 2,
@@ -206,8 +206,20 @@ describe("TaskBottomPane budget allocation", () => {
 
     expect(source).toContain("const bootstrapSlashRows =");
     expect(source).toMatch(/slashMaxRows = slashRows > 0 \? allocation\.slashMaxRows : bootstrapSlashRows/);
+    expect(source).toContain("const TASK_LIST_TOP_GAP_ROWS = 1;");
     expect(source).toContain("const TASK_STATUS_GAP_ROWS = 1;");
-    expect(source).toContain("return 1 + (hasFollowingStatus ? TASK_STATUS_GAP_ROWS : 0);");
+    expect(source).toContain(
+      "return 1 + TASK_LIST_TOP_GAP_ROWS + (hasFollowingStatus ? TASK_STATUS_GAP_ROWS : 0);",
+    );
+  });
+
+  it("keeps task progress visually distinct from running work status", () => {
+    const taskListSource = readFileSync(new URL("./TaskListView.tsx", import.meta.url), "utf8");
+    const paneSource = readFileSync(new URL("./TaskBottomPane.tsx", import.meta.url), "utf8");
+
+    expect(taskListSource).toContain("inProgress ? theme.accent : theme.muted");
+    expect(taskListSource).not.toContain("inProgress ? theme.brand : theme.muted");
+    expect(paneSource).toContain("running: theme.status.running");
   });
 
   it("keeps migrated status/footer theme colors wired in the bottom pane", () => {
