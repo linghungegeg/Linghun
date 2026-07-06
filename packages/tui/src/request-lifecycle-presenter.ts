@@ -4,6 +4,7 @@ export type RequestActivityPhase =
   | "request_started"
   | "request_started_report"
   | "waiting_first_delta"
+  | "compacting_context"
   | "tool_running"
   | "continuing_after_tool"
   | "permission_waiting"
@@ -34,6 +35,9 @@ export function formatRequestActivity(
     }
     if (phase === "waiting_first_delta") {
       return "Still waiting for the model. Use /interrupt to stop this request.";
+    }
+    if (phase === "compacting_context") {
+      return "Compacting context before the model request…";
     }
     if (phase === "tool_running") {
       return `Running ${toolName}…`;
@@ -75,6 +79,9 @@ export function formatRequestActivity(
   }
   if (phase === "waiting_first_delta") {
     return "模型仍在等待响应。可用 /interrupt 中断本次请求。";
+  }
+  if (phase === "compacting_context") {
+    return "正在压缩上下文，随后继续请求模型…";
   }
   if (phase === "tool_running") {
     return `正在运行 ${toolName}…`;

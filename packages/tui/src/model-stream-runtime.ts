@@ -1910,6 +1910,30 @@ export function startRequestActivity(
   context.requestActivity = { slowHintShown: false, slowTimer };
 }
 
+async function prepareMessagesForProviderPreflightWithActivity(
+  output: Writable,
+  context: TuiContext,
+  input: Parameters<typeof prepareMessagesForProviderPreflight>[0],
+): Promise<Awaited<ReturnType<typeof prepareMessagesForProviderPreflight>>> {
+  const previousPhase = context.requestActivityPhase;
+  let result: Awaited<ReturnType<typeof prepareMessagesForProviderPreflight>> | undefined;
+  startRequestActivity(output, context, "compacting_context");
+  try {
+    result = await prepareMessagesForProviderPreflight(input);
+    return result;
+  } finally {
+    if (context.requestActivityPhase === "compacting_context") {
+      if (result?.blocked) {
+        clearRequestActivity(context);
+      } else if (previousPhase) {
+        startRequestActivity(output, context, previousPhase);
+      } else {
+        clearRequestActivity(context);
+      }
+    }
+  }
+}
+
 async function appendNaturalGateDebugEvent(
   context: TuiContext,
   gate: PendingNaturalCommand,
@@ -2233,7 +2257,7 @@ export async function sendMessage(
       }
       const contextMaxChars = getProviderContextMaxChars(context, selectedRuntime);
       const _tPreflight0 = Date.now();
-      const preflight = await prepareMessagesForProviderPreflight({
+      const preflight = await prepareMessagesForProviderPreflightWithActivity(output, context, {
         messages: messagesForProvider,
         context,
         sessionId,
@@ -3653,7 +3677,7 @@ async function streamFinalModelAnswerWithoutTools(
   const originalProvider = continuation.provider;
   const originalModel = continuation.model;
   const runtime = runtimeFromContinuation(continuation);
-  const preflight = await prepareMessagesForProviderPreflight({
+  const preflight = await prepareMessagesForProviderPreflightWithActivity(output, context, {
     messages: [
       ...continuation.messages,
       {
@@ -4145,7 +4169,7 @@ export async function continueModelAfterToolResults(
       let roundHadThinking = false;
       let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       const continuationRuntime = runtimeFromContinuation(continuation);
-      const preflight = await prepareMessagesForProviderPreflight({
+      const preflight = await prepareMessagesForProviderPreflightWithActivity(output, context, {
         messages: continuation.messages,
         context,
         sessionId,

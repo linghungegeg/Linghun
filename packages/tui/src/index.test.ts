@@ -24566,6 +24566,7 @@ describe("Slice D.9: Long Task / Runner Resilience Closure", () => {
     const phases = [
       "request_started",
       "waiting_first_delta",
+      "compacting_context",
       "tool_running",
       "continuing_after_tool",
       "permission_waiting",

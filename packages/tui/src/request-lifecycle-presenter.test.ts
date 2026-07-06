@@ -11,6 +11,7 @@ describe("formatRequestActivity", () => {
     "request_started",
     "request_started_report",
     "waiting_first_delta",
+    "compacting_context",
     "tool_running",
     "continuing_after_tool",
     "permission_waiting",

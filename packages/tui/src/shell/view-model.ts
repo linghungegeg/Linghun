@@ -1337,6 +1337,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     request_started: "thinking",
     request_started_report: "thinking",
     waiting_first_delta: "thinking",
+    compacting_context: "continuing",
     provider_retrying: "thinking",
     provider_recovering: "continuing",
     provider_switching: "continuing",
@@ -1370,6 +1371,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
         ? `自动重试 ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s 后继续`
         : "自动重试…",
       provider_recovering: "恢复流并压缩上下文…",
+      compacting_context: "正在压缩上下文…",
       provider_switching: "切换备用模型…",
       tool_running: toolName ? `运行 ${toolName}…` : "运行工具…",
       continuing: "整理工具结果…",
@@ -1387,6 +1389,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
         ? `Automatic retry ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s remaining`
         : "Retrying…",
       provider_recovering: "Recovering stream and compacting context…",
+      compacting_context: "Compacting context…",
       provider_switching: "Switching to backup model…",
       tool_running: toolName ? `Running ${toolName}…` : "Running tool…",
       continuing: "Reviewing tool result…",
@@ -1405,6 +1408,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       request_started: "连接模型…",
       request_started_report: "生成报告…",
       waiting_first_delta: "等待模型响应…",
+      compacting_context: "压缩上下文…",
       provider_retrying: "自动重试…",
       provider_recovering: "恢复中…",
       provider_switching: "切换模型…",
@@ -1416,6 +1420,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       request_started: "Connecting model…",
       request_started_report: "Generating report…",
       waiting_first_delta: "Waiting for model response…",
+      compacting_context: "Compacting context…",
       provider_retrying: "Retrying…",
       provider_recovering: "Recovering…",
       provider_switching: "Switching model…",
@@ -2198,6 +2203,7 @@ function isActiveRequestActivityPhase(phase: string | undefined): boolean {
     phase === "request_started" ||
     phase === "request_started_report" ||
     phase === "waiting_first_delta" ||
+    phase === "compacting_context" ||
     phase === "provider_retrying" ||
     phase === "tool_running" ||
     phase === "continuing_after_tool" ||

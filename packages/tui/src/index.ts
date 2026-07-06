@@ -830,6 +830,7 @@ const HEADLESS_DEADLINE_CLOSURE_WINDOW_MS = 60_000;
 type HeadlessPhase =
   | "starting"
   | "waiting_first_delta"
+  | "compacting_context"
   | "tool_running"
   | "permission_waiting"
   | "provider_retrying"
@@ -884,6 +885,7 @@ function snapshotHeadlessActivity(context: TuiContext): HeadlessActivitySnapshot
     };
   }
   if (phase === "permission_waiting") return { phase };
+  if (phase === "compacting_context") return { phase };
   if (phase === "provider_retrying") {
     const retryInfo = (context as { retryInfo?: { attempt: number; max: number; delaySec: number } })
       .retryInfo;
