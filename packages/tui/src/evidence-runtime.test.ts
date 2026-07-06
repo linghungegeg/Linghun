@@ -1,9 +1,15 @@
-import { describe, expect, it } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { SessionStore } from "@linghun/core";
-import { isToolOutputFailure, recordToolEvidence } from "./evidence-runtime.js";
+import { describe, expect, it } from "vitest";
+import {
+  createEvidenceRecord,
+  deriveEvidenceClaimSeeds,
+  isToolOutputFailure,
+  recordToolEvidence,
+  recordVerificationEvidence,
+} from "./evidence-runtime.js";
 import { readRuntimeLedgerRecords } from "./runtime-storage.js";
 
 describe("evidence-runtime", () => {
@@ -32,6 +38,8 @@ describe("evidence-runtime", () => {
     expect(evidence?.summary).toContain("output_chars=");
     expect(evidence?.summary).not.toContain("line 1 line 1");
     expect(evidence?.supportsClaims).toContain("readonly_low_noise_evidence");
+    expect(evidence?.supportsClaims).toContain("file:src/main.ts");
+    expect(evidence?.claimSeeds).toBeUndefined();
     expect(events).toHaveLength(1);
   });
 
@@ -67,10 +75,157 @@ describe("evidence-runtime", () => {
     expect(sourcePack?.summary).toContain("query=find a");
     expect(sourcePack?.summary).toContain("paths=src/a.ts");
     expect(readSnippets?.summary).toContain("ranges=src/b.ts");
-    expect([...(sourcePack?.supportsClaims ?? []), ...(readSnippets?.supportsClaims ?? [])]).not.toEqual(
-      expect.arrayContaining(["test_passed", "build_passed"]),
-    );
+    expect([
+      ...(sourcePack?.supportsClaims ?? []),
+      ...(readSnippets?.supportsClaims ?? []),
+    ]).not.toEqual(expect.arrayContaining(["test_passed", "build_passed"]));
     expect(events).toHaveLength(2);
+  });
+
+  it("records file edit and web tool claim seeds on evidence events", async () => {
+    const events: unknown[] = [];
+    const context = {
+      evidence: [],
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    } as never;
+
+    const edit = await recordToolEvidence(
+      context,
+      "session-1",
+      "Edit",
+      { text: "updated" },
+      { path: "src/main.ts" },
+    );
+    const web = await recordToolEvidence(
+      context,
+      "session-1",
+      "WebSearch",
+      { text: "OpenAI pricing https://openai.com/pricing" },
+      { query: "OpenAI latest pricing" },
+    );
+
+    expect(edit?.supportsClaims).toEqual(
+      expect.arrayContaining(["Edit", "file_written", "file:src/main.ts"]),
+    );
+    expect(edit?.claimSeeds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "file_change_claim", evidenceRefs: [edit?.id] }),
+      ]),
+    );
+    expect(web?.kind).toBe("web_source");
+    expect(web?.supportsClaims).toEqual(
+      expect.arrayContaining(["web_source", "external_current_fact"]),
+    );
+    expect(web?.claimSeeds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "external_current_fact", evidenceRefs: [web?.id] }),
+      ]),
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "evidence_record", claimSeeds: edit?.claimSeeds }),
+        expect.objectContaining({ type: "evidence_record", claimSeeds: web?.claimSeeds }),
+      ]),
+    );
+  });
+
+  it("records verification claim seeds only for passed verification evidence", async () => {
+    const events: unknown[] = [];
+    const context = {
+      evidence: [],
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+      failureLearning: { records: [], maxRecords: 50 },
+    } as never;
+
+    await recordVerificationEvidence(context, "session-1", {
+      id: "vr-1",
+      status: "pass",
+      summary: "tests passed",
+      commands: [
+        {
+          kind: "test",
+          command: "pnpm test",
+          reason: "focused",
+          status: "pass",
+          durationMs: 10,
+          summary: "passed",
+        },
+        {
+          kind: "typecheck",
+          command: "pnpm typecheck",
+          reason: "focused",
+          status: "pass",
+          durationMs: 10,
+          summary: "passed",
+        },
+      ],
+      unverified: [],
+      risk: [],
+      startedAt: "2025-01-01T00:00:00.000Z",
+      endedAt: "2025-01-01T00:00:01.000Z",
+      durationMs: 1000,
+      nextAction: "none",
+    });
+
+    const evidence = (
+      context as { evidence: Array<{ claimSeeds?: unknown[]; supportsClaims: string[] }> }
+    ).evidence[0];
+    expect(evidence.supportsClaims).toEqual(
+      expect.arrayContaining(["verification_passed", "test_passed", "typecheck_passed"]),
+    );
+    expect(evidence.claimSeeds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "test_claim" }),
+        expect.objectContaining({ kind: "verification_claim", phrase: "typecheck passed" }),
+        expect.objectContaining({ kind: "completion_pass", phrase: "tests passed" }),
+      ]),
+    );
+    expect(events[0]).toEqual(
+      expect.objectContaining({ type: "evidence_record", claimSeeds: evidence.claimSeeds }),
+    );
+  });
+
+  it("derives terminal workflow, agent, git, and action claim seeds but not failure seeds", () => {
+    const workflow = createEvidenceRecord("command_output", "workflow completed", "workflow", [
+      "workflow_execution",
+      "workflow_terminal_status",
+      "action_executed",
+    ]);
+    const agent = createEvidenceRecord("command_output", "agent completed", "agent", [
+      "agent_execution",
+      "agent_terminal_status",
+    ]);
+    const git = createEvidenceRecord("command_output", "stable point created", "git-operation", [
+      "git_operation",
+      "stable_point_created",
+    ]);
+    const failed = createEvidenceRecord("command_output", "test failed", "Verification Runner", [
+      "tool_failure",
+      "test_passed",
+    ]);
+
+    expect(workflow.claimSeeds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "workflow_status_claim" }),
+        expect.objectContaining({ kind: "action_executed" }),
+      ]),
+    );
+    expect(agent.claimSeeds).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "agent_status_claim" })]),
+    );
+    expect(git.claimSeeds).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "git_operation" })]),
+    );
+    expect(failed.claimSeeds).toBeUndefined();
+    expect(deriveEvidenceClaimSeeds(failed)).toEqual([]);
   });
 
   it("registers persisted evidence in the runtime ledger", async () => {

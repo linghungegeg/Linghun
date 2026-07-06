@@ -402,6 +402,18 @@ compact 部分分支存在中文硬编码；英文环境可能出现中文提示
 - 没有工具证据时，最终回答不能把高风险事实写成已完成。
 - claim seed 与 evidence refs 能在 details/debug 中追溯。
 
+实施记录（已完成）：
+
+- `EvidenceRecord` 增加可选 `claimSeeds`，由 evidence 记录时自动派生，seed 内含 `evidenceRefs` 指回当前 evidence id。
+- `createEvidenceRecord` 统一为 verification、file edit、workflow、agent、git、web、action evidence 生成对应 claim seed；失败、tool failure、非零 Bash 不生成成功 seed。
+- `recordToolEvidence` 覆盖 `WebSearch` / `WebFetch` 为 `web_source` evidence；`Read` / `Write` / `Edit` / `MultiEdit` 同时兼容 `path` 与 `file_path`。
+- 旧文本匹配与 final gate 主逻辑保留，Phase 7 再切 contract-first。
+
+验证：
+
+- `corepack pnpm vitest run packages/tui/src/evidence-runtime.test.ts packages/tui/src/model-prompt-runtime.test.ts` 通过（2 files / 24 tests）。
+- `corepack pnpm exec tsc -b tsconfig.json` 通过。
+
 ### Phase 7：Final Gate contract-first 与 legacy 收敛
 
 目标：把反幻觉主路径切到 claim contract + evidence binding，并逐步降低正则权重。

@@ -107,6 +107,15 @@ export type CheckpointState = {
   files: { path: string; existed: boolean; content?: string }[];
 };
 
+export type EvidenceClaimSeed = {
+  kind: string;
+  phrase: string;
+  evidenceRequired: string[];
+  evidenceRefs: string[];
+  confidence: "explicit" | "inferred" | "fallback";
+  source: "tool" | "runtime" | "assistant_final" | "legacy_text_match";
+};
+
 export type EvidenceRecord = {
   id: string;
   kind:
@@ -125,6 +134,7 @@ export type EvidenceRecord = {
   outputPath?: string;
   logPath?: string;
   supportsClaims: string[];
+  claimSeeds?: EvidenceClaimSeed[];
   createdAt: string;
   data?: unknown;
 };

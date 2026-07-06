@@ -1866,7 +1866,12 @@ export function deriveToolSupportsClaims(
 
   if (name === "Read" || name === "ReadSnippets" || name === "SourcePack") {
     claims.add("local_read");
-    const filePath = typeof inputObj.file_path === "string" ? inputObj.file_path : undefined;
+    const filePath =
+      typeof inputObj.file_path === "string"
+        ? inputObj.file_path
+        : typeof inputObj.path === "string"
+          ? inputObj.path
+          : undefined;
     if (filePath) claims.add(`file:${filePath}`);
     if (name === "ReadSnippets" || name === "SourcePack") claims.add("source_snippet");
   }
@@ -1882,8 +1887,17 @@ export function deriveToolSupportsClaims(
   }
   if (name === "Write" || name === "Edit" || name === "MultiEdit") {
     claims.add("file_written");
-    const filePath = typeof inputObj.file_path === "string" ? inputObj.file_path : undefined;
+    const filePath =
+      typeof inputObj.file_path === "string"
+        ? inputObj.file_path
+        : typeof inputObj.path === "string"
+          ? inputObj.path
+          : undefined;
     if (filePath) claims.add(`file:${filePath}`);
+  }
+  if (name === "WebSearch" || name === "WebFetch") {
+    claims.add("web_source");
+    claims.add("external_current_fact");
   }
   if (name === "Bash") {
     const command = typeof inputObj.command === "string" ? inputObj.command : "";

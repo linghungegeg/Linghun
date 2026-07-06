@@ -24,6 +24,7 @@ import {
 import { MAX_EVIDENCE_RECORDS, type TuiContext } from "./tui-context-runtime.js";
 import type {
   BackgroundTaskState,
+  EvidenceClaimSeed,
   EvidenceRecord,
   FailureLearningRecord,
   RoleRouteDecision,
@@ -53,7 +54,7 @@ export function createEvidenceRecord(
   source: string,
   supportsClaims: string[],
 ): EvidenceRecord {
-  return {
+  const evidence: EvidenceRecord = {
     id: randomUUID(),
     kind,
     summary: truncateDisplay(summary.replace(/\s+/g, " "), 180),
@@ -61,6 +62,73 @@ export function createEvidenceRecord(
     supportsClaims,
     createdAt: new Date().toISOString(),
   };
+  const claimSeeds = deriveEvidenceClaimSeeds(evidence);
+  if (claimSeeds.length > 0) {
+    evidence.claimSeeds = claimSeeds;
+  }
+  return evidence;
+}
+
+export function deriveEvidenceClaimSeeds(evidence: EvidenceRecord): EvidenceClaimSeed[] {
+  if (evidence.supportsClaims.includes("tool_failure")) return [];
+  if (evidence.supportsClaims.includes("bash_exit_nonzero")) return [];
+  const seeds: EvidenceClaimSeed[] = [];
+  const add = (kind: string, phrase: string, evidenceRequired: string[]): void => {
+    if (seeds.some((seed) => seed.kind === kind && seed.phrase === phrase)) return;
+    seeds.push({
+      kind,
+      phrase,
+      evidenceRequired,
+      evidenceRefs: [evidence.id],
+      confidence: "explicit",
+      source: evidence.kind === "user_provided" ? "runtime" : "tool",
+    });
+  };
+  if (evidence.supportsClaims.includes("test_passed")) {
+    add("test_claim", "tests passed", ["test_result"]);
+    add("completion_pass", "tests passed", ["test_result"]);
+  }
+  if (evidence.supportsClaims.includes("typecheck_passed")) {
+    add("verification_claim", "typecheck passed", ["test_result"]);
+    add("completion_pass", "typecheck passed", ["test_result"]);
+  }
+  if (evidence.supportsClaims.includes("build_passed")) {
+    add("verification_claim", "build passed", ["test_result"]);
+    add("completion_pass", "build passed", ["test_result"]);
+  }
+  if (evidence.supportsClaims.includes("lint_passed")) {
+    add("verification_claim", "lint passed", ["test_result"]);
+  }
+  if (
+    evidence.supportsClaims.includes("verification_passed") ||
+    evidence.supportsClaims.includes("smoke_passed")
+  ) {
+    add("verification_claim", "verification passed", ["test_result"]);
+  }
+  if (
+    evidence.supportsClaims.includes("file_written") ||
+    evidence.supportsClaims.includes("Write") ||
+    evidence.supportsClaims.includes("Edit") ||
+    evidence.supportsClaims.includes("MultiEdit")
+  ) {
+    add("file_change_claim", "files changed", ["command_output"]);
+  }
+  if (evidence.supportsClaims.includes("workflow_terminal_status")) {
+    add("workflow_status_claim", "workflow completed", ["command_output"]);
+  }
+  if (evidence.supportsClaims.includes("agent_terminal_status")) {
+    add("agent_status_claim", "agent completed", ["command_output"]);
+  }
+  if (evidence.supportsClaims.includes("git_operation")) {
+    add("git_operation", "git operation completed", ["command_output"]);
+  }
+  if (evidence.kind === "web_source" || evidence.supportsClaims.includes("web_source")) {
+    add("external_current_fact", "external current fact checked", ["web_source"]);
+  }
+  if (evidence.supportsClaims.includes("action_executed")) {
+    add("action_executed", "action executed", ["command_output"]);
+  }
+  return seeds;
 }
 
 export function rememberEvidence(context: TuiContext, evidence: EvidenceRecord): void {
@@ -356,9 +424,11 @@ export async function recordToolEvidence(
       ? "file_read"
       : name === "Grep" || name === "Glob"
         ? "grep_result"
-        : name === "Bash" || name === "Write" || name === "Edit" || name === "MultiEdit"
-          ? "command_output"
-          : null;
+        : name === "WebSearch" || name === "WebFetch"
+          ? "web_source"
+          : name === "Bash" || name === "Write" || name === "Edit" || name === "MultiEdit"
+            ? "command_output"
+            : null;
   if (!kind) {
     return null;
   }
@@ -367,9 +437,12 @@ export async function recordToolEvidence(
     name === "ReadSnippets" ||
     name === "SourcePack" ||
     name === "Grep" ||
-    name === "Glob";
+    name === "Glob" ||
+    name === "WebSearch" ||
+    name === "WebFetch";
   const supportsClaims = [
     ...deriveToolSupportsClaims(name, input, output),
+    ...(kind === "web_source" ? ["web_source", "external_current_fact"] : []),
     ...(readOnlyEvidence ? ["readonly_low_noise_evidence"] : []),
   ];
   const evidence = createEvidenceRecord(
@@ -454,7 +527,7 @@ function extractOutputCandidatePaths(data: unknown): string[] {
 function readToolEvidenceTarget(input: unknown): string {
   if (!input || typeof input !== "object" || Array.isArray(input)) return "target=unspecified";
   const record = input as Record<string, unknown>;
-  for (const key of ["path", "file_path", "pattern", "query"]) {
+  for (const key of ["path", "file_path", "pattern", "query", "url"]) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) {
       return `${key}=${truncateDisplay(value.replace(/\s+/g, " "), 90)}`;
@@ -489,14 +562,12 @@ export async function recordVerificationEvidence(
   report: VerificationReport,
 ): Promise<void> {
   const supportsClaims = deriveVerificationSupportsClaims(report);
-  const evidence: EvidenceRecord = {
-    id: randomUUID(),
-    kind: "test_result",
-    summary: `${formatVerificationEvidenceStatusSummary(report)} 日志：${report.logPath ?? "无日志"}`,
-    source: report.logPath ?? "Verification Runner",
+  const evidence = createEvidenceRecord(
+    "test_result",
+    `${formatVerificationEvidenceStatusSummary(report)} 日志：${report.logPath ?? "无日志"}`,
+    report.logPath ?? "Verification Runner",
     supportsClaims,
-    createdAt: new Date().toISOString(),
-  };
+  );
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",

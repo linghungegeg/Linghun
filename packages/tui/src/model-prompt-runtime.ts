@@ -130,6 +130,11 @@ export function createEvidenceSummaryForModel(context: TuiContext): string {
       source: item.source,
       summary: truncateDisplay(item.summary.replace(/\s+/g, " "), 180),
       supportsClaims: item.supportsClaims.slice(0, 5),
+      claimSeeds: item.claimSeeds?.slice(0, 5).map((seed) => ({
+        kind: seed.kind,
+        phrase: seed.phrase,
+        evidenceRefs: seed.evidenceRefs,
+      })),
     })),
   );
 }
