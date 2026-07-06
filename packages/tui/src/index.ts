@@ -3960,8 +3960,12 @@ export async function handleSlashCommand(
     await handleCacheCommand(rest, context, output);
     return "handled";
   }
-  if (command === "/compact" || command === "/context") {
+  if (command === "/compact") {
     await handleCompactCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/context") {
+    await handleCompactCommand(["status"], context, output);
     return "handled";
   }
   if (command === "/break-cache") {

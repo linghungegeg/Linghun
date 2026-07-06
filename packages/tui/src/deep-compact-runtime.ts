@@ -20,7 +20,11 @@ import {
   sanitizeDisplayPaths,
   truncateDisplay,
 } from "./startup-runtime.js";
-import type { DeepCompactPacket, DeepCompactTrigger } from "./tui-data-types.js";
+import type {
+  CompactProgressStage,
+  DeepCompactPacket,
+  DeepCompactTrigger,
+} from "./tui-data-types.js";
 
 export type DeepCompactRuntimeDeps = {
   appendSystemEvent: (
@@ -114,6 +118,7 @@ export async function runDeepCompact(input: {
     input.runtime.provider,
     providerRequest,
   );
+  advanceDeepCompactProgress(input.context, "scan_context");
   let summary = "";
   try {
     for await (const event of withProviderRetry(
@@ -127,6 +132,7 @@ export async function runDeepCompact(input: {
         return failMessage(input.context, "Deep compact cancelled by user interrupt.");
       }
       if (event.type === "assistant_text_delta") {
+        advanceDeepCompactProgress(input.context, "generate_summary");
         summary += event.text;
         continue;
       }
@@ -165,6 +171,7 @@ export async function runDeepCompact(input: {
     return failMessage(input.context, "Deep compact failed before provider request.");
   }
 
+  advanceDeepCompactProgress(input.context, "trim_old_records");
   const packet = createDeepCompactPacket({
     context: input.context,
     transcript: input.transcript,
@@ -181,6 +188,7 @@ export async function runDeepCompact(input: {
     handoffPacketId: input.context.memory.lastHandoff?.id,
   });
   input.deps.recordCompactBoundary(input.context, boundary);
+  advanceDeepCompactProgress(input.context, "restore_context");
   input.context.cache.deepCompact = packet;
   input.context.cache.compacted = true;
   input.context.cache.compactFailure = undefined;
@@ -197,7 +205,20 @@ export async function runDeepCompact(input: {
     `deep compact success: id ${packet.id}; scope ${packet.scope}; trigger ${packet.trigger}`,
     "info",
   );
+  advanceDeepCompactProgress(input.context, "complete");
   return { ok: true, packet };
+}
+
+function advanceDeepCompactProgress(context: TuiContext, stage: CompactProgressStage): void {
+  const progress = context.cache.compactProgress;
+  if (!progress || progress.status !== "running") return;
+  if (!progress.stages.includes(stage)) {
+    progress.stages.push(stage);
+  }
+  if (stage === "complete") {
+    progress.status = "complete";
+  }
+  context.shellRerender?.();
 }
 
 export function shouldRunDeepCompact(

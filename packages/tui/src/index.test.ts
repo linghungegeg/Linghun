@@ -3876,11 +3876,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Terminal readiness doctor");
   });
 
-  it("runs manual deep compact with tools disabled and records a full transcript packet", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+  it("runs bare /compact while /context remains readonly status", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-contract-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deep-compact-model" });
-    const output = new MemoryOutput();
+    const compactOutput = new MemoryOutput();
+    const beforeStatusOutput = new MemoryOutput();
+    const afterStatusOutput = new MemoryOutput();
     const config: LinghunConfig = {
       ...defaultConfig,
       defaultModel: "deep-compact-model",
@@ -3909,6 +3911,90 @@ describe("Phase 06 TUI slash commands", () => {
     };
     const context = await createTestContext(project, store, session, config);
     context.modelGateway = createModelGateway(config);
+    await store.appendEvent(session.id, {
+      type: "user_message",
+      id: "bare-compact-user",
+      text: "bare compact marker RAW_BARE_COMPACT_CONTRACT",
+      createdAt: new Date().toISOString(),
+    });
+    const requests: unknown[] = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes("example.test")) {
+        requests.push(JSON.parse(String(init?.body ?? "{}")));
+        const body = `data: ${JSON.stringify({ id: "chatcmpl-bare-compact", choices: [{ delta: { content: "User goal: preserve RAW_BARE_COMPACT_CONTRACT." } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handleSlashCommand("/context", context, beforeStatusOutput);
+    await handleSlashCommand("/compact", context, compactOutput);
+    await handleSlashCommand("/context", context, afterStatusOutput);
+
+    const providerCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("example.test"),
+    );
+    expect(providerCalls).toHaveLength(1);
+    expect(requests).toHaveLength(1);
+    expect(beforeStatusOutput.text).toContain("Context Compact status");
+    expect(afterStatusOutput.text).toContain("Context Compact status");
+    expect(compactOutput.text).toContain("Deep compact 完成。");
+    expect(compactOutput.text).toContain("progress: compact");
+    expect(compactOutput.text).toContain("complete");
+    expect(compactOutput.text).toContain("下一步：用 /compact status 或 /context 查看完整诊断");
+    expect(compactOutput.text).not.toContain("Context Compact status");
+    expect(compactOutput.text).not.toContain("deep scope: full transcript semantic compact");
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+    expect(context.cache.deepCompact?.summary).toContain("RAW_BARE_COMPACT_CONTRACT");
+  });
+
+  it("runs manual deep compact with tools disabled and records a full transcript packet", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deep-compact-model" });
+    const statusOutput = new MemoryOutput();
+    const contextOutput = new MemoryOutput();
+    const autoOutput = new MemoryOutput();
+    const compactOutput = new MemoryOutput();
+    const postContextOutput = new MemoryOutput();
+    const postStatusOutput = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "deep-compact-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "deep-compact-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "deep-compact-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "deep-compact-model",
+              }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const progressSnapshots: string[][] = [];
+    context.shellRerender = () => {
+      const stages = context.cache.compactProgress?.stages;
+      if (stages) progressSnapshots.push([...stages]);
+    };
     await store.appendEvent(session.id, {
       type: "user_message",
       id: "older-user",
@@ -3945,10 +4031,12 @@ describe("Phase 06 TUI slash commands", () => {
     });
     context.recentlyMentionedFiles.push("README.md");
 
-    await handleSlashCommand("/compact status", context, output);
-    await handleSlashCommand("/compact auto", context, output);
-    await handleSlashCommand("/compact deep", context, output);
-    await handleSlashCommand("/compact status", context, output);
+    await handleSlashCommand("/compact status", context, statusOutput);
+    await handleSlashCommand("/context", context, contextOutput);
+    await handleSlashCommand("/compact auto", context, autoOutput);
+    await handleSlashCommand("/compact deep", context, compactOutput);
+    await handleSlashCommand("/context", context, postContextOutput);
+    await handleSlashCommand("/compact status", context, postStatusOutput);
 
     const providerCalls = fetchMock.mock.calls.filter(([url]) =>
       String(url).includes("example.test"),
@@ -3967,11 +4055,29 @@ describe("Phase 06 TUI slash commands", () => {
     expect(compactPrompt).not.toContain(project);
     expect(compactPrompt).not.toContain("sk-secret-compact");
     expect(compactPrompt).not.toContain("x".repeat(1000));
-    expect(output.text).toContain("Context Compact status");
-    expect(output.text).toContain("deep scope: full transcript semantic compact");
-    expect(output.text).toContain("projection scope: provider-visible recent context projection");
-    expect(output.text).toContain("Deep compact 完成。详情可用 /compact status 或 /details 查看。");
-    expect(output.text).not.toContain("Deep compact completed:");
+    expect(statusOutput.text).toContain("Context Compact status");
+    expect(contextOutput.text).toContain("Context Compact status");
+    expect(postContextOutput.text).toContain("Context Compact status");
+    expect(postStatusOutput.text).toContain("deep scope: full transcript semantic compact");
+    expect(postStatusOutput.text).toContain("projection scope: provider-visible recent context projection");
+    expect(autoOutput.text).toContain("Compact auto");
+    expect(compactOutput.text).toContain("Deep compact 完成。");
+    expect(compactOutput.text).toContain("progress: compact");
+    expect(compactOutput.text).toContain("complete");
+    expect(compactOutput.text).toContain("保留：1 条 evidence 引用；1 个文件线索");
+    expect(compactOutput.text).not.toContain("Context Compact status");
+    expect(compactOutput.text).not.toContain("deep scope: full transcript semantic compact");
+    expect(compactOutput.text).not.toContain("projection scope: provider-visible recent context projection");
+    expect(compactOutput.text).not.toContain("Deep compact completed:");
+    expect(progressSnapshots[0]).toEqual(["scan_context"]);
+    expect(progressSnapshots.some((stages) => stages.includes("generate_summary"))).toBe(true);
+    expect(progressSnapshots.at(-1)).toEqual([
+      "scan_context",
+      "generate_summary",
+      "trim_old_records",
+      "restore_context",
+      "complete",
+    ]);
     expect(context.cache.compactProgress).toBeUndefined();
     expect(context.cache.compactBoundaries).toHaveLength(1);
     expect(context.cache.compactBoundaries[0]?.kind).toBe("manual");

@@ -16,6 +16,7 @@ import {
 import {
   buildCacheStatusPanel,
   formatCacheLog,
+  formatCompactProgressBar,
   formatCompactStatus,
   writeLightHints,
 } from "./cache-command-runtime.js";
@@ -78,7 +79,7 @@ import {
   MIN_CACHE_HISTORY_SIZE,
   PROJECT_RULES_STATUS_WIDTH,
 } from "./tui-context-runtime.js";
-import type { CacheState, CompactProgressSnapshot, MemoryCandidate } from "./tui-data-types.js";
+import type { CacheState, CompactProgressSnapshot, DeepCompactPacket, MemoryCandidate } from "./tui-data-types.js";
 import {
   countMemoryScopes,
   createControlledMemoryInjection,
@@ -241,7 +242,7 @@ export async function handleCompactCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  const action = args[0] ?? "status";
+  const action = args[0] ?? "run";
   if (action === "status") {
     await refreshCompactPressureSnapshot(context);
     writeLine(output, formatCompactStatus(context));
@@ -284,17 +285,10 @@ export async function handleCompactCommand(
       return;
     }
     if (result.ok === false) {
-      writeLine(output, result.message);
-      writeStatus(output, context);
+      writeLine(output, formatCompactRunFailure(context, result.message));
       return;
     }
-    writeLine(
-      output,
-      context.language === "en-US"
-        ? "Deep compact completed. Details are available in /compact status or /details."
-        : "Deep compact 完成。详情可用 /compact status 或 /details 查看。",
-    );
-    writeStatus(output, context);
+    writeLine(output, formatCompactRunSuccess(context, result.packet));
     return;
   }
   if (action === "auto") {
@@ -310,10 +304,42 @@ export async function handleCompactCommand(
 function createRunningCompactProgress(): CompactProgressSnapshot {
   return {
     status: "running",
-    stages: ["scan_context", "generate_summary", "trim_old_records", "restore_context"],
+    stages: ["scan_context"],
     preCompactChars: 0,
     postCompactChars: 0,
   };
+}
+
+function formatCompactRunSuccess(context: TuiContext, packet: DeepCompactPacket): string {
+  const progress = formatCompactProgressBar({
+    status: "running",
+    stages: ["complete"],
+    preCompactChars: 0,
+    postCompactChars: 0,
+  });
+  const preservedEvidence = packet.preservedEvidenceRefs.length;
+  const preservedFiles = packet.preservedFiles.length;
+  return [
+    context.language === "en-US" ? "Deep compact completed." : "Deep compact 完成。",
+    progress ? `- progress: ${progress}` : undefined,
+    context.language === "en-US"
+      ? `- retained: ${preservedEvidence} evidence refs; ${preservedFiles} files`
+      : `- 保留：${preservedEvidence} 条 evidence 引用；${preservedFiles} 个文件线索`,
+    context.language === "en-US"
+      ? "- next: /compact status or /context for full diagnostics"
+      : "- 下一步：用 /compact status 或 /context 查看完整诊断",
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
+function formatCompactRunFailure(context: TuiContext, message: string): string {
+  return [
+    message,
+    context.language === "en-US"
+      ? "Full diagnostics are available in /compact status or /context."
+      : "完整诊断可用 /compact status 或 /context 查看。",
+  ].join("\n");
 }
 
 export async function refreshCompactPressureSnapshot(context: TuiContext): Promise<void> {
