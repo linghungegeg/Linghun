@@ -217,23 +217,62 @@ describe("Phase E index result presenter coverage", () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-phase-e-index-"));
     await mkdir(join(project, "dist"), { recursive: true });
     await mkdir(join(project, "apps", "cli", "bundled", "codebase-memory"), { recursive: true });
+    await mkdir(join(project, "apps", "cli", "bundled", "pre-engine"), { recursive: true });
+    await mkdir(join(project, "tools"), { recursive: true });
     await writeFile(join(project, "big.log"), "x".repeat(1_000_010), "utf8");
     await writeFile(
       join(project, "apps", "cli", "bundled", "codebase-memory", "codebase-memory-mcp.exe"),
       "x".repeat(1_000_010),
       "utf8",
     );
-    await writeFile(join(project, ".cbmignore"), "ignored.log\n", "utf8");
+    await writeFile(
+      join(project, "apps", "cli", "bundled", "pre-engine", "linghun-pre-engine.exe"),
+      "x".repeat(1_000_010),
+      "utf8",
+    );
+    await writeFile(join(project, "tools", "runtime.exe"), "x".repeat(1_000_010), "utf8");
+    await writeFile(join(project, ".cbmignore"), "ignored.log\npackages/pre-engine-*/bundled/pre-engine/\n", "utf8");
     await writeFile(join(project, "ignored.log"), "x".repeat(1_000_010), "utf8");
+    await mkdir(join(project, "packages", "pre-engine-linux-x64", "bundled", "pre-engine", "linux-x64"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(
+        project,
+        "packages",
+        "pre-engine-linux-x64",
+        "bundled",
+        "pre-engine",
+        "linux-x64",
+        "linghun-pre-engine",
+      ),
+      "x".repeat(1_000_010),
+      "utf8",
+    );
 
     const safety = await scanIndexSafety(project);
     expect(safety.riskyFiles.map((file) => file.path)).toEqual(
-      expect.arrayContaining(["dist/", "big.log", "apps/cli/bundled/codebase-memory/"]),
+      expect.arrayContaining([
+        "dist/",
+        "big.log",
+        "apps/cli/bundled/codebase-memory/",
+        "apps/cli/bundled/pre-engine/",
+        "tools/runtime.exe",
+      ]),
     );
     expect(safety.riskyFiles.map((file) => file.path)).not.toContain("ignored.log");
-    expect(createIndexTransientExcludes(safety)).toEqual([...new Set(createIndexTransientExcludes(safety))]);
+    expect(safety.riskyFiles.map((file) => file.path)).not.toContain(
+      "packages/pre-engine-linux-x64/bundled/pre-engine/",
+    );
+    expect(createIndexTransientExcludes(safety)).toEqual(
+      Array.from(new Set(createIndexTransientExcludes(safety))),
+    );
     await expect(createIndexSafetyRepairPlan(project, safety.riskyFiles)).resolves.toMatchObject({
-      missingEntries: expect.arrayContaining(["apps/cli/bundled/codebase-memory/"]),
+      missingEntries: expect.arrayContaining([
+        "apps/cli/bundled/codebase-memory/",
+        "apps/cli/bundled/pre-engine/",
+        "tools/runtime.exe",
+      ]),
     });
   });
 });

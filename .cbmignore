@@ -1,4 +1,6 @@
 apps/cli/bundled/codebase-memory/
+apps/cli/bundled/native-runner/
+apps/cli/bundled/pre-engine/
 apps/cli/dist/
 apps/cli/node_modules/
 apps/desktop/dist/
@@ -6,10 +8,9 @@ apps/desktop/node_modules/
 apps/desktop/src/renderer/node_modules/
 dist/
 node_modules/
-packages/codebase-memory-darwin-arm64/bundled/codebase-memory/
-packages/codebase-memory-darwin-x64/bundled/codebase-memory/
-packages/codebase-memory-linux-x64/bundled/codebase-memory/
-packages/codebase-memory-win32-x64/bundled/codebase-memory/
+packages/codebase-memory-*/bundled/codebase-memory/
+packages/native-runner-*/bundled/native-runner/
+packages/pre-engine-*/bundled/pre-engine/
 packages/config/dist/
 packages/config/node_modules/
 packages/core/dist/

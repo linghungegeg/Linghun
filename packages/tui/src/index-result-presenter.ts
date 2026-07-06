@@ -20,6 +20,8 @@ const LARGE_INDEX_RISK_EXTENSIONS = new Set([
   ".tsv",
   ".dump",
 ]);
+const LARGE_INDEX_BINARY_EXTENSIONS = new Set([".dll", ".dylib", ".exe", ".node", ".so", ".wasm"]);
+const BUNDLED_RUNTIME_NAMES = new Set(["codebase-memory", "native-runner", "pre-engine"]);
 const LARGE_INDEX_RISK_DIRS = new Set([
   ".next",
   ".turbo",
@@ -259,15 +261,20 @@ export function isIgnoredIndexPath(relativePath: string, patterns: string[]): bo
     if (!normalized) {
       return false;
     }
-    if (normalized.endsWith("/")) {
-      return relativePath.startsWith(normalized);
-    }
     if (normalized.includes("*")) {
-      const escaped = normalized.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+      const directoryPattern = normalized.endsWith("/");
+      const patternBase = directoryPattern ? normalized.slice(0, -1) : normalized;
+      const escaped = patternBase.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+      if (directoryPattern) {
+        return new RegExp(`^${escaped}(/|$)`).test(relativePath);
+      }
       return (
         new RegExp(`^${escaped}$`).test(relativePath) ||
         new RegExp(`(^|/)${escaped}$`).test(relativePath)
       );
+    }
+    if (normalized.endsWith("/")) {
+      return relativePath.startsWith(normalized);
     }
     return relativePath === normalized || relativePath.startsWith(`${normalized}/`);
   });
@@ -277,11 +284,14 @@ function getIndexFileRisk(relativePath: string): string | null {
   const fileName = basename(relativePath);
   const extension = extname(relativePath).toLowerCase();
   const segments = relativePath.split("/");
-  if (isBundledCodebaseMemoryPath(segments)) {
-    return "bundled codebase-memory runtime";
+  if (isBundledRuntimePath(segments)) {
+    return "bundled runtime";
   }
   if (fileName.endsWith(".min.js")) {
     return "minified javascript";
+  }
+  if (LARGE_INDEX_BINARY_EXTENSIONS.has(extension)) {
+    return "binary runtime artifact";
   }
   if (LARGE_INDEX_RISK_EXTENSIONS.has(extension)) {
     return `${extension} file`;
@@ -296,15 +306,15 @@ function getIndexDirectoryRisk(relativePath: string, directoryName: string): str
   if (LARGE_INDEX_RISK_DIRS.has(directoryName)) {
     return "generated/dependency directory";
   }
-  if (isBundledCodebaseMemoryPath(relativePath.split("/"))) {
-    return "bundled codebase-memory runtime";
+  if (isBundledRuntimePath(relativePath.split("/"))) {
+    return "bundled runtime";
   }
   return null;
 }
 
-function isBundledCodebaseMemoryPath(segments: string[]): boolean {
+function isBundledRuntimePath(segments: string[]): boolean {
   return segments.some(
-    (segment, index) => segment === "bundled" && segments[index + 1] === "codebase-memory",
+    (segment, index) => segment === "bundled" && BUNDLED_RUNTIME_NAMES.has(segments[index + 1] ?? ""),
   );
 }
 
