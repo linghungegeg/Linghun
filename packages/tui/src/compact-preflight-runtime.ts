@@ -28,6 +28,7 @@ import {
 import type {
   CompactPreflightTrigger,
   CompactProjection,
+  CompactRestoreContext,
   CompactStrategyStep,
   DeepCompactTrigger,
 } from "./tui-data-types.js";
@@ -107,7 +108,8 @@ export async function prepareMessagesForProviderPreflight(input: {
     {
       layer: "payload_trim",
       status: budgetedChars < originalChars ? "applied" : "skipped",
-      reason: budgetedChars < originalChars ? "tool_result_payload_budget" : "no_large_tool_payloads",
+      reason:
+        budgetedChars < originalChars ? "tool_result_payload_budget" : "no_large_tool_payloads",
       beforeChars: originalChars,
       afterChars: budgetedChars,
     },
@@ -207,7 +209,10 @@ export async function prepareMessagesForProviderPreflight(input: {
   }
 
   try {
-    if (input.deps.runDeepCompact && (input.context.modelGateway || input.context.cache.deepCompact)) {
+    if (
+      input.deps.runDeepCompact &&
+      (input.context.modelGateway || input.context.cache.deepCompact)
+    ) {
       const deep = await maybeRunDeepCompactBeforeProvider({
         context: input.context,
         sessionId: input.sessionId,
@@ -260,7 +265,9 @@ export async function prepareMessagesForProviderPreflight(input: {
       strategySteps.push({
         layer: "semantic_deep",
         status: input.context.cache.deepCompact ? "applied" : "skipped",
-        reason: input.context.cache.deepCompact ? "reuse_existing_deep_compact" : "deep_compact_unavailable",
+        reason: input.context.cache.deepCompact
+          ? "reuse_existing_deep_compact"
+          : "deep_compact_unavailable",
         beforeChars: budgetedChars,
         afterChars: afterDeep,
       });
@@ -544,12 +551,23 @@ function createCompactProjection(
     0,
     input.originalMessages.length - input.compactedMessages.length,
   );
+  const goal = sanitizeCompactSummaryText(
+    context,
+    context.memory.lastHandoff?.goal ?? "current interactive coding task",
+    220,
+  );
+  const currentTask = sanitizeCompactSummaryText(
+    context,
+    context.tools.todos.find((todo) => todo.status !== "completed")?.content ??
+      "continue the latest user request",
+    220,
+  );
   const activeAgents = context.agents
     .filter((agent) => agent.status === "running")
     .slice(0, 5)
     .map(
       (agent) =>
-        `${agent.id}:${agent.status}:${sanitizeCompactSummaryText(context, agent.summary || agent.task, 80)}`,
+        `agent:${agent.id}:${agent.status}:${sanitizeCompactSummaryText(context, agent.summary || agent.task, 80)}`,
     );
   const activeWorkflows = context.backgroundTasks
     .filter((task) => task.kind === "job" || task.kind === "agent")
@@ -557,7 +575,14 @@ function createCompactProjection(
     .slice(0, 5)
     .map(
       (task) =>
-        `${task.kind}:${task.status}:${sanitizeCompactSummaryText(context, task.userVisibleSummary, 80)}`,
+        `${task.kind}:${task.id}:${task.status}:${sanitizeCompactSummaryText(context, task.userVisibleSummary, 80)}`,
+    );
+  const needsAttentionAgents = context.agents
+    .filter((agent) => agent.status === "blocked" || agent.status === "failed")
+    .slice(0, 5)
+    .map(
+      (agent) =>
+        `agent:${agent.id}:${agent.status}:${sanitizeCompactSummaryText(context, agent.summary || agent.task, 80)}`,
     );
   const needsAttentionWorkflows = context.backgroundTasks
     .filter((task) => task.kind === "job" || task.kind === "agent")
@@ -565,7 +590,14 @@ function createCompactProjection(
     .slice(0, 5)
     .map(
       (task) =>
-        `${task.kind}:${task.status}:${sanitizeCompactSummaryText(context, task.userVisibleSummary, 80)}`,
+        `${task.kind}:${task.id}:${task.status}:${sanitizeCompactSummaryText(context, task.userVisibleSummary, 80)}`,
+    );
+  const staleResumableAgents = context.agents
+    .filter((agent) => agent.status === "stale")
+    .slice(0, 5)
+    .map(
+      (agent) =>
+        `agent:${agent.id}:${agent.status}:${sanitizeCompactSummaryText(context, agent.summary || agent.task, 80)}`,
     );
   const staleResumableWorkflows = context.backgroundTasks
     .filter((task) => task.kind === "job" || task.kind === "agent")
@@ -573,59 +605,105 @@ function createCompactProjection(
     .slice(0, 5)
     .map(
       (task) =>
-        `${task.kind}:${task.status}:${sanitizeCompactSummaryText(context, task.userVisibleSummary, 80)}`,
+        `${task.kind}:${task.id}:${task.status}:${sanitizeCompactSummaryText(context, task.userVisibleSummary, 80)}`,
     );
   const pending = [
-    context.pendingLocalApproval ? "local approval pending" : "",
+    context.pendingLocalApproval
+      ? `local approval pending:${context.pendingLocalApproval.kind}`
+      : "",
     context.pendingNaturalCommand ? "natural command pending" : "",
     context.pendingAutopilot ? "autopilot pending" : "",
-  ].filter(Boolean);
+    ...context.tools.todos
+      .filter((todo) => todo.status !== "completed")
+      .slice(0, 6)
+      .map(
+        (todo) => `todo:${todo.status}:${sanitizeCompactSummaryText(context, todo.content, 100)}`,
+      ),
+  ]
+    .filter(Boolean)
+    .slice(0, 10);
   const failureLearning = context.failureLearning.records
+    .filter((record) => record.status === "active")
     .slice(0, 3)
     .map(
       (record) => `${record.id}:${sanitizeCompactSummaryText(context, record.failureSummary, 100)}`,
     );
+  const decisions = context.routeDecisions
+    .slice(0, 5)
+    .map(
+      (item) =>
+        `${item.role}:${item.selectedProvider || "paused"}/${item.selectedModel || "paused"}`,
+    );
   const evidenceRefs = context.evidence.slice(0, 8).map((item) => item.id);
-  const files = Array.from(
-    new Set([
-      ...context.recentlyMentionedFiles.slice(0, 8),
-      ...context.tools.changedFiles.slice(0, 8),
-      ...input.boundary.preservedFiles.slice(0, 8),
-    ]),
-  )
-    .map((file) => sanitizeCompactSummaryText(context, file, 120))
-    .slice(0, 12);
+  const changedFiles = uniqueCompactValues(
+    context.tools.changedFiles.map((file) => sanitizeCompactSummaryText(context, file, 120)),
+    8,
+  );
+  const files = uniqueCompactValues(
+    [
+      ...context.recentlyMentionedFiles,
+      ...context.tools.changedFiles,
+      ...input.boundary.preservedFiles,
+    ].map((file) => sanitizeCompactSummaryText(context, file, 120)),
+    12,
+  );
   const risks = [
     removedMessages > 0 ? `${removedMessages} older provider messages replaced by summary` : "",
     input.boundary.compactedToolResultIds.length > 0
       ? `${input.boundary.compactedToolResultIds.length} older tool results removed as complete pairs`
       : "",
+    ...failureLearning.map((item) => `failure learning:${item}`),
   ].filter(Boolean);
+  const restoreContext: CompactRestoreContext = {
+    goal,
+    currentTask,
+    phaseStatus: context.memory.lastHandoff?.phaseStatus ?? "in_progress",
+    userConstraints: context.memory.accepted
+      .filter((item) => item.scope === "user" || item.taxonomy === "user")
+      .slice(0, 4)
+      .map((item) => sanitizeCompactSummaryText(context, item.summary, 160)),
+    keyFiles: files,
+    changedFiles,
+    evidenceRefs,
+    activeAgentsWorkflows: [...activeAgents, ...activeWorkflows].slice(0, 10),
+    needsAttentionAgentsWorkflows: [...needsAttentionAgents, ...needsAttentionWorkflows].slice(
+      0,
+      10,
+    ),
+    staleResumableAgentsWorkflows: [...staleResumableAgents, ...staleResumableWorkflows].slice(
+      0,
+      10,
+    ),
+    pendingItems: pending,
+    decisions,
+    risks: risks.slice(0, 10),
+    indexStatus: sanitizeCompactSummaryText(context, context.index.status, 80),
+    cacheFreshness: sanitizeCompactSummaryText(
+      context,
+      context.cache.lastFreshness?.changedKeys?.join(",") || "stable-or-unknown",
+      160,
+    ),
+    memoryStatus: `${context.memory.accepted.length} accepted memories`,
+    verificationRequirement:
+      "Do not claim completion, PASS, or verified results without recorded evidence.",
+  };
   const summary = truncateDisplay(
     [
       "Linghun compact summary",
       "scope provider-visible recent context projection",
       `trigger ${input.trigger}`,
-      `user goal ${sanitizeCompactSummaryText(context, context.memory.lastHandoff?.goal ?? "current interactive coding task", 220)}`,
-      `current task ${sanitizeCompactSummaryText(context, context.tools.todos.find((todo) => todo.status !== "completed")?.content ?? "continue the latest user request", 220)}`,
-      `decisions ${
-        context.routeDecisions
-          .slice(0, 3)
-          .map(
-            (item) =>
-              `${item.role}:${item.selectedProvider || "paused"}/${item.selectedModel || "paused"}`,
-          )
-          .join("; ") || "none recorded"
-      }`,
-      `files or evidence refs ${[...files, ...evidenceRefs.map((id) => `evidence:${id}`)].join(", ") || "none"}`,
-      `active agents/workflows ${[...activeAgents, ...activeWorkflows].join("; ") || "none"}`,
-      `needs-attention agents/workflows ${needsAttentionWorkflows.join("; ") || "none"}`,
-      `stale resumable agents/workflows ${staleResumableWorkflows.join("; ") || "none"}`,
-      `pending permissions/tool calls ${pending.join("; ") || "none"}`,
+      `user goal ${restoreContext.goal}`,
+      `current task ${restoreContext.currentTask}`,
+      `decisions ${restoreContext.decisions.join("; ") || "none recorded"}`,
+      `files or evidence refs ${[...restoreContext.keyFiles, ...evidenceRefs.map((id) => `evidence:${id}`)].join(", ") || "none"}`,
+      `active agents/workflows ${restoreContext.activeAgentsWorkflows.join("; ") || "none"}`,
+      `needs-attention agents/workflows ${restoreContext.needsAttentionAgentsWorkflows.join("; ") || "none"}`,
+      `stale resumable agents/workflows ${restoreContext.staleResumableAgentsWorkflows.join("; ") || "none"}`,
+      `pending permissions/tool calls ${restoreContext.pendingItems.join("; ") || "none"}`,
       `failure learning ${failureLearning.join("; ") || "none"}`,
       "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
-      `index/cache/memory freshness: index ${context.index.status}; cache freshness ${context.cache.lastFreshness?.changedKeys?.join(",") || "stable-or-unknown"}; memory ${context.memory.accepted.length} accepted`,
-      `discarded scope ${risks.join("; ") || "older provider-visible recent context summarized"}`,
+      `index/cache/memory freshness: index ${restoreContext.indexStatus}; cache freshness ${restoreContext.cacheFreshness}; memory ${restoreContext.memoryStatus}`,
+      `discarded scope ${restoreContext.risks.join("; ") || "older provider-visible recent context summarized"}`,
       `target budget chars ${input.postCompactTargetChars}`,
       `target budget tokens ${Math.ceil(input.postCompactTargetChars / CONTEXT_CHARS_PER_TOKEN_ESTIMATE)}`,
       `projected savings ${(savingsRatio * 100).toFixed(1)}%`,
@@ -637,6 +715,7 @@ function createCompactProjection(
     boundaryId: input.boundary.id,
     createdAt: input.boundary.createdAt,
     summary,
+    restoreContext,
     windowId: input.boundary.id,
     replacementKind: "provider-visible",
     replacedMessageCount: removedMessages,
@@ -651,6 +730,25 @@ function createCompactProjection(
     risks,
     evidenceRefs,
   };
+}
+
+function uniqueCompactValues(values: string[], limit: number): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function formatCompactRestoreContext(projection: CompactProjection): string {
+  if (!projection.restoreContext) {
+    return "";
+  }
+  return `\n\n[Context restore metadata]\n${JSON.stringify(projection.restoreContext)}`;
 }
 
 export function sanitizeCompactSummaryText(
@@ -669,7 +767,7 @@ function injectCompactProjectionMessage(
 ): ModelMessage[] {
   const summaryMessage: ModelMessage = {
     role: "user",
-    content: `[Context compact boundary ${projection.boundaryId}]\n${projection.summary}`,
+    content: `[Context compact boundary ${projection.boundaryId}]\n${projection.summary}${formatCompactRestoreContext(projection)}`,
   };
   return insertAfterLeadingSystemMessages(messages, summaryMessage);
 }

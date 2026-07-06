@@ -88,8 +88,8 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
           preCompactTokenEstimate: Math.ceil(projection.preCompactChars / 4),
           postCompactTokenEstimate: Math.ceil(projection.postCompactChars / 4),
           compactedToolResultIds: [],
-          preservedEvidenceRefs: projection.evidenceRefs,
-          preservedFiles: [],
+          preservedEvidenceRefs: projection.restoreContext?.evidenceRefs ?? projection.evidenceRefs,
+          preservedFiles: projection.restoreContext?.keyFiles ?? [],
         });
       }
     }
@@ -325,20 +325,51 @@ function isCompactProjection(value: unknown): value is CompactProjection {
     (value.windowId === undefined || typeof value.windowId === "string") &&
     (value.replacementKind === undefined || value.replacementKind === "provider-visible") &&
     (value.replacedMessageCount === undefined || typeof value.replacedMessageCount === "number") &&
-    (value.replacementMessageCount === undefined || typeof value.replacementMessageCount === "number") &&
-    (value.terminalVisibleBeforeCount === undefined || typeof value.terminalVisibleBeforeCount === "number") &&
-    (value.terminalVisibleAfterCount === undefined || typeof value.terminalVisibleAfterCount === "number") &&
+    (value.replacementMessageCount === undefined ||
+      typeof value.replacementMessageCount === "number") &&
+    (value.terminalVisibleBeforeCount === undefined ||
+      typeof value.terminalVisibleBeforeCount === "number") &&
+    (value.terminalVisibleAfterCount === undefined ||
+      typeof value.terminalVisibleAfterCount === "number") &&
     typeof value.pressureRatio === "number" &&
     typeof value.preCompactChars === "number" &&
     typeof value.postCompactChars === "number" &&
     (value.postCompactTargetChars === undefined ||
       typeof value.postCompactTargetChars === "number") &&
     (value.savingsRatio === undefined || typeof value.savingsRatio === "number") &&
+    (value.restoreContext === undefined || isCompactRestoreContext(value.restoreContext)) &&
     typeof value.discardedRange === "string" &&
     typeof value.toolPairingSafe === "boolean" &&
     Array.isArray(value.risks) &&
     Array.isArray(value.evidenceRefs)
   );
+}
+
+function isCompactRestoreContext(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.goal === "string" &&
+    typeof value.currentTask === "string" &&
+    typeof value.phaseStatus === "string" &&
+    stringArray(value.userConstraints) &&
+    stringArray(value.keyFiles) &&
+    stringArray(value.changedFiles) &&
+    stringArray(value.evidenceRefs) &&
+    stringArray(value.activeAgentsWorkflows) &&
+    stringArray(value.needsAttentionAgentsWorkflows) &&
+    stringArray(value.staleResumableAgentsWorkflows) &&
+    stringArray(value.pendingItems) &&
+    stringArray(value.decisions) &&
+    stringArray(value.risks) &&
+    typeof value.indexStatus === "string" &&
+    typeof value.cacheFreshness === "string" &&
+    typeof value.memoryStatus === "string" &&
+    typeof value.verificationRequirement === "string"
+  );
+}
+
+function stringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 export async function loadOrCreateHandoffPacket(

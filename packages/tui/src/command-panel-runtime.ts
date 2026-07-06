@@ -162,7 +162,10 @@ export function buildExplicitDetailsCommandPanel(
           `- pressure: ${projection.pressureRatio}`,
           "- scope: provider-visible recent context projection",
           `- discarded: ${sanitizeCompactDetailsText(projection.discardedRange, context.projectPath)}`,
-          `- evidence refs: ${projection.evidenceRefs.join(", ") || "none"}`,
+          `- restore task: ${projection.restoreContext ? sanitizeCompactDetailsText(projection.restoreContext.currentTask, context.projectPath) : "none"}`,
+          `- restore files: ${projection.restoreContext?.keyFiles.join(", ") || "none"}`,
+          `- restore pending: ${projection.restoreContext?.pendingItems.join(", ") || "none"}`,
+          `- evidence refs: ${(projection.restoreContext?.evidenceRefs ?? projection.evidenceRefs).join(", ") || "none"}`,
           `- summary: ${sanitizeCompactDetailsText(projection.summary, context.projectPath)}`,
         ].join("\n"),
       );

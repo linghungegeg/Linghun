@@ -217,10 +217,31 @@ export type CacheState = {
   startedAt: number;
 };
 
+export type CompactRestoreContext = {
+  goal: string;
+  currentTask: string;
+  phaseStatus: string;
+  userConstraints: string[];
+  keyFiles: string[];
+  changedFiles: string[];
+  evidenceRefs: string[];
+  activeAgentsWorkflows: string[];
+  needsAttentionAgentsWorkflows: string[];
+  staleResumableAgentsWorkflows: string[];
+  pendingItems: string[];
+  decisions: string[];
+  risks: string[];
+  indexStatus: string;
+  cacheFreshness: string;
+  memoryStatus: string;
+  verificationRequirement: string;
+};
+
 export type CompactProjection = {
   boundaryId: string;
   createdAt: string;
   summary: string;
+  restoreContext?: CompactRestoreContext;
   windowId?: string;
   replacementKind?: "provider-visible";
   replacedMessageCount?: number;

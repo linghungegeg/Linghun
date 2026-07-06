@@ -41,7 +41,13 @@ import { runMcpStdioToolCall } from "./mcp-stdio-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import type { TuiContext } from "./tui-context-runtime.js";
-import type { VerificationReport } from "./tui-data-types.js";
+import type {
+  AgentRun,
+  BackgroundTaskState,
+  CompactProjection,
+  RoleRouteDecision,
+  VerificationReport,
+} from "./tui-data-types.js";
 import {
   createCacheState,
   createMcpState,
@@ -116,6 +122,36 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(getPostCompactTargetChars(context, runtime()) / 4).toBe(80_000);
 
     setExecutorMaxInputTokens(context, 20_000);
+    context.tools.todos = [
+      { id: "todo-restore", content: "keep the latest request", status: "pending" },
+    ];
+    context.tools.changedFiles = ["src/changed.ts"];
+    context.recentlyMentionedFiles = ["src/mentioned.ts"];
+    context.evidence = [
+      {
+        id: "ev-restore",
+        kind: "file_read",
+        summary: "read src/mentioned.ts",
+        source: "src/mentioned.ts",
+        supportsClaims: ["code_fact"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    context.memory.accepted = [
+      {
+        id: "mem-user",
+        scope: "user",
+        status: "accepted",
+        taxonomy: "user",
+        summary:
+          "User prefers evidence-bound implementation notes with token=SECRET_TOKEN redacted",
+        source: "test",
+        sourceRefs: [],
+        risk: "low",
+        inferred: false,
+        createdAt: new Date().toISOString(),
+      },
+    ];
     const deps = compactDeps();
     const triggerChars = getAutoCompactTriggerChars(context, runtime());
     const belowTrigger: ModelMessage[] = [
@@ -186,6 +222,24 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       overLimit.length - (compacted.blocked ? 0 : compacted.messages.length - 1),
     );
     expect(context.cache.compactProjection?.replacementMessageCount).toBeGreaterThan(0);
+    expect(context.cache.compactProjection?.restoreContext).toMatchObject({
+      currentTask: "keep the latest request",
+      keyFiles: expect.arrayContaining(["src/mentioned.ts", "src/changed.ts"]),
+      changedFiles: ["src/changed.ts"],
+      evidenceRefs: ["ev-restore"],
+    });
+    expect(context.cache.compactProjection?.restoreContext?.pendingItems).toContain(
+      "todo:pending:keep the latest request",
+    );
+    expect(
+      context.cache.compactProjection?.restoreContext?.userConstraints.join("\n"),
+    ).not.toContain("SECRET_TOKEN");
+    if (!compacted.blocked) {
+      const compactMessage = compacted.messages.map((message) => message.content).join("\n");
+      expect(compactMessage).toContain("[Context restore metadata]");
+      expect(compactMessage).toContain('"currentTask":"keep the latest request"');
+      expect(compactMessage).toContain('"keyFiles":["src/mentioned.ts","src/changed.ts"]');
+    }
     expect(context.cache.compactProjection?.summary).toContain("target budget tokens");
     expect(context.cache.compactStrategy?.cacheStablePrefixRisk).toBe("medium");
     expect(context.cache.compactStrategy?.steps).toContainEqual(
@@ -267,6 +321,126 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(context.cache.compactProjection?.postCompactChars).toBeLessThanOrEqual(
       (context.cache.compactProjection?.postCompactTargetChars ?? 0) - 4_000,
     );
+  });
+
+  it("bounds restore context under noisy compact pressure", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 20_000);
+    context.tools.todos = Array.from({ length: 25 }, (_, index) => ({
+      id: `todo-${index}`,
+      content: `restore task ${index} with apiKey=SECRET_${index}`,
+      status: "pending" as const,
+    }));
+    context.tools.changedFiles = Array.from(
+      { length: 20 },
+      (_, index) => `src/changed-${index}.ts`,
+    );
+    context.recentlyMentionedFiles = [
+      ...Array.from({ length: 20 }, (_, index) => `src/mentioned-${index}.ts`),
+      "src/mentioned-0.ts",
+    ];
+    context.evidence = Array.from({ length: 20 }, (_, index) => ({
+      id: `ev-${index}`,
+      kind: "command_output" as const,
+      summary: `evidence ${index}`,
+      source: `src/evidence-${index}.ts`,
+      supportsClaims: ["stress"],
+      createdAt: new Date().toISOString(),
+    }));
+    context.memory.accepted = Array.from({ length: 12 }, (_, index) => ({
+      id: `mem-${index}`,
+      scope: "user" as const,
+      status: "accepted" as const,
+      taxonomy: "user" as const,
+      summary: `memory ${index} token=SECRET_${index} ${"x".repeat(240)}`,
+      source: "stress-test",
+      sourceRefs: [],
+      risk: "low" as const,
+      inferred: false,
+      createdAt: new Date().toISOString(),
+    }));
+    context.agents = [
+      ...Array.from({ length: 8 }, (_, index) => stressAgent(`run-${index}`, "running")),
+      ...Array.from({ length: 8 }, (_, index) => stressAgent(`blocked-${index}`, "blocked")),
+      ...Array.from({ length: 8 }, (_, index) => stressAgent(`stale-${index}`, "stale")),
+    ];
+    context.backgroundTasks = [
+      ...Array.from({ length: 8 }, (_, index) =>
+        stressBackgroundTask(`job-run-${index}`, "running"),
+      ),
+      ...Array.from({ length: 8 }, (_, index) =>
+        stressBackgroundTask(`job-block-${index}`, "blocked"),
+      ),
+      ...Array.from({ length: 8 }, (_, index) =>
+        stressBackgroundTask(`job-stale-${index}`, "stale"),
+      ),
+    ];
+    context.cache.lastFreshness = {
+      systemPromptHash: "system",
+      toolSchemaHash: "tools",
+      mcpToolListHash: "mcp",
+      modelProviderHash: "model",
+      changedKeys: Array.from({ length: 20 }, (_, index) => `key-${index}`),
+    };
+    context.routeDecisions = Array.from(
+      { length: 12 },
+      (_, index): RoleRouteDecision => ({
+        id: `route-${index}`,
+        triggerReason: "stress",
+        role: "executor",
+        selectedProvider: `provider-${index}`,
+        selectedModel: `model-${index}`,
+        fallbackCandidates: [],
+        requiredCapabilities: [],
+        stopConditions: [],
+        repairSuggestions: [],
+        fallbackUsed: false,
+        budgetStop: false,
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+    const compacted = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "system guard" },
+        { role: "user", content: "NOISY_OLD_CONTEXT".repeat(5_000) },
+        { role: "user", content: "latest noisy request" },
+      ],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+
+    expect(compacted.blocked).toBe(false);
+    const restore = context.cache.compactProjection?.restoreContext;
+    expect(restore).toBeDefined();
+    expect(restore?.keyFiles).toHaveLength(12);
+    expect(new Set(restore?.keyFiles).size).toBe(restore?.keyFiles.length);
+    expect(restore?.changedFiles).toHaveLength(8);
+    expect(restore?.evidenceRefs).toEqual(Array.from({ length: 8 }, (_, index) => `ev-${index}`));
+    expect(restore?.userConstraints).toHaveLength(4);
+    expect(restore?.pendingItems).toHaveLength(6);
+    expect(restore?.decisions).toHaveLength(5);
+    expect(restore?.activeAgentsWorkflows).toHaveLength(10);
+    expect(restore?.needsAttentionAgentsWorkflows).toHaveLength(10);
+    expect(restore?.staleResumableAgentsWorkflows).toHaveLength(10);
+    expect(JSON.stringify(restore)).not.toContain("SECRET_");
+    expect(
+      Math.max(...(restore?.userConstraints.map((item) => item.length) ?? [0])),
+    ).toBeLessThanOrEqual(161);
+    expect(Math.max(...(restore?.keyFiles.map((item) => item.length) ?? [0]))).toBeLessThanOrEqual(
+      120,
+    );
+    if (!compacted.blocked) {
+      const compactMessage = compacted.messages.map((message) => message.content).join("\n");
+      expect(compactMessage).toContain("[Context restore metadata]");
+      expect(compactMessage).not.toContain("SECRET_");
+      expect(estimateModelMessageChars(compacted.messages)).toBeLessThanOrEqual(
+        context.cache.compactProjection?.postCompactTargetChars ?? 0,
+      );
+    }
   });
 
   it("covers tool pairing safety and compact cooldown/blocking branches", async () => {
@@ -485,6 +659,43 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
 
   it("hydrates resume context and loads or creates a bounded handoff packet", async () => {
     const context = await createTestContext();
+    const projection: CompactProjection = {
+      boundaryId: "boundary-restore",
+      createdAt: new Date().toISOString(),
+      summary: "projection summary",
+      restoreContext: {
+        goal: "continue compact phase",
+        currentTask: "restore phase five metadata",
+        phaseStatus: "in_progress",
+        userConstraints: ["keep evidence references"],
+        keyFiles: ["src/a.ts", "src/restore.ts"],
+        changedFiles: ["src/restore.ts"],
+        evidenceRefs: ["ev-1"],
+        activeAgentsWorkflows: ["agent:a1:running:scan"],
+        needsAttentionAgentsWorkflows: [],
+        staleResumableAgentsWorkflows: [],
+        pendingItems: ["todo:pending:continue"],
+        decisions: ["executor:deepseek/deepseek-chat"],
+        risks: ["context continuity only"],
+        indexStatus: "ready",
+        cacheFreshness: "stable-or-unknown",
+        memoryStatus: "1 accepted memories",
+        verificationRequirement:
+          "Do not claim completion, PASS, or verified results without recorded evidence.",
+      },
+      replacementKind: "provider-visible",
+      replacedMessageCount: 4,
+      replacementMessageCount: 2,
+      pressureRatio: 1.2,
+      preCompactChars: 1000,
+      postCompactChars: 200,
+      postCompactTargetChars: 400,
+      savingsRatio: 0.8,
+      discardedRange: "older provider-visible recent context summarized",
+      toolPairingSafe: true,
+      risks: ["context continuity only"],
+      evidenceRefs: ["ev-legacy"],
+    };
     hydrateResumeContext(context, [
       {
         type: "todo_update",
@@ -503,6 +714,13 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
         summary: "summary",
         source: "src/a.ts",
         supportsClaims: ["claim"],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        type: "system_event",
+        id: "compact-event-1",
+        level: "info",
+        message: `compact_projection:${JSON.stringify(projection)}`,
         createdAt: new Date().toISOString(),
       },
       {
@@ -548,6 +766,14 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
     expect(context.lastVerification?.status).toBe("pass");
     expect(context.evidence[0]?.id).toBe("ev-1");
     expect(context.memory.lastHandoff?.currentPhase).toBe("Session handoff");
+    expect(context.cache.compactProjection?.restoreContext?.currentTask).toBe(
+      "restore phase five metadata",
+    );
+    expect(context.cache.compactBoundaries.at(-1)).toMatchObject({
+      id: "boundary-restore",
+      preservedEvidenceRefs: ["ev-1"],
+      preservedFiles: ["src/a.ts", "src/restore.ts"],
+    });
 
     const packet = await loadOrCreateHandoffPacket(context, "parent-session");
     expect(packet.id).toBe("handoff-1");
@@ -689,6 +915,51 @@ async function createTestContext(): Promise<TuiContext> {
     discoveredDeferredToolNames: new Set<string>(),
     providerBreaker: createProviderCircuitBreakerState(),
   } as unknown as TuiContext;
+}
+
+function stressAgent(id: string, status: "running" | "blocked" | "stale"): AgentRun {
+  return {
+    id,
+    type: "worker",
+    role: "executor",
+    provider: "deepseek",
+    task: `agent task ${id}`,
+    model: "deepseek-chat",
+    permissionMode: "default",
+    status,
+    transcriptPath: `agents/${id}.jsonl`,
+    transcriptSessionId: `session-${id}`,
+    mailbox: [],
+    summary: `agent ${id} summary with token=SECRET_AGENT_${id}`,
+    contextSummary: "context",
+    cost: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estimatedCny: 0,
+    },
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function stressBackgroundTask(
+  id: string,
+  status: "running" | "blocked" | "stale",
+): BackgroundTaskState {
+  return {
+    id,
+    kind: "job",
+    title: `job ${id}`,
+    status,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    heartbeatIntervalMs: 1_000,
+    staleAfterMs: 10_000,
+    hasOutput: false,
+    userVisibleSummary: `background ${id} with apiKey=SECRET_JOB_${id}`,
+  };
 }
 
 class MemoryOutput extends Writable {

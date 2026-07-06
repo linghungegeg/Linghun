@@ -244,6 +244,7 @@ export function formatCompactStatus(context: TuiContext): string {
     `- deep summary: ${deep ? sanitizeCompactStatusText(deep.summary.split(/\r?\n/).slice(0, 4).join(" | ")) : "none"}`,
     `- projection summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/).slice(0, 4).join(" | ")) : "none"}`,
     `- projection budget: ${projection?.postCompactTargetChars !== undefined ? `target ${projection.postCompactTargetChars} chars; post ${projection.postCompactChars} chars; saved ${((projection.savingsRatio ?? 0) * 100).toFixed(1)}%` : "none"}`,
+    `- restore context: ${projection?.restoreContext ? `goal ${sanitizeCompactStatusText(projection.restoreContext.goal)}; task ${sanitizeCompactStatusText(projection.restoreContext.currentTask)}; files ${projection.restoreContext.keyFiles.length}; evidence ${projection.restoreContext.evidenceRefs.length}; pending ${projection.restoreContext.pendingItems.length}` : "none"}`,
     `- discarded/degraded scope: ${projection ? sanitizeCompactStatusText(projection.discardedRange) : "none"}`,
     `- tool pairing safe: ${projection ? (projection.toolPairingSafe ? "yes" : "no") : pressure ? (pressure.toolPairingSafe ? "yes" : "no") : "unknown"}`,
     `- failure/cooldown: ${failure ? `${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactStatusText(failure.reason)}; cooldown until ${failure.cooldownUntil}` : "none"}`,
