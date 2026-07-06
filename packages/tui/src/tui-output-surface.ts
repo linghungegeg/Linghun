@@ -238,8 +238,11 @@ export class ShellBlockOutput extends Writable {
       this.assistantPreviewText = assistantStreamVisibleTail(this.assistantStreamState);
       this.setStreamingPreview(id, this.assistantPreviewText);
     } else {
-      this.assistantPreviewText = assistantStreamVisibleTail(this.assistantStreamState);
-      this.setStreamingPreview(id, this.assistantPreviewText);
+      // Final-answer drafts can still be rejected by the gate; keep them out of
+      // the user-visible live preview until replaceAssistantBlockContent commits
+      // the cleaned or downgraded text.
+      this.assistantPreviewText = "";
+      this.clearStreamingPreview(id);
     }
     this.onWrite();
   }

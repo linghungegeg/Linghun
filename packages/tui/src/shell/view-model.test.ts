@@ -5020,14 +5020,14 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
     expect(blocks.find((b) => b.id === "assistant-stream-held-final")).toBeUndefined();
     expect(ctx.lastFullOutput).toBeUndefined();
-    expect(ctx.streamingAssistant?.text).toBe("原始最终回答\n第二行");
+    expect(ctx.streamingAssistant).toBeUndefined();
 
     output.discardAssistantBlock("assistant-stream-held-final");
     output.appendAssistantDelta("retry 后的原始回答\n");
     vi.advanceTimersByTime(64);
     expect(blocks.find((b) => b.id === "assistant-stream-held-final")).toBeUndefined();
     expect(ctx.lastFullOutput).toBeUndefined();
-    expect(ctx.streamingAssistant?.text).toBe("retry 后的原始回答\n");
+    expect(ctx.streamingAssistant).toBeUndefined();
 
     output.replaceAssistantBlockContent("assistant-stream-held-final", "清洗后的最终回答");
     output.endAssistantStream();
@@ -5106,7 +5106,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.appendAssistantDelta("new draft\n");
     vi.advanceTimersByTime(64);
     expect(blocks.find((b) => b.id === "assistant-held-new")).toBeUndefined();
-    expect(ctx.streamingAssistant?.text).toBe("new draft\n");
+    expect(ctx.streamingAssistant).toBeUndefined();
   });
 
   it("terminal-first assistant gate discards held draft on direct end", () => {
@@ -5143,7 +5143,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(blocks.find((b) => b.id === "assistant-terminal-first")).toBeUndefined();
     const streamingView = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
     expect(streamingView.blocks.find((b) => b.id === "assistant-terminal-first")).toBeUndefined();
-    expect(streamingView.streamingAssistantText).toBe("A\nB");
+    expect(streamingView.streamingAssistantText).toBeUndefined();
 
     output.endAssistantStream();
     expect(terminalWrites).toEqual([]);
