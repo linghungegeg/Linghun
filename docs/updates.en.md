@@ -2,6 +2,29 @@
 
 This page records product updates that directly affect user experience. For the full system design, see the [English Whitepaper](../WHITEPAPER.en.md).
 
+## July 7, 2026: Heavy Update After Deep Real-world Development
+
+This is a heavy update after deep real-world development: anti-hallucination now fits more tightly with the foundations, output is smoother, faster, and steadier, and cache hit rate has increased sharply to 96%+ without becoming dumb. The focus is not a pile of isolated features. It tightens the parts of long development runs that most often need to work together: deep compact, cache boundaries, the command surface, provider watchdogs, final-answer gates, evidence state, and task progress display.
+
+This batch of stable points covers compact cache and command surface work, deep compact gating / projection, provider stream watchdogs, compact prompt prefixing, todo bottom progress summaries, final-answer downgrade boundaries, task bottom-pane status spacing, and final-gate evidence attempt state. The user-facing effect is closer to a model continuously working inside a real project: context that should be retained is not casually lost, reusable cache can be reused, output reaches the visible layer faster, and final answers stay closer to the evidence boundary.
+
+### How It Works
+
+- Deep compact and compact prompt boundaries were tightened so long-session compression, recovery, and projection are steadier, with less context breakage or repeated explanation after compaction.
+- Cache policy and cache diagnostics were hardened so reusable context can hit cache more reliably while preserving evidence and task state instead of trading high hit rate for shallow answers.
+- The command surface, search_code guard, and retry paths were refined so natural-language commands, index lookup, and failed retries fit real development flow better.
+- Provider stream watchdog and recovery logic were strengthened to reduce stuck streams, stale previews after retry, and unclear recovery state.
+- Final-answer gates, evidence attempt state, and downgrade boundaries were tightened so visible answers pass through clearer evidence alignment and completion checks.
+- The task bottom pane, progress colors, and status spacing were adjusted so running tasks, todo summaries, permission waits, and final states are easier to scan.
+
+### User Experience
+
+- Long-task output feels smoother, faster, and steadier, especially during continuous streaming, post-compact continuation, and multi-turn recovery.
+- Cache hit rate has increased sharply to 96%+ while keeping evidence, task, and context boundaries, reducing the risk of answers becoming generic just because cache hit.
+- The anti-hallucination path and the foundations behave more like one mainline: cache, compact, commands, providers, evidence, and final answers coordinate instead of drifting apart.
+- The command panel and search chain are steadier, retries are more observable, and the model has fewer reasons to wander because tool state is unclear.
+- Task progress, todo summaries, and final-answer state are clearer, making it easier to tell whether Linghun is advancing, recovering, waiting, or closing out.
+
 ## July 5, 2026: Terminal Foundation, Task Panels, and Runtime Recovery
 
 This release continues to harden Linghun's terminal mainline and smoothness: model streaming, terminal scroll and copy boundaries, background task status, answer display after anti-hallucination cleanup, diff / Markdown rendering, provider network recovery, and runtime storage were all tightened.

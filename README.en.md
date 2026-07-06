@@ -43,6 +43,7 @@ Linghun has completed and submitted runs for the four public TB2.1 tracks in the
 
 ## Updates
 
+- **July 7, 2026**: A heavy update after deep real-world development: anti-hallucination now fits more tightly with the foundations, output is smoother, faster, and steadier, and cache hit rate has increased sharply to 96%+ without becoming dumb. Deep compact, the command surface, provider watchdogs, final-answer gates, and task progress display were hardened further. See: [Updates](./docs/updates.en.md#july-7-2026-heavy-update-after-deep-real-world-development).
 - **July 5, 2026**: The terminal foundation, task panels, and runtime recovery path were hardened. Model output feels faster and smoother, and answers are displayed after anti-hallucination cleanup and evidence alignment, making cleaned responses steadier in more scenarios. See: [Updates](./docs/updates.en.md#july-5-2026-terminal-foundation-task-panels-and-runtime-recovery).
 - **June 27, 2026**: Session storage, model streaming, and permission modes were tightened to reduce memory pressure in long conversations, make Claude / OpenAI-compatible streaming output more stable, and make command/file-edit behavior clearer in auto-review and full-access modes. See: [Updates](./docs/updates.en.md#june-27-2026-session-storage-model-streaming-and-permission-modes).
 - **June 26, 2026**: The pre-check system expanded into multi-language deep layers, giving the model index facts, impact ranges, and language-level pre-check results earlier so it spends less time on blind file reading, repeated exploration, and rework. See: [Updates](./docs/updates.en.md#june-26-2026-pre-check-system-and-multi-language-deep-layers).
@@ -653,8 +654,6 @@ Linghun comes from my own long-term, high-intensity use of AI coding tools, and 
 My judgment is this: today's AI is not unable to work; it is not yet always able to work in an engineered, constrained, verifiable, and deliverable way. As models continue to advance quickly, "super individuals" will not be just a slogan. The real key is connecting model capability to engineering boundaries such as evidence, permissions, tools, verification, memory, cost, long tasks, and external capabilities. When models can work in an engineered way, the productivity they bring can be extraordinary.
 
 I also believe that a widely accessible Jarvis-like AI runtime will land sooner than many people expect, and in a more accessible form. Of course, this is only my personal projection and inference. In an era where model capability is advancing rapidly, creativity, judgment, and execution will become increasingly valuable.
-
-Building a product is not easy. If Linghun helps you, and your financial situation allows it, I welcome modest support. After my previous startup failed, I carried significant debt; I also need to support my family and continue investing in more stress testing, real-project testing, and product polish. I was a failure in my previous startup, but in this round of development and practice, I do not think I am.
 
 If you have more ideas, or if you run into problems while using Linghun, feel free to contact me. I will try to solve them one by one. Thank you again to the model providers for the real gains they have enabled, and thank you to every developer who provides good ideas, good work, and real feedback.
 

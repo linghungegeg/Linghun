@@ -7,9 +7,13 @@ import { fileURLToPath } from "node:url";
 import type { EndpointProfile } from "@linghun/config";
 import type { TranscriptEvent } from "@linghun/core";
 import { type ModelInfo, resolveProviderRuntimeContract } from "@linghun/providers";
-import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
+import { LINGHUN_CLI_NAME, LINGHUN_NAME } from "@linghun/shared";
 
-export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
+const require = createRequire(import.meta.url);
+const cliPackage = require("../package.json") as { version?: string };
+const LINGHUN_CLI_VERSION = cliPackage.version ?? "0.0.0";
+
+export const helpText = `${LINGHUN_NAME} ${LINGHUN_CLI_VERSION}
 
 用法：
   ${LINGHUN_CLI_NAME}                                   进入交互式终端
@@ -78,7 +82,7 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   }
 
   if (command === "--version" || command === "-v") {
-    return { stdout: `${LINGHUN_VERSION}\n`, stderr: "", exitCode: 0 };
+    return { stdout: `${LINGHUN_CLI_VERSION}\n`, stderr: "", exitCode: 0 };
   }
 
   const normalized = normalizeSlashCommand(argv);
