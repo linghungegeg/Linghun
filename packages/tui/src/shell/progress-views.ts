@@ -10,7 +10,6 @@ import type {
   WorkflowProgressView,
 } from "./types.js";
 
-const MAX_LIST_ITEMS = 8;
 const MAX_AGENT_ROWS = 6;
 const MAX_WORKFLOW_STEPS = 5;
 const MAX_DETAIL_LINES = 12;
@@ -101,21 +100,39 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
 
 export function buildTaskListView(context: TuiContext): TaskListView | undefined {
   const allTodos = context.tools?.todos ?? [];
-  const activeTodos = allTodos.filter((todo) => todo.status !== "completed");
+  const activeTodos = allTodos.filter(isActiveTodo);
   if (activeTodos.length === 0) return undefined;
-  const todos = smartSlice(activeTodos, MAX_LIST_ITEMS, (todo) => todo.status === "in_progress");
-  if (todos.visible.length === 0) return undefined;
+  const currentTodo = selectCurrentTodo(activeTodos);
+  if (!currentTodo) return undefined;
+  const currentIndex = allTodos.findIndex((todo) => todo.id === currentTodo.id);
   return {
-    rows: todos.visible.map((todo) => ({
-      id: todo.id,
-      subject: todo.content,
-      status: todo.status,
-      owner: readOptionalString(todo, "owner"),
-      blockedBy: readBlockedBy(todo),
-      activity: readOptionalString(todo, "evidence"),
-    })),
-    hiddenPending: todos.hiddenPending,
+    rows: [
+      {
+        id: currentTodo.id,
+        subject: currentTodo.content,
+        status: currentTodo.status,
+        owner: readOptionalString(currentTodo, "owner"),
+        blockedBy: readBlockedBy(currentTodo),
+        activity: readOptionalString(currentTodo, "evidence"),
+      },
+    ],
+    hiddenPending: Math.max(0, activeTodos.length - 1),
+    totalCount: allTodos.length,
+    currentIndex: currentIndex >= 0 ? currentIndex + 1 : 1,
+    completedCount: allTodos.filter((todo) => todo.status === "completed").length,
   };
+}
+
+function isActiveTodo(todo: TodoItem): boolean {
+  return todo.status === "in_progress" || todo.status === "blocked" || todo.status === "pending";
+}
+
+function selectCurrentTodo(todos: TodoItem[]): TodoItem | undefined {
+  return todos.find(isFocusedTodo) ?? todos[0];
+}
+
+function isFocusedTodo(todo: TodoItem): boolean {
+  return todo.status === "in_progress" || todo.status === "blocked";
 }
 
 export function buildWorkflowProgressView(context: TuiContext): WorkflowProgressView | undefined {

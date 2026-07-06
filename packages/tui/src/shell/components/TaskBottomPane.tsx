@@ -103,10 +103,10 @@ export function allocateBottomPaneBudget(
     return true;
   };
 
-  const showTaskList = take(slotEstimates.taskListRows);
   const showAgentProgress = take(slotEstimates.agentProgressRows);
   const showWorkflowProgress = take(slotEstimates.workflowProgressRows);
   const showBackgroundOverlay = take(slotEstimates.backgroundOverlayRows);
+  const showTaskList = take(slotEstimates.taskListRows);
   const showRuntimeSummary = take(slotEstimates.runtimeSummaryRows);
   const showNotifications = take(slotEstimates.notificationRows);
 
@@ -170,17 +170,6 @@ export function TaskBottomPane({
 
   return (
     <Box flexShrink={0} flexDirection="column">
-      {allocation.showTaskList && view.taskListView ? (
-        <Box paddingX={2} marginBottom={1}>
-          <TaskListView
-            list={view.taskListView}
-            width={contentWidth}
-            noColor={noColor}
-            language={view.language}
-          />
-        </Box>
-      ) : null}
-
       {allocation.showAgentProgress && view.agentProgressTree ? (
         <Box width={view.width} paddingX={2}>
           <AgentProgressTree
@@ -209,6 +198,17 @@ export function TaskBottomPane({
           width={contentWidth}
           noColor={noColor}
         />
+      ) : null}
+
+      {allocation.showTaskList && view.taskListView ? (
+        <Box paddingX={2}>
+          <TaskListView
+            list={view.taskListView}
+            width={contentWidth}
+            noColor={noColor}
+            language={view.language}
+          />
+        </Box>
       ) : null}
 
       {allocation.showRuntimeSummary && view.taskRuntimeSummary ? (
@@ -272,7 +272,7 @@ function isBottomPaneStatusVisible(status: ShellViewModel["bottomPaneStatus"]): 
 
 function estimateTaskListRows(taskListView: ShellViewModel["taskListView"]): number {
   if (!taskListView || taskListView.rows.length === 0) return 0;
-  return 1 + 1 + 1 + taskListView.rows.length + (taskListView.hiddenPending > 0 ? 1 : 0);
+  return 1;
 }
 
 function legacyStatusFromActivity(

@@ -747,6 +747,9 @@ describe("Ink TTY interaction smoke", () => {
           },
         ],
         hiddenPending: 0,
+        totalCount: 2,
+        currentIndex: 1,
+        completedCount: 0,
       },
       agentProgressTree: {
         rows: [

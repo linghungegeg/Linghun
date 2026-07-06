@@ -54,10 +54,10 @@ describe("TaskBottomPane budget allocation", () => {
     );
   });
 
-  it("keeps compact footer ahead of task list/progress rows while work is active", () => {
+  it("keeps compact footer and progress rows ahead of the one-line task summary", () => {
     const allocation = allocateBottomPaneBudget(10, {
       workingRows: 1,
-      taskListRows: 4,
+      taskListRows: 1,
       agentProgressRows: 2,
       workflowProgressRows: 2,
     });
@@ -65,18 +65,26 @@ describe("TaskBottomPane budget allocation", () => {
     expect(allocation.mode).toBe("compact");
     expect(allocation.footerRows).toBe(1);
     expect(allocation.workingRows).toBe(1);
-    expect(allocation.showTaskList).toBe(false);
+    expect(allocation.showAgentProgress).toBe(true);
+    expect(allocation.showWorkflowProgress).toBe(false);
+    expect(allocation.showTaskList).toBe(true);
   });
 
-  it("does not show a task list when its real row count would overflow compact budget", () => {
-    const allocation = allocateBottomPaneBudget(10, {
+  it("does not show the task summary when higher-priority progress rows use the compact budget", () => {
+    const allocation = allocateBottomPaneBudget(13, {
       workingRows: 1,
-      taskListRows: 8,
+      taskListRows: 1,
+      agentProgressRows: 2,
+      workflowProgressRows: 2,
+      backgroundOverlayRows: 2,
     });
 
     expect(allocation.mode).toBe("compact");
     expect(allocation.footerRows).toBe(1);
     expect(allocation.workingRows).toBe(1);
+    expect(allocation.showAgentProgress).toBe(true);
+    expect(allocation.showWorkflowProgress).toBe(true);
+    expect(allocation.showBackgroundOverlay).toBe(true);
     expect(allocation.showTaskList).toBe(false);
   });
 
@@ -198,7 +206,7 @@ describe("TaskBottomPane budget allocation", () => {
 
     expect(source).toContain("const bootstrapSlashRows =");
     expect(source).toMatch(/slashMaxRows = slashRows > 0 \? allocation\.slashMaxRows : bootstrapSlashRows/);
-    expect(source).toContain("taskListRows: estimateTaskListRows(view.taskListView)");
+    expect(source).toContain("return 1;");
   });
 
   it("keeps migrated status/footer theme colors wired in the bottom pane", () => {

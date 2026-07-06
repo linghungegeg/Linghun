@@ -419,6 +419,9 @@ export type TaskListView = {
     activity?: string;
   }[];
   hiddenPending: number;
+  totalCount: number;
+  currentIndex: number;
+  completedCount: number;
 };
 
 export type WorkflowProgressView = {

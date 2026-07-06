@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TuiContext } from "../tui-context-runtime.js";
 import {
   buildAgentProgressTreeView,
   buildBackgroundTaskOverlayView,
@@ -7,7 +8,6 @@ import {
   getBackgroundOverlaySelectedTask,
   updateBackgroundOverlayCursor,
 } from "./progress-views.js";
-import type { TuiContext } from "../tui-context-runtime.js";
 
 function createContext(): TuiContext {
   return {
@@ -58,6 +58,26 @@ describe("Phase R3 progress view projectors", () => {
     expect(view?.rows[0]).toMatchObject({ subject: "实现面板", owner: "agent-a", blockedBy: ["todo-0"] });
   });
 
+  it("shows only active todos, hides when all are completed, and reports active count", () => {
+    const ctx = createContext();
+    ctx.tools.todos = [
+      { id: "todo-1", content: "调查现状", status: "completed", evidence: "已确认" },
+      { id: "todo-2", content: "修复显示", status: "in_progress" },
+    ] as unknown as TuiContext["tools"]["todos"];
+
+    const view = buildTaskListView(ctx);
+
+    expect(view?.totalCount).toBe(2);
+    expect(view?.currentIndex).toBe(2);
+    expect(view?.completedCount).toBe(1);
+    expect(view?.rows.map((row) => row.status)).toEqual(["in_progress"]);
+    expect(view?.rows[0]).toMatchObject({ subject: "修复显示", status: "in_progress" });
+
+    ctx.tools.todos = [{ id: "todo-2", content: "修复显示", status: "completed" }] as unknown as TuiContext["tools"]["todos"];
+
+    expect(buildTaskListView(ctx)).toBeUndefined();
+  });
+
   it("projects workflow steps and marks the running step active", () => {
     const ctx = createContext();
     ctx.workflows.activeRuns = [
@@ -78,6 +98,24 @@ describe("Phase R3 progress view projectors", () => {
     expect(view?.runs[0]?.currentStepId).toBe("s2");
     expect(view?.runs[0]?.elapsed).toMatch(/\d+m\d{2}s/);
     expect(view?.runs[0]?.steps[1]).toMatchObject({ title: "Implement", active: true });
+  });
+
+  it("projects one current todo with overall progress and folds the rest", () => {
+    const ctx = createContext();
+    ctx.tools.todos = Array.from({ length: 5 }, (_, index) => ({
+      id: `todo-${index + 1}`,
+      content: `任务 ${index + 1}`,
+      status: index === 0 ? "completed" : "pending",
+    })) as unknown as TuiContext["tools"]["todos"];
+
+    const view = buildTaskListView(ctx);
+
+    expect(view?.totalCount).toBe(5);
+    expect(view?.currentIndex).toBe(2);
+    expect(view?.completedCount).toBe(1);
+    expect(view?.rows).toHaveLength(1);
+    expect(view?.hiddenPending).toBe(3);
+    expect(view?.rows.map((row) => row.subject)).toEqual(["任务 2"]);
   });
 
   it("bounds agent and workflow progress rows while keeping active work visible", () => {
