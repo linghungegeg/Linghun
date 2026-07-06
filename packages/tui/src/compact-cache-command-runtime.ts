@@ -38,7 +38,10 @@ import {
   recordCompactBoundary,
 } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
-import { runDeepCompact } from "./deep-compact-runtime.js";
+import {
+  maybeRunDeepCompactBeforeProvider,
+  runDeepCompact,
+} from "./deep-compact-runtime.js";
 import { deferredToolListHashInput, listDeferredTools } from "./deferred-tools-catalog.js";
 import { ensureSession, writeStatus } from "./details-status-runtime.js";
 import {
@@ -256,7 +259,6 @@ export async function handleCompactCommand(
       return;
     }
     const sessionId = await ensureSession(context);
-    const resumed = await context.store.resume(sessionId);
     const runtime = getSelectedModelRuntime(context);
     if (!context.modelGateway) {
       writeLine(
@@ -272,10 +274,9 @@ export async function handleCompactCommand(
     context.shellRerender?.();
     let result: Awaited<ReturnType<typeof runDeepCompact>> | undefined;
     try {
-      result = await runDeepCompact({
+      result = await maybeRunDeepCompactBeforeProvider({
         context,
         sessionId,
-        transcript: resumed.transcript,
         runtime,
         trigger: "manual",
         gateway: context.modelGateway,

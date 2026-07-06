@@ -66,6 +66,30 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
   if (!input.gateway) {
     return failMessage(input.context, "Deep compact unavailable: model gateway is not ready.");
   }
+  const existing = input.context.deepCompactInFlight;
+  if (existing?.sessionId === input.sessionId) {
+    return waitForDeepCompact(input.context, existing.promise, input.signal);
+  }
+  const run = runDeepCompactIfNeeded({ ...input, gateway: input.gateway });
+  input.context.deepCompactInFlight = { sessionId: input.sessionId, promise: run };
+  try {
+    return await waitForDeepCompact(input.context, run, input.signal);
+  } finally {
+    if (input.context.deepCompactInFlight?.promise === run) {
+      input.context.deepCompactInFlight = undefined;
+    }
+  }
+}
+
+async function runDeepCompactIfNeeded(input: {
+  context: TuiContext;
+  sessionId: string;
+  runtime: CompactPreflightRuntime;
+  trigger: DeepCompactTrigger;
+  gateway: ModelGateway;
+  signal?: AbortSignal;
+  deps: DeepCompactRuntimeDeps;
+}): Promise<DeepCompactRunResult> {
   const resumed = await input.context.store.resume(input.sessionId);
   if (!shouldRunDeepCompact(input.context, resumed.transcript, input.trigger)) {
     return input.context.cache.deepCompact
@@ -75,9 +99,25 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
   return runDeepCompact({
     ...input,
     transcript: resumed.transcript,
-    gateway: input.gateway,
     signal: input.signal,
   });
+}
+
+function waitForDeepCompact(
+  context: TuiContext,
+  promise: Promise<DeepCompactRunResult>,
+  signal?: AbortSignal,
+): Promise<DeepCompactRunResult> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.resolve(failMessage(context, "Deep compact cancelled by user interrupt."));
+  return Promise.race([
+    promise,
+    new Promise<DeepCompactRunResult>((resolve) => {
+      const onAbort = () => resolve(failMessage(context, "Deep compact cancelled by user interrupt."));
+      signal.addEventListener("abort", onAbort, { once: true });
+      promise.finally(() => signal.removeEventListener("abort", onAbort));
+    }),
+  ]);
 }
 
 export async function runDeepCompact(input: {
@@ -188,6 +228,7 @@ export async function runDeepCompact(input: {
     handoffPacketId: input.context.memory.lastHandoff?.id,
   });
   input.deps.recordCompactBoundary(input.context, boundary);
+  void projectDeepCompactMainScreen(input.context, input.deps, input.sessionId);
   advanceDeepCompactProgress(input.context, "restore_context");
   input.context.cache.deepCompact = packet;
   input.context.cache.compacted = true;
@@ -207,6 +248,27 @@ export async function runDeepCompact(input: {
   );
   advanceDeepCompactProgress(input.context, "complete");
   return { ok: true, packet };
+}
+
+async function projectDeepCompactMainScreen(
+  context: TuiContext,
+  deps: DeepCompactRuntimeDeps,
+  sessionId: string,
+): Promise<void> {
+  try {
+    await context.compactOutputMemory?.({ projectMainScreen: true });
+  } catch (error) {
+    await deps.appendSystemEvent(
+      context,
+      sessionId,
+      `deep compact terminal projection failed: ${sanitizeDeepCompactText(
+        context,
+        error instanceof Error ? error.message : String(error),
+        180,
+      )}`,
+      "warning",
+    );
+  }
 }
 
 function advanceDeepCompactProgress(context: TuiContext, stage: CompactProgressStage): void {
@@ -804,6 +866,10 @@ function failMessage(context: TuiContext, english: string): DeepCompactRunResult
             .replace(
               "Deep compact failed before provider request.",
               "Deep compact 在 provider 请求前失败。",
+            )
+            .replace(
+              "Deep compact is already running; waiting for the active compact to finish.",
+              "Deep compact 正在运行，正在等待当前压缩完成。",
             ),
   };
 }

@@ -22,6 +22,7 @@ import type { ArchitectureCard } from "./architecture-runtime.js";
 import type { IndexState } from "./index-runtime.js";
 import type { Keybinding } from "./keybinding-runtime.js";
 import type { MemoryMutation } from "./memory-command-runtime.js";
+import type { DeepCompactRunResult } from "./deep-compact-runtime.js";
 import type { MetaSchedulerDecision, PolicyDecision } from "./meta-scheduler-runtime.js";
 import type { SolutionCompletenessStatus } from "./model-loop-runtime.js";
 import type { PendingModelSetup } from "./model-setup-runtime.js";
@@ -514,6 +515,11 @@ export type TuiContext = {
    * 能在 await 前主动刷新一帧。plain TUI / 测试无此钩子时安全跳过。
    */
   shellRerender?: () => void;
+  /** Session-local deep compact owner. Provider preflights wait on this so no request bypasses an in-flight compact. */
+  deepCompactInFlight?: {
+    sessionId: string;
+    promise: Promise<DeepCompactRunResult>;
+  };
   /** Optional Ink output memory cleanup hook, invoked after context compaction succeeds. */
   compactOutputMemory?: (options?: {
     projectMainScreen?: boolean;

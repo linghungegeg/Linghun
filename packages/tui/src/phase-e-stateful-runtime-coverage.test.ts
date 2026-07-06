@@ -644,6 +644,88 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(packet.summary).not.toContain("raw-token");
     expect(packet.summary).not.toContain(context.projectPath);
   });
+
+  it("deduplicates concurrent deep compact preflights and reuses the owner result", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    await context.store.appendEvent(sessionId, {
+      type: "user_message",
+      id: "concurrent-u1",
+      text: "compact concurrent marker",
+      createdAt: new Date().toISOString(),
+    });
+    let streamCalls = 0;
+    let release!: () => void;
+    const releasePromise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gatedGateway = {
+      async *stream() {
+        streamCalls += 1;
+        await releasePromise;
+        yield { type: "assistant_text_delta", text: "shared summary", id: "a1" } as never;
+        yield { type: "message_stop", id: "a1", chunkCount: 1, hadUsage: false } as never;
+      },
+    } as unknown as ModelGateway;
+
+    const first = maybeRunDeepCompactBeforeProvider({
+      context,
+      sessionId,
+      runtime: runtime(),
+      trigger: "request",
+      gateway: gatedGateway,
+      deps: deepDeps(),
+    });
+    const second = maybeRunDeepCompactBeforeProvider({
+      context,
+      sessionId,
+      runtime: runtime(),
+      trigger: "continuation",
+      gateway: gatedGateway,
+      deps: deepDeps(),
+    });
+
+    expect(context.deepCompactInFlight?.sessionId).toBe(sessionId);
+    release();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(streamCalls).toBe(1);
+    expect(firstResult.ok).toBe(true);
+    expect(secondResult.ok).toBe(true);
+    if (firstResult.ok && secondResult.ok) {
+      expect(secondResult.packet.id).toBe(firstResult.packet.id);
+    }
+    expect(context.cache.deepCompact?.summary).toContain("shared summary");
+    expect(context.deepCompactInFlight).toBeUndefined();
+  });
+
+  it("projects the main screen after successful deep compact", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const projections: Array<{ projectMainScreen?: boolean }> = [];
+    context.compactOutputMemory = (options = {}) => {
+      projections.push(options);
+      return { beforeCount: 6, afterCount: 3 };
+    };
+
+    const result = await runDeepCompact({
+      context,
+      sessionId,
+      transcript: [
+        { type: "user_message", id: "screen-u1", text: "goal", createdAt: new Date().toISOString() },
+      ],
+      runtime: runtime(),
+      trigger: "manual",
+      gateway: gateway([
+        { type: "assistant_text_delta", text: "summary for screen", id: "a1" },
+        { type: "message_stop", id: "a1", chunkCount: 1, hadUsage: false },
+      ]),
+      deps: deepDeps(),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(projections).toContainEqual({ projectMainScreen: true });
+  });
 });
 
 describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", () => {
