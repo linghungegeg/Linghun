@@ -77,7 +77,7 @@ See the whitepaper: [2. User Pain Points and Practical Benefits](./WHITEPAPER.en
 ## Product Screenshots
 
 <p>
-  <img src="./img/Snipaste_2026-05-27_03-20-04.png" alt="Linghun TUI home screen" width="32%" />
+  <img src="./img/Snipaste_2026-07-06_04-01-02.png" alt="Linghun TUI latest screen" width="32%" />
   <img src="./img/Snipaste_2026-06-04_16-53-27.png" alt="Linghun TUI evidence-boundary answer" width="32%" />
   <img src="./img/Snipaste_2026-05-31_19-07-32.png" alt="Linghun remote channel example" width="32%" />
 </p>

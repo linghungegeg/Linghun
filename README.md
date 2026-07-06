@@ -90,7 +90,7 @@ Linghun 面向真实开发，而不是只做演示式问答。你可以直接用
 ## 产品截图
 
 <p>
-  <img src="./img/Snipaste_2026-05-27_03-20-04.png" alt="Linghun TUI 首页" width="32%" />
+  <img src="./img/Snipaste_2026-07-06_04-01-02.png" alt="Linghun TUI 最新界面" width="32%" />
   <img src="./img/Snipaste_2026-06-04_16-53-27.png" alt="Linghun TUI 证据边界回答" width="32%" />
   <img src="./img/Snipaste_2026-05-31_19-07-32.png" alt="Linghun 远程通道示例" width="32%" />
 </p>
