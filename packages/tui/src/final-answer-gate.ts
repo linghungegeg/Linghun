@@ -1,6 +1,10 @@
 import type { TranscriptEvent } from "@linghun/core";
 import type { Language } from "@linghun/shared";
 import { detectArchitectureDrift } from "./architecture-runtime.js";
+import {
+  hasStructuredArtifactEvidenceForPath,
+  readEvidenceDataRecord,
+} from "./artifact-evidence-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
   evaluateArchitectureAndCompletenessClaims,
@@ -353,47 +357,14 @@ function serviceMatchesDiagnostic(
 }
 
 function hasArtifactDiagnosticEvidence(context: TuiContext, path: string): boolean {
-  return context.evidence.some((item) => {
-    const artifactHint = readGenericEvidenceDataRecord(item, "artifactHint");
-    if (
-      artifactHint?.exists === true &&
-      typeof artifactHint.path === "string" &&
-      pathsReferToSameArtifact(artifactHint.path, path)
-    ) {
-      return true;
-    }
-    const binaryPreflight = readGenericEvidenceDataRecord(item, "binaryPreflight");
-    return (
-      typeof binaryPreflight?.path === "string" &&
-      pathsReferToSameArtifact(binaryPreflight.path, path)
-    );
-  });
+  return hasStructuredArtifactEvidenceForPath(context.evidence, path);
 }
 
 function readGenericEvidenceDataRecord(
   evidence: { data?: unknown },
   key: string,
 ): Record<string, unknown> | undefined {
-  if (!evidence.data || typeof evidence.data !== "object") return undefined;
-  const value = (evidence.data as Record<string, unknown>)[key];
-  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
-}
-
-function pathsReferToSameArtifact(actual: string, target: string): boolean {
-  const normalizedActual = normalizeArtifactEvidencePath(actual);
-  const normalizedTarget = normalizeArtifactEvidencePath(target);
-  return (
-    normalizedActual === normalizedTarget ||
-    basenameLike(normalizedActual) === basenameLike(normalizedTarget)
-  );
-}
-
-function normalizeArtifactEvidencePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
-}
-
-function basenameLike(path: string): string {
-  return path.split("/").filter(Boolean).at(-1) ?? path;
+  return readEvidenceDataRecord(evidence, key);
 }
 
 // D.14H Phase 7.5-C：纯自然语言高风险 claim 最小兜底识别。

@@ -788,6 +788,33 @@ describe("final answer gate aggregation", () => {
     expect(activeFailure.unsupportedKinds).toContain("engineering_provider_error");
   });
 
+  it("accepts binary preflight artifact evidence for the requested target", () => {
+    const context = {
+      ...makeGateContext(),
+      lastMetaSchedulerDecision: {
+        policyDecision: {
+          engineeringSignal: {
+            profile: "binary_or_artifact",
+            artifactTargets: ["dist/app.bin"],
+          },
+        },
+      },
+      evidence: [
+        makeEvidence({
+          data: { binaryPreflight: { path: "dist/app.bin" } },
+        }),
+      ],
+    };
+
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      "已完成，dist/app.bin 已生成。",
+      false,
+    );
+
+    expect(result.status).toBe("passed");
+  });
+
   it("first final-gate retry runs the runtime evidence action dispatcher", async () => {
     const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
     expect(source).toContain("runFinalGateEvidenceAction");

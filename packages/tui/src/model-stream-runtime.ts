@@ -20,6 +20,13 @@ import {
   createArchitectureRuntimeDirective,
   shouldTriggerArchitectureRuntime,
 } from "./architecture-runtime.js";
+import {
+  hasStructuredArtifactEvidence,
+  hasStructuredArtifactEvidenceForPath,
+  pathsReferToSameArtifact,
+  readEvidenceDataRecord,
+  uniqueArtifactTargets,
+} from "./artifact-evidence-runtime.js";
 import { RESOURCE_GUARD_KIND, checkResourceGuard } from "./background-control-runtime.js";
 import { buildPromptCacheRequestFields } from "./break-cache-runtime.js";
 import { writeLightHints } from "./cache-command-runtime.js";
@@ -710,13 +717,7 @@ function evaluateEngineeringFinalBoundary(
 function hasArtifactEvidence(context: TuiContext): boolean {
   const signalTargets =
     context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
-  const targets = uniqueArtifactTargets(signalTargets);
-  return context.evidence.some((item) => {
-    const artifactHint = readEvidenceDataRecord(item, "artifactHint");
-    if (artifactHint?.exists !== true || typeof artifactHint.path !== "string") return false;
-    if (targets.length === 0) return true;
-    return targets.some((target) => pathsReferToSameArtifact(artifactHint.path as string, target));
-  });
+  return hasStructuredArtifactEvidence(context.evidence, signalTargets);
 }
 
 function hasFullVerificationEvidence(context: TuiContext): boolean {
@@ -733,42 +734,6 @@ function hasServiceVerificationEvidence(context: TuiContext): boolean {
     const serviceHint = readEvidenceDataRecord(item, "serviceHint");
     return service?.ready === true || serviceHint?.ready === true;
   });
-}
-
-function readEvidenceDataRecord(
-  evidence: { data?: unknown },
-  key: "service" | "serviceHint" | "artifactHint",
-): Record<string, unknown> | undefined {
-  if (!evidence.data || typeof evidence.data !== "object") return undefined;
-  const value = (evidence.data as Record<string, unknown>)[key];
-  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
-}
-
-function pathsReferToSameArtifact(actual: string, target: string): boolean {
-  const normalizedActual = normalizeArtifactEvidencePath(actual);
-  const normalizedTarget = normalizeArtifactEvidencePath(target);
-  return normalizedActual === normalizedTarget ||
-    basenameLike(normalizedActual) === basenameLike(normalizedTarget);
-}
-
-function normalizeArtifactEvidencePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
-}
-
-function basenameLike(path: string): string {
-  return path.split("/").filter(Boolean).at(-1) ?? path;
-}
-
-function uniqueArtifactTargets(targets: string[]): string[] {
-  const out = new Set<string>();
-  for (const target of targets) {
-    const trimmed = target.trim();
-    if (!trimmed) continue;
-    out.add(trimmed);
-    const basename = trimmed.split(/[\\/]/u).filter(Boolean).at(-1);
-    if (basename) out.add(basename);
-  }
-  return Array.from(out);
 }
 
 export function planFinalGateEvidenceGapAction(input: {
@@ -1370,14 +1335,7 @@ function collectArtifactProbeCandidatePaths(
 }
 
 function hasArtifactProbeEvidenceForPath(evidence: TuiContext["evidence"], path: string): boolean {
-  return evidence.some((item) => {
-    const artifactHint = readEvidenceDataRecord(item, "artifactHint");
-    return (
-      artifactHint?.exists === true &&
-      typeof artifactHint.path === "string" &&
-      pathsReferToSameArtifact(artifactHint.path, path)
-    );
-  });
+  return hasStructuredArtifactEvidenceForPath(evidence, path);
 }
 
 function extractLikelyFilePathsFromText(text: string): string[] {
