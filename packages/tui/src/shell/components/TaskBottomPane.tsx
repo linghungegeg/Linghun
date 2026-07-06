@@ -25,6 +25,7 @@ const COMPACT_COMPOSER_VISIBLE_LINES = 1;
 const FULL_FOOTER_ROWS = 2;
 const COMPACT_FOOTER_ROWS = 1;
 const WORKING_ROWS = 1;
+const TASK_STATUS_GAP_ROWS = 1;
 const FULL_SLASH_ROWS = 9;
 const COMPACT_SLASH_ROWS = 7;
 
@@ -152,7 +153,7 @@ export function TaskBottomPane({
     backgroundOverlayRows: view.backgroundTaskOverlay && !view.permission ? 2 : 0,
     notificationRows: (view.notifications?.length ?? 0) > 0 ? 1 : 0,
     runtimeSummaryRows: view.taskRuntimeSummary ? 2 : 0,
-    taskListRows: estimateTaskListRows(view.taskListView),
+    taskListRows: estimateTaskListRows(view.taskListView, statusActive),
     agentProgressRows: view.agentProgressTree ? 2 : 0,
     workflowProgressRows: view.workflowProgressView ? 2 : 0,
   };
@@ -201,7 +202,7 @@ export function TaskBottomPane({
       ) : null}
 
       {allocation.showTaskList && view.taskListView ? (
-        <Box paddingX={2}>
+        <Box paddingX={2} marginBottom={statusActive ? TASK_STATUS_GAP_ROWS : 0}>
           <TaskListView
             list={view.taskListView}
             width={contentWidth}
@@ -270,9 +271,12 @@ function isBottomPaneStatusVisible(status: ShellViewModel["bottomPaneStatus"]): 
   return Boolean(status);
 }
 
-function estimateTaskListRows(taskListView: ShellViewModel["taskListView"]): number {
+function estimateTaskListRows(
+  taskListView: ShellViewModel["taskListView"],
+  hasFollowingStatus = false,
+): number {
   if (!taskListView || taskListView.rows.length === 0) return 0;
-  return 1;
+  return 1 + (hasFollowingStatus ? TASK_STATUS_GAP_ROWS : 0);
 }
 
 function legacyStatusFromActivity(

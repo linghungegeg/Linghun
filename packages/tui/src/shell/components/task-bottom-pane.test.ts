@@ -206,7 +206,8 @@ describe("TaskBottomPane budget allocation", () => {
 
     expect(source).toContain("const bootstrapSlashRows =");
     expect(source).toMatch(/slashMaxRows = slashRows > 0 \? allocation\.slashMaxRows : bootstrapSlashRows/);
-    expect(source).toContain("return 1;");
+    expect(source).toContain("const TASK_STATUS_GAP_ROWS = 1;");
+    expect(source).toContain("return 1 + (hasFollowingStatus ? TASK_STATUS_GAP_ROWS : 0);");
   });
 
   it("keeps migrated status/footer theme colors wired in the bottom pane", () => {
