@@ -846,6 +846,13 @@ describe("model-loop-runtime", () => {
       );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
+      expect(verdict.missingEvidenceByClaim).toEqual([
+        {
+          kind: "completion_pass",
+          phrase: "测试通过",
+          missingEvidenceKind: "test/build/typecheck/diff-check/smoke",
+        },
+      ]);
     });
 
     it("passes test PASS claim when test_passed evidence exists", () => {

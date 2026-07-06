@@ -932,11 +932,18 @@ export type FinalAnswerClaimMatch = {
   phrase: string;
 };
 
+export type FinalAnswerClaimEvidenceGap = {
+  kind: FinalAnswerClaimKind;
+  phrase: string;
+  missingEvidenceKind: string;
+};
+
 export type FinalAnswerClaimVerdict = {
   status: "passed" | "needs_disclaimer";
   matchedClaims: FinalAnswerClaimMatch[];
   unsupportedKinds: FinalAnswerClaimKind[];
   missingEvidenceKinds: string[];
+  missingEvidenceByClaim: FinalAnswerClaimEvidenceGap[];
   // D.13V-A: kinds whose only matching evidence was filtered out as stale.
   // 仅在 status==="needs_disclaimer" 且确有过期证据被忽略时出现；不影响 D.13U 的现有判定语义。
   staleKinds?: FinalAnswerClaimKind[];
@@ -1363,6 +1370,7 @@ export function evaluateStructuredFinalAnswerClaims(
       matchedClaims: [],
       unsupportedKinds: [],
       missingEvidenceKinds: [],
+      missingEvidenceByClaim: [],
     };
   }
   const matchedKinds = new Set<FinalAnswerClaimKind>(matches.map((item) => item.kind));
@@ -1464,14 +1472,24 @@ export function evaluateStructuredFinalAnswerClaims(
       matchedClaims: matches,
       unsupportedKinds: [],
       missingEvidenceKinds: [],
+      missingEvidenceByClaim: [],
     };
   }
   const missingEvidenceKinds = unsupported.map((kind) => REQUIRED_EVIDENCE_LABEL[kind]);
+  const unsupportedKindSet = new Set(unsupported);
+  const missingEvidenceByClaim = matches
+    .filter((match) => unsupportedKindSet.has(match.kind))
+    .map((match) => ({
+      kind: match.kind,
+      phrase: match.phrase,
+      missingEvidenceKind: REQUIRED_EVIDENCE_LABEL[match.kind],
+    }));
   const verdict: FinalAnswerClaimVerdict = {
     status: "needs_disclaimer",
     matchedClaims: matches,
     unsupportedKinds: unsupported,
     missingEvidenceKinds,
+    missingEvidenceByClaim,
   };
   if (staleKinds.length > 0) {
     verdict.staleKinds = staleKinds;

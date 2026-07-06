@@ -434,6 +434,21 @@ compact 部分分支存在中文硬编码；英文环境可能出现中文提示
 - 高风险完成声明仍严格，低风险讨论路径更轻。
 - `preflight` / `tool-result-budget` 仍未被本阶段修改。
 
+实施记录（已完成）：
+
+- `FinalAnswerClaimVerdict` 增加 `missingEvidenceByClaim`，把结构化 claim phrase 映射到缺失 evidence kind。
+- `/claim-check` 失败输出改为 contract-first：优先展示结构化 claim 缺少的 evidence kind，例如 `test/build/typecheck/diff-check/smoke`。
+- 无 `LinghunFinalAnswerClaims` 时，legacy 自然语言正则降为窄兜底：只拦截看起来像最终闭环的完成/通过/readiness 声明；包含“如果/方案/讨论/解释”等普通讨论文本直接放行。
+- 保持 `preflight` / `tool-result-budget` 不变。
+
+验证：
+
+- `corepack pnpm vitest run packages/tui/src/model-loop-runtime.test.ts` 通过（156 tests）。
+- `corepack pnpm vitest run packages/tui/src/index.test.ts -t "Phase 7:"` 通过（7 tests）。
+- `corepack pnpm vitest run packages/tui/src/index.test.ts -t "D.13U: /claim-check|rejects unsupported PASS claims"` 通过（3 tests）。
+- `corepack pnpm vitest run packages/tui/src/index.test.ts -t "D.13U: ordinary slash output stays free|D.13U: '当前分支' query|D.13U: source has no FreshnessLite"` 通过（3 tests）。
+- `corepack pnpm exec tsc -b tsconfig.json` 通过。
+
 ## 13. 待确认问题
 
 1. 裸 `/compact` 是否确认改成“执行 compact”？建议：是。

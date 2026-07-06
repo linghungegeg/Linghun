@@ -12,6 +12,7 @@ import {
   extractStructuredFinalAnswerClaims,
   finalAnswerHasCompletenessClassification,
   hasArchitectureEvidenceForClaims,
+  type FinalAnswerClaimVerdict,
 } from "./model-loop-runtime.js";
 import type { EvidenceRecord, VerdictEvidenceScope } from "./tui-data-types.js";
 
@@ -88,6 +89,7 @@ export function formatSolutionCompletenessReportBlock(context: TuiContext): stri
 export type ClaimCheck = {
   status: "passed" | "needs_disclaimer" | "blocked";
   unsupportedClaims: string[];
+  missingEvidenceKinds?: string[];
   verdict?: VerdictEvidenceScope;
 };
 
@@ -288,8 +290,18 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
   }
   return {
     status: "needs_disclaimer",
-    unsupportedClaims: structuredClaims.map((item) => item.phrase),
+    unsupportedClaims: formatUnsupportedStructuredClaims(verdict),
+    missingEvidenceKinds: verdict.missingEvidenceKinds,
   };
+}
+
+function formatUnsupportedStructuredClaims(verdict: FinalAnswerClaimVerdict): string[] {
+  if (verdict.missingEvidenceByClaim.length === 0) {
+    return verdict.matchedClaims.map((item) => item.phrase);
+  }
+  return verdict.missingEvidenceByClaim.map(
+    (item) => `${item.phrase} (missing: ${item.missingEvidenceKind})`,
+  );
 }
 
 function checkHeadlessRecentDiagnostics(context: TuiContext): ClaimCheck {
@@ -367,58 +379,36 @@ function readGenericEvidenceDataRecord(
   return readEvidenceDataRecord(evidence, key);
 }
 
-// D.14H Phase 7.5-C：纯自然语言高风险 claim 最小兜底识别。
-// 无结构化 LinghunFinalAnswerClaims 时，对无证据的高风险完成/通过声明做匹配。
-// 只拦截明确的自夸式 claim；普通陈述（如"当前分支是 master"）不误伤。
-//
-// D.14H Phase 7.5-C.1：JS 的 \b 是 ASCII 单词边界，CJK 全部是 \W，
-// \b 包住中文短语永远不会命中。中文 pattern 去掉 \b，英文保留。
+// Phase 7: legacy fallback is a narrow safety net only. Structured
+// LinghunFinalAnswerClaims remains the primary path; natural language text is
+// checked only when it looks like a final closure statement, not discussion.
 const HIGH_RISK_NL_CLAIM_PATTERNS: Array<{ regex: RegExp; label: string }> = [
-  // ── Chinese patterns（无 \b，CJK 字符无需 ASCII 单词边界）──
   {
-    regex: /(?:测试(?:都|全部|已经|已)?通过|全部测试通过|所有测试(?:都)?通过)/iu,
-    label: "测试通过",
+    regex: /(?:我|本轮|这次|已|已经)?(?:测试|验证|构建|typecheck|lint|smoke)\s*(?:都|全部|已经|已)?通过/iu,
+    label: "legacy fallback: verification/test pass evidence",
   },
   {
-    regex: /(?:已完成|已修复并已验证|已修复且已验证|已经完成修复|已经修复)/iu,
-    label: "已完成/已修复",
+    regex: /(?:我|本轮|这次|该问题|这个问题)?(?:已完成|已经完成|已修复并已验证|已修复且已验证|已经完成修复|已经修复|已修复)/iu,
+    label: "legacy fallback: task completion or fix evidence",
   },
   {
-    regex: /已修复/iu,
-    label: "已修复",
+    regex: /(?:全部通过|全部完成|完全通过|可上线|可以上线|达到上线标准)/iu,
+    label: "legacy fallback: completion/readiness evidence",
   },
   {
-    regex: /(?:全部通过|全部完成|完全通过)/iu,
-    label: "全部通过",
+    regex: /\b(?:tests?\s+passed|build\s+passed|type\s*check\s+passed|lint\s+passed|smoke\s*(?:test\s*)?pass(?:ed)?)\b/iu,
+    label: "legacy fallback: verification/test pass evidence",
   },
   {
-    regex: /(?:可上线|可以上线|达到上线标准)/iu,
-    label: "可上线",
-  },
-  {
-    regex: /(?:全部(?:单元)?测试(?:已|已经)?通过|所有(?:单元)?测试(?:已|已经)?通过)/iu,
-    label: "测试通过",
-  },
-  // ── English / mixed patterns（保留 \b，避免误伤普通词）──
-  {
-    regex: /\b(?:beta\s*ready|ready\s*for\s*beta|production\s*ready)\b/iu,
-    label: "beta ready",
-  },
-  {
-    regex: /\b(?:smoke\s*(?:test\s*)?pass(?:ed)?)\b/iu,
-    label: "smoke pass",
-  },
-  {
-    regex: /smoke\s*通过/iu,
-    label: "smoke pass",
-  },
-  {
-    regex: /\bPASS\b/u,
-    label: "PASS",
+    regex: /\b(?:fixed|completed|verified|beta\s*ready|ready\s*for\s*beta|production\s*ready)\b/iu,
+    label: "legacy fallback: task completion or readiness evidence",
   },
 ];
 
 function detectNaturalLanguageHighRiskClaims(text: string): ClaimCheck {
+  if (!looksLikeFinalClosureStatement(text)) {
+    return { status: "passed", unsupportedClaims: [] };
+  }
   const hitLabels = new Set<string>();
   for (const { regex, label } of HIGH_RISK_NL_CLAIM_PATTERNS) {
     if (regex.test(text)) {
@@ -429,9 +419,24 @@ function detectNaturalLanguageHighRiskClaims(text: string): ClaimCheck {
     return {
       status: "needs_disclaimer",
       unsupportedClaims: Array.from(hitLabels),
+      missingEvidenceKinds: Array.from(hitLabels),
     };
   }
   return { status: "passed", unsupportedClaims: [] };
+}
+
+function looksLikeFinalClosureStatement(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  if (/(?:可以上线|达到上线标准)/iu.test(normalized)) {
+    return true;
+  }
+  if (/(?:如果|计划|方案|建议|可以|应该|需要|讨论|解释|例如|比如|怎么|如何|\?)|(?:if|plan|proposal|should|could|would|example|explain|how\b)/iu.test(normalized)) {
+    return false;
+  }
+  return /(?:我|本轮|这次|已|已经|完成|修复|验证|测试|构建|通过|上线|ready|passed|fixed|completed|verified)/iu.test(
+    normalized,
+  );
 }
 
 export function formatClaimCheck(result: ClaimCheck, language: Language): string {
@@ -462,7 +467,10 @@ export function formatClaimCheck(result: ClaimCheck, language: Language): string
     return language === "en-US" ? "Claim check passed." : "Claim Checker：通过。";
   }
   const claims = result.unsupportedClaims.join(", ");
+  const missing = result.missingEvidenceKinds?.length
+    ? Array.from(new Set(result.missingEvidenceKinds)).join(", ")
+    : claims;
   return language === "en-US"
-    ? `Claim lacks evidence: ${claims}. Gather matching evidence or remove the claim.`
-    : `Claim Checker：缺少证据：${claims}。请补齐匹配证据或移除该声明。`;
+    ? `Claim lacks evidence: ${claims}. Missing evidence: ${missing}. Gather matching evidence or remove the claim.`
+    : `Claim Checker：缺少证据：${claims}。缺少 evidence：${missing}。请补齐匹配证据或移除该声明。`;
 }
