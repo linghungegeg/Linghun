@@ -2,6 +2,11 @@
 
 This page records product updates that directly affect user experience. For the full system design, see the [English Whitepaper](../WHITEPAPER.en.md).
 
+## Coming Soon
+
+- The desktop app is coming soon.
+- A specially trained random full-modal model (optional install) is coming with the desktop app. It connects through the foundation's built-in App Bridge and does not require any other software. With the current foundation + index + pre-check engine, a 10-minute task can be shortened to 3-5 minutes, making the workflow faster and steadier.
+
 ## July 7, 2026: Heavy Update After Deep Real-world Development
 
 This is a heavy update after deep real-world development: anti-hallucination now fits more tightly with the foundations, output is smoother, faster, and steadier, and cache hit rate has increased sharply to 96%+ without becoming dumb. The focus is not a pile of isolated features. It tightens the parts of long development runs that most often need to work together: deep compact, cache boundaries, the command surface, provider watchdogs, final-answer gates, evidence state, and task progress display.
