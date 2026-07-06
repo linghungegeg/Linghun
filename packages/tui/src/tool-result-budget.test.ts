@@ -92,6 +92,87 @@ describe("tool_result budget", () => {
     }
   });
 
+  it("caps aggregate visible tool_result content across multiple assistant turns", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const messages = Array.from({ length: 12 }).flatMap((_, index) => {
+      const id = `call-turn-${index}`;
+      return [
+        {
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [{ id, name: "Bash", input: { command: `large-${index}` } }],
+        },
+        {
+          role: "tool" as const,
+          tool_call_id: id,
+          content: `TURN_${index}_START:${"x".repeat(49_000)}:TURN_${index}_END`,
+        },
+      ];
+    });
+
+    const result = await applyToolResultBudgetToMessages(messages, {
+      projectPath: project,
+      sessionId: "session-multi-turn",
+    });
+
+    const visibleToolChars = result.messages.reduce((sum, message) => {
+      return message.role === "tool" ? sum + message.content.length : sum;
+    }, 0);
+    expect(visibleToolChars).toBeLessThanOrEqual(200_000);
+    expect(result.records.length).toBeGreaterThan(0);
+    expect(
+      result.messages.some(
+        (message) => message.role === "tool" && message.content.includes("<persisted-tool-result>"),
+      ),
+    ).toBe(true);
+  });
+
+  it("caps aggregate visible tool_result content after small results were already seen", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const state: ToolResultBudgetState = { seenIds: new Set(), replacements: new Map() };
+    const messages = Array.from({ length: 12 }).flatMap((_, index) => {
+      const id = `call-seen-${index}`;
+      return [
+        {
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [{ id, name: "Bash", input: { command: `large-${index}` } }],
+        },
+        {
+          role: "tool" as const,
+          tool_call_id: id,
+          content: `SEEN_${index}_START:${"x".repeat(49_000)}:SEEN_${index}_END`,
+        },
+      ];
+    });
+
+    for (let index = 0; index < messages.length; index += 2) {
+      const firstPass = await applyToolResultBudgetToMessages(messages.slice(index, index + 2), {
+        projectPath: project,
+        sessionId: "session-seen-multi-turn",
+        state,
+      });
+      expect(firstPass.records).toHaveLength(0);
+    }
+
+    const result = await applyToolResultBudgetToMessages(messages, {
+      projectPath: project,
+      sessionId: "session-seen-multi-turn",
+      state,
+    });
+
+    const visibleToolChars = result.messages.reduce((sum, message) => {
+      return message.role === "tool" ? sum + message.content.length : sum;
+    }, 0);
+    expect(visibleToolChars).toBeLessThanOrEqual(200_000);
+    expect(result.records.length).toBeGreaterThan(0);
+    expect(
+      result.messages.some(
+        (message) => message.role === "tool" && message.content.includes("<persisted-tool-result>"),
+      ),
+    ).toBe(true);
+  });
+
   it("persists Bash and RunWorkflow tool_results without changing their tool_call_id pairing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
     const bash = `BASH_BIG_START\n${"b".repeat(55_000)}\nBASH_BIG_END`;

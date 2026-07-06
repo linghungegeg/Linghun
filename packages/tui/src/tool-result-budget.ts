@@ -48,6 +48,7 @@ export type ToolResultBudgetState = {
 
 const TOOL_RESULTS_DIR = "tool-results";
 const TOOL_RESULT_PREVIEW_CHARS = 2_000;
+const TOOL_RESULT_SUMMARY_ESTIMATE_CHARS = TOOL_RESULT_PREVIEW_CHARS + 2_000;
 
 type Candidate = {
   messageIndex: number;
@@ -134,6 +135,15 @@ export async function applyToolResultBudgetToMessages(
       remaining -= candidate.chars;
     }
   }
+
+  selectCandidatesToFitVisibleBudget({
+    candidates,
+    selected,
+    freshIds,
+    cachedReplacements,
+    sessionId: options.sessionId,
+    state: options.state,
+  });
 
   if (selected.size === 0) {
     for (const candidate of freshCandidates) {
@@ -226,6 +236,81 @@ function getContentReplacements(
 ): Map<string, ToolResultBudgetReplacement> {
   state.contentReplacements ??= new Map();
   return state.contentReplacements;
+}
+
+function selectCandidatesToFitVisibleBudget(options: {
+  candidates: Candidate[];
+  selected: Map<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>;
+  freshIds: ReadonlySet<string>;
+  cachedReplacements: ReadonlyMap<string, string>;
+  sessionId: string;
+  state?: ToolResultBudgetState;
+}): void {
+  let visibleSize = options.candidates.reduce(
+    (sum, candidate) => sum + getCandidateVisibleChars(candidate, options),
+    0,
+  );
+  if (visibleSize <= LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS) return;
+
+  const freshCandidates = [...options.candidates]
+    .filter((item) => options.freshIds.has(item.toolUseId) && !options.selected.has(item.toolUseId))
+    .sort((a, b) => b.chars - a.chars);
+  visibleSize = selectCandidatesUntilWithinBudget(freshCandidates, visibleSize, options);
+  if (visibleSize <= LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS) return;
+
+  const seenCandidates = [...options.candidates]
+    .filter(
+      (item) =>
+        !options.freshIds.has(item.toolUseId) &&
+        !options.selected.has(item.toolUseId) &&
+        !options.cachedReplacements.has(item.toolUseId) &&
+        !getStateReplacement(item, options),
+    )
+    .sort((a, b) => b.chars - a.chars);
+  selectCandidatesUntilWithinBudget(seenCandidates, visibleSize, options);
+}
+
+function selectCandidatesUntilWithinBudget(
+  candidates: Candidate[],
+  visibleSize: number,
+  options: {
+    selected: Map<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>;
+  },
+): number {
+  let remaining = visibleSize;
+  for (const candidate of candidates) {
+    if (remaining <= LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS) break;
+    options.selected.set(candidate.toolUseId, { ...candidate, reason: "aggregate_message" });
+    remaining -= Math.max(0, candidate.chars - getEstimatedSummaryChars(candidate));
+  }
+  return remaining;
+}
+
+function getCandidateVisibleChars(
+  candidate: Candidate,
+  options: {
+    selected: ReadonlyMap<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>;
+    cachedReplacements: ReadonlyMap<string, string>;
+    sessionId: string;
+    state?: ToolResultBudgetState;
+  },
+): number {
+  if (options.selected.has(candidate.toolUseId)) return getEstimatedSummaryChars(candidate);
+  const cached = options.cachedReplacements.get(candidate.toolUseId);
+  if (cached) return cached.length;
+  return getStateReplacement(candidate, options)?.summary.length ?? candidate.chars;
+}
+
+function getStateReplacement(
+  candidate: Candidate,
+  options: { sessionId: string; state?: ToolResultBudgetState },
+): ToolResultBudgetReplacement | undefined {
+  const stateKey = options.state ? getCandidateStateKey(candidate, options.sessionId) : undefined;
+  return stateKey ? options.state?.replacements.get(stateKey) : undefined;
+}
+
+function getEstimatedSummaryChars(candidate: Candidate): number {
+  return Math.min(candidate.chars, TOOL_RESULT_SUMMARY_ESTIMATE_CHARS);
 }
 
 function groupCandidatesByAssistantToolUse(
