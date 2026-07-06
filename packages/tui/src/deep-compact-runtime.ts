@@ -2,18 +2,18 @@ import { randomUUID } from "node:crypto";
 import type { TranscriptEvent } from "@linghun/core";
 import type { ModelGateway, ModelMessage, ModelRequest } from "@linghun/providers";
 import { redactCommonSecrets } from "@linghun/shared";
-import { type CompactBoundary, createManualCompactBoundary } from "./compact-context.js";
 import {
   applyCacheWritePolicyToRequest,
   recordCacheRequestObservation,
   recordCacheUsageObservation,
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
+import { type CompactBoundary, createManualCompactBoundary } from "./compact-context.js";
 import type { CompactPreflightRuntime } from "./compact-preflight-runtime.js";
 import { estimateTranscriptContextChars } from "./context-estimator.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
-import type { TuiContext } from "./index.js";
 import { formatIndexRuntimeRef } from "./index-runtime.js";
+import type { TuiContext } from "./index.js";
 import { withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   sanitizeDiagnosticText,
@@ -21,6 +21,7 @@ import {
   truncateDisplay,
 } from "./startup-runtime.js";
 import type {
+  CompactProgressSnapshot,
   CompactProgressStage,
   DeepCompactPacket,
   DeepCompactTrigger,
@@ -54,6 +55,15 @@ const DEEP_COMPACT_RERUN_EVENT_THRESHOLD = 40;
 const RECENT_TRANSCRIPT_TAIL_EVENTS = 24;
 const EVENT_TEXT_LIMIT = 420;
 
+export function createDeepCompactProgress(): CompactProgressSnapshot {
+  return {
+    status: "running",
+    stages: ["scan_context"],
+    preCompactChars: 0,
+    postCompactChars: 0,
+  };
+}
+
 export async function maybeRunDeepCompactBeforeProvider(input: {
   context: TuiContext;
   sessionId: string;
@@ -70,6 +80,11 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
   if (existing?.sessionId === input.sessionId) {
     return waitForDeepCompact(input.context, existing.promise, input.signal);
   }
+  const progress = input.context.cache.compactProgress ? undefined : createDeepCompactProgress();
+  if (progress) {
+    input.context.cache.compactProgress = progress;
+    input.context.shellRerender?.();
+  }
   const run = runDeepCompactIfNeeded({ ...input, gateway: input.gateway });
   input.context.deepCompactInFlight = { sessionId: input.sessionId, promise: run };
   try {
@@ -77,6 +92,10 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
   } finally {
     if (input.context.deepCompactInFlight?.promise === run) {
       input.context.deepCompactInFlight = undefined;
+    }
+    if (progress && input.context.cache.compactProgress === progress) {
+      input.context.cache.compactProgress = undefined;
+      input.context.shellRerender?.();
     }
   }
 }
@@ -90,6 +109,15 @@ async function runDeepCompactIfNeeded(input: {
   signal?: AbortSignal;
   deps: DeepCompactRuntimeDeps;
 }): Promise<DeepCompactRunResult> {
+  const reusablePacket = await getReusableDeepCompactPacketFromTail(
+    input.context,
+    input.sessionId,
+    input.trigger,
+  );
+  if (reusablePacket) {
+    return { ok: true, packet: reusablePacket };
+  }
+
   const resumed = await input.context.store.resume(input.sessionId);
   if (!shouldRunDeepCompact(input.context, resumed.transcript, input.trigger)) {
     return input.context.cache.deepCompact
@@ -103,17 +131,39 @@ async function runDeepCompactIfNeeded(input: {
   });
 }
 
+async function getReusableDeepCompactPacketFromTail(
+  context: TuiContext,
+  sessionId: string,
+  trigger: DeepCompactTrigger,
+): Promise<DeepCompactPacket | undefined> {
+  const packet = context.cache.deepCompact;
+  if (!packet || trigger === "manual" || trigger === "workflow") return undefined;
+
+  try {
+    const recent = await context.store.readRecentTranscriptEvents(sessionId, {
+      limit: DEEP_COMPACT_RERUN_EVENT_THRESHOLD + 1,
+    });
+    return recent.events.some((event) => event.type === DEEP_COMPACT_EVENT_TYPE)
+      ? packet
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function waitForDeepCompact(
   context: TuiContext,
   promise: Promise<DeepCompactRunResult>,
   signal?: AbortSignal,
 ): Promise<DeepCompactRunResult> {
   if (!signal) return promise;
-  if (signal.aborted) return Promise.resolve(failMessage(context, "Deep compact cancelled by user interrupt."));
+  if (signal.aborted)
+    return Promise.resolve(failMessage(context, "Deep compact cancelled by user interrupt."));
   return Promise.race([
     promise,
     new Promise<DeepCompactRunResult>((resolve) => {
-      const onAbort = () => resolve(failMessage(context, "Deep compact cancelled by user interrupt."));
+      const onAbort = () =>
+        resolve(failMessage(context, "Deep compact cancelled by user interrupt."));
       signal.addEventListener("abort", onAbort, { once: true });
       promise.finally(() => signal.removeEventListener("abort", onAbort));
     }),
@@ -131,7 +181,10 @@ export async function runDeepCompact(input: {
   deps: DeepCompactRuntimeDeps;
 }): Promise<DeepCompactRunResult> {
   const now = Date.now();
-  if (input.context.cache.deepCompactCooldownUntil && input.context.cache.deepCompactCooldownUntil > now) {
+  if (
+    input.context.cache.deepCompactCooldownUntil &&
+    input.context.cache.deepCompactCooldownUntil > now
+  ) {
     return failMessage(
       input.context,
       "Deep compact is cooling down after a previous compact failure.",
@@ -859,10 +912,7 @@ function failMessage(context: TuiContext, english: string): DeepCompactRunResult
               "Deep compact 失败：compact agent 在禁用工具时尝试了 tool_use。",
             )
             .replace("Deep compact provider request failed.", "Deep compact provider 请求失败。")
-            .replace(
-              "Deep compact cancelled by user interrupt.",
-              "Deep compact 已被用户中断取消。",
-            )
+            .replace("Deep compact cancelled by user interrupt.", "Deep compact 已被用户中断取消。")
             .replace(
               "Deep compact failed before provider request.",
               "Deep compact 在 provider 请求前失败。",

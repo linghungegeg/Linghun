@@ -24,6 +24,7 @@ import {
 } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import {
+  DEEP_COMPACT_EVENT_TYPE,
   createDeepCompactPacket,
   maybeRunDeepCompactBeforeProvider,
   runDeepCompact,
@@ -645,7 +646,44 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(packet.summary).not.toContain(context.projectPath);
   });
 
-  it("deduplicates concurrent deep compact preflights and reuses the owner result", async () => {
+  it("reuses a recent deep compact packet from tail without full transcript resume", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const packet = createDeepCompactPacket({
+      context,
+      transcript: [],
+      summary: "cached summary",
+      runtime: runtime(),
+      trigger: "manual",
+    });
+    context.cache.deepCompact = packet;
+    await context.store.appendEvent(sessionId, {
+      type: DEEP_COMPACT_EVENT_TYPE,
+      packet,
+      createdAt: packet.createdAt,
+    } as never);
+
+    let resumeCalls = 0;
+    context.store.resume = async () => {
+      resumeCalls += 1;
+      throw new Error("full transcript resume should not run for recent deep compact packet");
+    };
+
+    const result = await maybeRunDeepCompactBeforeProvider({
+      context,
+      sessionId,
+      runtime: runtime(),
+      trigger: "request",
+      gateway: gateway([]),
+      deps: deepDeps(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.packet.id).toBe(packet.id);
+    expect(resumeCalls).toBe(0);
+  });
+
+  it("deduplicates concurrent deep compact preflights, reuses the owner result, and exposes progress", async () => {
     const context = await createTestContext();
     const sessionId = context.sessionId ?? "session";
     await context.store.appendEvent(sessionId, {
@@ -654,6 +692,11 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       text: "compact concurrent marker",
       createdAt: new Date().toISOString(),
     });
+    const progressSnapshots: Array<string[] | undefined> = [];
+    context.shellRerender = () => {
+      const stages = context.cache.compactProgress?.stages;
+      progressSnapshots.push(stages ? [...stages] : undefined);
+    };
     let streamCalls = 0;
     let release!: () => void;
     const releasePromise = new Promise<void>((resolve) => {
@@ -686,6 +729,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     });
 
     expect(context.deepCompactInFlight?.sessionId).toBe(sessionId);
+    expect(context.cache.compactProgress?.stages).toEqual(["scan_context"]);
     release();
     const [firstResult, secondResult] = await Promise.all([first, second]);
 
@@ -696,6 +740,10 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       expect(secondResult.packet.id).toBe(firstResult.packet.id);
     }
     expect(context.cache.deepCompact?.summary).toContain("shared summary");
+    expect(progressSnapshots[0]).toEqual(["scan_context"]);
+    expect(progressSnapshots.some((stages) => stages?.includes("generate_summary"))).toBe(true);
+    expect(progressSnapshots.at(-1)).toBeUndefined();
+    expect(context.cache.compactProgress).toBeUndefined();
     expect(context.deepCompactInFlight).toBeUndefined();
   });
 
@@ -712,7 +760,12 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       context,
       sessionId,
       transcript: [
-        { type: "user_message", id: "screen-u1", text: "goal", createdAt: new Date().toISOString() },
+        {
+          type: "user_message",
+          id: "screen-u1",
+          text: "goal",
+          createdAt: new Date().toISOString(),
+        },
       ],
       runtime: runtime(),
       trigger: "manual",

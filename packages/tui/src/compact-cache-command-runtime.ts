@@ -39,8 +39,9 @@ import {
 } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import {
+  createDeepCompactProgress,
   maybeRunDeepCompactBeforeProvider,
-  runDeepCompact,
+  type runDeepCompact,
 } from "./deep-compact-runtime.js";
 import { deferredToolListHashInput, listDeferredTools } from "./deferred-tools-catalog.js";
 import { ensureSession, writeStatus } from "./details-status-runtime.js";
@@ -83,7 +84,7 @@ import {
   MIN_CACHE_HISTORY_SIZE,
   PROJECT_RULES_STATUS_WIDTH,
 } from "./tui-context-runtime.js";
-import type { CacheState, CompactProgressSnapshot, DeepCompactPacket, MemoryCandidate } from "./tui-data-types.js";
+import type { CacheState, DeepCompactPacket, MemoryCandidate } from "./tui-data-types.js";
 import {
   countMemoryScopes,
   createControlledMemoryInjection,
@@ -253,7 +254,8 @@ export async function handleCompactCommand(
     return;
   }
   if (action === "manual" || action === "run" || action === "deep") {
-    const resourceGuard = checkResourceGuard(context, "compact") ?? checkResourceGuard(context, "heavy");
+    const resourceGuard =
+      checkResourceGuard(context, "compact") ?? checkResourceGuard(context, "heavy");
     if (resourceGuard) {
       writeLine(output, resourceGuard);
       return;
@@ -269,7 +271,7 @@ export async function handleCompactCommand(
       );
       return;
     }
-    const progress = createRunningCompactProgress();
+    const progress = createDeepCompactProgress();
     context.cache.compactProgress = progress;
     context.shellRerender?.();
     let result: Awaited<ReturnType<typeof runDeepCompact>> | undefined;
@@ -306,15 +308,6 @@ export async function handleCompactCommand(
     return;
   }
   writeLine(output, "用法：/compact status | /compact manual | /compact deep | /compact auto");
-}
-
-function createRunningCompactProgress(): CompactProgressSnapshot {
-  return {
-    status: "running",
-    stages: ["scan_context"],
-    preCompactChars: 0,
-    postCompactChars: 0,
-  };
 }
 
 function formatCompactRunSuccess(context: TuiContext, packet: DeepCompactPacket): string {
