@@ -3109,7 +3109,9 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
 
     const defaultHelpOutput = new MemoryOutput();
+    const advancedHelpOutput = new MemoryOutput();
     await handleSlashCommand("/help", context, defaultHelpOutput);
+    await handleSlashCommand("/help advanced", context, advancedHelpOutput);
     await handleSlashCommand("/status", context, output);
     await handleSlashCommand("/help all", context, output);
     await handleSlashCommand("/model", context, output);
@@ -3144,6 +3146,18 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/cache-log");
     expect(output.text).toContain("/cache");
     expect(output.text).toContain("/compact");
+    expect(output.text).toContain("执行上下文压缩");
+    expect(output.text).toContain("/context");
+    expect(output.text).toContain("只读查看上下文压力、compact 摘要");
+    expect(output.text).not.toContain("查看或执行");
+    expect(advancedHelpOutput.text).toContain("/compact              执行长对话上下文压缩");
+    expect(advancedHelpOutput.text).toContain("/compact status       只读查看 compact/context 状态");
+    expect(advancedHelpOutput.text).toContain(
+      "/context              只读查看上下文状态，不触发 provider 请求",
+    );
+    expect(advancedHelpOutput.text).not.toContain("查看或执行");
+    expect(advancedHelpOutput.text).not.toContain("/compact deep");
+    expect(advancedHelpOutput.text).not.toContain("/compact manual");
     expect(output.text).toContain("/break-cache");
     expect(output.text).toContain("/mcp");
     expect(output.text).toContain("/index");

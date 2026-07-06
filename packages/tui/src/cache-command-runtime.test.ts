@@ -192,6 +192,38 @@ describe("cache-command-runtime", () => {
     );
   });
 
+  it("keeps compact pressure hints on the primary /compact entry", () => {
+    const highPressure = makeContext();
+    highPressure.cache.compactPressure = {
+      estimatedChars: 91_000,
+      maxChars: 100_000,
+      triggerChars: 80_000,
+      ratio: 0.91,
+      toolPairingSafe: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const highPressureText = formatCompactStatus(highPressure);
+
+    expect(highPressureText).toContain("运行 /compact 摘要较早上下文以释放容量");
+    expect(highPressureText).toContain("你也可以运行 /compact 对较早上下文做语义重写");
+    expect(highPressureText).not.toContain("/compact deep");
+    expect(highPressureText).not.toContain("/compact manual");
+
+    const moderatePressure = makeContext();
+    moderatePressure.cache.compactPressure = {
+      estimatedChars: 75_000,
+      maxChars: 100_000,
+      triggerChars: 80_000,
+      ratio: 0.75,
+      toolPairingSafe: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const moderatePressureText = formatCompactStatus(moderatePressure);
+
+    expect(moderatePressureText).toContain("需要时可运行 /compact");
+    expect(moderatePressureText).not.toContain("deep compact");
+  });
+
   it("shows transient compact progress while a compact run is active", () => {
     const context = makeContext();
     context.cache.compactProgress = {

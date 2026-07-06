@@ -309,21 +309,21 @@ function buildCompactSuggestions(
   if (usage.ratio > 0.85) {
     out.push(
       en
-        ? `⚠ Suggestion: Context at ${(usage.ratio * 100).toFixed(0)}% — run /compact deep to semantically summarize older context and free capacity.`
-        : `⚠ 建议：上下文使用率 ${(usage.ratio * 100).toFixed(0)}% — 运行 /compact deep 语义摘要较早上下文以释放容量。`,
+        ? `⚠ Suggestion: Context at ${(usage.ratio * 100).toFixed(0)}% — run /compact to summarize older context and free capacity.`
+        : `⚠ 建议：上下文使用率 ${(usage.ratio * 100).toFixed(0)}% — 运行 /compact 摘要较早上下文以释放容量。`,
     );
   } else if (usage.ratio > 0.7) {
     out.push(
       en
-        ? `Suggestion: Context at ${(usage.ratio * 100).toFixed(0)}% — approaching limit. Deep compact is available when needed.`
-        : `建议：上下文使用率 ${(usage.ratio * 100).toFixed(0)}% — 接近上限。需要时可运行 deep compact。`,
+        ? `Suggestion: Context at ${(usage.ratio * 100).toFixed(0)}% — approaching limit. Compact is available when needed.`
+        : `建议：上下文使用率 ${(usage.ratio * 100).toFixed(0)}% — 接近上限。需要时可运行 /compact。`,
     );
   }
   if (usage.ratio > 0.6 && !context.cache.compacted) {
     out.push(
       en
-        ? "Tip: Auto-compact triggers around 80%. You can also /compact manual for a semantic rewrite of older context."
-        : "提示：自动压缩约在 80% 触发。你也可以 /compact manual 对较早上下文做语义重写。",
+        ? "Tip: Auto-compact triggers around 80%. You can also run /compact for a semantic rewrite of older context."
+        : "提示：自动压缩约在 80% 触发。你也可以运行 /compact 对较早上下文做语义重写。",
     );
   }
   return out;
