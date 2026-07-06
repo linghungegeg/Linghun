@@ -975,6 +975,41 @@ describe("OpenAI stream parser", () => {
     ]);
   });
 
+  it("returns a recoverable error when OpenAI SSE buffer grows without separators", async () => {
+    const events = await collectOpenAiEvents([`data: ${"x".repeat(1_000_001)}`]);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "error",
+        error: expect.objectContaining({ code: "PROVIDER_STREAM_LIMIT_EXCEEDED" }),
+      }),
+    ]);
+  });
+
+  it("returns a recoverable error when OpenAI streamed tool arguments exceed the limit", async () => {
+    const events = await collectOpenAiEvents([
+      `data: ${JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  id: "call-large",
+                  function: { name: "Read", arguments: `{"path":"${"x".repeat(1_000_001)}` },
+                },
+              ],
+            },
+          },
+        ],
+      })}\n\n`,
+    ]);
+
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: expect.objectContaining({ code: "PROVIDER_STREAM_LIMIT_EXCEEDED" }),
+    });
+  });
+
   it("converts reasoning-only deltas without treating them as assistant text", async () => {
     const events = await collectOpenAiEvents([
       'data: {"id":"chatcmpl-reasoning","choices":[{"delta":{"reasoning_content":"thinking"},"finish_reason":"stop"}]}\n\n',
@@ -2017,6 +2052,46 @@ describe("Anthropic Messages stream parser", () => {
       (event): event is Extract<LinghunEvent, { type: "error" }> => event.type === "error",
     );
     expect(error?.error.code).toBe("PROVIDER_MALFORMED_STREAM");
+  });
+
+  it("returns a recoverable error when Anthropic SSE buffer grows without separators", async () => {
+    const events = await collectAnthropicEvents([`data: ${"x".repeat(1_000_001)}`]);
+
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: expect.objectContaining({ code: "PROVIDER_STREAM_LIMIT_EXCEEDED" }),
+    });
+  });
+
+  it("returns a recoverable error when one Anthropic SSE event exceeds the limit", async () => {
+    const events = await collectAnthropicEvents([
+      `event: content_block_delta\ndata: ${JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "x".repeat(1_000_001) },
+      })}\n\n`,
+    ]);
+
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: expect.objectContaining({ code: "PROVIDER_STREAM_LIMIT_EXCEEDED" }),
+    });
+  });
+
+  it("returns a recoverable error when Anthropic tool arguments exceed the limit", async () => {
+    const events = await collectAnthropicEvents([
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Read"}}\n\n',
+      `event: content_block_delta\ndata: ${JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: `{"path":"${"x".repeat(1_000_001)}` },
+      })}\n\n`,
+    ]);
+
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: expect.objectContaining({ code: "PROVIDER_STREAM_LIMIT_EXCEEDED" }),
+    });
   });
 });
 

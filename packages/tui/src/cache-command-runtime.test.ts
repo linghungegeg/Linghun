@@ -204,5 +204,22 @@ describe("cache-command-runtime", () => {
     const text = formatCompactStatus(context);
 
     expect(text).toContain("progress: compact");
+    expect(text).toContain("generate-summary");
+    expect(text).not.toContain("[████────────]");
+  });
+
+  it("shows indeterminate compact progress when no stage is available", () => {
+    const context = makeContext();
+    context.cache.compactProgress = {
+      status: "running",
+      stages: [],
+      preCompactChars: 0,
+      postCompactChars: 0,
+    };
+
+    const text = formatCompactStatus(context);
+
+    expect(text).toContain("progress: compact running");
+    expect(text).not.toContain("[████────────]");
   });
 });

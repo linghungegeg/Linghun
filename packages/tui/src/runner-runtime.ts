@@ -2,7 +2,7 @@
  * Native runner resolution and lifecycle helpers.
  * Extracted from index.ts (Slice D.10C) — behavior-preserving move only.
  */
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { constants, accessSync, existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
@@ -24,6 +24,8 @@ import { isRecord } from "./tui-state-runtime.js";
 // ---------------------------------------------------------------------------
 
 const NATIVE_RUNNER_VERSION_TIMEOUT_MS = 2_000;
+const NATIVE_RUNNER_VERSION_CACHE_TTL_MS = 5_000;
+const NATIVE_RUNNER_STATUS_REFRESH_TTL_MS = 750;
 const NATIVE_RUNNER_START_STATE_WAIT_MS = 1_500;
 const NATIVE_RUNNER_APPROVED_TASK_HEARTBEAT_MS = 100;
 const CLI_BUNDLED_ROOT_ENV = "LINGHUN_CLI_BUNDLED_ROOT";
@@ -63,6 +65,8 @@ const NATIVE_RUNNER_APPROVED_TASK_SCRIPT = [
 // Local types
 // ---------------------------------------------------------------------------
 
+type NativeRunnerProbeCacheStatus = "fresh" | "cached" | "stale";
+
 type NativeRunnerResolution = {
   status: NativeRunnerResolutionStatus;
   enabled: boolean;
@@ -78,6 +82,7 @@ type NativeRunnerResolution = {
   version?: string;
   protocol?: string;
   lastError?: string;
+  probeCacheStatus?: NativeRunnerProbeCacheStatus;
   nextAction: string;
 };
 
@@ -86,6 +91,20 @@ type NativeRunnerCandidate = {
   ref: string;
   platformArch: string;
   supported: boolean;
+};
+
+type NativeRunnerCommandResult = {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  raw: string;
+  error?: Error;
+  timedOut: boolean;
+};
+
+type NativeRunnerVersionCacheEntry = {
+  expiresAt: number;
+  resolution: NativeRunnerResolution;
 };
 
 type NativeRunnerAdapterResult = {
@@ -185,55 +204,99 @@ export function resolveNativeRunner(config: LinghunConfig): NativeRunnerResoluti
           : "Repair runner execution permissions or keep using Node fallback.",
     };
   }
-  const versionCommand = createNativeRunnerCommand(resolvedPath, ["version"]);
-  const version = spawnSync(versionCommand.command, versionCommand.args, {
-    cwd: dirname(resolvedPath),
-    encoding: "utf8",
-    timeout: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
-    windowsHide: true,
+  return {
+    status: "unavailable",
+    enabled: true,
+    source: runner.source,
+    path: resolvedPath,
+    pathRef: redactedPath(resolvedPath),
+    ...base,
+    lastError: "runner version probe not started",
+    nextAction: "Run the async runner probe before starting native supervision; Node fallback remains available.",
+  };
+}
+
+const nativeRunnerVersionCache = new Map<string, NativeRunnerVersionCacheEntry>();
+
+export async function resolveNativeRunnerAsync(config: LinghunConfig): Promise<NativeRunnerResolution> {
+  const staticResolution = resolveNativeRunner(config);
+  if (!staticResolution.path || staticResolution.status !== "unavailable") {
+    return staticResolution;
+  }
+  if (staticResolution.lastError !== "runner version probe not started") {
+    return staticResolution;
+  }
+  const runner = config.nativeRunner;
+  const cacheKey = `${staticResolution.path}\0${runner.expectedProtocol}`;
+  const cached = nativeRunnerVersionCache.get(cacheKey);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) {
+    return { ...cached.resolution, probeCacheStatus: "cached" };
+  }
+
+  const probed = await probeNativeRunnerVersion(staticResolution, runner.expectedProtocol);
+  if (probed.status === "available") {
+    nativeRunnerVersionCache.set(cacheKey, {
+      expiresAt: now + NATIVE_RUNNER_VERSION_CACHE_TTL_MS,
+      resolution: { ...probed, probeCacheStatus: undefined },
+    });
+    return probed;
+  }
+  if (cached) {
+    return {
+      ...cached.resolution,
+      probeCacheStatus: "stale",
+      lastError: probed.lastError ?? cached.resolution.lastError,
+      nextAction:
+        "Runner probe failed; using stale cached runner metadata for this short window, with Node fallback still available.",
+    };
+  }
+  return probed;
+}
+
+async function probeNativeRunnerVersion(
+  base: NativeRunnerResolution,
+  expectedProtocol: string,
+): Promise<NativeRunnerResolution> {
+  if (!base.path) return base;
+  const versionCommand = createNativeRunnerCommand(base.path, ["version"]);
+  const version = await runNativeRunnerCommand(versionCommand, {
+    cwd: dirname(base.path),
+    timeoutMs: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
   });
-  const raw = `${version.stdout ?? ""}\n${version.stderr ?? ""}`.trim();
   if (version.error || version.status !== 0) {
     return {
-      status: "unavailable",
-      enabled: true,
-      source: runner.source,
-      path: resolvedPath,
-      pathRef: redactedPath(resolvedPath),
       ...base,
+      status: "unavailable",
       lastError: sanitizeDiagnosticText(
-        version.error instanceof Error ? version.error.message : raw || "version probe failed",
+        version.error instanceof Error ? version.error.message : version.raw || "version probe failed",
       ),
+      probeCacheStatus: "fresh",
       nextAction: "Repair runner execution permissions or keep using Node fallback.",
     };
   }
-  const parsed = parseRunnerJson(raw);
+  const parsed = parseRunnerJson(version.raw);
   const protocol = stringValue(parsed.protocol, "unknown");
   const runnerVersion = stringValue(parsed.version, "unknown");
-  if (protocol !== runner.expectedProtocol) {
+  if (protocol !== expectedProtocol) {
     return {
+      ...base,
       status: "protocol_mismatch",
-      enabled: true,
-      source: runner.source,
-      path: resolvedPath,
-      pathRef: redactedPath(resolvedPath),
       version: runnerVersion,
       protocol,
-      ...base,
-      lastError: `protocol mismatch: expected ${runner.expectedProtocol}, got ${protocol}`,
+      lastError: `protocol mismatch: expected ${expectedProtocol}, got ${protocol}`,
+      probeCacheStatus: "fresh",
       nextAction:
         "Use a compatible bundled/project-local runner build, or continue with Node fallback.",
     };
   }
   return {
+    ...base,
     status: "available",
-    enabled: true,
-    source: runner.source,
-    path: resolvedPath,
-    pathRef: redactedPath(resolvedPath),
     version: runnerVersion,
     protocol,
-    ...base,
+    lastError: undefined,
+    probeCacheStatus: "fresh",
     nextAction:
       "Native runner may supervise approved durable job specs; Node fallback remains available.",
   };
@@ -344,6 +407,56 @@ function createNativeRunnerCommand(
   return { command: runnerPath, args };
 }
 
+async function runNativeRunnerCommand(
+  command: { command: string; args: string[] },
+  options: { cwd?: string; timeoutMs: number },
+): Promise<NativeRunnerCommandResult> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    const child = spawn(command.command, command.args, {
+      cwd: options.cwd,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, options.timeoutMs);
+    const finish = (result: Omit<NativeRunnerCommandResult, "stdout" | "stderr" | "raw" | "timedOut">) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        ...result,
+        stdout,
+        stderr,
+        raw: `${stdout}\n${stderr}`.trim(),
+        timedOut,
+      });
+    };
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", (error) => {
+      finish({ status: null, error: error instanceof Error ? error : new Error(String(error)) });
+    });
+    child.once("close", (status) => {
+      finish({
+        status,
+        error: timedOut ? new Error(`runner command timed out after ${options.timeoutMs}ms`) : undefined,
+      });
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Runner spec and lifecycle
 // ---------------------------------------------------------------------------
@@ -398,7 +511,7 @@ export async function startRunnerForDurableJob(
   job: DurableJobState,
   deps: RunnerRuntimeDeps,
 ): Promise<void> {
-  const resolution = resolveNativeRunner(context.config);
+  const resolution = await resolveNativeRunnerAsync(context.config);
   const spec = createApprovedRunnerJobSpec(context, job, resolution);
   const result = await startApprovedRunnerSpec(context, spec, resolution);
   const now = new Date().toISOString();
@@ -606,13 +719,21 @@ function mapNativeRunnerStatus(status: string): NativeRunnerLifecycleStatus {
   return "failed";
 }
 
-export function refreshRunnerStatusForJob(
+export async function refreshRunnerStatusForJob(
   context: RunnerContext,
   job: DurableJobState,
   deps: RunnerRuntimeDeps,
-): void {
+): Promise<void> {
   if (!job.runner?.spec || job.runner.adapter !== "native") return;
-  const resolution = resolveNativeRunner(context.config);
+  const refreshedAt = Date.parse(job.runner.updatedAt);
+  if (
+    !Number.isNaN(refreshedAt) &&
+    Date.now() - refreshedAt < NATIVE_RUNNER_STATUS_REFRESH_TTL_MS &&
+    (job.runner.status === "starting" || job.runner.status === "running")
+  ) {
+    return;
+  }
+  const resolution = await resolveNativeRunnerAsync(context.config);
   if (resolution.status !== "available" || !resolution.path) {
     markJobRunnerFallback(job, resolution.status, resolution.lastError ?? resolution.status);
     return;
@@ -624,17 +745,14 @@ export function refreshRunnerStatusForJob(
     "--root",
     job.runner.spec.runnerRoot,
   ]);
-  const status = spawnSync(statusCommand.command, statusCommand.args, {
-    encoding: "utf8",
-    timeout: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
-    windowsHide: true,
+  const status = await runNativeRunnerCommand(statusCommand, {
+    timeoutMs: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
   });
-  const raw = `${status.stdout ?? ""}\n${status.stderr ?? ""}`.trim();
   if (status.error || status.status !== 0) {
-    markJobRunnerFallback(job, "available", raw || "runner status failed", "status_failed");
+    markJobRunnerFallback(job, "available", status.raw || "runner status failed", "status_failed");
     return;
   }
-  const parsed = parseRunnerJson(raw);
+  const parsed = parseRunnerJson(status.raw);
   const mapped = mapNativeRunnerStatus(stringValue(parsed.status, job.runner.status));
   const now = new Date().toISOString();
   job.runner.status = mapped;
@@ -667,7 +785,7 @@ export async function stopRunnerForDurableJob(
     markJobRunnerTerminal(job, "cancelled", "node fallback or no native runner to stop");
     return;
   }
-  const resolution = resolveNativeRunner(context.config);
+  const resolution = await resolveNativeRunnerAsync(context.config);
   let stopRequested = false;
   let fallbackKillAttempted = false;
   if (resolution.status === "available" && resolution.path) {
@@ -678,10 +796,8 @@ export async function stopRunnerForDurableJob(
       "--root",
       job.runner.spec.runnerRoot,
     ]);
-    spawnSync(stopCommand.command, stopCommand.args, {
-      encoding: "utf8",
-      timeout: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
-      windowsHide: true,
+    await runNativeRunnerCommand(stopCommand, {
+      timeoutMs: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
     });
     stopRequested = true;
   } else {
@@ -689,7 +805,10 @@ export async function stopRunnerForDurableJob(
     if (pid !== undefined) {
       try {
         if (process.platform === "win32") {
-          spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true });
+          await runNativeRunnerCommand(
+            { command: "taskkill", args: ["/pid", String(pid), "/t", "/f"] },
+            { timeoutMs: NATIVE_RUNNER_VERSION_TIMEOUT_MS },
+          );
         } else {
           try {
             process.kill(-pid, "SIGKILL");

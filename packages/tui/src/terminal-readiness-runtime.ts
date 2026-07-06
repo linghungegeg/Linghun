@@ -10,6 +10,12 @@ import { getSelectedModelRuntime } from "./tui-model-runtime.js";
 import { classifyVerificationLevel } from "./verification-level.js";
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
+const GIT_STATUS_SHORT_CACHE_TTL_MS = 1_500;
+const gitStatusShortCache = new Map<
+  string,
+  { expiresAt: number; value: string[] | undefined }
+>();
+
 export function createTerminalReadinessView(context: TuiContext): TerminalReadinessView {
   const runtime = getSelectedModelRuntime(context);
   const latestCache = context.cache.history.at(-1);
@@ -451,6 +457,9 @@ function hasPackageDependency(
 }
 
 function readGitStatusShortLite(projectPath: string): string[] | undefined {
+  const now = Date.now();
+  const cached = gitStatusShortCache.get(projectPath);
+  if (cached && cached.expiresAt > now) return cached.value;
   const result = spawnSync("git", ["status", "--short"], {
     cwd: projectPath,
     encoding: "utf8",
@@ -458,11 +467,14 @@ function readGitStatusShortLite(projectPath: string): string[] | undefined {
     timeout: 2_000,
     windowsHide: true,
   });
-  if (result.error || result.status !== 0) return undefined;
-  return result.stdout
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const value = result.error || result.status !== 0
+    ? undefined
+    : result.stdout
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter(Boolean);
+  gitStatusShortCache.set(projectPath, { expiresAt: now + GIT_STATUS_SHORT_CACHE_TTL_MS, value });
+  return value;
 }
 
 function readPackageManagerLite(

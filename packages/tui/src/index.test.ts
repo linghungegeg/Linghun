@@ -1792,6 +1792,33 @@ async function waitForTestCondition(predicate: () => boolean, timeoutMs = 1_000)
 }
 
 describe("runHeadlessTask", () => {
+  it("prints phase feedback for ordinary non-bench runs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-phases-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const output = new MemoryOutput();
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: output,
+      stderr,
+      bench: { enabled: false },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => undefined,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(output.text).toContain("[headless] starting: mode=full-access");
+    expect(output.text).toContain("[headless] waiting_first_delta: attempt=1");
+    expect(output.text).toContain("[headless] done: exitCode=0");
+    expect(stderr.text).toBe("");
+  });
+
   it("auto-approves pending local approval while sendMessage is still running", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-approve-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

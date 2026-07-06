@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, createWriteStream, openSync } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, appendFile, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   type ToolDefinition,
@@ -240,6 +240,7 @@ const SOURCE_PACK_CONTEXT_LINES = 8;
 const SOURCE_PACK_MAX_TERMS = 6;
 const BASH_PREVIEW_LIMIT = 30_000;
 const BASH_OUTPUT_TRUNCATION_NOTICE = "\n...（输出已截断，完整日志见 fullOutputPath）";
+const BASH_DETAILS_TAIL_LINES = 80;
 const BASH_TIMEOUT_MS = 120_000;
 // Removed: headless auto-background is unsafe (foreground-to-background transition unreliable)
 const MAX_TODO_ITEMS = 100;
@@ -1362,14 +1363,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
       },
     };
   }
-  const result = await runShell(
-    adapted.command,
-    context.workspaceRoot,
-    timeoutMs,
-    context.abortSignal,
-    (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
-    context.trackChildProcess,
-  );
+  const commandForLog = adapted.logCommand ?? adapted.command;
   const adapterLines =
     adapted.command === input.command && adapted.adapter === "native"
       ? []
@@ -1377,29 +1371,28 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
           `adapter ${adapted.adapter}`,
           `original command ${summarizeOriginalShellCommand(input.command)}`,
         ];
-  const commandForLog = adapted.logCommand ?? adapted.command;
-  const sanitizedShellOutput = sanitizeSecrets(result.output);
+  const result = await runShell(
+    adapted.command,
+    context.workspaceRoot,
+    timeoutMs,
+    fullOutputPath,
+    [`$ ${sanitizeSecrets(commandForLog)}`, ...adapterLines],
+    context.abortSignal,
+    (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
+    context.trackChildProcess,
+  );
   const cmdInterpretation = interpretCommandResult(input.command, result.exitCode);
-  const rawFullText = [
-    `$ ${sanitizeSecrets(commandForLog)}`,
-    ...adapterLines,
+  const diagnostics = createBashOutcomeDiagnostics(result.outcome);
+  const trailerLines = [
+    "",
     `exit code ${result.exitCode}`,
     `outcome ${result.outcome}`,
     ...(cmdInterpretation.message ? [`returnCodeInterpretation: ${cmdInterpretation.message}`] : []),
-    "",
-    sanitizedShellOutput,
-  ].join("\n");
-  const diagnostics = createBashOutcomeDiagnostics(result.outcome);
-  const fullText = rawFullText;
-  await writeFile(fullOutputPath, fullText, "utf8");
-  const truncated = sanitizedShellOutput.length > BASH_PREVIEW_LIMIT;
-  const preview = truncated
-    ? `${sanitizedShellOutput.slice(
-        0,
-        Math.max(0, BASH_PREVIEW_LIMIT - BASH_OUTPUT_TRUNCATION_NOTICE.length),
-      )}${BASH_OUTPUT_TRUNCATION_NOTICE}`
-    : sanitizedShellOutput;
-  const details = createBashDetails(fullOutputPath, fullText);
+  ];
+  await appendFileToPath(fullOutputPath, `${trailerLines.join("\n")}\n`);
+  result.capture.appendLogOnly(`${trailerLines.join("\n")}\n`);
+  const preview = result.capture.getPreview(BASH_OUTPUT_TRUNCATION_NOTICE);
+  const details = createBashDetails(fullOutputPath, result.capture);
   const data =
     adapted.adapter === "native"
       ? { exitCode: result.exitCode, outcome: result.outcome }
@@ -1410,6 +1403,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     ...(cmdInterpretation.isError === false && result.exitCode !== 0 ? { isError: false } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
   };
+  const truncated = result.capture.isTruncated();
   return {
     text: preview,
     details,
@@ -1419,14 +1413,69 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   };
 }
 
-function createBashDetails(fullOutputPath: string, fullText: string): string {
+function createBashDetails(fullOutputPath: string, capture: BashOutputCapture): string {
   return [
     `fullOutputPath: ${fullOutputPath}`,
     "--- summary",
-    ...fullText.split(/\r?\n/u).slice(0, 8),
+    ...capture.getSummaryLines(8),
     "--- tail",
-    ...tailLines(fullText, 80),
+    ...capture.getTailLines(BASH_DETAILS_TAIL_LINES),
   ].join("\n");
+}
+
+type BashOutputCapture = {
+  appendOutput: (text: string) => void;
+  appendSystem: (text: string) => void;
+  appendLogOnly: (text: string) => void;
+  getPreview: (truncationNotice: string) => string;
+  getSummaryLines: (limit: number) => string[];
+  getTailLines: (limit: number) => string[];
+  isTruncated: () => boolean;
+};
+
+function createBashOutputCapture(): BashOutputCapture {
+  let outputPreview = "";
+  let outputChars = 0;
+  let summaryText = "";
+  let tailText = "";
+  const summaryCharLimit = 8_000;
+  const tailCharLimit = 64_000;
+
+  const appendLogText = (text: string): void => {
+    if (!text) return;
+    if (summaryText.length < summaryCharLimit) {
+      summaryText += text.slice(0, summaryCharLimit - summaryText.length);
+    }
+    tailText = `${tailText}${text}`;
+    if (tailText.length > tailCharLimit) {
+      tailText = tailText.slice(tailText.length - tailCharLimit);
+    }
+  };
+  const appendOutputText = (text: string): void => {
+    if (!text) return;
+    outputChars += text.length;
+    if (outputPreview.length < BASH_PREVIEW_LIMIT) {
+      outputPreview += text.slice(0, BASH_PREVIEW_LIMIT - outputPreview.length);
+    }
+    appendLogText(text);
+  };
+
+  return {
+    appendOutput: appendOutputText,
+    appendSystem: appendOutputText,
+    appendLogOnly: appendLogText,
+    getPreview: (truncationNotice) =>
+      outputChars > BASH_PREVIEW_LIMIT
+        ? `${outputPreview.slice(0, Math.max(0, BASH_PREVIEW_LIMIT - truncationNotice.length))}${truncationNotice}`
+        : outputPreview,
+    getSummaryLines: (limit) => summaryText.split(/\r?\n/u).slice(0, limit),
+    getTailLines: (limit) => tailLines(tailText, limit),
+    isTruncated: () => outputChars > BASH_PREVIEW_LIMIT,
+  };
+}
+
+async function appendFileToPath(path: string, text: string): Promise<void> {
+  await appendFile(path, text, "utf8");
 }
 
 type BashCommandSegmentIntent = {
@@ -3321,10 +3370,12 @@ function runShell(
   command: string,
   cwd: string,
   timeoutMs: number,
+  fullOutputPath: string,
+  headerLines: string[],
   signal?: AbortSignal,
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
   trackChildProcess?: ToolContext["trackChildProcess"],
-): Promise<{ exitCode: number; output: string; outcome: "completed" | "timeout" | "cancelled" }> {
+): Promise<{ exitCode: number; capture: BashOutputCapture; outcome: "completed" | "timeout" | "cancelled" }> {
   return new Promise((resolvePromise) => {
     const detached = process.platform !== "win32";
     const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
@@ -3334,14 +3385,24 @@ function runShell(
       label: `Bash:${command.slice(0, 80)}`,
       retainAfterExit: detached,
     });
-    let output = "";
+    const capture = createBashOutputCapture();
+    let logWrite = writeFile(fullOutputPath, `${headerLines.join("\n")}\n\n`, "utf8");
+    capture.appendLogOnly(`${headerLines.join("\n")}\n\n`);
+    const appendSanitizedChunk = (text: string, countAsOutput: boolean): void => {
+      const sanitized = sanitizeSecrets(text);
+      if (countAsOutput) {
+        capture.appendOutput(sanitized);
+      } else {
+        capture.appendLogOnly(sanitized);
+      }
+      logWrite = logWrite.then(() => appendFileToPath(fullOutputPath, sanitized));
+    };
     let settled = false;
     let forcedKillTimer: NodeJS.Timeout | undefined;
     let stoppingOutcome: "timeout" | "cancelled" | undefined;
     let childClosed = false;
     const finish = (
       exitCode: number,
-      nextOutput = output,
       outcome: "completed" | "timeout" | "cancelled" = "completed",
     ) => {
       if (settled) {
@@ -3353,7 +3414,7 @@ function runShell(
         clearTimeout(forcedKillTimer);
       }
       signal?.removeEventListener("abort", onAbort);
-      resolvePromise({ exitCode, output: nextOutput, outcome });
+      void logWrite.finally(() => resolvePromise({ exitCode, capture, outcome }));
     };
     const waitForChildClose = (): Promise<void> =>
       new Promise((resolveClose) => {
@@ -3388,9 +3449,9 @@ function runShell(
       }, 1_000);
     };
     const onAbort = async () => {
-      const message = "\n工具调用已取消，正在终止子进程。";
-      output += message;
-      onProgress?.("system", `${message}\n`);
+      const message = "\n工具调用已取消，正在终止子进程。\n";
+      appendSanitizedChunk(message, true);
+      onProgress?.("system", message);
       stoppingOutcome = "cancelled";
       if (process.platform === "win32") {
         await requestStop(true);
@@ -3398,15 +3459,15 @@ function runShell(
         void requestStop(false);
         scheduleForceStop();
       }
-      finish(1, output, "cancelled");
+      finish(1, "cancelled");
     };
     const timer = setTimeout(() => {
       void handleTimeout();
     }, timeoutMs);
     const handleTimeout = async () => {
-      const message = `\n命令超时：超过 ${timeoutMs}ms，已尝试终止子进程。`;
-      output += message;
-      onProgress?.("system", `${message}\n`);
+      const message = `\n命令超时：超过 ${timeoutMs}ms，已尝试终止子进程。\n`;
+      appendSanitizedChunk(message, true);
+      onProgress?.("system", message);
       stoppingOutcome = "timeout";
       if (process.platform === "win32") {
         await requestStop(true);
@@ -3414,10 +3475,10 @@ function runShell(
         void requestStop(false);
         scheduleForceStop();
       }
-      finish(1, output, "timeout");
+      finish(1, "timeout");
     };
     if (signal?.aborted) {
-      onAbort();
+      void onAbort();
       return;
     }
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -3426,12 +3487,12 @@ function runShell(
     // UTF-8 decode 会产生 � 或 mojibake。优先 UTF-8，检测到问题时回退 GB18030。
     child.stdout.on("data", (chunk: Buffer) => {
       const text = decodeShellChunk(chunk);
-      output += text;
+      appendSanitizedChunk(text, true);
       onProgress?.("stdout", text);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       const text = decodeShellChunk(chunk);
-      output += text;
+      appendSanitizedChunk(text, true);
       onProgress?.("stderr", text);
     });
     child.on("close", (code) => {
@@ -3442,7 +3503,8 @@ function runShell(
       finish(code ?? 1);
     });
     child.on("error", (error) => {
-      finish(1, `命令执行失败：${error.message}`);
+      appendSanitizedChunk(`命令执行失败：${error.message}\n`, true);
+      finish(1);
     });
   });
 }

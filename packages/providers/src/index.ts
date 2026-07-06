@@ -127,6 +127,26 @@ type PendingOpenAiToolCall = {
   arguments: string;
 };
 
+const PROVIDER_SSE_BUFFER_LIMIT_CHARS = 1_000_000;
+const PROVIDER_SSE_EVENT_LIMIT_CHARS = 1_000_000;
+const PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS = 1_000_000;
+
+function createProviderStreamLimitError(
+  scope: "SSE buffer" | "SSE event" | "tool arguments",
+  endpoint: string,
+  limit: number,
+): LinghunEvent {
+  return {
+    type: "error",
+    error: new LinghunError({
+      code: "PROVIDER_STREAM_LIMIT_EXCEEDED",
+      message: `模型请求失败：provider ${scope} 超过安全上限 ${limit} chars。`,
+      suggestion: `请重试；如持续出现，运行 /model doctor 检查 ${endpoint} 的流式兼容性，或切换 provider/model。`,
+      recoverable: true,
+    }),
+  };
+}
+
 export type ModelMessage =
   | { role: "system" | "user"; content: string }
   | { role: "assistant"; content: string; toolCalls?: ModelToolCall[] }
@@ -2271,9 +2291,25 @@ export async function* parseOpenAiStream(
         break;
       }
       buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > PROVIDER_SSE_BUFFER_LIMIT_CHARS) {
+        yield createProviderStreamLimitError(
+          "SSE buffer",
+          endpoint,
+          PROVIDER_SSE_BUFFER_LIMIT_CHARS,
+        );
+        return;
+      }
       let separator = findSseEventSeparator(buffer);
       while (separator) {
         const eventBlock = buffer.slice(0, separator.index);
+        if (eventBlock.length > PROVIDER_SSE_EVENT_LIMIT_CHARS) {
+          yield createProviderStreamLimitError(
+            "SSE event",
+            endpoint,
+            PROVIDER_SSE_EVENT_LIMIT_CHARS,
+          );
+          return;
+        }
         buffer = buffer.slice(separator.index + separator.length);
         for (const event of parseOpenAiStreamEventBlock(eventBlock, state, endpoint)) {
           yield event;
@@ -2285,6 +2321,10 @@ export async function* parseOpenAiStream(
     const tail = decoder.decode();
     if (tail) {
       buffer += tail;
+    }
+    if (buffer.length > PROVIDER_SSE_EVENT_LIMIT_CHARS) {
+      yield createProviderStreamLimitError("SSE event", endpoint, PROVIDER_SSE_EVENT_LIMIT_CHARS);
+      return;
     }
     if (buffer.trim().length > 0) {
       for (const event of parseOpenAiStreamEventBlock(buffer, state, endpoint)) {
@@ -2389,10 +2429,26 @@ export async function* parseAnthropicMessagesStream(
         break;
       }
       buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > PROVIDER_SSE_BUFFER_LIMIT_CHARS) {
+        yield createProviderStreamLimitError(
+          "SSE buffer",
+          endpoint,
+          PROVIDER_SSE_BUFFER_LIMIT_CHARS,
+        );
+        return;
+      }
       // SSE 事件以 "\n\n" 分隔；按事件粒度切，避免半截 data 行解析失败。
       let separatorIndex = buffer.indexOf("\n\n");
       while (separatorIndex !== -1) {
         const eventBlock = buffer.slice(0, separatorIndex);
+        if (eventBlock.length > PROVIDER_SSE_EVENT_LIMIT_CHARS) {
+          yield createProviderStreamLimitError(
+            "SSE event",
+            endpoint,
+            PROVIDER_SSE_EVENT_LIMIT_CHARS,
+          );
+          return;
+        }
         buffer = buffer.slice(separatorIndex + 2);
         for (const event of parseAnthropicMessagesEventBlock(eventBlock, state, endpoint)) {
           yield event;
@@ -2403,6 +2459,10 @@ export async function* parseAnthropicMessagesStream(
 
     const tail = decoder.decode();
     if (tail) buffer += tail;
+    if (buffer.length > PROVIDER_SSE_EVENT_LIMIT_CHARS) {
+      yield createProviderStreamLimitError("SSE event", endpoint, PROVIDER_SSE_EVENT_LIMIT_CHARS);
+      return;
+    }
     if (buffer.trim().length > 0) {
       for (const event of parseAnthropicMessagesEventBlock(buffer, state, endpoint)) {
         yield event;
@@ -2606,7 +2666,18 @@ function parseAnthropicMessagesEventBlock(
         ];
       }
       if (typeof delta.partial_json === "string") {
-        pending.argsBuffer += delta.partial_json;
+        const nextArgs = pending.argsBuffer + delta.partial_json;
+        if (nextArgs.length > PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS) {
+          state.pendingToolUses.delete(blockIndex);
+          return [
+            createProviderStreamLimitError(
+              "tool arguments",
+              endpoint,
+              PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS,
+            ),
+          ];
+        }
+        pending.argsBuffer = nextArgs;
       }
       return [];
     }
@@ -2921,10 +2992,20 @@ function parseResponsesEvent(
   }
   if (parsed.type === "response.output_item.added" && parsed.item?.type === "function_call") {
     const index = parsed.output_index ?? state.pendingResponsesToolCalls.size;
+    const initialArguments = parsed.item.arguments ?? "";
+    if (initialArguments.length > PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS) {
+      return [
+        createProviderStreamLimitError(
+          "tool arguments",
+          endpoint,
+          PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS,
+        ),
+      ];
+    }
     state.pendingResponsesToolCalls.set(index, {
       id: parsed.item.call_id ?? parsed.item.id ?? `tool-${index + 1}`,
       name: parsed.item.name ?? "",
-      arguments: parsed.item.arguments ?? "",
+      arguments: initialArguments,
     });
     return [];
   }
@@ -2935,9 +3016,20 @@ function parseResponsesEvent(
       name: "",
       arguments: "",
     };
+    const nextArguments = existing.arguments + parsed.delta;
+    if (nextArguments.length > PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS) {
+      state.pendingResponsesToolCalls.delete(index);
+      return [
+        createProviderStreamLimitError(
+          "tool arguments",
+          endpoint,
+          PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS,
+        ),
+      ];
+    }
     state.pendingResponsesToolCalls.set(index, {
       ...existing,
-      arguments: existing.arguments + parsed.delta,
+      arguments: nextArguments,
     });
     return [];
   }
@@ -2948,6 +3040,15 @@ function parseResponsesEvent(
     const id = parsed.item.call_id ?? parsed.item.id ?? existing?.id ?? `tool-${index + 1}`;
     const name = parsed.item.name ?? existing?.name ?? "unknown";
     const args = parsed.item.arguments ?? existing?.arguments ?? "{}";
+    if (args.length > PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS) {
+      return [
+        createProviderStreamLimitError(
+          "tool arguments",
+          endpoint,
+          PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS,
+        ),
+      ];
+    }
     return [
       {
         type: "tool_use",
@@ -3029,10 +3130,22 @@ function parseOpenAiToolCalls(
       name: "",
       arguments: "",
     };
+    const nextArguments = existing.arguments + (toolCall.function?.arguments ?? "");
+    if (nextArguments.length > PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS) {
+      state.pendingToolCalls.delete(index);
+      events.push(
+        createProviderStreamLimitError(
+          "tool arguments",
+          "/v1/chat/completions",
+          PROVIDER_TOOL_ARGUMENTS_LIMIT_CHARS,
+        ),
+      );
+      continue;
+    }
     const next = {
       id: toolCall.id ?? existing.id,
       name: toolCall.function?.name || existing.name,
-      arguments: existing.arguments + (toolCall.function?.arguments ?? ""),
+      arguments: nextArguments,
     };
     state.pendingToolCalls.set(index, next);
     if (!next.name || !isCompleteJsonObject(next.arguments)) {

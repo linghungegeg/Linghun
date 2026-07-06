@@ -827,6 +827,25 @@ const HEADLESS_CONTINUATION_BACKOFF_BASE_MS = 250;
 const HEADLESS_CLEANUP_SETTLE_MS = 500;
 const HEADLESS_DEADLINE_CLOSURE_WINDOW_MS = 60_000;
 
+type HeadlessPhase =
+  | "starting"
+  | "waiting_first_delta"
+  | "continuing"
+  | "validating"
+  | "done"
+  | "failed";
+
+function emitHeadlessPhase(
+  output: Writable,
+  phase: HeadlessPhase,
+  detail?: string,
+  options?: { suppress?: boolean },
+): void {
+  if (options?.suppress) return;
+  const suffix = detail ? `: ${detail}` : "";
+  writeLine(output, `[headless] ${phase}${suffix}`);
+}
+
 export type {
   PermissionRule,
   RecentPermissionRejection,
@@ -1641,6 +1660,10 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   if (benchConfig.enabled && benchPreflight) {
     writeLine(output, `[headless] bench preflight: ${benchPreflight.summary}`);
   }
+  const suppressGenericHeadlessPhases = benchConfig.enabled;
+  emitHeadlessPhase(output, "starting", `mode=${context.permissionMode}`, {
+    suppress: suppressGenericHeadlessPhases,
+  });
 
   try {
     let approvals = 0;
@@ -1650,6 +1673,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     let lastValidation: HeadlessBenchValidationResult | undefined;
     const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
       requestAttempts += 1;
+      emitHeadlessPhase(output, "waiting_first_delta", `attempt=${requestAttempts}`, {
+        suppress: suppressGenericHeadlessPhases,
+      });
       const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
       const deferredApprovals: HeadlessDeferredApproval[] = [];
       const messagePromise = sendHeadlessMessage(text, context, gateway, output);
@@ -1729,6 +1755,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         "warning",
       );
       writeLine(output, `[headless] provider stream failed; continuing attempt ${continuations}/${maxContinuations}`);
+      emitHeadlessPhase(output, "continuing", `attempt=${continuations}/${maxContinuations}`, {
+        suppress: suppressGenericHeadlessPhases,
+      });
       context.lastProviderFailure = undefined;
       await sleep(createHeadlessContinuationBackoffMs(continuations));
       status = await runOneRequest(continuationPrompt);
@@ -1737,9 +1766,15 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       context.lastProviderFailure = undefined;
     }
     if (status.exitCode !== undefined) {
+      emitHeadlessPhase(errorOutput, "failed", `exitCode=${status.exitCode}`, {
+        suppress: suppressGenericHeadlessPhases,
+      });
       return status.exitCode;
     }
     if (status.providerFailure) {
+      emitHeadlessPhase(errorOutput, "failed", "provider stream failed", {
+        suppress: suppressGenericHeadlessPhases,
+      });
       writeLine(
         errorOutput,
         createHeadlessProviderFailureDiagnostic(context, {
@@ -1759,6 +1794,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     }
     if (benchConfig.enabled) {
       for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
+        emitHeadlessPhase(output, "validating", `bench attempt=${repairAttempt + 1}`, {
+          suppress: suppressGenericHeadlessPhases,
+        });
         let validation = await validateHeadlessBenchCompletion({ projectPath, config: benchConfig });
         if (validation.ok) {
         }
@@ -1798,6 +1836,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         });
         const repairStatus = await runOneRequest(repairPrompt);
         if (repairStatus.exitCode !== undefined) {
+          emitHeadlessPhase(errorOutput, "failed", `exitCode=${repairStatus.exitCode}`, {
+            suppress: suppressGenericHeadlessPhases,
+          });
           return repairStatus.exitCode;
         }
         if (repairStatus.providerFailure) {
@@ -1828,9 +1869,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
       context.sessionEnded = true;
     }
+    emitHeadlessPhase(output, "done", "exitCode=0", { suppress: suppressGenericHeadlessPhases });
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : "headless run 执行失败。";
+    emitHeadlessPhase(errorOutput, "failed", message, { suppress: suppressGenericHeadlessPhases });
     writeLine(errorOutput, `错误：${message}`);
     return 1;
   } finally {

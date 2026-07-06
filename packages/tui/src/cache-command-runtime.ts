@@ -272,7 +272,28 @@ export function formatCompactStatus(context: TuiContext): string {
 
 export function formatCompactProgressBar(progress: CompactProgressSnapshot | undefined): string | undefined {
   if (!progress || progress.status === "complete") return undefined;
-  return `compact ${formatContextProgressBar(0.35, 12)}`;
+  const stage = progress.stages.at(-1);
+  if (!stage) return "compact running";
+  return `compact ${formatContextProgressBar(compactStageRatio(stage), 12)} ${formatCompactProgressStage(stage)}`;
+}
+
+function compactStageRatio(stage: CompactProgressSnapshot["stages"][number]): number {
+  switch (stage) {
+    case "scan_context":
+      return 0.2;
+    case "generate_summary":
+      return 0.45;
+    case "trim_old_records":
+      return 0.7;
+    case "restore_context":
+      return 0.9;
+    case "complete":
+      return 1;
+  }
+}
+
+function formatCompactProgressStage(stage: CompactProgressSnapshot["stages"][number]): string {
+  return stage.replace(/_/gu, "-");
 }
 
 function buildCompactSuggestions(

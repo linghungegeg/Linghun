@@ -22,10 +22,12 @@ import {
   formatJobAgentLabels,
   formatJobList,
   formatJobLogs,
+  formatJobPanelSummary,
   formatJobPrimary,
   formatJobReport,
   formatJobReportConclusion,
   formatJobStatus,
+  getJobPanelTone,
   getDurableJobMaxSteps,
   getDurableJobPaths,
   getDurableJobStatePath,
@@ -344,6 +346,47 @@ describe("formatJobReport/List/Status", () => {
     expect(report).toContain(".linghun/jobs/job-test1234/job.log");
     expect(report).toMatch(/\[(?:local-path|user-home)\]\/.*report\.md/u);
     expect(logs).toContain(".linghun/jobs/job-test1234/job.log");
+  });
+
+  it("job status/report panel summary surfaces pause reason, next action, and attention tone", () => {
+    const blocked = createMinimalJob({
+      status: "blocked",
+      pauseReason: "needs_handoff_repair:index",
+    });
+    const stale = createMinimalJob({ status: "stale", pauseReason: "heartbeat_stale" });
+    const failed = createMinimalJob({
+      result: {
+        status: "failed",
+        summary: "worker failed",
+        facts: [],
+        evidenceRefs: [],
+        generatedAt: "2025-01-01T00:00:02.000Z",
+      },
+    });
+
+    const summary = formatJobPanelSummary(blocked, "en-US", "status").join("\n");
+
+    expect(summary).toContain("needs_handoff_repair:index");
+    expect(summary).toContain("/job resume job-test1234");
+    expect(summary).toContain("Ctrl+O opens the full status");
+    expect(getJobPanelTone(blocked)).toBe("warning");
+    expect(getJobPanelTone(stale)).toBe("warning");
+    expect(getJobPanelTone(failed)).toBe("error");
+  });
+
+  it("localizes job status, report, and empty logs for zh-CN", async () => {
+    const job = createMinimalJob({ status: "blocked", pauseReason: "needs_handoff_repair:index" });
+
+    const status = formatJobStatus(job, "zh-CN");
+    const report = formatJobReport(job, "zh-CN");
+    const logs = await formatJobLogs(job, "zh-CN");
+
+    expect(status).toContain("- 状态：blocked (需要明确修复后才能恢复)");
+    expect(status).toContain("- 下一步：");
+    expect(status).toContain("- 暂停原因：needs_handoff_repair:index");
+    expect(report).toContain("- 结论：blocked：需要先修复");
+    expect(report).toContain("blocked/cancelled/timeout/stale 都不是验证通过证据");
+    expect(logs).toContain("日志为空；job 可能尚未写入输出。");
   });
 
   it("formatJobReport includes job id", () => {

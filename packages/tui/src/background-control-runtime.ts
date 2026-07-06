@@ -64,8 +64,11 @@ export async function startRunnerForDurableJob(
   await startRunnerForDurableJobImpl(toRunnerContext(context), job, getRunnerRuntimeDeps());
 }
 
-export function refreshRunnerStatusForJob(context: TuiContext, job: DurableJobState): void {
-  refreshRunnerStatusForJobImpl(toRunnerContext(context), job, getRunnerRuntimeDeps());
+export async function refreshRunnerStatusForJob(
+  context: TuiContext,
+  job: DurableJobState,
+): Promise<void> {
+  await refreshRunnerStatusForJobImpl(toRunnerContext(context), job, getRunnerRuntimeDeps());
 }
 
 export async function stopRunnerForDurableJob(

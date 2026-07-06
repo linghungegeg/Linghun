@@ -35,9 +35,9 @@ const MIGRATIONS: Record<string, string[]> = {
     "formatMemoryLearningRun(result, context.language)",
   ],
   "job-agent-command-runtime.ts": [
-    "formatJobStatus(job)",
-    "formatJobReport(job)",
-    "await formatJobLogs(job)",
+    "formatJobStatus(job, context.language)",
+    "formatJobReport(job, context.language)",
+    "await formatJobLogs(job, context.language)",
     "formatAgentDetails(agent, context)",
     "formatAgentsList(context)",
   ],

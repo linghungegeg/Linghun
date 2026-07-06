@@ -198,6 +198,60 @@ describe("Phase 05 core tools", () => {
     expect(bash.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
+  it("keeps Bash foreground output bounded while preserving the full log", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+
+    const bash = await runTool(
+      "Bash",
+      {
+        command:
+          "node -e \"process.stdout.write('start\\n' + 'x'.repeat(40000) + '\\nend-marker\\n')\"",
+      },
+      context,
+    );
+    const fullOutputPath = bash.output.fullOutputPath;
+    if (!fullOutputPath) {
+      throw new Error("Bash full output path was not recorded");
+    }
+    const fullLog = await readFile(fullOutputPath, "utf8");
+
+    expect(bash.output.truncated).toBe(true);
+    expect(bash.output.text.length).toBeLessThanOrEqual(30_000);
+    expect(bash.output.text).toContain("输出已截断");
+    expect(fullLog).toContain("start");
+    expect(fullLog).toContain("end-marker");
+    expect(fullLog).toContain("exit code 0");
+    expect(bash.output.details).toContain("end-marker");
+  });
+
+  it("keeps large Bash stderr bounded while preserving the full log", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+
+    const bash = await runTool(
+      "Bash",
+      {
+        command:
+          "node -e \"process.stderr.write('err-start\\n' + 'e'.repeat(40000) + '\\nerr-end-marker\\n')\"",
+      },
+      context,
+    );
+    const fullOutputPath = bash.output.fullOutputPath;
+    if (!fullOutputPath) {
+      throw new Error("Bash full output path was not recorded");
+    }
+    const fullLog = await readFile(fullOutputPath, "utf8");
+
+    expect(bash.output.truncated).toBe(true);
+    expect(bash.output.text.length).toBeLessThanOrEqual(30_000);
+    expect(bash.output.text).toContain("输出已截断");
+    expect(fullLog).toContain("err-start");
+    expect(fullLog).toContain("err-end-marker");
+    expect(fullLog).toContain("exit code 0");
+    expect(bash.output.details).toContain("err-end-marker");
+  });
+
   it("preserves UTF-8 Chinese stdout and stderr in Bash logs", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);

@@ -13,6 +13,7 @@ import {
   markJobRunnerFallback,
   markJobRunnerTerminal,
   resolveNativeRunner,
+  resolveNativeRunnerAsync,
   stopRunnerForDurableJob,
 } from "./runner-runtime.js";
 
@@ -133,6 +134,29 @@ describe("runner path resolution", () => {
     const result = resolveNativeRunner(config);
     expect(result.platformArch).toBe("linux-x64");
     vi.unstubAllEnvs();
+  });
+
+  it("resolveNativeRunnerAsync probes version asynchronously and reuses the short TTL cache", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-runner-probe-"));
+    const runner = await createMockRunner(project);
+    const config = structuredClone(defaultConfig);
+    config.nativeRunner.enabled = true;
+    config.nativeRunner.source = "custom";
+    config.nativeRunner.path = runner.path;
+
+    const first = await resolveNativeRunnerAsync(config);
+    const second = await resolveNativeRunnerAsync(config);
+
+    expect(first.status).toBe("available");
+    expect(first.probeCacheStatus).toBe("fresh");
+    expect(second.status).toBe("available");
+    expect(second.probeCacheStatus).toBe("cached");
+    const calls = (await readFile(runner.callsPath, "utf8"))
+      .trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { argv: string[] });
+    expect(calls.filter((call) => call.argv[0] === "version")).toHaveLength(1);
   });
 });
 

@@ -25,7 +25,7 @@
 // the symbols below and imports them value-side for internal callers.
 
 import type { ModelRole } from "@linghun/config";
-import type { PermissionMode } from "@linghun/shared";
+import type { Language, PermissionMode } from "@linghun/shared";
 import { formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
@@ -365,12 +365,15 @@ export function formatJobPrimary(job: DurableJobState, context: TuiContext): str
   return formatJobPrimaryImpl(job, toJobContext(context));
 }
 
-export function formatJobReport(job: DurableJobState): string {
-  return formatJobReportImpl(job);
+export function formatJobReport(job: DurableJobState, language: Language = "en-US"): string {
+  return formatJobReportImpl(job, language);
 }
 
-export async function formatJobLogs(job: DurableJobState): Promise<string> {
-  return formatJobLogsImpl(job);
+export async function formatJobLogs(
+  job: DurableJobState,
+  language: Language = "en-US",
+): Promise<string> {
+  return formatJobLogsImpl(job, language);
 }
 
 export function createJobBackgroundTask(

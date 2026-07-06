@@ -21,6 +21,7 @@ export type RunnerDoctorResolutionView = {
   platformArch: string;
   nodeFallback: "available";
   processGuardContract?: readonly string[];
+  probeCacheStatus?: "fresh" | "cached" | "stale";
   lastError?: string;
   nextAction: string;
 };
@@ -39,6 +40,7 @@ export function formatRunnerDoctor(
     `- bundled candidate: ${resolution.bundledCandidateRef}`,
     `- resolved path: ${resolution.pathRef}`,
     `- version/protocol: ${resolution.version ?? "unknown"} / ${resolution.protocol ?? expectedProtocol}`,
+    `- probe cache: ${resolution.probeCacheStatus ?? "none"}`,
     `- fallback reason: ${resolution.status === "available" ? "none" : resolution.lastError ? sanitizeDiagnosticText(resolution.lastError) : resolution.status}`,
     `- next action: ${resolution.nextAction}`,
     ...(resolution.processGuardContract ?? []).map((line) => `- process guard contract: ${line}`),

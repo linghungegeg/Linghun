@@ -59,6 +59,8 @@ import {
   deriveAgentDisplayName,
   estimateJobTokens,
   formatJobStatus,
+  formatJobPanelSummary,
+  getJobPanelTone,
   getDurableJobMaxSteps,
   getEffectiveAgentCap,
   parseJobRunOptions,
@@ -599,8 +601,8 @@ async function startRunnerForDurableJob(context: TuiContext, job: DurableJobStat
   await startRunnerForDurableJobImpl(toRunnerContext(context), job, getRunnerRuntimeDeps());
 }
 
-function refreshRunnerStatusForJob(context: TuiContext, job: DurableJobState): void {
-  refreshRunnerStatusForJobImpl(toRunnerContext(context), job, getRunnerRuntimeDeps());
+async function refreshRunnerStatusForJob(context: TuiContext, job: DurableJobState): Promise<void> {
+  await refreshRunnerStatusForJobImpl(toRunnerContext(context), job, getRunnerRuntimeDeps());
 }
 
 async function stopRunnerForDurableJob(context: TuiContext, job: DurableJobState): Promise<void> {
@@ -809,38 +811,32 @@ export async function handleJobCommand(
       return;
     }
     if (action === "status") {
-      refreshRunnerStatusForJob(context, job);
+      await refreshRunnerStatusForJob(context, job);
       await persistDurableJob(job);
       await writeDurableJobReport(job);
       upsertJobBackgroundTask(context, job);
       // D.14D-E — /job status 走降噪 CommandPanel：完整状态进 detailsText。
+      const panelSummary = formatJobPanelSummary(job, context.language, "status");
       showCommandPanel(context, output, {
         title: "/job status",
-        tone: "neutral",
-        summary: [
-          context.language === "en-US"
-            ? `Job ${job.id} · ${job.status} — Ctrl+O for details.`
-            : `Job ${job.id} · ${job.status} — Ctrl+O 查看详情。`,
-        ],
-        detailsText: formatJobStatus(job),
+        tone: getJobPanelTone(job),
+        summary: panelSummary,
+        detailsText: formatJobStatus(job, context.language),
       });
       return;
     }
     if (action === "report") {
-      refreshRunnerStatusForJob(context, job);
+      await refreshRunnerStatusForJob(context, job);
       await persistDurableJob(job);
       await writeDurableJobReport(job);
       upsertJobBackgroundTask(context, job);
       // D.14D-E — /job report 走降噪 CommandPanel：完整报告进 detailsText。
+      const panelSummary = formatJobPanelSummary(job, context.language, "report");
       showCommandPanel(context, output, {
         title: "/job report",
-        tone: "neutral",
-        summary: [
-          context.language === "en-US"
-            ? `Job ${job.id} report — Ctrl+O for details.`
-            : `Job ${job.id} 报告 — Ctrl+O 查看详情。`,
-        ],
-        detailsText: formatJobReport(job),
+        tone: getJobPanelTone(job),
+        summary: panelSummary,
+        detailsText: formatJobReport(job, context.language),
       });
       return;
     }
@@ -854,7 +850,7 @@ export async function handleJobCommand(
             ? `Job ${job.id} logs — Ctrl+O for details.`
             : `Job ${job.id} 日志 — Ctrl+O 查看详情。`,
         ],
-        detailsText: await formatJobLogs(job),
+        detailsText: await formatJobLogs(job, context.language),
       });
       return;
     }

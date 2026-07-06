@@ -24,6 +24,7 @@ import {
   hasStructuredArtifactEvidence,
   hasStructuredArtifactEvidenceForPath,
   pathsReferToSameArtifact,
+  pathsReferToSameArtifactHint,
   readEvidenceDataRecord,
   uniqueArtifactTargets,
 } from "./artifact-evidence-runtime.js";
@@ -952,6 +953,28 @@ function selectFinalGateVerificationLevel(
   return "typecheck";
 }
 
+function isTerminalFinalGateGapAction(actionPlan: FinalGateEvidenceGapActionPlan): boolean {
+  return actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only";
+}
+
+async function recordFinalGateGapPlan(input: {
+  context: TuiContext;
+  output: Writable;
+  sessionId: string;
+  actionPlan: FinalGateEvidenceGapActionPlan;
+  scope?: string;
+}): Promise<void> {
+  startRequestActivity(input.output, input.context, "verifying_final_answer");
+  const scope = input.scope ? ` ${input.scope}` : "";
+  const tool = input.actionPlan.evidenceAction?.toolName ?? "none";
+  await appendSystemEvent(
+    input.context,
+    input.sessionId,
+    `final_answer_gap_planner${scope} action=${input.actionPlan.action} reason=${input.actionPlan.reason} evidence_action=${tool}`,
+    isTerminalFinalGateGapAction(input.actionPlan) ? "warning" : "info",
+  );
+}
+
 async function runFinalGateEvidenceAction(input: {
   actionPlan: FinalGateEvidenceGapActionPlan;
   context: TuiContext;
@@ -1458,7 +1481,7 @@ function serviceProbeTargetMatches(data: Record<string, unknown> | undefined, ta
 function artifactProbeMatchesRequestedTarget(context: TuiContext, path: string): boolean {
   const targets = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
   if (targets.length === 0) return true;
-  return uniqueArtifactTargets(targets).some((target) => pathsReferToSameArtifact(path, target));
+  return uniqueArtifactTargets(targets).some((target) => pathsReferToSameArtifactHint(path, target));
 }
 
 function readToolCallPath(input: unknown): string | undefined {

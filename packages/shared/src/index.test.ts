@@ -4,8 +4,10 @@ import {
   LINGHUN_NAME,
   LINGHUN_VERSION,
   canonicalPathForCompare,
+  canonicalPathKeyForCompare,
   isPathInside,
   normalizePathSeparators,
+  pathsReferToSameLocation,
 } from "./index.js";
 
 describe("shared constants", () => {
@@ -25,5 +27,10 @@ describe("shared path helpers", () => {
     expect(canonicalPathForCompare(upper, true)).toBe(canonicalPathForCompare(lower, true));
     expect(isPathInside("G:\\Linghun 项目\\子目录\\file.txt", "g:/linghun 项目", true)).toBe(true);
     expect(isPathInside("G:\\Linghun 项目-旁边\\file.txt", "g:/linghun 项目", true)).toBe(false);
+    expect(canonicalPathKeyForCompare("G:\\Linghun 项目\\file.txt\\", true)).toBe(
+      "g:/linghun 项目/file.txt",
+    );
+    expect(pathsReferToSameLocation("dist\\report.md", "dist/report.md", true)).toBe(true);
+    expect(pathsReferToSameLocation("dist/report.md", "docs/report.md", true)).toBe(false);
   });
 });

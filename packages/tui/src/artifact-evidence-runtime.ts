@@ -1,3 +1,4 @@
+import { pathsReferToSameLocation } from "@linghun/shared";
 import type { EvidenceRecord } from "./tui-data-types.js";
 
 export function hasStructuredArtifactEvidence(
@@ -68,15 +69,19 @@ export function uniqueArtifactTargets(targets: string[]): string[] {
 }
 
 export function pathsReferToSameArtifact(actual: string, target: string): boolean {
-  const normalizedActual = normalizeArtifactEvidencePath(actual);
-  const normalizedTarget = normalizeArtifactEvidencePath(target);
+  return pathsReferToSameLocation(actual, target);
+}
+
+export function pathsReferToSameArtifactHint(actual: string, target: string): boolean {
+  const normalizedActual = normalizeArtifactHintPath(actual);
+  const normalizedTarget = normalizeArtifactHintPath(target);
   return (
     normalizedActual === normalizedTarget ||
     basenameLike(normalizedActual) === basenameLike(normalizedTarget)
   );
 }
 
-function normalizeArtifactEvidencePath(path: string): string {
+function normalizeArtifactHintPath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
 }
 

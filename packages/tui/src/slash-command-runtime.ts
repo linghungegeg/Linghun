@@ -651,7 +651,7 @@ import {
   markJobRunnerFallback,
   markJobRunnerTerminal,
   refreshRunnerStatusForJob as refreshRunnerStatusForJobImpl,
-  resolveNativeRunner,
+  resolveNativeRunnerAsync,
   startRunnerForDurableJob as startRunnerForDurableJobImpl,
   stopRunnerForDurableJob as stopRunnerForDurableJobImpl,
 } from "./runner-runtime.js";
@@ -1099,7 +1099,7 @@ export async function handleDoctorCommand(
     writeLine(
       output,
       formatRunnerDoctor(
-        resolveNativeRunner(context.config),
+        await resolveNativeRunnerAsync(context.config),
         context.config.nativeRunner.expectedProtocol,
         sanitizeDiagnosticText,
       ),

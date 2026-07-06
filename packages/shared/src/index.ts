@@ -60,6 +60,25 @@ export function canonicalPathForCompare(
   return caseInsensitive ? normalized.toLowerCase() : normalized;
 }
 
+export function canonicalPathKeyForCompare(
+  path: string,
+  caseInsensitive = process.platform === "win32",
+): string {
+  const normalized = canonicalPathForCompare(path.trim(), caseInsensitive).replace(/\/+/g, "/");
+  return normalized.length > 1 ? normalized.replace(/\/+$/u, "") : normalized;
+}
+
+export function pathsReferToSameLocation(
+  actualPath: string,
+  targetPath: string,
+  caseInsensitive = process.platform === "win32",
+): boolean {
+  return (
+    canonicalPathKeyForCompare(actualPath, caseInsensitive) ===
+    canonicalPathKeyForCompare(targetPath, caseInsensitive)
+  );
+}
+
 export function isPathInside(
   candidatePath: string,
   rootPath: string,

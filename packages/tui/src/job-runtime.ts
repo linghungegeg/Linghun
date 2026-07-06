@@ -615,13 +615,36 @@ export function formatJobPrimary(job: DurableJobState, context: JobContext): str
   ].join("\n");
 }
 
-export function formatJobStatus(job: DurableJobState): string {
+export function formatJobStatus(job: DurableJobState, language: Language = "en-US"): string {
   const counts = countDurableJobAgents(job);
+  if (language !== "en-US") {
+    return [
+      `Job ${job.id}`,
+      `- 状态：${formatJobStateSummary(job.status, language)}`,
+      `- 结果：${formatJobResultStatus(job, language)}`,
+      `- 下一步：${formatJobNextAction(job, language)}`,
+      `- 暂停原因：${job.pauseReason ?? "无"}`,
+      "- 恢复检查：执行任何 worker 步骤前先检查 handoff/evidence/index/resource guard",
+      `- 目标：${truncateDisplay(job.goal, 120)}`,
+      `- projectPath：${formatDisplayPath(job.projectPath, job.projectPath)}`,
+      `- isolation：${job.isolation ?? "none"}`,
+      `- phase/target：${job.phase} / ${job.target}`,
+      `- agents：planned ${job.agents.length}; scheduled ${job.agents.filter((agent) => agent.runId).length}; started ${job.agents.filter((agent) => agent.startedAt).length}; running ${counts.running}; completed ${counts.completed}; queued ${counts.queued}; sleeping ${counts.sleeping}; skipped ${counts.skipped}; budget limited ${counts.budget_limited}; resource limited ${counts.resource_limited}; blocked ${counts.blocked}; stale ${counts.stale}; cap ${job.budget.maxRunningAgents}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}`,
+      `- 状态语义：${formatJobLifecycleLegend(language)}`,
+      `- agent labels：${formatJobAgentLabels(job.agents)}`,
+      formatJobBudgetLine(job),
+      `- worker：${job.worker?.status ?? "not_started"}; step ${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session ${job.worker?.sessionId ?? "-"}; ${truncateDisplay(job.worker?.summary ?? "-", 120)}`,
+      `- runner：${formatJobRunnerInline(job)}`,
+      `- 证据边界：status/result 行不是验证通过证据；使用结论前请查看 /job report ${job.id}。`,
+      `- permission：${job.permissionPolicy}; edit ${job.allowEdit}; bash ${job.allowBash}; multi-agent ${job.allowMultiAgent}`,
+      `- 排障：/job report ${job.id}; /job logs ${job.id}; /details background ${job.id}`,
+    ].join("\n");
+  }
   return [
     `Job ${job.id}`,
-    `- status: ${formatJobStateSummary(job.status)}`,
-    `- result: ${formatJobResultStatus(job)}`,
-    `- next action: ${formatJobNextAction(job, "en-US")}`,
+    `- status: ${formatJobStateSummary(job.status, language)}`,
+    `- result: ${formatJobResultStatus(job, language)}`,
+    `- next action: ${formatJobNextAction(job, language)}`,
     `- pause reason: ${job.pauseReason ?? "-"}`,
     "- resume check: handoff/evidence/index/resource guard before any worker step",
     `- goal: ${truncateDisplay(job.goal, 120)}`,
@@ -629,7 +652,7 @@ export function formatJobStatus(job: DurableJobState): string {
     `- isolation: ${job.isolation ?? "none"}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- agents: planned ${job.agents.length}; scheduled ${job.agents.filter((agent) => agent.runId).length}; started ${job.agents.filter((agent) => agent.startedAt).length}; running ${counts.running}; completed ${counts.completed}; queued ${counts.queued}; sleeping ${counts.sleeping}; skipped ${counts.skipped}; budget limited ${counts.budget_limited}; resource limited ${counts.resource_limited}; blocked ${counts.blocked}; stale ${counts.stale}; cap ${job.budget.maxRunningAgents}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}`,
-    `- status semantics: ${formatJobLifecycleLegend()}`,
+    `- status semantics: ${formatJobLifecycleLegend(language)}`,
     `- agent labels: ${formatJobAgentLabels(job.agents)}`,
     formatJobBudgetLine(job),
     `- worker: ${job.worker?.status ?? "not_started"}; step ${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session ${job.worker?.sessionId ?? "-"}; ${truncateDisplay(job.worker?.summary ?? "-", 120)}`,
@@ -640,18 +663,41 @@ export function formatJobStatus(job: DurableJobState): string {
   ].join("\n");
 }
 
-export function formatJobReport(job: DurableJobState): string {
+export function formatJobReport(job: DurableJobState, language: Language = "en-US"): string {
   const counts = countDurableJobAgents(job);
+  if (language !== "en-US") {
+    return [
+      `Job report ${job.id}`,
+      `- 状态：${formatJobStateSummary(job.status, language)}；结果 ${formatJobResultStatus(job, language)}；暂停原因 ${job.pauseReason ?? "无"}`,
+      `- 结论：${formatJobReportConclusion(job, language)}`,
+      `- 下一步：${formatJobNextAction(job, language)}`,
+      `- task graph：${job.plan.length} steps; worker ${job.worker?.status ?? "not_started"}; used steps ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
+      `- isolation：${job.isolation ?? "none"}`,
+      `- agent assignment：${formatJobAgentLabels(job.agents)}`,
+      `- agent counts：planned ${job.agents.length}; scheduled ${job.agents.filter((agent) => agent.runId).length}; started ${job.agents.filter((agent) => agent.startedAt).length}; running ${counts.running}; completed ${counts.completed}; queued ${counts.queued}; sleeping ${counts.sleeping}; skipped ${counts.skipped}; budget limited ${counts.budget_limited}; resource limited ${counts.resource_limited}; blocked ${counts.blocked}; stale ${counts.stale}; cap ${job.budget.maxRunningAgents}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}`,
+      `- 状态语义：${formatJobLifecycleLegend(language)}`,
+      formatJobBudgetLine(job),
+      `- verification：${job.verification?.status ?? "not_run"}; ${truncateDisplay(job.verification?.summary ?? "-", 120)}`,
+      "- 证据边界：report 只汇总有限 job 证据；完整诊断保留在下方 redacted/relative 路径中。",
+      `- evidence refs：${formatJobEvidenceRefs(job)}`,
+      `- runner：${formatJobRunnerInline(job)}`,
+      `- adopted：${job.adoptedConclusions.join("; ") || "none"}`,
+      `- rejected：${job.rejectedConclusions.join("; ") || "blocked/cancelled/timeout/stale 都不是验证通过证据"}`,
+      `- log path：${formatDisplayPath(job.logPath, job.projectPath)}`,
+      `- full output path：${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
+      `- report path：${formatDisplayPath(job.reportPath, job.projectPath)}`,
+    ].join("\n");
+  }
   return [
     `Job report ${job.id}`,
-    `- status: ${formatJobStateSummary(job.status)}; result ${formatJobResultStatus(job)}; pause reason ${job.pauseReason ?? "-"}`,
-    `- conclusion: ${formatJobReportConclusion(job)}`,
-    `- next action: ${formatJobNextAction(job, "en-US")}`,
+    `- status: ${formatJobStateSummary(job.status, language)}; result ${formatJobResultStatus(job, language)}; pause reason ${job.pauseReason ?? "-"}`,
+    `- conclusion: ${formatJobReportConclusion(job, language)}`,
+    `- next action: ${formatJobNextAction(job, language)}`,
     `- task graph: ${job.plan.length} steps; worker ${job.worker?.status ?? "not_started"}; used steps ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
     `- isolation: ${job.isolation ?? "none"}`,
     `- agent assignment: ${formatJobAgentLabels(job.agents)}`,
     `- agent counts: planned ${job.agents.length}; scheduled ${job.agents.filter((agent) => agent.runId).length}; started ${job.agents.filter((agent) => agent.startedAt).length}; running ${counts.running}; completed ${counts.completed}; queued ${counts.queued}; sleeping ${counts.sleeping}; skipped ${counts.skipped}; budget limited ${counts.budget_limited}; resource limited ${counts.resource_limited}; blocked ${counts.blocked}; stale ${counts.stale}; cap ${job.budget.maxRunningAgents}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}`,
-    `- status semantics: ${formatJobLifecycleLegend()}`,
+    `- status semantics: ${formatJobLifecycleLegend(language)}`,
     formatJobBudgetLine(job),
     `- verification: ${job.verification?.status ?? "not_run"}; ${truncateDisplay(job.verification?.summary ?? "-", 120)}`,
     "- evidence boundary: report summarizes bounded job evidence only; full diagnostics stay in redacted/relative paths below.",
@@ -665,15 +711,34 @@ export function formatJobReport(job: DurableJobState): string {
   ].join("\n");
 }
 
-function formatJobLifecycleLegend(): string {
+function formatJobLifecycleLegend(language: Language = "en-US"): string {
+  if (language !== "en-US") {
+    return "running 当前活跃；queued 等待执行槽位；sleeping 被用户或 resource guard 暂停；blocked 需要明确修复；stale 丢失 owner/heartbeat 新鲜度；cancelled 被用户停止；timeout 达到运行时限；completed 只是生命周期结束；partial 表示不完整或未验证证据。";
+  }
   return "running active now; queued waiting for an execution slot; sleeping paused by user/resource guard; blocked needs a concrete fix; stale lost owner/heartbeat freshness; cancelled stopped by user; timeout hit runtime limit; completed lifecycle ended only; partial means incomplete or unverified evidence.";
 }
 
-function formatJobStateSummary(status: DurableJobStatus | DurableJobAgentStatus | string): string {
-  return `${status} (${formatJobStateMeaning(status)})`;
+function formatJobStateSummary(
+  status: DurableJobStatus | DurableJobAgentStatus | string,
+  language: Language = "en-US",
+): string {
+  return `${status} (${formatJobStateMeaning(status, language)})`;
 }
 
-function formatJobStateMeaning(status: string): string {
+function formatJobStateMeaning(status: string, language: Language = "en-US"): string {
+  if (language !== "en-US") {
+    if (status === "running") return "当前活跃";
+    if (status === "queued") return "等待执行槽位";
+    if (status === "sleeping" || status === "created") return "已暂停或尚未启动";
+    if (status === "blocked") return "需要明确修复后才能恢复";
+    if (status === "stale") return "owner 或 heartbeat 新鲜度缺失";
+    if (status === "cancelled") return "已被用户停止";
+    if (status === "timeout") return "达到运行时限";
+    if (status === "completed") return "生命周期结束；仍需单独查看证据";
+    if (status === "partial") return "证据不完整或未验证";
+    if (status === "failed") return "运行错误；请查看日志";
+    return "durable job 生命周期状态";
+  }
   if (status === "running") return "active now";
   if (status === "queued") return "waiting for execution slot";
   if (status === "sleeping" || status === "created") return "paused or not started";
@@ -687,8 +752,8 @@ function formatJobStateMeaning(status: string): string {
   return "durable job lifecycle state";
 }
 
-function formatJobResultStatus(job: DurableJobState): string {
-  return formatJobStateSummary(job.result?.status ?? "partial");
+function formatJobResultStatus(job: DurableJobState, language: Language = "en-US"): string {
+  return formatJobStateSummary(job.result?.status ?? "partial", language);
 }
 
 function formatJobEvidenceRefs(job: DurableJobState): string {
@@ -712,7 +777,19 @@ export function formatJobAgentLabels(agents: DurableJobAgent[]): string {
   );
 }
 
-export function formatJobReportConclusion(job: DurableJobState): string {
+export function formatJobReportConclusion(job: DurableJobState, language: Language = "en-US"): string {
+  if (language !== "en-US") {
+    if (job.status === "stale") {
+      return "stale：heartbeat/owner 恢复失败；/job resume 会先重新检查 handoff、evidence/index 状态和 resource guard。";
+    }
+    if (job.status === "blocked") {
+      return "blocked：需要先修复 handoff/evidence/index/resource guard；当前没有生成验证通过证据。";
+    }
+    if (job.status === "cancelled" || job.status === "timeout" || job.status === "completed") {
+      return `${job.status} 是终态或保守状态；作为有效证据前请先检查 verification。`;
+    }
+    return "running/created job 使用裁剪后的 handoff、evidence refs、cache/index refs 和 resource guard。";
+  }
   if (job.status === "stale") {
     return "stale because heartbeat/owner recovery failed; /job resume first rechecks handoff, evidence/index state, and resource guard.";
   }
@@ -725,21 +802,69 @@ export function formatJobReportConclusion(job: DurableJobState): string {
   return "running/created job uses trimmed handoff, evidence refs, cache/index refs, and resource guard.";
 }
 
-export async function formatJobLogs(job: DurableJobState): Promise<string> {
+export function getJobPanelTone(job: DurableJobState): "neutral" | "warning" | "error" {
+  if (job.status === "blocked" || job.status === "stale" || job.status === "timeout") {
+    return "warning";
+  }
+  if (job.status === "cancelled" || job.result?.status === "failed") {
+    return "error";
+  }
+  return "neutral";
+}
+
+export function formatJobPanelSummary(
+  job: DurableJobState,
+  language: Language,
+  mode: "status" | "report",
+): string[] {
+  const nextAction = formatJobNextAction(job, language);
+  const pauseReason = job.pauseReason ?? (language === "en-US" ? "none" : "无");
+  const detailHint =
+    language === "en-US"
+      ? mode === "report"
+        ? "Ctrl+O opens the full report."
+        : "Ctrl+O opens the full status."
+      : mode === "report"
+        ? "Ctrl+O 查看完整报告。"
+        : "Ctrl+O 查看完整状态。";
+  return [
+    language === "en-US"
+      ? `Job ${job.id} · ${job.status} · result ${job.result?.status ?? "partial"}`
+      : `Job ${job.id} · ${job.status} · result ${job.result?.status ?? "partial"}`,
+    language === "en-US" ? `- pause reason: ${pauseReason}` : `- pause reason：${pauseReason}`,
+    language === "en-US" ? `- next: ${nextAction}` : `- next：${nextAction}`,
+    `- ${detailHint}`,
+  ];
+}
+
+export async function formatJobLogs(
+  job: DurableJobState,
+  language: Language = "en-US",
+): Promise<string> {
   const content = await readFile(job.logPath, "utf8").catch(() => "");
   const tail = content
     .split(/\r?\n/u)
     .filter(Boolean)
     .slice(-JOB_LOG_TAIL_LINES)
     .map((line) => sanitizeDisplayPaths(line, job.projectPath));
+  if (language !== "en-US") {
+    return [
+      `Job logs ${job.id}`,
+      `- path：${formatDisplayPath(job.logPath, job.projectPath)}`,
+      `- full output path：${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
+      `- tail：仅显示最后 ${tail.length}/${JOB_LOG_TAIL_LINES} 行；完整排障使用上方 redacted/relative 路径`,
+      `- 状态：${formatJobStateSummary(job.status, language)}；结果 ${formatJobResultStatus(job, language)}`,
+      tail.length > 0 ? tail.join("\n") : "日志为空；job 可能尚未写入输出。",
+    ].join("\n");
+  }
   return [
     `Job logs ${job.id}`,
     `- path: ${formatDisplayPath(job.logPath, job.projectPath)}`,
     `- full output path: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
     `- tail: bounded last ${tail.length}/${JOB_LOG_TAIL_LINES} lines; full troubleshooting uses the redacted/relative paths above`,
-    `- status: ${formatJobStateSummary(job.status)}; result ${formatJobResultStatus(job)}`,
+    `- status: ${formatJobStateSummary(job.status, language)}; result ${formatJobResultStatus(job, language)}`,
     tail.length > 0
       ? tail.join("\n")
-      : "\u65E5\u5FD7\u4E3A\u7A7A\uFF1Bjob \u53EF\u80FD\u5C1A\u672A\u5199\u5165\u8F93\u51FA\u3002",
+      : "Logs are empty; the job may not have written output yet.",
   ].join("\n");
 }
