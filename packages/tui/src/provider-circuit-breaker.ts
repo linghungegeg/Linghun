@@ -557,9 +557,9 @@ export async function* withProviderRetry(
 
     const kind = classifyProviderFailure(streamError);
     const code = getProviderErrorCode(streamError);
-    recordProviderFailure(state, provider, model, code);
 
     if (!shouldAttemptSameProviderRetry(code) || attempt >= maxRetries) {
+      recordProviderFailure(state, provider, model, code);
       // Non-retryable or retries exhausted — yield the error as-is.
       const error =
         streamError instanceof LinghunError

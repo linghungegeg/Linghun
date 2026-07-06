@@ -85,6 +85,10 @@ describe("Phase F MCP duplicate, schema, and SSE coverage", () => {
     expect(validateCodebaseMemoryToolExecution("search_code", { project: 1, pattern: "route" })).toMatchObject({
       ok: false,
     });
+    expect(validateCodebaseMemoryToolExecution("search_code", { project: "F-Linghun", pattern: {} })).toEqual({
+      ok: false,
+      summary: "MCP deferred tool guard: search_code.pattern 必须是 string，已拒绝执行。",
+    });
   });
 
   it("executes an SSE MCP tools/list plus tools/call round trip", async () => {
@@ -287,5 +291,6 @@ function minimalContext(projectPath: string): TuiContext {
       trustedIds: [],
     },
     discoveredDeferredToolNames: new Set<string>(),
+    index: { status: "unknown" },
   } as unknown as TuiContext;
 }

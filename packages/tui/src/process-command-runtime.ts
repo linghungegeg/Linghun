@@ -11,6 +11,18 @@ export function redactedPath(path: string | undefined): string {
   return `present:${sanitizeDiagnosticText(basename(path))}`;
 }
 
+export function summarizeCommandOutput(output: string, fallback: string): string {
+  const filtered = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/^level=info\s+msg=mem\.init\b/.test(line))
+    .join("\n");
+  return truncateDisplay(
+    sanitizeDiagnosticText(filtered || output || fallback).replace(/\s+/g, " "),
+    200,
+  );
+}
+
 export async function runCommandCapture(
   command: string,
   args: string[],
@@ -74,10 +86,7 @@ export async function runCommandCapture(
         exitCode: exitCode ?? 1,
         stdout: out,
         stderr: err,
-        summary: truncateDisplay(
-          sanitizeDiagnosticText(err || out || `exit ${exitCode}`).replace(/\s+/g, " "),
-          200,
-        ),
+        summary: summarizeCommandOutput(err || out, `exit ${exitCode}`),
       });
     });
   });

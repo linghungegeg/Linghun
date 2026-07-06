@@ -1365,8 +1365,8 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     "zh-CN": {
       thinking: "思考中…",
       provider_retrying: retryInfo
-        ? `重试请求 ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s 后继续`
-        : "重试请求…",
+        ? `自动重试 ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s 后继续`
+        : "自动重试…",
       tool_running: toolName ? `运行 ${toolName}…` : "运行工具…",
       continuing: "整理工具结果…",
       checking_final_evidence: "检查最终证据…",
@@ -1380,7 +1380,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     "en-US": {
       thinking: "Thinking…",
       provider_retrying: retryInfo
-        ? `Retry request ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s remaining`
+        ? `Automatic retry ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s remaining`
         : "Retrying…",
       tool_running: toolName ? `Running ${toolName}…` : "Running tool…",
       continuing: "Reviewing tool result…",

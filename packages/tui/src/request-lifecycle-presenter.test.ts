@@ -39,15 +39,21 @@ describe("formatRequestActivity", () => {
     expect(formatRequestActivity("tool_running", "en-US", { toolName: "Read" })).toContain("Read");
   });
 
-  it("provider_retrying includes attempt/max info", () => {
-    const result = formatRequestActivity("provider_retrying", "zh-CN", {
+  it("provider_retrying labels the counter as automatic retries", () => {
+    const zhResult = formatRequestActivity("provider_retrying", "zh-CN", {
       retryAttempt: 2,
       retryMax: 5,
       retryDelaySec: 3,
     });
-    expect(result).toContain("2");
-    expect(result).toContain("5");
-    expect(result).toContain("3");
+    const enResult = formatRequestActivity("provider_retrying", "en-US", {
+      retryAttempt: 2,
+      retryMax: 5,
+      retryDelaySec: 3,
+    });
+    expect(zhResult).toContain("自动重试 2/5");
+    expect(zhResult).toContain("3");
+    expect(enResult).toContain("Automatic retry 2/5");
+    expect(enResult).toContain("3");
   });
 
   it("request_started_report includes report path", () => {

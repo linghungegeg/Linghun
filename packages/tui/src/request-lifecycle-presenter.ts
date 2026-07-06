@@ -52,7 +52,7 @@ export function formatRequestActivity(
       const attempt = values.retryAttempt ?? 1;
       const max = values.retryMax ?? 3;
       const delay = values.retryDelaySec ?? 1;
-      return `Retrying (${attempt}/${max})… retry in ${delay}s`;
+      return `Automatic retry ${attempt}/${max}… retry in ${delay}s`;
     }
     return "Thinking…";
   }
@@ -87,7 +87,7 @@ export function formatRequestActivity(
     const attempt = values.retryAttempt ?? 1;
     const max = values.retryMax ?? 3;
     const delay = values.retryDelaySec ?? 1;
-    return `重试中 (${attempt}/${max})…${delay}s 后重试`;
+    return `自动重试 ${attempt}/${max}…${delay}s 后重试`;
   }
   return "正在思考…";
 }

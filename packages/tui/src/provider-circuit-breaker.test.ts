@@ -478,6 +478,79 @@ describe("provider-circuit-breaker", () => {
       }
     });
 
+    it("counts exhausted same-provider retries as one breaker failure", async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        let calls = 0;
+        const retryEvents: Array<{ attempt: number; maxAttempts: number; code: string }> = [];
+        const model: ModelInfo = {
+          id: "gpt-4o",
+          displayName: "GPT-4o",
+          providerId: "openai",
+          contextWindow: 128_000,
+          maxOutputTokens: 4_096,
+          supportsTools: true,
+          supportsVision: false,
+          supportsThinking: false,
+          supportsPromptCache: false,
+        };
+        const provider: Provider = {
+          id: "openai",
+          displayName: "OpenAI",
+          supports: { streaming: true, usage: true },
+          async listModels() {
+            return [model];
+          },
+          async *stream() {
+            calls += 1;
+            yield {
+              type: "error",
+              error: new LinghunError({
+                code: "PROVIDER_SERVER_ERROR",
+                message: "gateway unavailable",
+                recoverable: true,
+              }),
+            } satisfies LinghunEvent;
+          },
+        };
+        const gateway = new ModelGateway([provider]);
+        const events: LinghunEvent[] = [];
+        const run = (async () => {
+          for await (const event of withProviderRetry(
+            gateway,
+            state,
+            "openai",
+            { messages: [], model: "gpt-4o" },
+            new AbortController().signal,
+            { maxRetries: 3, onRetry: (info) => retryEvents.push(info) },
+          )) {
+            events.push(event);
+          }
+        })();
+
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(500);
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await run;
+
+        expect(calls).toBe(4);
+        expect(retryEvents.map((event) => `${event.attempt}/${event.maxAttempts}:${event.code}`)).toEqual([
+          "1/3:PROVIDER_SERVER_ERROR",
+          "2/3:PROVIDER_SERVER_ERROR",
+          "3/3:PROVIDER_SERVER_ERROR",
+        ]);
+        expect(events).toHaveLength(1);
+        expect(events[0]?.type).toBe("error");
+        expect(state.entries.get("openai::gpt-4o")?.consecutiveFailures).toBe(1);
+        expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
+
     it("surfaces partial tool-call stream failures without same-provider retry", async () => {
       const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
       try {

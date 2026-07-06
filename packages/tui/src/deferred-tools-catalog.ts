@@ -58,7 +58,17 @@ function validateCodebaseMemoryToolSchema(
   tool: string,
   input: Record<string, unknown>,
 ): string | undefined {
-  const stringArgs = new Set(["project", "projectName", "query", "path", "symbol", "from", "to", "repo_path"]);
+  const stringArgs = new Set([
+    "project",
+    "projectName",
+    "query",
+    "pattern",
+    "path",
+    "symbol",
+    "from",
+    "to",
+    "repo_path",
+  ]);
   const booleanArgs = new Set(["force"]);
   const numberArgs = new Set(["limit", "max_depth"]);
   for (const [key, value] of Object.entries(input)) {
