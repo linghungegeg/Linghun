@@ -1235,6 +1235,29 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     expect(result?.text).toBe("Running Bash…");
   });
 
+  it("maps provider recovery and switching to clear running states", () => {
+    const recovering = createContext({
+      requestActivityPhase: "provider_recovering",
+    } as Partial<TuiContext>);
+    const switching = createContext({
+      requestActivityPhase: "provider_switching",
+    } as Partial<TuiContext>);
+
+    const recoveringActivity = mapRequestActivityToView(recovering);
+    const switchingActivity = mapRequestActivityToView(switching);
+
+    expect(recoveringActivity?.phase).toBe("continuing");
+    expect(recoveringActivity?.text).toContain("恢复流");
+    expect(mapBottomPaneStatusToView(recovering, { activity: recoveringActivity })?.text).toContain(
+      "恢复 provider 流",
+    );
+    expect(switchingActivity?.phase).toBe("continuing");
+    expect(switchingActivity?.text).toContain("切换备用模型");
+    expect(mapBottomPaneStatusToView(switching, { activity: switchingActivity })?.text).toContain(
+      "切换 provider/model",
+    );
+  });
+
   it("does not carry stale retryInfo after request activity is cleared", () => {
     const retrying = createContext({
       requestActivityPhase: "provider_retrying",

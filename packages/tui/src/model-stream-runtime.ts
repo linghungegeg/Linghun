@@ -605,6 +605,17 @@ function applyHighReasoningToolsRetryShape(
   return request;
 }
 
+const LATEST_USER_REQUEST_ANCHOR =
+  "Recovery retry boundary: prioritize the latest user request and later transcript messages over older summaries or pre-retry drafts.";
+
+function appendLatestUserRequestAnchor(messages: ModelMessage[]): ModelMessage[] {
+  const last = messages.at(-1);
+  if (last?.role === "user" && last.content === LATEST_USER_REQUEST_ANCHOR) {
+    return messages;
+  }
+  return [...messages, { role: "user", content: LATEST_USER_REQUEST_ANCHOR }];
+}
+
 function showProviderRetryActivity(
   context: TuiContext,
   info: { attempt: number; maxAttempts: number; delayMs: number },
@@ -616,6 +627,20 @@ function showProviderRetryActivity(
     max: info.maxAttempts,
     delaySec: Math.ceil(info.delayMs / 1000),
   };
+  context.shellRerender?.();
+}
+
+function showProviderRecoveryActivity(context: TuiContext): void {
+  context.requestActivityPhase = "provider_recovering";
+  context.requestActivityToolName = undefined;
+  context.retryInfo = undefined;
+  context.shellRerender?.();
+}
+
+function showProviderSwitchActivity(context: TuiContext): void {
+  context.requestActivityPhase = "provider_switching";
+  context.requestActivityToolName = undefined;
+  context.retryInfo = undefined;
   context.shellRerender?.();
 }
 
@@ -2383,7 +2408,8 @@ export async function sendMessage(
               writeStatus(output, context);
               return;
             }
-            messagesForProvider = reactivePreflight.messages;
+            messagesForProvider = appendLatestUserRequestAnchor(reactivePreflight.messages);
+            showProviderRecoveryActivity(context);
             await appendSystemEvent(
               context,
               sessionId,
@@ -2403,6 +2429,7 @@ export async function sendMessage(
               code: fallback.code,
               status: "attempted",
             });
+            showProviderSwitchActivity(context);
             await appendRuntimePolicyHint(context, sessionId, text, {
               providerFailure: {
                 provider: selectedRuntime.provider,
@@ -2426,6 +2453,7 @@ export async function sendMessage(
                 ),
             );
             selectedRuntime = fallback.runtime;
+            messagesForProvider = appendLatestUserRequestAnchor(messagesForProvider);
             context.model = selectedRuntime.model;
             selectedTools = currentModelSupportsTools(context, selectedRuntime);
             if (checkAndWriteProviderCooldown(context, selectedRuntime, output)) {
@@ -3764,6 +3792,7 @@ async function streamFinalModelAnswerWithoutTools(
           code: fallback.code,
           status: "attempted",
         });
+        showProviderSwitchActivity(context);
         await appendRuntimePolicyHint(context, sessionId, "continuation", {
           providerFailure: {
             provider: currentRuntime.provider,
@@ -3774,6 +3803,7 @@ async function streamFinalModelAnswerWithoutTools(
         });
         writeLine(output, context.lastProviderFallbackAttempt?.summary ?? "");
         continuation.provider = fallback.runtime.provider;
+        continuation.messages = appendLatestUserRequestAnchor(continuation.messages);
         continuation.model = fallback.runtime.model;
         continuation.endpointProfile = fallback.runtime.endpointProfile;
         continuation.reasoningLevel = fallback.runtime.reasoningLevel;
@@ -4272,7 +4302,8 @@ export async function continueModelAfterToolResults(
               writeStatus(output, context);
               return;
             }
-            continuation.messages = reactivePreflight.messages;
+            continuation.messages = appendLatestUserRequestAnchor(reactivePreflight.messages);
+            showProviderRecoveryActivity(context);
             await appendSystemEvent(
               context,
               sessionId,
@@ -4295,6 +4326,7 @@ export async function continueModelAfterToolResults(
               code: fallback.code,
               status: "attempted",
             });
+            showProviderSwitchActivity(context);
             await appendRuntimePolicyHint(context, sessionId, "continuation", {
               providerFailure: {
                 provider: currentRuntime.provider,
@@ -4305,6 +4337,7 @@ export async function continueModelAfterToolResults(
             });
             writeLine(output, context.lastProviderFallbackAttempt?.summary ?? "");
             continuation.provider = fallback.runtime.provider;
+            continuation.messages = appendLatestUserRequestAnchor(continuation.messages);
             continuation.model = fallback.runtime.model;
             continuation.endpointProfile = fallback.runtime.endpointProfile;
             continuation.reasoningLevel = fallback.runtime.reasoningLevel;

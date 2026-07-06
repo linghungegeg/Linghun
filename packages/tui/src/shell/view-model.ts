@@ -1338,6 +1338,8 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     request_started_report: "thinking",
     waiting_first_delta: "thinking",
     provider_retrying: "thinking",
+    provider_recovering: "continuing",
+    provider_switching: "continuing",
     tool_running: "tool_running",
     continuing_after_tool: "continuing",
     checking_final_evidence: "continuing",
@@ -1367,6 +1369,8 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       provider_retrying: retryInfo
         ? `自动重试 ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s 后继续`
         : "自动重试…",
+      provider_recovering: "恢复流并压缩上下文…",
+      provider_switching: "切换备用模型…",
       tool_running: toolName ? `运行 ${toolName}…` : "运行工具…",
       continuing: "整理工具结果…",
       checking_final_evidence: "检查最终证据…",
@@ -1382,6 +1386,8 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       provider_retrying: retryInfo
         ? `Automatic retry ${retryInfo.attempt}/${retryInfo.max} · ${retryInfo.delaySec}s remaining`
         : "Retrying…",
+      provider_recovering: "Recovering stream and compacting context…",
+      provider_switching: "Switching to backup model…",
       tool_running: toolName ? `Running ${toolName}…` : "Running tool…",
       continuing: "Reviewing tool result…",
       checking_final_evidence: "Checking final evidence…",
@@ -1399,6 +1405,9 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       request_started: "连接模型…",
       request_started_report: "生成报告…",
       waiting_first_delta: "等待模型响应…",
+      provider_retrying: "自动重试…",
+      provider_recovering: "恢复中…",
+      provider_switching: "切换模型…",
       checking_final_evidence: "检查证据…",
       collecting_final_evidence: "补证据…",
       rewriting_final_answer: "重写回答…",
@@ -1407,6 +1416,9 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       request_started: "Connecting model…",
       request_started_report: "Generating report…",
       waiting_first_delta: "Waiting for model response…",
+      provider_retrying: "Retrying…",
+      provider_recovering: "Recovering…",
+      provider_switching: "Switching model…",
       checking_final_evidence: "Checking evidence…",
       collecting_final_evidence: "Collecting evidence…",
       rewriting_final_answer: "Rewriting answer…",
@@ -1480,6 +1492,28 @@ export function mapBottomPaneStatusToView(
       source: "final_gate",
       text: isEn ? "Verifying final answer…" : "验证最终回答…",
       nextAction: isEn ? "Keeping the draft out of scrollback until it is final." : "最终文本确认前不会写入 scrollback。",
+      elapsed: input.activity?.elapsed,
+    };
+  }
+
+  if (phase === "provider_recovering") {
+    return {
+      kind: "running",
+      source: "provider",
+      text: isEn ? "Recovering provider stream…" : "正在恢复 provider 流…",
+      nextAction: isEn
+        ? "Retrying with compacted context if needed."
+        : "必要时会压缩上下文后重试。",
+      elapsed: input.activity?.elapsed,
+    };
+  }
+
+  if (phase === "provider_switching") {
+    return {
+      kind: "running",
+      source: "provider",
+      text: isEn ? "Switching provider/model…" : "正在切换 provider/model…",
+      nextAction: isEn ? "Trying the configured fallback route." : "正在尝试配置的 fallback 路线。",
       elapsed: input.activity?.elapsed,
     };
   }

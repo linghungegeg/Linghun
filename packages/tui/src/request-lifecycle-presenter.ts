@@ -11,12 +11,20 @@ export type RequestActivityPhase =
   | "collecting_final_evidence"
   | "rewriting_final_answer"
   | "verifying_final_answer"
-  | "provider_retrying";
+  | "provider_retrying"
+  | "provider_recovering"
+  | "provider_switching";
 
 export function formatRequestActivity(
   phase: RequestActivityPhase,
   language: Language,
-  values: { reportPath?: string; toolName?: string; retryAttempt?: number; retryMax?: number; retryDelaySec?: number } = {},
+  values: {
+    reportPath?: string;
+    toolName?: string;
+    retryAttempt?: number;
+    retryMax?: number;
+    retryDelaySec?: number;
+  } = {},
 ): string {
   const reportPath = values.reportPath ?? "report.md";
   const toolName = values.toolName ?? "tool";
@@ -54,6 +62,12 @@ export function formatRequestActivity(
       const delay = values.retryDelaySec ?? 1;
       return `Automatic retry ${attempt}/${max}… retry in ${delay}s`;
     }
+    if (phase === "provider_recovering") {
+      return "Recovering the stream and compacting context before retry…";
+    }
+    if (phase === "provider_switching") {
+      return "Switching to a backup model…";
+    }
     return "Thinking…";
   }
   if (phase === "request_started_report") {
@@ -88,6 +102,12 @@ export function formatRequestActivity(
     const max = values.retryMax ?? 3;
     const delay = values.retryDelaySec ?? 1;
     return `自动重试 ${attempt}/${max}…${delay}s 后重试`;
+  }
+  if (phase === "provider_recovering") {
+    return "正在恢复流并压缩上下文后重试…";
+  }
+  if (phase === "provider_switching") {
+    return "正在切换备用模型…";
   }
   return "正在思考…";
 }

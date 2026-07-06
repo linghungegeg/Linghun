@@ -452,7 +452,7 @@ describe("OpenAI compatible provider", () => {
       retryStatuses: [429, 502, 503, 504],
       maxAttempts: 10,
       requestTimeoutMs: 600_000,
-      streamIdleTimeoutMs: 30_000,
+      streamIdleTimeoutMs: 60_000,
     });
     expect(strictChat).toMatchObject({
       profile: "strict_openai_compatible_chat_completions",

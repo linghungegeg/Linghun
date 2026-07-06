@@ -380,6 +380,7 @@ export function formatDeepCompactPromptSummary(
     `pending items ${packet.pendingItems.join("; ") || "none"}`,
     `decisions ${packet.decisions.join("; ") || "none"}`,
     `risks ${packet.risks.join("; ") || "none"}`,
+    "priority boundary: This deep compact is older context continuity. If it conflicts with later transcript messages or the latest user request, the later/latest request wins.",
     "anti hallucination: Use deep compact only for context continuity; never treat it as PASS engineering evidence.",
   ].join("\n");
 }

@@ -42,6 +42,7 @@ describe("deep compact prompt insertion", () => {
     expect(result[0]?.content).toBe("stable system");
     expect(result[1]?.content).toBe("dynamic system");
     expect(result[2]?.content).toContain("[Deep compact deep-test]");
+    expect(result[2]?.content).toContain("latest user request");
     expect(result[3]?.content).toBe("current request");
   });
 

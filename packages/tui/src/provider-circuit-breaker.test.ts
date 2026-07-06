@@ -551,6 +551,130 @@ describe("provider-circuit-breaker", () => {
       }
     });
 
+    it("times out idle provider streams and routes them through same-provider retry", async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        let calls = 0;
+        const retryEvents: Array<{ attempt: number; maxAttempts: number; code: string }> = [];
+        const model: ModelInfo = {
+          id: "gpt-4o",
+          displayName: "GPT-4o",
+          providerId: "openai",
+          contextWindow: 128_000,
+          maxOutputTokens: 4_096,
+          supportsTools: true,
+          supportsVision: false,
+          supportsThinking: false,
+          supportsPromptCache: false,
+        };
+        const provider: Provider = {
+          id: "openai",
+          displayName: "OpenAI",
+          supports: { streaming: true, usage: true },
+          async listModels() {
+            return [model];
+          },
+          async *stream(_request, signal) {
+            calls += 1;
+            await new Promise<void>((resolve) => {
+              if (signal?.aborted) {
+                resolve();
+                return;
+              }
+              signal?.addEventListener("abort", () => resolve(), { once: true });
+            });
+          },
+        };
+        const gateway = new ModelGateway([provider]);
+        const events: LinghunEvent[] = [];
+        const run = (async () => {
+          for await (const event of withProviderRetry(
+            gateway,
+            state,
+            "openai",
+            { messages: [], model: "gpt-4o" },
+            new AbortController().signal,
+            {
+              maxRetries: 1,
+              streamEventIdleMs: 10,
+              onRetry: (info) => retryEvents.push(info),
+            },
+          )) {
+            events.push(event);
+          }
+        })();
+
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(10);
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(500);
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(10);
+        await run;
+
+        expect(calls).toBe(2);
+        expect(retryEvents.map((event) => `${event.attempt}/${event.maxAttempts}:${event.code}`)).toEqual([
+          "1/1:PROVIDER_STREAM_TIMEOUT",
+        ]);
+        expect(events).toHaveLength(1);
+        expect(events[0]?.type).toBe("error");
+        if (events[0]?.type === "error") {
+          expect(events[0].error.code).toBe("PROVIDER_STREAM_TIMEOUT");
+        }
+        expect(state.entries.get("openai::gpt-4o")?.consecutiveFailures).toBe(1);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
+
+    it("does not trip the idle watchdog when stream events keep arriving", async () => {
+      const model: ModelInfo = {
+        id: "gpt-4o",
+        displayName: "GPT-4o",
+        providerId: "openai",
+        contextWindow: 128_000,
+        maxOutputTokens: 4_096,
+        supportsTools: true,
+        supportsVision: false,
+        supportsThinking: false,
+        supportsPromptCache: false,
+      };
+      const provider: Provider = {
+        id: "openai",
+        displayName: "OpenAI",
+        supports: { streaming: true, usage: true },
+        async listModels() {
+          return [model];
+        },
+        async *stream() {
+          yield { type: "assistant_text_delta", id: "delta-1", text: "ok" } satisfies LinghunEvent;
+          yield {
+            type: "message_stop",
+            id: "stop-1",
+            chunkCount: 1,
+            hadUsage: false,
+            finishReason: "stop",
+          } satisfies LinghunEvent;
+        },
+      };
+      const gateway = new ModelGateway([provider]);
+      const events: LinghunEvent[] = [];
+
+      for await (const event of withProviderRetry(
+        gateway,
+        state,
+        "openai",
+        { messages: [], model: "gpt-4o" },
+        new AbortController().signal,
+        { maxRetries: 1, streamEventIdleMs: 10 },
+      )) {
+        events.push(event);
+      }
+
+      expect(events.map((event) => event.type)).toEqual(["assistant_text_delta", "message_stop"]);
+      expect(state.entries.has("openai::gpt-4o")).toBe(false);
+    });
+
     it("surfaces partial tool-call stream failures without same-provider retry", async () => {
       const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
       try {

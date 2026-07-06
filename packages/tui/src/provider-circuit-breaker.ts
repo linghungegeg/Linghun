@@ -38,6 +38,10 @@ export type ProviderCircuitBreakerState = {
 const BREAKER_FAILURE_THRESHOLD = 5;
 const BREAKER_COOLDOWN_MS = readPositiveIntEnv("LINGHUN_PROVIDER_BREAKER_COOLDOWN_MS", 120_000);
 const PROVIDER_ACTIVE_LIMIT = readPositiveIntEnv("LINGHUN_PROVIDER_ACTIVE_LIMIT", 3);
+const PROVIDER_STREAM_EVENT_IDLE_MS = readPositiveIntEnv(
+  "LINGHUN_PROVIDER_STREAM_EVENT_IDLE_MS",
+  60_000,
+);
 
 /** Recoverable error codes that trigger the breaker and consume retry budget. */
 const RECOVERABLE_CODES = new Set([
@@ -366,6 +370,7 @@ export const BREAKER_CONSTANTS = {
   FAILURE_THRESHOLD: BREAKER_FAILURE_THRESHOLD,
   COOLDOWN_MS: BREAKER_COOLDOWN_MS,
   PROVIDER_ACTIVE_LIMIT,
+  PROVIDER_STREAM_EVENT_IDLE_MS,
   RECOVERABLE_CODES,
   SAME_PROVIDER_RETRY_CODES,
 } as const;
@@ -403,6 +408,49 @@ const PROVIDER_RETRY_MAX_MS = 32_000;
 const PROVIDER_RETRY_MAX_ATTEMPTS = 3;
 const PROVIDER_GATE_WAIT_MS_MIN = 1000;
 const PROVIDER_GATE_WAIT_JITTER_MS = 2000;
+
+type ProviderStreamNext = IteratorResult<LinghunEvent>;
+
+type ProviderStreamIterator = AsyncIterator<LinghunEvent>;
+
+async function readNextProviderStreamEvent(
+  iterator: ProviderStreamIterator,
+  input: {
+    provider: string;
+    model: string;
+    idleMs: number;
+    signal?: AbortSignal;
+    abort: () => void;
+  },
+): Promise<ProviderStreamNext> {
+  if (!Number.isFinite(input.idleMs) || input.idleMs <= 0) {
+    return iterator.next();
+  }
+  if (input.signal?.aborted) {
+    return Promise.reject(
+      new LinghunError({ code: "ABORT_ERR", message: "Request aborted.", recoverable: false }),
+    );
+  }
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const idle = new Promise<ProviderStreamNext>((_resolve, reject) => {
+    idleTimer = setTimeout(() => {
+      input.abort();
+      reject(
+        new LinghunError({
+          code: "PROVIDER_STREAM_TIMEOUT",
+          message: `Provider ${input.provider}/${input.model} stream produced no events for ${Math.ceil(input.idleMs / 1000)}s.`,
+          recoverable: true,
+          suggestion: "Retry the request or switch provider/model if this repeats.",
+        }),
+      );
+    }, input.idleMs);
+  });
+  try {
+    return await Promise.race([iterator.next(), idle]);
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer);
+  }
+}
 
 function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -445,6 +493,7 @@ export async function* withProviderRetry(
     maxDelayMs?: number;
     skipGate?: boolean;
     skipCooldownCheck?: boolean;
+    streamEventIdleMs?: number;
     onRetry?: (info: {
       attempt: number;
       maxAttempts: number;
@@ -457,6 +506,7 @@ export async function* withProviderRetry(
   const maxRetries = opts?.maxRetries ?? PROVIDER_RETRY_MAX_ATTEMPTS;
   const baseDelayMs = opts?.baseDelayMs ?? PROVIDER_RETRY_BASE_MS;
   const maxDelayMs = opts?.maxDelayMs ?? PROVIDER_RETRY_MAX_MS;
+  const streamEventIdleMs = opts?.streamEventIdleMs ?? PROVIDER_STREAM_EVENT_IDLE_MS;
   const model = request.model ?? "";
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -510,19 +560,43 @@ export async function* withProviderRetry(
     const pendingToolUses: LinghunEvent[] = [];
 
     try {
-      for await (const event of gateway.stream(provider, request, signal ?? new AbortController().signal)) {
-        if (event.type === "error") {
-          streamError = event.error;
-          pendingToolUses.length = 0;
-          break;
+      const streamController = new AbortController();
+      const forwardAbort = () => streamController.abort(signal?.reason);
+      if (signal?.aborted) {
+        forwardAbort();
+      } else {
+        signal?.addEventListener("abort", forwardAbort, { once: true });
+      }
+      const iterator = gateway.stream(provider, request, streamController.signal)[Symbol.asyncIterator]();
+      try {
+        while (true) {
+          const next = await readNextProviderStreamEvent(iterator, {
+            provider,
+            model,
+            idleMs: streamEventIdleMs,
+            signal: streamController.signal,
+            abort: () => streamController.abort(),
+          });
+          if (next.done) break;
+          const event = next.value;
+          if (event.type === "error") {
+            streamError = event.error;
+            pendingToolUses.length = 0;
+            break;
+          }
+          if (event.type === "tool_use") {
+            pendingToolUses.push(event);
+            continue;
+          }
+          yield event;
+          if (event.type === "message_stop") {
+            streamCompleted = true;
+          }
         }
-        if (event.type === "tool_use") {
-          pendingToolUses.push(event);
-          continue;
-        }
-        yield event;
-        if (event.type === "message_stop") {
-          streamCompleted = true;
+      } finally {
+        signal?.removeEventListener("abort", forwardAbort);
+        if (!streamCompleted && !streamController.signal.aborted) {
+          await iterator.return?.(undefined);
         }
       }
     } catch (error) {

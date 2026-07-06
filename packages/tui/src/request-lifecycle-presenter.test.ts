@@ -16,6 +16,8 @@ describe("formatRequestActivity", () => {
     "permission_waiting",
     "verifying_final_answer",
     "provider_retrying",
+    "provider_recovering",
+    "provider_switching",
   ];
 
   it("returns non-empty string for every phase in zh-CN", () => {
