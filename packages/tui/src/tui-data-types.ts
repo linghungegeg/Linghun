@@ -201,6 +201,20 @@ export type LightHint = {
   cooldownMs: number;
 };
 
+export type PostCompactCacheWarmupState = {
+  compactId: string;
+  summaryHash: string;
+  projectionHash: string;
+  baselinePrefixHash?: string;
+  baselineConversationPrefixHash?: string;
+  remainingTurns: number;
+  totalTurns: number;
+  status: "warming" | "complete";
+  lastChangedKeys: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CacheState = {
   config: CacheHistoryConfig;
   history: CacheTurnStats[];
@@ -217,6 +231,7 @@ export type CacheState = {
   compacted: boolean;
   compactBoundaries: CompactBoundary[];
   compactProjection?: CompactProjection;
+  postCompactCacheWarmup?: PostCompactCacheWarmupState;
   compactProgress?: CompactProgressSnapshot;
   compactStrategy?: CompactStrategySnapshot;
   deepCompact?: DeepCompactPacket;

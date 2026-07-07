@@ -1,6 +1,7 @@
 import type { ModelRole } from "@linghun/config";
 import type { ModelMessage } from "@linghun/providers";
 import { redactCommonSecrets } from "@linghun/shared";
+import { createPostCompactCacheWarmup } from "./cache-policy-runtime.js";
 import { type CompactBoundary, compactMessagesToFit } from "./compact-context.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import { getContextWindowForModel } from "./context-window-runtime.js";
@@ -402,6 +403,10 @@ export async function prepareMessagesForProviderPreflight(input: {
     }
     refreshCompactProjectionAcceptance(projection, input.context);
     input.context.cache.compactProjection = projection;
+    input.context.cache.postCompactCacheWarmup = createPostCompactCacheWarmup({
+      projection,
+      baseline: input.context.cache.lastRequestObservationByKind?.main,
+    });
     if (replacementProjectionEnabled) {
       await appendCompactProjectionEvents(input.context, input.sessionId, projection, input.deps);
     }
@@ -715,6 +720,7 @@ function createCompactProjection(
     `phase status ${restoreContext.phaseStatus}`,
     `user constraints ${restoreContext.userConstraints.join("; ") || "none recorded"}`,
     `key files ${restoreContext.keyFiles.join(", ") || "none"}`,
+    `target budget tokens ${Math.ceil(input.postCompactTargetChars / CONTEXT_CHARS_PER_TOKEN_ESTIMATE)}`,
     "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
     `verification requirement ${restoreContext.verificationRequirement}`,
   ].join("\n");
@@ -833,9 +839,12 @@ function injectCompactProjectionMessage(
   messages: ModelMessage[],
   projection: CompactProjection,
 ): ModelMessage[] {
+  const restoreMetadata = projection.restoreContext
+    ? `\n[Context restore metadata]\n${JSON.stringify(projection.restoreContext)}`
+    : "";
   const summaryMessage: ModelMessage = {
     role: "user",
-    content: `Context compact projection\n${projection.summary}`,
+    content: `Context compact projection\n${projection.summary}${restoreMetadata}`,
   };
   return insertAfterLeadingSystemMessages(messages, summaryMessage);
 }

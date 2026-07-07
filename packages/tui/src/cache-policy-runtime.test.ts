@@ -5,6 +5,7 @@ import {
   applyLastCacheSafePrefix,
   type CacheRequestKind,
   type CacheRequestObservationState,
+  createPostCompactCacheWarmup,
   normalizeCacheUsageObservation,
   observeCacheSafeRequest,
   observeCacheUsage,
@@ -405,6 +406,71 @@ describe("cache-policy-runtime", () => {
     expect(state.lastRequestObservationByKind?.["side-question"]?.id).toBe(observation.id);
     expect(updated?.usage?.cacheReadTokens).toBe(8);
     expect(state.lastRequestObservationByKind?.["side-question"]?.usage?.cacheReadTokens).toBe(8);
+  });
+
+  it("tracks post-compact warmup across main-chain observations", () => {
+    const state: CacheRequestObservationState = {};
+    state.postCompactCacheWarmup = createPostCompactCacheWarmup({
+      projection: {
+        boundaryId: "compact-1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        summary: "summary",
+        pressureRatio: 0.8,
+        preCompactChars: 120_000,
+        postCompactChars: 40_000,
+        discardedRange: "older context summarized",
+        toolPairingSafe: true,
+        risks: [],
+        evidenceRefs: [],
+      },
+      totalTurns: 2,
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    recordCacheRequestObservation(state, "main", "anthropic", makeRequest());
+    expect(state.postCompactCacheWarmup.status).toBe("warming");
+    expect(state.postCompactCacheWarmup.remainingTurns).toBe(1);
+    expect(state.postCompactCacheWarmup.baselinePrefixHash).toMatch(/^[0-9a-f]{12}$/);
+
+    recordCacheRequestObservation(
+      state,
+      "continuation",
+      "anthropic",
+      makeRequest({
+        messages: [
+          { role: "system", content: "system" },
+          { role: "user", content: "next" },
+        ],
+      }),
+    );
+    expect(state.postCompactCacheWarmup.status).toBe("complete");
+    expect(state.postCompactCacheWarmup.remainingTurns).toBe(0);
+    expect(state.postCompactCacheWarmup.lastChangedKeys).toContain("requestHash");
+  });
+
+  it("does not spend post-compact warmup on sidechain observations", () => {
+    const state: CacheRequestObservationState = {
+      postCompactCacheWarmup: createPostCompactCacheWarmup({
+        projection: {
+          boundaryId: "compact-side",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          summary: "summary",
+          pressureRatio: 0.8,
+          preCompactChars: 120_000,
+          postCompactChars: 40_000,
+          discardedRange: "older context summarized",
+          toolPairingSafe: true,
+          risks: [],
+          evidenceRefs: [],
+        },
+        totalTurns: 2,
+      }),
+    };
+
+    recordCacheRequestObservation(state, "side-question", "anthropic", makeRequest());
+
+    expect(state.postCompactCacheWarmup?.status).toBe("warming");
+    expect(state.postCompactCacheWarmup?.remainingTurns).toBe(2);
   });
 
   it("lets side questions reuse the parent message prefix without inheriting tools", () => {

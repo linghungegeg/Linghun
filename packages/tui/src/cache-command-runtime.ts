@@ -92,6 +92,7 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     observation: latestObservation,
     freshnessChangedKeys: changed,
     warnBelowHitRate: context.cache.config.warnBelowHitRate,
+    postCompactWarmup: context.cache.postCompactCacheWarmup,
   });
   const zeroNote =
     source === "zero_reported"
@@ -106,6 +107,7 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     `- read/write tokens: ${latest?.cacheReadTokens ?? 0}/${latest?.cacheWriteTokens ?? 0}`,
     `- cache write source: ${source}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
+    `- post-compact warmup: ${formatPostCompactWarmupStatus(context)}`,
     `- workspace reference: hits ${context.cache.workspaceReference.hits}; misses ${context.cache.workspaceReference.misses}; failures ${context.cache.workspaceReference.failures}; latest ${context.cache.workspaceReference.latest?.source ?? "none"}`,
     `- workspace snapshot lite: ${formatWorkspaceSnapshotLiteStatus(context)}`,
     `- freshness changedKeys: ${changed.length > 0 ? changed.join(", ") : "none"}`,
@@ -115,6 +117,13 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     `- break diagnosis: ${formatCacheBreakDiagnosis(diagnosis)}`,
     `- note: ${zeroNote}`,
   ].join("\n");
+}
+
+function formatPostCompactWarmupStatus(context: TuiContext): string {
+  const warmup = context.cache.postCompactCacheWarmup;
+  if (!warmup) return "none";
+  const lastChanged = warmup.lastChangedKeys.length > 0 ? warmup.lastChangedKeys.join(",") : "none";
+  return `${warmup.status}; compact ${warmup.compactId}; remaining ${warmup.remainingTurns}/${warmup.totalTurns}; summary ${warmup.summaryHash}; baseline ${warmup.baselinePrefixHash ?? "pending"}; changed ${lastChanged}`;
 }
 
 const CACHE_REQUEST_KIND_ORDER: CacheRequestObservation["kind"][] = [
@@ -293,7 +302,7 @@ function compactStageRatio(stage: CompactProgressSnapshot["stages"][number]): nu
 }
 
 function formatCompactProgressStage(stage: CompactProgressSnapshot["stages"][number]): string {
-  return stage.replace(/_/gu, "-");
+  return stage.replace(/_/g, "-");
 }
 
 function buildCompactSuggestions(
@@ -336,7 +345,9 @@ function sanitizeCompactStatusText(value: string): string {
 export function collectLightHints(context: TuiContext): LightHint[] {
   const latest = context.cache.history.at(-1);
   const hints: LightHint[] = [];
+  const postCompactWarming = context.cache.postCompactCacheWarmup?.status === "warming";
   if (
+    !postCompactWarming &&
     latest?.hitRate !== null &&
     latest?.hitRate !== undefined &&
     latest.hitRate < context.cache.config.warnBelowHitRate
@@ -363,6 +374,19 @@ export function collectLightHints(context: TuiContext): LightHint[] {
           ? "This conversation is getting long; compact only if it starts feeling slow"
           : "这轮对话较长；如果开始变慢，再按需压缩",
         "/compact",
+      ),
+    );
+  }
+  if (postCompactWarming) {
+    hints.push(
+      createLightHint(
+        "cache-post-compact-warmup",
+        "info",
+        9,
+        context.language === "en-US"
+          ? "Cache is warming after compact; low reuse is expected for the next turn or two"
+          : "压缩后缓存正在重建；接下来一两轮低复用属于预热期",
+        "/cache status",
       ),
     );
   }
@@ -442,6 +466,10 @@ export function formatPlainLightHint(hint: LightHint, language: TuiContext["lang
       return isEn
         ? "This conversation is getting long; compact only if it starts feeling slow."
         : "这轮对话较长；如果开始变慢，再按需压缩。";
+    case "cache-post-compact-warmup":
+      return isEn
+        ? "Cache is warming after compact; judge persistent breaks after the warmup window."
+        : "压缩后缓存正在预热；等预热窗口过后再判断是否持续破坏。";
     case "cache-zero-create-with-read":
       return isEn
         ? "Usage numbers may need a quick check before drawing cost conclusions."

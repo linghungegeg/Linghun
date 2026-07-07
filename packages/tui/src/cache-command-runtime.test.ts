@@ -1,7 +1,7 @@
 import type { CacheFreshness } from "@linghun/core";
 import { defaultConfig } from "@linghun/config";
 import { describe, expect, it } from "vitest";
-import { formatCacheStatus, formatCompactStatus } from "./cache-command-runtime.js";
+import { formatCacheStatus, formatCompactStatus, collectLightHints } from "./cache-command-runtime.js";
 import type { CacheRequestObservation } from "./cache-policy-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 
@@ -155,6 +155,7 @@ function makeContext(): TuiContext {
         risks: [],
         evidenceRefs: ["ev-1"],
       },
+      postCompactCacheWarmup: undefined,
       workspaceReference: {
         hits: 0,
         misses: 0,
@@ -176,7 +177,35 @@ describe("cache-command-runtime", () => {
     expect(text).toContain("telemetry by kind: main:openai-compatible/responses/r/w 70/5 api_usage");
     expect(text).toContain("side-question:deepseek/chat_completions/r/w 0/0 estimated");
     expect(text).toContain("drift reason: stable message prefix changed, reasoning changed");
+    expect(text).toContain("post-compact warmup: none");
     expect(text).toContain("break diagnosis: ok");
+  });
+
+  it("marks low cache reuse as post-compact warmup before calling it a break", () => {
+    const context = makeContext();
+    context.cache.config.warnBelowHitRate = 0.75;
+    context.cache.postCompactCacheWarmup = {
+      compactId: "boundary-1",
+      summaryHash: "summaryhash",
+      projectionHash: "projectionhash",
+      baselinePrefixHash: "baselinehash",
+      baselineConversationPrefixHash: "conversationhash",
+      remainingTurns: 1,
+      totalTurns: 2,
+      status: "warming",
+      lastChangedKeys: ["messagePrefixHash"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    };
+
+    const text = formatCacheStatus(context, freshness);
+    const hints = collectLightHints(context).map((hint) => hint.dedupeKey);
+
+    expect(text).toContain("post-compact warmup: warming; compact boundary-1; remaining 1/2");
+    expect(text).toContain("break diagnosis: warming");
+    expect(text).toContain("cache warming after compact boundary-1");
+    expect(hints).toContain("cache-post-compact-warmup");
+    expect(hints).not.toContain("cache-hit-low");
   });
 
   it("shows compact acceptance, progress, and rollback status", () => {

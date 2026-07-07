@@ -1,5 +1,6 @@
 import type { CacheTurnStats } from "@linghun/core";
 import type { CacheRequestObservation } from "./cache-policy-runtime.js";
+import type { PostCompactCacheWarmupState } from "./tui-data-types.js";
 
 export type CacheBreakDiagnosisInput = {
   latest?: Pick<
@@ -9,10 +10,11 @@ export type CacheBreakDiagnosisInput = {
   observation?: CacheRequestObservation;
   freshnessChangedKeys?: string[];
   warnBelowHitRate: number;
+  postCompactWarmup?: PostCompactCacheWarmupState;
 };
 
 export type CacheBreakDiagnosis = {
-  status: "ok" | "no_sample" | "read_miss" | "low_reuse";
+  status: "ok" | "no_sample" | "warming" | "read_miss" | "low_reuse";
   reasons: string[];
   nextAction: string;
 };
@@ -30,6 +32,18 @@ export function diagnoseCacheBreak(input: CacheBreakDiagnosisInput): CacheBreakD
 
   const changedKeys = observation?.fingerprint.changedKeys ?? input.freshnessChangedKeys ?? [];
   const reasons = new Set<string>();
+  const warmup = input.postCompactWarmup;
+  if (warmup?.status === "warming") {
+    return {
+      status: "warming",
+      reasons: [
+        `cache warming after compact ${warmup.compactId}`,
+        `remaining warmup turns ${warmup.remainingTurns}/${warmup.totalTurns}`,
+        changedKeys.length > 0 ? `changed keys ${changedKeys.join(",")}` : "no changed cache keys in latest sample",
+      ],
+      nextAction: "wait for the post-compact warmup window before judging persistent cache break",
+    };
+  }
   if (observation?.hasCacheBreakNonce) reasons.add("explicit break-cache nonce was attached");
   for (const key of changedKeys) reasons.add(formatCacheBreakKey(key));
   if (latest?.cacheReadTokens === 0) reasons.add("provider reported zero cache read tokens");

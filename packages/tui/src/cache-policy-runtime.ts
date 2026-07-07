@@ -1,10 +1,13 @@
 import type { EndpointProfile, ModelRequest, ModelUsage } from "@linghun/providers";
 import { stableHash } from "./cache-freshness.js";
+import type { CompactProjection, PostCompactCacheWarmupState } from "./tui-data-types.js";
 
 const COMPACT_STABLE_MESSAGE_PREFIXES = [
   "Deep compact context",
   "Context compact projection",
 ] as const;
+const POST_COMPACT_WARMUP_TURNS = 2;
+const MAIN_CHAIN_CACHE_REQUEST_KINDS = new Set<CacheRequestKind>(["main", "continuation", "final"]);
 
 export type CacheRequestKind =
   | "main"
@@ -229,6 +232,7 @@ export type CacheRequestObservationState = {
   cacheRequestShapeLatch?: CacheRequestShapeLatch;
   lastCacheSafePrefix?: CacheSafePrefixSnapshot;
   lastCacheSafePrefixSkipReason?: string;
+  postCompactCacheWarmup?: PostCompactCacheWarmupState;
 };
 
 export function rememberCacheSafePrefix(
@@ -332,6 +336,7 @@ export function recordCacheRequestObservation(
     ...state.lastRequestObservationByKind,
     [kind]: observation,
   };
+  updatePostCompactCacheWarmup(state, observation);
   return observation;
 }
 
@@ -347,6 +352,55 @@ export function recordCacheUsageObservation(
     [updated.kind]: updated,
   };
   return updated;
+}
+
+export function createPostCompactCacheWarmup(input: {
+  projection: CompactProjection;
+  baseline?: CacheRequestObservation;
+  now?: Date;
+  totalTurns?: number;
+}): PostCompactCacheWarmupState {
+  const now = input.now ?? new Date();
+  return {
+    compactId: input.projection.boundaryId,
+    summaryHash: stableHash(input.projection.summary),
+    projectionHash: stableHash({
+      boundaryId: input.projection.boundaryId,
+      summary: input.projection.summary,
+      restoreContext: input.projection.restoreContext,
+      replacementKind: input.projection.replacementKind,
+      replacementMessageCount: input.projection.replacementMessageCount,
+      postCompactChars: input.projection.postCompactChars,
+    }),
+    baselinePrefixHash: input.baseline?.fingerprint.messagePrefixHash,
+    baselineConversationPrefixHash: input.baseline?.fingerprint.conversationPrefixHash,
+    remainingTurns: input.totalTurns ?? POST_COMPACT_WARMUP_TURNS,
+    totalTurns: input.totalTurns ?? POST_COMPACT_WARMUP_TURNS,
+    status: "warming",
+    lastChangedKeys: [],
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  };
+}
+
+function updatePostCompactCacheWarmup(
+  state: CacheRequestObservationState,
+  observation: CacheRequestObservation,
+): void {
+  const warmup = state.postCompactCacheWarmup;
+  if (!warmup || !MAIN_CHAIN_CACHE_REQUEST_KINDS.has(observation.kind)) return;
+
+  warmup.baselinePrefixHash ??= observation.fingerprint.messagePrefixHash;
+  warmup.baselineConversationPrefixHash ??= observation.fingerprint.conversationPrefixHash;
+  warmup.lastChangedKeys = observation.fingerprint.changedKeys;
+  warmup.updatedAt = observation.createdAt;
+  if (warmup.remainingTurns > 0) {
+    warmup.remainingTurns -= 1;
+  }
+  if (warmup.remainingTurns <= 0) {
+    warmup.remainingTurns = 0;
+    warmup.status = "complete";
+  }
 }
 
 export function normalizeCacheUsageObservation(usage: ModelUsage): CacheUsageObservation {

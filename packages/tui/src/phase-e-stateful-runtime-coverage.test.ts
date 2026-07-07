@@ -7,6 +7,7 @@ import { SessionStore } from "@linghun/core";
 import type { ModelGateway, ModelMessage } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
+import { stableHash } from "./cache-freshness.js";
 import { breakCacheTestHooks } from "./break-cache-runtime.js";
 import {
   executeBreakCacheMutation,
@@ -192,6 +193,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(estimateModelMessageChars(overLimit)).toBeGreaterThan(
       getProviderContextMaxChars(context, runtime()),
     );
+    const overLimitMessagesHash = hashProviderMessages(overLimit);
 
     const compacted = await prepareMessagesForProviderPreflight({
       messages: overLimit,
@@ -210,6 +212,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       expect(compacted.messages.map((message) => message.content).join("\n")).not.toContain(
         "OVERSIZED_OLD_CONTEXT",
       );
+      expect(hashProviderMessages(compacted.messages)).not.toBe(overLimitMessagesHash);
     }
     expect(context.cache.compactProjection?.preCompactChars).toBeGreaterThan(
       context.cache.compactProjection?.postCompactChars ?? 0,
@@ -263,6 +266,25 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       expect(compactMessage).toContain('"currentTask":"keep the latest request"');
       expect(compactMessage).toContain('"keyFiles":["src/mentioned.ts","src/changed.ts"]');
     }
+    const projection = context.cache.compactProjection;
+    expect(projection).toBeDefined();
+    if (!projection) throw new Error("compact projection missing after provider preflight");
+    expect(context.cache.postCompactCacheWarmup).toMatchObject({
+      compactId: projection.boundaryId,
+      summaryHash: stableHash(projection.summary),
+      projectionHash: stableHash({
+        boundaryId: projection.boundaryId,
+        summary: projection.summary,
+        restoreContext: projection.restoreContext,
+        replacementKind: projection.replacementKind,
+        replacementMessageCount: projection.replacementMessageCount,
+        postCompactChars: projection.postCompactChars,
+      }),
+      remainingTurns: 2,
+      totalTurns: 2,
+      status: "warming",
+      lastChangedKeys: [],
+    });
     expect(context.cache.compactProjection?.summary).toContain("target budget tokens");
     expect(context.cache.compactProjection?.progress?.targetChars).toBe(
       context.cache.compactProjection?.postCompactTargetChars,
@@ -1127,6 +1149,10 @@ async function createTestContext(): Promise<TuiContext> {
     discoveredDeferredToolNames: new Set<string>(),
     providerBreaker: createProviderCircuitBreakerState(),
   } as unknown as TuiContext;
+}
+
+function hashProviderMessages(messages: ModelMessage[]): string {
+  return stableHash(messages);
 }
 
 function stressAgent(id: string, status: "running" | "blocked" | "stale"): AgentRun {

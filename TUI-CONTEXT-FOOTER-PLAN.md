@@ -620,6 +620,27 @@ assistant/tool summary: ...
 - TUI fixture 能展示 compact boundary、summary、recent tail、details 入口和窄屏降级。
 - 测试失败时能指出是 prefix 漂移、projection 顺序变化、cache_control 落点变化、恢复包字段缺失，还是终端可见记录缺失。
 
+### 12.6 本轮闭环记录
+
+已完成：
+
+- 新增 `postCompactCacheWarmup` 状态，deep compact/provider-visible projection 成功后建立 compact id、summary hash、projection hash、baseline prefix hash 和两轮 warmup 窗口。
+- `recordCacheRequestObservation` 只在 main / continuation / final 主链请求上递减 warmup，side-question / agent-child / deep-compact 不消耗 post-compact 重建窗口。
+- `/cache status` 增加 `post-compact warmup` 短状态；break diagnosis 在 warmup 期间显示 `warming`，不把压缩后一两轮低命中误报成持续 cache break。
+- light hint 在 warmup 期间显示 post-compact rebuild 提示，并抑制普通 `cache-hit-low` 噪音。
+- provider-visible `Context compact projection` 补回 `[Context restore metadata]` 结构化恢复字段，并保留 `target budget tokens`，确保 latest goal、current task、files/evidence、verification requirement 等恢复包进入压缩后上下文。
+
+验证：
+
+- `corepack pnpm vitest run packages/tui/src/cache-policy-runtime.test.ts packages/tui/src/cache-command-runtime.test.ts packages/tui/src/cache-break-diagnostics-runtime.test.ts`
+- `corepack pnpm vitest run packages/tui/src/deep-compact-runtime.test.ts packages/tui/src/phase-e-stateful-runtime-coverage.test.ts -t "compact|Compact|deep|Deep|cache|Cache"`
+- `corepack pnpm --filter @linghun/tui typecheck`
+
+剩余边界：
+
+- provider preflight fixture 已补压缩前/后 messages hash、restore metadata 和 post-compact warmup projection hash 断言；连续两轮 provider prefix 稳定性仍需另补专门 fixture。
+- Anthropic cache_control 落点和终端可见 compact marker/recent tail 的 snapshot 还需要单独收敛。
+
 ### 12.7 推荐执行顺序
 
 建议按这个顺序做，不和 TUI 视觉层混在一个 PR 里：
