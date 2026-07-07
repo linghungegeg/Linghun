@@ -106,7 +106,8 @@ type CapabilityRegistryEntry = {
 
 export type CapabilityDispatchRuntimePolicy =
   | { action: "run" }
-  | { action: "block"; reason: string };
+  | { action: "degrade-readonly"; reason: string }
+  | { action: "block"; reason: string; blockedBy: "ask" | "stop" | "unsafe-degrade" };
 
 export function resolveCapabilityDispatchRuntimePolicy(
   action: Pick<
@@ -115,13 +116,19 @@ export function resolveCapabilityDispatchRuntimePolicy(
   >,
   definition: Pick<CapabilityDefinition, "permission" | "riskLevel">,
 ): CapabilityDispatchRuntimePolicy {
-  if (action.shouldStop || action.shouldAsk) {
-    return { action: "block", reason: action.reason };
+  if (action.shouldStop) {
+    return { action: "block", reason: action.reason, blockedBy: "stop" };
   }
-  if (action.shouldDegrade && (definition.permission !== "read" || definition.riskLevel !== "low")) {
-    return { action: "block", reason: action.reason };
+  if (action.shouldAsk) {
+    return { action: "block", reason: action.reason, blockedBy: "ask" };
   }
-  return { action: "run" };
+  if (!action.shouldDegrade) {
+    return { action: "run" };
+  }
+  if (definition.permission === "read" && definition.riskLevel === "low") {
+    return { action: "degrade-readonly", reason: action.reason };
+  }
+  return { action: "block", reason: action.reason, blockedBy: "unsafe-degrade" };
 }
 
 const registry = new Map<string, CapabilityRegistryEntry[]>();
@@ -237,18 +244,33 @@ export async function executeCapability(
   }
   const dispatchPolicy = resolveCapabilityDispatchRuntimePolicy(orchestration, definition);
   if (dispatchPolicy.action === "block") {
+    const blockSummary =
+      dispatchPolicy.blockedBy === "unsafe-degrade"
+        ? `${definition.id}; blocked unsafe capability degrade: ${dispatchPolicy.reason}`
+        : `${definition.id}; blocked by meta scheduler: ${dispatchPolicy.reason}`;
     await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
       stepId: "capability-dispatch",
       executor: "capability-runtime",
       status: "blocked",
-      summary: `${definition.id}; blocked by meta scheduler: ${dispatchPolicy.reason}`,
+      summary: blockSummary,
       level: "warning",
     });
     return buildFailedCapabilityResult(
       definition,
-      `Capability dispatch blocked by meta scheduler: ${dispatchPolicy.reason}`,
+      dispatchPolicy.blockedBy === "unsafe-degrade"
+        ? `Capability dispatch blocked because degraded execution is only allowed for low-risk read capabilities: ${dispatchPolicy.reason}`
+        : `Capability dispatch blocked by meta scheduler: ${dispatchPolicy.reason}`,
       "unsupported",
     );
+  }
+  if (dispatchPolicy.action === "degrade-readonly") {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "capability-dispatch",
+      executor: "capability-runtime",
+      status: "degraded",
+      summary: `${definition.id}; degraded dispatch allowed for low-risk read capability: ${dispatchPolicy.reason}`,
+      level: "warning",
+    });
   }
   const schemaError = validateCapabilityInput(definition, request.input);
   if (schemaError) {

@@ -45,6 +45,7 @@ import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtim
 import type { TuiContext } from "./index.js";
 import {
   type MetaOrchestrationAction,
+  handleProviderRetryForMetaOrchestration,
   recordMetaOrchestrationRuntimeEvent,
   resolveMetaOrchestrationAction,
 } from "./meta-orchestration-runtime.js";
@@ -170,6 +171,10 @@ export type AgentDispatchRuntimePolicy =
   | { action: "degrade-job-create-only"; reason: string }
   | { action: "degrade-agent-role"; reason: string; type: AgentType };
 
+function blockIntentShift(reason: string, shift: string): AgentDispatchRuntimePolicy {
+  return { action: "block", reason: `${reason}; refusing to ${shift} without explicit confirmation` };
+}
+
 export function resolveAgentDispatchRuntimePolicy(
   action: Pick<
     MetaOrchestrationAction,
@@ -184,10 +189,10 @@ export function resolveAgentDispatchRuntimePolicy(
     return { action: "run" };
   }
   if (input.kind === "durable-job" && input.start) {
-    return { action: "degrade-job-create-only", reason: action.reason };
+    return blockIntentShift(action.reason, "turn a requested job start into create-only");
   }
   if (input.kind === "fork-agent" && input.type && input.type !== "planner") {
-    return { action: "degrade-agent-role", reason: action.reason, type: "planner" };
+    return blockIntentShift(action.reason, `change requested ${input.type} agent into planner`);
   }
   return { action: "run" };
 }
@@ -3052,6 +3057,10 @@ export async function runModelBackedAgent(
         currentRuntime.provider,
         providerRequest,
         signal,
+        {
+          onRetry: (info) =>
+            handleProviderRetryForMetaOrchestration(context, agent.transcriptSessionId, info),
+        },
       )) {
         if (event.type === "assistant_text_delta") {
           assistantText += event.text;

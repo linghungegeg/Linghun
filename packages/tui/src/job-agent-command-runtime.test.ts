@@ -140,22 +140,30 @@ describe("agent dispatch runtime policy", () => {
     ).toEqual({ action: "block", reason: "stop reason" });
   });
 
-  it("degrades durable job run to create-only", () => {
+  it("blocks durable job run degrade that would change start intent", () => {
     expect(
       resolveAgentDispatchRuntimePolicy(action("degrade"), {
         kind: "durable-job",
         start: true,
       }),
-    ).toEqual({ action: "degrade-job-create-only", reason: "degrade reason" });
+    ).toEqual({
+      action: "block",
+      reason:
+        "degrade reason; refusing to turn a requested job start into create-only without explicit confirmation",
+    });
   });
 
-  it("degrades non-planner fork agents to planner", () => {
+  it("blocks non-planner fork agent degrade that would change requested role", () => {
     expect(
       resolveAgentDispatchRuntimePolicy(action("degrade"), {
         kind: "fork-agent",
         type: "worker",
         start: true,
       }),
-    ).toEqual({ action: "degrade-agent-role", reason: "degrade reason", type: "planner" });
+    ).toEqual({
+      action: "block",
+      reason:
+        "degrade reason; refusing to change requested worker agent into planner without explicit confirmation",
+    });
   });
 });

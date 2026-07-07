@@ -485,24 +485,22 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   if (classification.reason) {
     internalEvents.push(`meta_scheduler:classifier_reason=${classification.reason}`);
   }
-  const expectedMutating =
-    userStateDecision.interactionPlan.allowImplementationPush &&
-    expectsMutatingAction(input.userText, taskKind, capabilityPlan);
+  const initialIntent = evaluateExecutionIntent({
+    taskKind,
+    capabilityPlan,
+    userStateDecision,
+    highRiskClaim,
+    indexStrategy,
+    lastVerificationStatus: input.lastVerificationStatus,
+  });
+  const expectedMutating = initialIntent.mutating;
   const verificationDomain = classifyVerificationDomain(input.userText, taskKind, expectedMutating);
   const evidenceFreshness = classifyVerificationEvidenceFreshness(input.evidence, input.nowMs);
   const runtimeSignal = summarizeRuntimeSignal(input, evidenceFreshness);
   const includeFailureLearning = hasActiveFailureLearning(input.failureLearning);
   const failureSignal = summarizeFailureSignal(input.failureLearning);
-  let preferSourceFirst =
-    shouldPreferSourceFirst(taskKind, indexStrategy) ||
-    userStateDecision.interactionPlan.sourceFactsFirst;
-  let requireVerification =
-    highRiskClaim ||
-    taskKind === "verification" ||
-    expectedMutating ||
-    isRiskyVerificationStatus(input.lastVerificationStatus) ||
-    userStateDecision.verificationPlan.strength === "strengthened" ||
-    userStateDecision.verificationPlan.strength === "release";
+  let preferSourceFirst = initialIntent.sourceFirst;
+  let requireVerification = initialIntent.verificationRequired;
   if (classification.secondaries.includes("code_fact")) {
     preferSourceFirst = true;
   }
@@ -626,6 +624,18 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     );
     internalEvents.push("meta_scheduler:blocked_runtime_stop");
   }
+  const finalIntent = evaluateExecutionIntent({
+    taskKind,
+    capabilityPlan,
+    userStateDecision: adjustedUserStateDecision,
+    highRiskClaim,
+    indexStrategy,
+    lastVerificationStatus: input.lastVerificationStatus,
+  });
+  const finalExpectedMutating = finalIntent.mutating;
+  const finalPreferSourceFirst = preferSourceFirst || finalIntent.sourceFirst;
+  const finalRequireVerification = adjustedRequireVerification || finalIntent.verificationRequired;
+
   directives.push(formatIndexStrategyDirective(indexStrategy, input.index));
   const verificationRoute = createVerificationRoute({
     domain: verificationDomain,
@@ -646,7 +656,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     riskLevel: classifyRiskLevel({
       highRiskClaim,
       blockedRuntime,
-      expectedMutating,
+      expectedMutating: finalExpectedMutating,
       providerFailure,
       toolFailure,
       pressure: pressure.shouldCompact,
@@ -655,14 +665,14 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     includeMemory: (input.memoryAcceptedCount ?? 0) > 0,
     includeFailureLearning: adjustedIncludeFailureLearning,
     compactBeforeProvider: adjustedShouldCompact,
-    preferSourceFirst,
+    preferSourceFirst: finalPreferSourceFirst,
     preferWorkflow:
       taskKind === "workflow" && adjustedUserStateDecision.interactionPlan.allowImplementationPush,
     preferAgent: taskKind === "agent" && adjustedUserStateDecision.interactionPlan.allowImplementationPush,
-    requireVerification: adjustedRequireVerification,
+    requireVerification: finalRequireVerification,
     requireFinalGate: adjustedRequireFinalGate,
-    expectedMutating,
-    requireExplicitGate: expectedMutating || blockedRuntime || Boolean(input.pendingApproval),
+    expectedMutating: finalExpectedMutating,
+    requireExplicitGate: finalExpectedMutating || blockedRuntime || Boolean(input.pendingApproval),
     providerPlan,
     blockedRuntime,
     toolFailure,
@@ -676,9 +686,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       permissionMode: input.permissionMode ?? "default",
       recentDenied: recentDeniedCount > 0,
       recentDeniedCount,
-      expectedMutating,
+      expectedMutating: finalExpectedMutating,
       requireExplicitGate:
-        expectedMutating ||
+        finalExpectedMutating ||
         blockedRuntime ||
         recentDeniedCount > 0 ||
         Boolean(input.pendingApproval),
@@ -694,12 +704,12 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       suggestedRole,
     },
     verificationSignal: {
-      required: adjustedRequireVerification,
+      required: finalRequireVerification,
       recommendedLevel: adjustedVerificationStrength === "focused"
         ? "focused"
         : classifyVerificationLevel({
             highRiskClaim,
-            expectedMutating,
+            expectedMutating: finalExpectedMutating,
             taskKind,
             blockedRuntime,
             lastStatus: input.lastVerificationStatus,
@@ -710,7 +720,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
         ? "high_risk_claim"
         : taskKind === "verification"
           ? "requested"
-          : expectedMutating
+          : finalExpectedMutating
             ? "mutating"
             : "normal",
       ...(input.lastVerificationStatus ? { lastStatus: input.lastVerificationStatus } : {}),
@@ -725,7 +735,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     failureSignal,
     architectureSignal: {
       cardPresent: Boolean(input.currentArchitectureCard),
-      guardReminder: Boolean(input.currentArchitectureCard && (expectedMutating || blockedRuntime)),
+      guardReminder: Boolean(input.currentArchitectureCard && (finalExpectedMutating || blockedRuntime)),
       driftPending: Boolean(input.architectureDriftPending),
     },
     platformSignal: {
@@ -787,17 +797,13 @@ function createOrchestrationPlan(input: {
   steps.push({
     id: "inspect-runtime",
     executor: "meta-scheduler",
-    mode: "run",
-    reason: "Collect runtime, permission, verification, provider, context, and background signals before dispatch.",
+    mode: input.shouldStopForBlockedRuntime ? "stop" : "run",
+    reason: input.shouldStopForBlockedRuntime
+      ? "Blocked or stale runtime must be recovered or degraded before claiming PASS."
+      : "Collect runtime, permission, verification, provider, context, and background signals before dispatch.",
   });
 
   if (input.shouldStopForBlockedRuntime) {
-    steps.push({
-      id: "inspect-runtime",
-      executor: "meta-scheduler",
-      mode: "stop",
-      reason: "Blocked or stale runtime must be recovered or degraded before claiming PASS.",
-    });
     hardStops.push("blocked_runtime");
   }
 
@@ -1144,6 +1150,36 @@ function adjustTaskKindForUserState(
 
 type KeywordWeight = [string, number];
 
+type ExecutionIntent = {
+  mutating: boolean;
+  sourceFirst: boolean;
+  verificationRequired: boolean;
+};
+
+function evaluateExecutionIntent(input: {
+  taskKind: PolicyDecision["taskKind"];
+  capabilityPlan: CapabilityPlan;
+  userStateDecision: UserStateDecision;
+  highRiskClaim: boolean;
+  indexStrategy: ReturnType<typeof classifyIndexStrategy>;
+  lastVerificationStatus?: MetaSchedulerInput["lastVerificationStatus"];
+}): ExecutionIntent {
+  const mutating =
+    input.userStateDecision.interactionPlan.allowImplementationPush &&
+    expectsMutatingAction(input.taskKind, input.capabilityPlan);
+  const sourceFirst =
+    shouldPreferSourceFirst(input.taskKind, input.indexStrategy) ||
+    input.userStateDecision.interactionPlan.sourceFactsFirst;
+  const verificationRequired =
+    input.highRiskClaim ||
+    input.taskKind === "verification" ||
+    mutating ||
+    isRiskyVerificationStatus(input.lastVerificationStatus) ||
+    input.userStateDecision.verificationPlan.strength === "strengthened" ||
+    input.userStateDecision.verificationPlan.strength === "release";
+  return { mutating, sourceFirst, verificationRequired };
+}
+
 const DOMAIN_KEYWORD_WEIGHTS: Record<string, KeywordWeight[]> = {
   code_fact: [
     ["读", 10], ["定位", 10], ["源码", 10], ["read", 10], ["source", 10],
@@ -1207,6 +1243,12 @@ function scoreDomain(text: string, keywords: KeywordWeight[]): number {
   return maxScore;
 }
 
+function hasReadOnlyIntent(text: string): boolean {
+  return /(?:先别改|别改|不要改|不改文件|先别写|不要写|别写|只(?:看|检查|分析|review|inspect)|先(?:看|检查|分析|review|inspect)|read\s+only|do\s+not\s+(?:edit|write|modify|change)|don't\s+(?:edit|write|modify|change))/iu.test(
+    text,
+  );
+}
+
 function classifyTaskKind(
   userText: string,
   capabilityPlan: CapabilityPlan = createEmptyCapabilityPlan(),
@@ -1260,9 +1302,14 @@ function classifyTaskKind(
     reasons.push("provider 历史失败，避免重压力操作");
   }
 
+  const readOnlyIntent = hasReadOnlyIntent(userText);
+  if (readOnlyIntent) {
+    reasons.push("用户明确要求只读/先不修改");
+  }
+
   // 确定 primary：信号可覆盖关键词打分
   let primary: PolicyDecision["taskKind"];
-  if (consecutiveFailures >= 2 && dominant.kind === "edit") {
+  if ((consecutiveFailures >= 2 || readOnlyIntent) && dominant.kind === "edit") {
     primary = "code_fact";
   } else {
     primary = dominant.kind;
@@ -1297,17 +1344,11 @@ function classifyTaskKind(
 }
 
 function expectsMutatingAction(
-  userText: string,
   taskKind: PolicyDecision["taskKind"],
   capabilityPlan: CapabilityPlan = createEmptyCapabilityPlan(),
 ): boolean {
-  return (
-    taskKind === "edit" ||
-    (taskKind === "capability" && capabilityPlan.permission !== "read") ||
-    /(?:写入|修改|更新|新增|删除|创建|实现|修复|提交|commit|write|edit|modify|update|delete|create|implement|fix)/iu.test(
-      userText,
-    )
-  );
+  if (taskKind === "edit") return true;
+  return taskKind === "capability" && capabilityPlan.permission !== "read";
 }
 
 function createCapabilityPlan(userText: string): CapabilityPlan {

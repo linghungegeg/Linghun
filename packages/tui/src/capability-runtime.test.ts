@@ -243,16 +243,76 @@ describe("Capability Runtime MVP", () => {
     expect(resolveCapabilityDispatchRuntimePolicy(baseAction, lowRiskRead)).toEqual({ action: "run" });
     expect(
       resolveCapabilityDispatchRuntimePolicy({ ...baseAction, shouldAsk: true }, lowRiskRead),
-    ).toEqual({ action: "block", reason: "slow down" });
+    ).toEqual({ action: "block", reason: "slow down", blockedBy: "ask" });
+    expect(
+      resolveCapabilityDispatchRuntimePolicy({ ...baseAction, shouldStop: true }, lowRiskRead),
+    ).toEqual({ action: "block", reason: "slow down", blockedBy: "stop" });
     expect(
       resolveCapabilityDispatchRuntimePolicy({ ...baseAction, shouldDegrade: true }, lowRiskRead),
-    ).toEqual({ action: "run" });
+    ).toEqual({ action: "degrade-readonly", reason: "slow down" });
     expect(
       resolveCapabilityDispatchRuntimePolicy(
         { ...baseAction, shouldDegrade: true },
         { permission: "external_app", riskLevel: "high" },
       ),
-    ).toEqual({ action: "block", reason: "slow down" });
+    ).toEqual({ action: "block", reason: "slow down", blockedBy: "unsafe-degrade" });
+  });
+
+  it("allows only low-risk read capability execution under degrade", async () => {
+    const context = await createCapabilityTestContext("default");
+    context.lastMetaSchedulerDecision = {
+      orchestrationPlan: {
+        steps: [
+          {
+            id: "capability-dispatch",
+            executor: "capability-runtime",
+            mode: "degrade",
+            reason: "reduce side effects",
+          },
+        ],
+      },
+    } as TuiContext["lastMetaSchedulerDecision"];
+
+    const result = await executeCapability(
+      { capabilityId: "mock.echo.read", input: { text: "readonly" }, source: "slash" },
+      context,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.summary).toContain("readonly");
+    expect(context.metaOrchestration?.events.some((event) => event.status === "degraded")).toBe(
+      true,
+    );
+  });
+
+  it("blocks unsafe capability execution under degrade without recording success evidence", async () => {
+    const context = await createCapabilityTestContext("full-access");
+    context.lastMetaSchedulerDecision = {
+      orchestrationPlan: {
+        steps: [
+          {
+            id: "capability-dispatch",
+            executor: "capability-runtime",
+            mode: "degrade",
+            reason: "reduce side effects",
+          },
+        ],
+      },
+    } as TuiContext["lastMetaSchedulerDecision"];
+
+    const result = await executeCapability(
+      { capabilityId: "mock.canvas.create", input: { title: "Blocked" }, source: "slash" },
+      context,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.summary).toContain("degraded execution is only allowed");
+    expect(context.evidence).toEqual([]);
+    expect(
+      context.metaOrchestration?.events.some(
+        (event) => event.status === "blocked" && event.summary.includes("unsafe capability degrade"),
+      ),
+    ).toBe(true);
   });
 
   it("blocks capability execution when meta scheduler requests stop", async () => {

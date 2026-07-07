@@ -1,3 +1,4 @@
+import type { ProviderRetryHookDecision } from "./provider-circuit-breaker.js";
 import type { OrchestrationStep } from "./meta-scheduler-runtime.js";
 import { appendSystemEvent } from "./evidence-runtime.js";
 import { truncateDisplay } from "./startup-runtime.js";
@@ -33,14 +34,27 @@ export type MetaOrchestrationRuntimeEvent = {
   createdAt: string;
 };
 
+const META_ORCHESTRATION_MODE_PRIORITY: Record<MetaOrchestrationMode, number> = {
+  run: 0,
+  degrade: 1,
+  ask: 2,
+  stop: 3,
+};
+
 const MAX_META_ORCHESTRATION_EVENTS = 80;
 
 export function getMetaOrchestrationStep(
   context: Pick<TuiContext, "lastMetaSchedulerDecision">,
   stepId: MetaOrchestrationStepId,
 ): OrchestrationStep | undefined {
-  return context.lastMetaSchedulerDecision?.orchestrationPlan.steps.find(
+  const matches = context.lastMetaSchedulerDecision?.orchestrationPlan.steps.filter(
     (step) => step.id === stepId,
+  );
+  if (!matches?.length) return undefined;
+  return matches.reduce((selected, step) =>
+    META_ORCHESTRATION_MODE_PRIORITY[step.mode] >= META_ORCHESTRATION_MODE_PRIORITY[selected.mode]
+      ? step
+      : selected,
   );
 }
 
@@ -110,6 +124,41 @@ export async function recordMetaOrchestrationRuntimeEvent(
     `meta_orchestration:${event.stepId}; executor=${event.executor}; mode=${event.mode}; status=${event.status}; summary=${event.summary}`,
     input.level ?? (event.status === "failed" || event.status === "blocked" ? "warning" : "info"),
   );
+}
+
+export type MetaProviderRetryInfo = {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  code?: string;
+};
+
+export async function handleProviderRetryForMetaOrchestration(
+  context: TuiContext,
+  sessionId: string | undefined,
+  info: MetaProviderRetryInfo,
+): Promise<ProviderRetryHookDecision | undefined> {
+  const orchestration = resolveMetaOrchestrationAction(context, "provider-retry");
+  if (orchestration.shouldStop) {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "provider-retry",
+      executor: "provider-runtime",
+      status: "blocked",
+      summary: `retry cancelled; attempt=${info.attempt}/${info.maxAttempts}; code=${info.code ?? "unknown"}; reason=${orchestration.reason}`,
+      level: "warning",
+    });
+    return { action: "cancel", reason: orchestration.reason };
+  }
+  if (orchestration.shouldDegrade) {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "provider-retry",
+      executor: "provider-runtime",
+      status: "degraded",
+      summary: `retry guard active; attempt=${info.attempt}/${info.maxAttempts}; code=${info.code ?? "unknown"}; reason=${orchestration.reason}`,
+      level: "warning",
+    });
+  }
+  return undefined;
 }
 
 export function summarizeMetaOrchestrationState(context: TuiContext): string | undefined {

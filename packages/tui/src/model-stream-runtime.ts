@@ -78,6 +78,7 @@ import { computeWorktreeContext } from "./git-operation-runtime.js";
 import { summarizeWorktreeContextForPrompt } from "./git-tool-runtime.js";
 import { runAutoLearningOnTurnEnd } from "./memory-command-runtime.js";
 import {
+  handleProviderRetryForMetaOrchestration,
   recordMetaOrchestrationRuntimeEvent,
   resolveMetaOrchestrationAction,
 } from "./meta-orchestration-runtime.js";
@@ -125,7 +126,7 @@ import {
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
-import { clearProviderBreaker, type ProviderRetryHookDecision, withProviderRetry } from "./provider-circuit-breaker.js";
+import { clearProviderBreaker, withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   checkAndWriteProviderCooldown,
   recordProviderFallbackAttempt,
@@ -712,33 +713,6 @@ function showProviderRetryActivity(
   context.shellRerender?.();
 }
 
-async function handleProviderRetryForMetaOrchestration(
-  context: TuiContext,
-  sessionId: string,
-  info: { attempt: number; maxAttempts: number; delayMs: number; code?: string },
-): Promise<ProviderRetryHookDecision | undefined> {
-  const orchestration = resolveMetaOrchestrationAction(context, "provider-retry");
-  if (orchestration.shouldStop) {
-    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
-      stepId: "provider-retry",
-      executor: "provider-runtime",
-      status: "blocked",
-      summary: `retry cancelled; attempt=${info.attempt}/${info.maxAttempts}; code=${info.code ?? "unknown"}; reason=${orchestration.reason}`,
-      level: "warning",
-    });
-    return { action: "cancel", reason: orchestration.reason };
-  }
-  if (orchestration.shouldDegrade) {
-    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
-      stepId: "provider-retry",
-      executor: "provider-runtime",
-      status: "degraded",
-      summary: `retry guard active; attempt=${info.attempt}/${info.maxAttempts}; code=${info.code ?? "unknown"}; reason=${orchestration.reason}`,
-      level: "warning",
-    });
-  }
-  return undefined;
-}
 
 function showProviderRecoveryActivity(context: TuiContext): void {
   context.requestActivityPhase = "provider_recovering";

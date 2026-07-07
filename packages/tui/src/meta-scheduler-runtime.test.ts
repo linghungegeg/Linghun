@@ -2,14 +2,20 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ModelMessage } from "@linghun/providers";
 import { describe, expect, it } from "vitest";
-import type { IndexState } from "./index-runtime.js";
+import {
+  getMetaOrchestrationStep,
+  handleProviderRetryForMetaOrchestration,
+  resolveMetaOrchestrationAction,
+} from "./meta-orchestration-runtime.js";
 import {
   evaluateMetaScheduler,
   formatMetaSchedulerDirective,
   ORCHESTRATION_STEP_IDS,
   verifyFailureLearningContract,
 } from "./meta-scheduler-runtime.js";
+import type { IndexState } from "./index-runtime.js";
 import { sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
+import type { TuiContext } from "./tui-context-runtime.js";
 import type {
   BackgroundTaskState,
   EvidenceRecord,
@@ -872,6 +878,89 @@ describe("Meta scheduler runtime", () => {
     expect(decision.internalEvents).toContain("meta_scheduler:blocked_runtime_stop");
   });
 
+  it("plans a single stop inspect-runtime step and consumers prefer stop over run", () => {
+    const workflow: NonNullable<WorkflowState["activeRun"]> = {
+      id: "wf-1",
+      goal: "ship",
+      planId: "plan-1",
+      status: "blocked",
+      steps: [],
+      startedAt: new Date(0).toISOString(),
+      result: "blocked",
+    };
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      workflow,
+    });
+
+    const inspectSteps = decision.orchestrationPlan.steps.filter(
+      (step) => step.id === "inspect-runtime",
+    );
+    expect(inspectSteps).toHaveLength(1);
+    expect(inspectSteps[0]).toMatchObject({ id: "inspect-runtime", mode: "stop" });
+    expect(
+      resolveMetaOrchestrationAction({ lastMetaSchedulerDecision: decision }, "inspect-runtime")
+        .shouldStop,
+    ).toBe(true);
+
+    const duplicateLegacyDecision = {
+      ...decision,
+      orchestrationPlan: {
+        ...decision.orchestrationPlan,
+        steps: [
+          { id: "inspect-runtime" as const, executor: "meta-scheduler" as const, mode: "run" as const, reason: "legacy run" },
+          { id: "inspect-runtime" as const, executor: "meta-scheduler" as const, mode: "stop" as const, reason: "blocked" },
+        ],
+      },
+    };
+    expect(
+      getMetaOrchestrationStep({ lastMetaSchedulerDecision: duplicateLegacyDecision }, "inspect-runtime")
+        ?.mode,
+    ).toBe("stop");
+  });
+
+  it("applies provider retry stop through the shared meta orchestration helper", async () => {
+    const context = makeMetaRetryContext("stop", "retry disabled");
+
+    const decision = await handleProviderRetryForMetaOrchestration(context, undefined, {
+      attempt: 1,
+      maxAttempts: 2,
+      delayMs: 10,
+      code: "PROVIDER_STREAM_ERROR",
+    });
+
+    expect(decision).toEqual({ action: "cancel", reason: "retry disabled" });
+    expect(context.metaOrchestration?.events).toEqual([
+      expect.objectContaining({
+        stepId: "provider-retry",
+        executor: "provider-runtime",
+        mode: "stop",
+        status: "blocked",
+      }),
+    ]);
+  });
+
+  it("records provider retry degrade without cancelling the retry", async () => {
+    const context = makeMetaRetryContext("degrade", "retry guard active");
+
+    const decision = await handleProviderRetryForMetaOrchestration(context, undefined, {
+      attempt: 1,
+      maxAttempts: 2,
+      delayMs: 10,
+      code: "PROVIDER_STREAM_ERROR",
+    });
+
+    expect(decision).toBeUndefined();
+    expect(context.metaOrchestration?.events).toEqual([
+      expect.objectContaining({
+        stepId: "provider-retry",
+        executor: "provider-runtime",
+        mode: "degrade",
+        status: "degraded",
+      }),
+    ]);
+  });
+
   it("keeps historical non-pass task states out of blocked runtime stop", () => {
     const backgroundTasks: BackgroundTaskState[] = [
       makeBackgroundTask("agent-stale", "agent", "stale", "stale"),
@@ -1065,6 +1154,8 @@ describe("Meta scheduler runtime", () => {
       });
 
       expect(decision.policyDecision.taskKind).toBe("code_fact");
+      expect(decision.policyDecision.permissionSignal.expectedMutating).toBe(false);
+      expect(decision.policyDecision.permissionSignal.requireExplicitGate).toBe(false);
       expect(decision.policyDecision.executionPlan.preferSourceFirst).toBe(true);
       expect(decision.internalEvents).toEqual(
         expect.arrayContaining([expect.stringContaining("连续失败后强制源码优先")]),
@@ -1093,6 +1184,28 @@ describe("Meta scheduler runtime", () => {
       expect(decision.internalEvents).toEqual(
         expect.arrayContaining([expect.stringContaining("上轮验证失败")]),
       );
+    });
+
+    it("keeps trust repair source-first synced into the execution plan", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "ok",
+        trustScore: 20,
+      });
+
+      expect(decision.policyDecision.userState.kind).toBe("trust_repair");
+      expect(decision.policyDecision.executionPlan.preferSourceFirst).toBe(true);
+    });
+
+    it("does not let repair wording alone open the mutating permission gate", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "检查这些修复点是否会冲突，先别改文件",
+      });
+
+      expect(decision.policyDecision.taskKind).not.toBe("edit");
+      expect(decision.policyDecision.permissionSignal.expectedMutating).toBe(false);
+      expect(decision.policyDecision.permissionSignal.requireExplicitGate).toBe(false);
     });
 
     it("scores edit over code_fact when edit keywords dominate", () => {
@@ -1172,6 +1285,23 @@ function makeEvidence(overrides: Partial<EvidenceRecord> = {}): EvidenceRecord {
     createdAt: new Date(0).toISOString(),
     ...overrides,
   };
+}
+
+function makeMetaRetryContext(mode: "stop" | "degrade", reason: string): TuiContext {
+  return {
+    lastMetaSchedulerDecision: {
+      orchestrationPlan: {
+        steps: [
+          {
+            id: "provider-retry" as const,
+            executor: "provider-runtime" as const,
+            mode,
+            reason,
+          },
+        ],
+      },
+    },
+  } as unknown as TuiContext;
 }
 
 function makeBackgroundTask(
