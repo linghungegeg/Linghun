@@ -116,6 +116,12 @@ export type McpIndexRuntimeDeps = {
   rememberEvidence: (context: TuiContext, evidence: EvidenceRecord) => void;
   resolveCodebaseMemoryPackageRoot?: (packageName: string) => string | undefined;
   resolvePreEngineBinary?: () => Promise<string | undefined>;
+  callPreEngineTool?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    cwd: string,
+    binary: string,
+  ) => Promise<{ ok: boolean; summary: string; data?: unknown }>;
 };
 
 let runtimeDeps: McpIndexRuntimeDeps | undefined;
@@ -674,6 +680,125 @@ function getOrCreatePreEngineDaemon(binary: string, cwd: string): PreEngineDaemo
     _preEngineDaemons.set(key, d);
   }
   return d;
+}
+
+const PRE_ENGINE_FALLBACK_TOOLS = [
+  "SearchExtraTools",
+  "SourcePack",
+  "Grep",
+  "Glob",
+  "Read",
+  "ReadSnippets",
+];
+
+type PreEngineSemanticDegradation = {
+  reason: string;
+  summary: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function extractFirstTextContent(value: Record<string, unknown>): string | undefined {
+  const content = asArray(value.content);
+  for (const item of content) {
+    if (isRecord(item) && typeof item.text === "string") {
+      return item.text;
+    }
+  }
+  return undefined;
+}
+
+function parsePreEnginePayload(data: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(data)) return undefined;
+  const text = extractFirstTextContent(data);
+  if (text) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      return { isError: data.isError === true, text };
+    }
+  }
+  return data;
+}
+
+function getAnswerPack(payload: Record<string, unknown>): Record<string, unknown> | undefined {
+  return isRecord(payload.answer_pack) ? payload.answer_pack : undefined;
+}
+
+function isEmptyArrayField(payload: Record<string, unknown>, key: string): boolean {
+  return asArray(payload[key]).length === 0;
+}
+
+function classifyPreEngineSemanticDegradation(
+  toolName: string,
+  data: unknown,
+): PreEngineSemanticDegradation | undefined {
+  const payload = parsePreEnginePayload(data);
+  if (!payload) return undefined;
+  if (payload.isError === true) {
+    const text = typeof payload.text === "string" ? payload.text : "pre-engine returned an error result";
+    return { reason: "pre-engine-result-error", summary: text };
+  }
+
+  const answerPack = getAnswerPack(payload);
+  const confidence = typeof answerPack?.confidence === "string" ? answerPack.confidence : undefined;
+  if (confidence === "low") {
+    return {
+      reason: "pre-engine-low-confidence",
+      summary: "pre-engine returned low-confidence repository analysis",
+    };
+  }
+
+  if (
+    toolName === "pre_context" &&
+    payload.definition == null &&
+    isEmptyArrayField(payload, "references") &&
+    isEmptyArrayField(payload, "callees") &&
+    isEmptyArrayField(payload, "callers")
+  ) {
+    return {
+      reason: "pre-engine-empty-context",
+      summary: "pre-engine did not find definition, references, callers, or callees",
+    };
+  }
+
+  if (
+    toolName === "pre_plan" &&
+    isEmptyArrayField(payload, "anchor_symbols") &&
+    isEmptyArrayField(payload, "candidate_files")
+  ) {
+    return {
+      reason: "pre-engine-empty-plan",
+      summary: "pre-engine did not find anchor symbols or candidate files",
+    };
+  }
+
+  if (toolName === "pre_verify") {
+    const layerKeys = Object.keys(payload).filter((key) => key.endsWith("_layer"));
+    const layerStatuses = layerKeys
+      .map((key) => payload[key])
+      .filter(isRecord)
+      .map((layer) => (typeof layer.status === "string" ? layer.status : undefined))
+      .filter((status): status is string => Boolean(status));
+    const allLayersUnavailable =
+      layerStatuses.length > 0 &&
+      layerStatuses.every((status) => status === "disabled" || status === "unavailable");
+    if (allLayersUnavailable && asArray(payload.issues).length === 0) {
+      return {
+        reason: "pre-engine-verifier-unavailable",
+        summary: "pre-engine verifier deep layers were disabled or unavailable for the changed files",
+      };
+    }
+  }
+
+  return undefined;
 }
 
 export async function resolvePreEngineBinary(): Promise<string | undefined> {
@@ -1741,12 +1866,18 @@ export async function executeExtraTool(
         data: {
           degraded: true,
           reason: "pre-engine-binary-missing",
-          fallback_tools: ["SearchExtraTools", "SourcePack", "Grep", "Glob", "Read", "ReadSnippets"],
+          fallback_tools: PRE_ENGINE_FALLBACK_TOOLS,
         },
       };
     }
-    const daemon = getOrCreatePreEngineDaemon(binary, context.projectPath);
-    const result = await daemon.call(target.name, params as Record<string, unknown>);
+    const result = await (
+      runtimeDeps?.callPreEngineTool
+        ? runtimeDeps.callPreEngineTool(target.name, params as Record<string, unknown>, context.projectPath, binary)
+        : getOrCreatePreEngineDaemon(binary, context.projectPath).call(
+            target.name,
+            params as Record<string, unknown>,
+          )
+    );
     if (!result.ok) {
       return {
         ok: true,
@@ -1756,7 +1887,22 @@ export async function executeExtraTool(
           degraded: true,
           reason: "pre-engine-runtime-unavailable",
           summary: result.summary,
-          fallback_tools: ["SearchExtraTools", "SourcePack", "Grep", "Glob", "Read", "ReadSnippets"],
+          fallback_tools: PRE_ENGINE_FALLBACK_TOOLS,
+        },
+      };
+    }
+    const semanticDegradation = classifyPreEngineSemanticDegradation(target.name, result.data);
+    if (semanticDegradation) {
+      return {
+        ok: true,
+        degraded: true,
+        text: `ExecuteExtraTool(pre-engine:${target.name}) 降级：${semanticDegradation.summary}。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        data: {
+          degraded: true,
+          reason: semanticDegradation.reason,
+          summary: semanticDegradation.summary,
+          pre_engine_result: result.data,
+          fallback_tools: PRE_ENGINE_FALLBACK_TOOLS,
         },
       };
     }

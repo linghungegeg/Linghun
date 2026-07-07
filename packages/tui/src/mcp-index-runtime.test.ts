@@ -129,6 +129,116 @@ describe("mcp-index-runtime", () => {
     expect(result.text).toContain("已跳过 AST 预分析");
   });
 
+  test("pre-engine deferred tools degrade when analysis returns low confidence", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-low-confidence-"));
+    const context = {
+      ...createIndexContext(projectPath),
+      discoveredDeferredToolNames: new Set<string>(["pre_plan"]),
+      mcp: { enabled: false, servers: [], tools: [] },
+      skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [] },
+      plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [] },
+    };
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-test",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary: async () => "mock-pre-engine",
+      callPreEngineTool: async () => ({
+        ok: true,
+        summary: "ok",
+        data: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                anchor_symbols: [],
+                candidate_files: [],
+                answer_pack: {
+                  confidence: "low",
+                  missing_evidence: ["anchor_symbols"],
+                  suggested_minimal_reads: [],
+                },
+              }),
+            },
+          ],
+        },
+      }),
+    });
+
+    const result = await executeExtraTool(
+      { tool_name: "pre_plan", params: { task: "inspect unsupported repository" } },
+      context as never,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result).toMatchObject({
+      degraded: true,
+      data: {
+        degraded: true,
+        reason: "pre-engine-low-confidence",
+        fallback_tools: ["SearchExtraTools", "SourcePack", "Grep", "Glob", "Read", "ReadSnippets"],
+      },
+    });
+    expect(result.text).toContain("降级");
+  });
+
+  test("pre_verify degrades when all verifier layers are unavailable", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-verify-disabled-"));
+    const context = {
+      ...createIndexContext(projectPath),
+      discoveredDeferredToolNames: new Set<string>(["pre_verify"]),
+      mcp: { enabled: false, servers: [], tools: [] },
+      skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [] },
+      plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [] },
+    };
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-test",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary: async () => "mock-pre-engine",
+      callPreEngineTool: async () => ({
+        ok: true,
+        summary: "ok",
+        data: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "pass",
+                issues: [],
+                deep_layer: { status: "disabled", reason: "no TypeScript files in changed_files" },
+                py_deep_layer: { status: "unavailable", reason: "python unavailable" },
+              }),
+            },
+          ],
+        },
+      }),
+    });
+
+    const result = await executeExtraTool(
+      { tool_name: "pre_verify", params: { changed_files: ["README.md"] } },
+      context as never,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result).toMatchObject({
+      degraded: true,
+      data: {
+        degraded: true,
+        reason: "pre-engine-verifier-unavailable",
+      },
+    });
+    expect(result.text).toContain("降级");
+  });
+
   test("findBundledCodebaseMemoryBinary resolves platform optional package binaries", async () => {
     const packageRoot = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-pkg-"));
     const platformArch = "win32-x64";
