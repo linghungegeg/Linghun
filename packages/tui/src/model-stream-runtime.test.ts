@@ -225,8 +225,15 @@ describe("responses prompt cache key", () => {
 });
 
 describe("tool batch fail-fast helpers", () => {
-  it("counts failed tool results as failures even when they carry evidence", () => {
+  it("counts failed tool results and required fallbacks as incomplete even with evidence", () => {
     expect(isToolBatchFailure({ ok: false, evidenceId: "evidence-1" } as never)).toBe(true);
+    expect(
+      isToolBatchFailure({
+        ok: true,
+        evidenceId: "evidence-1",
+        data: { fallback_required: true },
+      } as never),
+    ).toBe(true);
     expect(isToolBatchFailure({ ok: true, evidenceId: "evidence-1" } as never)).toBe(false);
   });
 
@@ -343,7 +350,7 @@ describe("tool failure recovery guard", () => {
     expect(stopped.state.repeatedFailureRounds).toBe(5);
   });
 
-  it("continues after a failed tool round when the next assistant turn has no tool call", () => {
+  it("continues after an incomplete tool round when the next assistant turn has no tool call", () => {
     expect(
       shouldContinueAfterToolFailureWithoutToolCall({ repeatedFailureRounds: 1 }, 0, 4),
     ).toBe(true);

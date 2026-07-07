@@ -245,8 +245,14 @@ const PARALLEL_READONLY_TOOL_NAMES = new Set([
   "pre_verify",
 ]);
 
-export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok">): boolean {
-  return result.ok !== true;
+function isFallbackRequiredToolResult(result: Pick<ModelToolExecutionResult, "data">): boolean {
+  const data = result.data;
+  return !!data && typeof data === "object" && !Array.isArray(data) &&
+    (data as Record<string, unknown>).fallback_required === true;
+}
+
+export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok" | "data">): boolean {
+  return result.ok !== true || isFallbackRequiredToolResult(result);
 }
 
 export type ToolFailureRecoveryState = {
@@ -295,19 +301,19 @@ export function shouldContinueAfterToolFailureWithoutToolCall(
 function classifyToolFailureForRecovery(text: string): string {
   const normalized = text.toLowerCase();
   if (
-    /old_string|no match|not found|0 replacements|no replacement|找不到|未匹配|没有匹配/u.test(
+    /old_string|no match|not found|0 replacements|no replacement|找不到|未匹配|没有匹配/.test(
       normalized,
     )
   ) {
     return "edit_no_match";
   }
-  if (/permission|denied|rejected|拒绝|权限/u.test(normalized)) return "permission";
-  if (/timeout|timed out|超时/u.test(normalized)) return "timeout";
-  if (/not recognized|command not found|不是内部或外部命令|找不到命令/u.test(normalized)) {
+  if (/permission|denied|rejected|拒绝|权限/.test(normalized)) return "permission";
+  if (/timeout|timed out|超时/.test(normalized)) return "timeout";
+  if (/not recognized|command not found|不是内部或外部命令|找不到命令/.test(normalized)) {
     return "command_not_found";
   }
-  if (/syntax|parse|heredoc|here-string|解析|语法/u.test(normalized)) return "shell_syntax";
-  return normalized.replace(/\s+/gu, " ").trim().slice(0, 240);
+  if (/syntax|parse|heredoc|here-string|解析|语法/.test(normalized)) return "shell_syntax";
+  return normalized.replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
 function createToolFailureRecoveryReminder(language: Language): string {
@@ -2721,7 +2727,6 @@ export async function sendMessage(
       }
       if (toolCalls.length === 0) {
         if (
-          metaSchedulerDecision.shouldUseRetryGuard &&
           shouldContinueAfterToolFailureWithoutToolCall(
             toolFailureRecoveryState,
             toolFailureNoToolRecoveryPrompts,
@@ -2927,7 +2932,7 @@ export async function sendMessage(
       const roundHadProgress = toolBatchResult.roundHadProgress;
       const roundFailureFingerprints = toolBatchResult.roundFailureFingerprints;
       const roundHadToolFailure = toolCalls.length > 0 && !roundHadProgress;
-      if (roundHadToolFailure && metaSchedulerDecision.shouldUseRetryGuard) {
+      if (roundHadToolFailure) {
         const recovery = updateToolFailureRecoveryState(
           toolFailureRecoveryState,
           roundFailureFingerprints,
