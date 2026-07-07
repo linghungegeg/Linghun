@@ -199,6 +199,18 @@ describe("tool batch fail-fast helpers", () => {
     ]);
   });
 
+  it("does not turn meta-scheduler tool ask into an empty local approval wait", async () => {
+    const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
+    const shortCircuitStart = source.indexOf("if (orchestration.shouldStop || orchestration.shouldAsk)");
+    const shortCircuitEnd = source.indexOf("for (const batch of batches)", shortCircuitStart);
+    const shortCircuit = source.slice(shortCircuitStart, shortCircuitEnd);
+
+    expect(shortCircuit).toContain("createMetaOrchestrationSkippedToolResult");
+    expect(shortCircuit).toContain("pendingApproval: false");
+    expect(shortCircuit).not.toContain("pendingApproval: orchestration.shouldAsk");
+    expect(shortCircuit).not.toContain("context.pendingLocalApproval");
+  });
+
   it("keeps sensitive or outside Read calls out of parallel readonly batches", () => {
     expect(canRunToolCallInParallelReadonlyBatch({ name: "Read", input: { path: "src/index.ts" } })).toBe(true);
     expect(canRunToolCallInParallelReadonlyBatch({ name: "Read", input: { path: "../secret.txt" } })).toBe(false);

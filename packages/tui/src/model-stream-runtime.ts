@@ -460,7 +460,7 @@ async function executeToolCallsWithReadonlyParallelism(
       summary: `mode=${orchestration.mode}; skipped=${toolCalls.length}; reason=${orchestration.reason}`,
       level: "warning",
     });
-    return { ...state, pendingApproval: orchestration.shouldAsk };
+    return { ...state, pendingApproval: false };
   }
 
   for (const batch of batches) {
