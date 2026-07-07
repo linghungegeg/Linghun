@@ -8,7 +8,6 @@ import type {
   ModelToolCall,
   ModelUsage,
 } from "@linghun/providers";
-import { findKnownModel } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import {
   collectPendingAgentCompletionNotices,
@@ -2104,6 +2103,7 @@ export async function sendMessage(
   const originalModel = selectedRuntime.model;
   context.model = selectedRuntime.model;
   let selectedTools = currentModelSupportsTools(context, selectedRuntime);
+  let toolCallingDegradedForRuntime: string | undefined;
   const reportWriteGuard = createReportWriteGuard(text);
   await appendSystemEvent(
     context,
@@ -2564,6 +2564,24 @@ export async function sendMessage(
             );
             continue modelRoundLoop;
           }
+          const toolCallingKey = runtimeToolCallingKey(selectedRuntime);
+          if (
+            modelSupportsTools &&
+            toolCallingDegradedForRuntime !== toolCallingKey &&
+            isToolCallingCompatibilityError(event.error)
+          ) {
+            selectedTools = false;
+            toolCallingDegradedForRuntime = toolCallingKey;
+            resetAssistantDraftForProviderRetry();
+            showProviderRecoveryActivity(context);
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `tool_calling_degraded_retry: provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile ?? "default"}`,
+              "warning",
+            );
+            continue modelRoundLoop;
+          }
           // withProviderRetry already handled same-provider retries, concurrency gating,
           // and breaker transitions. Only fallback to a different model remains.
           const fallback = resolveRuntimeFallback(context, selectedRuntime, event.error);
@@ -2603,6 +2621,7 @@ export async function sendMessage(
             messagesForProvider = appendLatestUserRequestAnchor(messagesForProvider);
             context.model = selectedRuntime.model;
             selectedTools = currentModelSupportsTools(context, selectedRuntime);
+            toolCallingDegradedForRuntime = undefined;
             if (checkAndWriteProviderCooldown(context, selectedRuntime, output)) {
               return;
             }
@@ -4282,6 +4301,8 @@ export async function continueModelAfterToolResults(
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
     let runtimeFallbackAttempted = false;
+    let continuationToolsEnabled = currentModelSupportsTools(context, runtimeFromContinuation(continuation));
+    let toolCallingDegradedForRuntime: string | undefined;
     let highReasoningToolsEmptyRetried = false;
     let reactiveCompactRetried = false;
     const _suggestedMax = context.lastMetaSchedulerDecision?.suggestedMaxTodoRounds ?? MAX_TODO_ONLY_CODE_FACT;
@@ -4330,8 +4351,12 @@ export async function continueModelAfterToolResults(
         model: continuation.model,
         endpointProfile: continuation.endpointProfile,
         ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
-        tools: createModelToolDefinitionsForReportGuard(continuation.reportWriteGuard),
-        toolChoice: "auto",
+        ...(continuationToolsEnabled
+          ? {
+              tools: createModelToolDefinitionsForReportGuard(continuation.reportWriteGuard),
+              toolChoice: "auto" as const,
+            }
+          : {}),
         ...promptCacheFields,
       };
       if (highReasoningToolsEmptyRetried) {
@@ -4476,6 +4501,25 @@ export async function continueModelAfterToolResults(
             );
             continue continuationRoundLoop;
           }
+          const toolCallingKey = runtimeToolCallingKey(currentRuntime);
+          if (
+            continuationToolsEnabled &&
+            toolCallingDegradedForRuntime !== toolCallingKey &&
+            isToolCallingCompatibilityError(event.error)
+          ) {
+            continuationToolsEnabled = false;
+            toolCallingDegradedForRuntime = toolCallingKey;
+            continuation.messages = appendLatestUserRequestAnchor(continuation.messages);
+            resetAssistantDraftForProviderRetry();
+            showProviderRecoveryActivity(context);
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `tool_calling_degraded_retry: provider=${currentRuntime.provider} model=${currentRuntime.model} endpointProfile=${currentRuntime.endpointProfile ?? "default"}`,
+              "warning",
+            );
+            continue continuationRoundLoop;
+          }
           // withProviderRetry already handled same-provider retries, concurrency gating,
           // and breaker transitions. Only fallback to a different model remains.
           const fallback = runtimeFallbackAttempted
@@ -4507,6 +4551,8 @@ export async function continueModelAfterToolResults(
             continuation.endpointProfile = fallback.runtime.endpointProfile;
             continuation.reasoningLevel = fallback.runtime.reasoningLevel;
             continuation.reasoningSent = fallback.runtime.reasoningSent;
+            continuationToolsEnabled = currentModelSupportsTools(context, fallback.runtime);
+            toolCallingDegradedForRuntime = undefined;
             if (checkAndWriteProviderCooldown(context, fallback.runtime, output)) {
               writeStatus(output, context);
               return;
@@ -5018,21 +5064,56 @@ function currentModelSupportsTools(
   context: TuiContext,
   runtime = getSelectedModelRuntime(context),
 ): boolean {
+  return !isToolCallingExplicitlyDisabled(context, runtime);
+}
+
+function isToolCallingExplicitlyDisabled(
+  context: TuiContext,
+  runtime = getSelectedModelRuntime(context),
+): boolean {
   const providerConfig = context.config.providers[runtime.provider];
   if (
     providerConfig &&
     "supportsTools" in providerConfig &&
     providerConfig.supportsTools === false
   ) {
-    return false;
+    return true;
   }
-  // Honour role route allowTools — reviewer/planner may be configured read-only.
   const route = context.config.modelRoutes.routes.find((r) => r.role === runtime.role);
-  if (route && !route.allowTools) {
-    return false;
+  return route?.allowTools === false;
+}
+
+function runtimeToolCallingKey(runtime: { provider: string; model: string; endpointProfile?: string }): string {
+  return `${runtime.provider}:${runtime.model}:${runtime.endpointProfile ?? "default"}`;
+}
+
+function isToolCallingCompatibilityError(error: unknown): boolean {
+  const text = providerErrorText(error).toLowerCase();
+  if (!text) return false;
+  const mentionsTools = /\btools?\b|tool[_ -]?choice|tool[_ -]?calls?|function[_ -]?calling/u.test(
+    text,
+  );
+  if (!mentionsTools) return false;
+  return (
+    /unsupported|not\s+supported|invalid|unknown|unrecognized|schema|parameter|field|400|bad\s+request/u.test(
+      text,
+    ) || text.includes("unsupported_parameter")
+  );
+}
+
+function providerErrorText(error: unknown): string {
+  if (error instanceof Error) {
+    const parts = [error.name, error.message];
+    const maybeError = error as { code?: unknown; status?: unknown; statusCode?: unknown };
+    if (maybeError.code !== undefined) parts.push(String(maybeError.code));
+    if (maybeError.status !== undefined) parts.push(String(maybeError.status));
+    if (maybeError.statusCode !== undefined) parts.push(String(maybeError.statusCode));
+    return parts.join(" ");
   }
-  const known = findKnownModel(runtime.model);
-  return known?.supportsTools !== false;
+  if (typeof error === "object" && error !== null) {
+    return JSON.stringify(error);
+  }
+  return String(error ?? "");
 }
 
 const GIT_PROMPT_MAX_CHARS = 1000;

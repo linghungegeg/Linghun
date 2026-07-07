@@ -7,6 +7,7 @@ import { createIndexState } from "./index-runtime.js";
 import { summarizeIndexResult } from "./index-result-presenter.js";
 import {
   configureMcpIndexRuntime,
+  executeExtraTool,
   findBundledCodebaseMemoryBinary,
   refreshIndexStatus,
   isSupportiveIndexEvidence,
@@ -97,6 +98,37 @@ function restoreEnv(name: string, value: string | undefined): void {
 }
 
 describe("mcp-index-runtime", () => {
+  test("pre-engine deferred tools degrade when the binary is unavailable", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-degrade-"));
+    const context = {
+      ...createIndexContext(projectPath),
+      discoveredDeferredToolNames: new Set<string>(["pre_plan"]),
+      mcp: { enabled: false, servers: [], tools: [] },
+      skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [] },
+      plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [] },
+    };
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-test",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary: async () => undefined,
+    });
+
+    const result = await executeExtraTool(
+      { tool_name: "pre_plan", params: { task: "inspect repository" } },
+      context as never,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result).toMatchObject({ degraded: true });
+    expect(result.text).toContain("降级");
+    expect(result.text).toContain("已跳过 AST 预分析");
+  });
+
   test("findBundledCodebaseMemoryBinary resolves platform optional package binaries", async () => {
     const packageRoot = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-pkg-"));
     const platformArch = "win32-x64";

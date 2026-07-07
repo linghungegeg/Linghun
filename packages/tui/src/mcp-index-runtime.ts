@@ -93,7 +93,8 @@ export type CodebaseMemoryResolution = {
 };
 
 export type ExecuteExtraToolResult =
-  | { ok: true; text: string; data?: unknown }
+  | { ok: true; text: string; data?: unknown; degraded?: false }
+  | { ok: true; text: string; data?: unknown; degraded: true }
   | { ok: false; text: string };
 
 export type McpIndexRuntimeDeps = {
@@ -114,6 +115,7 @@ export type McpIndexRuntimeDeps = {
   ) => Promise<void>;
   rememberEvidence: (context: TuiContext, evidence: EvidenceRecord) => void;
   resolveCodebaseMemoryPackageRoot?: (packageName: string) => string | undefined;
+  resolvePreEngineBinary?: () => Promise<string | undefined>;
 };
 
 let runtimeDeps: McpIndexRuntimeDeps | undefined;
@@ -1730,19 +1732,32 @@ export async function executeExtraTool(
     };
   }
   if (target.kind === "pre-engine") {
-    const binary = await resolvePreEngineBinary();
+    const binary = await (runtimeDeps?.resolvePreEngineBinary ?? resolvePreEngineBinary)();
     if (!binary) {
       return {
-        ok: false,
-        text: `ExecuteExtraTool(pre-engine:${target.name}) 失败：找不到 linghun-pre-engine 二进制文件（bundled 或 PATH 均未命中）。`,
+        ok: true,
+        degraded: true,
+        text: `ExecuteExtraTool(pre-engine:${target.name}) 降级：当前环境找不到 linghun-pre-engine 二进制文件，已跳过 AST 预分析。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        data: {
+          degraded: true,
+          reason: "pre-engine-binary-missing",
+          fallback_tools: ["SearchExtraTools", "SourcePack", "Grep", "Glob", "Read", "ReadSnippets"],
+        },
       };
     }
     const daemon = getOrCreatePreEngineDaemon(binary, context.projectPath);
     const result = await daemon.call(target.name, params as Record<string, unknown>);
     if (!result.ok) {
       return {
-        ok: false,
-        text: `ExecuteExtraTool(pre-engine:${target.name}) 失败：${result.summary}`,
+        ok: true,
+        degraded: true,
+        text: `ExecuteExtraTool(pre-engine:${target.name}) 降级：${result.summary}。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        data: {
+          degraded: true,
+          reason: "pre-engine-runtime-unavailable",
+          summary: result.summary,
+          fallback_tools: ["SearchExtraTools", "SourcePack", "Grep", "Glob", "Read", "ReadSnippets"],
+        },
       };
     }
     return {

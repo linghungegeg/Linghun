@@ -11142,6 +11142,79 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
+  it("degrades ordinary model requests to text when provider rejects tool calling", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "https://example.invalid/v1",
+            apiKey: "sk-test-openai-compatible-secret",
+            model: "gpt-5.5",
+            endpointProfile: "chat_completions",
+          },
+        },
+        modelRoutes: {
+          routes: [{ role: "executor", provider: "openai-compatible", primaryModel: "gpt-5.5" }],
+        },
+      }),
+      "utf8",
+    );
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        if (requests.length === 1) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: "Unsupported parameter: tools are not supported by this model",
+                type: "invalid_request_error",
+                code: "unsupported_parameter",
+              },
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+        const body = `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [{ delta: { content: "降级后继续完成。" } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["普通开发请求\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const resumed = await new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    }).resume(session?.id ?? "missing");
+    const first = requests[0] as { tools?: unknown[]; tool_choice?: string; toolChoice?: string };
+    const second = requests[1] as { tools?: unknown[]; tool_choice?: string; toolChoice?: string };
+
+    expect(first.tools?.length).toBeGreaterThan(0);
+    expect(first.tool_choice ?? first.toolChoice).toBe("auto");
+    expect(second.tools).toBeUndefined();
+    expect(second.tool_choice ?? second.toolChoice).toBeUndefined();
+    expect(output.text).toContain("降级后继续完成");
+    expect(
+      resumed.transcript.some(
+        (event) =>
+          event.type === "system_event" && event.message.includes("tool_calling_degraded_retry"),
+      ),
+    ).toBe(true);
+  });
+
   it("keeps exact Start Gate confirmation strict when a gate is pending", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

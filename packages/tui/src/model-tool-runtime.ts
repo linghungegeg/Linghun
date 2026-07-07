@@ -1097,6 +1097,30 @@ export async function executePreEngineToolUse(
       writeLine(output, formatPreEnginePrimaryText(toolName, false, context, toolCall.input));
       return { ok: false, tool: toolName, text: result.text, evidenceId: evidence.id };
     }
+    if (result.degraded) {
+      const evidence = await recordToolEvidence(context, sessionId, "Read", {
+        text: result.text,
+        data: result.data,
+      } as ToolOutput);
+      await appendDeferredToolResultEvent(
+        context,
+        sessionId,
+        toolCall.id,
+        toolName,
+        { text: result.text, data: result.data },
+        false,
+        evidence?.id,
+      );
+      clearRequestActivity(context);
+      writeLine(output, formatPreEngineDegradedPrimaryText(context));
+      return {
+        ok: true,
+        tool: toolName,
+        text: result.text,
+        data: result.data,
+        evidenceId: evidence?.id,
+      };
+    }
     rememberSourcePackCandidatesFromToolData(context, toolName, result.data);
     const evidence = await recordToolEvidence(context, sessionId, "Read", {
       text: result.text,
@@ -1143,6 +1167,12 @@ export async function executePreEngineToolUse(
 }
 
 const PRE_ENGINE_SYMBOL_MAX_LENGTH = 80;
+
+function formatPreEngineDegradedPrimaryText(context: TuiContext): string {
+  return context.language === "zh-CN"
+    ? "代码预分析已降级，继续使用索引和文件读取工具。"
+    : "Code pre-analysis degraded; continue with index and file-reading tools.";
+}
 
 function formatPreEnginePrimaryText(
   toolName: string,
