@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { createModelToolDefinitions } from "./model-loop-runtime.js";
 import {
   __testBuildForkArgsFromStartAgentInput,
+  __testBuildPreEngineFallbackRequiredResult,
   __testFormatPreEnginePrimaryText,
   rememberSourcePackCandidatesFromToolData,
   rememberToolFiles,
@@ -151,6 +152,28 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
 
     expect(text).toBe("代码规划分析完成。");
     expect(text).not.toBe("代码分析完成。");
+  });
+
+  it("marks pre-engine degradation as requiring real-tool fallback", () => {
+    const result = __testBuildPreEngineFallbackRequiredResult(
+      {
+        text: "ExecuteExtraTool(pre-engine:pre_verify) 降级：verifier unavailable。",
+        data: {
+          degraded: true,
+          reason: "pre-engine-verifier-unavailable",
+          fallback_tools: ["SearchExtraTools", "SourcePack", "Grep", "Glob", "Read", "ReadSnippets"],
+        },
+      },
+      { language: "zh-CN" } as TuiContext,
+    );
+
+    expect(result.text).toContain("必须继续调用真实工具");
+    expect(result.data).toMatchObject({
+      degraded: true,
+      fallback_required: true,
+      reason: "pre-engine-verifier-unavailable",
+      required_next_action: expect.stringContaining("ReadSnippets"),
+    });
   });
 
   it("does not pass cwd to slash fork when StartAgent requests managed worktree isolation", () => {

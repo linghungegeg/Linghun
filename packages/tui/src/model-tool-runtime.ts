@@ -1098,16 +1098,17 @@ export async function executePreEngineToolUse(
       return { ok: false, tool: toolName, text: result.text, evidenceId: evidence.id };
     }
     if (result.degraded) {
+      const fallbackResult = buildPreEngineFallbackRequiredResult(result, context);
       const evidence = await recordToolEvidence(context, sessionId, "Read", {
-        text: result.text,
-        data: result.data,
+        text: fallbackResult.text,
+        data: fallbackResult.data,
       } as ToolOutput);
       await appendDeferredToolResultEvent(
         context,
         sessionId,
         toolCall.id,
         toolName,
-        { text: result.text, data: result.data },
+        fallbackResult,
         false,
         evidence?.id,
       );
@@ -1116,8 +1117,8 @@ export async function executePreEngineToolUse(
       return {
         ok: true,
         tool: toolName,
-        text: result.text,
-        data: result.data,
+        text: fallbackResult.text,
+        data: fallbackResult.data,
         evidenceId: evidence?.id,
       };
     }
@@ -1170,8 +1171,31 @@ const PRE_ENGINE_SYMBOL_MAX_LENGTH = 80;
 
 function formatPreEngineDegradedPrimaryText(context: TuiContext): string {
   return context.language === "zh-CN"
-    ? "代码预分析已降级，继续使用索引和文件读取工具。"
-    : "Code pre-analysis degraded; continue with index and file-reading tools.";
+    ? "代码预分析已降级，正在改用真实工具继续取证。"
+    : "Code pre-analysis degraded; use real tools to continue gathering evidence.";
+}
+
+function buildPreEngineFallbackRequiredResult(
+  result: { text: string; data?: unknown },
+  context: TuiContext,
+): ToolOutput {
+  const zh = context.language === "zh-CN";
+  const requiredNextAction = zh
+    ? "pre 预分析不可用或证据不足。本轮不要把 pre 结果当成完成；必须继续调用真实工具，例如 SearchExtraTools、SourcePack、Grep、Glob、Read 或 ReadSnippets，取得源码证据后再回答或继续修改。"
+    : "Pre-analysis is unavailable or insufficient. Do not treat this pre-engine result as completion; call real tools such as SearchExtraTools, SourcePack, Grep, Glob, Read, or ReadSnippets in this turn, gather source evidence, then answer or continue editing.";
+  const fallbackData =
+    result.data && typeof result.data === "object" && !Array.isArray(result.data)
+      ? { ...(result.data as Record<string, unknown>) }
+      : { pre_engine_result: result.data };
+  return {
+    text: `${result.text}\n${requiredNextAction}`,
+    data: {
+      ...fallbackData,
+      degraded: true,
+      fallback_required: true,
+      required_next_action: requiredNextAction,
+    },
+  };
 }
 
 function formatPreEnginePrimaryText(
@@ -1238,6 +1262,13 @@ export function __testFormatPreEnginePrimaryText(
   input?: unknown,
 ): string {
   return formatPreEnginePrimaryText(toolName, ok, context, input);
+}
+
+export function __testBuildPreEngineFallbackRequiredResult(
+  result: { text: string; data?: unknown },
+  context: TuiContext,
+): ToolOutput {
+  return buildPreEngineFallbackRequiredResult(result, context);
 }
 
 export async function executeLinghunControlToolUse(
