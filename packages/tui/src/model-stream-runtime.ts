@@ -44,8 +44,10 @@ import {
 import {
   appendUsageEvents,
   compactPreflightDeps,
+  markContextUsageStale,
   recordModelUsage,
   refreshWorkspaceReferenceCache,
+  shouldForceCompactFromConfirmedUsage,
 } from "./compact-cache-command-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
 import { getProviderContextMaxChars } from "./compact-preflight-runtime.js";
@@ -2067,10 +2069,13 @@ async function prepareMessagesForProviderPreflightWithActivity(
   input: Parameters<typeof prepareMessagesForProviderPreflight>[0],
 ): Promise<Awaited<ReturnType<typeof prepareMessagesForProviderPreflight>>> {
   const previousPhase = context.requestActivityPhase;
+  const preflightInput = shouldForceCompactFromConfirmedUsage(context)
+    ? { ...input, trigger: "reactive" as const }
+    : input;
   let result: Awaited<ReturnType<typeof prepareMessagesForProviderPreflight>> | undefined;
   startRequestActivity(output, context, "compacting_context");
   try {
-    result = await prepareMessagesForProviderPreflight(input);
+    result = await prepareMessagesForProviderPreflight(preflightInput);
     return result;
   } finally {
     if (context.requestActivityPhase === "compacting_context") {
@@ -2572,6 +2577,7 @@ export async function sendMessage(
         }
         if (event.type === "error") {
           clearRequestActivity(context);
+          markContextUsageStale(context, "disconnected_mid_stream");
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
           if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
             reactiveCompactRetried = true;
@@ -4483,6 +4489,7 @@ export async function continueModelAfterToolResults(
           clearRequestActivity(context);
           pendingContinuationToolUses.length = 0;
           const currentRuntime = runtimeFromContinuation(continuation);
+          markContextUsageStale(context, "disconnected_mid_stream");
           await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
           if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
             reactiveCompactRetried = true;
@@ -5007,6 +5014,9 @@ async function recordProviderEmptyResponse(
   hadThinking: boolean,
 ): Promise<{ message: string; isError: boolean }> {
   const provider = getRuntimeStatusProvider(context);
+  if (!hadUsage) {
+    markContextUsageStale(context, "missing_usage");
+  }
   const model = context.model;
   const metadata = [
     `provider ${provider}`,

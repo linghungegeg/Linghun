@@ -381,8 +381,14 @@ export type ContextUsageSnapshot = {
   estimatedChars: number;
   maxChars: number;
   updatedAt: string;
-  source: "pressure" | "compact";
+  source: "pressure" | "compact" | "provider_usage";
   savingsRatio?: number;
+  confirmedUsedTokens?: number;
+  contextWindowTokens?: number;
+  compactTriggerTokens?: number;
+  usageRatio?: number;
+  staleReason?: "disconnected_mid_stream" | "missing_usage";
+  lastConfirmedTurn?: number;
 };
 
 export type CompactFailureState = {

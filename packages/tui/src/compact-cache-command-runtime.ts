@@ -109,6 +109,73 @@ import {
 } from "./workspace-reference-cache.js";
 import type { WorkspaceReferenceCache } from "./workspace-reference-cache.js";
 
+const USAGE_STALE_MIN_CONFIRMED_TOKENS = 1;
+
+function getContextWindowTokens(context: TuiContext): number {
+  const runtime = getSelectedModelRuntime(context);
+  return Math.max(1, Math.ceil(getProviderContextWindowChars(context, runtime) / LINGHUN_BYTES_PER_TOKEN));
+}
+
+function getCompactTriggerTokens(context: TuiContext): number {
+  const runtime = getSelectedModelRuntime(context);
+  return Math.max(1, Math.ceil(getAutoCompactTriggerChars(context, runtime) / LINGHUN_BYTES_PER_TOKEN));
+}
+
+function getProviderConfirmedContextTokens(usage: ModelUsage, provider: string): number {
+  const cacheReadTokens = usage.cacheReadTokens ?? 0;
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
+  const inputTokens = normalizeCacheInputTokens(usage, provider, cacheReadTokens, cacheWriteTokens);
+  return Math.max(0, inputTokens + cacheReadTokens + cacheWriteTokens);
+}
+
+export function recordConfirmedContextUsage(context: TuiContext, usage: ModelUsage): void {
+  const provider = getRuntimeStatusProvider(context);
+  const confirmedUsedTokens = getProviderConfirmedContextTokens(usage, provider);
+  const contextWindowTokens = getContextWindowTokens(context);
+  const compactTriggerTokens = getCompactTriggerTokens(context);
+  const estimatedChars = confirmedUsedTokens * LINGHUN_BYTES_PER_TOKEN;
+  context.cache.contextUsage = {
+    ...(context.cache.contextUsage ?? {
+      estimatedChars,
+      maxChars: contextWindowTokens * LINGHUN_BYTES_PER_TOKEN,
+      updatedAt: new Date().toISOString(),
+      source: "provider_usage" as const,
+    }),
+    estimatedChars,
+    maxChars: contextWindowTokens * LINGHUN_BYTES_PER_TOKEN,
+    updatedAt: new Date().toISOString(),
+    source: "provider_usage",
+    confirmedUsedTokens,
+    contextWindowTokens,
+    compactTriggerTokens,
+    usageRatio: Number((confirmedUsedTokens / Math.max(1, contextWindowTokens)).toFixed(3)),
+    staleReason: undefined,
+    lastConfirmedTurn: context.cache.nextTurn,
+  };
+}
+
+export function markContextUsageStale(
+  context: TuiContext,
+  reason: "disconnected_mid_stream" | "missing_usage",
+): void {
+  const existing = context.cache.contextUsage;
+  if (!existing?.confirmedUsedTokens || existing.confirmedUsedTokens < USAGE_STALE_MIN_CONFIRMED_TOKENS) {
+    return;
+  }
+  context.cache.contextUsage = {
+    ...existing,
+    updatedAt: new Date().toISOString(),
+    staleReason: reason,
+  };
+}
+
+export function shouldForceCompactFromConfirmedUsage(context: TuiContext): boolean {
+  const usage = context.cache.contextUsage;
+  if (!usage?.confirmedUsedTokens) return false;
+  const triggerTokens = usage.compactTriggerTokens ?? getCompactTriggerTokens(context);
+  return usage.confirmedUsedTokens >= triggerTokens;
+}
+
 let _builtInToolsHashCache: string | undefined;
 
 // Module 4 — abort controller helpers moved to ./tui-agent-job-runtime.ts
@@ -625,6 +692,7 @@ export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheT
     freshness: { ...freshness, changedKeys },
     rawUsage: usage.rawUsage,
   };
+  recordConfirmedContextUsage(context, usage);
   context.cache.nextTurn += 1;
   context.cache.lastFreshness = stats.freshness;
   context.cache.history.push(stats);
