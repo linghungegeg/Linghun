@@ -360,11 +360,6 @@ export function applyPostCompactMainChainCacheSafePrefix(input: {
     messages: [...currentSystemMessages, ...parentCompactStableMessages, ...nextDynamicMessages],
     tools: snapshot.tools,
     toolChoice: snapshot.toolChoice ?? input.request.toolChoice,
-    endpointProfile: snapshot.endpointProfile,
-    reasoningLevel: snapshot.reasoningLevel,
-    promptCacheEnabled: snapshot.promptCacheEnabled,
-    promptCacheTtl: snapshot.promptCacheTtl,
-    cacheBreakNonce: snapshot.cacheBreakNonce,
   };
   input.state.lastCacheSafePrefixSkipReason = undefined;
   return { status: "applied", request: next };

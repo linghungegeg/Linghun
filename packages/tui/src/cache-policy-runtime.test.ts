@@ -482,6 +482,8 @@ describe("cache-policy-runtime", () => {
           { role: "system", content: "runtime v2" },
           { role: "user", content: "second post compact request" },
         ],
+        promptCacheTtl: "1h",
+        cacheBreakNonce: "fresh-nonce",
       }),
     });
 
@@ -492,6 +494,8 @@ describe("cache-policy-runtime", () => {
       "Context compact projection\nrecent stable summary",
       "second post compact request",
     ]);
+    expect(result.request.promptCacheTtl).toBe("1h");
+    expect(result.request.cacheBreakNonce).toBe("fresh-nonce");
     const parentObservation = observeCacheSafeRequest({
       kind: "main",
       provider: "anthropic",
