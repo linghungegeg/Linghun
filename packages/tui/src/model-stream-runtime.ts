@@ -34,6 +34,7 @@ import { writeLightHints } from "./cache-command-runtime.js";
 import { stableHash, stableStringify } from "./cache-freshness.js";
 import {
   applyCacheWritePolicyToRequest,
+  applyPostCompactMainChainCacheSafePrefix,
   type CacheRequestKind,
   recordCacheRequestObservation as recordCacheRequestObservationState,
   recordCacheUsageObservation as recordCacheUsageObservationState,
@@ -2473,6 +2474,10 @@ export async function sendMessage(
         resolveCachePolicy("main"),
         context.cache,
       );
+      providerRequest = applyPostCompactMainChainCacheSafePrefix({
+        state: context.cache,
+        request: providerRequest,
+      }).request;
       providerRequest = applyPromptCacheKey(providerRequest, context, sessionId);
       rememberCacheSafePrefix(context.cache, providerRequest);
       recordCacheRequestObservation(context, "main", selectedRuntime.provider, providerRequest);
@@ -4375,6 +4380,10 @@ export async function continueModelAfterToolResults(
         resolveCachePolicy("continuation"),
         context.cache,
       );
+      providerRequest = applyPostCompactMainChainCacheSafePrefix({
+        state: context.cache,
+        request: providerRequest,
+      }).request;
       providerRequest = applyPromptCacheKey(providerRequest, context, sessionId);
       rememberCacheSafePrefix(context.cache, providerRequest);
       recordCacheRequestObservation(context, "continuation", continuation.provider, providerRequest);

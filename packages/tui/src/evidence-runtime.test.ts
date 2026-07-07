@@ -9,6 +9,7 @@ import {
   isToolOutputFailure,
   recordToolEvidence,
   recordVerificationEvidence,
+  stringifyToolResultContentForBudget,
 } from "./evidence-runtime.js";
 import { readRuntimeLedgerRecords } from "./runtime-storage.js";
 
@@ -263,6 +264,18 @@ describe("evidence-runtime", () => {
         source: outputPath,
       },
     ]);
+  });
+  it("stringifies large cyclic tool results within a bounded budget", () => {
+    const cyclic: { rows: string[]; self?: unknown } = {
+      rows: Array.from({ length: 20_000 }, (_, index) => `row-${index}`),
+    };
+    cyclic.self = cyclic;
+
+    const text = stringifyToolResultContentForBudget(cyclic);
+
+    expect(text).toBeTruthy();
+    expect(text?.length).toBeLessThan(60_000);
+    expect(text).toContain("[truncated]");
   });
 });
 

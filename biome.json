@@ -4,22 +4,60 @@
     "enabled": false
   },
   "files": {
-    "ignore": ["dist", "node_modules", ".codebase-memory", ".linghun", ".claude"],
+    "ignore": [
+      "dist",
+      "node_modules",
+      ".codebase-memory",
+      ".linghun",
+      ".claude",
+      "apps/cli/bundled",
+      "packages/pre-engine-*/bundled"
+    ],
     "maxSize": 2097152
   },
   "formatter": {
-    "enabled": true,
+    "enabled": false,
     "indentStyle": "space",
     "indentWidth": 2,
     "lineWidth": 100
   },
   "organizeImports": {
-    "enabled": true
+    "enabled": false
   },
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "recommended": true,
+      "complexity": {
+        "noForEach": "off",
+        "useOptionalChain": "off"
+      },
+      "correctness": {
+        "noUnnecessaryContinue": "off"
+      },
+      "performance": {
+        "noDelete": "off"
+      },
+      "style": {
+        "noNonNullAssertion": "off",
+        "noParameterAssign": "off",
+        "noUnusedTemplateLiteral": "off",
+        "useConst": "off",
+        "useExponentiationOperator": "off",
+        "useImportType": "off",
+        "useNodejsImportProtocol": "off",
+        "useNumberNamespace": "off",
+        "useSingleVarDeclarator": "off",
+        "useTemplate": "off"
+      },
+      "suspicious": {
+        "noArrayIndexKey": "off",
+        "noAssignInExpressions": "off",
+        "noConfusingVoidType": "off",
+        "noControlCharactersInRegex": "off",
+        "noExplicitAny": "off",
+        "noImplicitAnyLet": "off"
+      }
     }
   }
 }

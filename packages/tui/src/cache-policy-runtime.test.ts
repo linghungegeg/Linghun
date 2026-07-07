@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyCacheWritePolicyToRequest,
   applyLastCacheSafePrefix,
+  applyPostCompactMainChainCacheSafePrefix,
   type CacheRequestKind,
   type CacheRequestObservationState,
   createPostCompactCacheWarmup,
@@ -446,6 +447,159 @@ describe("cache-policy-runtime", () => {
     expect(state.postCompactCacheWarmup.status).toBe("complete");
     expect(state.postCompactCacheWarmup.remainingTurns).toBe(0);
     expect(state.postCompactCacheWarmup.lastChangedKeys).toContain("requestHash");
+  });
+
+  it("reuses post-compact main-chain compact prefix during warmup", () => {
+    const state: CacheRequestObservationState = {
+      postCompactCacheWarmup: createPostCompactCacheWarmup({
+        projection: {
+          boundaryId: "compact-1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          summary: "summary",
+          pressureRatio: 0.8,
+          preCompactChars: 120_000,
+          postCompactChars: 40_000,
+          discardedRange: "older context summarized",
+          toolPairingSafe: true,
+          risks: [],
+          evidenceRefs: [],
+        },
+        totalTurns: 2,
+      }),
+    };
+    const compactMessages: ModelRequest["messages"] = [
+      { role: "system", content: "runtime v1" },
+      { role: "user", content: "Deep compact context\nolder stable summary" },
+      { role: "user", content: "Context compact projection\nrecent stable summary" },
+      { role: "user", content: "first post compact request" },
+    ];
+    rememberCacheSafePrefix(state, makeRequest({ messages: compactMessages }));
+
+    const result = applyPostCompactMainChainCacheSafePrefix({
+      state,
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "runtime v2" },
+          { role: "user", content: "second post compact request" },
+        ],
+      }),
+    });
+
+    expect(result.status).toBe("applied");
+    expect(result.request.messages.map((message) => message.content)).toEqual([
+      "runtime v2",
+      "Deep compact context\nolder stable summary",
+      "Context compact projection\nrecent stable summary",
+      "second post compact request",
+    ]);
+    const parentObservation = observeCacheSafeRequest({
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({ messages: compactMessages }),
+    });
+    const shapedObservation = observeCacheSafeRequest({
+      kind: "main",
+      provider: "anthropic",
+      request: result.request,
+    });
+    expect(shapedObservation.fingerprint.conversationPrefixHash).toBe(
+      parentObservation.fingerprint.conversationPrefixHash,
+    );
+  });
+
+  it("skips post-compact main-chain inheritance when compact prefix changed", () => {
+    const state: CacheRequestObservationState = {
+      postCompactCacheWarmup: createPostCompactCacheWarmup({
+        projection: {
+          boundaryId: "compact-2",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          summary: "new summary",
+          pressureRatio: 0.8,
+          preCompactChars: 120_000,
+          postCompactChars: 40_000,
+          discardedRange: "older context summarized",
+          toolPairingSafe: true,
+          risks: [],
+          evidenceRefs: [],
+        },
+        totalTurns: 2,
+      }),
+    };
+    rememberCacheSafePrefix(
+      state,
+      makeRequest({
+        messages: [
+          { role: "system", content: "runtime v1" },
+          { role: "user", content: "Context compact projection\nold summary" },
+          { role: "user", content: "first request" },
+        ],
+      }),
+    );
+
+    const result = applyPostCompactMainChainCacheSafePrefix({
+      state,
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "runtime v2" },
+          { role: "user", content: "Context compact projection\nnew summary" },
+          { role: "user", content: "second request" },
+        ],
+      }),
+    });
+
+    expect(result.status).toBe("skipped");
+    expect(state.lastCacheSafePrefixSkipReason).toBe("compact stable prefix differs from parent");
+    expect(result.request.messages.map((message) => message.content)).toEqual([
+      "runtime v2",
+      "Context compact projection\nnew summary",
+      "second request",
+    ]);
+  });
+
+  it("skips post-compact main-chain inheritance when current tail contains tool results", () => {
+    const state: CacheRequestObservationState = {
+      postCompactCacheWarmup: createPostCompactCacheWarmup({
+        projection: {
+          boundaryId: "compact-1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          summary: "summary",
+          pressureRatio: 0.8,
+          preCompactChars: 120_000,
+          postCompactChars: 40_000,
+          discardedRange: "older context summarized",
+          toolPairingSafe: true,
+          risks: [],
+          evidenceRefs: [],
+        },
+        totalTurns: 2,
+      }),
+    };
+    rememberCacheSafePrefix(
+      state,
+      makeRequest({
+        messages: [
+          { role: "system", content: "runtime" },
+          { role: "user", content: "Context compact projection\nsummary" },
+          { role: "user", content: "first request" },
+        ],
+      }),
+    );
+
+    const result = applyPostCompactMainChainCacheSafePrefix({
+      state,
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "runtime" },
+          { role: "user", content: "Context compact projection\nsummary" },
+          { role: "assistant", content: "calling tool" },
+          { role: "tool", content: "tool result", tool_call_id: "tool-1" },
+          { role: "user", content: "continue" },
+        ],
+      }),
+    });
+
+    expect(result.status).toBe("skipped");
+    expect(state.lastCacheSafePrefixSkipReason).toBe("request has no safe current main-chain tail");
   });
 
   it("does not spend post-compact warmup on sidechain observations", () => {

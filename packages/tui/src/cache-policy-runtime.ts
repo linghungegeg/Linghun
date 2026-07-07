@@ -310,6 +310,77 @@ export function applyLastCacheSafePrefix(input: {
   return { status: "applied", request: next };
 }
 
+export function applyPostCompactMainChainCacheSafePrefix(input: {
+  state: CacheRequestObservationState;
+  request: ModelRequest;
+}): CacheSafePrefixApplyResult {
+  const warmup = input.state.postCompactCacheWarmup;
+  if (!warmup || warmup.status !== "warming" || warmup.remainingTurns <= 0) {
+    return cacheSafePrefixSkipped(input.state, input.request, "post-compact warmup is not active");
+  }
+  const snapshot = input.state.lastCacheSafePrefix;
+  if (!snapshot) return cacheSafePrefixSkipped(input.state, input.request, "no parent cache-safe prefix");
+
+  const parentCompactStableMessages = collectCompactStableConversationPrefix(
+    snapshot.messages.filter((message) => message.role !== "system"),
+  );
+  if (parentCompactStableMessages.length === 0) {
+    return cacheSafePrefixSkipped(
+      input.state,
+      input.request,
+      "parent prefix has no compact stable messages",
+    );
+  }
+  const requestCompactStableMessages = collectCompactStableConversationPrefix(
+    input.request.messages.filter((message) => message.role !== "system"),
+  );
+  if (
+    requestCompactStableMessages.length > 0 &&
+    stableHash(requestCompactStableMessages) !== stableHash(parentCompactStableMessages)
+  ) {
+    return cacheSafePrefixSkipped(input.state, input.request, "compact stable prefix differs from parent");
+  }
+  const nextDynamicMessages = collectCurrentMainChainDynamicTail(input.request.messages);
+  if (nextDynamicMessages.length === 0) {
+    return cacheSafePrefixSkipped(
+      input.state,
+      input.request,
+      "request has no safe current main-chain tail",
+    );
+  }
+  const requestedTools = normalizeToolSchema(input.request.tools ?? []);
+  const parentTools = normalizeToolSchema(snapshot.tools ?? []);
+  if (stableHash(requestedTools) !== stableHash(parentTools)) {
+    return cacheSafePrefixSkipped(input.state, input.request, "tool schema differs from parent prefix");
+  }
+
+  const currentSystemMessages = input.request.messages.filter((message) => message.role === "system");
+  const next: ModelRequest = {
+    ...input.request,
+    messages: [...currentSystemMessages, ...parentCompactStableMessages, ...nextDynamicMessages],
+    tools: snapshot.tools,
+    toolChoice: snapshot.toolChoice ?? input.request.toolChoice,
+    endpointProfile: snapshot.endpointProfile,
+    reasoningLevel: snapshot.reasoningLevel,
+    promptCacheEnabled: snapshot.promptCacheEnabled,
+    promptCacheTtl: snapshot.promptCacheTtl,
+    cacheBreakNonce: snapshot.cacheBreakNonce,
+  };
+  input.state.lastCacheSafePrefixSkipReason = undefined;
+  return { status: "applied", request: next };
+}
+
+
+function collectCurrentMainChainDynamicTail(
+  messages: ModelRequest["messages"],
+): ModelRequest["messages"] {
+  const conversation = messages.filter((message) => message.role !== "system");
+  const compactStablePrefixLength = collectCompactStableConversationPrefix(conversation).length;
+  const tail = conversation.slice(compactStablePrefixLength);
+  if (tail.some((message) => message.role === "tool")) return [];
+  return tail;
+}
+
 function cacheSafePrefixSkipped(
   state: CacheRequestObservationState,
   request: ModelRequest,

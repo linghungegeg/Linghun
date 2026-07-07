@@ -60,6 +60,132 @@ export function estimateValueChars(value: unknown, depth = 0): number {
   return 8; // fallback for symbols, functions, etc.
 }
 
+export function stringifyValueWithinBudget(value: unknown, maxChars: number): string | null {
+  const budget = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 0;
+  const writer = new BoundedJsonWriter(budget);
+  writer.writeValue(value);
+  return writer.result();
+}
+
+class BoundedJsonWriter {
+  private output = "";
+  private truncated = false;
+  private readonly seen = new WeakSet<object>();
+
+  constructor(private readonly maxChars: number) {}
+
+  result(): string | null {
+    if (!this.truncated) return this.output;
+    const marker = "...[truncated]";
+    if (this.maxChars <= marker.length) return marker.slice(0, this.maxChars);
+    return `${this.output.slice(0, this.maxChars - marker.length)}${marker}`;
+  }
+
+  writeValue(value: unknown): void {
+    if (this.truncated) return;
+    if (value === null) {
+      this.append("null");
+      return;
+    }
+    switch (typeof value) {
+      case "string":
+        this.writeString(value);
+        return;
+      case "number":
+      case "boolean":
+        this.append(JSON.stringify(value));
+        return;
+      case "bigint":
+        this.writeString(String(value));
+        return;
+      case "undefined":
+      case "function":
+      case "symbol":
+        this.append("null");
+        return;
+      case "object":
+        if (this.seen.has(value)) {
+          this.append('"[Circular]"');
+          return;
+        }
+        this.seen.add(value);
+        if (Array.isArray(value)) {
+          this.writeArray(value);
+        } else {
+          this.writeObject(value as Record<string, unknown>);
+        }
+        this.seen.delete(value);
+    }
+  }
+
+  private writeArray(values: unknown[]): void {
+    this.append("[");
+    for (let index = 0; index < values.length; index += 1) {
+      if (index > 0) this.append(",");
+      this.writeValue(values[index]);
+      if (this.truncated) return;
+    }
+    this.append("]");
+  }
+
+  private writeObject(record: Record<string, unknown>): void {
+    this.append("{");
+    const entries = Object.entries(record);
+    entries.forEach(([key, value], index) => {
+      if (index > 0) this.append(",");
+      this.writeString(key);
+      this.append(":");
+      this.writeValue(value);
+    });
+    this.append("}");
+  }
+
+  private writeString(value: string): void {
+    this.append('"');
+    for (let index = 0; index < value.length; index += 1) {
+      if (this.truncated) return;
+      const char = value[index] ?? "";
+      switch (char) {
+        case '"':
+          this.append('\\"');
+          break;
+        case "\\":
+          this.append("\\\\");
+          break;
+        case "\b":
+          this.append("\\b");
+          break;
+        case "\f":
+          this.append("\\f");
+          break;
+        case "\n":
+          this.append("\\n");
+          break;
+        case "\r":
+          this.append("\\r");
+          break;
+        case "\t":
+          this.append("\\t");
+          break;
+        default:
+          this.append(char < " " ? `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}` : char);
+      }
+    }
+    this.append('"');
+  }
+
+  private append(text: string): void {
+    if (this.truncated) return;
+    if (this.output.length + text.length <= this.maxChars) {
+      this.output += text;
+      return;
+    }
+    const remaining = Math.max(0, this.maxChars - this.output.length);
+    this.output += text.slice(0, remaining);
+    this.truncated = true;
+  }
+}
+
 /** Lightweight toolCalls size estimate — avoids JSON.stringify allocation on budget hot path. */
 export function estimateToolCallsCharsLocal(
   toolCalls: Array<{ id: string; name: string; input: unknown }> | undefined,

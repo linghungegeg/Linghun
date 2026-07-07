@@ -10,13 +10,11 @@ import {
 } from "./cache-policy-runtime.js";
 import { type CompactBoundary, createManualCompactBoundary } from "./compact-context.js";
 import type { CompactPreflightRuntime } from "./compact-preflight-runtime.js";
-import { estimateTranscriptContextChars } from "./context-estimator.js";
+import { estimateTranscriptContextChars, stringifyValueWithinBudget } from "./context-estimator.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
-import {
-  recordMetaOrchestrationRuntimeEvent,
-} from "./meta-orchestration-runtime.js";
+import { recordMetaOrchestrationRuntimeEvent } from "./meta-orchestration-runtime.js";
 import { withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   sanitizeDiagnosticText,
@@ -492,7 +490,7 @@ export function isDeepCompactPacket(value: unknown): value is DeepCompactPacket 
   );
 }
 
-function buildDeepCompactRequestMessages(
+export function buildDeepCompactRequestMessages(
   context: TuiContext,
   transcript: TranscriptEvent[],
   trigger: DeepCompactTrigger,
@@ -617,7 +615,7 @@ function collectOutlineEvent(
     case "tool_call_start":
       pushEarlyAndRecent(
         buckets.toolSummaries,
-        `tool_start:${event.name}:${sanitizeDeepCompactText(context, JSON.stringify(event.input), 220)}`,
+        `tool_start:${event.name}:${sanitizeDeepCompactText(context, stringifyValueWithinBudget(event.input, 221) ?? "[unserializable]", 220)}`,
       );
       break;
     case "tool_result":
@@ -757,7 +755,7 @@ function summarizeTranscriptEvent(context: TuiContext, event: TranscriptEvent): 
 
 function summarizeToolResultContent(content: unknown): string {
   if (typeof content === "string") return content;
-  return JSON.stringify(content);
+  return stringifyValueWithinBudget(content, EVENT_TEXT_LIMIT) ?? "[unserializable]";
 }
 
 function synthesizeFallbackSummary(context: TuiContext, transcript: TranscriptEvent[]): string {

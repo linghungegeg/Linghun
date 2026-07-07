@@ -3473,7 +3473,6 @@ describe("TTY legacy fallback product shell", () => {
     // Brand
     expect(rendered).toContain("LingHun");
     // Task separator (─ repeated across the task composer width)
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping requires matching ESC control character
     const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
     const underlineIdx = lines.findIndex((l) =>
       /^[\s]*─{40,}[\s]*$/.test(l.replace(ANSI_STRIP, "")),
@@ -4096,7 +4095,6 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     resetTerminalCapabilityCache();
     const view = createShellViewModel(createContext(), { width: 80, height: 24 });
     const rendered = renderPlainShell(view);
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
     const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
     const lines = rendered.split("\n").map((l) => l.replace(ANSI_STRIP, ""));
 
@@ -4128,7 +4126,6 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
       },
     });
     const rendered = renderPlainShell(view);
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
     const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
     const lines = rendered.split("\n").map((l) => l.replace(ANSI_STRIP, ""));
 
@@ -7088,7 +7085,6 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     });
     const colorRendered = renderPlainShell(colorView);
     const noColorRendered = renderPlainShell(noColorView);
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping requires matching ESC control character
     const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
     const stripAnsi = (value: string): string => value.replace(ANSI_STRIP, "");
 

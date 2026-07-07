@@ -3,6 +3,7 @@ import type { TranscriptEvent } from "@linghun/core";
 import type { DiffSummary, TodoItem, ToolName, ToolOutput } from "@linghun/tools";
 import type { ArchitectureCard } from "./architecture-runtime.js";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
+import { stringifyValueWithinBudget } from "./context-estimator.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { mergeFailureRecord, writeFailureRecord } from "./failure-learning-runtime.js";
 import { writeHandoffPacket } from "./handoff-session-runtime.js";
@@ -173,7 +174,8 @@ export async function recordProviderFailureEvidence(
   const failureKind = classifyProviderFailure(error);
   const transitFailure = failureKind === "transit";
   const endpointSummary = summarizeProviderEndpoint(error, message);
-  const httpStatus = readProviderFailureNumber(error, "status") ?? readProviderFailureNumber(error, "statusCode");
+  const httpStatus =
+    readProviderFailureNumber(error, "status") ?? readProviderFailureNumber(error, "statusCode");
   const contentType = summarizeProviderContentType(error, message);
   const diagnosticParts = [
     `provider failure: kind ${failureKind}`,
@@ -191,7 +193,14 @@ export async function recordProviderFailureEvidence(
     "command_output",
     summary,
     `provider:${runtime.provider}:failure`,
-    ["provider_failure", code, failureKind, runtime.provider, runtime.model, runtime.endpointProfile],
+    [
+      "provider_failure",
+      code,
+      failureKind,
+      runtime.provider,
+      runtime.model,
+      runtime.endpointProfile,
+    ],
   );
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
@@ -480,7 +489,8 @@ function formatReadOnlyToolEvidenceSummary(
 function sourcePackEvidenceTarget(input: unknown, output: ToolOutput): string {
   const query = readStringField(input, "query");
   const paths = extractOutputCandidatePaths(output.data);
-  const pathText = paths.length > 0 ? `; paths=${truncateDisplay(paths.slice(0, 4).join(","), 120)}` : "";
+  const pathText =
+    paths.length > 0 ? `; paths=${truncateDisplay(paths.slice(0, 4).join(","), 120)}` : "";
   return `query=${truncateDisplay((query ?? "unspecified").replace(/\s+/g, " "), 90)}${pathText}`;
 }
 
@@ -809,12 +819,16 @@ function compactToolOutputDataForTranscript(data: unknown): unknown {
   };
 }
 
-function compactToolStructuredDataForTranscript(data: unknown): Record<string, unknown> | undefined {
+function compactToolStructuredDataForTranscript(
+  data: unknown,
+): Record<string, unknown> | undefined {
   const diagnostics = compactDiagnosticsDataForTranscript(data);
   return diagnostics;
 }
 
-function compactDiagnosticsDataForTranscript(data: unknown): { diagnostics: CompactDiagnostic[] } | undefined {
+function compactDiagnosticsDataForTranscript(
+  data: unknown,
+): { diagnostics: CompactDiagnostic[] } | undefined {
   const diagnostics = readDiagnosticsForTranscript(data);
   if (!diagnostics) return undefined;
   return { diagnostics };
@@ -848,7 +862,9 @@ function compactDiagnosticForTranscript(value: unknown): CompactDiagnostic | und
   };
 }
 
-function readCompactDiagnosticTargetFields(record: Record<string, unknown>): Partial<CompactDiagnostic> {
+function readCompactDiagnosticTargetFields(
+  record: Record<string, unknown>,
+): Partial<CompactDiagnostic> {
   const target = typeof record.target === "string" ? record.target : undefined;
   const path = typeof record.path === "string" ? record.path : undefined;
   const command = typeof record.command === "string" ? record.command : undefined;
@@ -961,7 +977,11 @@ export async function appendToolResultEvent(
   });
 }
 
-function rememberToolEvidenceData(context: TuiContext, evidenceId: string | undefined, content: unknown): void {
+function rememberToolEvidenceData(
+  context: TuiContext,
+  evidenceId: string | undefined,
+  content: unknown,
+): void {
   if (!evidenceId || !content || typeof content !== "object") return;
   if (!Array.isArray(context.evidence)) return;
   const output = content as ToolOutput;
@@ -969,7 +989,10 @@ function rememberToolEvidenceData(context: TuiContext, evidenceId: string | unde
   if (!compact) return;
   const evidence = context.evidence.find((item) => item.id === evidenceId);
   if (evidence) {
-    evidence.data = { ...(typeof evidence.data === "object" && evidence.data ? evidence.data : {}), ...compact };
+    evidence.data = {
+      ...(typeof evidence.data === "object" && evidence.data ? evidence.data : {}),
+      ...compact,
+    };
   }
 }
 
@@ -990,7 +1013,9 @@ function rememberRecentDiagnostics(
   toolUseId: string,
   evidenceId?: string,
 ): void {
-  const diagnostics = readDiagnosticsForTranscript((content as { data?: unknown } | undefined)?.data);
+  const diagnostics = readDiagnosticsForTranscript(
+    (content as { data?: unknown } | undefined)?.data,
+  );
   if (!diagnostics || diagnostics.length === 0) return;
   const createdAt = new Date().toISOString();
   const entries = diagnostics.map((diagnostic) => ({
@@ -1001,10 +1026,10 @@ function rememberRecentDiagnostics(
     evidenceId,
   }));
   // newest-first: consumers can read index 0 as the latest diagnostic.
-  context.tools.recentDiagnostics = [
-    ...entries,
-    ...(context.tools.recentDiagnostics ?? []),
-  ].slice(0, RECENT_DIAGNOSTICS_LIMIT);
+  context.tools.recentDiagnostics = [...entries, ...(context.tools.recentDiagnostics ?? [])].slice(
+    0,
+    RECENT_DIAGNOSTICS_LIMIT,
+  );
 }
 
 function appendToolResultContentDiagnostics(content: unknown): unknown {
@@ -1023,7 +1048,7 @@ function appendToolResultContentDiagnostics(content: unknown): unknown {
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : undefined;
 }
 
@@ -1058,7 +1083,18 @@ function compactArtifactChecks(value: unknown): Record<string, unknown> {
 
 function compactCheckRecord(record: Record<string, unknown>): Record<string, unknown> {
   const compact: Record<string, unknown> = {};
-  for (const key of ["ok", "mode", "status", "expectedStatus", "missingBody", "contains", "lineSet", "exact", "magic", "size"]) {
+  for (const key of [
+    "ok",
+    "mode",
+    "status",
+    "expectedStatus",
+    "missingBody",
+    "contains",
+    "lineSet",
+    "exact",
+    "magic",
+    "size",
+  ]) {
     if (record[key] !== undefined) compact[key] = record[key];
   }
   return compact;
@@ -1090,11 +1126,7 @@ export async function budgetToolResultTranscriptContent(
   return replacement?.role === "tool" ? replacement.content : content;
 }
 
-function stringifyToolResultContentForBudget(content: unknown): string | null {
+export function stringifyToolResultContentForBudget(content: unknown): string | null {
   if (typeof content === "string") return content;
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return null;
-  }
+  return stringifyValueWithinBudget(content, LINGHUN_DEFAULT_TOOL_RESULT_CHARS + 1);
 }

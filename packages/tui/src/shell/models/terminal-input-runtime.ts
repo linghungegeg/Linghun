@@ -106,7 +106,6 @@ export function sanitizeTerminalText(value: string): string {
       .replace(CONTROL_SEQUENCE_PATTERN, "")
       .replace(ANSI_STRIP_PATTERN, "")
       .replace(/\r\n?/g, "\n")
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: composer sanitation intentionally drops raw terminal control bytes while preserving real newline.
       .replace(/[\u0001-\u0009\u000B-\u001F]/g, "")
   );
 }
@@ -146,8 +145,6 @@ function csiBody(input: string, suffix: string): string | undefined {
   return input.slice(start, -suffix.length);
 }
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape sequences inherently contain control characters.
 const ANSI_STRIP_PATTERN = /\u001B\[[\d;?]*[a-zA-Z]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B./g;
 const CONTROL_SEQUENCE_PATTERN =
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal control sequences are control characters.
   /(?:\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B[P_X^][\s\S]*?(?:\u001B\\)|\u001B[@-_]|\u009B[0-?]*[ -/]*[@-~]|\u0000|\u0007|\u0008|\u000B|\u000C|\u000E|\u000F|\u007F)/g;

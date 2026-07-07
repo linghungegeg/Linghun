@@ -1,6 +1,7 @@
 import type { ModelMessage } from "@linghun/providers";
 import { describe, expect, it } from "vitest";
 import {
+  buildDeepCompactRequestMessages,
   formatDeepCompactPromptSummary,
   injectDeepCompactSummary,
   insertAfterLeadingSystemMessages,
@@ -71,5 +72,51 @@ describe("deep compact prompt insertion", () => {
       "compact summary",
       "current request",
     ]);
+  });
+
+  it("summarizes cyclic tool results before the compact provider request", () => {
+    const cyclic: { rows: string[]; self?: unknown } = {
+      rows: Array.from({ length: 20_000 }, (_, index) => `row-${index}`),
+    };
+    cyclic.self = cyclic;
+    const context = {
+      projectPath: process.cwd(),
+      evidence: [],
+      recentlyMentionedFiles: [],
+      tools: { changedFiles: [], todos: [] },
+      agents: [],
+      backgroundTasks: [],
+      workflows: { runs: [] },
+      todos: [],
+      routeDecisions: [],
+      cache: {},
+      failureLearning: { records: [] },
+      memory: { accepted: [] },
+      index: {},
+    } as never;
+
+    const messages = buildDeepCompactRequestMessages(
+      context,
+      [
+        {
+          type: "user_message",
+          text: "please investigate oom",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          type: "tool_result",
+          toolName: "Read",
+          toolUseId: "tool-1",
+          content: cyclic,
+          isError: false,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+      ] as never,
+      "request",
+    );
+
+    const compactRequestText = messages.map((message) => message.content).join("\n");
+    expect(compactRequestText).toContain("[truncated]");
+    expect(compactRequestText.length).toBeLessThan(60_000);
   });
 });
