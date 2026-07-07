@@ -4484,6 +4484,38 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     });
   });
 
+  it("task footer prefers compact pressure over stale context usage", () => {
+    const view = createShellViewModel(
+      createContext({
+        cache: {
+          history: [{ hitRate: 0.84 }],
+          compactPressure: {
+            estimatedChars: 200_000,
+            maxChars: 400_000,
+            triggerChars: 360_000,
+            ratio: 0.5,
+            toolPairingSafe: true,
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+          contextUsage: {
+            estimatedChars: 800_000,
+            maxChars: 1_000_000,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            source: "pressure",
+          },
+        },
+      } as Partial<TuiContext>),
+      { width: 120, viewMode: "task" },
+    );
+
+    expect(view.taskFooter?.contextUsage).toMatchObject({
+      wide: "上下文 [█████─────] 50%",
+      narrow: "上下文 [███───] 50%",
+      minimal: "上下文 50%",
+      ratio: 0.5,
+    });
+  });
+
   it("Phase 6.6: task footer does NOT show workspaceStatus / runtimeStatus by default (moved to /details /status path)", () => {
     const view = createShellViewModel(createContext(), {
       width: 120,

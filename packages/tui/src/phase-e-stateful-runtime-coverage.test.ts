@@ -183,6 +183,12 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       layer: "full_summary",
       status: "skipped",
     });
+    expect(context.cache.compactPressure).toMatchObject({
+      estimatedChars: estimateModelMessageChars(below.messages),
+      maxChars: getProviderContextMaxChars(context, runtime()),
+      triggerChars,
+      toolPairingSafe: true,
+    });
 
     const oldOversized = "OVERSIZED_OLD_CONTEXT".repeat(1_600);
     const overLimit: ModelMessage[] = [
@@ -215,6 +221,12 @@ describe("Phase E compact preflight and deep compact coverage", () => {
         "OVERSIZED_OLD_CONTEXT",
       );
       expect(hashProviderMessages(compacted.messages)).not.toBe(overLimitMessagesHash);
+      expect(context.cache.compactPressure).toMatchObject({
+        estimatedChars: estimateModelMessageChars(compacted.messages),
+        maxChars: getProviderContextMaxChars(context, runtime()),
+        triggerChars,
+        toolPairingSafe: true,
+      });
     }
     expect(context.cache.compactProjection?.preCompactChars).toBeGreaterThan(
       context.cache.compactProjection?.postCompactChars ?? 0,

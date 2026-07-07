@@ -469,15 +469,7 @@ export function createShellViewModel(
     reasoningLevel: options.reasoningLevel,
     reasoningSent: options.reasoningSent,
     estimatedCostCny: sumFiniteNumbers((context.roleUsage ?? []).map((usage) => usage.estimatedCny)),
-    contextUsage: context.cache.contextUsage
-      ? {
-          ...calculateContextPercentages(
-            Math.ceil(context.cache.contextUsage.estimatedChars / 4),
-            Math.ceil(context.cache.contextUsage.maxChars / 4),
-          ),
-          savingsRatio: context.cache.contextUsage.savingsRatio,
-        }
-      : undefined,
+    contextUsage: selectFooterContextUsage(context),
     isRemoteMode: context.remote?.enabled ?? false,
   });
 
@@ -2417,6 +2409,27 @@ function buildTaskSuggestions(inputs: {
 type FooterContextUsageInput = ReturnType<typeof calculateContextPercentages> & {
   savingsRatio?: number;
 };
+
+function selectFooterContextUsage(context: TuiContext): FooterContextUsageInput | undefined {
+  const pressure = context.cache.compactPressure;
+  if (pressure) {
+    const usage = context.cache.contextUsage;
+    return {
+      ...calculateContextPercentages(
+        Math.ceil(pressure.estimatedChars / 4),
+        Math.ceil(pressure.maxChars / 4),
+      ),
+      ...(usage?.updatedAt === pressure.updatedAt ? { savingsRatio: usage.savingsRatio } : {}),
+    };
+  }
+
+  const usage = context.cache.contextUsage;
+  if (!usage) return undefined;
+  return {
+    ...calculateContextPercentages(Math.ceil(usage.estimatedChars / 4), Math.ceil(usage.maxChars / 4)),
+    savingsRatio: usage.savingsRatio,
+  };
+}
 
 type TaskFooterInput = {
   language: Language;

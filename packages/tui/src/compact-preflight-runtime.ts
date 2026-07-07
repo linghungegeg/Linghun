@@ -898,6 +898,15 @@ function recordCompactStrategy(
     .map((step) => step.layer);
   const updatedAt = new Date().toISOString();
   const windowChars = getProviderContextWindowChars(context, input.runtime);
+  const toolPairingSafe = !input.steps.some((step) => step.reason === "tool_pairing_unsafe");
+  context.cache.compactPressure = {
+    estimatedChars: input.finalChars,
+    maxChars: input.contextMaxChars,
+    triggerChars: input.triggerChars,
+    ratio: Number((input.finalChars / Math.max(1, input.contextMaxChars)).toFixed(3)),
+    toolPairingSafe,
+    updatedAt,
+  };
   context.cache.compactStrategy = {
     trigger: input.trigger,
     createdAt: updatedAt,
