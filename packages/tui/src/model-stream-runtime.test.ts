@@ -7,6 +7,7 @@ import { defaultConfig } from "@linghun/config";
 import type { ModelGateway } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import {
+  __testApplyPromptCacheKey,
   __testRunFinalGateEvidenceAction,
   __testStreamFinalModelAnswerWithoutTools,
   buildAggregatedDowngradedFinalAnswer,
@@ -161,6 +162,67 @@ function makeNaturalInputContext(language: "zh-CN" | "en-US" = "zh-CN") {
     },
   };
 }
+
+describe("responses prompt cache key", () => {
+  it("keeps dynamic tool schema out of the responses prompt cache key", () => {
+    const baseContext = makeNaturalInputContext() as never;
+    const request = {
+      endpointProfile: "responses" as const,
+      promptCacheEnabled: true,
+      model: "test-model",
+      messages: [{ role: "user" as const, content: "hello" }],
+      tools: [
+        {
+          name: "Read",
+          description: "Read file",
+          inputSchema: { type: "object", properties: { path: { type: "string" } } },
+          source: "built-in",
+        },
+        {
+          name: "mcp__search",
+          description: "Search v1",
+          inputSchema: { type: "object", properties: { q: { type: "string" } } },
+          source: "mcp",
+        },
+      ],
+    };
+
+    const first = __testApplyPromptCacheKey(request as never, baseContext, "session-1");
+    const dynamicChanged = __testApplyPromptCacheKey(
+      {
+        ...request,
+        tools: [
+          request.tools[0],
+          {
+            name: "mcp__search",
+            description: "Search v2",
+            inputSchema: { type: "object", properties: { query: { type: "string" } } },
+            source: "mcp",
+          },
+        ],
+      } as never,
+      baseContext,
+      "session-1",
+    );
+    const stableChanged = __testApplyPromptCacheKey(
+      {
+        ...request,
+        tools: [
+          {
+            ...request.tools[0],
+            description: "Read file v2",
+          },
+          request.tools[1],
+        ],
+      } as never,
+      baseContext,
+      "session-1",
+    );
+
+    expect(dynamicChanged.promptCacheKey).toBe(first.promptCacheKey);
+    expect(stableChanged.promptCacheKey).not.toBe(first.promptCacheKey);
+  });
+});
 
 describe("tool batch fail-fast helpers", () => {
   it("counts failed tool results as failures even when they carry evidence", () => {

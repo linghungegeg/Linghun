@@ -348,18 +348,16 @@ export function applyPostCompactMainChainCacheSafePrefix(input: {
       "request has no safe current main-chain tail",
     );
   }
-  const requestedTools = normalizeToolSchema(input.request.tools ?? []);
-  const parentTools = normalizeToolSchema(snapshot.tools ?? []);
-  if (stableHash(requestedTools) !== stableHash(parentTools)) {
-    return cacheSafePrefixSkipped(input.state, input.request, "tool schema differs from parent prefix");
+  const requestedToolBoundary = splitToolSchemaBoundary(normalizeToolSchema(input.request.tools ?? []));
+  const parentToolBoundary = splitToolSchemaBoundary(normalizeToolSchema(snapshot.tools ?? []));
+  if (stableHash(requestedToolBoundary.stable) !== stableHash(parentToolBoundary.stable)) {
+    return cacheSafePrefixSkipped(input.state, input.request, "stable tool schema differs from parent prefix");
   }
 
   const currentSystemMessages = input.request.messages.filter((message) => message.role === "system");
   const next: ModelRequest = {
     ...input.request,
     messages: [...currentSystemMessages, ...parentCompactStableMessages, ...nextDynamicMessages],
-    tools: snapshot.tools,
-    toolChoice: snapshot.toolChoice ?? input.request.toolChoice,
   };
   input.state.lastCacheSafePrefixSkipReason = undefined;
   return { status: "applied", request: next };

@@ -606,6 +606,69 @@ describe("cache-policy-runtime", () => {
     expect(state.lastCacheSafePrefixSkipReason).toBe("request has no safe current main-chain tail");
   });
 
+  it("reuses post-compact compact prefix when only dynamic tools changed", () => {
+    const state: CacheRequestObservationState = {
+      postCompactCacheWarmup: createPostCompactCacheWarmup({
+        projection: {
+          boundaryId: "compact-dynamic-tools",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          summary: "summary",
+          pressureRatio: 0.8,
+          preCompactChars: 120_000,
+          postCompactChars: 40_000,
+          discardedRange: "older context summarized",
+          toolPairingSafe: true,
+          risks: [],
+          evidenceRefs: [],
+        },
+        totalTurns: 2,
+      }),
+    };
+    const parentTools: ModelRequest["tools"] = [
+      { name: "Read", description: "read file", inputSchema: { type: "object" }, source: "built-in" },
+      { name: "mcp__search", description: "search v1", inputSchema: { type: "object" }, source: "mcp" },
+    ];
+    const currentTools: ModelRequest["tools"] = [
+      parentTools[0],
+      {
+        name: "mcp__search",
+        description: "search v2",
+        inputSchema: { type: "object", properties: { query: { type: "string" } } },
+        source: "mcp",
+      },
+    ];
+    rememberCacheSafePrefix(
+      state,
+      makeRequest({
+        messages: [
+          { role: "system", content: "runtime" },
+          { role: "user", content: "Context compact projection\nsummary" },
+          { role: "user", content: "first request" },
+        ],
+        tools: parentTools,
+      }),
+    );
+
+    const result = applyPostCompactMainChainCacheSafePrefix({
+      state,
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "runtime" },
+          { role: "user", content: "second request" },
+        ],
+        tools: currentTools,
+      }),
+    });
+
+    expect(result.status).toBe("applied");
+    expect(result.request.tools).toBe(currentTools);
+    expect(result.request.messages.map((message) => message.content)).toEqual([
+      "runtime",
+      "Context compact projection\nsummary",
+      "second request",
+    ]);
+  });
+
   it("does not spend post-compact warmup on sidechain observations", () => {
     const state: CacheRequestObservationState = {
       postCompactCacheWarmup: createPostCompactCacheWarmup({

@@ -3254,6 +3254,14 @@ export async function __testStreamFinalModelAnswerWithoutTools(
   );
 }
 
+export function __testApplyPromptCacheKey(
+  request: ModelRequest,
+  context: TuiContext,
+  sessionId: string,
+): ModelRequest {
+  return applyPromptCacheKey(request, context, sessionId);
+}
+
 function createPolicyContextPressureMessages(
   runtimeStatus: unknown,
   userText: string,
@@ -3761,20 +3769,49 @@ function applyPromptCacheKey(
       sessionId,
       model: request.model ?? context.model,
       endpointProfile: request.endpointProfile,
-      toolSchema: (request.tools ?? []).map((tool) => ({
+      stableToolSchema: normalizeStablePromptCacheTools(request.tools ?? []),
+    })}`,
+  };
+}
+
+function normalizeStablePromptCacheTools(
+  tools: NonNullable<ModelRequest["tools"]>,
+): Array<{ name: string; source: string; schemaHash: string }> {
+  return tools
+    .map((tool) => {
+      const source = resolvePromptCacheToolSource(tool);
+      return {
         name: tool.name,
-        source: tool.source ?? "unknown",
+        source,
         schemaHash:
           tool.schemaHash ??
           stableHash({
             name: tool.name,
             description: tool.description,
             inputSchema: tool.inputSchema,
-            source: tool.source ?? "unknown",
+            source,
           }),
-      })),
-    })}`,
-  };
+      };
+    })
+    .filter((tool) => !isDynamicPromptCacheToolSource(tool.source))
+    .sort(
+      (a, b) =>
+        a.name.localeCompare(b.name) ||
+        a.source.localeCompare(b.source) ||
+        a.schemaHash.localeCompare(b.schemaHash),
+    );
+}
+
+function resolvePromptCacheToolSource(tool: NonNullable<ModelRequest["tools"]>[number]): string {
+  if (tool.source) return tool.source;
+  if (tool.name.startsWith("mcp__")) return "mcp";
+  if (tool.name.startsWith("skill__")) return "skill";
+  if (tool.name.startsWith("plugin__")) return "plugin";
+  return "unknown";
+}
+
+function isDynamicPromptCacheToolSource(source: string): boolean {
+  return source === "mcp" || source === "skill" || source === "plugin";
 }
 
 async function budgetRecentContextToolResults(
