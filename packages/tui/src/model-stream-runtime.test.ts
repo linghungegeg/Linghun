@@ -702,7 +702,7 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(blocks)).not.toContain(rawDraft);
   });
 
-  it("plans completion gaps as readonly scope checks before verification", () => {
+  it("plans completion gaps through minimal verification immediately", () => {
     const context = { ...makeGateContext(), permissionMode: "default", language: "zh-CN" };
     const result = evaluateAggregatedFinalAnswerGate(
       context as never,
@@ -718,13 +718,14 @@ describe("final answer gate aggregation", () => {
       context: context as never,
       userText: "继续修复",
     });
-    expect(plan.action).toBe("readonly_check");
-    expect(plan.reason).toBe("completion_gap_readonly");
-    expect(plan.directive).toContain("GitStatusInspect");
-    expect(plan.directive).toContain("下一轮补证据会运行最小验证");
+    expect(plan.action).toBe("verification_request");
+    expect(plan.reason).toBe("completion_gap_verification_requires_permission");
+    expect(plan.directive).toContain("Bash");
+    expect(plan.directive).toContain("pendingLocalApproval");
     expect(plan.evidenceAction).toMatchObject({
-      toolName: "GitStatusInspect",
-      input: { includeDetails: true },
+      toolName: "Bash",
+      input: { level: "typecheck" },
+      strategy: "minimal_bash_verification",
     });
   });
 

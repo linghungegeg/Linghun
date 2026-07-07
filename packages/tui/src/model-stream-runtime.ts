@@ -980,38 +980,23 @@ export function planFinalGateEvidenceGapAction(input: {
     };
   }
   if (gap === "completion") {
-    const retryCount = input.evidenceActionRetryCount ?? 0;
-    if (retryCount > 0) {
-      return createVerificationEvidenceGapPlan({
-        language,
-        permissionMode: context.permissionMode,
-        reason:
-          context.permissionMode === "default"
-            ? "completion_gap_verification_requires_permission"
-            : "completion_gap_verification_allowed_by_mode",
-        missingKinds: result.unsupportedKinds,
-        level: selectFinalGateVerificationLevel(result),
-      });
+    if (context.permissionMode === "plan") {
+      return {
+        action: "blocked_explanation",
+        reason: "readonly_mode_blocks_verification",
+        directive: formatEvidenceGapBlocker("readonly_mode_blocks_verification", language),
+      };
     }
-    return {
-      action: "readonly_check",
-      reason: "completion_gap_readonly",
-      directive: formatEvidenceGapToolDirective({
-        language,
-        action: "readonly_check",
-        missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
-        tools: ["GitStatusInspect"],
-        note:
-          language === "en-US"
-            ? "Inspect current changes first; if this still does not support the final claim, the next evidence pass will run the smallest verification."
-            : "先检查当前变更范围；若仍不足以支撑最终声明，下一轮补证据会运行最小验证。",
-      }),
-      evidenceAction: {
-        toolName: "GitStatusInspect",
-        input: { includeDetails: true },
-        summary: "inspect current change scope for final-gate completion evidence",
-      },
-    };
+    return createVerificationEvidenceGapPlan({
+      language,
+      permissionMode: context.permissionMode,
+      reason:
+        context.permissionMode === "default"
+          ? "completion_gap_verification_requires_permission"
+          : "completion_gap_verification_allowed_by_mode",
+      missingKinds: result.unsupportedKinds,
+      level: selectFinalGateVerificationLevel(result),
+    });
   }
   if (gap === "runtime") {
     const runtimeAction = createServiceRuntimeReadonlyEvidenceAction(
