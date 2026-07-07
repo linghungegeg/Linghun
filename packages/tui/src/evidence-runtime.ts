@@ -9,10 +9,7 @@ import { mergeFailureRecord, writeFailureRecord } from "./failure-learning-runti
 import { writeHandoffPacket } from "./handoff-session-runtime.js";
 import { deriveToolSupportsClaims } from "./model-loop-runtime.js";
 import { classifyProviderFailure } from "./request-lifecycle-presenter.js";
-import {
-  LINGHUN_DEFAULT_TOOL_RESULT_CHARS,
-  LINGHUN_MAX_TOOL_RESULT_BYTES,
-} from "./runtime-budget.js";
+import { LINGHUN_DEFAULT_TOOL_RESULT_CHARS } from "./runtime-budget.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import { formatToolDiagnosticsSummary } from "./tool-output-presenter.js";
 import {
@@ -719,7 +716,7 @@ export function createToolEndEvent(id: string, output: ToolOutput): TranscriptEv
   return {
     type: "tool_call_end",
     id,
-    output: summarizeToolEndOutputForTranscript(output),
+    output: summarizeToolEndOutputForTranscript(compactToolOutputForTranscript(output)),
     createdAt: new Date().toISOString(),
   };
 }
@@ -772,49 +769,49 @@ function compactToolEndTextForTranscript(text: string, fullOutputPath?: string):
 }
 
 export function compactToolOutputForTranscript(output: ToolOutput): ToolOutput {
-  const text = typeof output.text === "string" ? output.text : "";
-  const textBytes = Buffer.byteLength(text, "utf8");
-  if (
-    text.length <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS &&
-    textBytes <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
-  ) {
-    const compactedDetails =
-      typeof output.details === "string" && output.details.length > TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
-        ? `<transcript-tool-output-details-truncated originalChars=${output.details.length}${output.fullOutputPath ? ` fullOutputPath=${output.fullOutputPath}` : ""}>`
-        : output.details;
-    return compactedDetails === output.details ? output : { ...output, details: compactedDetails };
+  const serialized = stringifyValueWithinBudget(output, TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS + 1);
+  if (serialized && isWithinTranscriptToolOutputBudget(serialized)) {
+    return output;
   }
-  const preview = text.slice(0, TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS);
+
+  const text = typeof output.text === "string" ? output.text : "";
+  const fullOutputPath =
+    typeof output.fullOutputPath === "string" ? output.fullOutputPath : undefined;
   return {
     ...output,
-    text: [
-      preview,
-      "",
-      `<transcript-tool-output-truncated originalChars=${text.length} originalBytes=${textBytes}${output.fullOutputPath ? ` fullOutputPath=${output.fullOutputPath}` : ""}>`,
-    ].join("\n"),
-    details:
-      typeof output.details === "string" &&
-      output.details.length > TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS
-        ? `<transcript-tool-output-details-truncated originalChars=${output.details.length}${output.fullOutputPath ? ` fullOutputPath=${output.fullOutputPath}` : ""}>`
-        : output.details,
+    text: compactToolEndTextForTranscript(text, fullOutputPath),
+    details: compactToolOutputDetailsForTranscript(output.details, fullOutputPath),
     data: compactToolOutputDataForTranscript(output.data),
     truncated: true,
   };
 }
 
+function isWithinTranscriptToolOutputBudget(text: string): boolean {
+  return (
+    text.length <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS &&
+    Buffer.byteLength(text, "utf8") <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
+  );
+}
+
+function compactToolOutputDetailsForTranscript(
+  details: unknown,
+  fullOutputPath?: string,
+): string | undefined {
+  if (typeof details !== "string") return undefined;
+  if (isWithinTranscriptToolOutputBudget(details)) return details;
+  return `<transcript-tool-output-details-truncated originalChars=${details.length}${fullOutputPath ? ` fullOutputPath=${fullOutputPath}` : ""}>`;
+}
+
 function compactToolOutputDataForTranscript(data: unknown): unknown {
   if (!data || typeof data !== "object") return data;
-  const serialized = JSON.stringify(data);
-  if (
-    serialized.length <= LINGHUN_DEFAULT_TOOL_RESULT_CHARS &&
-    Buffer.byteLength(serialized, "utf8") <= LINGHUN_MAX_TOOL_RESULT_BYTES
-  ) {
+  const serialized = stringifyValueWithinBudget(data, TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS + 1);
+  if (serialized && isWithinTranscriptToolOutputBudget(serialized)) {
     return data;
   }
   return {
     truncated: true,
-    originalChars: serialized.length,
-    preview: serialized.slice(0, TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS),
+    originalChars: serialized?.length,
+    preview: serialized?.slice(0, TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS),
     ...compactToolStructuredDataForTranscript(data),
   };
 }
@@ -965,6 +962,7 @@ export async function appendToolResultEvent(
     sessionId,
     toolUseId,
     contentWithDiagnostics,
+    content,
   );
   await context.store.appendEvent(sessionId, {
     type: "tool_result",
@@ -1105,19 +1103,26 @@ export async function budgetToolResultTranscriptContent(
   sessionId: string,
   toolUseId: string,
   content: unknown,
+  artifactContent: unknown = content,
 ): Promise<unknown> {
-  const contentText = stringifyToolResultContentForBudget(content);
+  const contentText = stringifyToolResultContentForBudget(artifactContent);
   if (!contentText || contentText.startsWith("<persisted-tool-result>")) return content;
   if (
-    contentText.length <= LINGHUN_DEFAULT_TOOL_RESULT_CHARS &&
-    Buffer.byteLength(contentText, "utf8") <= LINGHUN_MAX_TOOL_RESULT_BYTES
+    contentText.length <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS &&
+    Buffer.byteLength(contentText, "utf8") <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
   ) {
     return content;
   }
 
+  const artifactText = stringifyToolResultContentForArtifact(artifactContent) ?? contentText;
   const budgeted = await applyToolResultBudgetToMessages(
-    [{ role: "tool", tool_call_id: toolUseId, content: contentText }],
-    { projectPath: context.projectPath, sessionId },
+    [{ role: "tool", tool_call_id: toolUseId, content: artifactText }],
+    {
+      projectPath: context.projectPath,
+      sessionId,
+      singleResultChars: TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS,
+      singleResultBytes: TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS,
+    },
   );
   for (const record of budgeted.records) {
     await recordToolResultBudgetEvidence(context, sessionId, record);
@@ -1128,5 +1133,14 @@ export async function budgetToolResultTranscriptContent(
 
 export function stringifyToolResultContentForBudget(content: unknown): string | null {
   if (typeof content === "string") return content;
-  return stringifyValueWithinBudget(content, LINGHUN_DEFAULT_TOOL_RESULT_CHARS + 1);
+  return stringifyValueWithinBudget(content, TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS + 1);
+}
+
+export function stringifyToolResultContentForArtifact(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return stringifyValueWithinBudget(content, LINGHUN_DEFAULT_TOOL_RESULT_CHARS + 1);
+  }
 }

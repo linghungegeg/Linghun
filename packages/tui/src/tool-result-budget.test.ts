@@ -455,6 +455,59 @@ describe("tool_result budget", () => {
     }
   });
 
+  it("budgets transcript tool_end when small text carries oversized data and details", () => {
+    const tail = "STRUCTURED_DATA_TAIL_SHOULD_ONLY_BE_IN_COMPACT_PREVIEW";
+    const large = `${"x".repeat(12_000)}${tail}`;
+    const toolEnd = createToolEndEvent("call-structured", {
+      text: "short ok",
+      details: large,
+      data: { xml: large },
+      fullOutputPath: "/tmp/structured.log",
+    }) as Extract<ReturnType<typeof createToolEndEvent>, { type: "tool_call_end" }>;
+
+    const serialized = JSON.stringify(toolEnd.output);
+    expect(serialized).not.toContain(tail);
+    expect(serialized).not.toContain(large);
+    expect((toolEnd.output as { details?: unknown }).details).toBeUndefined();
+    expect((toolEnd.output as { data?: unknown }).data).toBeUndefined();
+  });
+
+  it("persists oversized object tool_result fully before transcript compaction", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-object-"));
+    const events: unknown[] = [];
+    const tail = "OBJECT_ARTIFACT_TAIL_SHOULD_BE_PRESERVED";
+    const large = `${"x".repeat(12_000)}${tail}`;
+    const context = {
+      projectPath: project,
+      evidence: [],
+      tools: { recentDiagnostics: [] },
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-object",
+      "call-object",
+      "Bash",
+      { text: "short ok", data: { xml: large } },
+      false,
+    );
+
+    const toolResult = events.find((event) => (event as { type?: string }).type === "tool_result") as
+      | { content?: unknown }
+      | undefined;
+    expect(JSON.stringify(toolResult?.content)).toContain("<persisted-tool-result>");
+    expect(JSON.stringify(toolResult?.content)).not.toContain(tail);
+    const evidence = events.find((event) => (event as { type?: string }).type === "evidence_record") as
+      | { fullOutputPath?: string }
+      | undefined;
+    await expect(readFile(evidence?.fullOutputPath ?? "", "utf8")).resolves.toContain(tail);
+  });
+
   it("preserves compact diagnostics in transcript tool_end output", () => {
     const diagnostics = Array.from({ length: 6 }, (_, index) => ({
       type: index === 0 ? "diagnostic_alpha" : `diagnostic_${index}`,
@@ -699,8 +752,66 @@ describe("tool_result budget", () => {
     });
   });
 
+  it("persists oversized artifact and file evidence while keeping compact evidence hints", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-artifact-"));
+    const events: unknown[] = [];
+    const tail = "FILE_ARTIFACT_TAIL_SHOULD_BE_PRESERVED";
+    const largeFileBody = `${"f".repeat(12_000)}${tail}`;
+    const context = {
+      projectPath: project,
+      evidence: [
+        {
+          id: "ev-artifact",
+          kind: "command_output",
+          source: "WriteReport",
+          summary: "report artifact output",
+          supportsClaims: ["WriteReport", "artifact"],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      tools: { recentDiagnostics: [] },
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    };
 
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-artifact",
+      "call-artifact",
+      "WriteReport",
+      {
+        text: "wrote report artifact",
+        data: {
+          artifactHint: { path: "reports/result.html", bytes: largeFileBody.length },
+          files: [{ path: "reports/result.html", content: largeFileBody }],
+        },
+      },
+      false,
+      "ev-artifact",
+    );
 
+    const toolResult = events.find((event) => (event as { type?: string }).type === "tool_result") as
+      | { content?: unknown }
+      | undefined;
+    expect(JSON.stringify(toolResult?.content)).toContain("<persisted-tool-result>");
+    expect(JSON.stringify(toolResult?.content)).toContain("artifactPath:");
+    expect(JSON.stringify(toolResult?.content)).not.toContain(tail);
+    const originalEvidence = context.evidence.find((evidence) => evidence.id === "ev-artifact");
+    expect(originalEvidence).toMatchObject({
+      data: { artifactHint: { path: "reports/result.html", bytes: largeFileBody.length } },
+    });
+
+    const persisted = events.find((event) => (event as { type?: string }).type === "evidence_record") as
+      | { fullOutputPath?: string; supportsClaims?: string[] }
+      | undefined;
+    expect(persisted?.supportsClaims).toContain("tool_result_budget");
+    const artifactContent = await readFile(persisted?.fullOutputPath ?? "", "utf8");
+    expect(artifactContent).toContain("reports/result.html");
+    expect(artifactContent).toContain(tail);
+  });
 
   it("does not change recentDiagnostics when tool result has no diagnostics", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));

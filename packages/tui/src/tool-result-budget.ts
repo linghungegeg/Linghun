@@ -66,9 +66,13 @@ export async function applyToolResultBudgetToMessages(
     sessionId: string;
     now?: Date;
     state?: ToolResultBudgetState;
+    singleResultChars?: number;
+    singleResultBytes?: number;
   },
 ): Promise<ToolResultBudgetResult> {
   const state = options.state;
+  const singleResultChars = options.singleResultChars ?? LINGHUN_DEFAULT_TOOL_RESULT_CHARS;
+  const singleResultBytes = options.singleResultBytes ?? LINGHUN_MAX_TOOL_RESULT_BYTES;
   if (state) state.contentReplacements ??= new Map();
   const candidates = collectToolResultCandidates(messages, state);
   if (candidates.length === 0) return { messages, records: [] };
@@ -106,10 +110,7 @@ export async function applyToolResultBudgetToMessages(
 
   const selected = new Map<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>();
   for (const candidate of freshCandidates) {
-    if (
-      candidate.chars > LINGHUN_DEFAULT_TOOL_RESULT_CHARS ||
-      candidate.bytes > LINGHUN_MAX_TOOL_RESULT_BYTES
-    ) {
+    if (candidate.chars > singleResultChars || candidate.bytes > singleResultBytes) {
       selected.set(candidate.toolUseId, { ...candidate, reason: "single_result" });
     }
   }
