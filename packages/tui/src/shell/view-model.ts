@@ -1205,7 +1205,8 @@ export function createOutputBlock(
   // Short normal final answers / completion confirms / "我能帮您做点什么？"
   // echoes never satisfy either condition and stay clean (no hint row).
   const nonEmptyLineCount = normalized.split("\n").filter((line) => line.trim().length > 0).length;
-  const toolResultLike = isToolResultLike(normalized);
+  const toolCallLike = isToolCallLike(normalized);
+  const toolResultLike = !toolCallLike && isToolResultLike(normalized);
   const toolResultErrorLike = toolResultLike && isToolResultErrorLike(normalized);
   const hasMore =
     explicitFold ||
@@ -1213,23 +1214,30 @@ export function createOutputBlock(
     (toolResultLike &&
       normalized.length > 0 &&
       (nonEmptyLineCount >= 6 || normalized.length > summary.length + 16));
+  const messageKind = toolCallLike
+    ? "tool_call"
+    : toolResultErrorLike
+      ? "tool_result_error"
+      : toolResultLike
+        ? "tool_result_success"
+        : "assistant_text";
   const displayBlock = {
-    kind: toolResultErrorLike ? "tool_result_error" : toolResultLike ? "tool_result_success" : "assistant_text",
-    title: toolResultLike ? summary.split("\n", 1)[0] : undefined,
-    status: toolResultErrorLike ? "error" : toolResultLike ? "success" : "info",
+    kind: messageKind,
+    title: toolCallLike || toolResultLike ? summary.split("\n", 1)[0] : undefined,
+    status: toolCallLike ? "running" : toolResultErrorLike ? "error" : toolResultLike ? "success" : "info",
     summary,
     body: normalized,
     collapsible: hasMore,
-    bordered: toolResultLike,
+    bordered: toolCallLike || toolResultLike,
   } as const;
   return {
     id,
-    kind: toolResultErrorLike ? "error" : "details",
-    status: toolResultErrorLike ? "fail" : "info",
+    kind: toolCallLike ? "tool" : toolResultErrorLike ? "error" : "details",
+    status: toolCallLike ? "running" : toolResultErrorLike ? "fail" : "info",
     // D13E-P3 empty title: drop the fixed "最近输出" / "Latest output" title
     // for normal outputs so ProductBlock renders only the summary line and
     // adjacent normal outputs breathe instead of stacking duplicate banners.
-    title: toolResultErrorLike ? summary.split("\n", 1)[0] : "",
+    title: toolCallLike || toolResultErrorLike ? summary.split("\n", 1)[0] : "",
     summary,
     nextAction: hasMore ? copy.detailsHint : undefined,
     // Preserve the full body so /details can reveal it. The summary keeps the
@@ -1237,13 +1245,15 @@ export function createOutputBlock(
     // /model doctor body with provider.env merge / endpointPath / providers)
     // are no longer truncated to the first line at this boundary.
     fullText: normalized,
-    messageKind: toolResultErrorLike
-      ? "tool_result_error"
-      : toolResultLike
-        ? "tool_result_success"
-        : "assistant_text",
+    messageKind,
     displayBlock,
   };
+}
+
+function isToolCallLike(text: string): boolean {
+  return /^(?:Bash|Read|ReadSnippets|SourcePack|Write|Edit|MultiEdit|Grep|Glob)\([^\n]{1,160}\)$/u.test(
+    text.trim(),
+  );
 }
 
 function isToolResultLike(text: string): boolean {
@@ -2454,6 +2464,7 @@ function fitBlockToWidth(block: ProductBlockViewModel, width: number): ProductBl
   const isMessageBlock =
     block.messageKind === "assistant_text" ||
     block.messageKind === "assistant_thinking" ||
+    block.messageKind === "tool_call" ||
     block.messageKind === "tool_result_success" ||
     block.messageKind === "tool_result_error" ||
     block.messageKind === "tool_result_cancelled" ||

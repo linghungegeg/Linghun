@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createAssistantPrimaryTextSanitizer,
   createLayeredToolOutput,
+  createStructuredToolCall,
   createStructuredToolOutput,
   formatToolOutput,
   formatToolStart,
@@ -167,6 +168,18 @@ describe("tool-output-presenter", () => {
 
     it("普通命令不被过度脱敏", () => {
       expect(formatToolStart("Bash", { command: "git status" })).toBe("Bash(git status)");
+    });
+
+    it("返回结构化调用卡，同时保留旧字符串兼容", () => {
+      const structured = createStructuredToolCall("Bash", { command: "git status" });
+
+      expect(structured?.text).toBe(formatToolStart("Bash", { command: "git status" }));
+      expect(structured?.block.kind).toBe("tool_call");
+      expect(structured?.block.toolName).toBe("Bash");
+      expect(structured?.block.status).toBe("running");
+      expect(structured?.block.summary).toBe("Bash(git status)");
+      expect(structured?.block.collapsible).toBe(false);
+      expect(structured?.block.bordered).toBe(true);
     });
   });
 

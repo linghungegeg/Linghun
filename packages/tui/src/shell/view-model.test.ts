@@ -247,6 +247,28 @@ describe("shell view model", () => {
     expect(rendered).not.toContain("sk-shell-output-secret");
   });
 
+  it("maps legacy single-line tool start banners to running tool_call blocks", () => {
+    const block = createOutputBlock("Bash(git status)", "en-US", "tool-call-out");
+
+    expect(block.kind).toBe("tool");
+    expect(block.status).toBe("running");
+    expect(block.messageKind).toBe("tool_call");
+    expect(block.displayBlock?.kind).toBe("tool_call");
+    expect(block.displayBlock?.status).toBe("running");
+    expect(block.displayBlock?.bordered).toBe(true);
+    expect(block.nextAction).toBeUndefined();
+  });
+
+  it("keeps multi-line tool output as a result card, not a running call card", () => {
+    const block = createOutputBlock("Read(package.json)\nRead 12 lines", "en-US", "tool-result-out");
+
+    expect(block.kind).toBe("details");
+    expect(block.status).toBe("info");
+    expect(block.messageKind).toBe("tool_result_success");
+    expect(block.displayBlock?.kind).toBe("tool_result_success");
+    expect(block.displayBlock?.status).toBe("success");
+  });
+
   it("keeps 120/80/60/40-column mature shell view models stable without default cards", () => {
     for (const width of [120, 80, 60, 40]) {
       const view = createShellViewModel(createContext(), { width });

@@ -20,6 +20,16 @@ export type ToolOutputDisplayBlock = DisplayBlock & {
   toolName: ToolName;
 };
 
+export type ToolCallDisplayBlock = DisplayBlock & {
+  kind: "tool_call";
+  toolName: ToolName;
+};
+
+export type StructuredToolCall = {
+  block: ToolCallDisplayBlock;
+  text: string;
+};
+
 export type StructuredToolOutput = {
   layered: LayeredToolOutput;
   block: ToolOutputDisplayBlock;
@@ -450,6 +460,24 @@ export function formatToolStart(name: ToolName, input: unknown): string | undefi
   }
   if (!arg) return undefined;
   return `${name}(${clamp(redactBannerArg(arg))})`;
+}
+
+export function createStructuredToolCall(name: ToolName, input: unknown): StructuredToolCall | undefined {
+  const text = formatToolStart(name, input);
+  if (!text) return undefined;
+  return {
+    block: {
+      kind: "tool_call",
+      toolName: name,
+      title: text,
+      status: "running",
+      summary: text,
+      body: text,
+      collapsible: false,
+      bordered: true,
+    },
+    text,
+  };
 }
 
 export function sanitizeAssistantPrimaryText(text: string, language: Language): string {
