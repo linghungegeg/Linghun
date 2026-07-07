@@ -7,6 +7,7 @@ import {
   nativeScrollbackTaskHistoryGeometry,
 } from "./native-scrollback-frame.js";
 import { resetTerminalCapabilityCache } from "./terminal-capability.js";
+import { displayWidth } from "./text-utils.js";
 import {
   commitTerminalFirstUserBlock,
   createTerminalFirstAssistantSink,
@@ -125,7 +126,10 @@ function baseTaskView(): ShellViewModel {
   };
 }
 
-async function renderWithEvents(getViewModel: () => ShellViewModel): Promise<{
+async function renderWithEvents(
+  getViewModel: () => ShellViewModel,
+  options: { columns?: number; rows?: number } = {},
+): Promise<{
   input: ReturnType<typeof createTtyInput>;
   output: TestTtyOutput;
   events: ShellInputEvent[];
@@ -135,6 +139,8 @@ async function renderWithEvents(getViewModel: () => ShellViewModel): Promise<{
   vi.stubEnv("FORCE_COLOR", "0");
   const input = createTtyInput();
   const output = new TestTtyOutput();
+  if (options.columns) output.columns = options.columns;
+  if (options.rows) output.rows = options.rows;
   const events: ShellInputEvent[] = [];
   const controller: ShellController = {
     getViewModel,
@@ -163,6 +169,13 @@ async function writeInput(
 
 function visibleLinesFrom(output: TestTtyOutput): string[] {
   return output.text.replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "").split(/\r?\n/u);
+}
+
+function expectLinesWithinWidth(lines: string[], width: number): void {
+  const overflow = lines
+    .map((line, index) => ({ index, line, width: displayWidth(line) }))
+    .filter((entry) => entry.line.trim().length > 0 && entry.width > width);
+  expect(overflow).toEqual([]);
 }
 
 function finalScreenLinesFrom(output: TestTtyOutput, rowCount = 80): string[] {
@@ -597,67 +610,74 @@ describe("Ink TTY interaction smoke", () => {
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
     vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     vi.stubEnv("FORCE_COLOR", "0");
-    const view: ShellViewModel = {
-      ...baseTaskView(),
-      themeMode: "no-color",
-      height: 34,
-      commandPanel: undefined,
-      blocks: [
-        {
-          id: "markdown-code",
-          kind: "details",
-          status: "pass",
-          title: "",
-          summary: "code sample",
-          fullText: [
-            "# Output",
-            "",
-            "查看 [文档](https://example.test/docs) 和 `inline` 标记。",
-            "",
-            "| 名称 | 说明 | 链接 |",
-            "| --- | --- | --- |",
-            "| 模块 | 包含中文宽字符 | https://example.test/docs |",
-            "",
-            "```ts",
-            "const answer = 42;",
-            "```",
-            "",
-            "```diff",
-            "--- a/file.ts",
-            "+++ b/file.ts",
-            "@@ -1 +1 @@",
-            "-const oldValue = 1;",
-            "+const newValue = 2;",
-            "```",
-          ].join("\n"),
-          messageKind: "assistant_text",
-          keep: true,
-        },
-      ],
-      staticHistoryBlocks: [],
-      streamingAssistantText: undefined,
-      activity: undefined,
-      taskSuggestions: undefined,
-      limitations: [],
-      transcriptScroll: { scrollOffset: 0, stickToBottom: true },
-    };
-    const { output, shell } = await renderWithEvents(() => view);
+    for (const width of [80, 120] as const) {
+      const view: ShellViewModel = {
+        ...baseTaskView(),
+        width,
+        themeMode: "no-color",
+        height: 34,
+        commandPanel: undefined,
+        blocks: [
+          {
+            id: `markdown-code-${width}`,
+            kind: "details",
+            status: "pass",
+            title: "",
+            summary: "code sample",
+            fullText: [
+              "# Output",
+              "",
+              "查看 [文档](https://example.test/docs) 和 `inline` 标记。",
+              "",
+              "| 名称 | 说明 | 链接 |",
+              "| --- | --- | --- |",
+              "| 模块 | 包含中文宽字符 | https://example.test/docs |",
+              "",
+              "```ts",
+              "const answer = 42;",
+              "const endpoint = 'https://example.test/a/really/long/path/that/should/wrap/instead/of/stretching/the/terminal?with=query&value=1234567890';",
+              "const payload = { message: '中文长行也要在八十列里稳定换行', value: 'abcdefghijklmnopqrstuvwxyz0123456789' };",
+              "```",
+              "",
+              "```diff",
+              "--- a/file.ts",
+              "+++ b/file.ts",
+              "@@ -1 +1 @@",
+              "-const oldValue = 1;",
+              "+const newValue = 2;",
+              "```",
+            ].join("\n"),
+            messageKind: "assistant_text",
+            keep: true,
+          },
+        ],
+        staticHistoryBlocks: [],
+        streamingAssistantText: undefined,
+        activity: undefined,
+        taskSuggestions: undefined,
+        limitations: [],
+        transcriptScroll: { scrollOffset: 0, stickToBottom: true },
+      };
+      const { output, shell } = await renderWithEvents(() => view, { columns: width });
 
-    await shell.waitUntilRenderFlush();
+      await shell.waitUntilRenderFlush();
 
-    const visible = finalScreenLinesFrom(output, view.height).join("\n");
-    expect(visible).toContain("查看 文档");
-    expect(visible).toContain("https://example.test/docs");
-    expect(visible).toContain("inline");
-    expect(visible).toContain("│  名称  │");
-    expect(visible).toContain("包含中文宽字符");
-    expect(visible).toContain("+ ts");
-    expect(visible).toContain("| 1 | const answer = 42;");
-    expect(visible).toContain("+---");
-    expect(visible).toContain("--- a/file.ts");
-    expect(visible).toContain("+ const newValue = 2;");
-    expect(visible).toContain("┈┈┈");
-    shell.unmount();
+      const visibleLines = finalScreenLinesFrom(output, view.height);
+      const visible = visibleLines.join("\n");
+      expect(visible).toContain("查看 文档");
+      expect(visible).toContain("https://example.test/docs");
+      expect(visible).toContain("inline");
+      expect(visible).toContain("│  名称  │");
+      expect(visible).toContain("包含中文宽字符");
+      expect(visible).toContain("+ ts · copy · details");
+      expect(visible).toContain("| 1 | const answer = 42;");
+      expect(visible).toContain("+---");
+      expect(visible).toContain("--- a/file.ts");
+      expect(visible).toContain("+ const newValue = 2;");
+      expect(visible).toContain("┈┈┈");
+      expectLinesWithinWidth(visibleLines, width);
+      shell.unmount();
+    }
   });
 
   it("first submit keeps the user message and pending activity visible in the native bottom frame", async () => {

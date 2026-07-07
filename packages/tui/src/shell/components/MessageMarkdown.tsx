@@ -6,7 +6,7 @@ import type React from "react";
 import { memo, useRef } from "react";
 import { isDiffFenceLanguage } from "../diff-renderer.js";
 import { findStableMarkdownPrefixLength } from "../models/markdown-stability.js";
-import { charWidth, displayWidth, wrapText } from "../text-utils.js";
+import { charWidth, displayWidth, fitText, wrapText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 import type { ProductBlockSelectionRange } from "../types.js";
 import { StructuredDiff } from "./StructuredDiff.js";
@@ -92,12 +92,16 @@ function codeBlockFrame(useAsciiBorders: boolean): CodeBlockFrame {
 
 function codeBlockTopLine(frame: CodeBlockFrame, width: number, label?: string): string {
   const innerWidth = Math.max(6, width - 2);
-  const title = label ? ` ${label.trim()} ` : "";
-  const clippedTitle =
-    title.length > innerWidth ? `${title.slice(0, Math.max(0, innerWidth - 3))}...` : title;
-  return `${frame.topLeft}${clippedTitle}${frame.horizontal.repeat(
-    Math.max(0, innerWidth - clippedTitle.length),
+  const title = label ? ` ${fitText(label.trim(), innerWidth - 2)} ` : "";
+  return `${frame.topLeft}${title}${frame.horizontal.repeat(
+    Math.max(0, innerWidth - displayWidth(title)),
   )}${frame.topRight}`;
+}
+
+function codeBlockHeader(lang: string | undefined, width: number): string {
+  const language = lang?.trim() || "text";
+  const header = `${language} · copy · details`;
+  return fitText(header, Math.max(4, width));
 }
 
 function codeBlockBottomLine(frame: CodeBlockFrame, width: number): string {
@@ -701,7 +705,7 @@ function renderCodeBlock({
   return (
     <Box key={blockKey} flexDirection="column" marginLeft={1} marginY={1}>
       <Text color={borderColor} dimColor={dim}>
-        {codeBlockTopLine(frame, frameWidth, lang)}
+        {codeBlockTopLine(frame, frameWidth, codeBlockHeader(lang, frameWidth - 4))}
       </Text>
       {rawLines.map((line, lineIndex) => {
         const num = String(lineIndex + 1).padStart(gutterWidth, " ");
