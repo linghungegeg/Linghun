@@ -1295,6 +1295,20 @@ describe("OpenAI stream parser", () => {
     ]);
   });
 
+  it("emits recoverable error when the stream closes before [DONE] or finish_reason", async () => {
+    const events = await collectOpenAiEvents([
+      'data: {"id":"chatcmpl-early","choices":[{"delta":{"content":"partial"}}]}\n\n',
+    ]);
+
+    expect(events).toEqual([
+      { type: "assistant_text_delta", id: "chatcmpl-early", text: "partial" },
+      expect.objectContaining({
+        type: "error",
+        error: expect.objectContaining({ code: "PROVIDER_STREAM_ERROR", recoverable: true }),
+      }),
+    ]);
+  });
+
   it("converts provider error chunks and malformed chunks into error events", async () => {
     const providerErrorEvents = await collectOpenAiEvents([
       'data: {"error":{"message":"bad gateway"}}\n\n',
@@ -2028,6 +2042,25 @@ describe("Anthropic Messages stream parser", () => {
       finishReason: "end_turn",
       hadUsage: true,
     });
+  });
+
+  it("parses CRLF-delimited Anthropic SSE events split across chunks", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\r\ndata: {"type":"message_start","message":{"id":"msg_crlf"}}\r\n\r\n',
+      'event: content_block_delta\r\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"he',
+      'llo"}}\r\n\r\n',
+      'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n',
+    ]);
+
+    const text = events
+      .filter(
+        (event): event is Extract<LinghunEvent, { type: "assistant_text_delta" }> =>
+          event.type === "assistant_text_delta",
+      )
+      .map((event) => event.text)
+      .join("");
+    expect(text).toBe("hello");
+    expect(events.at(-1)).toMatchObject({ type: "message_stop", id: "msg_crlf" });
   });
 
   it("emits PROVIDER_STREAM_ERROR on Anthropic error events without leaking JSON shape", async () => {
@@ -3572,6 +3605,40 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
       name: "Read",
       input: { path: "README.md" },
     });
+  });
+
+  it("stream parser: accepts Anthropic SSE frames with CR-only line endings", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\rdata: {"type":"message_start","message":{"id":"msg_cr","usage":{"input_tokens":1}}}\r\r',
+      'event: content_block_delta\rdata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\r\r',
+      'event: message_stop\rdata: {"type":"message_stop"}\r\r',
+    ]);
+
+    expect(events).toEqual([
+      { type: "assistant_text_delta", id: "msg_cr", text: "ok" },
+      {
+        type: "message_stop",
+        id: "msg_cr",
+        finishReason: undefined,
+        chunkCount: 3,
+        hadUsage: false,
+      },
+    ]);
+  });
+
+  it("stream parser: emits recoverable error when Anthropic stream closes before message_stop", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_early"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n',
+    ]);
+
+    expect(events).toEqual([
+      { type: "assistant_text_delta", id: "msg_early", text: "partial" },
+      expect.objectContaining({
+        type: "error",
+        error: expect.objectContaining({ code: "PROVIDER_STREAM_ERROR", recoverable: true }),
+      }),
+    ]);
   });
 
   it("stream parser: unfinished Anthropic tool_use emits PROVIDER_PARTIAL_TOOL_CALL", async () => {

@@ -3303,9 +3303,8 @@ async function runRipgrep(
       context.abortSignal?.removeEventListener("abort", abort);
       resolvePromise(value);
     };
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      pending += chunk;
+    child.stdout.on("data", (chunk: Buffer) => {
+      pending += decodeShellChunk(chunk);
       const parts = pending.split(/\r?\n/u);
       pending = parts.pop() ?? "";
       for (const line of parts) {
@@ -3320,9 +3319,8 @@ async function runRipgrep(
         }
       }
     });
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += decodeShellChunk(chunk);
     });
     child.on("error", () => finish(null));
     child.on("close", (code) => {
@@ -3399,6 +3397,9 @@ function runShell(
     };
     let settled = false;
     let forcedKillTimer: NodeJS.Timeout | undefined;
+    let heartbeatTimer: NodeJS.Timeout | undefined;
+    let lastOutputTime = Date.now();
+    const heartbeatMs = getForegroundBashHeartbeatMs();
     let stoppingOutcome: "timeout" | "cancelled" | undefined;
     let childClosed = false;
     const finish = (
@@ -3410,6 +3411,9 @@ function runShell(
       }
       settled = true;
       clearTimeout(timer);
+      if (heartbeatTimer) {
+        clearTimeout(heartbeatTimer);
+      }
       if (forcedKillTimer && outcome === "completed") {
         clearTimeout(forcedKillTimer);
       }
@@ -3483,15 +3487,37 @@ function runShell(
     }
     signal?.addEventListener("abort", onAbort, { once: true });
 
+    const markOutput = () => {
+      lastOutputTime = Date.now();
+      if (heartbeatTimer) {
+        clearTimeout(heartbeatTimer);
+      }
+      heartbeatTimer = setTimeout(reportHeartbeat, heartbeatMs);
+    };
+    const reportHeartbeat = () => {
+      if (settled) return;
+      const idleMs = Date.now() - lastOutputTime;
+      if (idleMs >= heartbeatMs) {
+        const message = `\n[bash] 命令仍在运行，已 ${Math.round(idleMs / 1000)}s 无输出。完整日志：${fullOutputPath}\n`;
+        appendSanitizedChunk(message, true);
+        onProgress?.("system", message);
+        lastOutputTime = Date.now();
+      }
+      heartbeatTimer = setTimeout(reportHeartbeat, heartbeatMs);
+    };
+    markOutput();
+
     // D.14H Phase 7.5-C：Windows 控制台输出可能为 GBK/GB18030 编码，
     // UTF-8 decode 会产生 � 或 mojibake。优先 UTF-8，检测到问题时回退 GB18030。
     child.stdout.on("data", (chunk: Buffer) => {
       const text = decodeShellChunk(chunk);
+      markOutput();
       appendSanitizedChunk(text, true);
       onProgress?.("stdout", text);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       const text = decodeShellChunk(chunk);
+      markOutput();
       appendSanitizedChunk(text, true);
       onProgress?.("stderr", text);
     });
@@ -3515,6 +3541,7 @@ function runShell(
 // ---------------------------------------------------------------------------
 
 const STALL_THRESHOLD_MS = 45_000;
+const DEFAULT_FOREGROUND_BASH_HEARTBEAT_MS = 30_000;
 const PROMPT_PATTERNS = [
   /\(y\/n\)\s*$/i,
   /\[y\/n\]\s*$/i,
@@ -3526,6 +3553,13 @@ const PROMPT_PATTERNS = [
   /passphrase[:\s]*$/i,
   /\?\s*$/,
 ];
+
+function getForegroundBashHeartbeatMs(): number {
+  const raw = process.env.LINGHUN_BASH_HEARTBEAT_MS;
+  if (!raw) return DEFAULT_FOREGROUND_BASH_HEARTBEAT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.max(10, parsed) : DEFAULT_FOREGROUND_BASH_HEARTBEAT_MS;
+}
 
 function looksLikePrompt(tail: string): boolean {
   const lastLine = tail.split(/\r?\n/).filter(Boolean).pop() ?? "";

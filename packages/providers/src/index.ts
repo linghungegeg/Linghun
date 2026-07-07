@@ -863,7 +863,7 @@ export class OpenAiCompatibleProvider implements Provider {
 
       await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
-      yield* parseAnthropicMessagesStream(
+      for await (const event of parseAnthropicMessagesStream(
         withStreamIdleTimeout(
           response.body,
           PROVIDER_STREAM_IDLE_TIMEOUT_MS,
@@ -871,7 +871,28 @@ export class OpenAiCompatibleProvider implements Provider {
           requestController,
         ),
         contract.endpoint,
-      );
+      )) {
+        if (isProviderIncompleteStreamErrorEvent(event)) {
+          const fallback = await tryNonStreamingFallback({
+            providerConfig: this.config,
+            request,
+            contract,
+            baseUrl: baseUrlDiagnostic.normalizedBaseUrl,
+            requestSignal,
+          });
+          if (fallback) {
+            await getRegisteredHooks().afterFallback?.({
+              config: this.config,
+              request,
+              contract,
+              reason: "stream_incomplete",
+            });
+            yield* fallback;
+            return;
+          }
+        }
+        yield event;
+      }
       return;
     }
 
@@ -939,7 +960,7 @@ export class OpenAiCompatibleProvider implements Provider {
 
     await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
-    yield* parseOpenAiStream(
+    for await (const event of parseOpenAiStream(
       withStreamIdleTimeout(
         response.body,
         PROVIDER_STREAM_IDLE_TIMEOUT_MS,
@@ -947,7 +968,28 @@ export class OpenAiCompatibleProvider implements Provider {
         requestController,
       ),
       contract.endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
-    );
+    )) {
+      if (isProviderIncompleteStreamErrorEvent(event)) {
+        const fallback = await tryNonStreamingFallback({
+          providerConfig: this.config,
+          request,
+          contract,
+          baseUrl: baseUrlDiagnostic.normalizedBaseUrl,
+          requestSignal,
+        });
+        if (fallback) {
+          await getRegisteredHooks().afterFallback?.({
+            config: this.config,
+            request,
+            contract,
+            reason: "stream_incomplete",
+          });
+          yield* fallback;
+          return;
+        }
+      }
+      yield event;
+    }
   }
 
   private assertReady(): void {
@@ -1407,7 +1449,7 @@ async function tryNonStreamingFallback(input: {
   request: ModelRequest;
   contract: ProviderRuntimeContract;
   baseUrl: string;
-  status: number;
+  status?: number;
   responseText?: string;
   requestSignal: AbortSignal;
 }): Promise<LinghunEvent[] | undefined> {
@@ -1451,9 +1493,9 @@ async function tryNonStreamingFallback(input: {
   ];
 }
 
-function shouldAttemptNonStreamingFallback(request: ModelRequest, status: number): boolean {
+function shouldAttemptNonStreamingFallback(request: ModelRequest, status?: number): boolean {
   if (request.tools?.length || request.toolChoice === "auto") return false;
-  return status === 400 || status === 408 || status >= 500;
+  return status === undefined || status === 400 || status === 408 || status >= 500;
 }
 
 function createProviderRequestHeaders(
@@ -2281,6 +2323,7 @@ export async function* parseOpenAiStream(
     hadUsage: false,
     hadText: false,
     lastId: "assistant",
+    streamComplete: false,
   };
 
   try {
@@ -2312,6 +2355,7 @@ export async function* parseOpenAiStream(
         }
         buffer = buffer.slice(separator.index + separator.length);
         for (const event of parseOpenAiStreamEventBlock(eventBlock, state, endpoint)) {
+          markOpenAiStreamCompleteOnError(event, state);
           yield event;
         }
         separator = findSseEventSeparator(buffer);
@@ -2328,6 +2372,7 @@ export async function* parseOpenAiStream(
     }
     if (buffer.trim().length > 0) {
       for (const event of parseOpenAiStreamEventBlock(buffer, state, endpoint)) {
+        markOpenAiStreamCompleteOnError(event, state);
         yield event;
       }
     }
@@ -2342,6 +2387,11 @@ export async function* parseOpenAiStream(
           recoverable: true,
         }),
       };
+      state.streamComplete = true;
+    }
+    if (!state.streamComplete) {
+      yield createProviderIncompleteStreamError(endpoint, "OpenAI compatible stream closed before a terminal event");
+      return;
     }
     yield {
       type: "message_stop",
@@ -2362,6 +2412,27 @@ export async function* parseOpenAiStream(
   }
 }
 
+function createProviderIncompleteStreamError(endpoint: string, detail: string): LinghunEvent {
+  return {
+    type: "error",
+    error: new LinghunError({
+      code: "PROVIDER_STREAM_ERROR",
+      message: "模型请求失败：provider 流式响应在终止事件前提前结束。",
+      suggestion: `请重试；如持续出现，运行 /model doctor 检查 ${endpoint} 流式接口、网关稳定性和 endpoint profile。`,
+      cause: new Error(detail),
+      recoverable: true,
+    }),
+  };
+}
+
+function isProviderIncompleteStreamErrorEvent(event: LinghunEvent): boolean {
+  return (
+    event.type === "error" &&
+    event.error.code === "PROVIDER_STREAM_ERROR" &&
+    event.error.message.includes("终止事件前提前结束")
+  );
+}
+
 function findSseEventSeparator(value: string): { index: number; length: number } | undefined {
   const candidates = [
     { index: value.indexOf("\r\n\r\n"), length: 4 },
@@ -2370,6 +2441,13 @@ function findSseEventSeparator(value: string): { index: number; length: number }
   ].filter((candidate) => candidate.index >= 0);
   candidates.sort((left, right) => left.index - right.index);
   return candidates[0];
+}
+
+function markOpenAiStreamCompleteOnError(
+  event: LinghunEvent,
+  state: OpenAiStreamParseState,
+): void {
+  if (event.type === "error") state.streamComplete = true;
 }
 
 function parseOpenAiStreamEventBlock(
@@ -2419,6 +2497,7 @@ export async function* parseAnthropicMessagesStream(
     cacheWriteTokens: undefined,
     rawUsage: undefined,
     pendingToolUses: new Map(),
+    streamComplete: false,
   };
 
   try {
@@ -2437,10 +2516,10 @@ export async function* parseAnthropicMessagesStream(
         );
         return;
       }
-      // SSE 事件以 "\n\n" 分隔；按事件粒度切，避免半截 data 行解析失败。
-      let separatorIndex = buffer.indexOf("\n\n");
-      while (separatorIndex !== -1) {
-        const eventBlock = buffer.slice(0, separatorIndex);
+      // Split on complete SSE event frames; relays may use LF, CRLF, or CR separators.
+      let separator = findSseEventSeparator(buffer);
+      while (separator) {
+        const eventBlock = buffer.slice(0, separator.index);
         if (eventBlock.length > PROVIDER_SSE_EVENT_LIMIT_CHARS) {
           yield createProviderStreamLimitError(
             "SSE event",
@@ -2449,11 +2528,12 @@ export async function* parseAnthropicMessagesStream(
           );
           return;
         }
-        buffer = buffer.slice(separatorIndex + 2);
+        buffer = buffer.slice(separator.index + separator.length);
         for (const event of parseAnthropicMessagesEventBlock(eventBlock, state, endpoint)) {
+          markAnthropicStreamCompleteOnError(event, state);
           yield event;
         }
-        separatorIndex = buffer.indexOf("\n\n");
+        separator = findSseEventSeparator(buffer);
       }
     }
 
@@ -2465,6 +2545,7 @@ export async function* parseAnthropicMessagesStream(
     }
     if (buffer.trim().length > 0) {
       for (const event of parseAnthropicMessagesEventBlock(buffer, state, endpoint)) {
+        markAnthropicStreamCompleteOnError(event, state);
         yield event;
       }
     }
@@ -2481,6 +2562,12 @@ export async function* parseAnthropicMessagesStream(
           recoverable: true,
         }),
       };
+      state.streamComplete = true;
+    }
+
+    if (!state.streamComplete) {
+      yield createProviderIncompleteStreamError(endpoint, "Anthropic Messages stream closed before message_stop");
+      return;
     }
 
     yield {
@@ -2500,6 +2587,13 @@ export async function* parseAnthropicMessagesStream(
       // Reader may already be released by the runtime after cancel.
     }
   }
+}
+
+function markAnthropicStreamCompleteOnError(
+  event: LinghunEvent,
+  state: AnthropicStreamParseState,
+): void {
+  if (event.type === "error") state.streamComplete = true;
 }
 
 type AnthropicPendingToolUse = {
@@ -2522,6 +2616,7 @@ type AnthropicStreamParseState = {
   // content_block_start(tool_use) 时建立 entry，input_json_delta 累积 partial_json，
   // content_block_stop 时 JSON.parse 并 emit 单个 LinghunEvent.tool_use。
   pendingToolUses: Map<number, AnthropicPendingToolUse>;
+  streamComplete: boolean;
 };
 
 function parseAnthropicMessagesEventBlock(
@@ -2530,7 +2625,7 @@ function parseAnthropicMessagesEventBlock(
   endpoint: string,
 ): LinghunEvent[] {
   // 在一个 SSE 事件块里寻找 data 行；忽略 event:、id:、retry: 等头。
-  const lines = block.split("\n");
+  const lines = block.split(/\r?\n|\r/u);
   const dataLines: string[] = [];
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -2540,12 +2635,16 @@ function parseAnthropicMessagesEventBlock(
   }
   if (dataLines.length === 0) return [];
   const payload = dataLines.join("\n");
-  if (!payload || payload === "[DONE]") return [];
+  if (!payload || payload === "[DONE]") {
+    if (payload === "[DONE]") state.streamComplete = true;
+    return [];
+  }
 
   let parsed: AnthropicStreamEvent;
   try {
     parsed = JSON.parse(payload) as AnthropicStreamEvent;
   } catch (error) {
+    state.streamComplete = true;
     return [
       {
         type: "error",
@@ -2564,6 +2663,7 @@ function parseAnthropicMessagesEventBlock(
   state.chunkCount += 1;
 
   if (parsed.type === "error") {
+    state.streamComplete = true;
     const message = parsed.error?.message;
     return [
       {
@@ -2746,7 +2846,12 @@ function parseAnthropicMessagesEventBlock(
     ];
   }
 
-  // message_stop / content_block_start / content_block_stop / ping：忽略，
+  if (parsed.type === "message_stop") {
+    state.streamComplete = true;
+    return [];
+  }
+
+  // content_block_start / content_block_stop / ping：忽略，
   // message_stop 由外层统一发出，避免重复。
   return [];
 }
@@ -2759,6 +2864,7 @@ type OpenAiStreamParseState = {
   hadUsage: boolean;
   hadText: boolean;
   lastId: string;
+  streamComplete: boolean;
 };
 
 type OpenAiStreamChoice = {
@@ -2820,6 +2926,7 @@ function parseOpenAiStreamLine(
   }
   const payload = trimmed.slice("data:".length).trim();
   if (!payload || payload === "[DONE]") {
+    if (payload === "[DONE]") state.streamComplete = true;
     return [];
   }
   state.chunkCount += 1;
@@ -2849,6 +2956,7 @@ function parseOpenAiStreamLine(
   try {
     parsed = JSON.parse(payload);
   } catch (error) {
+    state.streamComplete = true;
     return [
       {
         type: "error",
@@ -2868,6 +2976,7 @@ function parseOpenAiStreamLine(
     state.lastId = parsed.id;
   }
   if (parsed.error) {
+    state.streamComplete = true;
     const message = typeof parsed.error === "string" ? parsed.error : parsed.error.message;
     return [
       {
@@ -2892,6 +3001,7 @@ function parseOpenAiStreamLine(
   for (const choice of parsed.choices ?? []) {
     if (choice.finish_reason) {
       state.finishReason = choice.finish_reason;
+      state.streamComplete = true;
     }
     const content = choice.delta?.content ?? choice.message?.content;
     if (content) {
@@ -2961,6 +3071,7 @@ function parseResponsesEvent(
     return [];
   }
   if (parsed.type === "response.failed" || parsed.type === "response.incomplete") {
+    state.streamComplete = true;
     return [
       {
         type: "error",
@@ -3074,6 +3185,7 @@ function parseResponsesEvent(
   const response = parsed.response;
   const usage = response?.usage;
   if (parsed.type === "response.completed" && response) {
+    state.streamComplete = true;
     const events: LinghunEvent[] = [];
     const text = state.hadText ? "" : extractResponsesOutputTextFromResponse(response);
     if (text) {

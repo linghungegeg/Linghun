@@ -198,6 +198,44 @@ describe("Phase 05 core tools", () => {
     expect(bash.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
+  it("emits Bash heartbeat progress while a foreground command is still silent", async () => {
+    const previousHeartbeat = process.env.LINGHUN_BASH_HEARTBEAT_MS;
+    process.env.LINGHUN_BASH_HEARTBEAT_MS = "25";
+    try {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+      const context = createToolContext(project);
+      const progress: string[] = [];
+      context.onProgress = (event) => {
+        progress.push(`${event.stream}:${event.text}`);
+      };
+
+      const bash = await runTool(
+        "Bash",
+        {
+          command: "node -e \"setTimeout(()=>{}, 120)\"",
+          timeoutMs: 2_000,
+        },
+        context,
+      );
+      const fullOutputPath = bash.output.fullOutputPath;
+      if (!fullOutputPath) {
+        throw new Error("Bash full output path was not recorded");
+      }
+      const fullLog = await readFile(fullOutputPath, "utf8");
+
+      expect(progress.join("")).toContain("system:\n[bash] 命令仍在运行，已");
+      expect(bash.output.text).toContain("[bash] 命令仍在运行，已");
+      expect(fullLog).toContain("[bash] 命令仍在运行，已");
+      expect(bash.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+    } finally {
+      if (previousHeartbeat === undefined) {
+        Reflect.deleteProperty(process.env, "LINGHUN_BASH_HEARTBEAT_MS");
+      } else {
+        process.env.LINGHUN_BASH_HEARTBEAT_MS = previousHeartbeat;
+      }
+    }
+  });
+
   it("keeps Bash foreground output bounded while preserving the full log", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);

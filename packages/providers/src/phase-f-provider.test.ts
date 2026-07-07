@@ -11,17 +11,12 @@ describe("Phase F provider contract, fallback, and error classification", () => 
   });
 
   it("falls back to a non-streaming request for plain text stream HTTP failures", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("server overload", { status: 503 }))
-      .mockResolvedValueOnce(new Response("server overload", { status: 503 }))
-      .mockResolvedValueOnce(new Response("server overload", { status: 503 }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ choices: [{ message: { content: "fallback ok" } }] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-      );
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("server overload", { status: 503 })).mockResolvedValueOnce(
+      new Response(JSON.stringify({ choices: [{ message: { content: "fallback ok" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
@@ -49,8 +44,8 @@ describe("Phase F provider contract, fallback, and error classification", () => 
         hadUsage: false,
       },
     ]);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({ stream: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ stream: false });
   });
 
   it("does not fallback for tool requests that could duplicate tool execution", async () => {
