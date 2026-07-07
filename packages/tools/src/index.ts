@@ -201,6 +201,8 @@ type BashDiagnosticType =
   | "missing_command"
   | "missing_python_module"
   | "timeout"
+  | "no_output"
+  | "prompt"
   | "provider_or_network";
 type BashDiagnosticSeverity = "info" | "recoverable" | "blocking";
 type BashDiagnostic = {
@@ -1380,9 +1382,10 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     context.abortSignal,
     (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
     context.trackChildProcess,
+    createBashNoOutputHint(input.command),
   );
   const cmdInterpretation = interpretCommandResult(input.command, result.exitCode);
-  const diagnostics = createBashOutcomeDiagnostics(result.outcome);
+  const diagnostics = createBashOutcomeDiagnostics(input.command, result.outcome);
   const trailerLines = [
     "",
     `exit code ${result.exitCode}`,
@@ -2097,19 +2100,44 @@ function isHeadlessBenchContext(context: ToolContext): boolean {
 }
 
 function createBashOutcomeDiagnostics(
+  command: string,
   outcome: "completed" | "timeout" | "cancelled",
 ): BashDiagnostic[] {
-  if (outcome === "timeout") {
-    return [
-      {
-        type: "timeout",
-        severity: "recoverable",
-        evidence: "Bash outcome timeout",
-        suggestion: "Run the smallest focused check first and avoid repeating long blind commands.",
-      },
-    ];
+  if (outcome !== "timeout") return [];
+
+  const diagnostics: BashDiagnostic[] = [
+    {
+      type: "timeout",
+      severity: "recoverable",
+      evidence: "Bash outcome timeout",
+      suggestion: "Run the smallest focused check first and avoid repeating long blind commands.",
+    },
+  ];
+  const remoteShellDiagnostic = createRemoteShellNoOutputDiagnostic(command);
+  if (remoteShellDiagnostic) diagnostics.push(remoteShellDiagnostic);
+  return diagnostics;
+}
+
+function createRemoteShellNoOutputDiagnostic(command: string): BashDiagnostic | undefined {
+  const classification = classifyWindowsShellCommand(command);
+  if (classification.domain !== "remote_shell" && !isRemoteShellProgram(classification.program)) {
+    return undefined;
   }
-  return [];
+  return {
+    type: "no_output",
+    severity: "recoverable",
+    evidence: `Remote shell command timed out or stayed silent: ${classification.program}`,
+    suggestion:
+      "Check device authorization, remote command interactivity, quote boundaries, and whether host-level pipes should be moved inside the quoted remote payload.",
+  };
+}
+
+function createBashNoOutputHint(command: string): string | undefined {
+  const classification = classifyWindowsShellCommand(command);
+  if (classification.domain !== "remote_shell" && !isRemoteShellProgram(classification.program)) {
+    return undefined;
+  }
+  return "远端/设备命令长时间无输出时，优先检查设备授权、交互式等待、quote 边界，以及宿主层管线是否误放在远端 payload 外。";
 }
 
 function tailLines(text: string, limit: number): string[] {
@@ -2134,6 +2162,17 @@ type CommandClassification = {
   confidence: "high" | "medium" | "low";
 };
 
+export function __testCreateBashOutcomeDiagnostics(
+  command: string,
+  outcome: "completed" | "timeout" | "cancelled",
+): BashDiagnostic[] {
+  return createBashOutcomeDiagnostics(command, outcome);
+}
+
+export function __testCreateBashPromptDiagnostic(tail: string): BashDiagnostic | undefined {
+  return createBashPromptDiagnostic(tail);
+}
+
 export function __testClassifyWindowsShellCommand(command: string): CommandClassification {
   return classifyWindowsShellCommand(command);
 }
@@ -2150,41 +2189,90 @@ export function adaptShellCommandForPlatform(
   if (isExplicitPowerShellCommand(command)) return { command, adapter: "native" };
 
   const classification = classifyWindowsShellCommand(command);
-  if (classification.domain === "ambiguous" && isRemoteShellProgram(classification.program)) {
-    return createBlockedPowerShellAdapter(
-      "Ambiguous remote shell command on Windows: host-level pipeline detected outside the remote payload; quote the remote command or use a PowerShell-safe host pipeline.",
-    );
+  for (const adapter of WINDOWS_SHELL_ADAPTER_REGISTRY) {
+    const adapted = adapter.adapt(command, classification);
+    if (adapted) return adapted;
   }
-  if (classification.domain === "remote_shell") return { command, adapter: "native" };
-
-  const fileWriteBlock = blockWindowsShellFileWriteCommand(command);
-  if (fileWriteBlock) return fileWriteBlock;
-  if (classification.domain === "explicit_shell") return { command, adapter: "native" };
-
-  const heredoc = convertNodeHereDocForPowerShell(command);
-  if (heredoc) return heredoc;
-  const nativePowerShell = convertNativePowerShellCommand(command);
-  if (nativePowerShell) return nativePowerShell;
-  if (looksLikeUnsupportedUnixMultiline(command)) {
-    return createBlockedPowerShellAdapter(
-      "Unsupported multi-line Unix shell syntax on Windows PowerShell; use PowerShell-safe commands or Node one-liners.",
-    );
-  }
-  const unsupportedPosix = blockUnsupportedPosixShellSyntax(command);
-  if (unsupportedPosix) return unsupportedPosix;
-  const converted = convertUnixPipelineForPowerShell(command);
-  if (converted) return { command: converted, adapter: "powershell-adapted" };
-  const readOnlyCommand = convertUnixReadOnlyCommandForPowerShell(command);
-  if (readOnlyCommand) return readOnlyCommand;
-  if (looksLikeUnsupportedUnixPipeline(command)) {
-    const message =
-      "Unsupported Unix pipeline on Windows PowerShell; use PowerShell-safe commands or Node one-liners.";
-    return createBlockedPowerShellAdapter(message);
-  }
-  const unsupportedReadOnlyCommand = blockUnsupportedUnixReadOnlyCommand(command);
-  if (unsupportedReadOnlyCommand) return unsupportedReadOnlyCommand;
   return { command, adapter: "native" };
 }
+
+type WindowsShellAdapterRule = {
+  name: string;
+  adapt: (command: string, classification: CommandClassification) => ShellCommandAdapter | undefined;
+};
+
+const WINDOWS_SHELL_ADAPTER_REGISTRY: WindowsShellAdapterRule[] = [
+  {
+    name: "DiagnosticAdapter",
+    adapt: (_command, classification) => {
+      if (classification.domain !== "ambiguous" || !isRemoteShellProgram(classification.program)) {
+        return undefined;
+      }
+      return createBlockedPowerShellAdapter(
+        "Ambiguous remote shell command on Windows: host-level pipeline detected outside the remote payload; quote the remote command or use a PowerShell-safe host pipeline.",
+      );
+    },
+  },
+  {
+    name: "RemoteShellAdapter",
+    adapt: (command, classification) =>
+      classification.domain === "remote_shell" ? { command, adapter: "native" } : undefined,
+  },
+  {
+    name: "BlockedWriteAdapter",
+    adapt: (command) => blockWindowsShellFileWriteCommand(command),
+  },
+  {
+    name: "ExplicitShellAdapter",
+    adapt: (command, classification) =>
+      classification.domain === "explicit_shell" ? { command, adapter: "native" } : undefined,
+  },
+  {
+    name: "NodeHereDocAdapter",
+    adapt: (command) => convertNodeHereDocForPowerShell(command),
+  },
+  {
+    name: "NativePowerShellAdapter",
+    adapt: (command) => convertNativePowerShellCommand(command),
+  },
+  {
+    name: "UnsupportedMultilineAdapter",
+    adapt: (command) =>
+      looksLikeUnsupportedUnixMultiline(command)
+        ? createBlockedPowerShellAdapter(
+            "Unsupported multi-line Unix shell syntax on Windows PowerShell; use PowerShell-safe commands or Node one-liners.",
+          )
+        : undefined,
+  },
+  {
+    name: "UnsupportedPosixAdapter",
+    adapt: (command) => blockUnsupportedPosixShellSyntax(command),
+  },
+  {
+    name: "WindowsPipelineAdapter",
+    adapt: (command) => {
+      const converted = convertUnixPipelineForPowerShell(command);
+      return converted ? { command: converted, adapter: "powershell-adapted" } : undefined;
+    },
+  },
+  {
+    name: "WindowsReadOnlyAdapter",
+    adapt: (command) => convertUnixReadOnlyCommandForPowerShell(command),
+  },
+  {
+    name: "UnsupportedPipelineAdapter",
+    adapt: (command) =>
+      looksLikeUnsupportedUnixPipeline(command)
+        ? createBlockedPowerShellAdapter(
+            "Unsupported Unix pipeline on Windows PowerShell; use PowerShell-safe commands or Node one-liners.",
+          )
+        : undefined,
+  },
+  {
+    name: "UnsupportedReadOnlyAdapter",
+    adapt: (command) => blockUnsupportedUnixReadOnlyCommand(command),
+  },
+];
 
 function classifyWindowsShellCommand(command: string): CommandClassification {
   const tokens = tokenizeShellCommandWords(command);
@@ -3542,6 +3630,7 @@ function runShell(
   signal?: AbortSignal,
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
   trackChildProcess?: ToolContext["trackChildProcess"],
+  noOutputHint?: string,
 ): Promise<{ exitCode: number; capture: BashOutputCapture; outcome: "completed" | "timeout" | "cancelled" }> {
   return new Promise((resolvePromise) => {
     const detached = process.platform !== "win32";
@@ -3667,7 +3756,8 @@ function runShell(
       if (settled) return;
       const idleMs = Date.now() - lastOutputTime;
       if (idleMs >= heartbeatMs) {
-        const message = `\n[bash] 命令仍在运行，已 ${Math.round(idleMs / 1000)}s 无输出。完整日志：${fullOutputPath}\n`;
+        const hint = noOutputHint ? ` ${noOutputHint}` : "";
+        const message = `\n[bash] 命令仍在运行，已 ${Math.round(idleMs / 1000)}s 无输出。${hint}完整日志：${fullOutputPath}\n`;
         appendSanitizedChunk(message, true);
         onProgress?.("system", message);
         lastOutputTime = Date.now();
@@ -3733,6 +3823,16 @@ function getForegroundBashHeartbeatMs(): number {
 function looksLikePrompt(tail: string): boolean {
   const lastLine = tail.split(/\r?\n/).filter(Boolean).pop() ?? "";
   return PROMPT_PATTERNS.some((re) => re.test(lastLine));
+}
+
+function createBashPromptDiagnostic(tail: string): BashDiagnostic | undefined {
+  if (!looksLikePrompt(tail)) return undefined;
+  return {
+    type: "prompt",
+    severity: "recoverable",
+    evidence: "Bash output ended with an interactive prompt.",
+    suggestion: "Provide input explicitly, rerun with non-interactive flags, or cancel and use a safer command.",
+  };
 }
 
 type RunBackgroundBashOptions = {
@@ -3831,8 +3931,10 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
   };
 
   const checkStall = () => {
-    if (Date.now() - lastOutputTime >= STALL_THRESHOLD_MS && looksLikePrompt(tailBuffer)) {
-      const msg = "\n[stall watchdog] 检测到交互式提示，可能需要用户输入。\n";
+    if (Date.now() - lastOutputTime >= STALL_THRESHOLD_MS) {
+      const diagnostic = createBashPromptDiagnostic(tailBuffer);
+      if (!diagnostic) return;
+      const msg = `\n[stall watchdog] ${diagnostic.evidence} ${diagnostic.suggestion}\n`;
       fileStream.write(msg);
       onProgress?.("system", msg);
     }

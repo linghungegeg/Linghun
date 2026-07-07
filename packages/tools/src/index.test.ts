@@ -8,6 +8,8 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
   __testClassifyWindowsShellCommand,
+  __testCreateBashOutcomeDiagnostics,
+  __testCreateBashPromptDiagnostic,
   __testDecodeShellChunk,
   __testCanSafelyAliasPythonCommand,
   __testGlobToRegExp,
@@ -2162,6 +2164,98 @@ describe("Phase 05 core tools", () => {
     expect(adapted.adapter).toBe("blocked");
     expect(adapted.command).toContain("Ambiguous remote shell command on Windows");
     expect(adapted.command).toContain("host-level pipeline");
+  });
+
+  it("adds remote shell no-output diagnostics for timed out Bash commands", () => {
+    const diagnostics = __testCreateBashOutcomeDiagnostics(
+      'adb shell "cat /proc/meminfo | head -n 5"',
+      "timeout",
+    );
+
+    expect(diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "timeout",
+          severity: "recoverable",
+        }),
+        expect.objectContaining({
+          type: "no_output",
+          severity: "recoverable",
+          evidence: expect.stringContaining("adb"),
+          suggestion: expect.stringContaining("device authorization"),
+        }),
+      ]),
+    );
+    expect(__testCreateBashOutcomeDiagnostics("node --version", "timeout")).toHaveLength(1);
+    expect(__testCreateBashOutcomeDiagnostics('ssh host "sleep 60"', "completed")).toHaveLength(0);
+  });
+
+  it("distinguishes prompt, timeout, and no-output Bash diagnostics", () => {
+    const prompt = __testCreateBashPromptDiagnostic("remote login\npassword:");
+    expect(prompt).toMatchObject({
+      type: "prompt",
+      severity: "recoverable",
+      suggestion: expect.stringContaining("non-interactive"),
+    });
+    expect(__testCreateBashPromptDiagnostic("remote command completed")).toBeUndefined();
+
+    const hostTimeout = __testCreateBashOutcomeDiagnostics("node --version", "timeout");
+    expect(hostTimeout).toEqual([
+      expect.objectContaining({ type: "timeout", severity: "recoverable" }),
+    ]);
+
+    const remoteTimeoutTypes = __testCreateBashOutcomeDiagnostics(
+      'ssh host "cat /etc/os-release | head -n 5"',
+      "timeout",
+    ).map((diagnostic) => diagnostic.type);
+    expect(remoteTimeoutTypes).toEqual(["timeout", "no_output"]);
+    expect(remoteTimeoutTypes).not.toContain("prompt");
+    expect(__testCreateBashOutcomeDiagnostics("node --version", "cancelled")).toHaveLength(0);
+  });
+
+  it("locks phase 13 Windows smoke fixtures without requiring live devices or remotes", () => {
+    const explicitPowerShell = adaptShellCommandForPlatform("pwsh -NoProfile -Command Get-Date", "win32");
+    expect(explicitPowerShell).toEqual({ command: "pwsh -NoProfile -Command Get-Date", adapter: "native" });
+
+    const explicitCmd = adaptShellCommandForPlatform("cmd /c dir", "win32");
+    expect(explicitCmd).toEqual({ command: "cmd /c dir", adapter: "native" });
+
+    const cjkPath = adaptShellCommandForPlatform("cat '中文 路径\\file.txt'", "win32");
+    expect(cjkPath.adapter).toBe("powershell-adapted");
+    expect(cjkPath.command).toContain("Get-Content");
+    expect(cjkPath.command).toContain("'中文 路径\\file.txt'");
+
+    const spacedPath = adaptShellCommandForPlatform('ls -la "src files"', "win32");
+    expect(spacedPath.adapter).toBe("powershell-adapted");
+    expect(spacedPath.command).toContain("Get-ChildItem");
+    expect(spacedPath.command).toContain("'src files'");
+
+    for (const command of [
+      "adb devices",
+      'adb shell "cat /proc/meminfo | head -n 5"',
+      'docker exec app sh -c "cat /etc/os-release | head -n 5"',
+      'ssh host "cat /etc/os-release | head -n 5"',
+    ]) {
+      expect(adaptShellCommandForPlatform(command, "win32")).toEqual({ command, adapter: "native" });
+    }
+  });
+
+  it("keeps phase 13 adapter decisions stable for host, remote, write-blocked, and ambiguous commands", () => {
+    expect(adaptShellCommandForPlatform("pwd", "win32")).toMatchObject({
+      adapter: "powershell-adapted",
+    });
+    expect(adaptShellCommandForPlatform('docker exec app sh -c "pwd | head -n 1"', "win32")).toEqual({
+      command: 'docker exec app sh -c "pwd | head -n 1"',
+      adapter: "native",
+    });
+
+    const ambiguous = adaptShellCommandForPlatform("adb shell pm list packages | grep foo", "win32");
+    expect(ambiguous.adapter).toBe("blocked");
+    expect(ambiguous.command).toContain("quote the remote command");
+
+    const writeBlocked = adaptShellCommandForPlatform("tee file.txt", "win32");
+    expect(writeBlocked.adapter).toBe("blocked");
+    expect(writeBlocked.command).toContain("Edit/Write");
   });
 
   it("does not apply Windows shell adaptation on non-Windows platforms", () => {
