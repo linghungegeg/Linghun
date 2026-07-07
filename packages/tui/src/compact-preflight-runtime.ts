@@ -4,7 +4,10 @@ import { redactCommonSecrets } from "@linghun/shared";
 import { createPostCompactCacheWarmup } from "./cache-policy-runtime.js";
 import { type CompactBoundary, compactMessagesToFit } from "./compact-context.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
-import { getContextWindowForModel } from "./context-window-runtime.js";
+import {
+  getContextWindowForModel,
+  getNativeContextWindowForModel,
+} from "./context-window-runtime.js";
 import {
   type DeepCompactRuntimeDeps,
   injectDeepCompactSummary,
@@ -135,6 +138,7 @@ export async function prepareMessagesForProviderPreflight(input: {
         afterChars: withDeepChars,
       });
       recordCompactStrategy(input.context, {
+        runtime: input.runtime,
         trigger: input.trigger,
         contextMaxChars,
         triggerChars,
@@ -170,6 +174,7 @@ export async function prepareMessagesForProviderPreflight(input: {
       "warning",
     );
     recordCompactStrategy(input.context, {
+      runtime: input.runtime,
       trigger: input.trigger,
       contextMaxChars,
       triggerChars,
@@ -237,6 +242,7 @@ export async function prepareMessagesForProviderPreflight(input: {
           afterChars: afterDeep,
         });
         recordCompactStrategy(input.context, {
+          runtime: input.runtime,
           trigger: input.trigger,
           contextMaxChars,
           triggerChars,
@@ -292,6 +298,7 @@ export async function prepareMessagesForProviderPreflight(input: {
         afterChars: budgetedChars,
       });
       recordCompactStrategy(input.context, {
+        runtime: input.runtime,
         trigger: input.trigger,
         contextMaxChars,
         triggerChars,
@@ -346,12 +353,14 @@ export async function prepareMessagesForProviderPreflight(input: {
       });
     }
     recordCompactStrategy(input.context, {
+      runtime: input.runtime,
       trigger: input.trigger,
       contextMaxChars,
       triggerChars,
       postCompactTargetChars,
       finalChars: providerMessageChars,
       steps: strategySteps,
+      savingsRatio: projection.savingsRatio,
     });
     if (providerMessageChars > contextMaxChars) {
       await recordCompactFailure(
@@ -874,18 +883,21 @@ async function appendCompactProjectionEvents(
 function recordCompactStrategy(
   context: TuiContext,
   input: {
+    runtime: CompactPreflightRuntime;
     trigger: CompactPreflightTrigger;
     contextMaxChars: number;
     triggerChars: number;
     postCompactTargetChars: number;
     finalChars: number;
     steps: CompactStrategyStep[];
+    savingsRatio?: number;
   },
 ): void {
   const appliedLayers = input.steps
     .filter((step) => step.status === "applied")
     .map((step) => step.layer);
   const updatedAt = new Date().toISOString();
+  const windowChars = getProviderContextWindowChars(context, input.runtime);
   context.cache.compactStrategy = {
     trigger: input.trigger,
     createdAt: updatedAt,
@@ -898,9 +910,10 @@ function recordCompactStrategy(
   };
   context.cache.contextUsage = {
     estimatedChars: input.finalChars,
-    maxChars: input.contextMaxChars,
+    maxChars: windowChars,
     updatedAt,
     source: appliedLayers.length > 0 ? "compact" : "pressure",
+    ...(input.savingsRatio !== undefined ? { savingsRatio: input.savingsRatio } : {}),
   };
 }
 
@@ -939,6 +952,14 @@ async function recordCompactFailure(
     relatedTarget: "context compact",
     severity: "medium",
   });
+}
+
+export function getProviderContextWindowChars(
+  context: TuiContext,
+  runtime: CompactPreflightRuntime,
+): number {
+  const contextWindow = getNativeContextWindowForModel(runtime.model);
+  return Math.max(1, contextWindow * CONTEXT_CHARS_PER_TOKEN_ESTIMATE);
 }
 
 export function getProviderContextMaxChars(

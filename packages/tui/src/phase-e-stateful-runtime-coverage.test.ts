@@ -20,6 +20,7 @@ import {
   getAutoCompactTriggerChars,
   getPostCompactTargetChars,
   getProviderContextMaxChars,
+  getProviderContextWindowChars,
   inspectToolPairingSafety,
   prepareMessagesForProviderPreflight,
   sanitizeCompactSummaryText,
@@ -300,8 +301,9 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     if (!compacted.blocked) {
       expect(context.cache.contextUsage).toMatchObject({
         estimatedChars: estimateModelMessageChars(compacted.messages),
-        maxChars: getProviderContextMaxChars(context, runtime()),
+        maxChars: getProviderContextWindowChars(context, runtime()),
         source: "compact",
+        savingsRatio: context.cache.compactProjection?.savingsRatio,
       });
     }
   });

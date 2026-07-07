@@ -33,6 +33,7 @@ import { compactBoundaryHash } from "./compact-context.js";
 import {
   getAutoCompactTriggerChars,
   getProviderContextMaxChars,
+  getProviderContextWindowChars,
   inspectToolPairingSafety,
   prepareMessagesForProviderPreflight,
   recordCompactBoundary,
@@ -370,6 +371,7 @@ export async function refreshCompactPressureSnapshot(context: TuiContext): Promi
     const runtime = getSelectedModelRuntime(context);
     const estimatedChars = estimateModelMessageChars(messages);
     const maxChars = getProviderContextMaxChars(context, runtime);
+    const windowChars = getProviderContextWindowChars(context, runtime);
     const triggerChars = getAutoCompactTriggerChars(context, runtime);
     const updatedAt = new Date().toISOString();
     context.cache.compactPressure = {
@@ -382,7 +384,7 @@ export async function refreshCompactPressureSnapshot(context: TuiContext): Promi
     };
     context.cache.contextUsage = {
       estimatedChars,
-      maxChars,
+      maxChars: windowChars,
       updatedAt,
       source: "pressure",
     };

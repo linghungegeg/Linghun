@@ -14,9 +14,9 @@ function footer(overrides: Partial<TaskFooterView> = {}): TaskFooterView {
     cyclePermHint: "（Shift+Tab 切换模式）",
     reasoning: "推理 High",
     contextUsage: {
-      wide: "ctx [██░░░░░░░░] 12%",
-      narrow: "ctx 12%",
-      minimal: "ctx 12%",
+      wide: "上下文 [██░░░░░░░░] 12% ↓40%",
+      narrow: "上下文 12% ↓40%",
+      minimal: "上下文 12% ↓40%",
       ratio: 0.12,
     },
     cost: "费用 ¥0.0001 est",
@@ -39,7 +39,7 @@ describe("StatusFooter collapse rules", () => {
     });
 
     expect(segments.map((segment) => segment.key)).toEqual(["model", "index", "cache", "context"]);
-    expect(segments.map((segment) => segment.text)).toContain("ctx 12%");
+    expect(segments.map((segment) => segment.text)).toContain("上下文 12% ↓40%");
   });
 
   it("keeps only context usage in minimal mode when available", () => {
@@ -49,7 +49,7 @@ describe("StatusFooter collapse rules", () => {
     });
 
     expect(segments.map((segment) => segment.key)).toEqual(["context"]);
-    expect(segments[0]?.text).toBe("ctx 12%");
+    expect(segments[0]?.text).toBe("上下文 12% ↓40%");
   });
 
   it("wide mode includes the context progress bar after cache", () => {
@@ -68,6 +68,6 @@ describe("StatusFooter collapse rules", () => {
       "branch",
       "reasoning",
     ]);
-    expect(segments[3]?.text).toBe("ctx [██░░░░░░░░] 12%");
+    expect(segments[3]?.text).toBe("上下文 [██░░░░░░░░] 12% ↓40%");
   });
 });

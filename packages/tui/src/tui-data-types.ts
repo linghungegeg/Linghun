@@ -382,6 +382,7 @@ export type ContextUsageSnapshot = {
   maxChars: number;
   updatedAt: string;
   source: "pressure" | "compact";
+  savingsRatio?: number;
 };
 
 export type CompactFailureState = {

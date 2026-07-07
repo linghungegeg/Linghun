@@ -18,13 +18,17 @@ function has1mSuffix(model: string | undefined): boolean {
   return model ? /\[1m\]$/i.test(model) : false;
 }
 
+export function getNativeContextWindowForModel(model: string | undefined): number {
+  if (has1mSuffix(model)) return CONTEXT_1M_TOKENS;
+  return findKnownModel(model ?? "")?.contextWindow ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+}
+
 export function getContextWindowForModel(
   model: string | undefined,
   route?: Pick<RoleModelRoute, "maxInputTokens">,
 ): number {
   if (route?.maxInputTokens) return route.maxInputTokens;
-  if (has1mSuffix(model)) return CONTEXT_1M_TOKENS;
-  return findKnownModel(model ?? "")?.contextWindow ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+  return getNativeContextWindowForModel(model);
 }
 
 export function calculateContextPercentages(

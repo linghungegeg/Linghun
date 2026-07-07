@@ -4471,6 +4471,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
             maxChars: 400_000,
             updatedAt: "2026-01-01T00:00:00.000Z",
             source: "compact",
+            savingsRatio: 0.375,
           },
         },
       } as Partial<TuiContext>),
@@ -4479,9 +4480,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     expect(view.taskFooter?.cache).toBe("缓存 84%");
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "ctx [█████─────] 50%",
-      narrow: "ctx [███───] 50%",
-      minimal: "ctx 50%",
+      wide: "上下文 [█████─────] 50% ↓38%",
+      narrow: "上下文 [███───] 50% ↓38%",
+      minimal: "上下文 50% ↓38%",
       ratio: 0.5,
     });
   });

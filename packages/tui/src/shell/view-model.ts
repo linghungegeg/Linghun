@@ -470,10 +470,13 @@ export function createShellViewModel(
     reasoningSent: options.reasoningSent,
     estimatedCostCny: sumFiniteNumbers((context.roleUsage ?? []).map((usage) => usage.estimatedCny)),
     contextUsage: context.cache.contextUsage
-      ? calculateContextPercentages(
-          Math.ceil(context.cache.contextUsage.estimatedChars / 4),
-          Math.ceil(context.cache.contextUsage.maxChars / 4),
-        )
+      ? {
+          ...calculateContextPercentages(
+            Math.ceil(context.cache.contextUsage.estimatedChars / 4),
+            Math.ceil(context.cache.contextUsage.maxChars / 4),
+          ),
+          savingsRatio: context.cache.contextUsage.savingsRatio,
+        }
       : undefined,
     isRemoteMode: context.remote?.enabled ?? false,
   });
@@ -2411,6 +2414,10 @@ function buildTaskSuggestions(inputs: {
     .slice(0, 4);
 }
 
+type FooterContextUsageInput = ReturnType<typeof calculateContextPercentages> & {
+  savingsRatio?: number;
+};
+
 type TaskFooterInput = {
   language: Language;
   width: number;
@@ -2424,7 +2431,7 @@ type TaskFooterInput = {
   reasoningLevel?: string;
   reasoningSent?: boolean;
   estimatedCostCny?: number;
-  contextUsage?: ReturnType<typeof calculateContextPercentages>;
+  contextUsage?: FooterContextUsageInput;
   isRemoteMode: boolean;
 };
 
@@ -2500,17 +2507,26 @@ function formatFooterModel(
 
 function formatFooterContextUsage(
   language: Language,
-  contextUsage: ReturnType<typeof calculateContextPercentages> | undefined,
+  contextUsage: FooterContextUsageInput | undefined,
 ): TaskFooterView["contextUsage"] {
   if (!contextUsage) return undefined;
-  const label = language === "en-US" ? "ctx" : "ctx";
+  const label = language === "en-US" ? "ctx" : "上下文";
   const percent = `${Math.round(contextUsage.ratio * 100)}%`;
+  const savings = formatFooterContextSavings(contextUsage.savingsRatio);
+  const suffix = savings ? ` ${savings}` : "";
   return {
-    wide: `${label} ${formatContextProgressBar(contextUsage.ratio, 10)} ${percent}`,
-    narrow: `${label} ${formatContextProgressBar(contextUsage.ratio, 6)} ${percent}`,
-    minimal: `${label} ${percent}`,
+    wide: `${label} ${formatContextProgressBar(contextUsage.ratio, 10)} ${percent}${suffix}`,
+    narrow: `${label} ${formatContextProgressBar(contextUsage.ratio, 6)} ${percent}${suffix}`,
+    minimal: `${label} ${percent}${suffix}`,
     ratio: contextUsage.ratio,
   };
+}
+
+function formatFooterContextSavings(savingsRatio: number | undefined): string | undefined {
+  if (savingsRatio === undefined || !Number.isFinite(savingsRatio) || savingsRatio <= 0) {
+    return undefined;
+  }
+  return `↓${Math.round(Math.min(1, savingsRatio) * 100)}%`;
 }
 
 function formatFooterCache(language: Language, hitRate: number | null): string {
