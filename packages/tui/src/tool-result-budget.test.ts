@@ -763,9 +763,9 @@ describe("tool_result budget", () => {
         {
           id: "ev-artifact",
           kind: "command_output",
-          source: "WriteReport",
+          source: "Write",
           summary: "report artifact output",
-          supportsClaims: ["WriteReport", "artifact"],
+          supportsClaims: ["Write", "artifact"],
           createdAt: new Date().toISOString(),
         },
       ],
@@ -781,7 +781,7 @@ describe("tool_result budget", () => {
       context as unknown as Parameters<typeof appendToolResultEvent>[0],
       "session-artifact",
       "call-artifact",
-      "WriteReport",
+      "Write",
       {
         text: "wrote report artifact",
         data: {
