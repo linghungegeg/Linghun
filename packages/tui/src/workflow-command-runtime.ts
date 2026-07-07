@@ -24,6 +24,11 @@ import { formatWorkflows } from "./extension-command-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { formatIndexRuntimeRef } from "./index-runtime.js";
 import {
+  type MetaOrchestrationAction,
+  recordMetaOrchestrationRuntimeEvent,
+  resolveMetaOrchestrationAction,
+} from "./meta-orchestration-runtime.js";
+import {
   handleAgentsCommand,
   handleForkCommand,
   handleJobCommand,
@@ -154,6 +159,26 @@ function captureFailureLearning(
 
 function rememberEvidence(context: TuiContext, evidence: EvidenceRecord): void {
   getWorkflowDeps().rememberEvidence(context, evidence);
+}
+
+export type WorkflowDispatchRuntimePolicy =
+  | { action: "run" }
+  | { action: "block"; reason: string }
+  | { action: "plan-only"; reason: string };
+
+export function resolveWorkflowDispatchRuntimePolicy(
+  action: Pick<
+    MetaOrchestrationAction,
+    "mode" | "reason" | "shouldAsk" | "shouldDegrade" | "shouldStop"
+  >,
+): WorkflowDispatchRuntimePolicy {
+  if (action.shouldStop || action.shouldAsk) {
+    return { action: "block", reason: action.reason };
+  }
+  if (action.shouldDegrade) {
+    return { action: "plan-only", reason: action.reason };
+  }
+  return { action: "run" };
 }
 
 async function handleSlashCommand(
@@ -827,7 +852,15 @@ export async function runWorkflowSteps(
   output: Writable,
   options: RunWorkflowExecutionOptions = {},
 ): Promise<void> {
-  const { generateWorkflowPlanPreview } = await import("./workflow-planner-entry.js");
+  await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+    stepId: "workflow-dispatch",
+    executor: "workflow-runtime",
+    status: "consumed",
+    summary: `goal=${truncateDisplay(goal.replace(/\s+/g, " "), 160)}; agents=${options.agents ?? "auto"}`,
+  });
+  const { generateWorkflowPlanPreview, formatWorkflowPlanPreview } = await import(
+    "./workflow-planner-entry.js"
+  );
   const preview = generateWorkflowPlanPreview({
     goal,
     permissionMode: context.permissionMode,
@@ -840,6 +873,48 @@ export async function runWorkflowSteps(
   });
   if (!preview.ok) {
     writeLine(output, `工作流计划生成失败：${preview.reason}`);
+    await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+      stepId: "workflow-dispatch",
+      executor: "workflow-runtime",
+      status: "failed",
+      summary: `plan preview failed: ${preview.reason}`,
+      level: "warning",
+    });
+    return;
+  }
+
+  const orchestrationAction = resolveMetaOrchestrationAction(context, "workflow-dispatch");
+  const policy = resolveWorkflowDispatchRuntimePolicy(orchestrationAction);
+  if (policy.action === "block") {
+    await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+      stepId: "workflow-dispatch",
+      executor: "workflow-runtime",
+      status: "blocked",
+      summary: `workflow dispatch blocked before start: ${policy.reason}`,
+      level: "warning",
+    });
+    writeLine(output, `Workflow dispatch blocked by meta scheduler: ${policy.reason}`);
+    return;
+  }
+  if (policy.action === "plan-only") {
+    await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+      stepId: "workflow-dispatch",
+      executor: "workflow-runtime",
+      status: "degraded",
+      summary: `workflow dispatch degraded to plan-only: ${policy.reason}`,
+      level: "warning",
+    });
+    showCommandPanel(context, output, {
+      title: "/workflows run",
+      tone: "warning",
+      summary: [
+        context.language === "en-US"
+          ? `Workflow execution degraded to plan-only: ${policy.reason}`
+          : `workflow 执行已降级为仅生成计划：${policy.reason}`,
+      ],
+      actions: ["/workflows plan <goal>", "/workflows status", "/details"],
+      detailsText: formatWorkflowPlanPreview(preview, context.language),
+    });
     return;
   }
 
@@ -848,9 +923,22 @@ export async function runWorkflowSteps(
     preview.plan.phases[0];
   if (!phase) {
     writeLine(output, "工作流运行失败：计划没有可执行 phase。");
+    await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+      stepId: "workflow-dispatch",
+      executor: "workflow-runtime",
+      status: "failed",
+      summary: "plan has no executable phase",
+      level: "warning",
+    });
     return;
   }
   await runWorkflowPlanSteps(goal, preview.plan, context, output, options);
+  await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+    stepId: "workflow-dispatch",
+    executor: "workflow-runtime",
+    status: "completed",
+    summary: `workflow plan completed; phases=${preview.plan.phases.length}; currentPhase=${phase.id}`,
+  });
 }
 
 type RunWorkflowExecutionOptions = {
@@ -1204,6 +1292,45 @@ export async function runRegistryWorkflow(
   output: Writable,
 ): Promise<void> {
   const sessionId = await ensureSession(context);
+  const orchestrationAction = resolveMetaOrchestrationAction(context, "workflow-dispatch");
+  const policy = resolveWorkflowDispatchRuntimePolicy(orchestrationAction);
+  if (policy.action === "block") {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "workflow-dispatch",
+      executor: "workflow-runtime",
+      status: "blocked",
+      summary: `registry workflow dispatch blocked before start: ${policy.reason}`,
+      level: "warning",
+    });
+    writeLine(output, `Workflow dispatch blocked by meta scheduler: ${policy.reason}`);
+    return;
+  }
+  if (policy.action === "plan-only") {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "workflow-dispatch",
+      executor: "workflow-runtime",
+      status: "degraded",
+      summary: `registry workflow dispatch degraded to plan-only: ${policy.reason}`,
+      level: "warning",
+    });
+    const details = [
+      `Registry workflow: ${workflow.id} ${workflow.name}`,
+      `Goal: ${goal || workflow.description}`,
+      ...workflow.steps.map((step, index) => `${index + 1}. ${formatRegistryWorkflowStepTitle(step)}`),
+    ].join("\n");
+    showCommandPanel(context, output, {
+      title: "/workflows run",
+      tone: "warning",
+      summary: [
+        context.language === "en-US"
+          ? `Registry workflow degraded to plan-only: ${policy.reason}`
+          : `registry workflow 已降级为仅生成计划：${policy.reason}`,
+      ],
+      actions: ["/workflows registry", "/workflows status", "/details"],
+      detailsText: details,
+    });
+    return;
+  }
   const runId = `workflow-${workflow.id}-${randomUUID().slice(0, 8)}`;
   const startedAt = new Date().toISOString();
   const stepStates: WorkflowStepState[] = workflow.steps.map((step) => ({

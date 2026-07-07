@@ -7,6 +7,10 @@ import { resolveStoragePaths } from "@linghun/config";
 import type { Language } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
+import {
+  recordMetaOrchestrationRuntimeEvent,
+  resolveMetaOrchestrationAction,
+} from "./meta-orchestration-runtime.js";
 import { createProcessGuard } from "./process-guard.js";
 import { LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS } from "./runtime-budget.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
@@ -109,6 +113,30 @@ export function createVerificationUnavailableReport(
   };
 }
 
+function createMetaOrchestrationVerificationBlockedReport(input: {
+  id: string;
+  startedAt: string;
+  mode: "ask" | "stop";
+  reason: string;
+}): VerificationReport {
+  const endedAt = new Date().toISOString();
+  return {
+    id: input.id,
+    status: "partial",
+    summary: `PARTIAL：中枢调度要求 verification ${input.mode}，验证未运行，未生成 PASS 证据。`,
+    commands: [],
+    unverified: [`verification ${input.mode}: ${input.reason}`],
+    risk: ["Verification was blocked by meta orchestration; do not claim tests or checks passed."],
+    startedAt: input.startedAt,
+    endedAt,
+    durationMs: Date.parse(endedAt) - Date.parse(input.startedAt),
+    nextAction:
+      input.mode === "ask"
+        ? "先处理需要确认的中枢调度/权限边界，再重新运行验证。"
+        : "先解除中枢 hard-stop 条件，再重新运行验证。",
+  };
+}
+
 export function addPackageStep(
   steps: VerificationStep[],
   scripts: Record<string, unknown>,
@@ -206,6 +234,33 @@ export async function runVerificationPlan(
 ): Promise<VerificationReport> {
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
+  const orchestration = resolveMetaOrchestrationAction(context, "verification");
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "verification",
+    executor: "verification-runtime",
+    status: "consumed",
+    summary: `mode=${orchestration.mode}; requestedSteps=${plan.length}`,
+    level: orchestration.shouldRun ? "info" : "warning",
+  });
+  if (orchestration.shouldStop || orchestration.shouldAsk) {
+    const report = createMetaOrchestrationVerificationBlockedReport({
+      id: runId,
+      startedAt,
+      mode: orchestration.shouldAsk ? "ask" : "stop",
+      reason: orchestration.reason,
+    });
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "verification",
+      executor: "verification-runtime",
+      status: "blocked",
+      summary: `mode=${orchestration.mode}; reason=${orchestration.reason}`,
+      level: "warning",
+    });
+    writeLine(output, report.summary);
+    return report;
+  }
+  const effectivePlan = orchestration.shouldDegrade && plan.length > 1 ? plan.slice(0, 1) : plan;
+  const skippedByDegrade = plan.length - effectivePlan.length;
   const logRoot = join(
     resolveStoragePaths(context.config, context.projectPath).logs,
     "verification",
@@ -220,30 +275,44 @@ export async function runVerificationPlan(
     title: "Verification Runner",
     status: "running",
     currentStep: "preparing verification",
-    progress: { completed: 0, total: plan.length, label: "verify" },
+    progress: { completed: 0, total: effectivePlan.length, label: "verify" },
     startedAt,
     updatedAt: startedAt,
     heartbeatIntervalMs: 30_000,
     staleAfterMs: 120_000,
     logPath: logRoot,
     hasOutput: false,
-    userVisibleSummary: `验证已启动：${plan.length} 个步骤。可用 /background 查看详情。`,
+    userVisibleSummary: `验证已启动：${effectivePlan.length} 个步骤。可用 /background 查看详情。`,
     nextAction: "等待 PASS / FAIL / PARTIAL 结果，失败后按建议修复并复跑 /verify。",
   };
   rememberBackgroundTask(context, task);
   await context.store.appendEvent(sessionId, {
     type: "verification_start",
-    run: { id: runId, plan, startedAt },
+    run: { id: runId, plan: effectivePlan, startedAt },
     createdAt: startedAt,
   });
   await appendBackgroundTaskEvent(context, sessionId, task);
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "verification",
+    executor: "verification-runtime",
+    status: "consumed",
+    summary: `mode=${orchestration.mode}; run=${runId}; steps=${effectivePlan.length}; skipped=${skippedByDegrade}`,
+  });
   writeLine(output, formatBackgroundTask(task, context.language));
 
   const results: VerificationCommandResult[] = [];
-  const unverified: string[] = [];
-  const risk: string[] = [];
+  const unverified: string[] =
+    skippedByDegrade > 0
+      ? [
+          `meta orchestration degrade skipped ${skippedByDegrade} verification step(s): ${orchestration.reason}`,
+        ]
+      : [];
+  const risk: string[] =
+    skippedByDegrade > 0
+      ? ["Verification was degraded by meta orchestration; do not claim full verification PASS."]
+      : [];
   try {
-    for (const [index, step] of plan.entries()) {
+    for (const [index, step] of effectivePlan.entries()) {
       const stepStarted = Date.now();
       task.currentStep = `${step.kind} ${index + 1}/${plan.length}`;
       task.progress = { completed: index, total: plan.length, label: step.kind };
@@ -376,7 +445,7 @@ export async function runVerificationPlan(
           : "completed";
     task.result = status;
     task.currentStep = status === "pass" ? "verification finished" : `verification ${status}`;
-    task.progress = { completed: results.length, total: plan.length, label: "verify" };
+    task.progress = { completed: results.length, total: effectivePlan.length, label: "verify" };
     task.updatedAt = endedAt;
     task.nextAction = report.nextAction;
     task.userVisibleSummary = report.summary;
@@ -385,6 +454,13 @@ export async function runVerificationPlan(
       type: "verification_end",
       report,
       createdAt: endedAt,
+    });
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "verification",
+      executor: "verification-runtime",
+      status: status === "pass" ? "completed" : status === "fail" ? "failed" : "degraded",
+      summary: `${status}; run=${runId}; commands=${results.length}; unverified=${unverified.length}`,
+      level: status === "pass" ? "info" : "warning",
     });
     return report;
   } finally {

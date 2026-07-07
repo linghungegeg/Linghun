@@ -165,6 +165,53 @@ describe("verification-command-runtime", () => {
     );
     expect(context.evidence[0]?.supportsClaims).not.toContain("build_passed");
   });
+
+  it("returns partial without running commands when meta orchestration stops verification", async () => {
+    const context = await createVerificationRunContext("stop");
+    const report = await runVerificationPlan(
+      [
+        {
+          kind: "test",
+          command: "node -e \"throw new Error('should not run')\"",
+          reason: "blocked command",
+        },
+      ],
+      context,
+      "session-1",
+      new MockWritable(),
+      async () => {},
+    );
+
+    expect(report.status).toBe("partial");
+    expect(report.commands).toHaveLength(0);
+    expect(report.summary).toContain("中枢调度要求 verification stop");
+  });
+
+  it("runs only the first verification step when meta orchestration degrades verification", async () => {
+    const context = await createVerificationRunContext("degrade");
+    const report = await runVerificationPlan(
+      [
+        {
+          kind: "smoke",
+          command: "node -e \"console.log('first')\"",
+          reason: "first step",
+        },
+        {
+          kind: "test",
+          command: "node -e \"throw new Error('second should be skipped')\"",
+          reason: "second step",
+        },
+      ],
+      context,
+      "session-1",
+      new MockWritable(),
+      async () => {},
+    );
+
+    expect(report.status).toBe("partial");
+    expect(report.commands).toHaveLength(1);
+    expect(report.unverified.join("\n")).toContain("meta orchestration degrade skipped 1");
+  });
 });
 
 class MockWritable extends Writable {
@@ -178,6 +225,37 @@ function createEvidenceContext(): TuiContext {
     evidence: [],
     store: {
       appendEvent: vi.fn(async () => {}),
+    },
+  } as unknown as TuiContext;
+}
+
+async function createVerificationRunContext(mode: "degrade" | "stop"): Promise<TuiContext> {
+  const projectPath = await mkdtemp(join(tmpdir(), `linghun-verify-${mode}-`));
+  return {
+    projectPath,
+    config: defaultConfig,
+    language: "zh-CN",
+    backgroundTasks: [],
+    backgroundAbortControllers: new Map(),
+    cache: createCacheState(projectPath),
+    hooks: await createHookState(defaultConfig, projectPath),
+    store: {
+      appendEvent: vi.fn(async () => {}),
+    },
+    lastMetaSchedulerDecision: {
+      orchestrationPlan: {
+        primaryAction: "verify",
+        steps: [
+          {
+            id: "verification",
+            executor: "verification-runtime",
+            mode,
+            reason: `${mode} requested by test`,
+          },
+        ],
+        hardStops: mode === "stop" ? ["test_stop"] : [],
+        degradationPath: mode === "degrade" ? ["test_degrade"] : [],
+      },
     },
   } as unknown as TuiContext;
 }

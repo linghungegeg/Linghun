@@ -44,6 +44,11 @@ import { formatEngineeringProfileStrategyHint } from "./headless-bench-runtime.j
 import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
+  type MetaOrchestrationAction,
+  recordMetaOrchestrationRuntimeEvent,
+  resolveMetaOrchestrationAction,
+} from "./meta-orchestration-runtime.js";
+import {
   formatBackgroundTask,
   formatBackgroundTaskPanelDetails,
   formatBackgroundTaskPanelRow,
@@ -157,6 +162,35 @@ type AgentWorkResult = {
 };
 
 type AgentWakeMode = "start" | "mailbox" | "permission_approved" | "resume";
+
+type AgentDispatchKind = "durable-job" | "fork-agent";
+export type AgentDispatchRuntimePolicy =
+  | { action: "run" }
+  | { action: "block"; reason: string }
+  | { action: "degrade-job-create-only"; reason: string }
+  | { action: "degrade-agent-role"; reason: string; type: AgentType };
+
+export function resolveAgentDispatchRuntimePolicy(
+  action: Pick<
+    MetaOrchestrationAction,
+    "mode" | "reason" | "shouldAsk" | "shouldDegrade" | "shouldStop"
+  >,
+  input: { kind: AgentDispatchKind; type?: AgentType; start?: boolean },
+): AgentDispatchRuntimePolicy {
+  if (action.shouldStop || action.shouldAsk) {
+    return { action: "block", reason: action.reason };
+  }
+  if (!action.shouldDegrade) {
+    return { action: "run" };
+  }
+  if (input.kind === "durable-job" && input.start) {
+    return { action: "degrade-job-create-only", reason: action.reason };
+  }
+  if (input.kind === "fork-agent" && input.type && input.type !== "planner") {
+    return { action: "degrade-agent-role", reason: action.reason, type: "planner" };
+  }
+  return { action: "run" };
+}
 
 const AGENT_MAX_MODEL_TURNS = LINGHUN_MAX_AGENT_CHILD_TURNS;
 export const AGENT_MAILBOX_MAX_MESSAGES = 20;
@@ -788,16 +822,41 @@ export async function handleJobCommand(
       return;
     }
     const start = action === "run";
-    const job = await createDurableJob(context, options, start);
+    const sessionId = await deps().ensureSession(context);
+    const orchestrationAction = resolveMetaOrchestrationAction(context, "agent-dispatch");
+    const policy = resolveAgentDispatchRuntimePolicy(orchestrationAction, {
+      kind: "durable-job",
+      start,
+    });
+    if (policy.action === "block") {
+      await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+        stepId: "agent-dispatch",
+        status: "blocked",
+        summary: `durable job dispatch blocked before start: ${policy.reason}`,
+        level: "warning",
+      });
+      writeLine(output, `Agent dispatch blocked by meta scheduler: ${policy.reason}`);
+      return;
+    }
+    const effectiveStart = policy.action === "degrade-job-create-only" ? false : start;
+    if (policy.action === "degrade-job-create-only") {
+      await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+        stepId: "agent-dispatch",
+        status: "degraded",
+        summary: `durable job dispatch degraded to create-only: ${policy.reason}`,
+        level: "warning",
+      });
+    }
+    const job = await createDurableJob(context, options, effectiveStart);
     await persistDurableJobProgress(
       context,
       job,
       `job ${action}: ${job.status}; pause reason ${job.pauseReason ?? "none"}`,
     );
-    if (start && job.status === "running") {
+    if (effectiveStart && job.status === "running") {
       await startRunnerForDurableJob(context, job);
     }
-    if (start && job.status === "running") {
+    if (effectiveStart && job.status === "running") {
       await runDurableJobLiteTick(context, job);
       await persistDurableJobProgress(context, job, `job ${action}: final state ${job.status}`);
     }
@@ -2278,6 +2337,8 @@ export async function handleForkCommand(
     writeLine(output, `${baseHelp}${registryHint}`);
     return;
   }
+  const requestedType: AgentType = type;
+  let effectiveType: AgentType = requestedType;
   const workflowTaskId =
     runtimeOptions.workflowRunId ??
     getWorkflowRuns(context).find((run) => run.status === "running")?.id;
@@ -2289,15 +2350,40 @@ export async function handleForkCommand(
   }
 
   const parentSessionId = await deps().ensureSession(context);
+  const orchestrationAction = resolveMetaOrchestrationAction(context, "agent-dispatch");
+  const policy = resolveAgentDispatchRuntimePolicy(orchestrationAction, {
+    kind: "fork-agent",
+    type: requestedType,
+    start: true,
+  });
+  if (policy.action === "block") {
+    await recordMetaOrchestrationRuntimeEvent(context, parentSessionId, {
+      stepId: "agent-dispatch",
+      status: "blocked",
+      summary: `agent fork blocked before start: ${policy.reason}`,
+      level: "warning",
+    });
+    writeLine(output, `Agent dispatch blocked by meta scheduler: ${policy.reason}`);
+    return;
+  }
+  if (policy.action === "degrade-agent-role") {
+    effectiveType = policy.type;
+    await recordMetaOrchestrationRuntimeEvent(context, parentSessionId, {
+      stepId: "agent-dispatch",
+      status: "degraded",
+      summary: `agent fork degraded from ${requestedType} to ${effectiveType}: ${policy.reason}`,
+      level: "warning",
+    });
+  }
   const packet = await loadOrCreateHandoffPacket(context, parentSessionId);
   const cwdResult = await resolveAgentCwd(context, options);
   if (!cwdResult.ok) {
     writeLine(output, cwdResult.text);
     return;
   }
-  const role = getAgentRole(type);
+  const role = getAgentRole(effectiveType);
   const effectiveTask = registryAgent ? `${registryAgent.prompt}\n\nTask: ${task}` : task;
-  const resolved = resolveRoleRoute(context, role, `/fork ${type}`);
+  const resolved = resolveRoleRoute(context, role, `/fork ${effectiveType}`);
   await deps().appendRouteDecisionEvent(context, parentSessionId, resolved.decision);
   if (!resolved.usable) {
     writeLine(output, formatRoutePauseMessage(role, resolved.decision));
@@ -2325,13 +2411,13 @@ export async function handleForkCommand(
   const registryMaxTurns = normalizeRegistryAgentMaxTurns(registryAgent?.maxTurns);
   const child = await context.store.create({
     model: effectiveModel,
-    summary: `agent:${type}:${truncateDisplay(task, 60)}`,
+    summary: `agent:${effectiveType}:${truncateDisplay(task, 60)}`,
   });
   const now = new Date().toISOString();
   const agent: AgentRun = {
     id: `agent-${randomUUID().slice(0, 8)}`,
-    type,
-    displayName: deriveAgentDisplayName(type, task),
+    type: effectiveType,
+    displayName: deriveAgentDisplayName(effectiveType, task),
     addressableName: options.name ?? registryAgent?.name,
     teamName: options.teamName,
     role,
@@ -2344,7 +2430,7 @@ export async function handleForkCommand(
     ...(registryAgent ? { registryAgentId: registryAgent.id } : {}),
     ...(registryAllowedTools ? { allowedTools: registryAllowedTools } : {}),
     ...(registryMaxTurns ? { maxTurns: registryMaxTurns } : {}),
-    permissionMode: getAgentPermissionMode(type, context.permissionMode),
+    permissionMode: getAgentPermissionMode(effectiveType, context.permissionMode),
     status: "running",
     activityStatus: "processing",
     activitySummary: "agent running",
@@ -2609,6 +2695,13 @@ export async function runAgentWork(
   context: TuiContext,
   output: Writable,
 ): Promise<AgentWorkResult> {
+  await recordMetaOrchestrationRuntimeEvent(context, agent.parentSessionId ?? context.sessionId, {
+    stepId: "agent-dispatch",
+    executor: "agent-runtime",
+    status: "consumed",
+    summary: `agent=${agent.id}; type=${agent.type}; task=${agent.task}`,
+  });
+  let result: AgentWorkResult;
   if (agent.type === "verifier") {
     const plan = await createVerificationPlan(context.projectPath, "smoke");
     const report = await runVerificationPlan(
@@ -2633,14 +2726,23 @@ export async function runAgentWork(
         : `verifier 已运行验证，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`;
     const fullReport = `验证报告：\n${report.commands.map((cmd) => `${cmd.kind}: ${cmd.status} (${cmd.durationMs}ms)\n${cmd.summary}`).join("\n")}`;
     agent.lastResultFullReport = fullReport;
-    return {
+    result = {
       status:
         report.status === "pass" ? "completed" : report.status === "fail" ? "failed" : "blocked",
       summary,
       evidenceRefs: [],
     };
+  } else {
+    result = await runModelBackedAgent(agent, context, output);
   }
-  return runModelBackedAgent(agent, context, output);
+  await recordMetaOrchestrationRuntimeEvent(context, agent.parentSessionId ?? context.sessionId, {
+    stepId: "agent-dispatch",
+    executor: "agent-runtime",
+    status: result.status === "completed" ? "completed" : result.status === "failed" ? "failed" : "blocked",
+    summary: `agent=${agent.id}; status=${result.status}; ${result.summary}`,
+    level: result.status === "completed" ? "info" : "warning",
+  });
+  return result;
 }
 
 function getProviderErrorCode(error: unknown): string {

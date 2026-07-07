@@ -738,6 +738,68 @@ describe("provider-circuit-breaker", () => {
         randomSpy.mockRestore();
       }
     });
+
+    it("lets onRetry cancel same-provider retries", async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        let calls = 0;
+        const model: ModelInfo = {
+          id: "gpt-4o",
+          displayName: "GPT-4o",
+          providerId: "openai",
+          contextWindow: 128_000,
+          maxOutputTokens: 4_096,
+          supportsTools: true,
+          supportsVision: false,
+          supportsThinking: false,
+          supportsPromptCache: false,
+        };
+        const provider: Provider = {
+          id: "openai",
+          displayName: "OpenAI",
+          supports: { streaming: true, usage: true },
+          async listModels() {
+            return [model];
+          },
+          async *stream() {
+            calls += 1;
+            yield {
+              type: "error",
+              error: new LinghunError({
+                code: "PROVIDER_SERVER_ERROR",
+                message: "server down",
+                recoverable: true,
+              }),
+            } satisfies LinghunEvent;
+          },
+        };
+        const gateway = new ModelGateway([provider]);
+        const events: LinghunEvent[] = [];
+
+        for await (const event of withProviderRetry(
+          gateway,
+          state,
+          "openai",
+          { messages: [], model: "gpt-4o" },
+          new AbortController().signal,
+          {
+            maxRetries: 3,
+            onRetry: () => ({ action: "cancel", reason: "test stop" }),
+          },
+        )) {
+          events.push(event);
+        }
+
+        expect(calls).toBe(1);
+        expect(events).toHaveLength(1);
+        expect(events[0]?.type).toBe("error");
+        expect(events[0]?.type === "error" ? events[0].error.code : undefined).toBe(
+          "META_ORCHESTRATION_PROVIDER_RETRY_STOP",
+        );
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
   });
 
   describe("constants", () => {

@@ -222,6 +222,10 @@ import {
   readLogArtifactSlice,
 } from "./log-artifact.js";
 import {
+  recordMetaOrchestrationRuntimeEvent,
+  resolveMetaOrchestrationAction,
+} from "./meta-orchestration-runtime.js";
+import {
   evaluateMetaScheduler,
   formatMetaSchedulerDirective,
   verifyFailureLearningContract,
@@ -1592,6 +1596,17 @@ function attachProviderRuntimeHooks(context: TuiContext): void {
     onRetry: (info) => {
       // Agent/workflow background retries must not overwrite main-screen status.
       if (info.requestContext === "agent") return;
+      const orchestration = resolveMetaOrchestrationAction(context, "provider-retry");
+      if (orchestration.shouldStop) {
+        void recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+          stepId: "provider-retry",
+          executor: "provider-runtime",
+          status: "blocked",
+          summary: `client retry blocked; attempt=${info.attempt}/${info.maxAttempts}; status=${info.statusCode}; reason=${orchestration.reason}`,
+          level: "warning",
+        });
+        return;
+      }
       context.requestActivityPhase = "provider_retrying";
       context.requestActivityToolName = undefined;
       context.retryInfo = {
@@ -1599,6 +1614,15 @@ function attachProviderRuntimeHooks(context: TuiContext): void {
         max: info.maxAttempts,
         delaySec: Math.ceil(info.delayMs / 1000),
       };
+      if (orchestration.shouldDegrade) {
+        void recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+          stepId: "provider-retry",
+          executor: "provider-runtime",
+          status: "degraded",
+          summary: `client retry guard active; attempt=${info.attempt}/${info.maxAttempts}; status=${info.statusCode}; reason=${orchestration.reason}`,
+          level: "warning",
+        });
+      }
     },
   });
   context.pushNotification = (text, tone) => pushTransientNotification(context, text, tone);
@@ -3831,6 +3855,12 @@ export async function handleSlashCommand(
   }
 
   const [command, ...rest] = text.split(/\s+/);
+  await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+    stepId: "slash-command",
+    executor: "slash-command-runtime",
+    status: "consumed",
+    summary: `command=${command}`,
+  });
   if (command === "/" || command === "/?") {
     writeLine(output, formatSlashDiscovery(context.language));
     return "handled";
@@ -4180,6 +4210,13 @@ export async function handleSlashCommand(
   }
 
   writeLine(output, formatUnknownSlashCommand(command, context.language));
+  await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
+    stepId: "slash-command",
+    executor: "slash-command-runtime",
+    status: "failed",
+    summary: `unknown command=${command}`,
+    level: "warning",
+  });
   return "handled";
 }
 

@@ -468,6 +468,18 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+export type ProviderRetryHookDecision = { action: "continue" | "cancel"; reason?: string };
+
+function isProviderRetryHookDecision(value: unknown): value is ProviderRetryHookDecision {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "action" in value &&
+    ((value as { action?: unknown }).action === "continue" ||
+      (value as { action?: unknown }).action === "cancel")
+  );
+}
+
 /**
  * Wraps `gateway.stream()` with same-provider retry, concurrency gating,
  * and exponential backoff + jitter.
@@ -500,7 +512,7 @@ export async function* withProviderRetry(
       delayMs: number;
       kind: ProviderFailureKind;
       code: string;
-    }) => void;
+    }) => unknown | Promise<unknown>;
   },
 ): AsyncGenerator<LinghunEvent> {
   const maxRetries = opts?.maxRetries ?? PROVIDER_RETRY_MAX_ATTEMPTS;
@@ -651,13 +663,26 @@ export async function* withProviderRetry(
     const baseDelay = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
     const jitter = Math.random() * 0.25 * baseDelay;
     const delayMs = baseDelay + jitter;
-    opts?.onRetry?.({
+    const retryDecision = await opts?.onRetry?.({
       attempt: attempt + 1,
       maxAttempts: maxRetries,
       delayMs,
       kind,
       code,
     });
+    if (isProviderRetryHookDecision(retryDecision) && retryDecision.action === "cancel") {
+      recordProviderFailure(state, provider, model, code);
+      yield {
+        type: "error",
+        error: new LinghunError({
+          code: "META_ORCHESTRATION_PROVIDER_RETRY_STOP",
+          message: retryDecision.reason ?? "Provider retry cancelled by meta orchestration.",
+          recoverable: true,
+          suggestion: "Resolve the meta orchestration hard-stop before retrying provider requests.",
+        }),
+      };
+      return;
+    }
     await sleepAbortable(delayMs, signal);
   }
 }

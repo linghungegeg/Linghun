@@ -75,6 +75,10 @@ import { computeWorktreeContext } from "./git-operation-runtime.js";
 import { summarizeWorktreeContextForPrompt } from "./git-tool-runtime.js";
 import { runAutoLearningOnTurnEnd } from "./memory-command-runtime.js";
 import {
+  recordMetaOrchestrationRuntimeEvent,
+  resolveMetaOrchestrationAction,
+} from "./meta-orchestration-runtime.js";
+import {
   type MetaSchedulerInput,
   type PolicyDecision,
   evaluateMetaScheduler,
@@ -118,7 +122,7 @@ import {
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
-import { clearProviderBreaker, withProviderRetry } from "./provider-circuit-breaker.js";
+import { clearProviderBreaker, type ProviderRetryHookDecision, withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   checkAndWriteProviderCooldown,
   recordProviderFallbackAttempt,
@@ -329,6 +333,18 @@ export function createToolBatchFailFastSkippedResult(
   };
 }
 
+export function createMetaOrchestrationSkippedToolResult(
+  toolCall: ModelToolCall,
+  reason: string,
+): ModelToolExecutionResult {
+  return {
+    ok: false,
+    tool: toolCall.name,
+    text: `Skipped by meta orchestration stop: ${reason}`,
+    data: { skipped: true, reason: "meta_orchestration_stop", detail: reason },
+  };
+}
+
 function pushToolResultMessage(
   messages: ModelMessage[],
   toolCall: ModelToolCall,
@@ -417,10 +433,36 @@ async function executeToolCallsWithReadonlyParallelism(
     roundFailureFingerprints: [],
     stoppedByFailFast: false,
   };
+  const orchestration = resolveMetaOrchestrationAction(context, "tool-execution");
   const batches = createToolExecutionBatches(toolCalls);
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "tool-execution",
+    executor: "model-stream-runtime",
+    status: "consumed",
+    summary: `mode=${orchestration.mode}; tool calls=${toolCalls.length}; batches=${batches.length}`,
+    level: orchestration.shouldRun ? "info" : "warning",
+  });
+  if (orchestration.shouldStop || orchestration.shouldAsk) {
+    for (const toolCall of toolCalls) {
+      pushToolResultMessage(
+        options.continuation.messages,
+        toolCall,
+        createMetaOrchestrationSkippedToolResult(toolCall, orchestration.reason),
+      );
+    }
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "tool-execution",
+      executor: "model-stream-runtime",
+      status: orchestration.shouldAsk ? "blocked" : "failed",
+      summary: `mode=${orchestration.mode}; skipped=${toolCalls.length}; reason=${orchestration.reason}`,
+      level: "warning",
+    });
+    return { ...state, pendingApproval: orchestration.shouldAsk };
+  }
 
   for (const batch of batches) {
-    const canUseParallelBatch = batch.mode === "parallel_readonly" && state.batchFailureCount === 0;
+    const canUseParallelBatch =
+      !orchestration.shouldDegrade && batch.mode === "parallel_readonly" && state.batchFailureCount === 0;
     const calls = canUseParallelBatch ? batch.toolCalls : batch.toolCalls.slice(0, 1);
     const results = canUseParallelBatch
       ? await Promise.all(
@@ -435,6 +477,13 @@ async function executeToolCallsWithReadonlyParallelism(
       const result = results[resultIndex]!;
       await recordModelToolFailureForMetaScheduler(context, sessionId, result);
       if (result.pendingApproval) {
+        await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+          stepId: "permission-gate",
+          executor: "permission-runtime",
+          status: "blocked",
+          summary: `tool ${toolCall.name} waiting for permission approval`,
+          level: "warning",
+        });
         return { ...state, pendingApproval: true };
       }
       updateToolBatchExecutionState(state, toolCall, result, options);
@@ -452,6 +501,13 @@ async function executeToolCallsWithReadonlyParallelism(
           `tool_batch_fail_fast: stopped after ${state.batchFailureCount} consecutive failures in ${options.failFastContext}; last: ${state.lastBatchFailureReason}`,
           "warning",
         );
+        await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+          stepId: "tool-execution",
+          executor: "model-stream-runtime",
+          status: "degraded",
+          summary: `fail-fast after ${state.batchFailureCount} failures; last=${state.lastBatchFailureReason ?? "unknown"}`,
+          level: "warning",
+        });
         return { ...state, pendingApproval: false };
       }
     }
@@ -461,6 +517,13 @@ async function executeToolCallsWithReadonlyParallelism(
         const result = await executeModelToolUse(remaining, context, sessionId, output, options.continuation);
         await recordModelToolFailureForMetaScheduler(context, sessionId, result);
         if (result.pendingApproval) {
+          await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+            stepId: "permission-gate",
+            executor: "permission-runtime",
+            status: "blocked",
+            summary: `tool ${remaining.name} waiting for permission approval`,
+            level: "warning",
+          });
           return { ...state, pendingApproval: true };
         }
         updateToolBatchExecutionState(state, remaining, result, options);
@@ -478,12 +541,26 @@ async function executeToolCallsWithReadonlyParallelism(
             `tool_batch_fail_fast: stopped after ${state.batchFailureCount} consecutive failures in ${options.failFastContext}; last: ${state.lastBatchFailureReason}`,
             "warning",
           );
+          await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+            stepId: "tool-execution",
+            executor: "model-stream-runtime",
+            status: "degraded",
+            summary: `fail-fast after ${state.batchFailureCount} failures; last=${state.lastBatchFailureReason ?? "unknown"}`,
+            level: "warning",
+          });
           return { ...state, pendingApproval: false };
         }
       }
     }
   }
 
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "tool-execution",
+    executor: "model-stream-runtime",
+    status: state.batchFailureCount > 0 ? "degraded" : "completed",
+    summary: `progress=${state.roundHadProgress ? "yes" : "no"}; failures=${state.batchFailureCount}`,
+    level: state.batchFailureCount > 0 ? "warning" : "info",
+  });
   return { ...state, pendingApproval: false };
 }
 
@@ -630,6 +707,34 @@ function showProviderRetryActivity(
     delaySec: Math.ceil(info.delayMs / 1000),
   };
   context.shellRerender?.();
+}
+
+async function handleProviderRetryForMetaOrchestration(
+  context: TuiContext,
+  sessionId: string,
+  info: { attempt: number; maxAttempts: number; delayMs: number; code?: string },
+): Promise<ProviderRetryHookDecision | undefined> {
+  const orchestration = resolveMetaOrchestrationAction(context, "provider-retry");
+  if (orchestration.shouldStop) {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "provider-retry",
+      executor: "provider-runtime",
+      status: "blocked",
+      summary: `retry cancelled; attempt=${info.attempt}/${info.maxAttempts}; code=${info.code ?? "unknown"}; reason=${orchestration.reason}`,
+      level: "warning",
+    });
+    return { action: "cancel", reason: orchestration.reason };
+  }
+  if (orchestration.shouldDegrade) {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "provider-retry",
+      executor: "provider-runtime",
+      status: "degraded",
+      summary: `retry guard active; attempt=${info.attempt}/${info.maxAttempts}; code=${info.code ?? "unknown"}; reason=${orchestration.reason}`,
+      level: "warning",
+    });
+  }
+  return undefined;
 }
 
 function showProviderRecoveryActivity(context: TuiContext): void {
@@ -2389,6 +2494,7 @@ export async function sendMessage(
           onRetry: (info) => {
             resetAssistantDraftForProviderRetry();
             showProviderRetryActivity(context, info);
+            return handleProviderRetryForMetaOrchestration(context, sessionId, info);
           },
         },
       )) {
@@ -3064,11 +3170,19 @@ export async function sendMessage(
     // 避免内部运行时 token 泄漏。doctor/details 诊断能力不受影响。必须在
     // final-answer gate 之后执行，避免提前移除 LinghunFinalAnswerClaims 契约。
     {
+      const beforeSanitize = assistantText;
       const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
       if (sanitized !== assistantText) {
         assistantText = sanitized;
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
+      await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+        stepId: "output-presenter",
+        executor: "output-presenter-runtime",
+        status: sanitized !== beforeSanitize ? "degraded" : "completed",
+        summary: `assistant_chars=${assistantText.length}; sanitized=${sanitized !== beforeSanitize ? "yes" : "no"}`,
+        level: sanitized !== beforeSanitize ? "warning" : "info",
+      });
     }
     const visibleAssistantBlockText =
       committedIntermediateAssistantText && assistantText.startsWith(committedIntermediateAssistantText)
@@ -3782,6 +3896,7 @@ async function streamFinalModelAnswerWithoutTools(
       onRetry: (info) => {
         resetFinalAssistantDraftForProviderRetry();
         showProviderRetryActivity(context, info);
+        return handleProviderRetryForMetaOrchestration(context, sessionId, info);
       },
     },
   )) {
@@ -4281,6 +4396,7 @@ export async function continueModelAfterToolResults(
           onRetry: (info) => {
             resetAssistantDraftForProviderRetry();
             showProviderRetryActivity(context, info);
+            return handleProviderRetryForMetaOrchestration(context, sessionId, info);
           },
         },
       )) {

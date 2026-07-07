@@ -315,9 +315,79 @@ export type PolicyHint = {
   text: { "zh-CN": string; "en-US": string };
 };
 
+export type OrchestrationStep = {
+  id:
+    | "inspect-runtime"
+    | "compact-context"
+    | "permission-gate"
+    | "provider-retry"
+    | "source-facts"
+    | "slash-command"
+    | "provider-request"
+    | "tool-execution"
+    | "agent-dispatch"
+    | "workflow-dispatch"
+    | "capability-dispatch"
+    | "verification"
+    | "output-presenter"
+    | "final-answer-gate";
+  executor:
+    | "meta-scheduler"
+    | "permission-runtime"
+    | "model-stream-runtime"
+    | "agent-runtime"
+    | "workflow-runtime"
+    | "capability-runtime"
+    | "verification-runtime"
+    | "compact-runtime"
+    | "provider-runtime"
+    | "slash-command-runtime"
+    | "output-presenter-runtime";
+  mode: "run" | "ask" | "degrade" | "stop";
+  reason: string;
+};
+
+export const ORCHESTRATION_STEP_IDS = [
+  "inspect-runtime",
+  "compact-context",
+  "permission-gate",
+  "provider-retry",
+  "source-facts",
+  "slash-command",
+  "provider-request",
+  "tool-execution",
+  "agent-dispatch",
+  "workflow-dispatch",
+  "capability-dispatch",
+  "verification",
+  "output-presenter",
+  "final-answer-gate",
+] as const satisfies readonly OrchestrationStep["id"][];
+
+type MissingOrchestrationStepId = Exclude<OrchestrationStep["id"], (typeof ORCHESTRATION_STEP_IDS)[number]>;
+type AssertNoMissingOrchestrationStepId = MissingOrchestrationStepId extends never ? true : never;
+type _OrchestrationStepIdsCoverUnion = AssertNoMissingOrchestrationStepId;
+
+export type OrchestrationPlan = {
+  primaryAction:
+    | "continue"
+    | "ask_permission"
+    | "compact"
+    | "retry_provider"
+    | "delegate_agent"
+    | "delegate_workflow"
+    | "dispatch_capability"
+    | "verify"
+    | "stop_blocked";
+  steps: OrchestrationStep[];
+  hardStops: string[];
+  degradationPath: string[];
+};
+
 export type MetaSchedulerDecision = {
   directives: string[];
   policyDecision: PolicyDecision;
+  orchestrationPlan: OrchestrationPlan;
   shouldRunFinalAnswerGate: boolean;
   shouldPreferVerifier: boolean;
   shouldCaptureFailureLearning: boolean;
@@ -671,9 +741,19 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     },
   });
 
+  const orchestrationPlan = createOrchestrationPlan({
+    policyDecision,
+    shouldRunFinalAnswerGate: adjustedRequireFinalGate,
+    shouldCompactBeforeProvider: adjustedShouldCompact,
+    shouldStopForBlockedRuntime: blockedRuntime,
+    shouldUseRetryGuard: adjustedShouldUseRetryGuard,
+    shouldCaptureFailureLearning: toolFailure || providerFailure,
+  });
+
   return {
     directives,
     policyDecision,
+    orchestrationPlan,
     shouldRunFinalAnswerGate: adjustedRequireFinalGate,
     shouldPreferVerifier:
       (highRiskClaim || adjustedUserStateDecision.verificationPlan.strength === "release") &&
@@ -689,6 +769,188 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     suggestedBackgroundConcurrency: computeSuggestedBackgroundConcurrency(taskKind),
     internalEvents,
   };
+}
+
+function createOrchestrationPlan(input: {
+  policyDecision: PolicyDecision;
+  shouldRunFinalAnswerGate: boolean;
+  shouldCompactBeforeProvider: boolean;
+  shouldStopForBlockedRuntime: boolean;
+  shouldUseRetryGuard: boolean;
+  shouldCaptureFailureLearning: boolean;
+}): OrchestrationPlan {
+  const steps: OrchestrationStep[] = [];
+  const hardStops: string[] = [];
+  const degradationPath: string[] = [];
+  const policy = input.policyDecision;
+
+  steps.push({
+    id: "inspect-runtime",
+    executor: "meta-scheduler",
+    mode: "run",
+    reason: "Collect runtime, permission, verification, provider, context, and background signals before dispatch.",
+  });
+
+  if (input.shouldStopForBlockedRuntime) {
+    steps.push({
+      id: "inspect-runtime",
+      executor: "meta-scheduler",
+      mode: "stop",
+      reason: "Blocked or stale runtime must be recovered or degraded before claiming PASS.",
+    });
+    hardStops.push("blocked_runtime");
+  }
+
+  if (input.shouldCompactBeforeProvider) {
+    steps.push({
+      id: "compact-context",
+      executor: "compact-runtime",
+      mode: "run",
+      reason: "Context pressure requires compact/artifact flow before another provider-visible request.",
+    });
+    degradationPath.push("compact-before-provider");
+  }
+
+  if (policy.providerPlan === "cooldownBlocked") {
+    steps.push({
+      id: "provider-retry",
+      executor: "provider-runtime",
+      mode: "stop",
+      reason: "Provider cooldown is active; do not spend another request until recovery or route change.",
+    });
+    hardStops.push("provider_cooldown");
+  } else if (policy.providerPlan === "fallbackCandidate" || input.shouldUseRetryGuard) {
+    steps.push({
+      id: "provider-retry",
+      executor: "provider-runtime",
+      mode: "degrade",
+      reason: "Provider/tool failure is present; retry guarded or fallback path must be used before normal continuation.",
+    });
+    degradationPath.push("provider-retry-guard");
+  }
+
+  if (policy.permissionPlan.requireExplicitGate || policy.permissionSignal.pendingApproval) {
+    steps.push({
+      id: "permission-gate",
+      executor: "permission-runtime",
+      mode: policy.permissionSignal.pendingApproval ? "stop" : "ask",
+      reason: "Mutating, recently denied, blocked, or pending approval state requires the permission runtime to decide before execution.",
+    });
+    if (policy.permissionSignal.pendingApproval) {
+      hardStops.push("pending_permission");
+    }
+  }
+
+  if (policy.executionPlan.preferSourceFirst) {
+    steps.push({
+      id: "source-facts",
+      executor: "model-stream-runtime",
+      mode: "run",
+      reason: "Source-first policy requires evidence gathering before conclusions or edits.",
+    });
+  }
+
+  if (policy.userState.interactionPlan.commandFirst) {
+    steps.push({
+      id: "slash-command",
+      executor: "slash-command-runtime",
+      mode: "run",
+      reason: "Command-first intent must enter the slash command dispatcher through the meta-scheduler plan.",
+    });
+  }
+
+  steps.push({
+    id: "provider-request",
+    executor: "provider-runtime",
+    mode: policy.providerPlan === "cooldownBlocked" ? "stop" : policy.providerPlan === "fallbackCandidate" ? "degrade" : "run",
+    reason: "Every provider-visible request should be evaluated against cooldown, fallback, and retry guard state.",
+  });
+
+  if (policy.executionPlan.preferAgent) {
+    steps.push({
+      id: "agent-dispatch",
+      executor: "agent-runtime",
+      mode: "run",
+      reason: "Agent-classified task should delegate through the managed agent runtime.",
+    });
+  } else if (policy.executionPlan.preferWorkflow) {
+    steps.push({
+      id: "workflow-dispatch",
+      executor: "workflow-runtime",
+      mode: "run",
+      reason: "Workflow-classified task should dispatch through the workflow runtime.",
+    });
+  } else if (policy.capabilitySignal.active && policy.taskKind === "capability") {
+    steps.push({
+      id: "capability-dispatch",
+      executor: "capability-runtime",
+      mode: "run",
+      reason: "Capability-classified task should execute through the capability runtime and its permission bridge.",
+    });
+  } else {
+    steps.push({
+      id: "tool-execution",
+      executor: "model-stream-runtime",
+      mode: "run",
+      reason: "Normal model tool calls execute through the central model stream runtime after gates are satisfied.",
+    });
+  }
+
+  if (policy.executionPlan.requireVerification) {
+    steps.push({
+      id: "verification",
+      executor: "verification-runtime",
+      mode: "run",
+      reason: `Verification route ${policy.verificationSignal.route.domain} requires ${policy.verificationSignal.route.commands.join(",") || "project-appropriate checks"}.`,
+    });
+  }
+
+  steps.push({
+    id: "output-presenter",
+    executor: "output-presenter-runtime",
+    mode: "run",
+    reason: "Visible output must pass through presenter/sanitizer boundaries before reaching the user.",
+  });
+
+  if (input.shouldRunFinalAnswerGate) {
+    steps.push({
+      id: "final-answer-gate",
+      executor: "meta-scheduler",
+      mode: "run",
+      reason: "Final answer must pass evidence and high-risk claim gates before completion wording.",
+    });
+  }
+
+  if (input.shouldCaptureFailureLearning) {
+    degradationPath.push("capture-failure-learning");
+  }
+  if (policy.runtimeSignal.resourceCapPressure) {
+    degradationPath.push("avoid-duplicate-background-starts");
+  }
+
+  return {
+    primaryAction: selectPrimaryOrchestrationAction(steps, policy),
+    steps,
+    hardStops,
+    degradationPath: Array.from(new Set(degradationPath)),
+  };
+}
+
+function selectPrimaryOrchestrationAction(
+  steps: OrchestrationStep[],
+  policy: PolicyDecision,
+): OrchestrationPlan["primaryAction"] {
+  if (steps.some((step) => step.id === "inspect-runtime" && step.mode === "stop")) return "stop_blocked";
+  if (steps.some((step) => step.id === "provider-retry" && step.mode === "stop")) return "stop_blocked";
+  if (steps.some((step) => step.id === "permission-gate" && step.mode === "stop")) return "ask_permission";
+  if (steps.some((step) => step.id === "compact-context")) return "compact";
+  if (steps.some((step) => step.id === "provider-retry")) return "retry_provider";
+  if (policy.executionPlan.preferAgent) return "delegate_agent";
+  if (policy.executionPlan.preferWorkflow) return "delegate_workflow";
+  if (policy.capabilitySignal.active && policy.taskKind === "capability") return "dispatch_capability";
+  if (steps.some((step) => step.id === "permission-gate" && step.mode === "ask")) return "ask_permission";
+  if (policy.taskKind === "verification" || policy.executionPlan.requireVerification) return "verify";
+  return "continue";
 }
 
 function computeSuggestedMaxTodoRounds(taskKind: PolicyDecision["taskKind"]): number {
@@ -756,6 +1018,7 @@ export function formatMetaSchedulerDirective(decision: MetaSchedulerDecision): s
     "MetaSchedulerForModel:",
     ...decision.directives.map((item) => `- ${item}`),
     `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; budget ${decision.suggestedMaxTodoRounds} rounds; agent-max-turns ${decision.suggestedMaxAgentChildTurns}; agent-tool-rounds ${decision.suggestedMaxAgentToolRounds}; bg-concurrency ${decision.suggestedBackgroundConcurrency}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}; capability ${decision.policyDecision.capabilitySignal.active ? "candidate" : "none"}.`,
+    `- Orchestration plan: action ${decision.orchestrationPlan.primaryAction}; steps ${decision.orchestrationPlan.steps.map((step) => `${step.id}:${step.executor}:${step.mode}`).join(" > ")}; hard-stops ${decision.orchestrationPlan.hardStops.join(",") || "none"}; degrade ${decision.orchestrationPlan.degradationPath.join(",") || "none"}.`,
     `- EngineeringTaskProfile: profile=${decision.policyDecision.engineeringSignal.profile}; strategy=${decision.policyDecision.engineeringSignal.strategyHint}; failure=${decision.policyDecision.engineeringSignal.failureCategory ?? "none"}; final-boundary=${decision.policyDecision.engineeringSignal.finalBoundaryHint ?? "normal"}.`,
     ...(decision.policyDecision.platformSignal.windowsSafeHint
       ? ["- Windows shell boundary: do not use shell apply_patch, heredoc, cat redirects, or tee redirects for file writes; use Edit/MultiEdit/Write structured tools instead."]

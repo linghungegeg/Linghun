@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { evaluateChildAgentSummaryClaims } from "./job-agent-command-runtime.js";
+import {
+  evaluateChildAgentSummaryClaims,
+  resolveAgentDispatchRuntimePolicy,
+} from "./job-agent-command-runtime.js";
 import { formatAgentRunToolResultData } from "./model-tool-runtime.js";
 import { formatAgentSummary } from "./tui-agent-job-runtime.js";
 import type { AgentRun, EvidenceRecord } from "./tui-data-types.js";
@@ -109,5 +112,50 @@ describe("child agent summary claim gate", () => {
 
     expect(result.status).toBe("downgraded");
     expect(result.missingEvidenceKinds).toContain("file change evidence");
+  });
+});
+
+describe("agent dispatch runtime policy", () => {
+  const action = (mode: "run" | "ask" | "degrade" | "stop") => ({
+    mode,
+    reason: `${mode} reason`,
+    shouldAsk: mode === "ask",
+    shouldDegrade: mode === "degrade",
+    shouldStop: mode === "stop",
+  });
+
+  it("blocks agent dispatch when the scheduler asks or stops", () => {
+    expect(
+      resolveAgentDispatchRuntimePolicy(action("ask"), {
+        kind: "fork-agent",
+        type: "worker",
+        start: true,
+      }),
+    ).toEqual({ action: "block", reason: "ask reason" });
+    expect(
+      resolveAgentDispatchRuntimePolicy(action("stop"), {
+        kind: "durable-job",
+        start: true,
+      }),
+    ).toEqual({ action: "block", reason: "stop reason" });
+  });
+
+  it("degrades durable job run to create-only", () => {
+    expect(
+      resolveAgentDispatchRuntimePolicy(action("degrade"), {
+        kind: "durable-job",
+        start: true,
+      }),
+    ).toEqual({ action: "degrade-job-create-only", reason: "degrade reason" });
+  });
+
+  it("degrades non-planner fork agents to planner", () => {
+    expect(
+      resolveAgentDispatchRuntimePolicy(action("degrade"), {
+        kind: "fork-agent",
+        type: "worker",
+        start: true,
+      }),
+    ).toEqual({ action: "degrade-agent-role", reason: "degrade reason", type: "planner" });
   });
 });

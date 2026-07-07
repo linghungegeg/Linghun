@@ -26,6 +26,9 @@ import type { PermissionMode } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 import type { TuiContext } from "./index.js";
 import {
+  recordMetaOrchestrationRuntimeEvent,
+} from "./meta-orchestration-runtime.js";
+import {
   type PermissionRule,
   type PermissionState,
   collectInputFiles,
@@ -83,6 +86,24 @@ export type AddAllowRuleResult =
   | { kind: "duplicate"; rule: PermissionRule; message: string }
   | { kind: "invalid"; message: string }
   | { kind: "save_failed"; error: Error; message: string };
+
+async function recordPermissionOrchestration(
+  context: TuiContext,
+  sessionId: string,
+  input: {
+    status: "consumed" | "completed" | "blocked" | "failed" | "degraded";
+    summary: string;
+    level?: "info" | "warning";
+  },
+): Promise<void> {
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "permission-gate",
+    executor: "permission-runtime",
+    status: input.status,
+    summary: input.summary,
+    level: input.level,
+  });
+}
 
 export async function addAllowRule(
   context: TuiContext,
@@ -173,6 +194,10 @@ export async function decidePermission(
     files,
     reason: tool.permission.reason,
   };
+  await recordPermissionOrchestration(context, _sessionId, {
+    status: "consumed",
+    summary: `${name}; mode=${context.permissionMode}; risk=${tool.permission.risk}`,
+  });
   if (context.permissionMode === "full-access") {
     return {
       request,
@@ -183,10 +208,20 @@ export async function decidePermission(
   }
   if (hardDeny) {
     await recordPermissionDenied(context, name, hardDeny);
+    await recordPermissionOrchestration(context, _sessionId, {
+      status: "failed",
+      summary: `${name}; hard deny: ${hardDeny}`,
+      level: "warning",
+    });
     return { request, decision: "deny", reason: hardDeny };
   }
   if (toolPermission.behavior === "deny") {
     await recordPermissionDenied(context, name, toolPermission.reason);
+    await recordPermissionOrchestration(context, _sessionId, {
+      status: "failed",
+      summary: `${name}; tool policy deny: ${toolPermission.reason}`,
+      level: "warning",
+    });
     return { request, decision: "deny", reason: toolPermission.reason };
   }
   if (toolPermission.behavior === "allow") {
@@ -206,6 +241,11 @@ export async function decidePermission(
   const schedulerDecision = context.lastMetaSchedulerDecision;
   if (schedulerDecision?.policyDecision.permissionPlan.requireExplicitGate && verdict.semantic === "mutating") {
     if (context.permissionMode === "default") {
+      await recordPermissionOrchestration(context, _sessionId, {
+        status: "blocked",
+        summary: `${name}; scheduler explicit mutating gate`,
+        level: "warning",
+      });
       return {
         request,
         decision: "ask",
@@ -251,10 +291,20 @@ export async function decidePermission(
     const reason =
       "Plan 模式禁止写入、编辑和 Bash 执行；请先 /plan accept 确认方案并切回执行模式。";
     await recordPermissionDenied(context, name, reason);
+    await recordPermissionOrchestration(context, _sessionId, {
+      status: "failed",
+      summary: `${name}; plan mode deny`,
+      level: "warning",
+    });
     return { request, decision: "deny", reason, verdict };
   }
 
   if (options.architectureDrift && context.permissionMode !== "auto-review") {
+    await recordPermissionOrchestration(context, _sessionId, {
+      status: "blocked",
+      summary: `${name}; architecture drift confirmation required`,
+      level: "warning",
+    });
     return {
       request,
       decision: "ask",
@@ -274,11 +324,21 @@ export async function decidePermission(
       // 内部 rule.id 仍可在 system event log / details debug 区追踪。
       const reason = "命中拒绝规则。";
       await recordPermissionDenied(context, name, reason);
+      await recordPermissionOrchestration(context, _sessionId, {
+        status: "failed",
+        summary: `${name}; rule deny`,
+        level: "warning",
+      });
       return { request, decision: "deny", reason, verdict };
     }
     if (rule.effect === "ask") {
       const reason = "命中需确认规则。需要用户确认后才会执行本次工具。";
       await recordPermissionDenied(context, name, reason);
+      await recordPermissionOrchestration(context, _sessionId, {
+        status: "blocked",
+        summary: `${name}; rule ask`,
+        level: "warning",
+      });
       return { request, decision: "ask", reason, verdict };
     }
     return { request, decision: "allow", reason: "命中允许规则。", verdict };
@@ -304,6 +364,11 @@ export async function decidePermission(
     if (tool.permission.risk === "high") {
       const reason =
         "auto-review 已放行常规操作，但本次动作涉及高风险，需确认。";
+      await recordPermissionOrchestration(context, _sessionId, {
+        status: "blocked",
+        summary: `${name}; auto-review high-risk ask`,
+        level: "warning",
+      });
       return { request, decision: "ask", reason, verdict };
     }
     const reason = "auto-review 放行非高风险操作。";
@@ -322,6 +387,11 @@ export async function decidePermission(
   const reason =
     "default 模式不会静默执行 Bash、写入、编辑、删除、配置、安装、联网或权限变更；需要用户确认后才会执行本次工具。";
   await recordPermissionDenied(context, name, reason);
+  await recordPermissionOrchestration(context, _sessionId, {
+    status: "blocked",
+    summary: `${name}; default mode ask`,
+    level: "warning",
+  });
   return { request, decision: "ask", reason, verdict };
 }
 

@@ -6,6 +6,7 @@ import type { IndexState } from "./index-runtime.js";
 import {
   evaluateMetaScheduler,
   formatMetaSchedulerDirective,
+  ORCHESTRATION_STEP_IDS,
   verifyFailureLearningContract,
 } from "./meta-scheduler-runtime.js";
 import { sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
@@ -17,6 +18,31 @@ import type {
 } from "./tui-data-types.js";
 
 describe("Meta scheduler runtime", () => {
+  it("keeps every orchestration step explicitly classified for runtime consumption", () => {
+    type RuntimeCoverageKind =
+      | "runtime-enforced-gate"
+      | "observed-runtime-state"
+      | "model-policy-directive";
+    const stepRuntimeCoverage = {
+      "inspect-runtime": "observed-runtime-state",
+      "compact-context": "runtime-enforced-gate",
+      "permission-gate": "runtime-enforced-gate",
+      "provider-retry": "runtime-enforced-gate",
+      "source-facts": "model-policy-directive",
+      "slash-command": "runtime-enforced-gate",
+      "provider-request": "runtime-enforced-gate",
+      "tool-execution": "runtime-enforced-gate",
+      "agent-dispatch": "runtime-enforced-gate",
+      "workflow-dispatch": "runtime-enforced-gate",
+      "capability-dispatch": "runtime-enforced-gate",
+      verification: "runtime-enforced-gate",
+      "output-presenter": "observed-runtime-state",
+      "final-answer-gate": "model-policy-directive",
+    } as const satisfies Record<(typeof ORCHESTRATION_STEP_IDS)[number], RuntimeCoverageKind>;
+
+    expect(Object.keys(stepRuntimeCoverage).sort()).toEqual([...ORCHESTRATION_STEP_IDS].sort());
+  });
+
   it("requires verifier/final-answer gate for high-risk completion claims without PASS evidence", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
@@ -28,6 +54,10 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.riskLevel).toBe("high");
     expect(decision.policyDecision.executionPlan.requireFinalGate).toBe(true);
     expect(decision.policyDecision.executionPlan.requireVerification).toBe(true);
+    expect(decision.orchestrationPlan.primaryAction).toBe("verify");
+    expect(decision.orchestrationPlan.steps.map((step) => step.id)).toEqual(
+      expect.arrayContaining(["verification", "final-answer-gate"]),
+    );
     expect(formatMetaSchedulerDirective(decision)).toContain("final-answer-gate");
   });
 
@@ -74,6 +104,12 @@ describe("Meta scheduler runtime", () => {
       decision.policyDecision.hints.some((hint) => hint.id === "compact-before-provider"),
     ).toBe(true);
     expect(decision.internalEvents).toContain("meta_scheduler:compact_required");
+    expect(decision.orchestrationPlan.primaryAction).toBe("compact");
+    expect(decision.orchestrationPlan.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "compact-context", executor: "compact-runtime", mode: "run" }),
+      ]),
+    );
   });
 
   it("creates source-first typed policy for code fact requests with bilingual hints", () => {
@@ -119,6 +155,13 @@ describe("Meta scheduler runtime", () => {
       reason: "mutating",
     });
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("permission-risk");
+    expect(decision.orchestrationPlan.primaryAction).toBe("ask_permission");
+    expect(decision.orchestrationPlan.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "permission-gate", executor: "permission-runtime", mode: "ask" }),
+        expect.objectContaining({ id: "verification", executor: "verification-runtime", mode: "run" }),
+      ]),
+    );
   });
 
   it("routes explicit external app capability mentions without stealing workflow or agent routes", () => {
@@ -136,6 +179,16 @@ describe("Meta scheduler runtime", () => {
     expect(capability.policyDecision.capabilitySignal.candidateIds).toContain("mock.canvas.create");
     expect(capability.policyDecision.executionPlan.preferAgent).toBe(false);
     expect(capability.policyDecision.executionPlan.preferWorkflow).toBe(false);
+    expect(capability.orchestrationPlan.primaryAction).toBe("dispatch_capability");
+    expect(capability.orchestrationPlan.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "capability-dispatch",
+          executor: "capability-runtime",
+          mode: "run",
+        }),
+      ]),
+    );
 
     const agent = evaluateMetaScheduler({
       ...baseInput(),
@@ -143,6 +196,12 @@ describe("Meta scheduler runtime", () => {
     });
     expect(agent.policyDecision.taskKind).toBe("agent");
     expect(agent.policyDecision.capabilitySignal.active).toBe(false);
+    expect(agent.orchestrationPlan.primaryAction).toBe("delegate_agent");
+    expect(agent.orchestrationPlan.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "agent-dispatch", executor: "agent-runtime", mode: "run" }),
+      ]),
+    );
   });
 
   it("keeps strategic exploration in chat even when capability is mentioned", () => {
@@ -191,6 +250,12 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.verificationSignal.route.conservativeNoPass).toBe(true);
     expect(decision.policyDecision.verificationSignal.route.noPassReasons).toContain(
       "user_state:frustrated",
+    );
+    expect(decision.orchestrationPlan.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "source-facts", executor: "model-stream-runtime", mode: "run" }),
+        expect.objectContaining({ id: "verification", executor: "verification-runtime", mode: "run" }),
+      ]),
     );
   });
 

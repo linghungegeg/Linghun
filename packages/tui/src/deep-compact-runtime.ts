@@ -14,6 +14,9 @@ import { estimateTranscriptContextChars } from "./context-estimator.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
+import {
+  recordMetaOrchestrationRuntimeEvent,
+} from "./meta-orchestration-runtime.js";
 import { withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   sanitizeDiagnosticText,
@@ -212,6 +215,18 @@ export async function runDeepCompact(input: {
     providerRequest,
   );
   advanceDeepCompactProgress(input.context, "scan_context");
+  await recordMetaOrchestrationRuntimeEvent(input.context, input.sessionId, {
+    stepId: "compact-context",
+    executor: "compact-runtime",
+    status: "consumed",
+    summary: `deep compact trigger=${input.trigger}; messages=${requestMessages.length}`,
+  });
+  await recordMetaOrchestrationRuntimeEvent(input.context, input.sessionId, {
+    stepId: "provider-request",
+    executor: "provider-runtime",
+    status: "consumed",
+    summary: `deep compact provider=${input.runtime.provider}; model=${input.runtime.model}`,
+  });
   let summary = "";
   try {
     for await (const event of withProviderRetry(
@@ -299,6 +314,18 @@ export async function runDeepCompact(input: {
     `deep compact success: id ${packet.id}; scope ${packet.scope}; trigger ${packet.trigger}`,
     "info",
   );
+  await recordMetaOrchestrationRuntimeEvent(input.context, input.sessionId, {
+    stepId: "compact-context",
+    executor: "compact-runtime",
+    status: "completed",
+    summary: `packet=${packet.id}; scope=${packet.scope}; trigger=${packet.trigger}`,
+  });
+  await recordMetaOrchestrationRuntimeEvent(input.context, input.sessionId, {
+    stepId: "provider-request",
+    executor: "provider-runtime",
+    status: "completed",
+    summary: `deep compact provider request completed; packet=${packet.id}`,
+  });
   advanceDeepCompactProgress(input.context, "complete");
   return { ok: true, packet };
 }
@@ -873,6 +900,20 @@ async function recordDeepCompactFailure(
     `deep compact failed: blocked yes; reason ${context.cache.compactFailure.reason}; cooldown until ${context.cache.compactFailure.cooldownUntil}`,
     "warning",
   );
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "compact-context",
+    executor: "compact-runtime",
+    status: "failed",
+    summary: `deep compact failed: ${context.cache.compactFailure.reason}`,
+    level: "warning",
+  });
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "provider-request",
+    executor: "provider-runtime",
+    status: "degraded",
+    summary: `deep compact provider path failed: ${context.cache.compactFailure.reason}`,
+    level: "warning",
+  });
   await deps.captureFailureLearning(context, sessionId, {
     category: "resource_cap",
     failureSummary: "deep compact failed before provider request",

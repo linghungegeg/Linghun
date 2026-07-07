@@ -23,6 +23,9 @@ import type { IndexState } from "./index-runtime.js";
 import type { Keybinding } from "./keybinding-runtime.js";
 import type { MemoryMutation } from "./memory-command-runtime.js";
 import type { DeepCompactRunResult } from "./deep-compact-runtime.js";
+import type {
+  MetaOrchestrationRuntimeEvent,
+} from "./meta-orchestration-runtime.js";
 import type { MetaSchedulerDecision, PolicyDecision } from "./meta-scheduler-runtime.js";
 import type { SolutionCompletenessStatus } from "./model-loop-runtime.js";
 import type { PendingModelSetup } from "./model-setup-runtime.js";
@@ -371,6 +374,8 @@ export type TuiContext = {
   lastMetaSchedulerFailureLearningFulfilled?: boolean;
   /** 最近一轮 MetaScheduler 完整决策，供主链各子系统消费 */
   lastMetaSchedulerDecision?: MetaSchedulerDecision;
+  /** Runtime consumption/status reports for the current meta-scheduler plan. */
+  metaOrchestration?: { events: MetaOrchestrationRuntimeEvent[] };
   /** 跨轮人格连续性状态 */
   turnContinuity?: TurnContinuityState;
   /** 最近 N 轮的 taskKind 历史（用于 dominantTaskKind 计算） */

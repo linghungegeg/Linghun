@@ -14,6 +14,7 @@ import {
   listCapabilities,
   registerCapability,
   resolveCapabilityConnection,
+  resolveCapabilityDispatchRuntimePolicy,
 } from "./capability-runtime.js";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
@@ -228,6 +229,56 @@ describe("Capability Runtime MVP", () => {
     expect(visible).not.toContain("raw-display-token");
     expect(visible).not.toContain("raw-result-secret");
     expect(visible).not.toContain("raw-auth");
+  });
+
+  it("maps meta scheduler capability stop/ask/degrade into runtime policy", () => {
+    const baseAction = {
+      reason: "slow down",
+      shouldAsk: false,
+      shouldDegrade: false,
+      shouldStop: false,
+    };
+    const lowRiskRead = { permission: "read" as const, riskLevel: "low" as const };
+
+    expect(resolveCapabilityDispatchRuntimePolicy(baseAction, lowRiskRead)).toEqual({ action: "run" });
+    expect(
+      resolveCapabilityDispatchRuntimePolicy({ ...baseAction, shouldAsk: true }, lowRiskRead),
+    ).toEqual({ action: "block", reason: "slow down" });
+    expect(
+      resolveCapabilityDispatchRuntimePolicy({ ...baseAction, shouldDegrade: true }, lowRiskRead),
+    ).toEqual({ action: "run" });
+    expect(
+      resolveCapabilityDispatchRuntimePolicy(
+        { ...baseAction, shouldDegrade: true },
+        { permission: "external_app", riskLevel: "high" },
+      ),
+    ).toEqual({ action: "block", reason: "slow down" });
+  });
+
+  it("blocks capability execution when meta scheduler requests stop", async () => {
+    const context = await createCapabilityTestContext("full-access");
+    context.lastMetaSchedulerDecision = {
+      orchestrationPlan: {
+        steps: [
+          {
+            id: "capability-dispatch",
+            executor: "capability-runtime",
+            mode: "stop",
+            reason: "capability dispatch disabled",
+          },
+        ],
+      },
+    } as TuiContext["lastMetaSchedulerDecision"];
+
+    const result = await executeCapability(
+      { capabilityId: "mock.canvas.create", input: { title: "Blocked" }, source: "slash" },
+      context,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.summary).toContain("Capability dispatch blocked by meta scheduler");
+    expect(context.evidence).toEqual([]);
+    expect(context.metaOrchestration?.events.some((event) => event.status === "blocked")).toBe(true);
   });
 });
 

@@ -11,6 +11,11 @@ import {
   createEvidenceRecord,
   rememberEvidence,
 } from "./evidence-runtime.js";
+import {
+  recordMetaOrchestrationRuntimeEvent,
+  resolveMetaOrchestrationAction,
+  type MetaOrchestrationAction,
+} from "./meta-orchestration-runtime.js";
 import { sanitizeDiagnosticText, truncateDisplay, writeLine } from "./startup-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import { decidePermission } from "./tui-permission-runtime.js";
@@ -99,6 +104,26 @@ type CapabilityRegistryEntry = {
   projectPath?: string;
 };
 
+export type CapabilityDispatchRuntimePolicy =
+  | { action: "run" }
+  | { action: "block"; reason: string };
+
+export function resolveCapabilityDispatchRuntimePolicy(
+  action: Pick<
+    MetaOrchestrationAction,
+    "reason" | "shouldAsk" | "shouldDegrade" | "shouldStop"
+  >,
+  definition: Pick<CapabilityDefinition, "permission" | "riskLevel">,
+): CapabilityDispatchRuntimePolicy {
+  if (action.shouldStop || action.shouldAsk) {
+    return { action: "block", reason: action.reason };
+  }
+  if (action.shouldDegrade && (definition.permission !== "read" || definition.riskLevel !== "low")) {
+    return { action: "block", reason: action.reason };
+  }
+  return { action: "run" };
+}
+
 const registry = new Map<string, CapabilityRegistryEntry[]>();
 const providers = new Map<CapabilityTransport, CapabilityProvider>();
 let externalConnectionResolver:
@@ -179,8 +204,24 @@ export async function executeCapability(
   request: CapabilityExecutionRequest,
   context: TuiContext,
 ): Promise<CapabilityExecutionResult> {
+  const sessionId = await ensureSession(context);
+  const orchestration = resolveMetaOrchestrationAction(context, "capability-dispatch");
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "capability-dispatch",
+    executor: "capability-runtime",
+    status: "consumed",
+    summary: `${request.capabilityId}; source=${request.source}; mode=${orchestration.mode}`,
+    level: orchestration.shouldRun ? "info" : "warning",
+  });
   const definition = findCapability(request.capabilityId, context);
   if (!definition) {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "capability-dispatch",
+      executor: "capability-runtime",
+      status: "failed",
+      summary: `${request.capabilityId}; definition not found`,
+      level: "warning",
+    });
     return {
       ok: false,
       capabilityId: request.capabilityId,
@@ -194,16 +235,52 @@ export async function executeCapability(
       },
     };
   }
+  const dispatchPolicy = resolveCapabilityDispatchRuntimePolicy(orchestration, definition);
+  if (dispatchPolicy.action === "block") {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "capability-dispatch",
+      executor: "capability-runtime",
+      status: "blocked",
+      summary: `${definition.id}; blocked by meta scheduler: ${dispatchPolicy.reason}`,
+      level: "warning",
+    });
+    return buildFailedCapabilityResult(
+      definition,
+      `Capability dispatch blocked by meta scheduler: ${dispatchPolicy.reason}`,
+      "unsupported",
+    );
+  }
   const schemaError = validateCapabilityInput(definition, request.input);
   if (schemaError) {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "capability-dispatch",
+      executor: "capability-runtime",
+      status: "failed",
+      summary: `${definition.id}; schema error: ${schemaError}`,
+      level: "warning",
+    });
     return buildFailedCapabilityResult(definition, schemaError, "unsupported");
   }
   const connection = resolveCapabilityConnection(definition, context);
   if (connection.status !== "connected") {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "capability-dispatch",
+      executor: "capability-runtime",
+      status: "blocked",
+      summary: `${definition.id}; connection=${connection.status}; ${connection.summary}`,
+      level: "warning",
+    });
     return buildFailedCapabilityResult(definition, connection.summary, connection.status);
   }
   const permission = await checkCapabilityPermission(definition, request, context);
   if (permission.decision !== "allow") {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "capability-dispatch",
+      executor: "capability-runtime",
+      status: permission.decision === "deny" ? "failed" : "blocked",
+      summary: `${definition.id}; permission ${permission.decision}: ${permission.reason}`,
+      level: "warning",
+    });
     return buildFailedCapabilityResult(
       definition,
       permission.decision === "deny"
@@ -214,6 +291,13 @@ export async function executeCapability(
   }
   const provider = providers.get(definition.transport);
   if (!provider) {
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "capability-dispatch",
+      executor: "capability-runtime",
+      status: "failed",
+      summary: `${definition.id}; provider unavailable`,
+      level: "warning",
+    });
     return buildFailedCapabilityResult(
       definition,
       "Capability provider unavailable.",
@@ -221,7 +305,6 @@ export async function executeCapability(
     );
   }
   const result = await provider.execute(definition, request, context);
-  const sessionId = await ensureSession(context);
   const outcome = result.ok ? "succeeded" : "failed";
   const evidence = createEvidenceRecord(
     "command_output",
@@ -259,6 +342,13 @@ export async function executeCapability(
     ].join(" "),
     result.ok ? "info" : "warning",
   );
+  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+    stepId: "capability-dispatch",
+    executor: "capability-runtime",
+    status: result.ok ? "completed" : "failed",
+    summary: `${definition.id}; ${outcome}; evidence=${evidence.id}`,
+    level: result.ok ? "info" : "warning",
+  });
   return {
     ...result,
     evidenceId: evidence.id,
