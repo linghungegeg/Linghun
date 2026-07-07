@@ -569,7 +569,8 @@ export async function* withProviderRetry(
 
     let streamError: unknown;
     let streamCompleted = false;
-    const pendingToolUses: LinghunEvent[] = [];
+    const deferredEvents: LinghunEvent[] = [];
+    let deferringAfterToolUse = false;
 
     try {
       const streamController = new AbortController();
@@ -593,11 +594,19 @@ export async function* withProviderRetry(
           const event = next.value;
           if (event.type === "error") {
             streamError = event.error;
-            pendingToolUses.length = 0;
+            deferredEvents.length = 0;
             break;
           }
+          // Once a tool_use appears, defer it and all subsequent events
+          // so that the original order is preserved on flush.
           if (event.type === "tool_use") {
-            pendingToolUses.push(event);
+            deferringAfterToolUse = true;
+          }
+          if (deferringAfterToolUse) {
+            deferredEvents.push(event);
+            if (event.type === "message_stop") {
+              streamCompleted = true;
+            }
             continue;
           }
           yield event;
@@ -613,7 +622,7 @@ export async function* withProviderRetry(
       }
     } catch (error) {
       streamError = error;
-      pendingToolUses.length = 0;
+      deferredEvents.length = 0;
     } finally {
       releaseProviderSlot(state, provider, model);
     }
@@ -627,9 +636,9 @@ export async function* withProviderRetry(
     }
 
     if (!streamError) {
-      // Success — clear the breaker for this provider+model.
+      // Success — flush deferred events (tool_use + subsequent) in original order.
       clearProviderBreaker(state, provider, model);
-      for (const ev of pendingToolUses) yield ev;
+      for (const ev of deferredEvents) yield ev;
       return;
     }
 

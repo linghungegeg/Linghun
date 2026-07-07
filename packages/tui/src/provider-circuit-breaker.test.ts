@@ -800,6 +800,153 @@ describe("provider-circuit-breaker", () => {
         randomSpy.mockRestore();
       }
     });
+
+    it("successful tool stream preserves original event order (tool_use before message_stop)", async () => {
+      const model: ModelInfo = {
+        id: "gpt-4o",
+        displayName: "GPT-4o",
+        providerId: "openai",
+        contextWindow: 128_000,
+        maxOutputTokens: 4_096,
+        supportsTools: true,
+        supportsVision: false,
+        supportsThinking: false,
+        supportsPromptCache: false,
+      };
+      const provider: Provider = {
+        id: "openai",
+        displayName: "OpenAI",
+        supports: { streaming: true, usage: true },
+        async listModels() {
+          return [model];
+        },
+        async *stream() {
+          yield { type: "assistant_text_delta", id: "td-1", text: "thinking" } satisfies LinghunEvent;
+          yield { type: "tool_use", id: "tu-1", name: "read_file", input: { path: "a.ts" } } satisfies LinghunEvent;
+          yield {
+            type: "message_stop",
+            id: "stop-1",
+            chunkCount: 3,
+            hadUsage: false,
+            finishReason: "tool_use",
+          } satisfies LinghunEvent;
+        },
+      };
+      const gateway = new ModelGateway([provider]);
+      const events: LinghunEvent[] = [];
+
+      for await (const event of withProviderRetry(
+        gateway,
+        state,
+        "openai",
+        { messages: [], model: "gpt-4o" },
+        new AbortController().signal,
+        { maxRetries: 1 },
+      )) {
+        events.push(event);
+      }
+
+      const types = events.map((e) => e.type);
+      expect(types).toEqual(["assistant_text_delta", "tool_use", "message_stop"]);
+      // Critical assertion: tool_use MUST precede message_stop
+      expect(types.indexOf("tool_use")).toBeLessThan(types.indexOf("message_stop"));
+    });
+
+    it("failed attempt tool events do not leak into final output", async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        let calls = 0;
+        const model: ModelInfo = {
+          id: "gpt-4o",
+          displayName: "GPT-4o",
+          providerId: "openai",
+          contextWindow: 128_000,
+          maxOutputTokens: 4_096,
+          supportsTools: true,
+          supportsVision: false,
+          supportsThinking: false,
+          supportsPromptCache: false,
+        };
+        const provider: Provider = {
+          id: "openai",
+          displayName: "OpenAI",
+          supports: { streaming: true, usage: true },
+          async listModels() {
+            return [model];
+          },
+          async *stream() {
+            calls += 1;
+            if (calls === 1) {
+              // First attempt: emits text immediately, then defers tool_use before failing.
+              yield { type: "assistant_text_delta", id: "td-bad", text: "bad" } satisfies LinghunEvent;
+              yield { type: "tool_use", id: "tu-bad", name: "write_file", input: {} } satisfies LinghunEvent;
+              yield {
+                type: "error",
+                error: new LinghunError({
+                  code: "PROVIDER_SERVER_ERROR",
+                  message: "transient failure",
+                  recoverable: true,
+                }),
+              } satisfies LinghunEvent;
+              return;
+            }
+            // Second attempt: succeeds
+            yield { type: "assistant_text_delta", id: "td-ok", text: "ok" } satisfies LinghunEvent;
+            yield { type: "tool_use", id: "tu-ok", name: "read_file", input: { path: "b.ts" } } satisfies LinghunEvent;
+            yield {
+              type: "message_stop",
+              id: "stop-ok",
+              chunkCount: 3,
+              hadUsage: false,
+              finishReason: "tool_use",
+            } satisfies LinghunEvent;
+          },
+        };
+        const gateway = new ModelGateway([provider]);
+        const events: LinghunEvent[] = [];
+
+        const run = (async () => {
+          for await (const event of withProviderRetry(
+            gateway,
+            state,
+            "openai",
+            { messages: [], model: "gpt-4o" },
+            new AbortController().signal,
+            { maxRetries: 3 },
+          )) {
+            events.push(event);
+          }
+        })();
+
+        // Let first attempt complete and hit backoff sleep
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(2000);
+        await Promise.resolve();
+        await run;
+
+        expect(calls).toBe(2);
+        // Text before the first tool_use is already streamed; tool events from
+        // the failed attempt must not leak into dispatch.
+        const texts = events
+          .filter((e): e is Extract<LinghunEvent, { type: "assistant_text_delta" }> => e.type === "assistant_text_delta")
+          .map((e) => e.text);
+        expect(texts).toEqual(["bad", "ok"]);
+        const toolIds = events
+          .filter((e): e is Extract<LinghunEvent, { type: "tool_use" }> => e.type === "tool_use")
+          .map((e) => e.id);
+        expect(toolIds).toEqual(["tu-ok"]);
+        const toolNames = events
+          .filter((e): e is Extract<LinghunEvent, { type: "tool_use" }> => e.type === "tool_use")
+          .map((e) => e.name);
+        expect(toolNames).toEqual(["read_file"]);
+        // The successful attempt's tool_use still precedes its message_stop.
+        const types = events.map((e) => e.type);
+        expect(types).toEqual(["assistant_text_delta", "assistant_text_delta", "tool_use", "message_stop"]);
+        expect(types.indexOf("tool_use")).toBeLessThan(types.indexOf("message_stop"));
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
   });
 
   describe("constants", () => {
