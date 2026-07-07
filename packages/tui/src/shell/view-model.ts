@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import type { CacheTurnStats } from "@linghun/core";
 import { type Language, type PermissionMode, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
-import { calculateContextPercentages } from "../context-window-runtime.js";
+import { calculateContextPercentages, formatContextProgressBar } from "../context-window-runtime.js";
 import type { BackgroundTaskState, TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
 import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
@@ -465,11 +465,11 @@ export function createShellViewModel(
     reasoningLevel: options.reasoningLevel,
     reasoningSent: options.reasoningSent,
     estimatedCostCny: sumFiniteNumbers((context.roleUsage ?? []).map((usage) => usage.estimatedCny)),
-    contextUsageLabel: context.cache.compactPressure
+    contextUsage: context.cache.compactPressure
       ? calculateContextPercentages(
           Math.ceil(context.cache.compactPressure.estimatedChars / 4),
           Math.ceil(context.cache.compactPressure.maxChars / 4),
-        ).label
+        )
       : undefined,
     isRemoteMode: context.remote?.enabled ?? false,
   });
@@ -2326,7 +2326,7 @@ type TaskFooterInput = {
   reasoningLevel?: string;
   reasoningSent?: boolean;
   estimatedCostCny?: number;
-  contextUsageLabel?: string;
+  contextUsage?: ReturnType<typeof calculateContextPercentages>;
   isRemoteMode: boolean;
 };
 
@@ -2380,7 +2380,7 @@ function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
     cacheTone: formatFooterCacheTone(input.cacheHitRate),
     index: formatFooterIndex(input.language, input.indexStatus),
     reasoning: formatFooterReasoning(input.language, input.reasoningLevel, input.reasoningSent),
-    contextUsage: input.contextUsageLabel,
+    contextUsage: formatFooterContextUsage(input.language, input.contextUsage),
     cost: formatFooterCost(input.language, input.estimatedCostCny),
     isRemoteMode: input.isRemoteMode,
   };
@@ -2398,6 +2398,21 @@ function formatFooterModel(
   if (setupNeeded || placeholders.has(trimmed.toLowerCase()))
     return { text: `${label} --`, dim: true };
   return { text: `${label} ${truncateMiddle(trimmed, width <= 60 ? 12 : 22)}`, dim: false };
+}
+
+function formatFooterContextUsage(
+  language: Language,
+  contextUsage: ReturnType<typeof calculateContextPercentages> | undefined,
+): TaskFooterView["contextUsage"] {
+  if (!contextUsage) return undefined;
+  const label = language === "en-US" ? "ctx" : "ctx";
+  const percent = `${Math.round(contextUsage.ratio * 100)}%`;
+  return {
+    wide: `${label} ${formatContextProgressBar(contextUsage.ratio, 10)} ${percent}`,
+    narrow: `${label} ${percent}`,
+    minimal: `${label} ${percent}`,
+    ratio: contextUsage.ratio,
+  };
 }
 
 function formatFooterCache(language: Language, hitRate: number | null): string {

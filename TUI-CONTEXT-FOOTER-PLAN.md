@@ -311,6 +311,26 @@ ctx 12%
 - 异常状态能展开，正常状态不刷屏。
 - 预览区不再常驻展示上下文额度。
 
+### 8.4 Phase 4 闭环记录
+
+已完成：
+
+- `TaskFooterView.contextUsage` 从单个长字符串改为结构化三档文案：宽屏 `ctx [bar] pct`、窄屏 `ctx pct`、极窄 `ctx pct`，并保留真实 ratio。
+- `createShellViewModel` 继续使用 `compactPressure` 的真实估算值计算上下文比例，footer 文案不再使用 `上下文 12.0% (tokens/tokens)` 这种长标签。
+- `StatusFooter` 的分段优先级调整为 `model · index · cache · context ...`，确保上下文额度紧跟缓存；宽屏显示真实进度条，窄屏显示短百分比，极窄屏只保留 `ctx pct`。
+- `CompactStatusFooter` 同步接入 `contextUsage`，避免旧 compact 路径丢失 ctx。
+- 正常 footer 仍不把 background/runtime/workspace 长详情常驻刷到主屏；异常/运行中状态继续走 `bottomPaneStatus`、details 或后续工作请求状态轨道。
+
+验证：
+
+- `corepack pnpm vitest run packages/tui/src/shell/components/status-footer.test.ts packages/tui/src/shell/view-model.test.ts -t "StatusFooter collapse rules|task footer exposes real context usage"`
+- `corepack pnpm --filter @linghun/tui typecheck`
+- `corepack pnpm vitest run packages/tui/src/shell/ink-interaction-smoke.test.ts -t "drives CommandPanel, Ctrl\\+O, task scroll, footer, and permission focus through TTY keys"`
+
+剩余边界：
+
+- git dirty/ahead/behind、权限等待、验证失败、后台 running 的异常展开仍按现有 `bottomPaneStatus` 和后续工作请求状态投影继续收敛，本阶段只闭环 footer 稳定面板与上下文额度展示。
+
 ## 9. 第五阶段：验证方式
 
 目标：用 snapshot/golden tests 和真实 TUI smoke 锁住视觉层，避免后面又退回裸文本堆叠。

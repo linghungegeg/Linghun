@@ -4181,6 +4181,26 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(Object.values(footer).join(" ")).not.toContain("正在运行 Bash");
   });
 
+  it("task footer exposes real context usage as wide, narrow, and minimal status panel labels", () => {
+    const view = createShellViewModel(
+      createContext({
+        cache: {
+          history: [{ hitRate: 0.84 }],
+          compactPressure: { estimatedChars: 200_000, maxChars: 400_000 },
+        },
+      } as Partial<TuiContext>),
+      { width: 120, viewMode: "task" },
+    );
+
+    expect(view.taskFooter?.cache).toBe("缓存 84%");
+    expect(view.taskFooter?.contextUsage).toMatchObject({
+      wide: "ctx [█████─────] 50%",
+      narrow: "ctx 50%",
+      minimal: "ctx 50%",
+      ratio: 0.5,
+    });
+  });
+
   it("Phase 6.6: task footer does NOT show workspaceStatus / runtimeStatus by default (moved to /details /status path)", () => {
     const view = createShellViewModel(createContext(), {
       width: 120,

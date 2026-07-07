@@ -363,8 +363,12 @@ function CompactStatusFooter({
   footer: NonNullable<ShellViewModel["taskFooter"]>;
   width: number;
 }): React.ReactNode {
+  const context = footer.contextUsage?.minimal;
   const model = fitText(footer.model, Math.max(12, Math.min(28, Math.floor(width / 3))));
-  const text = `${footer.permissionMode}${footer.cyclePermHint} · ${model} · ${footer.index} · ${footer.cache}`;
+  const segments = width < 48 && context
+    ? [context]
+    : [model, footer.index, footer.cache, footer.contextUsage?.narrow].filter(Boolean);
+  const text = `${footer.permissionMode}${footer.cyclePermHint} · ${segments.join(" · ")}`;
   const fitted = fitText(text, Math.max(8, width - 4));
   const modeText = fitted.startsWith(footer.permissionMode) ? footer.permissionMode : fitted;
   const rest = fitted.startsWith(footer.permissionMode) ? fitted.slice(footer.permissionMode.length) : "";

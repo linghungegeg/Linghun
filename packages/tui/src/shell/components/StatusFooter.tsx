@@ -51,6 +51,8 @@ export function selectStatusFooterSegments(input: {
   cacheTone?: "default" | "warning" | "dim";
   gitBranch?: string;
 }): StatusFooterSegment[] {
+  const mode = statusFooterCollapseMode(input.width);
+  const contextText = formatContextSegment(input.footer.contextUsage, mode);
   const segments: StatusFooterSegment[] = [
     { key: "model", text: input.footer.model, tone: input.modelDim ? "dim" : "default", priority: 2 },
     { key: "index", text: input.footer.index, tone: "default", priority: 3 },
@@ -61,20 +63,33 @@ export function selectStatusFooterSegments(input: {
       priority: 4,
     },
   ];
+  if (contextText) {
+    segments.push({ key: "context", text: contextText, tone: "dim", priority: 5 });
+  }
   if (input.footer.isRemoteMode) {
-    segments.push({ key: "remote", text: "remote", tone: "dim", priority: 5 });
+    segments.push({ key: "remote", text: "remote", tone: "dim", priority: 6 });
   }
-  if (input.gitBranch) segments.push({ key: "branch", text: `⎇ ${input.gitBranch}`, tone: "dim", priority: 6 });
-  if (input.footer.contextUsage) {
-    segments.push({ key: "context", text: input.footer.contextUsage, tone: "dim", priority: 7 });
-  }
+  if (input.gitBranch) segments.push({ key: "branch", text: `⎇ ${input.gitBranch}`, tone: "dim", priority: 7 });
   if (input.footer.reasoning) segments.push({ key: "reasoning", text: input.footer.reasoning, priority: 8 });
 
-  const mode = statusFooterCollapseMode(input.width);
-  const maxPriority = mode === "wide" ? 9 : mode === "narrow" ? 4 : 3;
-  return segments
+  const maxPriority = mode === "wide" ? 9 : mode === "narrow" ? 5 : 3;
+  const selected = segments
     .filter((segment) => segment.priority <= maxPriority)
     .sort((a, b) => a.priority - b.priority);
+  if (mode === "minimal" && contextText) {
+    return [{ key: "context", text: input.footer.contextUsage?.minimal ?? contextText, tone: "dim", priority: 1 }];
+  }
+  return selected;
+}
+
+function formatContextSegment(
+  contextUsage: TaskFooterView["contextUsage"],
+  mode: ReturnType<typeof statusFooterCollapseMode>,
+): string | undefined {
+  if (!contextUsage) return undefined;
+  if (mode === "wide") return contextUsage.wide;
+  if (mode === "narrow") return contextUsage.narrow;
+  return contextUsage.minimal;
 }
 
 export function StatusFooter({

@@ -13,7 +13,12 @@ function footer(overrides: Partial<TaskFooterView> = {}): TaskFooterView {
     index: "索引 ready",
     cyclePermHint: "（Shift+Tab 切换模式）",
     reasoning: "推理 High",
-    contextUsage: "上下文 12%",
+    contextUsage: {
+      wide: "ctx [██░░░░░░░░] 12%",
+      narrow: "ctx 12%",
+      minimal: "ctx 12%",
+      ratio: 0.12,
+    },
     cost: "费用 ¥0.0001 est",
     ...overrides,
   };
@@ -26,40 +31,43 @@ describe("StatusFooter collapse rules", () => {
     expect(statusFooterCollapseMode(40)).toBe("minimal");
   });
 
-  it("keeps key footer items in narrow mode and drops optional status", () => {
-    const keys = selectStatusFooterSegments({
+  it("keeps cache followed by context in narrow mode and drops optional status", () => {
+    const segments = selectStatusFooterSegments({
       footer: footer(),
       width: 60,
       cacheTone: "warning",
-    }).map((segment) => segment.key);
+    });
 
-    expect(keys).toEqual(["model", "index", "cache"]);
+    expect(segments.map((segment) => segment.key)).toEqual(["model", "index", "cache", "context"]);
+    expect(segments.map((segment) => segment.text)).toContain("ctx 12%");
   });
 
-  it("keeps only the highest-priority metadata in minimal mode", () => {
-    const keys = selectStatusFooterSegments({
+  it("keeps only context usage in minimal mode when available", () => {
+    const segments = selectStatusFooterSegments({
       footer: footer({ isRemoteMode: true }),
       width: 40,
-    }).map((segment) => segment.key);
+    });
 
-    expect(keys).toEqual(["model", "index"]);
+    expect(segments.map((segment) => segment.key)).toEqual(["context"]);
+    expect(segments[0]?.text).toBe("ctx 12%");
   });
 
-  it("wide mode may include optional reasoning, context, and remote", () => {
-    const keys = selectStatusFooterSegments({
+  it("wide mode includes the context progress bar after cache", () => {
+    const segments = selectStatusFooterSegments({
       footer: footer({ isRemoteMode: true }),
       width: 100,
       gitBranch: "main",
-    }).map((segment) => segment.key);
+    });
 
-    expect(keys).toEqual([
+    expect(segments.map((segment) => segment.key)).toEqual([
       "model",
       "index",
       "cache",
+      "context",
       "remote",
       "branch",
-      "context",
       "reasoning",
     ]);
+    expect(segments[3]?.text).toBe("ctx [██░░░░░░░░] 12%");
   });
 });

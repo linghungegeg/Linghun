@@ -313,7 +313,13 @@ export type TaskFooterView = {
    */
   reasoning?: string;
   cost?: string;
-  contextUsage?: string;
+  /** Stable context usage segment for the footer status panel. */
+  contextUsage?: {
+    wide: string;
+    narrow: string;
+    minimal: string;
+    ratio: number;
+  };
   hint?: string;
   /**
    * D.13Q-UX — model 段是否染 dim。setup-needed / "unknown" / "openai-compatible-model"
