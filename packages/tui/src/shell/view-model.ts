@@ -5,6 +5,10 @@ import type { ToolName } from "@linghun/tools";
 import { calculateContextPercentages, formatContextProgressBar } from "../context-window-runtime.js";
 import type { BackgroundTaskState, TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
+import {
+  projectWorkRequestState,
+  type WorkRequestState,
+} from "../request-lifecycle-presenter.js";
 import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
 import { sanitizeMainScreenLeakage } from "../model-prompt-runtime.js";
 import { SLASH_COMMAND_REGISTRY } from "../natural-command-bridge.js";
@@ -536,6 +540,10 @@ export function createShellViewModel(
     ? createPermissionWaitingActivity(context, permissionView)
     : undefined;
   const visibleActivity = permissionActivity ?? effectiveActivity;
+  const workRequestState = deriveWorkRequestState(context, {
+    permission: permissionView,
+    visibleWorkState,
+  });
   const streamingAssistantText = permissionView
     ? undefined
     : selectStreamingAssistantText(context, fullFittedBlocks);
@@ -543,6 +551,7 @@ export function createShellViewModel(
     activity: visibleActivity,
     permission: permissionView,
     visibleWorkState,
+    workRequestState,
     suppressProviderFailure: hasProviderFailureOutputBlock || hasRecoveredAfterProviderFailure,
   });
 
@@ -1494,18 +1503,104 @@ function createPermissionWaitingActivity(
   };
 }
 
+function deriveWorkRequestState(
+  context: TuiContext,
+  input: { permission?: TaskPermissionView; visibleWorkState?: VisibleWorkState },
+): WorkRequestState | undefined {
+  const retryInfo = (context as { retryInfo?: { attempt: number; max: number; delaySec: number } })
+    .retryInfo;
+  const phase = (context as { requestActivityPhase?: string }).requestActivityPhase;
+  const startedAtMs = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
+  const visibleWork = input.visibleWorkState;
+  return projectWorkRequestState({
+    language: context.language,
+    requestPhase: phase,
+    startedAtMs,
+    toolName: (context as { requestActivityToolName?: string }).requestActivityToolName,
+    toolTarget: (context as { requestActivityToolTarget?: string }).requestActivityToolTarget,
+    retryAttempt: retryInfo?.attempt,
+    retryMax: retryInfo?.max,
+    retryDelaySec: retryInfo?.delaySec,
+    permissionToolName: input.permission?.toolName,
+    permissionSummary: input.permission?.actionSummary,
+    permissionNextAction: input.permission?.hint,
+    agentsRunning: visibleWork?.agentsRunning,
+    workflowRunning: visibleWork?.explicitWorkflowRunning,
+    multiAgentWorkflowRunning: visibleWork?.multiAgentWorkflowRunning,
+    backgroundTasksRunning: visibleWork?.backgroundTasksRunning,
+    includeBackgroundRunning: true,
+  });
+}
+
+function mapWorkRequestStateToBottomPaneStatus(work: WorkRequestState): BottomPaneStatusView {
+  return {
+    kind: mapWorkRequestPhaseToBottomKind(work.phase),
+    source: mapWorkRequestSourceToBottomSource(work.source),
+    text: work.title,
+    reason: work.summary,
+    nextAction: work.nextAction,
+    elapsed: formatElapsedMs(work.elapsedMs),
+  };
+}
+
+function mapWorkRequestPhaseToBottomKind(phase: WorkRequestState["phase"]): BottomPaneStatusView["kind"] {
+  if (phase === "permission_waiting") return "action_required";
+  if (phase === "verification_running") return "verifying";
+  if (phase === "blocked") return "blocked";
+  if (phase === "failed") return "failed";
+  if (phase === "completed") return "completed_partial";
+  return "running";
+}
+
+function mapWorkRequestSourceToBottomSource(
+  source: WorkRequestState["source"],
+): BottomPaneStatusView["source"] {
+  if (source === "permission") return "permission";
+  if (source === "tool") return "tool";
+  if (source === "provider") return "provider";
+  if (source === "agent") return "agent_workflow";
+  if (source === "background") return "background";
+  if (source === "verification") return "final_gate";
+  if (source === "runner") return "resource";
+  return "request";
+}
+
+function isForegroundWorkRequestState(work: WorkRequestState): boolean {
+  return work.phase !== "agent_running" && work.phase !== "background_running";
+}
+
+function formatElapsedMs(elapsedMs: number | undefined): string | undefined {
+  if (elapsedMs === undefined) return undefined;
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return `${minutes}m${rest.toString().padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${(minutes % 60).toString().padStart(2, "0")}m`;
+}
+
 export function mapBottomPaneStatusToView(
   context: TuiContext,
   input: {
     activity?: TaskActivityView;
     permission?: TaskPermissionView;
     visibleWorkState?: VisibleWorkState;
+    workRequestState?: WorkRequestState;
     suppressProviderFailure?: boolean;
   } = {},
 ): BottomPaneStatusView | undefined {
   const language = context.language;
   const isEn = language === "en-US";
   const phase = (context as { requestActivityPhase?: string }).requestActivityPhase;
+
+  if (input.workRequestState && isForegroundWorkRequestState(input.workRequestState)) {
+    return mapWorkRequestStateToBottomPaneStatus(input.workRequestState);
+  }
+
+  const deferredWorkRequestStatus = input.workRequestState
+    ? mapWorkRequestStateToBottomPaneStatus(input.workRequestState)
+    : undefined;
 
   if (input.permission) {
     return {
@@ -1631,6 +1726,9 @@ export function mapBottomPaneStatusToView(
   }
 
   const work = input.visibleWorkState;
+  if (deferredWorkRequestStatus) {
+    return deferredWorkRequestStatus;
+  }
   if (work && (work.agentsRunning > 0 || work.explicitWorkflowRunning || work.multiAgentWorkflowRunning)) {
     return {
       kind: "running",

@@ -16,6 +16,281 @@ export type RequestActivityPhase =
   | "provider_recovering"
   | "provider_switching";
 
+export type WorkRequestPhase =
+  | "idle"
+  | "queued"
+  | "understanding"
+  | "planning"
+  | "model_streaming"
+  | "tool_calling"
+  | "tool_running"
+  | "permission_waiting"
+  | "verification_running"
+  | "provider_recovering"
+  | "background_running"
+  | "agent_running"
+  | "blocked"
+  | "failed"
+  | "completed";
+
+export type WorkRequestSource =
+  | "model"
+  | "tool"
+  | "permission"
+  | "runner"
+  | "verification"
+  | "agent"
+  | "background"
+  | "provider";
+
+export type WorkRequestProgress = {
+  completed: number;
+  total: number;
+  label?: string;
+};
+
+export type WorkRequestState = {
+  phase: WorkRequestPhase;
+  title: string;
+  summary?: string;
+  nextAction?: string;
+  elapsedMs?: number;
+  progress?: WorkRequestProgress;
+  source: WorkRequestSource;
+  detailsRef?: string;
+};
+
+export type WorkRequestProjectionInput = {
+  language: Language;
+  requestPhase?: string;
+  startedAtMs?: number;
+  nowMs?: number;
+  reportPath?: string;
+  toolName?: string;
+  toolTarget?: string;
+  retryAttempt?: number;
+  retryMax?: number;
+  retryDelaySec?: number;
+  permissionToolName?: string;
+  permissionSummary?: string;
+  permissionNextAction?: string;
+  agentsRunning?: number;
+  workflowRunning?: boolean;
+  multiAgentWorkflowRunning?: boolean;
+  backgroundTasksRunning?: number;
+  includeBackgroundRunning?: boolean;
+  detailsRef?: string;
+};
+
+export function projectWorkRequestState(
+  input: WorkRequestProjectionInput,
+): WorkRequestState | undefined {
+  const isEn = input.language === "en-US";
+  const elapsedMs = computeElapsedMs(input.startedAtMs, input.nowMs);
+  const withCommon = (state: Omit<WorkRequestState, "elapsedMs" | "detailsRef">): WorkRequestState => ({
+    ...state,
+    ...(elapsedMs === undefined || isTerminalWorkRequestPhase(state.phase) ? {} : { elapsedMs }),
+    ...(input.detailsRef ? { detailsRef: input.detailsRef } : {}),
+  });
+
+  const permissionToolName = normalizeOptionalText(input.permissionToolName);
+  if (permissionToolName) {
+    return withCommon({
+      phase: "permission_waiting",
+      source: "permission",
+      title: isEn ? `Waiting for approval · ${permissionToolName}` : `等待确认 · ${permissionToolName}`,
+      summary: input.permissionSummary,
+      nextAction:
+        input.permissionNextAction ??
+        (isEn ? "Confirm, inspect details, or cancel." : "确认、查看详情或取消。"),
+    });
+  }
+
+  const phase = input.requestPhase;
+  if (phase) {
+    const activityState = projectActivityPhaseToWorkRequestState(input, phase, isEn);
+    if (activityState) return withCommon(activityState);
+  }
+
+  const agentsRunning = input.agentsRunning ?? 0;
+  if (agentsRunning > 0) {
+    return withCommon({
+      phase: "agent_running",
+      source: "agent",
+      title: isEn
+        ? agentsRunning === 1
+          ? "Agent running"
+          : `${agentsRunning} agents running`
+        : agentsRunning === 1
+          ? "智能体运行中"
+          : `${agentsRunning} 个智能体运行中`,
+      nextAction: isEn ? "Use /agents for details." : "可用 /agents 查看详情。",
+    });
+  }
+
+  if (input.workflowRunning || input.multiAgentWorkflowRunning) {
+    return withCommon({
+      phase: "agent_running",
+      source: "agent",
+      title: input.multiAgentWorkflowRunning
+        ? isEn
+          ? "Multi-agent workflow running"
+          : "多智能体工作流运行中"
+        : isEn
+          ? "Workflow running"
+          : "工作流运行中",
+      nextAction: isEn ? "Use /workflows for details." : "可用 /workflows 查看详情。",
+    });
+  }
+
+  const backgroundTasksRunning = input.backgroundTasksRunning ?? 0;
+  if (input.includeBackgroundRunning && backgroundTasksRunning > 0) {
+    return withCommon({
+      phase: "background_running",
+      source: "background",
+      title: isEn
+        ? `${backgroundTasksRunning} background task(s) running`
+        : `${backgroundTasksRunning} 个后台任务运行中`,
+      nextAction: isEn ? "Use /background for details." : "可用 /background 查看详情。",
+    });
+  }
+
+  return undefined;
+}
+
+function projectActivityPhaseToWorkRequestState(
+  input: WorkRequestProjectionInput,
+  phase: string,
+  isEn: boolean,
+): Omit<WorkRequestState, "elapsedMs" | "detailsRef"> | undefined {
+  const toolName = normalizeOptionalText(input.toolName) ?? (isEn ? "tool" : "工具");
+  const toolTarget = normalizeOptionalText(input.toolTarget);
+  const reportPath = input.reportPath ?? "report.md";
+  if (phase === "request_started") {
+    return { phase: "understanding", source: "model", title: isEn ? "Thinking…" : "思考中…" };
+  }
+  if (phase === "request_started_report") {
+    return {
+      phase: "planning",
+      source: "model",
+      title: isEn ? "Preparing report…" : "准备报告…",
+      summary: reportPath,
+    };
+  }
+  if (phase === "waiting_first_delta") {
+    return {
+      phase: "model_streaming",
+      source: "model",
+      title: isEn ? "Waiting for model response…" : "等待模型响应…",
+      nextAction: isEn ? "Use /interrupt to stop this request." : "可用 /interrupt 中断本次请求。",
+    };
+  }
+  if (phase === "compacting_context") {
+    return {
+      phase: "provider_recovering",
+      source: "provider",
+      title: isEn ? "Compacting context…" : "正在压缩上下文…",
+      nextAction: isEn ? "Continuing after compaction." : "压缩完成后继续。",
+    };
+  }
+  if (phase === "provider_retrying") {
+    const attempt = input.retryAttempt ?? 1;
+    const max = input.retryMax ?? 3;
+    const delay = input.retryDelaySec ?? 1;
+    return {
+      phase: "provider_recovering",
+      source: "provider",
+      title: isEn ? `Automatic retry ${attempt}/${max}` : `自动重试 ${attempt}/${max}`,
+      summary: isEn ? `Retry in ${delay}s` : `${delay}s 后重试`,
+    };
+  }
+  if (phase === "provider_recovering") {
+    return {
+      phase: "provider_recovering",
+      source: "provider",
+      title: isEn ? "Recovering provider stream…" : "正在恢复 provider 流…",
+      nextAction: isEn
+        ? "Retrying with compacted context if needed."
+        : "必要时会压缩上下文后重试。",
+    };
+  }
+  if (phase === "provider_switching") {
+    return {
+      phase: "provider_recovering",
+      source: "provider",
+      title: isEn ? "Switching provider/model…" : "正在切换 provider/model…",
+      nextAction: isEn ? "Trying the configured fallback route." : "正在尝试配置的 fallback 路线。",
+    };
+  }
+  if (phase === "tool_running") {
+    return {
+      phase: "tool_running",
+      source: "tool",
+      title: isEn ? `Running ${toolName}…` : `运行 ${toolName}…`,
+      summary: toolTarget,
+    };
+  }
+  if (phase === "continuing_after_tool") {
+    return {
+      phase: "tool_calling",
+      source: "model",
+      title: isEn ? "Reviewing tool result…" : "整理工具结果…",
+    };
+  }
+  if (
+    phase === "checking_final_evidence" ||
+    phase === "collecting_final_evidence" ||
+    phase === "rewriting_final_answer" ||
+    phase === "verifying_final_answer"
+  ) {
+    return {
+      phase: "verification_running",
+      source: "verification",
+      title: isEn ? "Verifying final answer…" : "验证最终回答…",
+      nextAction: isEn
+        ? "Keeping the draft out of scrollback until it is final."
+        : "最终文本确认前不会写入 scrollback。",
+    };
+  }
+  if (phase === "permission_waiting") {
+    return {
+      phase: "permission_waiting",
+      source: "permission",
+      title: isEn ? "Waiting for approval" : "等待确认",
+    };
+  }
+  if (phase === "request_failed" || phase === "error" || phase === "failed") {
+    return {
+      phase: "failed",
+      source: "provider",
+      title: isEn ? "Request failed" : "请求失败",
+      nextAction: isEn ? "Retry or inspect details." : "请重试或查看详情。",
+    };
+  }
+  if (phase === "completed" || phase === "request_completed") {
+    return {
+      phase: "completed",
+      source: "model",
+      title: isEn ? "Completed" : "已完成",
+    };
+  }
+  return undefined;
+}
+
+function computeElapsedMs(startedAtMs: number | undefined, nowMs: number | undefined): number | undefined {
+  if (!startedAtMs || !Number.isFinite(startedAtMs)) return undefined;
+  return Math.max(0, (nowMs ?? Date.now()) - startedAtMs);
+}
+
+function isTerminalWorkRequestPhase(phase: WorkRequestPhase): boolean {
+  return phase === "completed" || phase === "failed" || phase === "idle";
+}
+
+function normalizeOptionalText(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export function formatRequestActivity(
   phase: RequestActivityPhase,
   language: Language,

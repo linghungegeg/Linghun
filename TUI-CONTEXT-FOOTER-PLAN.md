@@ -1003,6 +1003,26 @@ failed · Bash timeout · d details · next: retry or cancel
 
 这条轨道的最终目标：让用户持续知道 Linghun 当前是在工作、等待、验证、阻塞还是完成；状态要真实、短、可追溯，不靠刷日志制造存在感。
 
+### 14.8 Phase 14 闭环记录
+
+已完成：
+
+- `request-lifecycle-presenter` 新增 `WorkRequestPhase` / `WorkRequestState` / `projectWorkRequestState`，把 request activity、permission、verification、provider recovery、background、agent/workflow 汇总成统一生命周期投影。
+- `createShellViewModel` 在 bottom pane 前生成 `WorkRequestState`，复用现有 `TaskPermissionView`、`requestActivityPhase`、`VisibleWorkState`，没有新造 runner、permission 或 provider 系统。
+- `mapBottomPaneStatusToView` 优先消费前台 `WorkRequestState`，同时保留旧逻辑 fallback；background/agent/workflow 状态延后到 provider/resource 强告警之后显示，避免遮住失败或阻塞。
+- 补充 lifecycle presenter 与 bottom pane focused tests，覆盖 tool running、permission waiting、verification、provider recovery、background、agent/workflow、provider failure 优先级。
+
+验证：
+
+- `corepack pnpm vitest run packages/tui/src/request-lifecycle-presenter.test.ts packages/tui/src/shell/view-model.test.ts -t "projectWorkRequestState|unified bottom status"`
+- `corepack pnpm vitest run packages/tui/src/request-lifecycle-presenter.test.ts packages/tui/src/shell/view-model.test.ts`
+- `corepack pnpm --filter @linghun/tui typecheck`
+
+剩余边界：
+
+- recent request history 和远程 summary-only progress 事件还未接入，本阶段先完成当前请求状态可见层闭环。
+- verification runner、background、agent/workflow 目前通过现有 TUI context/VisibleWorkState 汇总到统一投影，后续可继续把更细的 detailsRef/progress 透传进同一模型。
+
 
 ### 重要：
 1.每个阶段做完 必须要独立复检和压测一次 经过用户同意以后才能提交稳定点

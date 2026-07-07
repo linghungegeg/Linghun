@@ -1515,6 +1515,75 @@ describe("mapRequestActivityToView — real context field mapping", () => {
 });
 
 describe("mapBottomPaneStatusToView — unified bottom status", () => {
+  it("prefers foreground WorkRequestState over legacy activity mapping", () => {
+    const ctx = createContext({
+      requestActivityPhase: "tool_running",
+      requestActivityToolName: "Read",
+      requestActivityStartedAt: Date.now() - 2_500,
+    } as Partial<TuiContext>);
+    const status = mapBottomPaneStatusToView(ctx, {
+      activity: mapRequestActivityToView(ctx),
+      workRequestState: {
+        phase: "tool_running",
+        source: "tool",
+        title: "运行 Read…",
+        summary: "packages/tui/src/view-model.ts",
+        elapsedMs: 2_500,
+      },
+    });
+
+    expect(status).toMatchObject({
+      kind: "running",
+      source: "tool",
+      text: "运行 Read…",
+      reason: "packages/tui/src/view-model.ts",
+      elapsed: "2s",
+    });
+  });
+
+  it("maps background WorkRequestState after blocking and provider failure checks", () => {
+    const ctx = createContext({ language: "en-US" });
+    const status = mapBottomPaneStatusToView(ctx, {
+      workRequestState: {
+        phase: "background_running",
+        source: "background",
+        title: "1 background task(s) running",
+        nextAction: "Use /background for details.",
+      },
+    });
+
+    expect(status).toMatchObject({
+      kind: "running",
+      source: "background",
+      text: "1 background task(s) running",
+      nextAction: "Use /background for details.",
+    });
+  });
+
+  it("keeps provider failure stronger than deferred background WorkRequestState", () => {
+    const ctx = createContext({
+      language: "en-US",
+      lastProviderFailure: {
+        code: "HTTP_502",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5.5",
+        endpointProfile: "default",
+        summary: "HTTP 502",
+      },
+    } as unknown as Partial<TuiContext>);
+    const status = mapBottomPaneStatusToView(ctx, {
+      workRequestState: {
+        phase: "background_running",
+        source: "background",
+        title: "1 background task(s) running",
+      },
+    });
+
+    expect(status).toMatchObject({ kind: "failed", source: "provider" });
+    expect(status?.reason).toBe("HTTP 502");
+  });
+
   it("maps request running to running", () => {
     const ctx = createContext({ requestActivityPhase: "request_started" } as Partial<TuiContext>);
     const activity = mapRequestActivityToView(ctx);
