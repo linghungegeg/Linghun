@@ -127,6 +127,46 @@ describe("tool_result budget", () => {
     ).toBe(true);
   });
 
+  it("progressively persists older tool_results under pressure while keeping recent raw results", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
+    const messages = Array.from({ length: 10 }).flatMap((_, index) => {
+      const id = `call-pressure-${index}`;
+      return [
+        {
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [{ id, name: "Bash", input: { command: `pressure-${index}` } }],
+        },
+        {
+          role: "tool" as const,
+          tool_call_id: id,
+          content: `PRESSURE_${index}_START:${"p".repeat(12_500)}:PRESSURE_${index}_END`,
+        },
+      ];
+    });
+
+    const result = await applyToolResultBudgetToMessages(messages, {
+      projectPath: project,
+      sessionId: "session-pressure-age",
+    });
+
+    expect(result.records.map((record) => record.reason)).toEqual(["pressure_age"]);
+    expect(result.records[0]?.toolUseId).toBe("call-pressure-0");
+    const tools = result.messages.filter((message) => message.role === "tool");
+    expect(tools[0]?.role === "tool" ? tools[0].content : "").toContain(
+      "<persisted-tool-result>",
+    );
+    for (const index of [4, 5, 6, 7, 8, 9]) {
+      expect(tools[index]?.role === "tool" ? tools[index].content : "").toContain(
+        `PRESSURE_${index}_END`,
+      );
+    }
+    const visibleToolChars = tools.reduce((sum, message) => {
+      return message.role === "tool" ? sum + message.content.length : sum;
+    }, 0);
+    expect(visibleToolChars).toBeLessThanOrEqual(120_000);
+  });
+
   it("caps aggregate visible tool_result content after small results were already seen", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
     const state: ToolResultBudgetState = { seenIds: new Set(), replacements: new Map() };

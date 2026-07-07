@@ -15,6 +15,7 @@ import {
   maybeRunDeepCompactBeforeProvider,
 } from "./deep-compact-runtime.js";
 import { createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
+import { buildPostCompactRestoreMessage } from "./compact-restore-runtime.js";
 import { isFeatureEnabled } from "./feature-flag-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import type { TuiContext } from "./index.js";
@@ -120,7 +121,7 @@ export async function prepareMessagesForProviderPreflight(input: {
     },
   ];
   if (input.trigger !== "reactive" && budgetedChars <= triggerChars) {
-    const withDeep = injectDeepCompactSummary(budgeted, input.context.cache.deepCompact);
+    const withDeep = await injectDeepCompactContext(budgeted, input.context);
     const withDeepChars = estimateModelMessageChars(withDeep);
     strategySteps.push({
       layer: "semantic_deep",
@@ -230,7 +231,7 @@ export async function prepareMessagesForProviderPreflight(input: {
         deps: input.deps.runDeepCompact,
       });
       const afterDeep = estimateModelMessageChars(
-        injectDeepCompactSummary(budgeted, input.context.cache.deepCompact),
+        await injectDeepCompactContext(budgeted, input.context),
       );
       if (!deep.ok) {
         const deepMessage = "message" in deep ? deep.message : "Deep compact failed.";
@@ -268,7 +269,7 @@ export async function prepareMessagesForProviderPreflight(input: {
       });
     } else {
       const afterDeep = estimateModelMessageChars(
-        injectDeepCompactSummary(budgeted, input.context.cache.deepCompact),
+        await injectDeepCompactContext(budgeted, input.context),
       );
       strategySteps.push({
         layer: "semantic_deep",
@@ -327,11 +328,11 @@ export async function prepareMessagesForProviderPreflight(input: {
       input.context,
     );
     refreshCompactProjectionAcceptance(projection, input.context);
-    const providerMessages = injectDeepCompactSummary(
+    const providerMessages = await injectDeepCompactContext(
       replacementProjectionEnabled
         ? injectCompactProjectionMessage(compacted.messages, projection)
         : compacted.messages,
-      input.context.cache.deepCompact,
+      input.context,
     );
     const providerMessageChars = estimateModelMessageChars(providerMessages);
     strategySteps.push({
@@ -842,6 +843,16 @@ export function sanitizeCompactSummaryText(
   const singleLine = value.replace(/\s+/g, " ");
   const withoutSecrets = sanitizeDiagnosticText(redactCommonSecrets(singleLine));
   return truncateDisplay(sanitizeDisplayPaths(withoutSecrets, context.projectPath), maxChars);
+}
+
+async function injectDeepCompactContext(
+  messages: ModelMessage[],
+  context: TuiContext,
+): Promise<ModelMessage[]> {
+  const packet = context.cache.deepCompact;
+  if (!packet) return messages;
+  const restoreMessage = await buildPostCompactRestoreMessage(context);
+  return injectDeepCompactSummary(messages, packet, restoreMessage ? [restoreMessage] : []);
 }
 
 function injectCompactProjectionMessage(

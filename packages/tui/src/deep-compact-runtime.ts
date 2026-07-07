@@ -55,6 +55,10 @@ const DEEP_COMPACT_SUMMARY_MAX_CHARS = 4_000;
 const DEEP_COMPACT_RERUN_EVENT_THRESHOLD = 40;
 const RECENT_TRANSCRIPT_TAIL_EVENTS = 24;
 const EVENT_TEXT_LIMIT = 420;
+const VERBATIM_USER_MESSAGE_LIMIT = 6;
+const TOOL_RESULT_SUMMARY_LIMIT = 12;
+const CODE_SNIPPET_LIMIT = 8;
+const CODE_SNIPPET_TEXT_LIMIT = 360;
 
 export function createDeepCompactProgress(): CompactProgressSnapshot {
   return {
@@ -395,6 +399,10 @@ export function formatDeepCompactPromptSummary(
     `summary ${packet.summary}`,
     `preserved evidence refs ${packet.preservedEvidenceRefs.join(", ") || "none"}`,
     `preserved files ${packet.preservedFiles.join(", ") || "none"}`,
+    `narrative summary ${packet.narrativeSummary || "none"}`,
+    `user messages verbatim ${packet.userMessagesVerbatim?.join("\n") || "none"}`,
+    `tool result summaries ${packet.toolResultSummaries?.join("\n") || "none"}`,
+    `code snippets ${packet.codeSnippets?.join("\n") || "none"}`,
     `active agents/workflows ${packet.activeAgentsWorkflows.join("; ") || "none"}`,
     `needs-attention agents/workflows ${packet.needsAttentionAgentsWorkflows?.join("; ") || "none"}`,
     `stale resumable agents/workflows ${packet.staleResumableAgentsWorkflows?.join("; ") || "none"}`,
@@ -409,6 +417,7 @@ export function formatDeepCompactPromptSummary(
 export function injectDeepCompactSummary(
   messages: ModelMessage[],
   packet: DeepCompactPacket | undefined,
+  additionalMessages: ModelMessage[] = [],
 ): ModelMessage[] {
   const summary = formatDeepCompactPromptSummary(packet);
   if (!summary) return messages;
@@ -416,7 +425,14 @@ export function injectDeepCompactSummary(
     role: "user",
     content: summary,
   };
-  return insertAfterLeadingSystemMessages(messages, summaryMessage);
+  let index = 0;
+  while (messages[index]?.role === "system") index += 1;
+  return [
+    ...messages.slice(0, index),
+    summaryMessage,
+    ...additionalMessages,
+    ...messages.slice(index),
+  ];
 }
 
 export function insertAfterLeadingSystemMessages(
@@ -455,6 +471,14 @@ export function createDeepCompactPacket(input: {
     ])
       .map((file) => sanitizeDeepCompactText(context, file, 180))
       .slice(0, 20),
+    narrativeSummary: sanitizeDeepCompactText(
+      context,
+      input.summary.trim() || synthesizeFallbackSummary(context, input.transcript),
+      1_200,
+    ),
+    userMessagesVerbatim: collectUserMessagesVerbatim(context, input.transcript),
+    toolResultSummaries: collectToolResultSummaries(context, input.transcript),
+    codeSnippets: collectCodeSnippets(context, input.transcript),
     activeAgentsWorkflows: collectActiveAgentsWorkflows(context),
     needsAttentionAgentsWorkflows: collectNeedsAttentionAgentsWorkflows(context),
     staleResumableAgentsWorkflows: collectStaleResumableAgentsWorkflows(context),
@@ -568,7 +592,7 @@ function buildFullTranscriptSemanticOutline(
 
   return [
     "Full transcript semantic outline:",
-    `event type counts: ${[...eventTypeCounts.entries()].map(([type, count]) => `${type}:${count}`).join(", ") || "none"}`,
+    `event type counts: ${Array.from(eventTypeCounts.entries()).map(([type, count]) => `${type}:${count}`).join(", ") || "none"}`,
     `first user goal: ${firstUser?.type === "user_message" ? sanitizeDeepCompactText(context, firstUser.text, EVENT_TEXT_LIMIT) : "none"}`,
     `latest user goal: ${latestUser?.type === "user_message" ? sanitizeDeepCompactText(context, latestUser.text, EVENT_TEXT_LIMIT) : "none"}`,
     formatOutlineSection("key user requirements", userMessages, 24),
@@ -658,7 +682,7 @@ function collectOutlineEvent(
       break;
     case "system_event":
       if (
-        /fail|failure|failed|compact|cooldown|risk|decision|scope|blocked|失败|风险|阻断/iu.test(
+        /fail|failure|failed|compact|cooldown|risk|decision|scope|blocked|失败|风险|阻断/i.test(
           event.message,
         )
       ) {
@@ -707,7 +731,7 @@ function findLatestEvent<T extends TranscriptEvent["type"]>(
 }
 
 function looksLikeDecision(text: string): boolean {
-  return /decid|decision|choose|chosen|plan|will|must|should|done|fixed|blocked|risk|决定|选择|计划|必须|应该|已|阻断|风险/iu.test(
+  return /decid|decision|choose|chosen|plan|will|must|should|done|fixed|blocked|risk|决定|选择|计划|必须|应该|已|阻断|风险/i.test(
     text,
   );
 }
@@ -758,6 +782,53 @@ function summarizeToolResultContent(content: unknown): string {
   return stringifyValueWithinBudget(content, EVENT_TEXT_LIMIT) ?? "[unserializable]";
 }
 
+function collectUserMessagesVerbatim(context: TuiContext, transcript: TranscriptEvent[]): string[] {
+  return transcript
+    .filter((event): event is Extract<TranscriptEvent, { type: "user_message" }> => event.type === "user_message")
+    .slice(-VERBATIM_USER_MESSAGE_LIMIT)
+    .map((event) => sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT));
+}
+
+function collectToolResultSummaries(context: TuiContext, transcript: TranscriptEvent[]): string[] {
+  return transcript
+    .filter((event): event is Extract<TranscriptEvent, { type: "tool_result" | "tool_call_end" }> =>
+      event.type === "tool_result" || event.type === "tool_call_end",
+    )
+    .slice(-TOOL_RESULT_SUMMARY_LIMIT)
+    .map((event) => summarizeTranscriptEvent(context, event));
+}
+
+function collectCodeSnippets(context: TuiContext, transcript: TranscriptEvent[]): string[] {
+  const snippets: string[] = [];
+  for (const event of transcript) {
+    if (event.type !== "tool_result" && event.type !== "tool_call_end") continue;
+    const text = event.type === "tool_result" ? summarizeToolResultContent(event.content) : event.output.text;
+    const snippet = extractCodeLikeSnippet(text);
+    if (!snippet) continue;
+    pushEarlyAndRecent(
+      snippets,
+      sanitizeDeepCompactText(context, snippet, CODE_SNIPPET_TEXT_LIMIT),
+      CODE_SNIPPET_LIMIT,
+    );
+  }
+  return snippets;
+}
+
+function extractCodeLikeSnippet(value: string): string | undefined {
+  const fenced = value.match(/```[\s\S]*?```/)?.[0];
+  if (fenced) return fenced;
+  const lines = value.split(/\r?\n/).filter((line) => {
+    const trimmed = line.trim();
+    return (
+      trimmed.startsWith("+") ||
+      trimmed.startsWith("-") ||
+      trimmed.startsWith("@@") ||
+      /\b(function|class|const|let|type|interface|export|import)\b/.test(trimmed)
+    );
+  });
+  return lines.length > 0 ? lines.slice(0, 12).join("\n") : undefined;
+}
+
 function synthesizeFallbackSummary(context: TuiContext, transcript: TranscriptEvent[]): string {
   const latestUser = [...transcript].reverse().find((event) => event.type === "user_message");
   const latestAssistant = [...transcript]
@@ -781,7 +852,7 @@ export function sanitizeDeepCompactText(
 ): string {
   const singleLine = value.replace(/\s+/g, " ");
   const redacted = redactCommonSecrets(singleLine).replace(
-    /[A-Z]:[\\/][^\s"')\]}]+/gu,
+    /[A-Z]:[\\/][^\s"')\]}]+/g,
     "[local-path]",
   );
   return truncateDisplay(
@@ -961,5 +1032,5 @@ function failMessage(context: TuiContext, english: string): DeepCompactRunResult
 }
 
 function unique(values: string[]): string[] {
-  return [...new Set(values.filter(Boolean))];
+  return Array.from(new Set(values.filter(Boolean)));
 }

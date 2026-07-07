@@ -1,0 +1,121 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  buildPostCompactRestoreMessage,
+  buildPostCompactRestorePayload,
+  formatPostCompactRestorePayload,
+} from "./compact-restore-runtime.js";
+import type { TuiContext } from "./index.js";
+
+function makeContext(projectPath: string, overrides: Partial<TuiContext> = {}): TuiContext {
+  return {
+    projectPath,
+    recentlyMentionedFiles: [],
+    tools: { changedFiles: [], todos: [], workspaceRoot: projectPath },
+    cache: {},
+    activePlan: undefined,
+    agents: [],
+    workflows: {},
+    ...overrides,
+  } as TuiContext;
+}
+
+describe("post compact restore runtime", () => {
+  it("restores recent workspace file content with plan and active runtime status", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
+    await mkdir(join(project, "src"));
+    await writeFile(join(project, "src", "current.ts"), "export const current = 42;\n", "utf8");
+
+    const context = makeContext(project, {
+      recentlyMentionedFiles: ["src/current.ts"],
+      tools: { changedFiles: ["src/current.ts"], todos: [], workspaceRoot: project },
+      activePlan: {
+        id: "plan-1",
+        title: "Finish restore",
+        options: [{ id: "a", title: "Main", steps: ["Read file"], risks: ["none"] }],
+      },
+      agents: [
+        {
+          id: "agent-1",
+          type: "worker",
+          role: "executor",
+          provider: "test",
+          task: "continue restore work",
+          model: "test-model",
+          permissionMode: "auto-review",
+          status: "running",
+          transcriptPath: "agent.log",
+          transcriptSessionId: "agent-session",
+          mailbox: [],
+          summary: "running worker",
+          contextSummary: "restore context",
+          cost: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            estimatedCny: 0,
+          },
+          startedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+      ],
+      workflows: {
+        enabled: true,
+        templates: [],
+        disabledIds: [],
+        activeRun: {
+          id: "wf-1",
+          goal: "ship restore",
+          planId: "plan-wf",
+          status: "running",
+          steps: [],
+          startedAt: "2026-01-01T00:00:00.000Z",
+          result: "partial",
+        },
+      },
+    });
+
+    const message = await buildPostCompactRestoreMessage(context);
+
+    expect(message?.role).toBe("user");
+    expect(message?.content).toContain("Post-compact restored context");
+    expect(message?.content).toContain("file src/current.ts");
+    expect(message?.content).toContain("export const current = 42;");
+    expect(message?.content).toContain("PlanProposal plan-1: Finish restore");
+    expect(message?.content).toContain("agent agent-1: running");
+    expect(message?.content).toContain("workflow wf-1: running");
+  });
+
+  it("skips missing and out-of-workspace files without failing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
+    const context = makeContext(project, {
+      recentlyMentionedFiles: ["missing.ts", "../outside.ts"],
+      tools: { changedFiles: [], todos: [], workspaceRoot: project },
+    });
+
+    const payload = await buildPostCompactRestorePayload(context);
+
+    expect(payload.files).toEqual([]);
+    expect(formatPostCompactRestorePayload(payload)).toBeUndefined();
+  });
+
+  it("truncates restored files within per-file budget", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
+    await mkdir(join(project, "src"));
+    await writeFile(join(project, "src", "large.ts"), `START${"x".repeat(7_000)}END`, "utf8");
+
+    const payload = await buildPostCompactRestorePayload(
+      makeContext(project, {
+        recentlyMentionedFiles: ["src/large.ts"],
+        tools: { changedFiles: [], todos: [], workspaceRoot: project },
+      }),
+    );
+
+    expect(payload.files).toHaveLength(1);
+    expect(payload.files[0]?.truncated).toBe(true);
+    expect(payload.files[0]?.content.length).toBeLessThanOrEqual(5_000);
+  });
+});

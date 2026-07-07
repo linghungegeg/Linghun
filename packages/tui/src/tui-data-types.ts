@@ -355,6 +355,10 @@ export type DeepCompactPacket = {
   summary: string;
   preservedEvidenceRefs: string[];
   preservedFiles: string[];
+  narrativeSummary?: string;
+  userMessagesVerbatim?: string[];
+  toolResultSummaries?: string[];
+  codeSnippets?: string[];
   activeAgentsWorkflows: string[];
   needsAttentionAgentsWorkflows?: string[];
   staleResumableAgentsWorkflows?: string[];

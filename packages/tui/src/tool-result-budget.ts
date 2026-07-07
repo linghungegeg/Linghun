@@ -6,6 +6,8 @@ import {
   LINGHUN_DEFAULT_TOOL_RESULT_CHARS,
   LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
   LINGHUN_MAX_TOOL_RESULT_BYTES,
+  LINGHUN_TOOL_RESULT_PRESSURE_RATIO,
+  LINGHUN_TOOL_RESULT_RECENT_RAW_RESULTS,
 } from "./runtime-budget.js";
 
 export type ToolResultBudgetArtifact = {
@@ -26,7 +28,7 @@ export type ToolResultBudgetRecord = {
   originalChars: number;
   replacementChars: number;
   artifact: ToolResultBudgetArtifact;
-  reason: "single_result" | "aggregate_message";
+  reason: "single_result" | "aggregate_message" | "pressure_age";
 };
 
 export type ToolResultBudgetResult = {
@@ -137,6 +139,7 @@ export async function applyToolResultBudgetToMessages(
     }
   }
 
+  const selectedBeforePressure = selected.size;
   selectCandidatesToFitVisibleBudget({
     candidates,
     selected,
@@ -145,6 +148,15 @@ export async function applyToolResultBudgetToMessages(
     sessionId: options.sessionId,
     state: options.state,
   });
+  if (selected.size === selectedBeforePressure) {
+    selectOldCandidatesUnderPressure({
+      candidates,
+      selected,
+      cachedReplacements,
+      sessionId: options.sessionId,
+      state: options.state,
+    });
+  }
 
   if (selected.size === 0) {
     for (const candidate of freshCandidates) {
@@ -269,6 +281,42 @@ function selectCandidatesToFitVisibleBudget(options: {
     )
     .sort((a, b) => b.chars - a.chars);
   selectCandidatesUntilWithinBudget(seenCandidates, visibleSize, options);
+}
+
+function selectOldCandidatesUnderPressure(options: {
+  candidates: Candidate[];
+  selected: Map<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>;
+  cachedReplacements: ReadonlyMap<string, string>;
+  sessionId: string;
+  state?: ToolResultBudgetState;
+}): void {
+  const pressureTarget = Math.floor(
+    LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS * LINGHUN_TOOL_RESULT_PRESSURE_RATIO,
+  );
+  let visibleSize = options.candidates.reduce(
+    (sum, candidate) => sum + getCandidateVisibleChars(candidate, options),
+    0,
+  );
+  if (visibleSize <= pressureTarget) return;
+
+  const rawCandidates = options.candidates.filter(
+    (item) =>
+      !options.selected.has(item.toolUseId) &&
+      !options.cachedReplacements.has(item.toolUseId) &&
+      !getStateReplacement(item, options),
+  );
+  const recentRawMessageIndexes = new Set(
+    rawCandidates
+      .slice(-LINGHUN_TOOL_RESULT_RECENT_RAW_RESULTS)
+      .map((candidate) => candidate.messageIndex),
+  );
+
+  for (const candidate of rawCandidates) {
+    if (visibleSize <= pressureTarget) break;
+    if (recentRawMessageIndexes.has(candidate.messageIndex)) continue;
+    options.selected.set(candidate.toolUseId, { ...candidate, reason: "pressure_age" });
+    visibleSize -= Math.max(0, candidate.chars - getEstimatedSummaryChars(candidate));
+  }
 }
 
 function selectCandidatesUntilWithinBudget(
