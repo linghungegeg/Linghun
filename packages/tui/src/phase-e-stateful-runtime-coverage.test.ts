@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { defaultConfig } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
-import type { ModelGateway, ModelMessage } from "@linghun/providers";
+import type { ModelGateway, ModelMessage, ModelRequest } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
 import { stableHash } from "./cache-freshness.js";
+import { observeCacheSafeRequest } from "./cache-policy-runtime.js";
 import { breakCacheTestHooks } from "./break-cache-runtime.js";
 import {
   executeBreakCacheMutation,
@@ -296,6 +297,83 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(context.cache.compactStrategy?.steps).toContainEqual(
       expect.objectContaining({ layer: "full_summary", status: "applied" }),
     );
+  });
+
+  it("keeps the provider prefix stable across two post-compact rounds", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 20_000);
+    const staleContext = "POST_COMPACT_PREFIX_STALE_CONTEXT".repeat(1_600);
+    const messages: ModelMessage[] = [
+      { role: "system", content: "stable system guard" },
+      { role: "user", content: staleContext },
+      { role: "assistant", content: staleContext },
+      { role: "user", content: staleContext },
+      { role: "user", content: "initial compact trigger request" },
+    ];
+
+    const compacted = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+
+    expect(compacted.blocked).toBe(false);
+    if (compacted.blocked) throw new Error("provider preflight unexpectedly blocked");
+    const stablePrefix = providerPrefixThroughCompactProjection(compacted.messages);
+    const stablePrefixHash = hashProviderMessages(stablePrefix);
+    expect(stablePrefix.map((message) => message.content).join("\n")).toContain(
+      "Context compact projection",
+    );
+
+    const firstRoundMessages: ModelMessage[] = [
+      ...stablePrefix,
+      { role: "user", content: "post-compact follow-up round one" },
+    ];
+    const secondRoundMessages: ModelMessage[] = [
+      ...stablePrefix,
+      { role: "user", content: "post-compact follow-up round two" },
+    ];
+
+    expect(hashProviderMessages(providerPrefixThroughCompactProjection(firstRoundMessages))).toBe(
+      stablePrefixHash,
+    );
+    expect(hashProviderMessages(providerPrefixThroughCompactProjection(secondRoundMessages))).toBe(
+      stablePrefixHash,
+    );
+
+    const firstObservation = observeCacheSafeRequest({
+      kind: "main",
+      provider: "anthropic",
+      request: makeProviderCacheRequest(firstRoundMessages),
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    const secondObservation = observeCacheSafeRequest({
+      previous: firstObservation,
+      kind: "main",
+      provider: "anthropic",
+      request: makeProviderCacheRequest(secondRoundMessages),
+      now: new Date("2026-01-01T00:00:01.000Z"),
+    });
+
+    expect(secondObservation.fingerprint.systemPrefixHash).toBe(
+      firstObservation.fingerprint.systemPrefixHash,
+    );
+    expect(secondObservation.fingerprint.conversationPrefixHash).toBe(
+      firstObservation.fingerprint.conversationPrefixHash,
+    );
+    expect(secondObservation.fingerprint.messagePrefixHash).toBe(
+      firstObservation.fingerprint.messagePrefixHash,
+    );
+    expect(secondObservation.fingerprint.latestMessageHash).not.toBe(
+      firstObservation.fingerprint.latestMessageHash,
+    );
+    expect(secondObservation.fingerprint.changedKeys).toEqual([
+      "requestHash",
+      "latestMessageHash",
+    ]);
   });
 
   it("can roll back provider-visible replacement projection with a feature flag", async () => {
@@ -1153,6 +1231,29 @@ async function createTestContext(): Promise<TuiContext> {
 
 function hashProviderMessages(messages: ModelMessage[]): string {
   return stableHash(messages);
+}
+
+function providerPrefixThroughCompactProjection(messages: ModelMessage[]): ModelMessage[] {
+  const compactProjectionIndex = messages.findIndex(
+    (message) =>
+      typeof message.content === "string" &&
+      message.content.startsWith("Context compact projection"),
+  );
+  if (compactProjectionIndex < 0) {
+    throw new Error("Context compact projection missing from provider prefix fixture");
+  }
+  return messages.slice(0, compactProjectionIndex + 1);
+}
+
+function makeProviderCacheRequest(messages: ModelMessage[]): ModelRequest {
+  return {
+    messages,
+    model: "claude-sonnet-4-5",
+    endpointProfile: "anthropic_messages",
+    promptCacheEnabled: true,
+    tools: [{ name: "Read", description: "read file", inputSchema: { type: "object" } }],
+    toolChoice: "auto",
+  };
 }
 
 function stressAgent(id: string, status: "running" | "blocked" | "stale"): AgentRun {

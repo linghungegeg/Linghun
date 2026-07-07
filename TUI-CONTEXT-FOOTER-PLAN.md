@@ -636,10 +636,14 @@ assistant/tool summary: ...
 - `corepack pnpm vitest run packages/tui/src/deep-compact-runtime.test.ts packages/tui/src/phase-e-stateful-runtime-coverage.test.ts -t "compact|Compact|deep|Deep|cache|Cache"`
 - `corepack pnpm --filter @linghun/tui typecheck`
 
+补充闭环：
+
+- provider preflight 专门 fixture 已补连续两轮 post-compact provider prefix 稳定性断言；同一 compact projection 下，两轮只允许 latest message/request hash 变化，system/conversation/message prefix hash 必须保持稳定。
+- Anthropic cache_control 落点和终端可见 compact marker/recent tail 已纳入 focused compact/cache/provider 压测集合，并完成 5 轮本地压测。
+
 剩余边界：
 
-- provider preflight fixture 已补压缩前/后 messages hash、restore metadata 和 post-compact warmup projection hash 断言；连续两轮 provider prefix 稳定性仍需另补专门 fixture。
-- Anthropic cache_control 落点和终端可见 compact marker/recent tail 的 snapshot 还需要单独收敛。
+- 真模型/真网络 cache read 命中率压测仍依赖外部 provider、网络和临时 key；当前闭环为本地可复现 fixture 与 focused regression。
 
 ### 12.7 推荐执行顺序
 
