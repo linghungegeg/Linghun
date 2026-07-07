@@ -62,6 +62,7 @@ import {
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
+  __testBindCompactOutputMemoryForShell,
   __testBuildExplicitDetailsCommandPanel,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
@@ -28176,6 +28177,22 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const transcriptSource = ctx.transcriptSource;
     if (!transcriptSource || !firstId) throw new Error("missing transcript source cell input");
     expect(findTranscriptSourceCell(transcriptSource, firstId)).toBeTruthy();
+  });
+
+  it("binds compact output memory without dropping projection options", async () => {
+    const ctx = makeFakeContext();
+    const seenOptions: Array<{ projectMainScreen?: boolean } | undefined> = [];
+    __testBindCompactOutputMemoryForShell(ctx, {
+      compactOutputMemory: (options) => {
+        seenOptions.push(options);
+        return { beforeCount: 8, afterCount: 4 };
+      },
+    });
+
+    const counts = await ctx.compactOutputMemory?.({ projectMainScreen: true });
+
+    expect(counts).toEqual({ beforeCount: 8, afterCount: 4 });
+    expect(seenOptions).toEqual([{ projectMainScreen: true }]);
   });
 
   it("Phase 7.17: final assistant summary 首行超过 MAX_STREAMING_SUMMARY_CHARS 时被截断", async () => {

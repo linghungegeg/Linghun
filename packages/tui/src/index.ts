@@ -2560,6 +2560,17 @@ function isSameTranscriptViewportGeometry(
   );
 }
 
+export function __testBindCompactOutputMemoryForShell(
+  context: TuiContext,
+  shellOutput: {
+    compactOutputMemory: (options?: { projectMainScreen?: boolean }) =>
+      | Promise<{ beforeCount: number; afterCount: number }>
+      | { beforeCount: number; afterCount: number };
+  },
+): void {
+  context.compactOutputMemory = (options) => shellOutput.compactOutputMemory(options);
+}
+
 async function runInkShell(
   input: Readable,
   output: Writable,
@@ -2627,7 +2638,7 @@ async function runInkShell(
     requestShellFrame,
     terminalFirstSink,
   );
-  context.compactOutputMemory = () => shellOutput.compactOutputMemory();
+  __testBindCompactOutputMemoryForShell(context, shellOutput);
   context.pushTranscriptBlock = (block) => {
     appendTranscriptSourceBlock(context, block);
     blocks.push(block);
