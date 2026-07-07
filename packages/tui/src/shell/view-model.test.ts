@@ -9,7 +9,7 @@ import {
   __testBuildExplicitDetailsCommandPanel,
   __testCreateShellBlockOutput,
 } from "../index.js";
-import { formatToolOutput } from "../tool-output-presenter.js";
+import { createStructuredToolOutput, formatToolOutput } from "../tool-output-presenter.js";
 import {
   commitTerminalFirstUserBlock,
   createTerminalFirstAssistantSink,
@@ -317,6 +317,212 @@ describe("shell view model", () => {
     expect(rendered).not.toContain("v0.1.0");
     // No ANSI escapes in no-color mode
     expect(rendered).not.toContain("\x1B[");
+  });
+
+  it("locks Phase 5 visual coverage across content kinds, narrow width, and provider-neutral footer state", () => {
+    const longBashText = Array.from({ length: 30 }, (_, index) => `stdout line ${index + 1}`).join("\n");
+    const successStructured = createStructuredToolOutput(
+      "Bash",
+      {
+        text: longBashText,
+        preview:
+          "stdout line 1\nstdout line 2\nstdout line 3\nstdout line 4\nstdout line 5\nOutput folded. Press Ctrl+O to expand.",
+        summary: "Bash summary: generated 30 lines",
+        details: longBashText,
+        truncated: true,
+        fullOutputPath: ".linghun/session/tool-results/bash-long.txt",
+        evidenceId: "ev-bash-long",
+        data: { command: "pnpm test", exitCode: 0, totalLines: 30 },
+      },
+      "en-US",
+      "ev-bash-long",
+    );
+    const success = createOutputBlock(
+      successStructured.text,
+      "en-US",
+      "phase5-tool-success",
+    );
+    const failure = createOutputBlock(
+      formatToolOutput(
+        "Bash",
+        {
+          text: "Error: missing fixture\nexit 1",
+          preview: "Error: missing fixture",
+          summary: "Bash failed because a fixture is missing",
+          details: "Error: missing fixture\nstack line\nexit 1",
+          truncated: true,
+          fullOutputPath: ".linghun/session/tool-results/bash-fail.txt",
+          evidenceId: "ev-bash-fail",
+          data: { command: "pnpm test", exitCode: 1 },
+        },
+        "en-US",
+        "ev-bash-fail",
+      ),
+      "en-US",
+      "phase5-tool-failure",
+    );
+    const markdown: ProductBlockViewModel = {
+      id: "phase5-markdown",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "phase5 markdown",
+      fullText: [
+        "长中文段落用于验证窄终端换行，不应该撑爆布局，也不应该被工具结果样式污染。",
+        "",
+        "English markdown keeps **bold** text and `inline code` readable.",
+        "",
+        "| Name | Value |",
+        "| --- | --- |",
+        "| table | works |",
+        "",
+        "```ts",
+        "const url = 'https://example.test/a/very/long/path/that/must/wrap?query=1234567890';",
+        "```",
+        "",
+        "```diff",
+        "--- a/file.ts",
+        "+++ b/file.ts",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+        "```",
+      ].join("\n"),
+      messageKind: "assistant_text",
+      keep: true,
+    };
+    const workspace: ProductBlockViewModel = {
+      id: "phase5-workspace",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "main · clean/ahead · index ready · cache 84% · ctx 12%",
+      fullText: "main · clean/ahead · index ready · cache 84% · ctx 12%",
+      messageKind: "workspace_status",
+      displayBlock: {
+        kind: "workspace_status",
+        status: "info",
+        summary: "main · clean/ahead · index ready · cache 84% · ctx 12%",
+        bordered: true,
+      },
+      keep: true,
+    };
+    const diagnostic: ProductBlockViewModel = {
+      id: "phase5-diagnostic",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "Diagnostic: cache warming after compact",
+      fullText: "Diagnostic: cache warming after compact\nchangedKeys hidden in details",
+      nextAction: "Press Ctrl+O for details",
+      ctrlOCollapsed: true,
+      messageKind: "diagnostic",
+      displayBlock: {
+        kind: "diagnostic",
+        status: "info",
+        summary: "Diagnostic: cache warming after compact",
+        detailsPath: ".linghun/session/details/cache.txt",
+        evidenceId: "ev-cache",
+        bordered: true,
+        collapsible: true,
+      },
+      keep: true,
+    };
+    const notification = {
+      key: "phase5-notification",
+      text: "cache warming after compact",
+      priority: "low" as const,
+      tone: "dim" as const,
+    };
+
+    const view = createShellViewModel(
+      createContext({
+        language: "en-US",
+        model: "claude-opus-4-8",
+        cache: {
+          history: [{ hitRate: 0.84 }],
+          compactPressure: { estimatedChars: 12_000, maxChars: 100_000 },
+        },
+        notifications: [notification],
+      } as Partial<TuiContext>),
+      {
+        width: 52,
+        noColor: true,
+        viewMode: "task",
+        outputBlocks: [markdown, success, failure, workspace, diagnostic],
+      },
+    );
+    const rendered = renderPlainShell(view);
+
+    expect(view.width).toBe(52);
+    expect(view.themeMode).toBe("no-color");
+    expect(view.notifications).toEqual([notification]);
+    expect(view.blocks.map((block) => block.messageKind)).toEqual([
+      "assistant_text",
+      "tool_result_success",
+      "tool_result_error",
+      "workspace_status",
+      "diagnostic",
+    ]);
+    expect(successStructured.block).toMatchObject({
+      kind: "tool_result_success",
+      status: "success",
+      bordered: true,
+      collapsible: true,
+      detailsPath: ".linghun/session/tool-results/bash-long.txt",
+      evidenceId: "ev-bash-long",
+    });
+    expect(success.displayBlock).toMatchObject({
+      kind: "tool_result_success",
+      status: "success",
+      bordered: true,
+    });
+    expect(failure.displayBlock).toMatchObject({ kind: "tool_result_error", status: "error" });
+    expect(workspace.displayBlock).toMatchObject({ kind: "workspace_status", bordered: true });
+    expect(diagnostic.displayBlock).toMatchObject({
+      kind: "diagnostic",
+      detailsPath: ".linghun/session/details/cache.txt",
+      evidenceId: "ev-cache",
+      bordered: true,
+    });
+    expect(view.taskFooter?.model).toMatch(/^Model\s+\S/u);
+    expect(view.taskFooter?.cache).toBe("Cache 84%");
+    expect(view.taskFooter?.contextUsage?.wide).toContain("ctx [");
+    expect(view.taskFooter?.contextUsage?.ratio).toBe(0.12);
+    expect(rendered).toContain("长中文段落用于验证窄终端换行");
+    expect(rendered).toContain("English markdown keeps bold text");
+    expect(rendered).toContain("+ ts");
+    expect(rendered).toContain("--- a/file.ts");
+    expect(rendered).toContain("Bash(pnpm test) ✓");
+    expect(rendered).toContain("Bash(pnpm test) ✗ exit 1");
+    expect(rendered).toContain("Press Ctrl+O for details");
+    expect(rendered).toContain("main · clean/ahead · index ready");
+    expect(rendered).toContain("Diagnostic: cache warming after compact");
+    expect(rendered).not.toContain("tool_result_success");
+    expect(rendered).not.toContain("ev-bash-long");
+    expect(rendered).not.toContain(".linghun/session/tool-results/bash-long.txt");
+    expect(rendered).not.toContain("cache warming after compact\ncache warming after compact");
+    expect(rendered).not.toContain("\x1B[");
+
+    const permissionView = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 52,
+      noColor: true,
+      viewMode: "task",
+      permission: {
+        toolName: "Write",
+        reason: "write report fixture",
+        risk: "medium",
+        scope: ["TUI-CONTEXT-FOOTER-PLAN.md"],
+        hint: "allow / deny / details",
+      },
+    });
+    const permissionRendered = renderPlainShell(permissionView);
+
+    expect(permissionView.blocks).toEqual([]);
+    expect(permissionView.permission?.toolName).toBe("Write");
+    expect(permissionRendered).toContain("[Write] [MEDIUM]");
+    expect(permissionRendered).toContain("allow / deny / details");
+    expect(permissionRendered).not.toContain("\x1B[");
   });
 });
 

@@ -371,6 +371,40 @@ ctx 12%
 - 如果某些 smoke 不能自动化，记录手动验证步骤和结果。
 - 不能只看单一宽度或单一英文输出。
 
+### 9.4 Phase 5 闭环记录
+
+已完成：
+
+- `view-model.test.ts` 增加 Phase 5 聚合回归，集中覆盖长中文段落、英文 markdown、表格、diff、code block、工具成功、工具失败、超长 Bash 输出折叠、workspace status、diagnostic、notification、权限等待/阻塞、窄终端宽度和 no-color 主屏输出。
+- 聚合回归断言 `DisplayBlock` / `messageKind` 语义不退化：工具成功/失败仍是 `tool_result_success` / `tool_result_error`，workspace status 和 diagnostic 仍带轻边界，diagnostic 的 details/evidence 元数据保留在结构化 block 上但不泄漏到主屏。
+- 聚合回归断言 footer 的 cache/ctx 来自真实状态投影：`Cache 84%`、`ctx [bar] 12%` 和 ratio 保持一致，防止上下文额度又回到预览区长句或缺失。
+- 真实 TUI smoke 已有 80/120 列 no-color 覆盖，覆盖中文、表格、普通 code 长 URL/长 JSON、diff fence 和最终屏幕行宽不溢出；本阶段把工具/状态/权限/notification/details/evidence 覆盖补到 view-model/golden 侧。
+
+验证：
+
+- `corepack pnpm vitest run packages/tui/src/shell/view-model.test.ts -t "Phase 5 visual coverage"`
+- `corepack pnpm vitest run packages/tui/src/shell/ink-interaction-smoke.test.ts -t "renders assistant markdown code blocks"`
+- `corepack pnpm --filter @linghun/tui typecheck`
+
+源码证据：
+
+- `packages/tui/src/index.ts` 的 `runPlainTui` / `runInkShell` 都把 `outputBlocks`、权限、activity、reasoning、background summary 等状态统一送进 `createShellViewModel`；provider 差异在上游 runtime 解析，TUI 展示层不按 provider 分叉。
+- `packages/tui/src/tui-output-surface.ts` 的 `ShellBlockOutput` 和 `createTerminalFirstAssistantSink` 负责把稳定 transcript block 送入同一输出面，覆盖 assistant 正文、工具结果和 diagnostic 的 terminal-first 路径。
+- `packages/tui/src/tool-output-presenter.ts` 的 `createStructuredToolOutput` 生成 `tool_result_success` / `tool_result_error` 的 `DisplayBlock`，保留 `detailsPath`、`evidenceId`、`collapsible` 和 `bordered` 元数据，同时 `formatToolOutput` 继续提供旧字符串兼容。
+- `packages/tui/src/shell/types.ts` 已把 `assistant_text`、`tool_call`、`tool_result_success`、`tool_result_error`、`diff`、`code`、`workspace_status`、`diagnostic`、`notification` 纳入 `DisplayBlockKind`；`packages/tui/src/shell/components/ProductBlock.tsx` 再用 `MessageResponse` 轻 rail 渲染工具成功、diagnostic、diff/code/workspace status，普通 assistant 正文仍走无卡片 markdown。
+- `packages/tui/src/shell/components/StatusFooter.tsx` 负责选择 model、cache、index、context、reasoning、remote/git 等 footer segment，`packages/tui/src/shell/view-model.ts` 负责从 `TuiContext` 和上游 runtime 状态装配这些字段。
+
+当前 CCB / provider 结论：
+
+- TUI 视觉五阶段和文档第 12 节的 CCB/codex 压缩轨道是两条边界：前者负责输出精装层，后者负责 compact boundary、replacement projection、缓存命中和恢复包；不能把上下文压缩修复混进 ProductBlock/MessageResponse/tool-output-presenter 的视觉闭环。
+- 视觉层已经采用 CCB 风格的轻 rail / MessageResponse 思路，但实现仍复用 Linghun 自己的 DisplayBlock、ProductBlock、MessageMarkdown、StatusFooter、details/evidence 体系，没有搬第二套 CCB UI/runtime。
+- 这五阶段美化在 TUI 层生效，和 provider 名称无关；Claude、OpenAI-compatible、DeepSeek 只要通过同一 Linghun TUI transcript/output surface，都会吃到同一套工具卡、diff/code、footer ctx、diagnostic、notification 和 permission 展示。例外是 provider 自身的 preflight、compact、cache_control、fallback 等底层消息结构，它们属于第 12 节压缩/缓存轨道，不由 Phase 5 视觉测试证明。
+
+剩余边界：
+
+- Phase 5 锁住的是 TUI 展示层不会退回裸文本堆叠；它不声称 compact 后 provider messages、cache prefix hash、Anthropic cache_control 落点已经和 CCB/codex 完全对齐。
+- 中文 Windows 终端真实环境仍建议保留手动 smoke 记录；自动化侧当前通过 no-color、80/120 列、宽度断言和 plain/Ink 测试覆盖主要退化风险。
+
 ## 10. 推荐落地顺序
 
 建议按这个顺序推进：
