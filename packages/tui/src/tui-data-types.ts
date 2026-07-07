@@ -215,6 +215,23 @@ export type PostCompactCacheWarmupState = {
   updatedAt: string;
 };
 
+export type PromptSectionMetric = {
+  name: string;
+  chars: number;
+  percent: number;
+  volatile: boolean;
+  truncated?: boolean;
+};
+
+export type PromptSectionSnapshot = {
+  stableChars: number;
+  dynamicChars: number;
+  totalChars: number;
+  largestSection?: string;
+  sections: PromptSectionMetric[];
+  createdAt: string;
+};
+
 export type CacheState = {
   config: CacheHistoryConfig;
   history: CacheTurnStats[];
@@ -232,6 +249,7 @@ export type CacheState = {
   compactBoundaries: CompactBoundary[];
   compactProjection?: CompactProjection;
   postCompactCacheWarmup?: PostCompactCacheWarmupState;
+  lastPromptSections?: PromptSectionSnapshot;
   compactProgress?: CompactProgressSnapshot;
   compactStrategy?: CompactStrategySnapshot;
   deepCompact?: DeepCompactPacket;

@@ -51,6 +51,15 @@ export function buildCacheStatusPanel(
         : "命中率偏低 — 可运行 /cache warmup 或核对 provider usage。",
     );
   }
+  const promptSections = context.cache.lastPromptSections;
+  if (promptSections) {
+    const dynamicPct = Math.round((promptSections.dynamicChars / Math.max(promptSections.totalChars, 1)) * 100);
+    summary.push(
+      isEn
+        ? `Prompt dynamic share: ${dynamicPct}% · largest ${promptSections.largestSection ?? "none"}`
+        : `Prompt 动态占比：${dynamicPct}% · 最大段 ${promptSections.largestSection ?? "无"}`,
+    );
+  }
   return {
     title: "/cache",
     tone,
@@ -108,6 +117,7 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     `- cache write source: ${source}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
     `- post-compact warmup: ${formatPostCompactWarmupStatus(context)}`,
+    `- prompt sections: ${formatPromptSectionsStatus(context)}`,
     `- workspace reference: hits ${context.cache.workspaceReference.hits}; misses ${context.cache.workspaceReference.misses}; failures ${context.cache.workspaceReference.failures}; latest ${context.cache.workspaceReference.latest?.source ?? "none"}`,
     `- workspace snapshot lite: ${formatWorkspaceSnapshotLiteStatus(context)}`,
     `- freshness changedKeys: ${changed.length > 0 ? changed.join(", ") : "none"}`,
@@ -124,6 +134,23 @@ function formatPostCompactWarmupStatus(context: TuiContext): string {
   if (!warmup) return "none";
   const lastChanged = warmup.lastChangedKeys.length > 0 ? warmup.lastChangedKeys.join(",") : "none";
   return `${warmup.status}; compact ${warmup.compactId}; remaining ${warmup.remainingTurns}/${warmup.totalTurns}; summary ${warmup.summaryHash}; baseline ${warmup.baselinePrefixHash ?? "pending"}; changed ${lastChanged}`;
+}
+
+function formatPromptSectionsStatus(context: TuiContext): string {
+  const snapshot = context.cache.lastPromptSections;
+  if (!snapshot) return "none";
+  const dynamicPct = snapshot.totalChars > 0 ? snapshot.dynamicChars / snapshot.totalChars : 0;
+  const topSections = [...snapshot.sections]
+    .sort((a, b) => b.chars - a.chars)
+    .slice(0, 5)
+    .map((section) => {
+      const bar = formatContextProgressBar(section.percent, 12);
+      const volatility = section.volatile ? "volatile" : "stable";
+      const truncated = section.truncated ? "; truncated" : "";
+      return `${section.name} ${bar} ${formatPercent(section.percent)} ${section.chars} chars ${volatility}${truncated}`;
+    });
+  const headline = `stable ${snapshot.stableChars} chars; dynamic ${snapshot.dynamicChars} chars (${formatPercent(dynamicPct)}); largest ${snapshot.largestSection ?? "none"}; sampled ${snapshot.createdAt}`;
+  return topSections.length > 0 ? `${headline}; top ${topSections.join(" | ")}` : headline;
 }
 
 const CACHE_REQUEST_KIND_ORDER: CacheRequestObservation["kind"][] = [

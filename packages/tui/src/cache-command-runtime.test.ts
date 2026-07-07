@@ -156,6 +156,28 @@ function makeContext(): TuiContext {
         evidenceRefs: ["ev-1"],
       },
       postCompactCacheWarmup: undefined,
+      lastPromptSections: {
+        stableChars: 1_000,
+        dynamicChars: 500,
+        totalChars: 1_500,
+        largestSection: "meta_scheduler",
+        createdAt: "2026-01-01T00:00:02.000Z",
+        sections: [
+          {
+            name: "meta_scheduler",
+            chars: 300,
+            percent: 0.2,
+            volatile: true,
+            truncated: true,
+          },
+          {
+            name: "memory",
+            chars: 200,
+            percent: 0.133,
+            volatile: false,
+          },
+        ],
+      },
       workspaceReference: {
         hits: 0,
         misses: 0,
@@ -178,6 +200,10 @@ describe("cache-command-runtime", () => {
     expect(text).toContain("side-question:deepseek/chat_completions/r/w 0/0 estimated");
     expect(text).toContain("drift reason: stable message prefix changed, reasoning changed");
     expect(text).toContain("post-compact warmup: none");
+    expect(text).toContain("prompt sections: stable 1000 chars; dynamic 500 chars");
+    expect(text).toContain("largest meta_scheduler");
+    expect(text).toContain("meta_scheduler");
+    expect(text).toContain("truncated");
     expect(text).toContain("break diagnosis: ok");
   });
 

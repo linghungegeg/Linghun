@@ -5,6 +5,7 @@ import {
   createModelSystemPromptSegments,
   sanitizeMainScreenLeakage,
 } from "./model-prompt-runtime.js";
+import { createCacheState } from "./tui-state-runtime.js";
 
 function createPromptTestContext(overrides: Partial<TuiContext> = {}): TuiContext {
   return {
@@ -41,6 +42,7 @@ function createPromptTestContext(overrides: Partial<TuiContext> = {}): TuiContex
       retired: [],
       learningMode: "off",
     },
+    cache: createCacheState("F:\\synthetic-project", "gpt-test"),
     discoveredDeferredToolNames: new Set<string>(),
     ...overrides,
   } as unknown as TuiContext;
@@ -48,9 +50,10 @@ function createPromptTestContext(overrides: Partial<TuiContext> = {}): TuiContex
 
 describe("D.14D sanitizeMainScreenLeakage", () => {
   it("keeps dynamic runtime context out of the stable system prompt segment", () => {
+    const context = createPromptTestContext();
     const segments = createModelSystemPromptSegments(
       "检查缓存机制",
-      createPromptTestContext(),
+      context,
       { index: { status: "ready" } },
       "ArchitectureDirective=dynamic architecture note",
       { isWorktree: true, branch: "codex/cache" },
@@ -69,6 +72,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(segments.dynamic).toContain("SolutionCompleteness=");
     expect(segments.dynamic).toContain("GitStatus=clean");
     expect(segments.dynamic).toContain("MetaSchedulerForModel=dynamic scheduler note");
+    expect(context.cache.lastPromptSections?.sections.map((section) => section.name)).toContain("runtime_status");
 
     for (const token of [
       "RuntimeStatusForModel=",
@@ -85,6 +89,46 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     ]) {
       expect(segments.stable).not.toContain(token);
     }
+  });
+
+  it("records dynamic prompt section metrics without dropping accepted memory", () => {
+    const context = createPromptTestContext({
+      memory: {
+        ...createPromptTestContext().memory,
+        accepted: [
+          {
+            id: "mem-1",
+            scope: "user",
+            summary: "User preference: keep progress bar simple",
+            source: "test",
+            sourceRefs: ["test"],
+            risk: "low",
+            inferred: false,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            status: "accepted",
+          },
+        ],
+      },
+    });
+
+    const segments = createModelSystemPromptSegments("继续", context, { runtime: "test" });
+
+    expect(segments.dynamic).toContain("User preference: keep progress bar simple");
+    expect(context.cache.lastPromptSections).toBeDefined();
+    expect(context.cache.lastPromptSections?.sections.map((section) => section.name)).toContain("memory");
+    expect(context.cache.lastPromptSections?.largestSection).toBeTruthy();
+  });
+
+  it("truncates oversized volatile diagnostics but keeps the section boundary", () => {
+    const context = createPromptTestContext();
+    const longScheduler = `MetaSchedulerForModel=${"x".repeat(7_000)}`;
+
+    const segments = createModelSystemPromptSegments("继续", context, { runtime: "test" }, undefined, undefined, undefined, longScheduler);
+
+    expect(segments.dynamic).toContain("MetaSchedulerForModel=");
+    expect(segments.dynamic).toContain("[meta_scheduler truncated:");
+    const meta = context.cache.lastPromptSections?.sections.find((section) => section.name === "meta_scheduler");
+    expect(meta?.truncated).toBe(true);
   });
 
   it("returns text unchanged when no internal tokens are present", () => {
