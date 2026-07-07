@@ -1,5 +1,6 @@
 import type { Language } from "@linghun/shared";
 import type { ToolName, ToolOutput } from "@linghun/tools";
+import type { DisplayBlock } from "./shell/types.js";
 
 export type TuiOutputLayer = "primary" | "details" | "debug";
 
@@ -12,6 +13,17 @@ export type LayeredToolOutput = {
   truncated: boolean;
   fullOutputPath?: string;
   evidenceId?: string;
+};
+
+export type ToolOutputDisplayBlock = DisplayBlock & {
+  kind: "tool_result_success" | "tool_result_error";
+  toolName: ToolName;
+};
+
+export type StructuredToolOutput = {
+  layered: LayeredToolOutput;
+  block: ToolOutputDisplayBlock;
+  text: string;
 };
 
 const TODO_OUTPUT_ITEM_LIMIT = 8;
@@ -89,43 +101,64 @@ export function createLayeredToolOutput(
   };
 }
 
-export function formatToolOutput(
+export function createStructuredToolOutput(
   name: ToolName,
   output: ToolOutput,
   language: Language,
   evidenceId?: string,
-): string {
+): StructuredToolOutput {
   const layered = createLayeredToolOutput(name, output, language, evidenceId);
   const lead = formatPrimaryToolLead(name, output, layered, language);
-  const lines: string[] = lead ? [lead] : [];
+  const bodyLines: string[] = [];
   // Phase 18: large response token warning (>10K characters).
   const textLen = output.text?.length ?? 0;
   if (textLen > 10_000) {
     const approxTokens = Math.round(textLen / 4);
-    lines.push(
+    bodyLines.push(
       language === "en-US"
         ? `⚠ Large response · ~${approxTokens} tokens`
         : `⚠ 大响应 · ~${approxTokens} tokens`,
     );
   }
   if (layered.preview) {
-    lines.push(layered.preview);
+    bodyLines.push(layered.preview);
   }
   const diagnostics = formatToolDiagnosticsSummary(output);
   if (diagnostics) {
-    lines.push(diagnostics);
+    bodyLines.push(diagnostics);
   }
-  // D.13L Section 4 — Bash 单独再补一行人类可读终态：
-  //   "Command exited 0" / "命令已退出 0"
-  // 与 CCB AssistantToolUseMessage 的 end-summary 模式对齐；只在能从
-  // output.data.exitCode 读出退出码时打印。其他工具不需要这条行——
-  // Read/Edit/Write/Glob/Grep 的 stats 行（N 行 / +N -N / N 条结果）
-  // 已经能一眼看出工作量。
   const bashEnd = formatBashEndSummary(name, output, language);
   if (bashEnd) {
-    lines.push(bashEnd);
+    bodyLines.push(bashEnd);
   }
-  return lines.join("\n");
+  const body = bodyLines.join("\n");
+  const text = [lead, body].filter(Boolean).join("\n");
+  const isError = isToolOutputError(output);
+  return {
+    layered,
+    block: {
+      kind: isError ? "tool_result_error" : "tool_result_success",
+      toolName: name,
+      title: lead || name,
+      status: isError ? "error" : "success",
+      summary: layered.summary,
+      body,
+      detailsPath: layered.fullOutputPath,
+      evidenceId: layered.evidenceId,
+      collapsible: Boolean(layered.truncated || layered.details || layered.fullOutputPath),
+      bordered: true,
+    },
+    text,
+  };
+}
+
+export function formatToolOutput(
+  name: ToolName,
+  output: ToolOutput,
+  language: Language,
+  evidenceId?: string,
+): string {
+  return createStructuredToolOutput(name, output, language, evidenceId).text;
 }
 
 export function formatToolDiagnosticsSummary(output: ToolOutput): string | undefined {
@@ -217,6 +250,16 @@ function formatPrimaryToolLead(
   const zhStructured = tryExtractLeadText(output.text);
   if (zhStructured) return `${name}：${zhStructured}`;
   return `${name} 摘要：${layered.summary}`;
+}
+
+function isToolOutputError(output: ToolOutput): boolean {
+  const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
+  const exitCode = readNumber(metadata, "exitCode");
+  if (exitCode !== undefined) return exitCode !== 0;
+  const ok = metadata && typeof (metadata as Record<string, unknown>).ok === "boolean"
+    ? (metadata as Record<string, unknown>).ok
+    : undefined;
+  return ok === false;
 }
 
 function lineCount(value: string): number {

@@ -33,10 +33,14 @@ function isMessageKind(kind: MessageBlockKind | undefined): boolean {
     kind === "assistant_text" ||
     kind === "assistant_thinking" ||
     kind === "local_command_output" ||
+    kind === "tool_call" ||
     kind === "tool_result_success" ||
     kind === "tool_result_error" ||
     kind === "tool_result_cancelled" ||
     kind === "tool_result_rejected" ||
+    kind === "diff" ||
+    kind === "code" ||
+    kind === "workspace_status" ||
     kind === "diagnostic"
   );
 }
@@ -140,16 +144,21 @@ export function ProductBlock({
     if (!body) return null;
     const isLocalOutput = block.messageKind === "local_command_output";
     const isDiagnostic = block.messageKind === "diagnostic";
+    const isStructuredSurface =
+      block.messageKind === "diff" || block.messageKind === "code" || block.messageKind === "workspace_status";
     const isCancelled = block.messageKind === "tool_result_cancelled";
     const isRejected = block.messageKind === "tool_result_rejected";
     const dim = isCancelled || isRejected;
     const tone = isDiagnostic ? "diagnostic" : "default";
     const useMessageResponse =
-      isLocalOutput || block.messageKind === "tool_result_success" || isDiagnostic;
+      isLocalOutput || block.messageKind === "tool_result_success" || isDiagnostic || isStructuredSurface;
+    const useRail =
+      block.displayBlock?.bordered ??
+      (block.messageKind === "tool_result_success" || isDiagnostic || isStructuredSurface);
     return (
       <Box flexDirection="column" marginTop={0} marginBottom={1}>
         {useMessageResponse ? (
-          <MessageResponse width={width}>
+          <MessageResponse width={width} rail={useRail} tone={tone}>
             <MessageMarkdown
               text={body}
               theme={theme}
@@ -266,7 +275,7 @@ export function ProductBlock({
           </Text>
         ) : null}
         {body ? (
-          <MessageResponse width={width}>
+          <MessageResponse width={width} rail={block.displayBlock?.bordered ?? true} tone="error">
             <MessageMarkdown
               text={body}
               theme={theme}

@@ -49,16 +49,47 @@ export type MessageBlockKind =
   | "command_transcript"
   | "user_text"
   | "local_command_output"
+  | "tool_call"
   | "tool_result_success"
   | "tool_result_error"
   | "tool_result_cancelled"
   | "tool_result_rejected"
+  | "diff"
+  | "code"
+  | "workspace_status"
   | "diagnostic"
   | "notification"
   | "permission_panel"
   | "help_panel"
   | "status"
   | "compact_boundary";
+
+export type DisplayBlockKind =
+  | "assistant_text"
+  | "assistant_thinking"
+  | "tool_call"
+  | "tool_result_success"
+  | "tool_result_error"
+  | "diff"
+  | "code"
+  | "workspace_status"
+  | "diagnostic"
+  | "notification";
+
+export type DisplayBlockStatus = "info" | "running" | "success" | "error" | "blocked";
+
+export type DisplayBlock = {
+  id?: string;
+  kind: DisplayBlockKind;
+  title?: string;
+  status?: DisplayBlockStatus;
+  summary?: string;
+  body?: string;
+  detailsPath?: string;
+  evidenceId?: string;
+  collapsible?: boolean;
+  bordered?: boolean;
+};
 
 export type ProductBlockViewModel = {
   id: string;
@@ -84,6 +115,8 @@ export type ProductBlockViewModel = {
    * 着色；notification / status 等不进 transcript 主流。未设时回退到旧路径。
    */
   messageKind?: MessageBlockKind;
+  /** Phase 1 display contract: optional structured source for renderer/details parity. */
+  displayBlock?: DisplayBlock;
   /** Whole-line compatibility fallback for older app-owned transcript selection rendering. */
   selectionLineIndexes?: number[];
   /** Cell-column ranges highlighted by the app-owned transcript selection substrate. */

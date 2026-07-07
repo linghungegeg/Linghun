@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createAssistantPrimaryTextSanitizer,
   createLayeredToolOutput,
+  createStructuredToolOutput,
   formatToolOutput,
   formatToolStart,
   sanitizeAssistantPrimaryText,
@@ -179,6 +180,32 @@ describe("tool-output-presenter", () => {
       expect(layered.layer).toBe("primary");
       expect(typeof layered.summary).toBe("string");
       expect(layered.summary.length).toBeGreaterThan(0);
+    });
+
+    it("返回结构化 DisplayBlock，同时保留旧字符串兼容", () => {
+      const output = { text: "done", data: { exitCode: 0, lines: 1 }, evidenceId: "ev-1" };
+      const structured = createStructuredToolOutput("Bash", output, "zh-CN");
+
+      expect(structured.text).toBe(formatToolOutput("Bash", output, "zh-CN"));
+      expect(structured.block.kind).toBe("tool_result_success");
+      expect(structured.block.toolName).toBe("Bash");
+      expect(structured.block.status).toBe("success");
+      expect(structured.block.evidenceId).toBe("ev-1");
+      expect(structured.block.bordered).toBe(true);
+      expect(structured.block.collapsible).toBe(false);
+    });
+
+    it("失败结构化 DisplayBlock 包含错误状态和退出码文本", () => {
+      const structured = createStructuredToolOutput(
+        "Bash",
+        { text: "boom", data: { exitCode: 2 }, details: "full stack" },
+        "zh-CN",
+      );
+
+      expect(structured.block.kind).toBe("tool_result_error");
+      expect(structured.block.status).toBe("error");
+      expect(structured.block.collapsible).toBe(true);
+      expect(structured.text).toContain("退出 2");
     });
 
     it("Bash 成功时 formatToolOutput 含 lead '✓'", () => {

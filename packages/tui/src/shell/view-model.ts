@@ -1206,20 +1206,30 @@ export function createOutputBlock(
   // echoes never satisfy either condition and stay clean (no hint row).
   const nonEmptyLineCount = normalized.split("\n").filter((line) => line.trim().length > 0).length;
   const toolResultLike = isToolResultLike(normalized);
+  const toolResultErrorLike = toolResultLike && isToolResultErrorLike(normalized);
   const hasMore =
     explicitFold ||
     hasPresenterHiddenSummary(normalized) ||
     (toolResultLike &&
       normalized.length > 0 &&
       (nonEmptyLineCount >= 6 || normalized.length > summary.length + 16));
+  const displayBlock = {
+    kind: toolResultErrorLike ? "tool_result_error" : toolResultLike ? "tool_result_success" : "assistant_text",
+    title: toolResultLike ? summary.split("\n", 1)[0] : undefined,
+    status: toolResultErrorLike ? "error" : toolResultLike ? "success" : "info",
+    summary,
+    body: normalized,
+    collapsible: hasMore,
+    bordered: toolResultLike,
+  } as const;
   return {
     id,
-    kind: "details",
-    status: "info",
+    kind: toolResultErrorLike ? "error" : "details",
+    status: toolResultErrorLike ? "fail" : "info",
     // D13E-P3 empty title: drop the fixed "最近输出" / "Latest output" title
     // for normal outputs so ProductBlock renders only the summary line and
     // adjacent normal outputs breathe instead of stacking duplicate banners.
-    title: "",
+    title: toolResultErrorLike ? summary.split("\n", 1)[0] : "",
     summary,
     nextAction: hasMore ? copy.detailsHint : undefined,
     // Preserve the full body so /details can reveal it. The summary keeps the
@@ -1227,14 +1237,23 @@ export function createOutputBlock(
     // /model doctor body with provider.env merge / endpointPath / providers)
     // are no longer truncated to the first line at this boundary.
     fullText: normalized,
-    messageKind: toolResultLike ? "tool_result_success" : "assistant_text",
+    messageKind: toolResultErrorLike
+      ? "tool_result_error"
+      : toolResultLike
+        ? "tool_result_success"
+        : "assistant_text",
+    displayBlock,
   };
 }
 
 function isToolResultLike(text: string): boolean {
-  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit)\(|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|Todo[:：]|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
+  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit)\(|Bash\s+(?:✓|✗)|找到\s+\*\*?\d+\*\*?\s+(?:处匹配|个文件)|读取\s+\*\*?\d+\*\*?\s+行|(?:Found|Read)\s+\*\*?\d+\*\*?|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|Todo[:：]|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
     text.trim(),
   );
+}
+
+function isToolResultErrorLike(text: string): boolean {
+  return /^(?:Bash\s+✗|.*(?:退出|exit)\s+\d+)/iu.test(text.trim());
 }
 
 function summarizeExplicitFold(text: string): string {

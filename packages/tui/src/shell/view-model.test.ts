@@ -237,6 +237,9 @@ describe("shell view model", () => {
     expect(block.detail).toBeUndefined();
     // D.13Q-UX assistant_text 在 plain 模式应保留所有多行正文。
     expect(block.messageKind).toBe("assistant_text");
+    expect(block.displayBlock?.kind).toBe("assistant_text");
+    expect(block.displayBlock?.bordered).toBe(false);
+    expect(block.displayBlock?.body).toBe(block.fullText);
     expect(rendered).toContain("done with apiKey=[masked-key]");
     expect(rendered).toContain("full line 2");
     expect(rendered).toContain("full line 3");
@@ -9200,10 +9203,48 @@ describe("D.14D explicit details summary-first panel", () => {
     );
     expect(presenterBody).not.toContain("Ctrl+O");
     const block = createOutputBlock(presenterBody, "zh-CN", "out-e2e");
+    expect(block.messageKind).toBe("tool_result_success");
+    expect(block.displayBlock?.kind).toBe("tool_result_success");
+    expect(block.displayBlock?.bordered).toBe(true);
+    expect(block.displayBlock?.collapsible).toBe(true);
     expect(block.fullText).not.toContain("输出已折叠");
     expect(block.nextAction).toContain("Ctrl+O");
     const rendered = `${block.fullText ?? ""}\n${block.nextAction ?? ""}`;
     expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);
+  });
+
+  it("Phase 1: 中文搜索/读取 presenter 输出经旧字符串入口仍是工具结果轻边界", () => {
+    const cases = [
+      formatToolOutput("Grep", { text: "src/a.ts:1:match", data: { count: 1, lines: 1 } }, "zh-CN"),
+      formatToolOutput(
+        "Read",
+        { text: "line\n".repeat(120), data: { lines: 120, totalLines: 120 } },
+        "zh-CN",
+      ),
+    ];
+
+    for (const [index, presenterBody] of cases.entries()) {
+      const block = createOutputBlock(presenterBody, "zh-CN", `phase1-tool-${index}`);
+      expect(block.messageKind).toBe("tool_result_success");
+      expect(block.displayBlock?.kind).toBe("tool_result_success");
+      expect(block.displayBlock?.bordered).toBe(true);
+    }
+  });
+
+  it("Phase 1: 失败工具 presenter 输出经旧字符串入口仍是醒目的错误块", () => {
+    const presenterBody = formatToolOutput(
+      "Bash",
+      { text: "boom\nstack line", data: { exitCode: 7 }, details: "full stack" },
+      "zh-CN",
+    );
+    const block = createOutputBlock(presenterBody, "zh-CN", "phase1-fail-bash");
+
+    expect(presenterBody).toContain("退出 7");
+    expect(block.kind).toBe("error");
+    expect(block.status).toBe("fail");
+    expect(block.messageKind).toBe("tool_result_error");
+    expect(block.displayBlock?.kind).toBe("tool_result_error");
+    expect(block.displayBlock?.bordered).toBe(true);
   });
 
   it("D.14D-R P1-1: tool 输出块同一块只出现一次 Ctrl+O 提示（内嵌折叠行被剥离）", () => {
