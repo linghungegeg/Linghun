@@ -718,27 +718,7 @@ function createCompactProjection(
     "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
     `verification requirement ${restoreContext.verificationRequirement}`,
   ].join("\n");
-  const diagnosticProjection = [
-    "[Compact projection diagnostics]",
-    `trigger ${input.trigger}`,
-    `decisions ${restoreContext.decisions.join("; ") || "none recorded"}`,
-    `evidence refs ${evidenceRefs.map((id) => `evidence:${id}`).join(", ") || "none"}`,
-    `active agents/workflows ${restoreContext.activeAgentsWorkflows.join("; ") || "none"}`,
-    `needs-attention agents/workflows ${restoreContext.needsAttentionAgentsWorkflows.join("; ") || "none"}`,
-    `stale resumable agents/workflows ${restoreContext.staleResumableAgentsWorkflows.join("; ") || "none"}`,
-    `pending permissions/tool calls ${restoreContext.pendingItems.join("; ") || "none"}`,
-    `failure learning ${failureLearning.join("; ") || "none"}`,
-    `index/cache/memory freshness: index ${restoreContext.indexStatus}; cache freshness ${restoreContext.cacheFreshness}; memory ${restoreContext.memoryStatus}`,
-    `discarded scope ${restoreContext.risks.join("; ") || "older provider-visible recent context summarized"}`,
-    `target budget chars ${input.postCompactTargetChars}`,
-    `target budget tokens ${Math.ceil(input.postCompactTargetChars / CONTEXT_CHARS_PER_TOKEN_ESTIMATE)}`,
-    `projected savings ${(savingsRatio * 100).toFixed(1)}%`,
-    `tool pairing safe ${input.pairingSafe ? "yes" : "no"}`,
-  ].join("\n");
-  const summary = truncateDisplay(
-    [stableProjection, diagnosticProjection].join("\n\n"),
-    COMPACT_SUMMARY_MAX_CHARS,
-  );
+  const summary = truncateDisplay(stableProjection, COMPACT_SUMMARY_MAX_CHARS);
   const projection: CompactProjection = {
     boundaryId: input.boundary.id,
     createdAt: input.boundary.createdAt,
@@ -839,13 +819,6 @@ function uniqueCompactValues(values: string[], limit: number): string[] {
   return result;
 }
 
-function formatCompactRestoreContext(projection: CompactProjection): string {
-  if (!projection.restoreContext) {
-    return "";
-  }
-  return `\n\n[Context restore metadata]\n${JSON.stringify(projection.restoreContext)}`;
-}
-
 export function sanitizeCompactSummaryText(
   context: Pick<TuiContext, "projectPath">,
   value: string,
@@ -862,7 +835,7 @@ function injectCompactProjectionMessage(
 ): ModelMessage[] {
   const summaryMessage: ModelMessage = {
     role: "user",
-    content: `Context compact projection\n${projection.summary}\n\n[Compact boundary diagnostics]\nboundary ${projection.boundaryId}\ncreated at ${projection.createdAt}${formatCompactRestoreContext(projection)}`,
+    content: `Context compact projection\n${projection.summary}`,
   };
   return insertAfterLeadingSystemMessages(messages, summaryMessage);
 }

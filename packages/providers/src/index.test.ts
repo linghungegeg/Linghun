@@ -3101,6 +3101,47 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
     });
   });
 
+  it("prefers the compact stable summary for Anthropic message cache_control", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "alpha" },
+        { role: "user", content: "Deep compact context\nsummary stable older context" },
+        { role: "user", content: "Context compact projection\nsummary stable recent context" },
+        { role: "user", content: "rolling recent window" },
+        { role: "assistant", content: "ack" },
+        { role: "user", content: "current dynamic request" },
+      ],
+      promptCacheEnabled: true,
+    });
+    const deepBlocks = body.messages[0]?.content as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    const projectionBlocks = body.messages[1]?.content as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    const currentUserBlocks = body.messages.at(-1)?.content as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+
+    expect(deepBlocks[0]?.cache_control).toBeUndefined();
+    expect(projectionBlocks[0]).toEqual({
+      type: "text",
+      text: "Context compact projection\nsummary stable recent context",
+      cache_control: { type: "ephemeral" },
+    });
+    expect(currentUserBlocks[0]).toEqual({
+      type: "text",
+      text: "current dynamic request",
+    });
+  });
+
   it("does not append cacheBreakNonce to the current user message", () => {
     const provider = buildAnthropicProvider();
     const body = provider.createAnthropicMessagesRequest({

@@ -1927,6 +1927,28 @@ function createAnthropicMessagesProfileRequest(
 function findStableUserMessageCacheBreakpoint(
   conversation: AnthropicMessage[],
 ): AnthropicTextBlock | undefined {
+  return (
+    findCompactStableUserMessageCacheBreakpoint(conversation) ??
+    findLatestUserMessageCacheBreakpoint(conversation)
+  );
+}
+
+function findCompactStableUserMessageCacheBreakpoint(
+  conversation: AnthropicMessage[],
+): AnthropicTextBlock | undefined {
+  let breakpoint: AnthropicTextBlock | undefined;
+  for (const message of conversation) {
+    if (!message || message.role !== "user" || !Array.isArray(message.content)) return breakpoint;
+    const block = message.content.find((item) => item.type === "text");
+    if (!block || !isCompactStableUserMessageText(block.text)) return breakpoint;
+    breakpoint = block;
+  }
+  return breakpoint;
+}
+
+function findLatestUserMessageCacheBreakpoint(
+  conversation: AnthropicMessage[],
+): AnthropicTextBlock | undefined {
   // Cache the latest provider-visible user text. The next turn can then read this
   // prefix instead of waiting one extra turn before a message-level cache point exists.
   for (let index = conversation.length - 1; index >= 0; index -= 1) {
@@ -1938,6 +1960,10 @@ function findStableUserMessageCacheBreakpoint(
     }
   }
   return undefined;
+}
+
+function isCompactStableUserMessageText(text: string): boolean {
+  return text.startsWith("Deep compact context") || text.startsWith("Context compact projection");
 }
 
 function createAnthropicCacheControl(request: ModelRequest): AnthropicCacheControl {

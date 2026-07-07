@@ -1,6 +1,11 @@
 import type { EndpointProfile, ModelRequest, ModelUsage } from "@linghun/providers";
 import { stableHash } from "./cache-freshness.js";
 
+const COMPACT_STABLE_MESSAGE_PREFIXES = [
+  "Deep compact context",
+  "Context compact projection",
+] as const;
+
 export type CacheRequestKind =
   | "main"
   | "continuation"
@@ -465,11 +470,35 @@ function splitCacheMessageBoundary(messages: ModelRequest["messages"]): {
 } {
   const systemPrefix = messages.filter((message) => message.role === "system");
   const conversation = messages.filter((message) => message.role !== "system");
+  const compactStablePrefix = collectCompactStableConversationPrefix(conversation);
   return {
     systemPrefix,
-    conversationPrefix: conversation.slice(0, -1),
+    conversationPrefix:
+      compactStablePrefix.length > 0 ? compactStablePrefix : conversation.slice(0, -1),
     latestMessage: conversation.at(-1),
   };
+}
+
+function collectCompactStableConversationPrefix(
+  conversation: ModelRequest["messages"],
+): ModelRequest["messages"] {
+  const prefix: ModelRequest["messages"] = [];
+  for (const message of conversation) {
+    if (!isCompactStableMessage(message)) break;
+    prefix.push(message);
+  }
+  return prefix;
+}
+
+function isCompactStableMessage(message: ModelRequest["messages"][number]): boolean {
+  return message.role === "user" && startsWithCompactStablePrefix(message.content);
+}
+
+function startsWithCompactStablePrefix(content: ModelRequest["messages"][number]["content"]): boolean {
+  return (
+    typeof content === "string" &&
+    COMPACT_STABLE_MESSAGE_PREFIXES.some((prefix) => content.startsWith(prefix))
+  );
 }
 
 function diffCacheRequestFingerprint(

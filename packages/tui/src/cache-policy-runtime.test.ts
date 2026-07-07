@@ -208,6 +208,88 @@ describe("cache-policy-runtime", () => {
     expect(second.fingerprint.changedKeys).toEqual(["requestHash", "latestMessageHash"]);
   });
 
+  it("keeps compact stable summaries out of rolling recent-window drift", () => {
+    const stableMessages: ModelRequest["messages"] = [
+      { role: "system", content: "stable system" },
+      { role: "user", content: "Deep compact context\nsummary stable older context" },
+      { role: "user", content: "Context compact projection\nsummary stable recent context" },
+    ];
+    const first = observeCacheSafeRequest({
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        messages: [
+          ...stableMessages,
+          { role: "user", content: "rolling recent window a" },
+          { role: "assistant", content: "ack a" },
+          { role: "user", content: "current question a" },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    const second = observeCacheSafeRequest({
+      previous: first,
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        messages: [
+          ...stableMessages,
+          { role: "user", content: "rolling recent window b" },
+          { role: "assistant", content: "ack b" },
+          { role: "user", content: "current question b" },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:01.000Z"),
+    });
+
+    expect(second.fingerprint.systemPrefixHash).toBe(first.fingerprint.systemPrefixHash);
+    expect(second.fingerprint.conversationPrefixHash).toBe(
+      first.fingerprint.conversationPrefixHash,
+    );
+    expect(second.fingerprint.messagePrefixHash).toBe(first.fingerprint.messagePrefixHash);
+    expect(second.fingerprint.latestMessageHash).not.toBe(first.fingerprint.latestMessageHash);
+    expect(second.fingerprint.changedKeys).toEqual(["requestHash", "latestMessageHash"]);
+  });
+
+  it("refreshes the compact conversation prefix when the stable summary changes", () => {
+    const first = observeCacheSafeRequest({
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "stable system" },
+          { role: "user", content: "Deep compact context\nsummary stable older context" },
+          { role: "user", content: "Context compact projection\nsummary stable recent context" },
+          { role: "user", content: "current question" },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    const second = observeCacheSafeRequest({
+      previous: first,
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "stable system" },
+          { role: "user", content: "Deep compact context\nsummary updated older context" },
+          { role: "user", content: "Context compact projection\nsummary stable recent context" },
+          { role: "user", content: "current question" },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:01.000Z"),
+    });
+
+    expect(second.fingerprint.conversationPrefixHash).not.toBe(
+      first.fingerprint.conversationPrefixHash,
+    );
+    expect(second.fingerprint.changedKeys).toEqual([
+      "requestHash",
+      "messagePrefixHash",
+      "conversationPrefixHash",
+    ]);
+  });
+
   it("detects message/model/reasoning/cache shape drift without storing raw request text", () => {
     const first = observeCacheSafeRequest({
       kind: "main",

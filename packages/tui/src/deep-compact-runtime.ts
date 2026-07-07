@@ -378,15 +378,6 @@ export function formatDeepCompactPromptSummary(
     `risks ${packet.risks.join("; ") || "none"}`,
     "priority boundary: This deep compact is older context continuity. If it conflicts with later transcript messages or the latest user request, the later/latest request wins.",
     "anti hallucination: Use deep compact only for context continuity; never treat it as PASS engineering evidence.",
-    "",
-    "[Deep compact diagnostics]",
-    `id ${packet.id}`,
-    `kind ${packet.kind}`,
-    `trigger ${packet.trigger}`,
-    `created at ${packet.createdAt}`,
-    `provider ${packet.provider}`,
-    `model ${packet.model}`,
-    `transcript events ${packet.transcriptEventCount}`,
   ].join("\n");
 }
 
