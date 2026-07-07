@@ -885,15 +885,22 @@ function recordCompactStrategy(
   const appliedLayers = input.steps
     .filter((step) => step.status === "applied")
     .map((step) => step.layer);
+  const updatedAt = new Date().toISOString();
   context.cache.compactStrategy = {
     trigger: input.trigger,
-    createdAt: new Date().toISOString(),
+    createdAt: updatedAt,
     contextMaxChars: input.contextMaxChars,
     triggerChars: input.triggerChars,
     postCompactTargetChars: input.postCompactTargetChars,
     finalChars: input.finalChars,
     cacheStablePrefixRisk: appliedLayers.includes("full_summary") ? "medium" : "low",
     steps: input.steps,
+  };
+  context.cache.contextUsage = {
+    estimatedChars: input.finalChars,
+    maxChars: input.contextMaxChars,
+    updatedAt,
+    source: appliedLayers.length > 0 ? "compact" : "pressure",
   };
 }
 

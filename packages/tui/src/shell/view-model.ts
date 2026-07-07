@@ -465,10 +465,10 @@ export function createShellViewModel(
     reasoningLevel: options.reasoningLevel,
     reasoningSent: options.reasoningSent,
     estimatedCostCny: sumFiniteNumbers((context.roleUsage ?? []).map((usage) => usage.estimatedCny)),
-    contextUsage: context.cache.compactPressure
+    contextUsage: context.cache.contextUsage
       ? calculateContextPercentages(
-          Math.ceil(context.cache.compactPressure.estimatedChars / 4),
-          Math.ceil(context.cache.compactPressure.maxChars / 4),
+          Math.ceil(context.cache.contextUsage.estimatedChars / 4),
+          Math.ceil(context.cache.contextUsage.maxChars / 4),
         )
       : undefined,
     isRemoteMode: context.remote?.enabled ?? false,
@@ -2409,7 +2409,7 @@ function formatFooterContextUsage(
   const percent = `${Math.round(contextUsage.ratio * 100)}%`;
   return {
     wide: `${label} ${formatContextProgressBar(contextUsage.ratio, 10)} ${percent}`,
-    narrow: `${label} ${percent}`,
+    narrow: `${label} ${formatContextProgressBar(contextUsage.ratio, 6)} ${percent}`,
     minimal: `${label} ${percent}`,
     ratio: contextUsage.ratio,
   };

@@ -105,6 +105,7 @@ export function createCacheState(
     compactStrategy: undefined,
     deepCompact: undefined,
     compactPressure: undefined,
+    contextUsage: undefined,
     compactFailure: undefined,
     compactCooldownUntil: undefined,
     deepCompactCooldownUntil: undefined,

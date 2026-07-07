@@ -236,6 +236,7 @@ export type CacheState = {
   compactStrategy?: CompactStrategySnapshot;
   deepCompact?: DeepCompactPacket;
   compactPressure?: CompactPressureSnapshot;
+  contextUsage?: ContextUsageSnapshot;
   compactFailure?: CompactFailureState;
   compactCooldownUntil?: number;
   deepCompactCooldownUntil?: number;
@@ -374,6 +375,13 @@ export type CompactPressureSnapshot = {
   ratio: number;
   toolPairingSafe: boolean;
   updatedAt: string;
+};
+
+export type ContextUsageSnapshot = {
+  estimatedChars: number;
+  maxChars: number;
+  updatedAt: string;
+  source: "pressure" | "compact";
 };
 
 export type CompactFailureState = {

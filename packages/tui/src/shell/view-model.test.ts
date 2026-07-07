@@ -441,7 +441,12 @@ describe("shell view model", () => {
         model: "claude-opus-4-8",
         cache: {
           history: [{ hitRate: 0.84 }],
-          compactPressure: { estimatedChars: 12_000, maxChars: 100_000 },
+          contextUsage: {
+            estimatedChars: 12_000,
+            maxChars: 100_000,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            source: "pressure",
+          },
         },
         notifications: [notification],
       } as Partial<TuiContext>),
@@ -4392,7 +4397,12 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       createContext({
         cache: {
           history: [{ hitRate: 0.84 }],
-          compactPressure: { estimatedChars: 200_000, maxChars: 400_000 },
+          contextUsage: {
+            estimatedChars: 200_000,
+            maxChars: 400_000,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            source: "compact",
+          },
         },
       } as Partial<TuiContext>),
       { width: 120, viewMode: "task" },
@@ -4401,7 +4411,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(view.taskFooter?.cache).toBe("缓存 84%");
     expect(view.taskFooter?.contextUsage).toMatchObject({
       wide: "ctx [█████─────] 50%",
-      narrow: "ctx 50%",
+      narrow: "ctx [███───] 50%",
       minimal: "ctx 50%",
       ratio: 0.5,
     });

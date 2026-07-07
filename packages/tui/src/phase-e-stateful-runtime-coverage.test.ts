@@ -297,6 +297,13 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(context.cache.compactStrategy?.steps).toContainEqual(
       expect.objectContaining({ layer: "full_summary", status: "applied" }),
     );
+    if (!compacted.blocked) {
+      expect(context.cache.contextUsage).toMatchObject({
+        estimatedChars: estimateModelMessageChars(compacted.messages),
+        maxChars: getProviderContextMaxChars(context, runtime()),
+        source: "compact",
+      });
+    }
   });
 
   it("keeps the provider prefix stable across two post-compact rounds", async () => {

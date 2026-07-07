@@ -371,13 +371,20 @@ export async function refreshCompactPressureSnapshot(context: TuiContext): Promi
     const estimatedChars = estimateModelMessageChars(messages);
     const maxChars = getProviderContextMaxChars(context, runtime);
     const triggerChars = getAutoCompactTriggerChars(context, runtime);
+    const updatedAt = new Date().toISOString();
     context.cache.compactPressure = {
       estimatedChars,
       maxChars,
       triggerChars,
       ratio: Number((estimatedChars / Math.max(1, maxChars)).toFixed(3)),
       toolPairingSafe: inspectToolPairingSafety(messages).safe,
-      updatedAt: new Date().toISOString(),
+      updatedAt,
+    };
+    context.cache.contextUsage = {
+      estimatedChars,
+      maxChars,
+      updatedAt,
+      source: "pressure",
     };
   } catch (error) {
     await appendCompactPressureWarning(
