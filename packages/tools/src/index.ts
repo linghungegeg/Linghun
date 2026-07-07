@@ -2123,6 +2123,21 @@ type ShellCommandAdapter = {
   logCommand?: string;
 };
 
+type CommandDomain = "host" | "explicit_shell" | "remote_shell" | "ambiguous";
+
+type CommandClassification = {
+  domain: CommandDomain;
+  program: string;
+  hostArgs: string[];
+  remotePayload?: string;
+  hasHostPipeline: boolean;
+  confidence: "high" | "medium" | "low";
+};
+
+export function __testClassifyWindowsShellCommand(command: string): CommandClassification {
+  return classifyWindowsShellCommand(command);
+}
+
 export function adaptShellCommand(command: string): ShellCommandAdapter {
   return adaptShellCommandForPlatform(command, process.platform);
 }
@@ -2133,8 +2148,19 @@ export function adaptShellCommandForPlatform(
 ): ShellCommandAdapter {
   if (platform !== "win32") return { command, adapter: "native" };
   if (isExplicitPowerShellCommand(command)) return { command, adapter: "native" };
+
+  const classification = classifyWindowsShellCommand(command);
+  if (classification.domain === "ambiguous" && isRemoteShellProgram(classification.program)) {
+    return createBlockedPowerShellAdapter(
+      "Ambiguous remote shell command on Windows: host-level pipeline detected outside the remote payload; quote the remote command or use a PowerShell-safe host pipeline.",
+    );
+  }
+  if (classification.domain === "remote_shell") return { command, adapter: "native" };
+
   const fileWriteBlock = blockWindowsShellFileWriteCommand(command);
   if (fileWriteBlock) return fileWriteBlock;
+  if (classification.domain === "explicit_shell") return { command, adapter: "native" };
+
   const heredoc = convertNodeHereDocForPowerShell(command);
   if (heredoc) return heredoc;
   const nativePowerShell = convertNativePowerShellCommand(command);
@@ -2158,6 +2184,149 @@ export function adaptShellCommandForPlatform(
   const unsupportedReadOnlyCommand = blockUnsupportedUnixReadOnlyCommand(command);
   if (unsupportedReadOnlyCommand) return unsupportedReadOnlyCommand;
   return { command, adapter: "native" };
+}
+
+function classifyWindowsShellCommand(command: string): CommandClassification {
+  const tokens = tokenizeShellCommandWords(command);
+  const hasHostPipeline = hasUnquotedShellPipe(command);
+  const program = tokens?.[0]?.toLowerCase() ?? "";
+  const hostArgs = tokens?.slice(1) ?? [];
+  if (!tokens || !program) {
+    return { domain: "ambiguous", program, hostArgs, hasHostPipeline, confidence: "low" };
+  }
+
+  const remote = classifyRemoteShellCommand(program, hostArgs, hasHostPipeline);
+  if (remote) return remote;
+
+  if (isExplicitShellProgram(program)) {
+    return {
+      domain: "explicit_shell",
+      program,
+      hostArgs,
+      hasHostPipeline,
+      confidence: hasHostPipeline ? "medium" : "high",
+    };
+  }
+
+  return { domain: "host", program, hostArgs, hasHostPipeline, confidence: "high" };
+}
+
+function classifyRemoteShellCommand(
+  program: string,
+  hostArgs: string[],
+  hasHostPipeline: boolean,
+): CommandClassification | undefined {
+  if (program === "adb" && hostArgs[0]?.toLowerCase() === "shell") {
+    return remoteShellClassification(program, hostArgs, hostArgs.slice(1).join(" "), hasHostPipeline);
+  }
+  if (program === "ssh" && hostArgs.length >= 2) {
+    return remoteShellClassification(program, hostArgs, hostArgs.slice(1).join(" "), hasHostPipeline);
+  }
+  if (program === "docker" && hostArgs.some((arg) => arg.toLowerCase() === "exec")) {
+    return remoteShellClassification(program, hostArgs, hostArgs.join(" "), hasHostPipeline);
+  }
+  return undefined;
+}
+
+function remoteShellClassification(
+  program: string,
+  hostArgs: string[],
+  remotePayload: string,
+  hasHostPipeline: boolean,
+): CommandClassification {
+  if (hasHostPipeline) {
+    return {
+      domain: "ambiguous",
+      program,
+      hostArgs,
+      remotePayload,
+      hasHostPipeline,
+      confidence: "medium",
+    };
+  }
+  return {
+    domain: "remote_shell",
+    program,
+    hostArgs,
+    remotePayload,
+    hasHostPipeline,
+    confidence: "high",
+  };
+}
+
+function isRemoteShellProgram(program: string): boolean {
+  return program === "adb" || program === "docker" || program === "ssh";
+}
+
+function isExplicitShellProgram(program: string): boolean {
+  return /^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|bash|sh)$/iu.test(program);
+}
+
+function hasUnquotedShellPipe(command: string): boolean {
+  return scanShellCommand(command, (_char, quoted) => !quoted && _char === "|");
+}
+
+function tokenizeShellCommandWords(command: string): string[] | undefined {
+  const trimmed = command.trim();
+  if (!trimmed) return undefined;
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index];
+    if (!char) continue;
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (/\s/u.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    if (char === "|") {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      tokens.push(char);
+      continue;
+    }
+    current += char;
+  }
+  if (quote) return undefined;
+  if (current) tokens.push(current);
+  return tokens.length > 0 ? tokens : undefined;
+}
+
+function scanShellCommand(command: string, predicate: (char: string, quoted: boolean) => boolean): boolean {
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (!char) continue;
+    if (quote) {
+      if (char === quote) quote = undefined;
+      if (predicate(char, true)) return true;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      if (predicate(char, true)) return true;
+      continue;
+    }
+    if (predicate(char, false)) return true;
+  }
+  return false;
 }
 
 function isExplicitPowerShellCommand(command: string): boolean {

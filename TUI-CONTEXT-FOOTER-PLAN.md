@@ -738,6 +738,13 @@ type CommandClassification = {
 - 已有简单 Windows 只读命令适配不回退。
 - mixed/ambiguous 命令不会被盲改。
 
+本轮局部验证记录（仅 13.2/13.3）：
+
+- 已在 `packages/tools/src/index.ts` 为 Windows Bash 适配新增 `CommandClassification` 和 quote-aware host pipe 检测，先识别 `host`、`explicit_shell`、`remote_shell`、`ambiguous`，再决定 pass-through、PowerShell 适配或 diagnostic。
+- 已在 `packages/tools/src/index.test.ts` 覆盖 `adb devices`、quoted `adb shell`、`docker exec ... sh -c`、`ssh host "..."`、宿主层只读命令、显式 `cmd /c`、以及 `adb shell ... | grep ...` 混合管线 diagnostic。
+- 本轮只完成 `13.2` 和 `13.3` 的最小 runner/adapter 边界；`13.4` adapter registry、`13.5` 前台 stall/prompt/timeout 诊断和 `13.6` 跨仓库 smoke 仍未完成。
+- Focused verification：`corepack pnpm vitest run packages/tools/src/index.test.ts` 通过；`corepack pnpm --filter @linghun/tools typecheck` 通过。
+
 ### 13.4 第三阶段：Adapter registry 替代全局规则堆叠
 
 目标：让不同执行域有自己的 adapter，不再把所有逻辑塞进一个巨大的字符串适配函数。

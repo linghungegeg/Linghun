@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
+  __testClassifyWindowsShellCommand,
   __testDecodeShellChunk,
   __testCanSafelyAliasPythonCommand,
   __testGlobToRegExp,
@@ -2111,6 +2112,56 @@ describe("Phase 05 core tools", () => {
       expect(adapted.adapter).toBe("blocked");
       expect(adapted.command).toContain("Linghun Bash does not support shell apply_patch");
     }
+  });
+
+  it("classifies Windows host, explicit shell, remote shell, and ambiguous command domains", () => {
+    expect(__testClassifyWindowsShellCommand("cat package.json")).toMatchObject({
+      domain: "host",
+      program: "cat",
+      hasHostPipeline: false,
+      confidence: "high",
+    });
+    expect(__testClassifyWindowsShellCommand("cmd /c dir")).toMatchObject({
+      domain: "explicit_shell",
+      program: "cmd",
+      hasHostPipeline: false,
+    });
+    expect(
+      __testClassifyWindowsShellCommand('adb shell "cat /proc/meminfo | head -n 5"'),
+    ).toMatchObject({
+      domain: "remote_shell",
+      program: "adb",
+      remotePayload: "cat /proc/meminfo | head -n 5",
+      hasHostPipeline: false,
+    });
+    expect(__testClassifyWindowsShellCommand("adb shell pm list packages | grep foo")).toMatchObject({
+      domain: "ambiguous",
+      program: "adb",
+      hasHostPipeline: true,
+      confidence: "medium",
+    });
+  });
+
+  it("preserves remote shell payloads instead of adapting quoted sub-shell Unix syntax", () => {
+    for (const command of [
+      'adb shell "cat /proc/meminfo | head -n 5"',
+      'docker exec app sh -c "cat /etc/os-release | head -n 5"',
+      'ssh host "cat /etc/os-release | head -n 5"',
+    ]) {
+      const adapted = adaptShellCommandForPlatform(command, "win32");
+      expect(adapted).toEqual({ command, adapter: "native" });
+    }
+
+    const nativeAdb = adaptShellCommandForPlatform("adb devices", "win32");
+    expect(nativeAdb).toEqual({ command: "adb devices", adapter: "native" });
+  });
+
+  it("diagnoses ambiguous remote shell commands with host-level pipelines", () => {
+    const adapted = adaptShellCommandForPlatform("adb shell pm list packages | grep foo", "win32");
+
+    expect(adapted.adapter).toBe("blocked");
+    expect(adapted.command).toContain("Ambiguous remote shell command on Windows");
+    expect(adapted.command).toContain("host-level pipeline");
   });
 
   it("does not apply Windows shell adaptation on non-Windows platforms", () => {
