@@ -2411,9 +2411,19 @@ type FooterContextUsageInput = ReturnType<typeof calculateContextPercentages> & 
 };
 
 function selectFooterContextUsage(context: TuiContext): FooterContextUsageInput | undefined {
+  const usage = context.cache.contextUsage;
+  if (usage?.source === "provider_usage") {
+    return {
+      ...calculateContextPercentages(
+        Math.ceil(usage.estimatedChars / 4),
+        Math.ceil(usage.maxChars / 4),
+      ),
+      savingsRatio: usage.savingsRatio,
+    };
+  }
+
   const pressure = context.cache.compactPressure;
   if (pressure) {
-    const usage = context.cache.contextUsage;
     return {
       ...calculateContextPercentages(
         Math.ceil(pressure.estimatedChars / 4),
@@ -2423,7 +2433,6 @@ function selectFooterContextUsage(context: TuiContext): FooterContextUsageInput 
     };
   }
 
-  const usage = context.cache.contextUsage;
   if (!usage) return undefined;
   return {
     ...calculateContextPercentages(Math.ceil(usage.estimatedChars / 4), Math.ceil(usage.maxChars / 4)),
