@@ -273,5 +273,7 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
     expect(data.completionClaimAllowed).toBe(false);
     expect(data.verificationClaimAllowed).toBe(false);
     expect(data.nextAction).toContain("声称 PASS 前");
+    expect(data.nextAction).toContain("精确文件路径");
+    expect(data.nextAction).toContain("不要用宽泛 Glob 零结果推断文件不存在");
   });
 });

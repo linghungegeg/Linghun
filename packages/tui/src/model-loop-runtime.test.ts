@@ -269,6 +269,19 @@ describe("model-loop-runtime", () => {
       expect(sendMessage?.description).toContain("continue an agent whose context overlaps");
       expect(runWorkflow?.description).toContain("Workflow lifecycle completion is orchestration evidence only");
       expect(runWorkflow?.description).toContain("verification PASS");
+      expect(runWorkflow?.description).toContain("exact file path");
+      expect(runWorkflow?.description).toContain("broad Glob with zero matches is not enough");
+    });
+
+    it("documents exact-path evidence boundaries for Read and Glob", () => {
+      const defs = createModelToolDefinitions();
+      const read = defs.find((d) => d.name === "Read");
+      const glob = defs.find((d) => d.name === "Glob");
+
+      expect(read?.description).toContain("Use Read for exact known file paths");
+      expect(glob?.description).toContain("Glob zero matches only proves");
+      expect(glob?.description).toContain("read-only Bash existence check");
+      expect(glob?.description).toContain("before claiming the file is absent");
     });
 
     it("allows AgentControl to stop all running agents through structured actions", () => {

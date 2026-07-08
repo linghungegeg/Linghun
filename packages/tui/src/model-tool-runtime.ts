@@ -1749,8 +1749,8 @@ function buildWorkflowToolResultData(
           : "workflow 仍在运行；先检查回流的 agent/workflow 结果，再声称工作完成。"
         : lifecycleStatus === "terminal"
           ? language === "en-US"
-            ? "Workflow lifecycle ended; use separate evidence or verification before claiming PASS."
-            : "workflow 生命周期已结束；声称 PASS 前必须有独立证据或验证。"
+            ? "Workflow lifecycle ended; use separate evidence or verification before claiming PASS. If an exact file path is in the task, verify it directly with Read or a read-only Bash existence check; do not infer absence from broad Glob zero matches."
+            : "workflow 生命周期已结束；声称 PASS 前必须有独立证据或验证。如任务中有精确文件路径，必须用 Read 或只读 Bash 存在性检查直接验证；不要用宽泛 Glob 零结果推断文件不存在。"
           : language === "en-US"
             ? "Workflow runtime did not start; check workflow id, model route, and background guard."
             : "workflow runtime 未启动；检查 workflow id、模型路由和后台守卫。",
