@@ -2024,6 +2024,15 @@ describe("Phase 05 core tools", () => {
     expect(which.adapter).toBe("powershell-adapted");
     expect(which.command).toContain("Get-Command");
     expect(which.command).toContain("'node'");
+
+    const testPrint = adaptShellCommandForPlatform(
+      "test -f apps/cli/dist/main.js && printf exists || printf missing",
+      "win32",
+    );
+    expect(testPrint.adapter).toBe("powershell-adapted");
+    expect(testPrint.command).toContain("Test-Path");
+    expect(testPrint.command).toContain("PathType Leaf");
+    expect(testPrint.command).toContain("Write-Output");
   });
 
   it("wraps native PowerShell cmdlets on Windows before they reach cmd.exe", () => {

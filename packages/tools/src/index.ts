@@ -2608,6 +2608,17 @@ function convertUnixPipelineForPowerShell(command: string): string | undefined {
 }
 
 function convertUnixReadOnlyCommandForPowerShell(command: string): ShellCommandAdapter | undefined {
+  const testPrint = convertPosixTestPrintForPowerShell(command);
+  if (testPrint) {
+    return {
+      command: [
+        "powershell.exe -NoProfile -NonInteractive -Command",
+        quoteCmdArg(`$ErrorActionPreference='Stop'; ${testPrint}`),
+      ].join(" "),
+      adapter: "powershell-adapted",
+    };
+  }
+
   const tokens = tokenizeSimpleShellCommand(command);
   if (!tokens) return undefined;
   const [program = "", ...args] = tokens;
@@ -2641,6 +2652,33 @@ function convertUnixReadOnlyCommandForPowerShell(command: string): ShellCommandA
     ].join(" "),
     adapter: "powershell-adapted",
   };
+}
+
+function convertPosixTestPrintForPowerShell(command: string): string | undefined {
+  const normalized = command.trim();
+  const match = normalized.match(
+    /^test\s+-(f|e|d)\s+((?:"[^"]+"|'[^']+'|[^\s&|;]+))\s*&&\s*(?:printf|echo)\s+((?:"[^"]+"|'[^']+'|[^\s|;]+))\s*\|\|\s*(?:printf|echo)\s+((?:"[^"]+"|'[^']+'|[^\s|;]+))$/iu,
+  );
+  if (!match) return undefined;
+  const flag = match[1]?.toLowerCase();
+  const path = stripShellQuotes(match[2] ?? "");
+  const success = normalizeShellLiteralOutput(match[3] ?? "");
+  const failure = normalizeShellLiteralOutput(match[4] ?? "");
+  if (!flag || !path || !success || !failure) return undefined;
+
+  const pathType =
+    flag === "f" ? " -PathType Leaf" : flag === "d" ? " -PathType Container" : "";
+  return [
+    `if (Test-Path -LiteralPath ${quotePowerShellString(path)}${pathType}) {`,
+    `Write-Output ${quotePowerShellString(success)}`,
+    "} else {",
+    `Write-Output ${quotePowerShellString(failure)}`,
+    "}",
+  ].join(" ");
+}
+
+function normalizeShellLiteralOutput(value: string): string {
+  return stripShellQuotes(value).replace(/\\n$/u, "");
 }
 
 function convertLsForPowerShell(args: string[]): string | undefined {
