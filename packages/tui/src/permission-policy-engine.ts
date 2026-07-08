@@ -851,11 +851,9 @@ export function classifyBashHead(head: string, args: string[]): SemanticClass {
     return "secret_read";
   }
 
-  // D.13N-fix: echo / printf are only readonly when they emit pure literals.
-  // Any shell-style env expansion ($VAR / ${VAR} / $env:VAR / %VAR%) or any
-  // sensitive keyword (secret/key/token/password/credential/api_key/apikey)
-  // in the argv must require_permission so the value can't be dumped to
-  // stdout under auto_allow_readonly.
+  // D.13N-fix: echo / printf are readonly for pure literals. Shell-style env
+  // expansion ($VAR / ${VAR} / $env:VAR / %VAR%) requires permission because it
+  // can dump real process secrets to stdout under auto_allow_readonly.
   if (head === "echo" || head === "printf") {
     return classifyEchoPrintf(args);
   }
@@ -966,22 +964,17 @@ function classifyDockerSubcommand(args: string[]): SemanticClass {
   return "unknown";
 }
 
-// D.13N-fix: detect env-expansion / sensitive-keyword arguments to echo /
-// printf. The check is intentionally conservative and purely static — we
-// never evaluate the shell or run the command. Any signal of dynamic
-// expansion or secret-shaped naming flips the verdict to `secret_read` so
-// the existing require_permission path catches it.
+// D.13N-fix: detect env-expansion arguments to echo / printf. The check is
+// intentionally conservative and purely static — we never evaluate the shell
+// or run the command. Any signal of dynamic expansion flips the verdict to
+// `secret_read` so the existing require_permission path catches it.
 //
 // Patterns:
 //   $VAR, ${VAR}, ${env:VAR}     POSIX-style expansion
 //   $env:VAR                     PowerShell-style env expansion
 //   %VAR%                        cmd.exe-style env expansion
-//   secret/token/password/credential/api_key/apikey/key (case-insensitive)
-//                                even as a literal word, since echoing one
-//                                of these almost always means dumping a
-//                                value the user does not want in transcripts
 //
-// `echo --version` / `printf "%s\n" hello` / `echo "hello world"` stay
+// `echo token bucket` / `echo PASSWORD` / `printf "%s\n" hello` stay
 // readonly because none of those tokens contains an expansion marker.
 const ENV_EXPANSION_REGEX = /\$\{?[A-Za-z_][\w:]*\}?|%[A-Za-z_][\w]*%/u;
 const SENSITIVE_SUMMARY_KEYWORDS = [

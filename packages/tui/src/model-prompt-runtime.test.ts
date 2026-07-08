@@ -67,6 +67,9 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(segments.stable).toContain("CommandCapabilitySummary=");
     expect(segments.stable).toContain("shell apply_patch");
     expect(segments.stable).toContain("Edit/MultiEdit/Write");
+    expect(segments.stable).toContain("TemporaryCredentialRule=");
+    expect(segments.stable).toContain("不要仅因为它是密钥就拒绝");
+    expect(segments.stable).toContain("进程环境变量或内存请求配置临时使用");
     expect(segments.dynamic).toContain("RuntimeStatusForModel=");
     expect(segments.dynamic).toContain("EvidenceSummary=");
     expect(segments.dynamic).toContain("SolutionCompleteness=");
