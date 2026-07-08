@@ -93,12 +93,16 @@ import {
 import { detectEngineeringTaskProfile } from "./headless-bench-runtime.js";
 import { startModelSetup } from "./model-command-runtime.js";
 import {
+  createModelToolDefinitions,
   createModelToolDefinitionsForReportGuard,
-  evaluateFinalAnswerClaims,
-  isEvidenceStaleForClaim,
+  isPreEngineToolName,
 } from "./model-loop-runtime.js";
 import type { FinalAnswerClaimVerdict, FinalAnswerExtendedVerdict } from "./model-loop-runtime.js";
-import { stripStructuredFinalAnswerClaims } from "./model-loop-runtime.js";
+import {
+  evaluateFinalAnswerClaims,
+  isEvidenceStaleForClaim,
+  stripStructuredFinalAnswerClaims,
+} from "./model-loop-runtime.js";
 import {
   createModelSystemPromptSegments,
   sanitizeMainScreenLeakage,
@@ -2412,9 +2416,10 @@ export async function sendMessage(
   const messages = await buildModelMessagesWithRecentContext(
     context,
     sessionId,
-    [...systemPrompt.cacheable, ...systemPrompt.volatile],
+    systemPrompt.cacheable,
     text,
     selectedRuntime,
+    systemPrompt.volatile,
   );
   let messagesForProvider = messages;
   if (reportWriteGuard) {
@@ -3764,27 +3769,31 @@ export async function handleRemoteInboundMessage(
 
 type SystemPromptInput = string | readonly string[] | readonly ModelSystemPromptSegment[];
 
+function toSystemMessages(systemPrompt: SystemPromptInput): ModelMessage[] {
+  const rawSystemPrompts = Array.isArray(systemPrompt) ? systemPrompt : [systemPrompt];
+  return rawSystemPrompts.flatMap((entry) => {
+    const segment = typeof entry === "string" ? { content: entry } : entry;
+    const content = segment.content.trim();
+    if (!content) return [];
+    return [
+      {
+        role: "system" as const,
+        content,
+        ...(segment.promptCache ? { promptCache: segment.promptCache } : {}),
+      },
+    ];
+  });
+}
+
 export async function buildModelMessagesWithRecentContext(
   context: TuiContext,
   sessionId: string,
   systemPrompt: SystemPromptInput,
   currentUserText: string,
   runtime = getSelectedModelRuntime(context),
+  volatileSystemPrompt: readonly ModelSystemPromptSegment[] = [],
 ): Promise<ModelMessage[]> {
-  const rawSystemPrompts = Array.isArray(systemPrompt) ? systemPrompt : [systemPrompt];
-  const messages: ModelMessage[] = rawSystemPrompts
-    .flatMap((entry) => {
-      const segment = typeof entry === "string" ? { content: entry } : entry;
-      const content = segment.content.trim();
-      if (!content) return [];
-      return [
-        {
-          role: "system" as const,
-          content,
-          ...(segment.promptCache ? { promptCache: segment.promptCache } : {}),
-        },
-      ];
-    });
+  const messages: ModelMessage[] = toSystemMessages(systemPrompt);
   try {
     const recentTranscript = await context.store.readRecentTranscriptEvents(sessionId, {
       limit: MAX_CONTEXT_MESSAGES * 2 + 1,
@@ -3873,9 +3882,12 @@ export async function buildModelMessagesWithRecentContext(
       "warning",
     );
   }
+  messages.push(...toSystemMessages(volatileSystemPrompt));
   messages.push({ role: "user", content: currentUserText });
   return messages;
 }
+
+export const __testBuildModelMessagesWithRecentContext = buildModelMessagesWithRecentContext;
 
 function applyPromptCacheKey(
   request: ModelRequest,

@@ -8,6 +8,7 @@ import type { ModelGateway } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import {
   __testApplyPromptCacheKey,
+  __testBuildModelMessagesWithRecentContext,
   __testRunFinalGateEvidenceAction,
   __testStreamFinalModelAnswerWithoutTools,
   buildAggregatedDowngradedFinalAnswer,
@@ -166,6 +167,50 @@ function makeNaturalInputContext(language: "zh-CN" | "en-US" = "zh-CN") {
     },
   };
 }
+
+describe("model message prompt cache layout", () => {
+  it("keeps volatile system diagnostics after reusable transcript history", async () => {
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            { type: "user_message", text: "previous user" },
+            { type: "assistant_text_delta", text: "previous assistant" },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-cache-layout",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+      [{ content: "volatile diagnostics", promptCache: "volatile" }],
+    );
+
+    expect(messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+      "system:stable system",
+      "user:previous user",
+      "assistant:previous assistant",
+      "system:volatile diagnostics",
+      "user:current user",
+    ]);
+    expect(messages[0]).toMatchObject({ promptCache: "cacheable" });
+    expect(messages[3]).toMatchObject({ promptCache: "volatile" });
+  });
+});
 
 describe("responses prompt cache key", () => {
   it("keeps dynamic tool schema out of the responses prompt cache key", () => {
