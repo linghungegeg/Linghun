@@ -148,6 +148,20 @@ describe("TaskBottomPane budget allocation", () => {
     expect(allocation.slashMaxRows).toBe(0);
   });
 
+  it("keeps the running work status visible in minimal mode when one row fits", () => {
+    const allocation = allocateBottomPaneBudget(5, {
+      workingRows: 1,
+      slashRows: 4,
+    });
+
+    expect(allocation.mode).toBe("minimal");
+    expect(allocation.footerRows).toBe(0);
+    expect(allocation.workingRows).toBe(1);
+    expect(
+      allocation.composerMaxVisibleLines + allocation.footerRows + allocation.workingRows,
+    ).toBeLessThanOrEqual(allocation.maxRows);
+  });
+
   it("keeps native slash overlay frame compact instead of double-budgeting full height", () => {
     const height = nativeScrollbackTaskFrameHeight({
       height: 24,

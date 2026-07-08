@@ -71,8 +71,7 @@ export function allocateBottomPaneBudget(
           maxRows >= COMPOSER_BORDER_ROWS + COMPACT_COMPOSER_VISIBLE_LINES + 1
         ? COMPACT_FOOTER_ROWS
         : 0;
-  let workingRows =
-    mode !== "minimal" && (slotEstimates.workingRows ?? 0) > 0 ? WORKING_ROWS : 0;
+  let workingRows = (slotEstimates.workingRows ?? 0) > 0 ? WORKING_ROWS : 0;
   const slashCap =
     mode === "full" ? FULL_SLASH_ROWS : mode === "compact" ? COMPACT_SLASH_ROWS : 0;
   let slashMaxRows = Math.min(Math.max(0, slotEstimates.slashRows ?? 0), slashCap);
