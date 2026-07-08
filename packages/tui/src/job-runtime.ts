@@ -4,7 +4,7 @@
  */
 import { createHash } from "node:crypto";
 import { appendFile as fsAppendFile } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { LinghunConfig } from "@linghun/config";
@@ -37,6 +37,9 @@ const appendFileAsync = promisify(fsAppendFile);
 export const DEFAULT_JOB_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_JOB_BUDGET_TOKENS = 120_000;
 export const JOB_LOG_TAIL_LINES = 40;
+export const JOB_LOG_ENTRY_MAX_CHARS = 2_000;
+export const JOB_LOG_DISPLAY_LINE_MAX_CHARS = 800;
+const JOB_LOG_TAIL_MAX_BYTES = 64 * 1024;
 export const JOB_RECOVERY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
 export const DEFAULT_JOB_MAX_STEPS = 4;
 export const MAX_JOB_MAX_STEPS = 20;
@@ -421,10 +424,40 @@ export async function persistDurableJob(job: DurableJobState): Promise<void> {
   await writeFile(getDurableJobStatePath(job), `${JSON.stringify(job, null, 2)}\n`, "utf8");
 }
 
+function formatJobLogSummary(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim() || "(empty log entry)";
+  if (normalized.length <= JOB_LOG_ENTRY_MAX_CHARS) {
+    return normalized;
+  }
+  const suffix = " [truncated; see full-output.log]";
+  return `${truncateDisplay(normalized, JOB_LOG_ENTRY_MAX_CHARS - suffix.length)}${suffix}`;
+}
+
+async function readUtf8Tail(path: string, maxBytes: number): Promise<string> {
+  try {
+    const file = await open(path, "r");
+    try {
+      const stats = await file.stat();
+      const length = Math.min(stats.size, maxBytes);
+      if (length <= 0) {
+        return "";
+      }
+      const buffer = Buffer.alloc(length);
+      await file.read(buffer, 0, length, stats.size - length);
+      return buffer.toString("utf8");
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return "";
+  }
+}
+
 export async function appendJobLog(job: DurableJobState, message: string): Promise<void> {
   await mkdir(dirname(job.logPath), { recursive: true });
-  await appendFileAsync(job.logPath, `[${new Date().toISOString()}] ${message}\n`, "utf8");
-  await appendFileAsync(job.fullOutputPath, `[${new Date().toISOString()}] ${message}\n`, "utf8");
+  const timestamp = new Date().toISOString();
+  await appendFileAsync(job.logPath, `[${timestamp}] ${formatJobLogSummary(message)}\n`, "utf8");
+  await appendFileAsync(job.fullOutputPath, `[${timestamp}] ${message}\n`, "utf8");
 }
 
 export async function readDurableJobState(path: string): Promise<DurableJobState | null> {
@@ -842,12 +875,17 @@ export async function formatJobLogs(
   job: DurableJobState,
   language: Language = "en-US",
 ): Promise<string> {
-  const content = await readFile(job.logPath, "utf8").catch(() => "");
+  const content = await readUtf8Tail(job.logPath, JOB_LOG_TAIL_MAX_BYTES);
   const tail = content
-    .split(/\r?\n/u)
+    .split(/\r?\n/)
     .filter(Boolean)
     .slice(-JOB_LOG_TAIL_LINES)
-    .map((line) => sanitizeDisplayPaths(line, job.projectPath));
+    .map((line) =>
+      truncateDisplay(
+        sanitizeDisplayPaths(line, job.projectPath),
+        JOB_LOG_DISPLAY_LINE_MAX_CHARS,
+      ),
+    );
   if (language !== "en-US") {
     return [
       `Job logs ${job.id}`,

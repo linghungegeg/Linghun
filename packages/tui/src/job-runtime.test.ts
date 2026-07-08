@@ -9,6 +9,8 @@ import {
   DEFAULT_JOB_BUDGET_TOKENS,
   DEFAULT_JOB_MAX_STEPS,
   DEFAULT_JOB_TIMEOUT_MS,
+  JOB_LOG_DISPLAY_LINE_MAX_CHARS,
+  JOB_LOG_ENTRY_MAX_CHARS,
   type JobContext,
   MAX_JOB_MAX_STEPS,
   type ParsedJobRunOptions,
@@ -616,7 +618,7 @@ describe("read/write roundtrip", () => {
     expect(fullContent).toContain("test message");
   });
 
-  it("keeps large job payload in fullOutput while status/report/log views stay bounded", async () => {
+  it("keeps large job payload in fullOutput while summary logs stay bounded", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "job-rt-test-"));
     const job = createMinimalJob({
       projectPath: tempDir,
@@ -625,21 +627,47 @@ describe("read/write roundtrip", () => {
       fullOutputPath: join(tempDir, "full-output.log"),
     });
     const sentinel = "JOB_DUP_END_SHOULD_ONLY_BE_IN_FULL_OUTPUT";
+    const oversizedPayload = `${"j".repeat(JOB_LOG_ENTRY_MAX_CHARS + 500)} ${sentinel}`;
     for (let index = 0; index < 45; index += 1) {
-      const tail = index === 0 ? sentinel : `line-${index}`;
-      await appendJobLog(job, `job payload ${index} ${"j".repeat(1200)} ${tail}`);
+      await appendJobLog(job, `job payload ${index} ${oversizedPayload}`);
     }
 
     const status = formatJobStatus(job);
     const report = formatJobReport(job);
     const logs = await formatJobLogs(job);
+    const logContent = await readFile(job.logPath, "utf8");
     const fullOutput = await readFile(job.fullOutputPath, "utf8");
 
     expect(status).not.toContain(sentinel);
     expect(report).not.toContain(sentinel);
     expect(logs).not.toContain(sentinel);
-    expect(logs).toContain("- tail: bounded last 40/40 lines");
+    expect(logContent).not.toContain(sentinel);
+    expect(logContent).toContain("[truncated; see full-output.log]");
+    expect(logContent.length).toBeLessThan(fullOutput.length);
+    expect(logs).toContain("- tail: bounded last ");
     expect(fullOutput).toContain(sentinel);
+  });
+
+  it("bounds display of an oversized job log tail line", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "job-rt-test-"));
+    const job = createMinimalJob({
+      projectPath: tempDir,
+      logPath: join(tempDir, "job.log"),
+      reportPath: join(tempDir, "report.md"),
+      fullOutputPath: join(tempDir, "full-output.log"),
+    });
+    const sentinel = "JOB_LOG_DISPLAY_SENTINEL_SHOULD_BE_TRUNCATED";
+    await mkdir(tempDir, { recursive: true });
+    await writeFile(
+      job.logPath,
+      `[2025-01-01T00:00:00.000Z] ${"x".repeat(JOB_LOG_DISPLAY_LINE_MAX_CHARS + 500)} ${sentinel}\n`,
+      "utf8",
+    );
+
+    const logs = await formatJobLogs(job);
+
+    expect(logs).not.toContain(sentinel);
+    expect(logs.length).toBeLessThan(JOB_LOG_DISPLAY_LINE_MAX_CHARS + 1_000);
   });
 
   it("writeDurableJobReport creates report file", async () => {
