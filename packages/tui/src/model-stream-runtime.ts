@@ -93,7 +93,6 @@ import {
 import { detectEngineeringTaskProfile } from "./headless-bench-runtime.js";
 import { startModelSetup } from "./model-command-runtime.js";
 import {
-  createModelToolDefinitions,
   createModelToolDefinitionsForReportGuard,
   isPreEngineToolName,
 } from "./model-loop-runtime.js";
@@ -372,6 +371,33 @@ export function recordPreEngineFallbackPreference(context: TuiContext): void {
   };
 }
 
+function isPreEngineFallbackHardCutActive(context: TuiContext): boolean {
+  return (
+    context.preEngineFallbackPreference?.active === true &&
+    context.preEngineFallbackPreference.projectPath === context.projectPath
+  );
+}
+
+function createProviderToolDefinitionsForContext(
+  context: TuiContext,
+  guard: ToolBatchExecutionOptions["continuation"]["reportWriteGuard"],
+): ReturnType<typeof createModelToolDefinitionsForReportGuard> {
+  return createModelToolDefinitionsForReportGuard(guard, {
+    excludePreEngineTools: isPreEngineFallbackHardCutActive(context),
+  });
+}
+
+export function createPreFallbackHardCutSkippedToolResult(
+  toolCall: ModelToolCall,
+): ModelToolExecutionResult {
+  return {
+    ok: false,
+    tool: toolCall.name,
+    text: "Pre-engine fallback is active for this task. This tool call was hard-cut; use real workspace tools instead.",
+    data: { skipped: true, reason: "pre_engine_fallback_hard_cut" },
+  };
+}
+
 export function createToolBatchFailFastSkippedResult(
   toolCall: ModelToolCall,
   reason: string,
@@ -522,10 +548,24 @@ async function executeToolCallsWithReadonlyParallelism(
     const results = canUseParallelBatch
       ? await Promise.all(
           calls.map((toolCall) =>
-            executeModelToolUse(toolCall, context, sessionId, output, options.continuation),
+            executeModelToolUseWithPreFallbackHardCut(
+              toolCall,
+              context,
+              sessionId,
+              output,
+              options.continuation,
+            ),
           ),
         )
-      : [await executeModelToolUse(calls[0]!, context, sessionId, output, options.continuation)];
+      : [
+          await executeModelToolUseWithPreFallbackHardCut(
+            calls[0]!,
+            context,
+            sessionId,
+            output,
+            options.continuation,
+          ),
+        ];
 
     for (let resultIndex = 0; resultIndex < results.length; resultIndex += 1) {
       const toolCall = calls[resultIndex]!;
@@ -569,7 +609,13 @@ async function executeToolCallsWithReadonlyParallelism(
 
     if (!canUseParallelBatch && batch.mode === "parallel_readonly") {
       for (const remaining of batch.toolCalls.slice(1)) {
-        const result = await executeModelToolUse(remaining, context, sessionId, output, options.continuation);
+        const result = await executeModelToolUseWithPreFallbackHardCut(
+          remaining,
+          context,
+          sessionId,
+          output,
+          options.continuation,
+        );
         await recordModelToolFailureForMetaScheduler(context, sessionId, result);
         if (result.pendingApproval) {
           await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
@@ -644,8 +690,24 @@ function readExecuteExtraToolTargetName(input: unknown): string | undefined {
   return undefined;
 }
 
-function isPreEngineToolName(toolName: string): boolean {
-  return toolName === "pre_context" || toolName === "pre_impact" || toolName === "pre_plan" || toolName === "pre_verify";
+export function isPreEngineToolCall(toolCall: Pick<ModelToolCall, "name" | "input">): boolean {
+  if (isPreEngineToolName(toolCall.name)) return true;
+  if (toolCall.name !== "ExecuteExtraTool") return false;
+  const targetName = readExecuteExtraToolTargetName(toolCall.input);
+  return !!targetName && isPreEngineToolName(targetName);
+}
+
+async function executeModelToolUseWithPreFallbackHardCut(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  continuation: PendingModelContinuation,
+): Promise<ModelToolExecutionResult> {
+  if (isPreEngineFallbackHardCutActive(context) && isPreEngineToolCall(toolCall)) {
+    return createPreFallbackHardCutSkippedToolResult(toolCall);
+  }
+  return executeModelToolUse(toolCall, context, sessionId, output, continuation);
 }
 
 export function isRealFallbackToolProgress(
@@ -2518,7 +2580,7 @@ export async function sendMessage(
           : {}),
         ...(modelSupportsTools
           ? {
-              tools: createModelToolDefinitionsForReportGuard(reportWriteGuard),
+              tools: createProviderToolDefinitionsForContext(context, reportWriteGuard),
               toolChoice: "auto" as const,
             }
           : {}),
@@ -4527,7 +4589,7 @@ export async function continueModelAfterToolResults(
         ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
         ...(continuationToolsEnabled
           ? {
-              tools: createModelToolDefinitionsForReportGuard(continuation.reportWriteGuard),
+              tools: createProviderToolDefinitionsForContext(context, continuation.reportWriteGuard),
               toolChoice: "auto" as const,
             }
           : {}),

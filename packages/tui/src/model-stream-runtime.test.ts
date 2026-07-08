@@ -16,10 +16,12 @@ import {
   canRunToolCallInParallelReadonlyBatch,
   createToolFallbackRecoveryReminder,
   createToolFailureRecoveryFingerprint,
+  createPreFallbackHardCutSkippedToolResult,
   createToolBatchFailFastSkippedResult,
   createToolExecutionBatches,
   evaluateAggregatedFinalAnswerGate,
   handleNaturalInput,
+  isPreEngineToolCall,
   isRealFallbackToolProgress,
   isToolBatchFailure,
   isToolBatchFallbackRequired,
@@ -309,6 +311,31 @@ describe("tool batch fail-fast helpers", () => {
       ),
     ).toBe(false);
     expect(isRealFallbackToolProgress({ name: "Grep", input: { pattern: "x" } } as never, fallbackResult)).toBe(false);
+  });
+
+  it("detects pre-engine direct and deferred tool calls for hard-cut fallback", () => {
+    expect(isPreEngineToolCall({ name: "pre_plan", input: {} } as never)).toBe(true);
+    expect(
+      isPreEngineToolCall(
+        { name: "ExecuteExtraTool", input: { tool_name: "pre_context", params: { symbol: "x" } } } as never,
+      ),
+    ).toBe(true);
+    expect(
+      isPreEngineToolCall(
+        { name: "ExecuteExtraTool", input: { tool_name: "search_code", params: { query: "x" } } } as never,
+      ),
+    ).toBe(false);
+    expect(isPreEngineToolCall({ name: "Read", input: { path: "x.ts" } } as never)).toBe(false);
+  });
+
+  it("creates pre fallback hard-cut skipped results as non-progress failures", () => {
+    const skipped = createPreFallbackHardCutSkippedToolResult(
+      { id: "call-pre", name: "pre_plan", input: { task: "x" } } as never,
+    );
+
+    expect(skipped.ok).toBe(false);
+    expect(skipped.data).toMatchObject({ skipped: true, reason: "pre_engine_fallback_hard_cut" });
+    expect(isToolBatchFailure(skipped)).toBe(true);
   });
 
   it("creates strict pre-analysis fallback recovery reminders", () => {

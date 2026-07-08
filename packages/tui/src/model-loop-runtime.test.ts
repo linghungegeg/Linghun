@@ -186,6 +186,21 @@ describe("model-loop-runtime", () => {
       expect(names).toContain("IndexOperation");
     });
 
+    it("can hard-cut pre-engine tools out of the report-guard provider schema", () => {
+      const names = createModelToolDefinitionsForReportGuard(undefined, {
+        excludePreEngineTools: true,
+      }).map((d) => d.name);
+
+      expect(names).not.toContain("pre_context");
+      expect(names).not.toContain("pre_impact");
+      expect(names).not.toContain("pre_plan");
+      expect(names).not.toContain("pre_verify");
+      expect(names).toContain("Read");
+      expect(names).toContain("Grep");
+      expect(names).toContain("RunVerification");
+      expect(names).toContain("ExecuteExtraTool");
+    });
+
     it("exposes real agent workflow verification and report tools before CommandProposal fallback", () => {
       const names = createModelToolDefinitions().map((d) => d.name);
       expect(names).toContain("StartAgent");
