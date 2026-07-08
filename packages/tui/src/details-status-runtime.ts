@@ -9,6 +9,7 @@ import { formatBackgroundDetails, formatBackgroundOutputDetails } from "./job-ru
 import { formatLogArtifactSlice, readLogArtifactSlice } from "./log-artifact.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import { readRuntimeLedgerRecords, type RuntimeLedgerRecord } from "./runtime-storage.js";
+import { bindSessionRuntimeStorage } from "./session-runtime-storage.js";
 import type { BackgroundTaskSummary, CommandPanelSection, CommandPanelView, ProductBlockViewModel } from "./shell/types.js";
 import { formatModeBehavior } from "./slash-dispatch.js";
 import { formatError, writeLine } from "./startup-runtime.js";
@@ -230,12 +231,14 @@ export function formatHomeScreen(context: TuiContext): string {
 export async function ensureSession(context: TuiContext): Promise<string> {
   if (context.sessionId) {
     if (context.sessionStoreVerifiedId === context.sessionId) {
+      bindSessionRuntimeStorage(context, context.sessionId);
       context.sessionEnded = false;
       return context.sessionId;
     }
     try {
       await context.store.resume(context.sessionId);
       context.sessionStoreVerifiedId = context.sessionId;
+      bindSessionRuntimeStorage(context, context.sessionId);
       context.sessionEnded = false;
       return context.sessionId;
     } catch (error) {
@@ -249,6 +252,7 @@ export async function ensureSession(context: TuiContext): Promise<string> {
   const session = await context.store.create({ model: context.model });
   context.sessionId = session.id;
   context.sessionStoreVerifiedId = session.id;
+  bindSessionRuntimeStorage(context, session.id);
   context.sessionEnded = false;
   return session.id;
 }

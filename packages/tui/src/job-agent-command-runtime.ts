@@ -1679,8 +1679,10 @@ export async function transitionDurableJob(
 }
 
 export async function hydrateDurableJobBackgroundTasks(context: TuiContext): Promise<void> {
+  if (!context.sessionId) return;
   const jobs = await listDurableJobs(context);
   for (const job of jobs) {
+    if (!isDurableJobOwnedBySession(job, context.sessionId)) continue;
     if (context.dismissedBackgroundTaskIds?.has(job.id)) {
       continue;
     }
@@ -4077,6 +4079,7 @@ export async function markRunningAgentsStaleForInterrupt(
 }
 
 export async function hydratePersistentAgents(context: TuiContext): Promise<void> {
+  if (!context.sessionId) return;
   let files: string[];
   try {
     files = await readdir(getAgentRunsDir(context));
@@ -4095,6 +4098,7 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       const raw = await readFile(resolve(getAgentRunsDir(context), file), "utf8");
       const parsed = JSON.parse(raw) as AgentRun;
       if (!parsed.id || existing.has(parsed.id)) continue;
+      if (!isAgentOwnedBySession(parsed, context.sessionId)) continue;
       if (parsed.status !== "running") {
         const filePath = resolve(getAgentRunsDir(context), file);
         try {
@@ -4148,6 +4152,14 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       );
     }
   }
+}
+
+function isDurableJobOwnedBySession(job: DurableJobState, sessionId: string): boolean {
+  return job.ownerSessionId === sessionId || job.worker?.sessionId === sessionId;
+}
+
+function isAgentOwnedBySession(agent: AgentRun, sessionId: string): boolean {
+  return agent.parentSessionId === sessionId || agent.transcriptSessionId === sessionId;
 }
 
 async function appendAgentHydrateWarning(context: TuiContext, message: string): Promise<void> {

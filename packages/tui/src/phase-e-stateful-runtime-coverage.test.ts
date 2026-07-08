@@ -38,6 +38,7 @@ import {
   recordProviderFailureEvidence,
   recordVerificationEvidence,
 } from "./evidence-runtime.js";
+import { ensureSession } from "./details-status-runtime.js";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { hydrateResumeContext, loadOrCreateHandoffPacket } from "./handoff-session-runtime.js";
 import { createIndexState } from "./index-runtime.js";
@@ -147,6 +148,22 @@ describe("Phase E provider payload budgeting", () => {
     await expect(readFile(records[0]?.artifact.path ?? "", "utf8")).resolves.toContain(
       "READSNIPPETS_MEDIUM_END_SHOULD_NOT_REACH_PROVIDER",
     );
+  });
+});
+
+describe("Phase E session runtime isolation", () => {
+  it("writes handoff runtime artifacts under the bound session directory", async () => {
+    const context = await createTestContext();
+    const projectSharedSessionDir = context.memory.sessionDir;
+    const sessionId = await ensureSession(context);
+
+    await loadOrCreateHandoffPacket(context, sessionId);
+
+    expect(context.memory.sessionDir).toBe(join(projectSharedSessionDir, sessionId));
+    await expect(readFile(join(context.memory.sessionDir, "handoff-latest.json"), "utf8")).resolves
+      .toContain(sessionId);
+    await expect(readFile(join(projectSharedSessionDir, "handoff-latest.json"), "utf8")).rejects
+      .toThrow();
   });
 });
 

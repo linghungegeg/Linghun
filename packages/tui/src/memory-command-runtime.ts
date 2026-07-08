@@ -11,6 +11,7 @@ import {
   hydrateResumeContext,
   validateHandoffPacket,
 } from "./handoff-session-runtime.js";
+import { bindSessionRuntimeStorage } from "./session-runtime-storage.js";
 import type { TuiContext } from "./index.js";
 import {
   applyMemoryExtractionDecision,
@@ -376,6 +377,8 @@ export async function resumeSessionWithHandoff(
   try {
     const resumed = await context.store.resume(sessionId);
     context.sessionId = resumed.session.id;
+    context.sessionStoreVerifiedId = resumed.session.id;
+    bindSessionRuntimeStorage(context, resumed.session.id);
     context.sessionEnded = isSessionEnded(resumed.transcript);
     context.model = resumed.session.model;
     hydrateResumeContext(context, resumed.transcript);
