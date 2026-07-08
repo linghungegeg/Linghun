@@ -10,6 +10,10 @@ import type {
   FailureLearningState,
   WorkflowState,
 } from "./tui-data-types.js";
+import {
+  hasReadOnlyUserConstraint,
+  parseUserActionConstraints,
+} from "./user-action-constraints.js";
 import { evaluateUserStateSignal } from "./user-state-signal-runtime.js";
 import {
   LINGHUN_AGENT_CHILD_TURNS_AGENT,
@@ -1189,7 +1193,7 @@ const DOMAIN_KEYWORD_WEIGHTS: Record<string, KeywordWeight[]> = {
     ["file", 4],
   ],
   edit: [
-    ["修改", 10], ["修", 10], ["改", 10], ["fix", 10], ["modify", 10],
+    ["修改", 10], ["修复", 10], ["fix", 10], ["modify", 10],
     ["实现", 8], ["写入", 8], ["write", 8], ["implement", 8], ["update", 8],
     ["新增", 6], ["创建", 6], ["删除", 6], ["create", 6], ["delete", 6],
   ],
@@ -1244,9 +1248,7 @@ function scoreDomain(text: string, keywords: KeywordWeight[]): number {
 }
 
 function hasReadOnlyIntent(text: string): boolean {
-  return /(?:先别改|别改|不要改|不改文件|先别写|不要写|别写|只(?:看|检查|分析|review|inspect)|先(?:看|检查|分析|review|inspect)|read\s+only|do\s+not\s+(?:edit|write|modify|change)|don't\s+(?:edit|write|modify|change))/iu.test(
-    text,
-  );
+  return hasReadOnlyUserConstraint(parseUserActionConstraints(text));
 }
 
 function classifyTaskKind(

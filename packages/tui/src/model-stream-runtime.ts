@@ -162,6 +162,10 @@ import { formatError, writeLine } from "./startup-runtime.js";
 import { summarizeEvidenceRecords } from "./task-status-presenter.js";
 import { createAssistantPrimaryTextSanitizer } from "./tool-output-presenter.js";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
+import {
+  forbidsVerificationEvidence,
+  parseUserActionConstraints,
+} from "./user-action-constraints.js";
 import { createVerificationPlan } from "./verification-command-runtime.js";
 import type { PendingModelContinuation, TuiContext } from "./tui-context-runtime.js";
 import { updateTurnContinuity } from "./turn-continuity-runtime.js";
@@ -771,9 +775,20 @@ async function appendSkippedToolResultsAfterFailFast(
 function latestUserTextFromMessages(messages: ModelMessage[]): string | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message?.role === "user" && message.content.trim()) return message.content;
+    if (message?.role !== "user") continue;
+    const content = message.content.trim();
+    if (!content) continue;
+    if (isInternalFinalGateUserPrompt(content)) continue;
+    return content;
   }
   return undefined;
+}
+
+function isInternalFinalGateUserPrompt(content: string): boolean {
+  return content.startsWith("Final answer evidence preflight:") ||
+    content.startsWith("最终回答证据前置检查：") ||
+    content.startsWith("Final answer claim alignment:") ||
+    content.startsWith("最终回答声明对齐：");
 }
 
 function recordCacheRequestObservation(
@@ -1022,6 +1037,9 @@ function isFinalGateEvidenceActionSatisfied(
       return artifactHint?.exists === true;
     });
   }
+  if (actionPlan.reason === "git_gap_readonly") {
+    return true;
+  }
   if (actionPlan.reason === "service_runtime_gap_readonly") {
     return hasServiceVerificationEvidence({ evidence: newEvidence });
   }
@@ -1035,6 +1053,7 @@ function classifyFinalGateEvidenceAttemptGap(
   if (result.ok !== true) return "tool_failed";
   if (actionPlan.action === "verification_request") return "verification_not_proven";
   if (actionPlan.reason === "artifact_gap_readonly") return "artifact_not_proven";
+  if (actionPlan.reason === "git_gap_readonly") return "git_not_proven";
   if (actionPlan.reason === "service_runtime_gap_readonly") return "service_not_proven";
   return "evidence_not_proven";
 }
@@ -1058,14 +1077,24 @@ export function planFinalGateEvidenceGapAction(input: {
 }): FinalGateEvidenceGapActionPlan {
   const { result, context } = input;
   const language = context.language;
-  if (userForbidsCommandEvidence(input.userText)) {
+  const gap = classifyFinalGateEvidenceGap(result.unsupportedKinds);
+  const constraints = parseUserActionConstraints(input.userText);
+  if (gap === "verification" || gap === "completion") {
+    if (forbidsVerificationEvidence(constraints)) {
+      return {
+        action: "blocked_explanation",
+        reason: "user_forbid_commands",
+        directive: formatEvidenceGapBlocker("user_forbid_commands", language),
+      };
+    }
+  }
+  if (constraints.forbidAllTools) {
     return {
       action: "blocked_explanation",
       reason: "user_forbid_commands",
       directive: formatEvidenceGapBlocker("user_forbid_commands", language),
     };
   }
-  const gap = classifyFinalGateEvidenceGap(result.unsupportedKinds);
   if (gap === "artifact") {
     const artifactAction = createArtifactReadonlyEvidenceAction({
       text: input.assistantText ?? input.userText ?? "",
@@ -1850,10 +1879,7 @@ function extractLikelyArtifactPath(text: string): string | undefined {
 }
 
 function userForbidsCommandEvidence(userText: string | undefined): boolean {
-  if (!userText) return false;
-  return /(?:不要|别|不准|禁止|只(?:定位|看|分析|审计)|先(?:定位|看|分析|审计)).{0,24}(?:改|修改|运行测试|跑测试|执行命令|运行命令|跑命令|测试|typecheck|build|lint|Bash|命令)|(?:do\s+not|don't|dont|no)\s+(?:run|execute|modify|edit).{0,24}(?:tests?|commands?|bash|typecheck|build|lint|files?)?|(?:read[-\s]?only|audit\s+only|diagnose\s+only)/iu.test(
-    userText,
-  );
+  return forbidsVerificationEvidence(parseUserActionConstraints(userText));
 }
 
 function formatEvidenceGapToolDirective(input: {

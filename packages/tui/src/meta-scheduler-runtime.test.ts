@@ -1208,6 +1208,18 @@ describe("Meta scheduler runtime", () => {
       expect(decision.policyDecision.permissionSignal.requireExplicitGate).toBe(false);
     });
 
+    it("does not treat short Chinese edit characters as mutating intent", () => {
+      for (const userText of ["改进理解方式", "修辞一下提示词"]) {
+        const decision = evaluateMetaScheduler({
+          ...baseInput(),
+          userText,
+        });
+
+        expect(decision.policyDecision.taskKind).not.toBe("edit");
+        expect(decision.policyDecision.permissionSignal.expectedMutating).toBe(false);
+      }
+    });
+
     it("scores edit over code_fact when edit keywords dominate", () => {
       const decision = evaluateMetaScheduler({
         ...baseInput(),

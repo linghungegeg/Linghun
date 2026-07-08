@@ -395,10 +395,8 @@ describe("permission-policy-engine — tokenizer & path classifier (unit)", () =
 // D.13N-fix — env-leak hardening for Bash readonly auto-allow.
 //   - `env` / `set` no longer auto-allow under any argument shape (they would
 //     dump process environment, which holds provider keys).
-//   - `echo` / `printf` only auto-allow with pure literal arguments. Any sign
-//     of shell/env expansion ($VAR / ${VAR} / $env:VAR / %VAR%) or a
-//     sensitive keyword (key / token / secret / password / credential) flips
-//     the verdict to require_permission.
+//   - `echo` / `printf` require permission for dynamic shell/env expansion
+//     ($VAR / ${VAR} / $env:VAR / %VAR%), but pure literal text stays readonly.
 describe("permission-policy-engine — D.13N-fix env-leak hardening", () => {
   for (const cmd of ["env", "env --version", "env LINGHUN_OPENAI_API_KEY", "set", "set FOO"]) {
     it(`env/set 强制 require_permission: ${cmd}`, () => {
@@ -415,11 +413,9 @@ describe("permission-policy-engine — D.13N-fix env-leak hardening", () => {
     "echo ${LINGHUN_OPENAI_API_KEY}",
     "echo ${env:LINGHUN_OPENAI_API_KEY}",
     "printf %s $LINGHUN_OPENAI_API_KEY",
-    "echo my_secret",
-    "echo PASSWORD",
     "printf '%s' $TOKEN",
   ]) {
-    it(`echo/printf 含 env 扩展或 secret 关键词 → require_permission: ${cmd}`, () => {
+    it(`echo/printf 含 env 扩展 → require_permission: ${cmd}`, () => {
       const v = classifyToolRequest(bash(cmd));
       expect(v.decision).toBe("require_permission");
       expect(v.semantic).toBe("secret_read");
@@ -432,6 +428,10 @@ describe("permission-policy-engine — D.13N-fix env-leak hardening", () => {
     "printf hello",
     'printf "%s\\n" hello',
     "echo --version",
+    "echo token bucket",
+    "echo my_secret",
+    "echo PASSWORD",
+    "printf '%s' api key design point",
   ]) {
     it(`echo/printf 纯字面量仍 auto_allow_readonly: ${cmd}`, () => {
       const v = classifyToolRequest(bash(cmd));

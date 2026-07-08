@@ -441,7 +441,9 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
       redactedSummary,
     };
   }
-  if (containsBareSensitiveTokenInCommand(command)) {
+  const tokens = tokenizeShellCommand(command);
+  const head = tokens[0]?.toLowerCase() ?? "";
+  if (containsBareSensitiveTokenInCommand(command) && head !== "echo" && head !== "printf") {
     return {
       decision: "require_permission",
       semantic: "secret_read",
@@ -514,7 +516,6 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
     };
   }
 
-  const tokens = tokenizeShellCommand(command);
   if (tokens.length === 0) {
     return {
       decision: "require_permission",
@@ -525,7 +526,6 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
     };
   }
 
-  const head = tokens[0]?.toLowerCase() ?? "";
   const args = tokens.slice(1);
   const semantic = classifyBashHead(head, args);
 
@@ -984,30 +984,26 @@ function classifyDockerSubcommand(args: string[]): SemanticClass {
 // `echo --version` / `printf "%s\n" hello` / `echo "hello world"` stay
 // readonly because none of those tokens contains an expansion marker.
 const ENV_EXPANSION_REGEX = /\$\{?[A-Za-z_][\w:]*\}?|%[A-Za-z_][\w]*%/u;
-const ECHO_SENSITIVE_KEYWORDS = [
+const SENSITIVE_SUMMARY_KEYWORDS = [
   "secret",
   "token",
   "password",
   "credential",
   "api_key",
   "apikey",
-  // Standalone "key" as a whole word — e.g. `echo $key` after we already
-  // catch $key, but also covers `echo my_key value`. Boundary-checked so
-  // benign strings like "monkey" don't trip.
   "key",
 ];
 
 function classifyEchoPrintf(args: string[]): SemanticClass {
   for (const arg of args) {
     if (ENV_EXPANSION_REGEX.test(arg)) return "secret_read";
-    if (containsSensitiveEchoKeyword(arg)) return "secret_read";
   }
   return "readonly";
 }
 
 function containsSensitiveEchoKeyword(arg: string): boolean {
   const lower = arg.toLowerCase();
-  for (const kw of ECHO_SENSITIVE_KEYWORDS) {
+  for (const kw of SENSITIVE_SUMMARY_KEYWORDS) {
     // Word-boundary match against [A-Za-z0-9_] so monkey/keychain/passwordless
     // do NOT match — only standalone tokens like KEY / api_key / SECRET.
     const re = new RegExp(`(?:^|[^a-z0-9_])${kw}(?:$|[^a-z0-9_])`, "iu");

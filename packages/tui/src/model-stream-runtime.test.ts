@@ -1124,7 +1124,7 @@ describe("final answer gate aggregation", () => {
     expect(plan.evidenceAction).toBeUndefined();
   });
 
-  it("blocks automatic verification when the user says not to modify", () => {
+  it("does not block automatic verification when the user only says not to modify", () => {
     const result = evaluateAggregatedFinalAnswerGate(
       makeGateContext() as never,
       withClaims("已验证。", [{ kind: "verification_claim", phrase: "已验证" }]),
@@ -1139,10 +1139,9 @@ describe("final answer gate aggregation", () => {
       userText: "先定位，不要改",
     });
 
-    expect(plan.action).toBe("blocked_explanation");
-    expect(plan.reason).toBe("user_forbid_commands");
-    expect(plan.directive).not.toContain("RunVerification");
-    expect(plan.evidenceAction).toBeUndefined();
+    expect(plan.action).toBe("verification_request");
+    expect(plan.directive).toContain("RunVerification");
+    expect(plan.evidenceAction?.toolName).toBe("RunVerification");
   });
 
   it("plans verification gaps in default mode through the permission-aware verification path", () => {
@@ -1234,6 +1233,20 @@ describe("final answer gate aggregation", () => {
     expect(plan.directive).toContain("不要运行 Bash");
     expect(plan.evidenceAction?.toolName).toBe("Glob");
     expect(JSON.stringify(plan.evidenceAction?.input)).toContain("md,txt,json,log");
+  });
+
+  it("keeps artifact readonly evidence available when the user only forbids tests", () => {
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["file_change_claim"],
+      },
+      context: { ...makeGateContext(), permissionMode: "default", language: "zh-CN" } as never,
+      userText: "不要跑测试，但可以 Read/Grep 看源码",
+    });
+
+    expect(plan.action).toBe("readonly_check");
+    expect(plan.evidenceAction?.toolName).toBe("Glob");
   });
 
   it("plans artifact gaps from changed files before broad globbing", () => {
