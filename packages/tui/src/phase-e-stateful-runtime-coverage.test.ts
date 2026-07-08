@@ -730,9 +730,10 @@ describe("Phase E compact preflight and deep compact coverage", () => {
 
     const cancelledController = new AbortController();
     cancelledController.abort();
+    const cancelledContext = await createTestContext();
     const cancelled = await runDeepCompact({
-      context: await createTestContext(),
-      sessionId,
+      context: cancelledContext,
+      sessionId: cancelledContext.sessionId ?? "session",
       transcript: [],
       runtime: runtime(),
       trigger: "manual",
@@ -745,9 +746,10 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     });
     expect(cancelled).toMatchObject({ ok: false, message: expect.stringContaining("取消") });
 
+    const toolUseContext = await createTestContext();
     const toolUseFailure = await runDeepCompact({
-      context: await createTestContext(),
-      sessionId,
+      context: toolUseContext,
+      sessionId: toolUseContext.sessionId ?? "session",
       transcript: [],
       runtime: runtime(),
       trigger: "manual",

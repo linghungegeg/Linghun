@@ -99,7 +99,11 @@ import {
 } from "./model-loop-runtime.js";
 import type { FinalAnswerClaimVerdict, FinalAnswerExtendedVerdict } from "./model-loop-runtime.js";
 import { stripStructuredFinalAnswerClaims } from "./model-loop-runtime.js";
-import { createModelSystemPromptSegments, sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
+import {
+  createModelSystemPromptSegments,
+  sanitizeMainScreenLeakage,
+  type ModelSystemPromptSegment,
+} from "./model-prompt-runtime.js";
 import { looksLikeModelSetupInput, parseModelSetupPrefill } from "./model-setup-runtime.js";
 import { executeModelToolUse, recordReportIncompleteEvidence } from "./model-tool-runtime.js";
 import {
@@ -2327,7 +2331,7 @@ export async function sendMessage(
   const messages = await buildModelMessagesWithRecentContext(
     context,
     sessionId,
-    [systemPrompt.stable, systemPrompt.dynamic],
+    [...systemPrompt.cacheable, ...systemPrompt.volatile],
     text,
     selectedRuntime,
   );
@@ -3655,17 +3659,29 @@ export async function handleRemoteInboundMessage(
   return decision;
 }
 
+type SystemPromptInput = string | readonly string[] | readonly ModelSystemPromptSegment[];
+
 export async function buildModelMessagesWithRecentContext(
   context: TuiContext,
   sessionId: string,
-  systemPrompt: string | readonly string[],
+  systemPrompt: SystemPromptInput,
   currentUserText: string,
   runtime = getSelectedModelRuntime(context),
 ): Promise<ModelMessage[]> {
-  const systemPrompts = Array.isArray(systemPrompt) ? systemPrompt : [systemPrompt];
-  const messages: ModelMessage[] = systemPrompts
-    .filter((content) => content.trim().length > 0)
-    .map((content) => ({ role: "system", content }));
+  const rawSystemPrompts = Array.isArray(systemPrompt) ? systemPrompt : [systemPrompt];
+  const messages: ModelMessage[] = rawSystemPrompts
+    .flatMap((entry) => {
+      const segment = typeof entry === "string" ? { content: entry } : entry;
+      const content = segment.content.trim();
+      if (!content) return [];
+      return [
+        {
+          role: "system" as const,
+          content,
+          ...(segment.promptCache ? { promptCache: segment.promptCache } : {}),
+        },
+      ];
+    });
   try {
     const recentTranscript = await context.store.readRecentTranscriptEvents(sessionId, {
       limit: MAX_CONTEXT_MESSAGES * 2 + 1,

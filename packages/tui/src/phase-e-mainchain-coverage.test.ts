@@ -396,7 +396,10 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(agent.mailbox[0]?.status).toBe("consumed");
 
     const recoveredContext = await createTestContext([
-      [{ type: "tool_use", id: "tc-unknown", name: "UnknownTool", input: {} }],
+      [
+        { type: "tool_use", id: "tc-invalid", name: "Todo", input: {} },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "tool_calls" },
+      ],
       [
         { type: "assistant_text_delta", text: "tool error observed; recovered with final answer" },
         { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
@@ -409,7 +412,7 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       recoveredContext,
       new MemoryOutput(),
     );
-    expect(recovered.status).toBe("completed");
+    expect(recovered.status, recovered.summary).toBe("completed");
     expect(recovered.summary).toContain("recovered with final answer");
   });
 
@@ -635,6 +638,13 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       classifyToolRequest({
         toolName: "Bash",
         input: { command: "npm install" },
+        workspaceRoot: context.projectPath,
+      }).decision,
+    ).toBe("auto_allow_development");
+    expect(
+      classifyToolRequest({
+        toolName: "Bash",
+        input: { command: "git push" },
         workspaceRoot: context.projectPath,
       }).decision,
     ).toBe("require_permission");
@@ -876,6 +886,12 @@ async function createTestContext(
   const store = new SessionStore({ projectPath, sessionRootDir: join(projectPath, ".sessions") });
   const session = await store.create({ model: "deepseek-chat" });
   const memory = await createMemoryState(defaultConfig, projectPath);
+  const agentGateway = Array.isArray(agentEvents?.[0])
+    ? gatewayByTurn(agentEvents as TestStreamEvent[][])
+    : gateway((agentEvents as TestStreamEvent[] | undefined) ?? [
+        { type: "assistant_text_delta", text: "agent final" },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ]);
   const context = {
     store,
     sessionId: session.id,
@@ -943,12 +959,7 @@ async function createTestContext(
     recordAgentToolFailureEvidence: async () => "evidence-agent-failure",
     recordToolResultBudgetEvidence: async () => undefined,
     createAgentGatewayContinuation: () => ({
-      gateway: Array.isArray(agentEvents?.[0])
-        ? gatewayByTurn(agentEvents as TestStreamEvent[][])
-        : gateway((agentEvents as TestStreamEvent[] | undefined) ?? [
-            { type: "assistant_text_delta", text: "agent final" },
-            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
-          ]),
+      gateway: agentGateway,
       provider: "deepseek",
       model: "deepseek-chat",
       endpointProfile: "chat_completions",

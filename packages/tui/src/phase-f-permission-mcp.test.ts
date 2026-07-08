@@ -270,6 +270,10 @@ function minimalContext(projectPath: string): TuiContext {
     permissionMode: "default",
     config: defaultConfig,
     tools: createToolContext(projectPath),
+    store: {
+      appendEvent: async () => {},
+    },
+    sessionId: "session",
     permissions: { rules: [], recentDenied: [] },
     mcp: { enabled: false, servers: [], tools: [] },
     skills: {

@@ -45,9 +45,16 @@ type PromptSection = Omit<PromptSectionInput, "text"> & {
   truncated?: boolean;
 };
 
+export type ModelSystemPromptSegment = {
+  content: string;
+  promptCache: "cacheable" | "volatile";
+};
+
 export type ModelSystemPromptSegments = {
   stable: string;
   dynamic: string;
+  cacheable: readonly ModelSystemPromptSegment[];
+  volatile: readonly ModelSystemPromptSegment[];
 };
 
 export function createModelSystemPrompt(
@@ -175,8 +182,21 @@ export function createModelSystemPromptSegments(
     { name: "meta_scheduler", text: metaSchedulerLine, volatile: true },
   ]);
   const dynamic = dynamicSections.map((section) => section.text).join("\n");
+  const cacheableSections = dynamicSections.filter((section) => !section.volatile);
+  const volatileSections = dynamicSections.filter((section) => section.volatile);
+  const cacheable = [
+    { content: stable, promptCache: "cacheable" as const },
+    ...cacheableSections.map((section) => ({
+      content: section.text,
+      promptCache: "cacheable" as const,
+    })),
+  ];
+  const volatile = volatileSections.map((section) => ({
+    content: section.text,
+    promptCache: "volatile" as const,
+  }));
   context.cache.lastPromptSections = createPromptSectionSnapshot(stable, dynamicSections);
-  return { stable, dynamic };
+  return { stable, dynamic, cacheable, volatile };
 }
 
 function buildPromptSections(sections: PromptSectionInput[]): PromptSection[] {

@@ -147,8 +147,15 @@ function createProviderStreamLimitError(
   };
 }
 
+export type ModelMessagePromptCacheHint = "cacheable" | "volatile";
+
 export type ModelMessage =
-  | { role: "system" | "user"; content: string }
+  | {
+      role: "system" | "user";
+      content: string;
+      /** Internal cache-boundary hint. Provider builders must not serialize this field directly. */
+      promptCache?: ModelMessagePromptCacheHint;
+    }
   | { role: "assistant"; content: string; toolCalls?: ModelToolCall[] }
   | { role: "tool"; content: string; tool_call_id: string };
 
@@ -1756,7 +1763,10 @@ function createAnthropicMessagesProfileRequest(
   const model = normalizeProviderRequestModel(request.model ?? config.model, config);
   // Anthropic 的 system prompt 是顶层字段；从 messages 中抽出第一个 system 文本，
   // 其余 system 消息合并到 system 字段，剩下 user/assistant 按顺序保留。
-  const systemSegments: string[] = [];
+  const systemSegments: Array<{
+    text: string;
+    promptCache?: ModelMessagePromptCacheHint;
+  }> = [];
   const conversation: AnthropicMessage[] = [];
   // D.13G：跨消息追踪 assistant 已经发起但还未配对 tool_result 的 tool_use id 集合，
   // 用于 minimal pairing repair（仅在 builder 边界）：
@@ -1766,7 +1776,9 @@ function createAnthropicMessagesProfileRequest(
   const repaired = repairToolMessagePairing(request.messages);
   for (const message of repaired.messages) {
     if (message.role === "system") {
-      if (message.content) systemSegments.push(message.content);
+      if (message.content) {
+        systemSegments.push({ text: message.content, promptCache: message.promptCache });
+      }
       continue;
     }
     if (message.role === "user") {
@@ -1904,13 +1916,13 @@ function createAnthropicMessagesProfileRequest(
     // 关闭时仍走 string 形态，request body 不会出现 cache_control 字段，避免误触发缓存计费。
     // cacheBreakNonce 仅在 enabled 且非空时附加到同一个 cache 边界 block，破坏前缀 hash。
     if (request.promptCacheEnabled) {
-      const cacheControlIndex = systemSegments.length > 1 ? 0 : systemSegments.length - 1;
+      const cacheControlIndex = selectAnthropicSystemCacheControlIndex(systemSegments);
       const blocks: AnthropicSystemBlock[] = systemSegments.map((segment, index) => {
         const isCacheBoundary = index === cacheControlIndex;
         const text =
           isCacheBoundary && request.cacheBreakNonce
-            ? `${segment}\n<!-- linghun-break-cache:${request.cacheBreakNonce} -->`
-            : segment;
+            ? `${segment.text}\n<!-- linghun-break-cache:${request.cacheBreakNonce} -->`
+            : segment.text;
         if (!isCacheBoundary) {
           return { type: "text", text };
         }
@@ -1918,10 +1930,24 @@ function createAnthropicMessagesProfileRequest(
       });
       body.system = blocks;
     } else {
-      body.system = systemSegments.join("\n\n");
+      body.system = systemSegments.map((segment) => segment.text).join("\n\n");
     }
   }
   return body;
+}
+
+function selectAnthropicSystemCacheControlIndex(
+  systemSegments: Array<{ text: string; promptCache?: ModelMessagePromptCacheHint }>,
+): number | undefined {
+  if (systemSegments.length === 0) return undefined;
+  const hasExplicitHints = systemSegments.some((segment) => segment.promptCache !== undefined);
+  if (!hasExplicitHints) {
+    return systemSegments.length > 1 ? 0 : systemSegments.length - 1;
+  }
+  for (let index = systemSegments.length - 1; index >= 0; index -= 1) {
+    if (systemSegments[index]?.promptCache === "cacheable") return index;
+  }
+  return undefined;
 }
 
 function findStableUserMessageCacheBreakpoint(
@@ -2300,9 +2326,9 @@ function toOpenAiMessage(message: ModelMessage): OpenAiChatMessage {
     };
   }
   if (message.role === "tool") {
-    return message;
+    return { role: "tool", content: message.content, tool_call_id: message.tool_call_id };
   }
-  return message;
+  return { role: message.role, content: message.content };
 }
 
 function toOpenAiResponsesInputItem(message: ModelMessage): OpenAiResponsesInputItem[] {
@@ -2330,7 +2356,7 @@ function toOpenAiResponsesInputItem(message: ModelMessage): OpenAiResponsesInput
       },
     ];
   }
-  return [message];
+  return [{ role: message.role, content: message.content }];
 }
 
 export async function* parseOpenAiStream(

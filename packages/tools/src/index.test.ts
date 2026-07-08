@@ -801,22 +801,18 @@ describe("Phase 05 core tools", () => {
     }
   });
 
-  it("does not infer package-script service intent from ordinary Bash", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
-    const noPort = await runTool(
-      "Bash",
-      { command: "npm start" },
-      createToolContext(project),
-    );
-    expect(JSON.stringify(noPort.output.data)).not.toContain("serviceHint");
+  it("does not infer package-script service intent from ordinary Bash", () => {
+    const noPort = __testParseBashCommandIntent("npm start");
+    expect(noPort.serviceCandidates).toEqual([]);
+    expect(noPort.backgroundLikely).toBe(false);
 
-    const result = await runTool(
-      "Bash",
-      { command: "PORT=9 npm start" },
-      createToolContext(project),
-    );
-    expect(result.output.data).toMatchObject({ exitCode: 1, outcome: "completed" });
-    expect(result.output.data).not.toHaveProperty("serviceHint");
+    const withPort = __testParseBashCommandIntent("PORT=9 npm start");
+    expect(withPort.serviceCandidates).toEqual([
+      expect.objectContaining({ kind: "package-script", port: 9 }),
+    ]);
+    expect(withPort.serviceCandidates).not.toEqual([
+      expect.objectContaining({ kind: "explicit-port" }),
+    ]);
   });
 
   it("does not infer node service intent from ordinary Bash", async () => {

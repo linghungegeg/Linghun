@@ -3142,6 +3142,51 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
     });
   });
 
+  it("uses the last explicit cacheable system segment as the Anthropic cache boundary", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "core stable", promptCache: "cacheable" },
+        { role: "system", content: "low churn memory", promptCache: "cacheable" },
+        { role: "system", content: "volatile runtime", promptCache: "volatile" },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: true,
+      cacheBreakNonce: "nonce-explicit-1",
+    });
+    const blocks = body.system as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    expect(blocks.map((block) => block.cache_control)).toEqual([
+      undefined,
+      { type: "ephemeral" },
+      undefined,
+    ]);
+    expect(blocks[1]?.text).toContain("low churn memory");
+    expect(blocks[1]?.text).toContain("<!-- linghun-break-cache:nonce-explicit-1 -->");
+    expect(blocks[2]?.text).toBe("volatile runtime");
+  });
+
+  it("does not attach system cache_control when explicit hints mark all system segments volatile", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "volatile runtime", promptCache: "volatile" },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: true,
+    });
+    const blocks = body.system as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    expect(blocks[0]?.cache_control).toBeUndefined();
+    expect(blocks[0]?.text).toBe("volatile runtime");
+  });
+
   it("does not append cacheBreakNonce to the current user message", () => {
     const provider = buildAnthropicProvider();
     const body = provider.createAnthropicMessagesRequest({
@@ -3288,8 +3333,9 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
     });
     const request: ModelRequest = {
       messages: [
-        { role: "system", content: "stable system" },
-        { role: "user", content: "hi" },
+        { role: "system", content: "stable system", promptCache: "cacheable" },
+        { role: "system", content: "dynamic system", promptCache: "volatile" },
+        { role: "user", content: "hi", promptCache: "cacheable" },
       ],
       promptCacheEnabled: true,
       promptCacheTtl: "1h",
@@ -3323,6 +3369,9 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
       expect(serialized).not.toContain("prompt_cache_retention");
       expect(serialized).not.toContain("cache_control");
       expect(serialized).not.toContain("linghun-break-cache");
+      expect(serialized).not.toContain("promptCache");
+      expect(serialized).not.toContain("cacheable");
+      expect(serialized).not.toContain("volatile");
       expect(serialized).not.toContain("input_schema");
     }
   });
@@ -3387,8 +3436,8 @@ describe("D.13F end-to-end Anthropic POST body with cache_control", () => {
     });
     const request: ModelRequest = {
       messages: [
-        { role: "system", content: "You are Linghun." },
-        { role: "system", content: "Dynamic turn context." },
+        { role: "system", content: "You are Linghun.", promptCache: "cacheable" },
+        { role: "system", content: "Dynamic turn context.", promptCache: "volatile" },
         { role: "user", content: "hi" },
       ],
       promptCacheEnabled: true,
@@ -3408,6 +3457,7 @@ describe("D.13F end-to-end Anthropic POST body with cache_control", () => {
     expect(sent.system[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(sent.system[0]?.text).toContain("<!-- linghun-break-cache:wire-nonce-9 -->");
     expect(sent.system[1]?.cache_control).toBeUndefined();
+    expect(sent.system[1]?.text).toBe("Dynamic turn context.");
   });
 });
 

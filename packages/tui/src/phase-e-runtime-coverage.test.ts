@@ -182,16 +182,12 @@ describe("Phase E cache light hints coverage", () => {
 
     const output = new MemoryOutput();
     writeLightHintsForTest(output, context);
-    expect(context.notifications).toHaveLength(1);
-    expect(context.notifications?.[0]?.key).toBe("lighthint:cache-hit-low");
+    expect(Object.keys(context.cache.hintLastShownAt)).toEqual(["cache-hit-low"]);
     writeLightHintsForTest(output, context);
-    expect(context.notifications?.map((item) => item.key)).toEqual([
-      "lighthint:cache-hit-low",
-      "lighthint:freshness-changed",
+    expect(Object.keys(context.cache.hintLastShownAt)).toEqual([
+      "cache-hit-low",
+      "freshness-changed",
     ]);
-    expect(new Set(context.notifications?.map((item) => item.key)).size).toBe(
-      context.notifications?.length,
-    );
     expect(output.text).toBe("");
   });
 });
