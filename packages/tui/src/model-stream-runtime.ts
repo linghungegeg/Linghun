@@ -154,7 +154,10 @@ import {
   formatReportEvidenceRequired,
   formatRequestActivity,
 } from "./request-lifecycle-presenter.js";
-import { LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES } from "./runtime-budget.js";
+import {
+  LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
+  LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
+} from "./runtime-budget.js";
 import { detectTerminalCapability } from "./shell/terminal-capability.js";
 import { addRoleUsage } from "./slash-command-runtime.js";
 import { handleSlashCommand } from "./slash-command-runtime.js";
@@ -4067,6 +4070,7 @@ async function budgetRecentContextToolResults(
     projectPath: context.projectPath,
     sessionId,
     state: getToolResultBudgetState(context),
+    singleResultChars: LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
   });
   for (const record of budgeted.records) {
     await recordToolResultBudgetEvidence(context, sessionId, record);

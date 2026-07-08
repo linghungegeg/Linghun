@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -97,6 +97,56 @@ describe("Phase E MCP stdio runtime coverage", () => {
       200,
     );
     expect(spawnError.ok).toBe(false);
+  });
+});
+
+describe("Phase E provider payload budgeting", () => {
+  it("persists medium-large tool outputs before provider requests", async () => {
+    const context = await createTestContext();
+    const records: Array<{ artifact: { path: string }; reason: string }> = [];
+    const large = `READSNIPPETS_MEDIUM_START\n${"x".repeat(20_000)}\nREADSNIPPETS_MEDIUM_END_SHOULD_NOT_REACH_PROVIDER`;
+
+    const result = await prepareMessagesForProviderPreflight({
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "call-medium-readsnippets",
+              name: "ReadSnippets",
+              input: { ranges: [{ path: "src/a.ts", start: 1, end: 100 }] },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call-medium-readsnippets", content: large },
+        { role: "user", content: "continue" },
+      ],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: {
+        ...compactDeps(),
+        recordToolResultBudgetEvidence: async (_context, _sessionId, record) => {
+          records.push(record);
+          return undefined;
+        },
+      },
+    });
+
+    expect(result.blocked).toBe(false);
+    const toolMessage = result.messages.find((message) => message.role === "tool");
+    expect(toolMessage?.role === "tool" ? toolMessage.content : "").toContain(
+      "<persisted-tool-result>",
+    );
+    expect(toolMessage?.role === "tool" ? toolMessage.content : "").not.toContain(
+      "READSNIPPETS_MEDIUM_END_SHOULD_NOT_REACH_PROVIDER",
+    );
+    expect(records.map((record) => record.reason)).toEqual(["single_result"]);
+    await expect(readFile(records[0]?.artifact.path ?? "", "utf8")).resolves.toContain(
+      "READSNIPPETS_MEDIUM_END_SHOULD_NOT_REACH_PROVIDER",
+    );
   });
 });
 

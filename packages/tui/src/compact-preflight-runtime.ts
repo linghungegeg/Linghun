@@ -31,6 +31,7 @@ import {
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
 } from "./tool-result-budget.js";
+import { LINGHUN_PROVIDER_TOOL_RESULT_CHARS } from "./runtime-budget.js";
 import type {
   CompactPreflightTrigger,
   CompactProjection,
@@ -442,6 +443,7 @@ async function prepareMessagesForProviderWithToolResultBudget(
     projectPath: context.projectPath,
     sessionId,
     state: getToolResultBudgetState(context),
+    singleResultChars: LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
   });
   for (const record of budgeted.records) {
     await deps.recordToolResultBudgetEvidence(context, sessionId, record);
