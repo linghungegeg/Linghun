@@ -201,6 +201,28 @@ describe("model-loop-runtime", () => {
       expect(names).toContain("ExecuteExtraTool");
     });
 
+    it("can switch pre-engine fallback recovery to direct real workspace tools", () => {
+      const names = createModelToolDefinitionsForReportGuard(undefined, {
+        excludePreEngineTools: true,
+        excludeDeferredToolDispatch: true,
+      }).map((d) => d.name);
+
+      expect(names).not.toContain("pre_context");
+      expect(names).not.toContain("pre_impact");
+      expect(names).not.toContain("pre_plan");
+      expect(names).not.toContain("pre_verify");
+      expect(names).not.toContain("SearchExtraTools");
+      expect(names).not.toContain("ExecuteExtraTool");
+      expect(names).toContain("Read");
+      expect(names).toContain("ReadSnippets");
+      expect(names).toContain("SourcePack");
+      expect(names).toContain("Grep");
+      expect(names).toContain("Glob");
+      expect(names).toContain("Bash");
+      expect(names).toContain("Diff");
+      expect(names).toContain("RunVerification");
+    });
+
     it("exposes real agent workflow verification and report tools before CommandProposal fallback", () => {
       const names = createModelToolDefinitions().map((d) => d.name);
       expect(names).toContain("StartAgent");

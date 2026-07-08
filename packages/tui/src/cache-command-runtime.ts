@@ -96,9 +96,10 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     latest?.freshness.changedKeys ?? diffFreshness(context.cache.lastFreshness, freshness);
   const source = latest?.cacheWriteTokensSource ?? "missing";
   const latestObservation = context.cache.lastRequestObservation;
+  const diagnosticObservation = context.cache.lastMainChainRequestObservation ?? latestObservation;
   const diagnosis = diagnoseCacheBreak({
     latest,
-    observation: latestObservation,
+    observation: diagnosticObservation,
     freshnessChangedKeys: changed,
     warnBelowHitRate: context.cache.config.warnBelowHitRate,
     postCompactWarmup: context.cache.postCompactCacheWarmup,
@@ -123,7 +124,7 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     `- freshness changedKeys: ${changed.length > 0 ? changed.join(", ") : "none"}`,
     `- latest telemetry: ${formatCacheTelemetryObservation(latestObservation)}`,
     `- telemetry by kind: ${formatCacheTelemetryByKind(context.cache.lastRequestObservationByKind)}`,
-    `- drift reason: ${formatCacheTelemetryDrift(latestObservation)}`,
+    `- drift reason: ${formatCacheTelemetryDrift(diagnosticObservation)}`,
     `- break diagnosis: ${formatCacheBreakDiagnosis(diagnosis)}`,
     `- note: ${zeroNote}`,
   ].join("\n");

@@ -119,6 +119,73 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(context.cache.lastPromptSections?.largestSection).toBeTruthy();
   });
 
+  it("keeps memory and failure learning outside the cacheable prompt boundary", () => {
+    const context = createPromptTestContext({
+      memory: {
+        ...createPromptTestContext().memory,
+        accepted: [
+          {
+            id: "mem-1",
+            scope: "project",
+            summary: "Use focused validation after edits",
+            source: "test",
+            sourceRefs: ["test"],
+            risk: "low",
+            inferred: false,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            status: "accepted",
+          },
+        ],
+      },
+    });
+
+    const segments = createModelSystemPromptSegments(
+      "继续",
+      context,
+      { runtime: "test" },
+      undefined,
+      undefined,
+      { count: 1, text: '[{"category":"tool_failure","avoid":"retry blindly","severity":"medium","count":1}]' },
+    );
+
+    expect(segments.cacheable.map((segment) => segment.content).join("\n")).not.toContain(
+      "ControlledMemorySummary=",
+    );
+    expect(segments.cacheable.map((segment) => segment.content).join("\n")).not.toContain(
+      "FailureLearningSummary=",
+    );
+    expect(segments.volatile.map((segment) => segment.content).join("\n")).toContain(
+      "ControlledMemorySummary=",
+    );
+    expect(segments.volatile.map((segment) => segment.content).join("\n")).toContain(
+      "FailureLearningSummary=",
+    );
+  });
+
+  it("does not inject deferred pre-engine guidance during pre fallback recovery", () => {
+    const context = createPromptTestContext({
+      preEngineFallbackPreference: {
+        projectPath: "F:\\synthetic-project",
+        active: true,
+        activatedAt: "2026-01-01T00:00:00.000Z",
+        reason: "fallback_required",
+      },
+    });
+
+    const segments = createModelSystemPromptSegments("继续", context, { runtime: "test" });
+    const allPromptText = [
+      segments.stable,
+      segments.dynamic,
+      ...segments.cacheable.map((segment) => segment.content),
+      ...segments.volatile.map((segment) => segment.content),
+    ].join("\n");
+
+    expect(allPromptText).not.toContain("DeferredToolsReminder=");
+    expect(allPromptText).not.toContain("PreEngineRepositoryTools=");
+    expect(allPromptText).not.toContain("RepositoryAnalysisWorkflow=");
+    expect(context.discoveredDeferredToolNames.size).toBe(0);
+  });
+
   it("truncates oversized volatile diagnostics but keeps the section boundary", () => {
     const context = createPromptTestContext();
     const longScheduler = `MetaSchedulerForModel=${"x".repeat(7_000)}`;

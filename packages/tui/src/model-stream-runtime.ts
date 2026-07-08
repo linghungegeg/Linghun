@@ -386,8 +386,10 @@ function createProviderToolDefinitionsForContext(
   context: TuiContext,
   guard: ToolBatchExecutionOptions["continuation"]["reportWriteGuard"],
 ): ReturnType<typeof createModelToolDefinitionsForReportGuard> {
+  const preEngineFallbackActive = isPreEngineFallbackHardCutActive(context);
   return createModelToolDefinitionsForReportGuard(guard, {
-    excludePreEngineTools: isPreEngineFallbackHardCutActive(context),
+    excludePreEngineTools: preEngineFallbackActive,
+    excludeDeferredToolDispatch: preEngineFallbackActive,
   });
 }
 
@@ -395,10 +397,15 @@ export function createPreFallbackHardCutSkippedToolResult(
   toolCall: ModelToolCall,
 ): ModelToolExecutionResult {
   return {
-    ok: false,
+    ok: true,
     tool: toolCall.name,
     text: "Pre-engine fallback is active for this task. This tool call was hard-cut; use real workspace tools instead.",
-    data: { skipped: true, reason: "pre_engine_fallback_hard_cut" },
+    data: {
+      skipped: true,
+      reason: "pre_engine_fallback_hard_cut",
+      degraded: true,
+      fallback_required: true,
+    },
   };
 }
 
@@ -800,8 +807,12 @@ function recordCacheRequestObservation(
   recordCacheRequestObservationState(context.cache, kind, provider, request);
 }
 
-function recordCacheUsageObservation(context: TuiContext, usage: ModelUsage): void {
-  recordCacheUsageObservationState(context.cache, usage);
+function recordCacheUsageObservation(
+  context: TuiContext,
+  kind: CacheRequestKind,
+  usage: ModelUsage,
+): void {
+  recordCacheUsageObservationState(context.cache, usage, kind);
 }
 
 function injectAgentCompletionMainChainContext(
@@ -2092,16 +2103,6 @@ export async function handleNaturalInput(
     writeLine(output, modelGuard);
     return "handled";
   }
-  if (context.memory.learningMode === "active") {
-    const run = await runAutoLearningOnTurnEnd(context, text);
-    if (run.candidatesCreated > 0) {
-      enqueueMemoryCandidateHint(context, run.candidatesCreated);
-    }
-    const acceptedChanged = (run.acceptedCreated ?? 0) + (run.acceptedUpdated ?? 0);
-    if (acceptedChanged > 0) {
-      enqueueAutoMemoryHint(context, run.acceptedCreated ?? 0, run.acceptedUpdated ?? 0);
-    }
-  }
   return "message";
 }
 
@@ -2701,7 +2702,7 @@ export async function sendMessage(
         }
         if (event.type === "usage") {
           roundHadUsage = true;
-          recordCacheUsageObservation(context, event.usage);
+          recordCacheUsageObservation(context, "main", event.usage);
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
           await recordApiTokenCountIfAvailable(
@@ -3395,6 +3396,7 @@ export async function sendMessage(
       text: assistantText,
       createdAt: new Date().toISOString(),
     });
+    await commitAutoLearningAfterSuccessfulTurn(context, text);
     const reportedAt = new Date().toISOString();
     for (const noticeId of agentCompletionNoticeIdsForTurn) {
       markAgentCompletionNoticeReported(context, noticeId, reportedAt);
@@ -3677,6 +3679,21 @@ function enqueueMemoryCandidateHint(_context: TuiContext, _count: number): void 
 
 function enqueueAutoMemoryHint(_context: TuiContext, _created: number, _updated: number): void {
   return;
+}
+
+async function commitAutoLearningAfterSuccessfulTurn(
+  context: TuiContext,
+  userText: string,
+): Promise<void> {
+  if (context.memory.learningMode !== "active") return;
+  const run = await runAutoLearningOnTurnEnd(context, userText);
+  if (run.candidatesCreated > 0) {
+    enqueueMemoryCandidateHint(context, run.candidatesCreated);
+  }
+  const acceptedChanged = (run.acceptedCreated ?? 0) + (run.acceptedUpdated ?? 0);
+  if (acceptedChanged > 0) {
+    enqueueAutoMemoryHint(context, run.acceptedCreated ?? 0, run.acceptedUpdated ?? 0);
+  }
 }
 
 function policyHintPriority(hint: PolicyDecision["hints"][number]): number {
@@ -4181,7 +4198,7 @@ async function streamFinalModelAnswerWithoutTools(
     }
     if (event.type === "usage") {
       hadUsage = true;
-      recordCacheUsageObservation(context, event.usage);
+      recordCacheUsageObservation(context, "final", event.usage);
       const stats = recordModelUsage(context, event.usage);
       await appendUsageEvents(context, sessionId, stats);
       await recordApiTokenCountIfAvailable(
@@ -4713,7 +4730,7 @@ export async function continueModelAfterToolResults(
         }
         if (event.type === "usage") {
           roundHadUsage = true;
-          recordCacheUsageObservation(context, event.usage);
+          recordCacheUsageObservation(context, "continuation", event.usage);
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
           await recordApiTokenCountIfAvailable(

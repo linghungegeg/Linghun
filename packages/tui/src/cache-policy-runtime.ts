@@ -226,6 +226,7 @@ export function observeCacheUsage(input: {
 
 export type CacheRequestObservationState = {
   lastRequestObservation?: CacheRequestObservation;
+  lastMainChainRequestObservation?: CacheRequestObservation;
   lastRequestObservationByKind?: Partial<
     Record<CacheRequestObservation["kind"], CacheRequestObservation>
   >;
@@ -389,16 +390,23 @@ export function recordCacheRequestObservation(
   provider: string,
   request: ModelRequest,
 ): CacheRequestObservation {
+  const policyKind = resolveCachePolicy(kind).kind;
+  const previous = MAIN_CHAIN_CACHE_REQUEST_KINDS.has(policyKind)
+    ? state.lastMainChainRequestObservation
+    : state.lastRequestObservationByKind?.[policyKind];
   const observation = observeCacheSafeRequest({
-    previous: state.lastRequestObservation,
-    kind,
+    previous,
+    kind: policyKind,
     provider,
     request,
   });
   state.lastRequestObservation = observation;
+  if (MAIN_CHAIN_CACHE_REQUEST_KINDS.has(observation.kind)) {
+    state.lastMainChainRequestObservation = observation;
+  }
   state.lastRequestObservationByKind = {
     ...state.lastRequestObservationByKind,
-    [kind]: observation,
+    [policyKind]: observation,
   };
   updatePostCompactCacheWarmup(state, observation);
   return observation;
@@ -407,10 +415,23 @@ export function recordCacheRequestObservation(
 export function recordCacheUsageObservation(
   state: CacheRequestObservationState,
   usage: ModelUsage,
+  kind?: CacheRequestKind,
 ): CacheRequestObservation | undefined {
-  const updated = observeCacheUsage({ observation: state.lastRequestObservation, usage });
+  const policyKind = kind ? resolveCachePolicy(kind).kind : undefined;
+  const target = policyKind
+    ? state.lastRequestObservationByKind?.[policyKind]
+    : state.lastRequestObservation;
+  const updated = observeCacheUsage({ observation: target, usage });
   if (!updated) return undefined;
-  state.lastRequestObservation = updated;
+  if (!kind || state.lastRequestObservation?.id === updated.id) {
+    state.lastRequestObservation = updated;
+  }
+  if (
+    MAIN_CHAIN_CACHE_REQUEST_KINDS.has(updated.kind) &&
+    state.lastMainChainRequestObservation?.id === updated.id
+  ) {
+    state.lastMainChainRequestObservation = updated;
+  }
   state.lastRequestObservationByKind = {
     ...state.lastRequestObservationByKind,
     [updated.kind]: updated,
@@ -586,15 +607,32 @@ function splitCacheMessageBoundary(messages: ModelRequest["messages"]): {
   conversationPrefix: ModelRequest["messages"];
   latestMessage: ModelRequest["messages"][number] | undefined;
 } {
-  const systemPrefix = messages.filter((message) => message.role === "system");
+  const systemMessages = messages.filter((message) => message.role === "system");
   const conversation = messages.filter((message) => message.role !== "system");
   const compactStablePrefix = collectCompactStableConversationPrefix(conversation);
   return {
-    systemPrefix,
+    systemPrefix: selectCacheableSystemPrefix(systemMessages),
     conversationPrefix:
       compactStablePrefix.length > 0 ? compactStablePrefix : conversation.slice(0, -1),
     latestMessage: conversation.at(-1),
   };
+}
+
+function selectCacheableSystemPrefix(
+  systemMessages: ModelRequest["messages"],
+): ModelRequest["messages"] {
+  if (systemMessages.length <= 1) return systemMessages;
+  const hasExplicitHints = systemMessages.some(
+    (message) => "promptCache" in message && message.promptCache !== undefined,
+  );
+  if (!hasExplicitHints) return systemMessages.slice(0, 1);
+  for (let index = systemMessages.length - 1; index >= 0; index -= 1) {
+    const message = systemMessages[index];
+    if (message && "promptCache" in message && message.promptCache === "cacheable") {
+      return systemMessages.slice(0, index + 1);
+    }
+  }
+  return [];
 }
 
 function collectCompactStableConversationPrefix(

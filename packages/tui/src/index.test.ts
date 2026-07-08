@@ -17,7 +17,7 @@ import {
   resolveStoragePaths,
   saveProviderEnvSetup,
 } from "@linghun/config";
-import { SessionStore } from "@linghun/core";
+import { LinghunError, SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import type { ModelMessage } from "@linghun/providers";
 import { type ToolOutput, createToolContext } from "@linghun/tools";
@@ -5367,7 +5367,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates).toHaveLength(0);
   });
 
-  it("D.14B: real input path auto accepts stable memory when learning is on", async () => {
+  it("D.14B: real input path defers stable memory until model turn succeeds", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -5378,8 +5378,7 @@ describe("Phase 06 TUI slash commands", () => {
     const result = await handleNaturalInput("请记住：我偏好用 pnpm 而不是 npm。", context, output);
     expect(result).toBe("message");
     expect(context.memory.candidates).toHaveLength(0);
-    expect(context.memory.accepted[0]?.inferred).toBe(true);
-    expect(context.memory.accepted[0]?.status).toBe("accepted");
+    expect(context.memory.accepted).toHaveLength(0);
   });
 
   it("D.14B: auto-learning accepted memory stays out of user-visible notifications", async () => {
@@ -5390,8 +5389,8 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    await handleNaturalInput("请记住：我偏好简短中文回答。", context, output);
-    await handleNaturalInput("请记住：我偏好先读源码再回答。", context, output);
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好简短中文回答。");
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好先读源码再回答。");
 
     expect(context.memory.candidates).toHaveLength(0);
     expect(context.memory.accepted.length).toBeGreaterThan(0);
@@ -5439,7 +5438,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates).toHaveLength(0);
   });
 
-  it("D.14B: real-path auto accepted memory is immediately eligible for accepted-only prompt", async () => {
+  it("D.14B: accepted auto memory is eligible for accepted-only prompt after commit", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -5447,7 +5446,7 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     context.memory.learningMode = "active";
-    await handleNaturalInput("请记住：我偏好用 vitest 而不是 jest。", context, output);
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好用 vitest 而不是 jest。");
     expect(context.memory.candidates).toHaveLength(0);
     expect(context.memory.accepted).toHaveLength(1);
 
@@ -27190,6 +27189,51 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(JSON.stringify(transcript)).not.toContain("ordinary_light_path");
   });
 
+  it("auto-learning commits only after a successful model turn", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-memory-commit-success-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    const gateway = {
+      stream: vi.fn(async function* () {
+        yield { type: "assistant_text_delta", text: "已记住。" } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+      }),
+    } as unknown as Parameters<typeof __testSendMessage>[2];
+
+    await __testSendMessage("请记住：我偏好用 pnpm 而不是 npm。", context, gateway, output);
+
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted[0]?.status).toBe("accepted");
+    expect(context.memory.accepted[0]?.inferred).toBe(true);
+  });
+
+  it("auto-learning does not commit when the model turn fails before final answer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-memory-commit-failure-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    const gateway = {
+      stream: vi.fn(async function* () {
+        yield {
+          type: "error",
+          error: new LinghunError({
+            code: "PROVIDER_SERVER_ERROR",
+            message: "gateway stopped",
+            recoverable: true,
+          }),
+        } as const;
+      }),
+    } as unknown as Parameters<typeof __testSendMessage>[2];
+
+    await __testSendMessage("请记住：我偏好先读源码再回答。", context, gateway, output);
+
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(context.memory.accepted).toHaveLength(0);
+  });
+
   it("Policy: code fact request keeps source-first in system_event, not main notifications", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-policy-source-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -30148,11 +30192,13 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
 
     const output = new MemoryOutput();
     await __testSendMessage("帮我看看现在的整体情况", context, gateway, output);
-    expect(streamCount).toBeGreaterThanOrEqual(2);
+    expect(streamCount).toBeGreaterThanOrEqual(1);
 
     const files = await readFailureFiles(project);
     const categories = files.map((f) => f.category);
     expect(categories).toContain("final_gate_downgrade");
+    expect(context.lastFullOutput ?? output.text).not.toContain("LinghunFinalAnswerClaims");
+    expect(context.lastFullOutput ?? output.text).not.toContain("completion_pass");
     // 持久化文件不含 secret/baseUrl。
     const raw = JSON.stringify(files);
     expect(raw).not.toContain("example.test");

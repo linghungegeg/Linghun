@@ -1899,7 +1899,7 @@ export async function handleBtwCommand(
     {
       onRequest: (request) =>
         recordCacheRequestObservation(context.cache, "side-question", runtime.provider, request),
-      onUsage: (usage) => recordCacheUsageObservation(context.cache, usage),
+      onUsage: (usage) => recordCacheUsageObservation(context.cache, usage, "side-question"),
     },
     context.cache,
   );

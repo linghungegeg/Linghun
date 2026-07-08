@@ -16,10 +16,12 @@ import { classifyProviderFailure, type ProviderFailureKind } from "./request-lif
  */
 
 export type BreakerKey = string;
+export type ProviderCooldownScope = "main" | "sidechain";
 
 export type BreakerEntry = {
   providerId: string;
   model: string;
+  cooldownScope?: ProviderCooldownScope;
   state: "closed" | "open" | "half-open";
   consecutiveFailures: number;
   lastFailureAt: number;
@@ -68,8 +70,17 @@ export function createProviderCircuitBreakerState(): ProviderCircuitBreakerState
   return { entries: new Map() };
 }
 
-export function makeBreakerKey(providerId: string, model: string): BreakerKey {
+export function makeBreakerKey(
+  providerId: string,
+  model: string,
+  cooldownScope: ProviderCooldownScope = "main",
+): BreakerKey {
+  if (cooldownScope === "sidechain") return `${providerId}::${model}::sidechain`;
   return `${providerId}::${model}`;
+}
+
+function makeProviderActiveKey(providerId: string, model: string): BreakerKey {
+  return makeBreakerKey(providerId, model, "main");
 }
 
 /**
@@ -95,9 +106,10 @@ export function checkProviderGate(
   state: ProviderCircuitBreakerState,
   providerId: string,
   model: string,
+  cooldownScope: ProviderCooldownScope = "main",
 ): ProviderGateResult {
   // Check cooldown first — if the breaker is open, no request can proceed.
-  const cooldown = checkProviderCooldown(state, providerId, model);
+  const cooldown = checkProviderCooldown(state, providerId, model, cooldownScope);
   if (cooldown.blocked) {
     return {
       allowed: false,
@@ -107,7 +119,7 @@ export function checkProviderGate(
     };
   }
   // Check concurrency capacity.
-  const key = makeBreakerKey(providerId, model);
+  const key = makeProviderActiveKey(providerId, model);
   const entry = state.entries.get(key);
   const limit = entry?.activeLimit ?? PROVIDER_ACTIVE_LIMIT;
   const count = entry?.activeCount ?? 0;
@@ -126,7 +138,7 @@ export function acquireProviderSlot(
   providerId: string,
   model: string,
 ): boolean {
-  const key = makeBreakerKey(providerId, model);
+  const key = makeProviderActiveKey(providerId, model);
   const existing = state.entries.get(key);
   const limit = existing?.activeLimit ?? PROVIDER_ACTIVE_LIMIT;
   const count = existing?.activeCount ?? 0;
@@ -134,6 +146,7 @@ export function acquireProviderSlot(
   state.entries.set(key, {
     providerId,
     model,
+    cooldownScope: existing?.cooldownScope ?? "main",
     state: existing?.state ?? "closed",
     consecutiveFailures: existing?.consecutiveFailures ?? 0,
     lastFailureAt: existing?.lastFailureAt ?? 0,
@@ -154,7 +167,7 @@ export function releaseProviderSlot(
   providerId: string,
   model: string,
 ): void {
-  const key = makeBreakerKey(providerId, model);
+  const key = makeProviderActiveKey(providerId, model);
   const existing = state.entries.get(key);
   if (!existing) return;
   const count = Math.max(0, existing.activeCount - 1);
@@ -182,11 +195,12 @@ export function recordProviderFailure(
   providerId: string,
   model: string,
   errorCode: string,
+  cooldownScope: ProviderCooldownScope = "main",
 ): boolean {
   if (!isRecoverableProviderFailure(errorCode)) {
     return false;
   }
-  const key = makeBreakerKey(providerId, model);
+  const key = makeBreakerKey(providerId, model, cooldownScope);
   const existing = state.entries.get(key);
   const previousState = existing?.state ?? "closed";
   const now = Date.now();
@@ -197,12 +211,13 @@ export function recordProviderFailure(
   state.entries.set(key, {
     providerId,
     model,
+    cooldownScope,
     state: breakerState,
     consecutiveFailures,
     lastFailureAt: now,
     cooldownUntil,
     reasonCode: errorCode,
-    activeCount: existing?.activeCount ?? 0,
+    activeCount: cooldownScope === "main" ? (existing?.activeCount ?? 0) : 0,
     activeLimit: existing?.activeLimit ?? PROVIDER_ACTIVE_LIMIT,
   });
   return breakerState === "open" && previousState !== "open";
@@ -217,15 +232,21 @@ export function clearProviderBreaker(
   state: ProviderCircuitBreakerState,
   providerId: string,
   model: string,
+  cooldownScope: ProviderCooldownScope = "main",
 ): void {
+  if (cooldownScope !== "main") {
+    state.entries.delete(makeBreakerKey(providerId, model, cooldownScope));
+    return;
+  }
   // Preserve activeCount through the clear — concurrent requests may still be in-flight.
-  const key = makeBreakerKey(providerId, model);
+  const key = makeProviderActiveKey(providerId, model);
   const existing = state.entries.get(key);
   const count = existing?.activeCount ?? 0;
   if (count > 0) {
     state.entries.set(key, {
       providerId,
       model,
+      cooldownScope: "main",
       state: "closed",
       consecutiveFailures: 0,
       lastFailureAt: 0,
@@ -254,8 +275,9 @@ export function checkProviderCooldown(
   state: ProviderCircuitBreakerState,
   providerId: string,
   model: string,
+  cooldownScope: ProviderCooldownScope = "main",
 ): CooldownCheckResult {
-  const key = makeBreakerKey(providerId, model);
+  const key = makeBreakerKey(providerId, model, cooldownScope);
   const entry = state.entries.get(key);
   if (!entry || entry.cooldownUntil === 0) {
     return { blocked: false };
@@ -506,19 +528,21 @@ export async function* withProviderRetry(
     skipGate?: boolean;
     skipCooldownCheck?: boolean;
     streamEventIdleMs?: number;
-    onRetry?: (info: {
+      onRetry?: (info: {
       attempt: number;
       maxAttempts: number;
       delayMs: number;
       kind: ProviderFailureKind;
       code: string;
     }) => unknown | Promise<unknown>;
+    cooldownScope?: ProviderCooldownScope;
   },
 ): AsyncGenerator<LinghunEvent> {
   const maxRetries = opts?.maxRetries ?? PROVIDER_RETRY_MAX_ATTEMPTS;
   const baseDelayMs = opts?.baseDelayMs ?? PROVIDER_RETRY_BASE_MS;
   const maxDelayMs = opts?.maxDelayMs ?? PROVIDER_RETRY_MAX_MS;
   const streamEventIdleMs = opts?.streamEventIdleMs ?? PROVIDER_STREAM_EVENT_IDLE_MS;
+  const cooldownScope = opts?.cooldownScope ?? "main";
   const model = request.model ?? "";
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -531,7 +555,7 @@ export async function* withProviderRetry(
     }
 
     if (!opts?.skipGate) {
-      const gate = checkProviderGate(state, provider, model);
+      const gate = checkProviderGate(state, provider, model, cooldownScope);
       if (!gate.allowed) {
         if (gate.reason === "at_capacity") {
           // Wait for a slot to open, then retry without counting as an attempt.
@@ -637,7 +661,7 @@ export async function* withProviderRetry(
 
     if (!streamError) {
       // Success — flush deferred events (tool_use + subsequent) in original order.
-      clearProviderBreaker(state, provider, model);
+      clearProviderBreaker(state, provider, model, cooldownScope);
       for (const ev of deferredEvents) yield ev;
       return;
     }
@@ -654,7 +678,7 @@ export async function* withProviderRetry(
     const code = getProviderErrorCode(streamError);
 
     if (!shouldAttemptSameProviderRetry(code) || attempt >= maxRetries) {
-      recordProviderFailure(state, provider, model, code);
+      recordProviderFailure(state, provider, model, code, cooldownScope);
       // Non-retryable or retries exhausted — yield the error as-is.
       const error =
         streamError instanceof LinghunError
@@ -680,7 +704,7 @@ export async function* withProviderRetry(
       code,
     });
     if (isProviderRetryHookDecision(retryDecision) && retryDecision.action === "cancel") {
-      recordProviderFailure(state, provider, model, code);
+      recordProviderFailure(state, provider, model, code, cooldownScope);
       yield {
         type: "error",
         error: new LinghunError({

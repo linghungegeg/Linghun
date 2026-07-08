@@ -2400,6 +2400,7 @@ export async function handleForkCommand(
     context.providerBreaker,
     route.provider ?? "unconfigured",
     effectiveModel,
+    "sidechain",
   );
   if (cooldown.blocked) {
     const message = formatCooldownMessage(
@@ -3058,6 +3059,7 @@ export async function runModelBackedAgent(
         providerRequest,
         signal,
         {
+          cooldownScope: "sidechain",
           onRetry: (info) =>
             handleProviderRetryForMetaOrchestration(context, agent.transcriptSessionId, info),
         },
@@ -3073,7 +3075,7 @@ export async function runModelBackedAgent(
         if (event.type === "usage") {
           agent.cost.inputTokens += event.usage.inputTokens;
           agent.cost.outputTokens += event.usage.outputTokens;
-          recordCacheUsageObservation(context.cache, event.usage);
+          recordCacheUsageObservation(context.cache, event.usage, "agent-child");
           continue;
         }
         if (event.type === "error") {
@@ -3098,6 +3100,7 @@ export async function runModelBackedAgent(
               context.providerBreaker,
               fallback.runtime.provider,
               fallback.runtime.model,
+              "sidechain",
             );
             if (fallbackCooldown.blocked) {
               const message = formatCooldownMessage(
@@ -3175,6 +3178,7 @@ export async function runModelBackedAgent(
           context.providerBreaker,
           currentRuntime.provider,
           currentRuntime.model,
+          "sidechain",
         );
         if (activeFallback) {
           syncAgentRuntimeFallbackMetadata(context, agent, activeFallback.from, activeFallback.to);

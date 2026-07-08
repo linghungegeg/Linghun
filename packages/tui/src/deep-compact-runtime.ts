@@ -237,6 +237,7 @@ export async function runDeepCompact(input: {
       input.runtime.provider,
       providerRequest,
       signal,
+      { cooldownScope: "sidechain" },
     )) {
       if (signal.aborted) {
         return failMessage(input.context, "Deep compact cancelled by user interrupt.");
@@ -259,7 +260,7 @@ export async function runDeepCompact(input: {
         );
       }
       if (event.type === "usage") {
-        recordCacheUsageObservation(input.context.cache, event.usage);
+        recordCacheUsageObservation(input.context.cache, event.usage, "deep-compact");
         continue;
       }
       if (event.type === "error") {

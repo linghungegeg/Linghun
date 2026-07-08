@@ -97,12 +97,16 @@ export function createModelSystemPromptSegments(
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
   // 工具继续直接调用；不暴露 raw schema/secret/参数，仅提示发现-执行两步约束。
-  const deferredSnapshot = snapshotDeferredTools(context);
-  const deferredReminder = formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
-  const preEngineToolNames = registerPreEngineDeferredToolsForRuntime(context, deferredSnapshot);
   const preEngineFallbackPreferenceActive =
     context.preEngineFallbackPreference?.active === true &&
     context.preEngineFallbackPreference.projectPath === context.projectPath;
+  const deferredSnapshot = snapshotDeferredTools(context);
+  const deferredReminder = preEngineFallbackPreferenceActive
+    ? undefined
+    : formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
+  const preEngineToolNames = preEngineFallbackPreferenceActive
+    ? []
+    : registerPreEngineDeferredToolsForRuntime(context, deferredSnapshot);
   const preEngineRepositoryTools = {
     discovered: true,
     tools: preEngineToolNames,
@@ -170,7 +174,7 @@ export function createModelSystemPromptSegments(
       text: `RuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}`,
       volatile: true,
     },
-    { name: "memory", text: `ControlledMemorySummary=${memorySummary}`, volatile: false },
+    { name: "memory", text: `ControlledMemorySummary=${memorySummary}`, volatile: true },
     {
       name: "memory_boundary",
       text: `MemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; autoExtractionRuntime; dedicatedMemoryDir; manualLearnCandidateOnly; noSecretsOrFullDumps`,
@@ -187,7 +191,7 @@ export function createModelSystemPromptSegments(
     { name: "worktree", text: worktreeContextLine.trim(), volatile: true },
     { name: "git_status", text: gitStatusLine, volatile: true },
     { name: "agent_completion", text: agentCompletionLine, volatile: true },
-    { name: "failure_learning", text: failureLearningLine.trim(), volatile: false },
+    { name: "failure_learning", text: failureLearningLine.trim(), volatile: true },
     { name: "meta_scheduler", text: metaSchedulerLine, volatile: true },
   ]);
   const dynamic = dynamicSections.map((section) => section.text).join("\n");

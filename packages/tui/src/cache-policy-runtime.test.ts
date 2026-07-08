@@ -210,6 +210,70 @@ describe("cache-policy-runtime", () => {
     expect(second.fingerprint.changedKeys).toEqual(["requestHash", "latestMessageHash"]);
   });
 
+  it("keeps volatile system sections out of the cacheable system prefix", () => {
+    const first = observeCacheSafeRequest({
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "stable base", promptCache: "cacheable" },
+          { role: "system", content: "stable memory", promptCache: "cacheable" },
+          { role: "system", content: "turn evidence a", promptCache: "volatile" },
+          { role: "user", content: "current question" },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    const second = observeCacheSafeRequest({
+      previous: first,
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "stable base", promptCache: "cacheable" },
+          { role: "system", content: "stable memory", promptCache: "cacheable" },
+          { role: "system", content: "turn evidence b", promptCache: "volatile" },
+          { role: "user", content: "current question" },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:01.000Z"),
+    });
+
+    expect(second.fingerprint.systemPrefixHash).toBe(first.fingerprint.systemPrefixHash);
+    expect(second.fingerprint.changedKeys).toEqual(["requestHash"]);
+  });
+
+  it("matches the provider cache boundary for legacy multi-system prompts without hints", () => {
+    const first = observeCacheSafeRequest({
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "stable system" },
+          { role: "system", content: "dynamic system a" },
+          { role: "user", content: "current question" },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    const second = observeCacheSafeRequest({
+      previous: first,
+      kind: "main",
+      provider: "anthropic",
+      request: makeRequest({
+        messages: [
+          { role: "system", content: "stable system" },
+          { role: "system", content: "dynamic system b" },
+          { role: "user", content: "current question" },
+        ],
+      }),
+      now: new Date("2026-01-01T00:00:01.000Z"),
+    });
+
+    expect(second.fingerprint.systemPrefixHash).toBe(first.fingerprint.systemPrefixHash);
+    expect(second.fingerprint.changedKeys).toEqual(["requestHash"]);
+  });
+
   it("keeps compact stable summaries out of rolling recent-window drift", () => {
     const stableMessages: ModelRequest["messages"] = [
       { role: "system", content: "stable system" },
@@ -407,6 +471,51 @@ describe("cache-policy-runtime", () => {
     expect(state.lastRequestObservationByKind?.["side-question"]?.id).toBe(observation.id);
     expect(updated?.usage?.cacheReadTokens).toBe(8);
     expect(state.lastRequestObservationByKind?.["side-question"]?.usage?.cacheReadTokens).toBe(8);
+  });
+
+  it("compares cache drift against the previous observation for the same request kind", () => {
+    const state: CacheRequestObservationState = {};
+    recordCacheRequestObservation(state, "main", "anthropic", makeRequest());
+    recordCacheRequestObservation(
+      state,
+      "side-question",
+      "anthropic",
+      makeRequest({
+        messages: [{ role: "user", content: "btw" }],
+        tools: undefined,
+        toolChoice: "none",
+        promptCacheEnabled: undefined,
+      }),
+    );
+    const nextMain = recordCacheRequestObservation(state, "main", "anthropic", makeRequest());
+
+    expect(nextMain.fingerprint.changedKeys).toEqual([]);
+  });
+
+  it("attaches cache usage to the requested kind when sidechain observations interleave", () => {
+    const state: CacheRequestObservationState = {};
+    const main = recordCacheRequestObservation(state, "main", "anthropic", makeRequest());
+    const side = recordCacheRequestObservation(
+      state,
+      "side-question",
+      "anthropic",
+      makeRequest({
+        messages: [{ role: "user", content: "btw" }],
+        tools: undefined,
+        toolChoice: "none",
+        promptCacheEnabled: undefined,
+      }),
+    );
+    const updated = recordCacheUsageObservation(
+      state,
+      makeUsage({ cacheReadTokens: 42 }),
+      "main",
+    );
+
+    expect(updated?.id).toBe(main.id);
+    expect(state.lastRequestObservation?.id).toBe(side.id);
+    expect(state.lastRequestObservationByKind?.main?.usage?.cacheReadTokens).toBe(42);
+    expect(state.lastRequestObservationByKind?.["side-question"]?.usage).toBeUndefined();
   });
 
   it("tracks post-compact warmup across main-chain observations", () => {

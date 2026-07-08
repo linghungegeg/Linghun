@@ -238,6 +238,7 @@ export type CacheState = {
   nextTurn: number;
   lastFreshness?: CacheFreshness;
   lastRequestObservation?: CacheRequestObservation;
+  lastMainChainRequestObservation?: CacheRequestObservation;
   lastRequestObservationByKind?: Partial<
     Record<CacheRequestObservation["kind"], CacheRequestObservation>
   >;

@@ -86,6 +86,7 @@ function makeContext(): TuiContext {
       nextTurn: 2,
       lastFreshness: freshness,
       lastRequestObservation: observation,
+      lastMainChainRequestObservation: observation,
       lastRequestObservationByKind: {
         main: observation,
         "side-question": makeObservation({
@@ -205,6 +206,41 @@ describe("cache-command-runtime", () => {
     expect(text).toContain("meta_scheduler");
     expect(text).toContain("truncated");
     expect(text).toContain("break diagnosis: ok");
+  });
+
+  it("uses main-chain telemetry for cache break diagnosis when sidechain ran last", () => {
+    const context = makeContext();
+    const mainObservation = makeObservation({
+      id: "obs-main-drift",
+      kind: "main",
+      fingerprint: {
+        ...makeObservation().fingerprint,
+        changedKeys: ["messagePrefixHash"],
+      },
+    });
+    const sideObservation = makeObservation({
+      id: "obs-side-last",
+      kind: "side-question",
+      provider: "deepseek",
+      endpointProfile: "chat_completions",
+      promptCacheEnabled: false,
+      fingerprint: {
+        ...makeObservation().fingerprint,
+        changedKeys: ["toolSchemaHash"],
+      },
+    });
+    context.cache.lastRequestObservation = sideObservation;
+    context.cache.lastMainChainRequestObservation = mainObservation;
+    context.cache.lastRequestObservationByKind = {
+      main: mainObservation,
+      "side-question": sideObservation,
+    };
+
+    const text = formatCacheStatus(context, freshness);
+
+    expect(text).toContain("latest telemetry: side-question; provider deepseek");
+    expect(text).toContain("drift reason: stable message prefix changed");
+    expect(text).not.toContain("drift reason: tools changed");
   });
 
   it("marks low cache reuse as post-compact warmup before calling it a break", () => {

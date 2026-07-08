@@ -160,6 +160,7 @@ export async function runBtwSideQuestion(
           runtime.provider,
           providerRequest,
           signal,
+          { cooldownScope: "sidechain" },
         )
       : gateway.stream(
           runtime.provider,

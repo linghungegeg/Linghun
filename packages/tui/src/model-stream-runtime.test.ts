@@ -328,14 +328,15 @@ describe("tool batch fail-fast helpers", () => {
     expect(isPreEngineToolCall({ name: "Read", input: { path: "x.ts" } } as never)).toBe(false);
   });
 
-  it("creates pre fallback hard-cut skipped results as non-progress failures", () => {
+  it("creates pre fallback hard-cut skipped results as recovery-required signals", () => {
     const skipped = createPreFallbackHardCutSkippedToolResult(
       { id: "call-pre", name: "pre_plan", input: { task: "x" } } as never,
     );
 
-    expect(skipped.ok).toBe(false);
+    expect(skipped.ok).toBe(true);
     expect(skipped.data).toMatchObject({ skipped: true, reason: "pre_engine_fallback_hard_cut" });
-    expect(isToolBatchFailure(skipped)).toBe(true);
+    expect(isToolBatchFailure(skipped)).toBe(false);
+    expect(isToolBatchFallbackRequired(skipped)).toBe(true);
   });
 
   it("creates strict pre-analysis fallback recovery reminders", () => {

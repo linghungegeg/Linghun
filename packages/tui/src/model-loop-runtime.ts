@@ -675,6 +675,7 @@ function createBuiltInToolIdentityDefinition(definition: ModelToolDefinition): M
 
 export type CreateModelToolDefinitionsForReportGuardOptions = {
   excludePreEngineTools?: boolean;
+  excludeDeferredToolDispatch?: boolean;
 };
 
 export function createModelToolDefinitionsForReportGuard(
@@ -683,8 +684,16 @@ export function createModelToolDefinitionsForReportGuard(
 ): ModelToolDefinition[] {
   void guard;
   const definitions = createModelToolDefinitions();
-  if (!options.excludePreEngineTools) return definitions;
-  return definitions.filter((definition) => !isPreEngineToolName(definition.name));
+  return definitions.filter((definition) => {
+    if (options.excludePreEngineTools && isPreEngineToolName(definition.name)) return false;
+    if (
+      options.excludeDeferredToolDispatch &&
+      (definition.name === SEARCH_EXTRA_TOOLS_NAME || definition.name === EXECUTE_EXTRA_TOOL_NAME)
+    ) {
+      return false;
+    }
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------

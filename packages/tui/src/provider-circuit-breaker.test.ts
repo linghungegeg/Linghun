@@ -4,6 +4,8 @@ import { ModelGateway, type LinghunEvent, type ModelInfo, type Provider } from "
 import {
   BREAKER_CONSTANTS,
   type ProviderCircuitBreakerState,
+  acquireProviderSlot,
+  checkProviderGate,
   checkProviderCooldown,
   clearProviderBreaker,
   createProviderCircuitBreakerState,
@@ -148,6 +150,34 @@ describe("provider-circuit-breaker", () => {
       const entry = state.entries.get("openai::gpt-4o");
       expect(entry?.reasonCode).toBe("PROVIDER_STREAM_TIMEOUT");
     });
+
+    it("keeps sidechain cooldown separate from the main chain", () => {
+      vi.setSystemTime(10_000);
+      for (let i = 0; i < 5; i += 1) {
+        recordProviderFailure(
+          state,
+          "openai",
+          "gpt-4o",
+          "PROVIDER_SERVER_ERROR",
+          "sidechain",
+        );
+      }
+
+      expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
+      expect(checkProviderCooldown(state, "openai", "gpt-4o", "sidechain").blocked).toBe(true);
+      expect(state.entries.get("openai::gpt-4o")).toBeUndefined();
+      expect(state.entries.get("openai::gpt-4o::sidechain")?.consecutiveFailures).toBe(5);
+    });
+
+    it("keeps main-chain cooldown separate from sidechain requests", () => {
+      vi.setSystemTime(10_000);
+      for (let i = 0; i < 5; i += 1) {
+        recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      }
+
+      expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(true);
+      expect(checkProviderCooldown(state, "openai", "gpt-4o", "sidechain").blocked).toBe(false);
+    });
   });
 
   describe("clearProviderBreaker", () => {
@@ -172,12 +202,42 @@ describe("provider-circuit-breaker", () => {
       clearProviderBreaker(state, "openai", "gpt-4o");
       expect(state.entries.has("anthropic::claude-3")).toBe(true);
     });
+
+    it("clears only the requested cooldown scope", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(
+        state,
+        "openai",
+        "gpt-4o",
+        "PROVIDER_SERVER_ERROR",
+        "sidechain",
+      );
+
+      clearProviderBreaker(state, "openai", "gpt-4o", "sidechain");
+
+      expect(state.entries.has("openai::gpt-4o")).toBe(true);
+      expect(state.entries.has("openai::gpt-4o::sidechain")).toBe(false);
+    });
   });
 
   describe("checkProviderCooldown", () => {
     it("returns blocked=false when no entry exists", () => {
       const result = checkProviderCooldown(state, "openai", "gpt-4o");
       expect(result.blocked).toBe(false);
+    });
+
+    it("shares provider capacity across main-chain and sidechain scopes", () => {
+      for (let i = 0; i < BREAKER_CONSTANTS.PROVIDER_ACTIVE_LIMIT; i += 1) {
+        expect(acquireProviderSlot(state, "openai", "gpt-4o")).toBe(true);
+      }
+
+      const mainGate = checkProviderGate(state, "openai", "gpt-4o");
+      const sideGate = checkProviderGate(state, "openai", "gpt-4o", "sidechain");
+
+      expect(mainGate.allowed).toBe(false);
+      expect(sideGate.allowed).toBe(false);
+      if (!mainGate.allowed) expect(mainGate.reason).toBe("at_capacity");
+      if (!sideGate.allowed) expect(sideGate.reason).toBe("at_capacity");
     });
 
     it("returns blocked=false when below threshold (4 failures)", () => {
@@ -549,6 +609,56 @@ describe("provider-circuit-breaker", () => {
       } finally {
         randomSpy.mockRestore();
       }
+    });
+
+    it("records withProviderRetry failures in the requested cooldown scope", async () => {
+      const model: ModelInfo = {
+        id: "gpt-4o",
+        displayName: "GPT-4o",
+        providerId: "openai",
+        contextWindow: 128_000,
+        maxOutputTokens: 4_096,
+        supportsTools: true,
+        supportsVision: false,
+        supportsThinking: false,
+        supportsPromptCache: false,
+      };
+      const provider: Provider = {
+        id: "openai",
+        displayName: "OpenAI",
+        supports: { streaming: true, usage: true },
+        async listModels() {
+          return [model];
+        },
+        async *stream() {
+          yield {
+            type: "error",
+            error: new LinghunError({
+              code: "PROVIDER_SERVER_ERROR",
+              message: "sidechain gateway unavailable",
+              recoverable: true,
+            }),
+          } satisfies LinghunEvent;
+        },
+      };
+      const gateway = new ModelGateway([provider]);
+      const events: LinghunEvent[] = [];
+
+      for await (const event of withProviderRetry(
+        gateway,
+        state,
+        "openai",
+        { messages: [], model: "gpt-4o" },
+        new AbortController().signal,
+        { maxRetries: 0, cooldownScope: "sidechain" },
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.type).toBe("error");
+      expect(state.entries.get("openai::gpt-4o")).toBeUndefined();
+      expect(state.entries.get("openai::gpt-4o::sidechain")?.consecutiveFailures).toBe(1);
     });
 
     it("times out idle provider streams and routes them through same-provider retry", async () => {
