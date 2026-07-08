@@ -239,6 +239,57 @@ describe("mcp-index-runtime", () => {
     expect(result.text).toContain("降级");
   });
 
+  test("pre_verify degrades when verifier layers fall back", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-verify-fallback-"));
+    const context = {
+      ...createIndexContext(projectPath),
+      discoveredDeferredToolNames: new Set<string>(["pre_verify"]),
+      mcp: { enabled: false, servers: [], tools: [] },
+      skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [] },
+      plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [] },
+    };
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-test",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary: async () => "mock-pre-engine",
+      callPreEngineTool: async () => ({
+        ok: true,
+        summary: "ok",
+        data: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "pass",
+                issues: [],
+                java_deep_layer: { status: "fallback", reason: "android_classpath_required" },
+              }),
+            },
+          ],
+        },
+      }),
+    });
+
+    const result = await executeExtraTool(
+      { tool_name: "pre_verify", params: { changed_files: ["app/src/main/java/Foo.java"] } },
+      context as never,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result).toMatchObject({
+      degraded: true,
+      data: {
+        degraded: true,
+        reason: "pre-engine-verifier-unavailable",
+      },
+    });
+  });
+
   test("findBundledCodebaseMemoryBinary resolves platform optional package binaries", async () => {
     const packageRoot = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-pkg-"));
     const platformArch = "win32-x64";

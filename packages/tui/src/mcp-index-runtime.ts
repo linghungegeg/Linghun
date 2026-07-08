@@ -789,7 +789,9 @@ function classifyPreEngineSemanticDegradation(
       .filter((status): status is string => Boolean(status));
     const allLayersUnavailable =
       layerStatuses.length > 0 &&
-      layerStatuses.every((status) => status === "disabled" || status === "unavailable");
+      layerStatuses.every((status) =>
+        status === "disabled" || status === "unavailable" || status === "fallback",
+      );
     if (allLayersUnavailable && asArray(payload.issues).length === 0) {
       return {
         reason: "pre-engine-verifier-unavailable",

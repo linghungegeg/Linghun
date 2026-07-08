@@ -282,13 +282,86 @@ function findJavac() {
   return null;
 }
 
+function readSmallText(filePath, maxBytes = 65536) {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size > maxBytes) return "";
+    return fs.readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function explicitJavaClasspath() {
+  return process.env.LINGHUN_PRE_ENGINE_JAVA_CLASSPATH ||
+    process.env.JAVA_CLASSPATH ||
+    process.env.CLASSPATH ||
+    "";
+}
+
+function rootHasAndroidBuildMarker(root) {
+  const candidates = [
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "app/build.gradle",
+    "app/build.gradle.kts",
+    "android/build.gradle",
+    "android/build.gradle.kts",
+    "android/app/build.gradle",
+    "android/app/build.gradle.kts",
+    "app/android/build.gradle",
+    "app/android/build.gradle.kts",
+    "app/android/app/build.gradle",
+    "app/android/app/build.gradle.kts",
+  ];
+  for (const rel of candidates) {
+    const text = readSmallText(path.join(root, rel));
+    if (/com\.android\.(application|library)|\bandroid\s*\{/m.test(text)) return true;
+  }
+  return fs.existsSync(path.join(root, "AndroidManifest.xml")) ||
+    fs.existsSync(path.join(root, "app", "src", "main", "AndroidManifest.xml")) ||
+    fs.existsSync(path.join(root, "android", "app", "src", "main", "AndroidManifest.xml")) ||
+    fs.existsSync(path.join(root, "app", "android", "app", "src", "main", "AndroidManifest.xml"));
+}
+
+function hasNearbyAndroidManifest(absPath) {
+  const normalized = absPath.replace(/\\/g, "/");
+  const lower = normalized.toLowerCase();
+  const marker = "/src/main/java/";
+  const idx = lower.indexOf(marker);
+  if (idx === -1) return false;
+  return fs.existsSync(normalized.slice(0, idx) + "/src/main/AndroidManifest.xml");
+}
+
+function fileHasAndroidImports(absPath) {
+  const text = readSmallText(absPath);
+  return /^\s*import\s+(android|androidx)\./m.test(text) ||
+    /^\s*package\s+io\.flutter\.plugins\b/m.test(text);
+}
+
+function isAndroidJavaContext(root, files) {
+  const absPaths = files.map(f => path.isAbsolute(f) ? f : path.join(root, f));
+  for (const fp of absPaths) {
+    const rel = path.relative(root, fp).replace(/\\/g, "/").toLowerCase();
+    if (!rel.endsWith(".java")) continue;
+    if (rel.includes("/android/") || hasNearbyAndroidManifest(fp) || fileHasAndroidImports(fp)) return true;
+  }
+  if (!rootHasAndroidBuildMarker(root)) return false;
+  return absPaths.some(fp => path.relative(root, fp).replace(/\\/g, "/").toLowerCase().includes("/src/main/java/"));
+}
+
 function runJavac(root, files) {
   const javac = findJavac();
   if (!javac) return null;
   const absPaths = files.map(f => path.isAbsolute(f) ? f : path.join(root, f));
   const outDir = path.join(root, "__javac_out__");
   try { fs.mkdirSync(outDir, { recursive: true }); } catch {}
-  const args = ["-J-Duser.language=en", "-J-Duser.country=US", "-d", outDir, "-Xlint:all", ...absPaths];
+  const args = ["-J-Duser.language=en", "-J-Duser.country=US", "-d", outDir, "-Xlint:all"];
+  const classpath = explicitJavaClasspath();
+  if (classpath) args.push("-classpath", classpath);
+  args.push(...absPaths);
   const r = spawnSync(javac, args, {
     cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 15000,
   });
@@ -311,6 +384,16 @@ async function handleRequest(req) {
   const files = req.files || [];
   if (files.length === 0) {
     return { issues: [], status: "clean", reason: "no_files", elapsed_ms: 0 };
+  }
+
+  if (isAndroidJavaContext(root, files) && !explicitJavaClasspath()) {
+    return {
+      issues: [],
+      status: "unavailable",
+      reason: "android_classpath_required",
+      error: "android_classpath_required: Android Java requires the Gradle/Android SDK classpath; skipping bare javac pre_verify",
+      elapsed_ms: Date.now() - t0,
+    };
   }
 
   const javacResult = runJavac(root, files);

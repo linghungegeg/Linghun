@@ -58,7 +58,7 @@ impl JavaDeepLayer {
         Ok(JavaDeepLayer { child, stdin, stdout, root: root.to_path_buf() })
     }
 
-    pub fn query(&mut self, files: &[String]) -> Result<(Vec<Value>, u128), String> {
+    pub fn query(&mut self, files: &[String]) -> Result<JavaDeepLayerResult, String> {
         let req = json!({
             "root": self.root.to_string_lossy().replace('\\', "/"),
             "files": files,
@@ -85,19 +85,35 @@ impl JavaDeepLayer {
             }
         };
 
-        let elapsed = t0.elapsed().as_millis();
+        let elapsed_ms = t0.elapsed().as_millis();
         if resp_line.is_empty() {
             return Err("java deep layer process closed".to_string());
         }
         let resp: Value = serde_json::from_str(resp_line.trim()).map_err(|e| e.to_string())?;
-        if let Some(err) = resp.get("error").and_then(|e| e.as_str()) {
-            return Err(err.to_string());
-        }
         let issues = resp.get("issues")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok((issues, elapsed))
+        let status = resp.get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("active");
+        let status = match status {
+            "clean" => "clean",
+            "type_error" => "type_error",
+            "unavailable" => "unavailable",
+            "error" => "fallback",
+            _ => "active",
+        };
+        let reason = resp.get("reason")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| resp.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()));
+        Ok(JavaDeepLayerResult {
+            issues,
+            status,
+            reason,
+            elapsed_ms,
+        })
     }
 }
 
@@ -124,12 +140,7 @@ pub fn run(deep: &mut Option<JavaDeepLayer>, root: &Path, files: &[String]) -> J
 
     let d = deep.as_mut().unwrap();
     match d.query(files) {
-        Ok((issues, elapsed_ms)) => JavaDeepLayerResult {
-            issues,
-            status: "active",
-            reason: None,
-            elapsed_ms,
-        },
+        Ok(result) => result,
         Err(reason) => {
             *deep = None;
             JavaDeepLayerResult {
