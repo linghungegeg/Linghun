@@ -63,6 +63,7 @@ const MEMORY_PROMPT_TOP_K = 3;
 const MEMORY_PROMPT_ITEM_WIDTH = 180;
 const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 const PROJECT_RULES_STATUS_WIDTH = 160;
+const MEMORY_PROMPT_SCOPE_ORDER: readonly MemoryScope[] = ["user", "project", "session"];
 export function createMemoryCandidate(
   scope: MemoryScope,
   summary: string,
@@ -388,10 +389,26 @@ export function createControlledMemoryInjection(context: TuiContext): {
   items: MemoryCandidate[];
   text: string;
 } {
-  const items = context.memory.accepted
+  const accepted = context.memory.accepted
     .filter((item) => normalizeMemoryStatus(item) === "accepted")
-    .sort((a, b) => a.id.localeCompare(b.id))
-    .slice(0, MEMORY_PROMPT_TOP_K);
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const items: MemoryCandidate[] = [];
+  const selected = new Set<string>();
+  for (const scope of MEMORY_PROMPT_SCOPE_ORDER) {
+    const item = accepted.find(
+      (candidate) => candidate.scope === scope && !selected.has(candidate.id),
+    );
+    if (!item) continue;
+    items.push(item);
+    selected.add(item.id);
+    if (items.length >= MEMORY_PROMPT_TOP_K) break;
+  }
+  for (const item of accepted) {
+    if (items.length >= MEMORY_PROMPT_TOP_K) break;
+    if (selected.has(item.id)) continue;
+    items.push(item);
+    selected.add(item.id);
+  }
   const text = truncateDisplay(
     items
       .map(

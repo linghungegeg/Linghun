@@ -99,6 +99,73 @@ describe("memory extraction runtime", () => {
     }
   });
 
+  it("turns natural-language forget requests into delete only when a target exists", () => {
+    const accepted = [
+      makeMemory({
+        id: "memory-short-list",
+        taxonomy: "user",
+        topic: "user-report-format",
+        summary: "User preference: 中文短列表",
+      }),
+    ];
+
+    const deleteDecision = decideMemoryExtraction({
+      recentMessages: ["请忘记我偏好中文短列表。"],
+      accepted,
+      disabled: [],
+    });
+    expect(deleteDecision).toMatchObject({
+      action: "delete",
+      id: "memory-short-list",
+      matchedExistingId: "memory-short-list",
+    });
+
+    const noTargetDecision = decideMemoryExtraction({
+      recentMessages: ["以后不要记住我偏好中文短列表。"],
+      accepted: [],
+      disabled: [],
+    });
+    expect(noTargetDecision).toMatchObject({
+      action: "no-op",
+      reason: "memory_forget_target_not_found",
+    });
+  });
+
+  it("updates existing memory from natural-language update requests instead of creating malformed memory", () => {
+    const accepted = [
+      makeMemory({
+        id: "memory-report-format",
+        taxonomy: "user",
+        topic: "user-report-format",
+        summary: "User preference: 压测报告用中文短列表。",
+      }),
+    ];
+
+    const updateDecision = decideMemoryExtraction({
+      recentMessages: ["请把我偏好的压测报告格式更新为英文表格。"],
+      accepted,
+      disabled: [],
+    });
+    expect(updateDecision).toMatchObject({
+      action: "update",
+      id: "memory-report-format",
+      matchedExistingId: "memory-report-format",
+    });
+    if (updateDecision.action !== "update") throw new Error("expected update");
+    expect(updateDecision.summary).toContain("压测报告格式");
+    expect(updateDecision.summary).toContain("英文表格");
+
+    const noTargetDecision = decideMemoryExtraction({
+      recentMessages: ["请把我偏好的压测报告格式更新为英文表格。"],
+      accepted: [],
+      disabled: [],
+    });
+    expect(noTargetDecision).toMatchObject({
+      action: "no-op",
+      reason: "memory_update_target_not_found",
+    });
+  });
+
   it("refreshes markdown manifest after disable and delete", async () => {
     const dir = await mkdtemp(join(tmpdir(), "linghun-memory-refresh-"));
     const memory = makeMemory({
@@ -115,6 +182,58 @@ describe("memory extraction runtime", () => {
 
     await refreshAutoMemoryFiles(dir, [], []);
     expect(await readFile(join(dir, "MEMORY.md"), "utf8")).not.toContain(memory.id);
+  });
+
+  it("removes stale topic markdown when an accepted memory changes topic", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "linghun-memory-update-topic-"));
+    const first = makeMemory({
+      id: "memory-report-format",
+      taxonomy: "user",
+      topic: "user-report-format-short-list",
+      summary: "User preference: 压测报告用中文短列表。",
+    });
+    const second = {
+      ...first,
+      topic: "user-report-format-english-table",
+      summary: "User preference: 压测报告格式：英文表格",
+    };
+
+    await applyMemoryExtractionDecision({
+      decision: {
+        action: "update",
+        id: first.id,
+        taxonomy: first.taxonomy ?? "user",
+        topic: first.topic ?? "user-report-format-short-list",
+        scope: "user",
+        summary: first.summary,
+        source: "test",
+        sourceRefs: ["test"],
+        matchedExistingId: first.id,
+      },
+      memoryDir: dir,
+      existing: first,
+    });
+    await applyMemoryExtractionDecision({
+      decision: {
+        action: "update",
+        id: second.id,
+        taxonomy: second.taxonomy ?? "user",
+        topic: second.topic ?? "user-report-format-english-table",
+        scope: "user",
+        summary: second.summary,
+        source: "test",
+        sourceRefs: ["test"],
+        matchedExistingId: second.id,
+      },
+      memoryDir: dir,
+      existing: first,
+    });
+
+    await expect(readFile(join(dir, "topics", `${first.topic}.md`), "utf8")).rejects.toThrow();
+    expect(await readFile(join(dir, "topics", `${second.topic}.md`), "utf8")).toContain(
+      "英文表格",
+    );
+    expect(await readFile(join(dir, "MEMORY.md"), "utf8")).not.toContain(first.topic);
   });
 
   it("does not recreate a disabled memory from similar later input", () => {

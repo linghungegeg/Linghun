@@ -62,7 +62,7 @@ type MemoryManifestEntry = {
 export type MemoryExtractionDecision =
   | { action: "no-op"; reason: string; blockedBy?: string }
   | {
-      action: "create" | "update";
+      action: "create" | "update" | "delete";
       id: string;
       taxonomy: MemoryTaxonomy;
       topic: string;
@@ -103,6 +103,22 @@ export function decideMemoryExtraction(input: MemoryExtractionInput): MemoryExtr
   const taxonomy = classifyTaxonomy(text);
   if (!taxonomy) return { action: "no-op", reason: "no_long_lived_fact" };
 
+  if (isMemoryForgetRequest(text)) {
+    const existing = findRelatedMemoryForIntent(input.accepted, taxonomy, text);
+    if (!existing) return { action: "no-op", reason: "memory_forget_target_not_found" };
+    return {
+      action: "delete",
+      id: existing.id,
+      taxonomy: existing.taxonomy ?? taxonomy,
+      topic: existing.topic ?? topicForSummary(existing.summary, existing.taxonomy ?? taxonomy),
+      scope: existing.scope === "session" ? "project" : existing.scope,
+      summary: existing.summary,
+      source: "memory-extraction:turn",
+      sourceRefs: ["turn:recent"],
+      matchedExistingId: existing.id,
+    };
+  }
+
   const summary = summarizeLongLivedFact(text, taxonomy);
   if (!summary) return { action: "no-op", reason: "insufficient_specificity" };
   const summaryBlocked = findUnsavableReason(summary);
@@ -116,7 +132,13 @@ export function decideMemoryExtraction(input: MemoryExtractionInput): MemoryExtr
     return { action: "no-op", reason: "disabled_existing_memory" };
   }
 
-  const existing = findRelatedMemory(input.accepted, taxonomy, topic, summary);
+  const updateRequest = isMemoryUpdateRequest(text);
+  const existing = updateRequest
+    ? findRelatedMemoryForIntent(input.accepted, taxonomy, text, summary)
+    : findRelatedMemory(input.accepted, taxonomy, topic, summary);
+  if (updateRequest && !existing) {
+    return { action: "no-op", reason: "memory_update_target_not_found" };
+  }
   const duplicate = findRelatedMemory(
     [...input.accepted, ...input.disabled, ...(input.candidates ?? [])],
     taxonomy,
@@ -147,6 +169,9 @@ export async function applyMemoryExtractionDecision(input: {
   now?: Date;
 }): Promise<MemoryExtractionApplyResult> {
   if (input.decision.action === "no-op") {
+    return { decision: input.decision };
+  }
+  if (input.decision.action === "delete") {
     return { decision: input.decision };
   }
   const now = (input.now ?? new Date()).toISOString();
@@ -181,6 +206,10 @@ export async function writeAutoMemoryFiles(
     "utf8",
   );
   const manifest = await readManifest(memoryDir);
+  const previous = manifest.find((entry) => entry.id === memory.id);
+  if (previous && previous.topic !== topic) {
+    await rm(join(memoryDir, MEMORY_TOPICS_DIR, `${previous.topic}.md`), { force: true });
+  }
   const next = upsertManifestEntry(manifest, {
     id: memory.id,
     taxonomy: memory.taxonomy ?? "project",
@@ -245,6 +274,28 @@ function isMemoryLookupQuestion(text: string): boolean {
   );
 }
 
+function isMemoryForgetRequest(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return (
+    /(?:忘记|删除|清除|移除).{0,80}(?:偏好|习惯|喜欢|希望|记忆|memory)/iu.test(normalized) ||
+    /(?:不要|别|不再).{0,12}(?:记住|保存).{0,80}(?:偏好|习惯|喜欢|希望|记忆)/iu.test(
+      normalized,
+    ) ||
+    /(?:我不再|不再).{0,12}(?:偏好|喜欢|希望)/iu.test(normalized) ||
+    /(?:forget|delete|remove|clear).{0,80}(?:my|user)?.{0,30}(?:preference|memory|habit)/iu.test(
+      normalized,
+    )
+  );
+}
+
+function isMemoryUpdateRequest(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return (
+    /(?:更新为|改成|改为|换成)/iu.test(normalized) ||
+    /(?:update|change|switch).{0,80}\bto\b/iu.test(normalized)
+  );
+}
+
 function classifyTaxonomy(text: string): MemoryTaxonomy | undefined {
   if (
     /(?:反馈|不喜欢|太啰嗦|太慢|少废话|别空泛|feedback|too verbose|too slow|no fluff)/iu.test(text)
@@ -273,6 +324,8 @@ function classifyTaxonomy(text: string): MemoryTaxonomy | undefined {
 
 function summarizeLongLivedFact(text: string, taxonomy: MemoryTaxonomy): string | undefined {
   const normalized = text.replace(/\s+/g, " ").trim();
+  const updateSummary = summarizeUpdateRequest(normalized, taxonomy);
+  if (updateSummary) return updateSummary;
   const explicit =
     normalized.match(/(?:记住|remember|长期记忆|保存为记忆)[:：]?\s*(.{8,180})/iu)?.[1] ??
     normalized.match(
@@ -295,6 +348,40 @@ function summarizeLongLivedFact(text: string, taxonomy: MemoryTaxonomy): string 
   return truncateDisplay(`${prefix}: ${candidate}`, MEMORY_SUMMARY_WIDTH);
 }
 
+function summarizeUpdateRequest(text: string, taxonomy: MemoryTaxonomy): string | undefined {
+  if (!isMemoryUpdateRequest(text)) return undefined;
+  const match =
+    text.match(/(?:请)?(?:把|将)?(.{2,80}?)(?:更新为|改成|改为|换成)\s*(.{2,120})/iu) ??
+    text.match(/(?:update|change|switch)\s+(.{2,80}?)\s+to\s+(.{2,120})/iu);
+  if (!match) return undefined;
+  const subject = cleanUpdateSubject(match[1] ?? "");
+  const value = cleanUpdateValue(match[2] ?? "");
+  if (!subject || !value) return undefined;
+  const prefix =
+    taxonomy === "feedback"
+      ? "User feedback"
+      : taxonomy === "user"
+        ? "User preference"
+        : taxonomy === "reference"
+          ? "Reference note"
+          : "Project memory";
+  return truncateDisplay(`${prefix}: ${subject}：${value}`, MEMORY_SUMMARY_WIDTH);
+}
+
+function cleanUpdateSubject(text: string): string {
+  return text
+    .replace(/^(?:请|please)\s*/iu, "")
+    .replace(/^(?:把|将)\s*/u, "")
+    .replace(/^(?:我(?:的|偏好的|偏好)?|my)\s*/iu, "")
+    .replace(/^(?:用户)?(?:偏好|preference)\s*/iu, "")
+    .replace(/[，,。.\s:：]+$/u, "")
+    .trim();
+}
+
+function cleanUpdateValue(text: string): string {
+  return text.replace(/[，,。.\s]+$/u, "").trim();
+}
+
 function findRelatedMemory(
   memories: MemoryCandidate[],
   taxonomy: MemoryTaxonomy,
@@ -307,6 +394,56 @@ function findRelatedMemory(
     if (hasMeaningfulOverlap(item.summary, summary)) return true;
     return normalizeText(item.summary) === normalizeText(summary);
   });
+}
+
+function findRelatedMemoryForIntent(
+  memories: MemoryCandidate[],
+  taxonomy: MemoryTaxonomy,
+  text: string,
+  summary?: string,
+): MemoryCandidate | undefined {
+  return memories.find((item) => {
+    if (item.taxonomy && item.taxonomy !== taxonomy) return false;
+    if (
+      summary &&
+      findRelatedMemory([item], taxonomy, topicForSummary(summary, taxonomy), summary)
+    ) {
+      return true;
+    }
+    return hasIntentOverlap(item.summary, text);
+  });
+}
+
+function hasIntentOverlap(summary: string, text: string): boolean {
+  const left = intentTokens(summary);
+  const right = intentTokens(text);
+  let wordOverlap = 0;
+  for (const word of left.words) {
+    if (right.words.has(word)) wordOverlap += 1;
+  }
+  let cjkOverlap = 0;
+  for (const char of left.cjkChars) {
+    if (right.cjkChars.has(char)) cjkOverlap += 1;
+  }
+  return wordOverlap >= 1 || cjkOverlap >= 4;
+}
+
+function intentTokens(text: string): { words: Set<string>; cjkChars: Set<string> } {
+  const normalized = normalizeText(text)
+    .replace(
+      /(?:user|preference|feedback|project|memory|reference|用户|偏好|习惯|喜欢|希望|记忆|请|把|将|忘记|删除|清除|移除|不要|别|不再|记住|保存|更新为|改成|改为|换成|格式|为|用)/giu,
+      " ",
+    )
+    .replace(/\s+/g, " ");
+  return {
+    words: new Set(
+      normalized
+        .split(/[^a-z0-9]+/iu)
+        .filter((word) => word.length >= 3)
+        .filter((word) => !["the", "and", "for", "with"].includes(word)),
+    ),
+    cjkChars: new Set(Array.from(normalized.replace(/[^\u4e00-\u9fa5]/gu, ""))),
+  };
 }
 
 function hasMeaningfulOverlap(left: string, right: string): boolean {

@@ -643,6 +643,47 @@ export async function runAutoLearningOnTurnEnd(
     return run;
   }
 
+  if (decision.action === "delete") {
+    const existing = context.memory.accepted.find((item) => item.id === decision.id);
+    if (!existing) {
+      return {
+        trigger: "manual",
+        candidatesCreated: 0,
+        modelCalled: false,
+        skippedReason: "memory_extraction:memory_forget_target_not_found",
+        createdAt: new Date().toISOString(),
+      };
+    }
+    await removeMemoryRecord(existing, context);
+    removeMemoryFromState(context.memory, existing.id);
+    if (existing.taxonomy && existing.scope !== "session") {
+      await refreshAutoMemoryFiles(
+        getMemoryDirectory(existing.scope, context),
+        context.memory.accepted.filter((item) => item.scope === existing.scope),
+        context.memory.disabled.filter((item) => item.scope === existing.scope),
+      );
+    }
+    const sessionId = await deps().ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "auto_deleted", existing);
+    await deps().recordMemoryMutationEvidence(context, sessionId, "auto_deleted", existing);
+    const run: MemoryLearningRun = {
+      trigger: "evidence",
+      candidatesCreated: 0,
+      acceptedDeleted: 1,
+      modelCalled: false,
+      createdAt: new Date().toISOString(),
+    };
+    context.memory.lastLearningRun = run;
+    await deps().appendSystemEvent(
+      context,
+      sessionId,
+      `auto_memory_extraction action=delete taxonomy=${decision.taxonomy} topic=${decision.topic}`,
+      "info",
+    );
+    deps().refreshCacheFreshness(context);
+    return run;
+  }
+
   return {
     trigger: "manual",
     candidatesCreated: 0,

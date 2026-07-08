@@ -138,6 +138,7 @@ import {
   wecomBridgeAdapter,
   writeLightHintsForTest,
 } from "./index.js";
+import { createControlledMemoryInjection } from "./tui-memory-runtime.js";
 import {
   recoverDurableJobForContext,
   resumeDurableJob,
@@ -5278,6 +5279,79 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates).toHaveLength(0);
     expect(context.memory.accepted).toHaveLength(0);
     expect(output.text).toContain("已删除记忆记录");
+  });
+
+  it("D.14B: natural-language forget deletes auto accepted memory and prompt injection", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好压测报告用中文短列表。");
+    const memoryId = context.memory.accepted[0]?.id;
+    expect(memoryId).toBeTruthy();
+
+    const result = await runAutoLearningOnTurnEnd(
+      context,
+      "请忘记我偏好压测报告用中文短列表。",
+    );
+    expect(result.acceptedDeleted).toBe(1);
+    expect(context.memory.accepted).toHaveLength(0);
+
+    const prompt = createModelSystemPrompt("继续", context, {
+      memory: { candidates: 0, accepted: 0 },
+    });
+    expect(prompt).not.toContain("中文短列表");
+    expect(await readFile(join(context.memory.userDir, "MEMORY.md"), "utf8")).not.toContain(
+      memoryId,
+    );
+  });
+
+  it("D.14B: prompt injection keeps project memory from being crowded out by user memory", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const baseMemory = {
+      status: "accepted" as const,
+      source: "test",
+      sourceRefs: ["test"],
+      risk: "low" as const,
+      inferred: true,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    };
+    context.memory.accepted = [
+      {
+        ...baseMemory,
+        id: "a-user",
+        scope: "user",
+        summary: "User preference: first user memory",
+      },
+      {
+        ...baseMemory,
+        id: "b-user",
+        scope: "user",
+        summary: "User preference: second user memory",
+      },
+      {
+        ...baseMemory,
+        id: "c-user",
+        scope: "user",
+        summary: "User preference: third user memory",
+      },
+      {
+        ...baseMemory,
+        id: "z-project",
+        scope: "project",
+        summary: "Project memory: required verification command",
+      },
+    ];
+
+    const injection = createControlledMemoryInjection(context);
+    expect(injection.items).toHaveLength(3);
+    expect(injection.items.map((item) => item.id)).toContain("a-user");
+    expect(injection.items.map((item) => item.id)).toContain("z-project");
   });
 
   it("D.14B: secret/key content is never learned", async () => {

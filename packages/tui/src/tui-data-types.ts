@@ -1058,6 +1058,7 @@ export type MemoryLearningRun = {
   candidatesCreated: number;
   acceptedCreated?: number;
   acceptedUpdated?: number;
+  acceptedDeleted?: number;
   modelCalled: boolean;
   skippedReason?: string;
   createdAt: string;
