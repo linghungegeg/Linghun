@@ -874,12 +874,25 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     const context = await createTestContext();
     const sessionId = context.sessionId ?? "session";
     const projections: Array<{ projectMainScreen?: boolean }> = [];
+    let releaseProjection!: () => void;
+    let markProjectionStarted!: () => void;
+    const projectionStarted = new Promise<void>((resolve) => {
+      markProjectionStarted = resolve;
+    });
+    const projectionRelease = new Promise<void>((resolve) => {
+      releaseProjection = resolve;
+    });
+    let projectionCompleted = false;
     context.compactOutputMemory = (options = {}) => {
       projections.push(options);
-      return { beforeCount: 6, afterCount: 3 };
+      markProjectionStarted();
+      return projectionRelease.then(() => {
+        projectionCompleted = true;
+        return { beforeCount: 6, afterCount: 3 };
+      });
     };
 
-    const result = await runDeepCompact({
+    const run = runDeepCompact({
       context,
       sessionId,
       transcript: [
@@ -898,9 +911,21 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       ]),
       deps: deepDeps(),
     });
+    let completed = false;
+    void run.then(() => {
+      completed = true;
+    });
+
+    await projectionStarted;
+    await Promise.resolve();
+
+    expect(completed).toBe(false);
+    expect(projections).toContainEqual({ projectMainScreen: true });
+    releaseProjection();
+    const result = await run;
 
     expect(result.ok).toBe(true);
-    expect(projections).toContainEqual({ projectMainScreen: true });
+    expect(projectionCompleted).toBe(true);
   });
 });
 

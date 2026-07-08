@@ -299,7 +299,7 @@ export async function runDeepCompact(input: {
     handoffPacketId: input.context.memory.lastHandoff?.id,
   });
   input.deps.recordCompactBoundary(input.context, boundary);
-  void projectDeepCompactMainScreen(input.context, input.deps, input.sessionId);
+  await projectDeepCompactMainScreen(input.context, input.deps, input.sessionId);
   advanceDeepCompactProgress(input.context, "restore_context");
   input.context.cache.deepCompact = packet;
   input.context.cache.compacted = true;
