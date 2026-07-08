@@ -255,8 +255,12 @@ function isFallbackRequiredToolResult(result: Pick<ModelToolExecutionResult, "da
     (data as Record<string, unknown>).fallback_required === true;
 }
 
+export function isToolBatchFallbackRequired(result: Pick<ModelToolExecutionResult, "ok" | "data">): boolean {
+  return result.ok === true && isFallbackRequiredToolResult(result);
+}
+
 export function isToolBatchFailure(result: Pick<ModelToolExecutionResult, "ok" | "data">): boolean {
-  return result.ok !== true || isFallbackRequiredToolResult(result);
+  return result.ok !== true;
 }
 
 export type ToolFailureRecoveryState = {
@@ -334,6 +338,20 @@ function createToolFailureRecoveryReminder(language: Language): string {
       ].join("\n");
 }
 
+function createToolFallbackRecoveryReminder(language: Language): string {
+  return language === "en-US"
+    ? [
+        "The repository pre-analysis tool reported fallback_required and did not complete the task.",
+        "Continue now by calling real workspace tools such as Read, ReadSnippets, SourcePack, Grep, Glob, or Bash to gather evidence and perform the requested work.",
+        "Do not call the same pre-engine tool again unless a real-tool result shows it is still needed.",
+      ].join("\n")
+    : [
+        "仓库 pre 预分析工具返回了 fallback_required，任务还没有完成。",
+        "现在必须继续调用真实工作区工具，例如 Read、ReadSnippets、SourcePack、Grep、Glob 或 Bash，拿到证据并推进用户请求。",
+        "除非真实工具结果证明仍然需要，否则不要重复调用同一个 pre 工具。",
+      ].join("\n");
+}
+
 export function createToolBatchFailFastSkippedResult(
   toolCall: ModelToolCall,
   reason: string,
@@ -376,6 +394,8 @@ type ToolExecutionBatch =
 
 type ToolBatchExecutionState = {
   roundHadProgress: boolean;
+  roundHadRealFallbackToolProgress: boolean;
+  roundFallbackRequiredCount: number;
   batchFailureCount: number;
   lastBatchFailureReason?: string;
   roundFailureFingerprints: string[];
@@ -442,6 +462,8 @@ async function executeToolCallsWithReadonlyParallelism(
 ): Promise<ToolBatchExecutionState & { pendingApproval: boolean }> {
   const state: ToolBatchExecutionState = {
     roundHadProgress: false,
+    roundHadRealFallbackToolProgress: false,
+    roundFallbackRequiredCount: 0,
     batchFailureCount: 0,
     roundFailureFingerprints: [],
     stoppedByFailFast: false,
@@ -570,11 +592,51 @@ async function executeToolCallsWithReadonlyParallelism(
   await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
     stepId: "tool-execution",
     executor: "model-stream-runtime",
-    status: state.batchFailureCount > 0 ? "degraded" : "completed",
-    summary: `progress=${state.roundHadProgress ? "yes" : "no"}; failures=${state.batchFailureCount}`,
-    level: state.batchFailureCount > 0 ? "warning" : "info",
+    status: state.batchFailureCount > 0 || state.roundFallbackRequiredCount > 0 ? "degraded" : "completed",
+    summary: `progress=${state.roundHadProgress ? "yes" : "no"}; real_fallback_progress=${state.roundHadRealFallbackToolProgress ? "yes" : "no"}; failures=${state.batchFailureCount}; fallback_required=${state.roundFallbackRequiredCount}`,
+    level: state.batchFailureCount > 0 || state.roundFallbackRequiredCount > 0 ? "warning" : "info",
   });
   return { ...state, pendingApproval: false };
+}
+
+const REAL_FALLBACK_TOOL_NAMES = new Set([
+  "Read",
+  "ReadSnippets",
+  "SourcePack",
+  "Grep",
+  "Glob",
+  "Bash",
+  "Diff",
+  "GitStatusInspect",
+  "RunVerification",
+]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function readExecuteExtraToolTargetName(input: unknown): string | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const direct = input.tool_name;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  const nested = input.toolName;
+  if (typeof nested === "string" && nested.trim()) return nested.trim();
+  return undefined;
+}
+
+function isPreEngineToolName(toolName: string): boolean {
+  return toolName === "pre_context" || toolName === "pre_impact" || toolName === "pre_plan" || toolName === "pre_verify";
+}
+
+export function isRealFallbackToolProgress(
+  toolCall: Pick<ModelToolCall, "name" | "input">,
+  result: Pick<ModelToolExecutionResult, "ok" | "data">,
+): boolean {
+  if (isToolBatchFailure(result) || isToolBatchFallbackRequired(result)) return false;
+  if (REAL_FALLBACK_TOOL_NAMES.has(toolCall.name)) return true;
+  if (toolCall.name !== "ExecuteExtraTool") return false;
+  const targetName = readExecuteExtraToolTargetName(toolCall.input);
+  return !!targetName && !isPreEngineToolName(targetName) && targetName !== "list_projects";
 }
 
 function updateToolBatchExecutionState(
@@ -586,8 +648,16 @@ function updateToolBatchExecutionState(
   if (doesWriteSatisfyReportGuard(options.continuation.reportWriteGuard, toolCall, result)) {
     options.continuation.reportWriteGuard.completed = true;
   }
+  if (isToolBatchFallbackRequired(result)) {
+    state.roundFallbackRequiredCount += 1;
+    state.batchFailureCount = 0;
+    return;
+  }
   if (!isToolBatchFailure(result)) {
     state.roundHadProgress = true;
+    if (isRealFallbackToolProgress(toolCall, result)) {
+      state.roundHadRealFallbackToolProgress = true;
+    }
     state.batchFailureCount = 0;
     return;
   }
@@ -887,10 +957,12 @@ function classifyFinalGateEvidenceAttemptGap(
   return "evidence_not_proven";
 }
 
-function shouldContinueAfterFinalGateEvidenceAction(
+export function shouldContinueAfterFinalGateEvidenceAction(
   result: FinalGateEvidenceActionResult,
+  evidenceActionRetryCount: number,
 ): result is Extract<FinalGateEvidenceActionResult, { status: "evidence_recorded" | "attempt_recorded" }> {
-  return result.status === "evidence_recorded" || result.status === "attempt_recorded";
+  if (result.status === "evidence_recorded") return true;
+  return result.status === "attempt_recorded" && evidenceActionRetryCount < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES;
 }
 
 export function planFinalGateEvidenceGapAction(input: {
@@ -904,13 +976,6 @@ export function planFinalGateEvidenceGapAction(input: {
 }): FinalGateEvidenceGapActionPlan {
   const { result, context } = input;
   const language = context.language;
-  if (input.retryBudgetRemaining === false) {
-    return {
-      action: "downgrade_only",
-      reason: "retry_budget_exhausted",
-      directive: formatEvidenceGapBlocker("retry_budget_exhausted", language),
-    };
-  }
   if (userForbidsCommandEvidence(input.userText)) {
     return {
       action: "blocked_explanation",
@@ -2872,7 +2937,7 @@ export async function sendMessage(
             if (actionResult.status === "permission_pending") {
               return;
             }
-            if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
+            if (shouldContinueAfterFinalGateEvidenceAction(actionResult, finalAnswerEvidenceActionRetries)) {
               messagesForProvider = actionResult.messages;
               finalAnswerEvidenceActionRetries += 1;
               continue;
@@ -2934,8 +2999,12 @@ export async function sendMessage(
         return;
       }
       const roundHadProgress = toolBatchResult.roundHadProgress;
+      const roundHadRealFallbackToolProgress = toolBatchResult.roundHadRealFallbackToolProgress;
+      const roundFallbackRequiredCount = toolBatchResult.roundFallbackRequiredCount;
       const roundFailureFingerprints = toolBatchResult.roundFailureFingerprints;
-      const roundHadToolFailure = toolCalls.length > 0 && !roundHadProgress;
+      const roundHadToolFailure = roundFailureFingerprints.length > 0;
+      const roundNeedsRealToolFallback =
+        toolCalls.length > 0 && !roundHadRealFallbackToolProgress && roundFallbackRequiredCount > 0;
       if (roundHadToolFailure) {
         const recovery = updateToolFailureRecoveryState(
           toolFailureRecoveryState,
@@ -2952,6 +3021,21 @@ export async function sendMessage(
           );
           break;
         }
+      } else if (roundNeedsRealToolFallback) {
+        toolFailureRetries = 0;
+        toolFailureRecoveryState = { repeatedFailureRounds: 0 };
+        toolFailureNoToolRecoveryPrompts = 0;
+        messagesForProvider.push({
+          role: "user",
+          content: createToolFallbackRecoveryReminder(context.language),
+        });
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `pre_fallback_requires_real_tools count=${roundFallbackRequiredCount}`,
+          "warning",
+        );
+        continue;
       } else if (roundHadProgress) {
         toolFailureRetries = 0;
         toolFailureRecoveryState = { repeatedFailureRounds: 0 };
@@ -3097,7 +3181,7 @@ export async function sendMessage(
             if (actionResult.status === "permission_pending") {
               return;
             }
-            if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
+            if (shouldContinueAfterFinalGateEvidenceAction(actionResult, finalAnswerEvidenceActionRetries)) {
               finalAnswerEvidenceActionRetries += 1;
               assistantText = await streamFinalModelAnswerWithoutTools(
                 {
@@ -4171,7 +4255,7 @@ async function streamFinalModelAnswerWithoutTools(
         if (actionResult.status === "permission_pending") {
           return "";
         }
-        if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
+        if (shouldContinueAfterFinalGateEvidenceAction(actionResult, evidenceActionRetryCount)) {
           continuation.messages = actionResult.messages;
           startRequestActivity(output, context, "rewriting_final_answer");
           return streamFinalModelAnswerWithoutTools(
@@ -4810,7 +4894,7 @@ export async function continueModelAfterToolResults(
             if (actionResult.status === "permission_pending") {
               return;
             }
-            if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
+            if (shouldContinueAfterFinalGateEvidenceAction(actionResult, finalAnswerEvidenceActionRetries)) {
               continuation.messages = actionResult.messages;
               finalAnswerEvidenceActionRetries += 1;
               continue;
@@ -4861,6 +4945,21 @@ export async function continueModelAfterToolResults(
         return;
       }
       const roundHadProgress = toolBatchResult.roundHadProgress;
+      const roundHadRealFallbackToolProgress = toolBatchResult.roundHadRealFallbackToolProgress;
+      const roundFallbackRequiredCount = toolBatchResult.roundFallbackRequiredCount;
+      const roundNeedsRealToolFallback =
+        toolCalls.length > 0 && !roundHadRealFallbackToolProgress && roundFallbackRequiredCount > 0;
+      if (roundNeedsRealToolFallback) {
+        continuation.messages.push({ role: "user", content: createToolFallbackRecoveryReminder(context.language) });
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `pre_fallback_requires_real_tools count=${roundFallbackRequiredCount}`,
+          "warning",
+        );
+        noProgressRounds = 0;
+        continue;
+      }
       if (todoOnly && consecutiveTodoOnlyRounds >= _hintThreshold) {
         if (!todoOnlyHintSent) {
           const todoHint =
@@ -4967,7 +5066,7 @@ export async function continueModelAfterToolResults(
               if (actionResult.status === "permission_pending") {
                 return;
               }
-              if (shouldContinueAfterFinalGateEvidenceAction(actionResult)) {
+              if (shouldContinueAfterFinalGateEvidenceAction(actionResult, finalAnswerEvidenceActionRetries)) {
                 finalAnswerEvidenceActionRetries += 1;
                 continuation.messages = actionResult.messages;
                 assistantText = await streamFinalModelAnswerWithoutTools(

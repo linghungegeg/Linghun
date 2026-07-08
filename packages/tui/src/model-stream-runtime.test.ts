@@ -18,8 +18,11 @@ import {
   createToolExecutionBatches,
   evaluateAggregatedFinalAnswerGate,
   handleNaturalInput,
+  isRealFallbackToolProgress,
   isToolBatchFailure,
+  isToolBatchFallbackRequired,
   planFinalGateEvidenceGapAction,
+  shouldContinueAfterFinalGateEvidenceAction,
   shouldRewriteFinalGateClaimAlignment,
   shouldContinueAfterToolFailureWithoutToolCall,
   shouldRetryHighReasoningToolsEmptyResponse,
@@ -225,16 +228,41 @@ describe("responses prompt cache key", () => {
 });
 
 describe("tool batch fail-fast helpers", () => {
-  it("counts failed tool results and required fallbacks as incomplete even with evidence", () => {
+  it("separates failed tool results from required pre-analysis fallbacks", () => {
+    const fallbackResult = {
+      ok: true,
+      evidenceId: "evidence-1",
+      data: { fallback_required: true },
+    } as never;
+
     expect(isToolBatchFailure({ ok: false, evidenceId: "evidence-1" } as never)).toBe(true);
-    expect(
-      isToolBatchFailure({
-        ok: true,
-        evidenceId: "evidence-1",
-        data: { fallback_required: true },
-      } as never),
-    ).toBe(true);
+    expect(isToolBatchFailure(fallbackResult)).toBe(false);
+    expect(isToolBatchFallbackRequired(fallbackResult)).toBe(true);
+    expect(isToolBatchFallbackRequired({ ok: true, evidenceId: "evidence-1" } as never)).toBe(false);
     expect(isToolBatchFailure({ ok: true, evidenceId: "evidence-1" } as never)).toBe(false);
+  });
+
+  it("separates real fallback tool progress from pre-analysis discovery or degradation", () => {
+    const okResult = { ok: true, evidenceId: "evidence-1", data: { nodes: [] } } as never;
+    const fallbackResult = { ok: true, evidenceId: "evidence-2", data: { fallback_required: true } } as never;
+
+    expect(isRealFallbackToolProgress({ name: "SearchExtraTools", input: {} } as never, okResult)).toBe(false);
+    expect(isRealFallbackToolProgress({ name: "pre_plan", input: {} } as never, okResult)).toBe(false);
+    expect(isRealFallbackToolProgress({ name: "Grep", input: { pattern: "x" } } as never, okResult)).toBe(true);
+    expect(isRealFallbackToolProgress({ name: "Read", input: { path: "packages/tui/src/a.ts" } } as never, okResult)).toBe(true);
+    expect(
+      isRealFallbackToolProgress(
+        { name: "ExecuteExtraTool", input: { tool_name: "search_code", params: { project: "F-linghun" } } } as never,
+        okResult,
+      ),
+    ).toBe(true);
+    expect(
+      isRealFallbackToolProgress(
+        { name: "ExecuteExtraTool", input: { tool_name: "pre_plan", params: { task: "x" } } } as never,
+        okResult,
+      ),
+    ).toBe(false);
+    expect(isRealFallbackToolProgress({ name: "Grep", input: { pattern: "x" } } as never, fallbackResult)).toBe(false);
   });
 
   it("creates skipped tool result with the original tool call id handled by caller", () => {
@@ -985,7 +1013,7 @@ describe("final answer gate aggregation", () => {
     expect(source).toContain("final_answer_claim_alignment_rewrite continuation=yes");
     expect(source).toContain("final_answer_claim_alignment_rewrite final_safety=yes");
     expect(source).toContain("final_answer_claim_alignment_rewrite continuation_final_safety=yes");
-    expect(source).toContain("shouldContinueAfterFinalGateEvidenceAction(actionResult)");
+    expect(source).toContain("shouldContinueAfterFinalGateEvidenceAction(actionResult,");
   });
 
   it("plans verification gaps in plan mode without Bash or automatic test execution", () => {
@@ -1165,6 +1193,50 @@ describe("final answer gate aggregation", () => {
     });
   });
 
+  it("continues artifact evidence search even after the aggregate evidence retry budget is spent", () => {
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["engineering_missing_artifact"],
+      },
+      context: { ...makeGateContext(), permissionMode: "default", language: "zh-CN" } as never,
+      userText: "继续确认产物",
+      retryBudgetRemaining: false,
+      evidenceActionRetryCount: 3,
+    });
+
+    expect(plan.action).toBe("readonly_check");
+    expect(plan.reason).toBe("artifact_gap_readonly");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "Grep",
+      strategy: "artifact_readonly_check",
+    });
+  });
+
+  it("continues recorded final-gate evidence even when attempt retry budget is spent", () => {
+    expect(
+      shouldContinueAfterFinalGateEvidenceAction(
+        {
+          status: "evidence_recorded",
+          messages: [],
+          result: { ok: true, tool: "GitStatusInspect", text: "ok" },
+        },
+        3,
+      ),
+    ).toBe(true);
+    expect(
+      shouldContinueAfterFinalGateEvidenceAction(
+        {
+          status: "attempt_recorded",
+          messages: [],
+          result: { ok: true, tool: "Grep", text: "no match" },
+          reason: "artifact_not_proven",
+        },
+        3,
+      ),
+    ).toBe(false);
+  });
+
   it("plans artifact gaps with a direct Read when the draft names a file", () => {
     const plan = planFinalGateEvidenceGapAction({
       result: {
@@ -1244,6 +1316,26 @@ describe("final answer gate aggregation", () => {
     expect(plan.action).toBe("readonly_check");
     expect(plan.directive).toContain("GitStatusInspect");
     expect(plan.directive).toContain("不要创建 commit");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "GitStatusInspect",
+      input: { includeDetails: true },
+    });
+  });
+
+  it("continues git evidence collection even after the aggregate evidence retry budget is spent", () => {
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["git_operation"],
+      },
+      context: { ...makeGateContext(), permissionMode: "default", language: "zh-CN" } as never,
+      userText: "确认 git 状态",
+      retryBudgetRemaining: false,
+      evidenceActionRetryCount: 3,
+    });
+
+    expect(plan.action).toBe("readonly_check");
+    expect(plan.reason).toBe("git_gap_readonly");
     expect(plan.evidenceAction).toMatchObject({
       toolName: "GitStatusInspect",
       input: { includeDetails: true },
