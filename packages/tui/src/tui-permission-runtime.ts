@@ -40,6 +40,7 @@ import {
   isPlanAllowedTool,
 } from "./permission-continuation-runtime.js";
 import { type PolicyVerdict, classifyToolRequest } from "./permission-policy-engine.js";
+import type { UserActionConstraints } from "./user-action-constraints.js";
 
 export type PermissionCheck = {
   request: {
@@ -165,6 +166,37 @@ export function toPermissionPromptView(permission: PermissionCheck) {
   };
 }
 
+const FILE_WRITE_TOOL_NAMES = new Set<ToolName>(["Write", "Edit", "MultiEdit"]);
+const WRITE_SEMANTICS = new Set<PolicyVerdict["semantic"]>(["mutating", "destructive", "install"]);
+
+function currentUserConstraintDenyReason(
+  name: ToolName,
+  verdict: PolicyVerdict,
+  constraints: UserActionConstraints | undefined,
+  language: TuiContext["language"],
+): string | undefined {
+  if (!constraints) return undefined;
+  if (constraints.forbidAllTools) {
+    return language === "en-US"
+      ? "The current user turn explicitly forbids using tools; the permission layer blocked this tool call."
+      : "本轮用户明确要求不要使用工具，权限管道已阻止本次工具调用。";
+  }
+  if (constraints.forbidShell && name === "Bash") {
+    return language === "en-US"
+      ? "The current user turn explicitly forbids running shell commands; the permission layer blocked Bash."
+      : "本轮用户明确要求不要执行命令，权限管道已阻止 Bash。";
+  }
+  if (
+    (constraints.forbidWrite || constraints.readonlyOnly) &&
+    (FILE_WRITE_TOOL_NAMES.has(name) || WRITE_SEMANTICS.has(verdict.semantic))
+  ) {
+    return language === "en-US"
+      ? "The current user turn explicitly forbids writing or modifying files; the permission layer blocked this mutating tool call."
+      : "本轮用户明确要求不要写入或修改文件，权限管道已阻止本次变更类工具调用。";
+  }
+  return undefined;
+}
+
 export async function decidePermission(
   name: ToolName,
   input: unknown,
@@ -198,11 +230,36 @@ export async function decidePermission(
     status: "consumed",
     summary: `${name}; mode=${context.permissionMode}; risk=${tool.permission.risk}`,
   });
+  // D.13Q-UX Closure: 始终算一次 verdict 用于 UI 解释行（即使 auto-allow 不命中）。
+  // engine 是纯函数，调用便宜；后续任何 ask/deny 分支返回时都附带 verdict，
+  // 让 PermissionPanel 能用真实 semantic / pathSafety / redactedSummary 渲染。
+  const verdict = classifyToolRequest({
+    toolName: name,
+    input,
+    workspaceRoot: context.projectPath,
+  });
+
+  const constraintDenyReason = currentUserConstraintDenyReason(
+    name,
+    verdict,
+    context.currentUserActionConstraints,
+    context.language,
+  );
+  if (constraintDenyReason) {
+    await recordPermissionDenied(context, name, constraintDenyReason);
+    await recordPermissionOrchestration(context, _sessionId, {
+      status: "failed",
+      summary: `${name}; current user constraint deny`,
+      level: "warning",
+    });
+    return { request, decision: "deny", reason: constraintDenyReason, verdict };
+  }
   if (context.permissionMode === "full-access") {
     return {
       request,
       decision: "allow",
       reason: "full-access 已由本地用户显式开启，TUI 权限确认已放行。",
+      verdict,
       architectureDrift: options.architectureDrift,
     };
   }
@@ -213,7 +270,7 @@ export async function decidePermission(
       summary: `${name}; hard deny: ${hardDeny}`,
       level: "warning",
     });
-    return { request, decision: "deny", reason: hardDeny };
+    return { request, decision: "deny", reason: hardDeny, verdict };
   }
   if (toolPermission.behavior === "deny") {
     await recordPermissionDenied(context, name, toolPermission.reason);
@@ -222,20 +279,11 @@ export async function decidePermission(
       summary: `${name}; tool policy deny: ${toolPermission.reason}`,
       level: "warning",
     });
-    return { request, decision: "deny", reason: toolPermission.reason };
+    return { request, decision: "deny", reason: toolPermission.reason, verdict };
   }
   if (toolPermission.behavior === "allow") {
-    return { request, decision: "allow", reason: toolPermission.reason };
+    return { request, decision: "allow", reason: toolPermission.reason, verdict };
   }
-
-  // D.13Q-UX Closure: 始终算一次 verdict 用于 UI 解释行（即使 auto-allow 不命中）。
-  // engine 是纯函数，调用便宜；后续任何 ask/deny 分支返回时都附带 verdict，
-  // 让 PermissionPanel 能用真实 semantic / pathSafety / redactedSummary 渲染。
-  const verdict = classifyToolRequest({
-    toolName: name,
-    input,
-    workspaceRoot: context.projectPath,
-  });
 
   // 哲学模块 1.3：权限引擎读取调度决策，预加热写入确认。
   const schedulerDecision = context.lastMetaSchedulerDecision;

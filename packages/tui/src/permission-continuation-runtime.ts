@@ -28,6 +28,7 @@ import { type ToolName, type ToolOutput, builtInTools } from "@linghun/tools";
 import { getPlatformPathDenyReason } from "./platform-security.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import { formatToolOutput } from "./tool-output-presenter.js";
+import { hasReadOnlyUserConstraint, parseUserActionConstraints } from "./user-action-constraints.js";
 
 // ---------------------------------------------------------------------------
 // Types re-exported for use by index.ts
@@ -261,6 +262,9 @@ export function hasRepeatedPermissionDenial(recentDenied: RecentPermissionReject
 // ---------------------------------------------------------------------------
 
 export function createReportWriteGuard(text: string): ReportWriteGuard | undefined {
+  if (hasReadOnlyUserConstraint(parseUserActionConstraints(text))) {
+    return undefined;
+  }
   if (!isReportFileWriteRequest(text)) {
     return undefined;
   }

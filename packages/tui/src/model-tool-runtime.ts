@@ -17,6 +17,10 @@ import type { BoundaryEditPreflightResult } from "./architecture-boundary.js";
 import { checkBoundaryEditPreflight, detectBashFileWriteTargets } from "./architecture-boundary.js";
 import { detectArchitectureDrift } from "./architecture-runtime.js";
 import {
+  collectPendingAgentCompletionNotices,
+  markAgentCompletionNoticeReported,
+} from "./agent-completion-finalizer.js";
+import {
   checkBackgroundStartGuard,
   finishBackgroundTaskFromToolOutput,
 } from "./background-control-runtime.js";
@@ -181,6 +185,7 @@ import type {
   DurableJobState,
   PlanProposal,
   VerificationReport,
+  WorkflowRunState,
   WorkflowTemplate,
 } from "./tui-data-types.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
@@ -244,6 +249,100 @@ export function formatAgentRunToolResultData(agent: AgentRun | undefined) {
     recentResult: agent.lastResultSummary ?? agent.summary,
     resultFullReport: agent.lastResultFullReport ?? null,
   };
+}
+
+type StartAgentToolResult = {
+  ok: boolean;
+  text: string;
+  data: {
+    status: AgentRun["status"] | "blocked" | "not_found";
+    agentId?: string;
+    lastTerminalStatus?: AgentRun["lastTerminalStatus"] | null;
+    transcriptSessionId?: string;
+    summary?: string;
+    recentResult?: string;
+    resultFullReport?: string | null;
+    lifecycleStatus: "not_started" | "running" | "terminal" | "blocked";
+    terminal: boolean;
+    completionClaimAllowed: boolean;
+    nextAction: string;
+  };
+};
+
+function buildStartAgentToolResult(
+  agent: AgentRun | undefined,
+  notStartedText: string,
+  language: TuiContext["language"],
+): StartAgentToolResult {
+  if (!agent) {
+    return {
+      ok: false,
+      text: notStartedText,
+      data: {
+        ...formatAgentRunToolResultData(agent),
+        status: "blocked",
+        lifecycleStatus: "not_started",
+        terminal: false,
+        completionClaimAllowed: false,
+        nextAction:
+          language === "en-US"
+            ? "Check /background and /model doctor, then retry the real agent runtime."
+            : "请先查看 /background 和 /model doctor，再重试真实 agent runtime。",
+      },
+    };
+  }
+
+  const terminalStatus = agent.lastTerminalStatus ?? agent.status;
+  const terminal =
+    agent.status === "idle" ||
+    agent.status === "completed" ||
+    terminalStatus === "completed" ||
+    terminalStatus === "failed" ||
+    terminalStatus === "blocked";
+  const lifecycleStatus = terminal
+    ? "terminal"
+    : agent.status === "running"
+      ? "running"
+      : "blocked";
+  const completionClaimAllowed = terminalStatus === "completed";
+  const text =
+    lifecycleStatus === "running"
+      ? `Agent started and still running: ${agent.id}; ${agent.summary}`
+      : lifecycleStatus === "terminal"
+        ? `Agent terminal ${terminalStatus}: ${agent.id}; ${agent.summary}`
+        : `Agent ${agent.status}: ${agent.id}; ${agent.summary}`;
+
+  return {
+    ok: lifecycleStatus === "running" || completionClaimAllowed,
+    text,
+    data: {
+      ...formatAgentRunToolResultData(agent),
+      status: agent.status,
+      lifecycleStatus,
+      terminal,
+      completionClaimAllowed,
+      nextAction:
+        lifecycleStatus === "running"
+          ? language === "en-US"
+            ? "Do not claim delegated work is complete yet; wait for AgentCompletionReturnsForMainChain or inspect AgentControl show."
+            : "不要声称委派工作已完成；等待 AgentCompletionReturnsForMainChain，或用 AgentControl show 查看。"
+          : completionClaimAllowed
+            ? language === "en-US"
+              ? "Use the returned agent summary as child-agent context, not as independent verification PASS."
+              : "把返回的 agent 摘要当作子 agent 上下文，不要当作独立验证 PASS。"
+            : language === "en-US"
+              ? "Inspect the child transcript or continue/cancel the agent before reporting completion."
+              : "先查看子 transcript，或继续/取消该 agent，再报告完成状态。",
+    },
+  };
+}
+
+export function __testBuildStartAgentToolResult(
+  agent: AgentRun | undefined,
+  notStartedText: string,
+  language: TuiContext["language"],
+): StartAgentToolResult {
+  return buildStartAgentToolResult(agent, notStartedText, language);
 }
 
 function formatPermissionAutoAllowEvent(toolName: string, verdict: PolicyVerdict): string {
@@ -1306,15 +1405,26 @@ export async function executeLinghunControlToolUse(
         createSilentOutput(),
       );
       const agent = context.agents.find((item) => !before.has(item.id));
-      const ok =
-        agent?.status === "completed" || agent?.status === "idle" || agent?.status === "running";
-      const text = agent
-        ? `Agent ${agent.status}: ${agent.summary}`
-        : formatStartAgentDidNotStartMessage(input, context);
-      return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
-        ...formatAgentRunToolResultData(agent),
-        status: agent?.status ?? "blocked",
-      });
+      const result = buildStartAgentToolResult(
+        agent,
+        formatStartAgentDidNotStartMessage(input, context),
+        context.language,
+      );
+      if (agent && !input.runInBackground && result.data.terminal) {
+        const reportedAt = new Date().toISOString();
+        for (const notice of collectPendingAgentCompletionNotices(context)) {
+          if (notice.agentId === agent.id) markAgentCompletionNoticeReported(context, notice.id, reportedAt);
+        }
+      }
+      return await finishControlToolResult(
+        toolCall,
+        context,
+        sessionId,
+        output,
+        result.text,
+        !result.ok,
+        result.data,
+      );
     }
     if (toolCall.name === AGENT_CONTROL_TOOL_NAME) {
       const input = parseAgentControlToolInput(toolCall.input, context);
@@ -1442,10 +1552,7 @@ export async function executeLinghunControlToolUse(
             existingRun.result,
           );
           return await finishControlToolResult(toolCall, context, sessionId, output, text, false, {
-            workflowId: existingRun.id,
-            status: existingRun.status,
-            result: existingRun.result,
-            multiAgent: existingRun.multiAgent,
+            ...buildWorkflowToolResultData(existingRun, input, context.language),
           });
         }
         const workflowGoal = input.goal ?? (input.inputs ? JSON.stringify(input.inputs) : "");
@@ -1487,15 +1594,15 @@ export async function executeLinghunControlToolUse(
             run.result,
           )
         : "Workflow runtime did not start.";
-      return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
-        workflowId: run?.id,
-        status: run?.status ?? "blocked",
-        result: run?.result ?? "blocked",
-        agents: input.agents,
-        multiAgent: input.multiAgent,
-        runningCap: input.runningCap,
-        teamName: input.teamName,
-      });
+      return await finishControlToolResult(
+        toolCall,
+        context,
+        sessionId,
+        output,
+        text,
+        !ok,
+        buildWorkflowToolResultData(run, input, context.language),
+      );
     }
     if (toolCall.name === INDEX_OPERATION_TOOL_NAME) {
       const input = parseIndexOperationToolInput(toolCall.input);
@@ -1601,6 +1708,61 @@ function formatWorkflowToolResultSummary(
     return `Workflow started, then stopped at step: ${currentStep}. Status: ${status}. Use /workflows status for details.`;
   }
   return `workflow 已启动，随后停在步骤：${currentStep}。状态：${status}。可用 /workflows status 查看详情。`;
+}
+
+function buildWorkflowToolResultData(
+  run: WorkflowRunState | undefined,
+  input: Extract<ReturnType<typeof parseRunWorkflowToolInput>, { ok: true }>,
+  language: Language,
+): {
+  workflowId?: string;
+  status: WorkflowRunState["status"] | "blocked";
+  result: WorkflowRunState["result"] | "blocked";
+  agents?: number;
+  multiAgent?: boolean;
+  runningCap?: number;
+  teamName?: string;
+  lifecycleStatus: "not_started" | "running" | "terminal";
+  terminal: boolean;
+  completionClaimAllowed: false;
+  verificationClaimAllowed: false;
+  nextAction: string;
+} {
+  const terminal = Boolean(run && run.status !== "running");
+  const lifecycleStatus = run ? (terminal ? "terminal" : "running") : "not_started";
+  return {
+    workflowId: run?.id,
+    status: run?.status ?? "blocked",
+    result: run?.result ?? "blocked",
+    agents: input.agents,
+    multiAgent: run?.multiAgent ?? input.multiAgent,
+    runningCap: input.runningCap,
+    teamName: input.teamName,
+    lifecycleStatus,
+    terminal,
+    completionClaimAllowed: false,
+    verificationClaimAllowed: false,
+    nextAction:
+      lifecycleStatus === "running"
+        ? language === "en-US"
+          ? "Workflow is still running; inspect returned agent/workflow completions before claiming work is complete."
+          : "workflow 仍在运行；先检查回流的 agent/workflow 结果，再声称工作完成。"
+        : lifecycleStatus === "terminal"
+          ? language === "en-US"
+            ? "Workflow lifecycle ended; use separate evidence or verification before claiming PASS."
+            : "workflow 生命周期已结束；声称 PASS 前必须有独立证据或验证。"
+          : language === "en-US"
+            ? "Workflow runtime did not start; check workflow id, model route, and background guard."
+            : "workflow runtime 未启动；检查 workflow id、模型路由和后台守卫。",
+  };
+}
+
+export function __testBuildWorkflowToolResultData(
+  run: WorkflowRunState | undefined,
+  input: Extract<ReturnType<typeof parseRunWorkflowToolInput>, { ok: true }>,
+  language: Language,
+): ReturnType<typeof buildWorkflowToolResultData> {
+  return buildWorkflowToolResultData(run, input, language);
 }
 
 function selectWorkflowCurrentStepForToolResult(

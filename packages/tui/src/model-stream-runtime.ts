@@ -2517,6 +2517,8 @@ export async function sendMessage(
       content: createReportTaskGuard(reportWriteGuard, context.language),
     });
   }
+  const previousUserActionConstraints = context.currentUserActionConstraints;
+  context.currentUserActionConstraints = parseUserActionConstraints(text);
   try {
     let evidenceRounds = 0;
     let consecutiveTodoOnlyRounds = 0;
@@ -3195,6 +3197,7 @@ export async function sendMessage(
     context.activeAbortController = undefined;
     context.tools.abortSignal = undefined;
     context.interrupt = { type: "idle" };
+    context.currentUserActionConstraints = previousUserActionConstraints;
   }
 
   // Successful response — clear the circuit breaker for both the current and original provider+model.

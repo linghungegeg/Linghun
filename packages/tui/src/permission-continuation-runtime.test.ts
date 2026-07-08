@@ -406,6 +406,12 @@ describe("permission-continuation-runtime", () => {
         expect(createReportWriteGuard("帮我看看代码")).toBeUndefined();
       });
 
+      it("does not create a report guard when the same turn forbids writing", () => {
+        expect(
+          createReportWriteGuard("查询我偏好的压测报告格式是什么？不要写文件，不要创建报告。"),
+        ).toBeUndefined();
+      });
+
       it("does not invent report.md when the markdown target is not parseable", () => {
         expect(createReportWriteGuard("生成报告保存为 .md")).toBeUndefined();
       });

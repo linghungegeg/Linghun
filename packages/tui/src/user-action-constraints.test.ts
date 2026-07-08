@@ -32,4 +32,13 @@ describe("user-action-constraints", () => {
     expect(constraints.forbidShell).toBe(true);
     expect(forbidsVerificationEvidence(constraints)).toBe(true);
   });
+
+  it("does not merge secret-output bans with later tool-use permission", () => {
+    const constraints = parseUserActionConstraints(
+      "请不要输出 key；用真实工具检查当前模型诊断状态",
+    );
+
+    expect(constraints.forbidAllTools).toBe(false);
+    expect(constraints.forbidShell).toBe(false);
+  });
 });

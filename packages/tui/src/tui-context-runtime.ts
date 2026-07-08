@@ -45,6 +45,7 @@ import {
 import type { TranscriptSelectionState } from "./shell/models/transcript-selection-state.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import type { ToolResultBudgetState } from "./tool-result-budget.js";
+import type { UserActionConstraints } from "./user-action-constraints.js";
 import type {
   AgentCompletionState,
   AgentRun,
@@ -388,6 +389,8 @@ export type TuiContext = {
   userStateCooldownUntilMs?: number;
   /** most recent tool failure captured for meta-scheduler input */
   lastToolFailure?: { toolName: string; summary: string };
+  /** Current user turn constraints that must be honored by the tool permission layer. */
+  currentUserActionConstraints?: UserActionConstraints;
   providerBreaker: ProviderCircuitBreakerState;
   solutionCompleteness: SolutionCompletenessStatus;
   currentArchitectureCard?: ArchitectureCard;

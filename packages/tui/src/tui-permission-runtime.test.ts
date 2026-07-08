@@ -21,6 +21,7 @@ import {
   createMemoryState,
   createRemoteState,
 } from "./tui-state-runtime.js";
+import { parseUserActionConstraints } from "./user-action-constraints.js";
 
 class MemoryOutput extends Writable {
   text = "";
@@ -88,6 +89,29 @@ describe("tui permission runtime — CCB-aligned modes", () => {
     expect(read.decision).toBe("allow");
     expect(edit.decision).toBe("allow");
     expect(secret.decision).toBe("allow");
+    expect(context.pendingLocalApproval).toBeUndefined();
+  });
+
+  it("full-access still honors current user no-write constraints", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.permissionMode = "full-access";
+    context.currentUserActionConstraints = parseUserActionConstraints("不要写文件，只检查现状");
+    await writeFile(join(context.projectPath, "README.md"), "# demo\n", "utf8");
+
+    const read = await decidePermission("Read", { path: "README.md" }, context, sessionId);
+    const write = await decidePermission("Write", { path: "report.md", content: "x" }, context, sessionId);
+    const edit = await decidePermission(
+      "Edit",
+      { path: "README.md", oldText: "demo", newText: "demo!" },
+      context,
+      sessionId,
+    );
+    const mutatingBash = await decidePermission("Bash", { command: "New-Item report.md" }, context, sessionId);
+
+    expect(read.decision).toBe("allow");
+    expect(write.decision).toBe("deny");
+    expect(edit.decision).toBe("deny");
+    expect(mutatingBash.decision).toBe("deny");
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 

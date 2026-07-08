@@ -258,6 +258,19 @@ describe("model-loop-runtime", () => {
       expect(schema.properties?.isolation?.description).toContain("omit cwd");
     });
 
+    it("documents agent/workflow orchestration state boundaries in model tool descriptions", () => {
+      const defs = createModelToolDefinitions();
+      const startAgent = defs.find((d) => d.name === "StartAgent");
+      const sendMessage = defs.find((d) => d.name === "SendMessage");
+      const runWorkflow = defs.find((d) => d.name === "RunWorkflow");
+
+      expect(startAgent?.description).toContain("Treat a running result as started-only");
+      expect(startAgent?.description).toContain("Continue a useful existing agent with SendMessage");
+      expect(sendMessage?.description).toContain("continue an agent whose context overlaps");
+      expect(runWorkflow?.description).toContain("Workflow lifecycle completion is orchestration evidence only");
+      expect(runWorkflow?.description).toContain("verification PASS");
+    });
+
     it("allows AgentControl to stop all running agents through structured actions", () => {
       const agentControl = createModelToolDefinitions().find((d) => d.name === "AgentControl");
       const schema = agentControl?.inputSchema as {

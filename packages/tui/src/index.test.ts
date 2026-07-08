@@ -14260,7 +14260,7 @@ describe("Phase 06 TUI slash commands", () => {
       ),
       toolUseStream("toolu_child_todo_1", "Todo", '{"action":"add","content":"记录验证点"}'),
       textStream("msg-child-final", "子 agent 已完成真实 Todo 工具调用。"),
-      textStream("msg-main-final", "已通过真实 StartAgent 完成多智能体任务。"),
+      textStream("msg-main-final", "已收到真实 StartAgent 回流，正在整理多智能体结果。"),
     ];
     vi.stubGlobal(
       "fetch",
@@ -14293,12 +14293,18 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(4);
-    for (const request of requests) {
+    const modelRequests = requests.filter(
+      (request) =>
+        !JSON.stringify(request.body.messages ?? []).includes(
+          "Decide whether the latest user message should create, update, delete, or skip long-lived memory",
+        ),
+    );
+    expect(modelRequests).toHaveLength(4);
+    for (const request of modelRequests) {
       expect(request.url).toBe("https://relay.example.com/v1/messages");
       expect(request.url.endsWith("/chat/completions")).toBe(false);
     }
-    const mainContinuation = requests[3]?.body.messages ?? [];
+    const mainContinuation = modelRequests[3]?.body.messages ?? [];
     const mainBlocks = mainContinuation.flatMap((message) =>
       Array.isArray(message.content)
         ? (message.content as Array<{
@@ -14322,7 +14328,7 @@ describe("Phase 06 TUI slash commands", () => {
         (block) => block.type === "tool_result" && block.tool_use_id === "toolu_start_agent_1",
       ),
     ).toBe(true);
-    const childContinuation = requests[2]?.body.messages ?? [];
+    const childContinuation = modelRequests[2]?.body.messages ?? [];
     const childBlocks = childContinuation.flatMap((message) =>
       Array.isArray(message.content)
         ? (message.content as Array<{
@@ -14344,7 +14350,7 @@ describe("Phase 06 TUI slash commands", () => {
         (block) => block.type === "tool_result" && block.tool_use_id === "toolu_child_todo_1",
       ),
     ).toBe(true);
-    const childTools = requests[1]?.body.tools as
+    const childTools = modelRequests[1]?.body.tools as
       | Array<{ name?: string; function?: unknown; input_schema?: unknown }>
       | undefined;
     expect(childTools?.some((tool) => tool.name === "Todo" && tool.input_schema)).toBe(true);
@@ -14352,7 +14358,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("endpointProfile");
     expect(output.text).not.toContain("tool_result");
     expect(output.text).not.toContain("工具调用上限");
-    expect(output.text).toContain("已通过真实 StartAgent");
+    expect(output.text).toContain("已收到真实 StartAgent 回流");
   });
 
   it("StartAgent child loop oversized context triggers compact projection in child provider requests", async () => {

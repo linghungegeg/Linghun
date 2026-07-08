@@ -5,12 +5,15 @@ import { createModelToolDefinitions } from "./model-loop-runtime.js";
 import {
   __testBuildForkArgsFromStartAgentInput,
   __testBuildPreEngineFallbackRequiredResult,
+  __testBuildStartAgentToolResult,
+  __testBuildWorkflowToolResultData,
   __testFormatPreEnginePrimaryText,
   rememberSourcePackCandidatesFromToolData,
   rememberToolFiles,
 } from "./model-tool-runtime.js";
 import { formatToolOutput } from "./tool-output-presenter.js";
 import type { TuiContext } from "./tui-context-runtime.js";
+import type { AgentRun, WorkflowRunState } from "./tui-data-types.js";
 
 describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
   it("keeps automatic final-gate evidence primary text out of the main screen", () => {
@@ -203,5 +206,72 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
       "worktree",
     ]);
     expect(args).not.toContain("--cwd");
+  });
+
+  it("marks running StartAgent results as started-only instead of completion", () => {
+    const result = __testBuildStartAgentToolResult(
+      {
+        id: "agent-running",
+        type: "worker",
+        role: "executor",
+        provider: "openai-compatible",
+        task: "inspect auth",
+        model: "test-model",
+        permissionMode: "default",
+        status: "running",
+        activityStatus: "processing",
+        transcriptPath: "agent.jsonl",
+        transcriptSessionId: "agent-session",
+        mailbox: [],
+        summary: "agent running",
+        contextSummary: "handoff",
+        cost: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          estimatedCny: 0,
+        },
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      } satisfies AgentRun,
+      "not started",
+      "zh-CN",
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain("still running");
+    expect(result.data.lifecycleStatus).toBe("running");
+    expect(result.data.terminal).toBe(false);
+    expect(result.data.completionClaimAllowed).toBe(false);
+    expect(result.data.nextAction).toContain("不要声称");
+  });
+
+  it("keeps workflow lifecycle separate from completion or verification claims", () => {
+    const data = __testBuildWorkflowToolResultData(
+      {
+        id: "workflow-test",
+        goal: "fix auth",
+        planId: "plan-test",
+        status: "completed",
+        result: "partial",
+        steps: [],
+        startedAt: "2026-01-01T00:00:00.000Z",
+      } satisfies WorkflowRunState,
+      {
+        ok: true,
+        goal: "fix auth",
+        runInBackground: false,
+        multiAgent: true,
+        agents: 2,
+      } as Parameters<typeof __testBuildWorkflowToolResultData>[1],
+      "zh-CN",
+    );
+
+    expect(data.lifecycleStatus).toBe("terminal");
+    expect(data.terminal).toBe(true);
+    expect(data.completionClaimAllowed).toBe(false);
+    expect(data.verificationClaimAllowed).toBe(false);
+    expect(data.nextAction).toContain("声称 PASS 前");
   });
 });
