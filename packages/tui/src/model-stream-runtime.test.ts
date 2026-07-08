@@ -13,6 +13,7 @@ import {
   buildAggregatedDowngradedFinalAnswer,
   buildEvidenceBackedFinalBoundaryAnswer,
   canRunToolCallInParallelReadonlyBatch,
+  createToolFallbackRecoveryReminder,
   createToolFailureRecoveryFingerprint,
   createToolBatchFailFastSkippedResult,
   createToolExecutionBatches,
@@ -263,6 +264,19 @@ describe("tool batch fail-fast helpers", () => {
       ),
     ).toBe(false);
     expect(isRealFallbackToolProgress({ name: "Grep", input: { pattern: "x" } } as never, fallbackResult)).toBe(false);
+  });
+
+  it("creates strict pre-analysis fallback recovery reminders", () => {
+    const first = createToolFallbackRecoveryReminder("en-US");
+    const repeated = createToolFallbackRecoveryReminder("zh-CN", 1);
+
+    expect(first).toContain("fallback_required");
+    expect(first).toContain("MUST call at least one real workspace tool");
+    expect(first).toContain("Do not produce a final natural-language answer");
+    expect(first).toContain("pre_context/pre_plan/pre_impact/pre_verify");
+    expect(repeated).toContain("已经进入 pre 降级恢复模式");
+    expect(repeated).toContain("后续默认改用真实工作区工具");
+    expect(repeated).toContain("下一轮回复必须至少调用一个真实工作区工具");
   });
 
   it("creates skipped tool result with the original tool call id handled by caller", () => {

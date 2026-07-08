@@ -100,22 +100,31 @@ export function createModelSystemPromptSegments(
   const deferredSnapshot = snapshotDeferredTools(context);
   const deferredReminder = formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
   const preEngineToolNames = registerPreEngineDeferredToolsForRuntime(context, deferredSnapshot);
+  const preEngineFallbackPreferenceActive =
+    context.preEngineFallbackPreference?.active === true &&
+    context.preEngineFallbackPreference.projectPath === context.projectPath;
+  const preEngineRepositoryTools = {
+    discovered: true,
+    tools: preEngineToolNames,
+    invocation: preEngineFallbackPreferenceActive
+      ? "These pre-engine tools are still available, but this repository previously returned fallback_required; use real workspace tools first and call pre-engine only as a secondary check after real-tool evidence."
+      : "These pre-engine tools are first-class readonly model tools; call them directly when useful. ExecuteExtraTool remains available for deferred-tool dispatch.",
+    indexCoordination: preEngineFallbackPreferenceActive
+      ? "Repository pre-analysis fallback is active for this project. For repository code understanding, start with real workspace tools such as ReadSnippets, SourcePack, Grep, Glob, Bash, Diff, or RunVerification; use codebase-memory index tools when useful; do not lead with pre-engine unless real-tool evidence shows it is needed."
+      : "If codebase-memory index is ready, use index-backed tools for broad repository discovery first, then pre-engine for AST precision; if the index is missing or stale, use pre-engine as the fast repository-analysis entry.",
+    useFor: [
+      "repository code understanding",
+      "impact analysis",
+      "edit planning",
+      "quick verification",
+    ],
+  };
+  const repositoryAnalysisWorkflow = preEngineFallbackPreferenceActive
+    ? "RepositoryAnalysisWorkflow=This repository has an active pre-engine fallback preference from an earlier fallback_required result. Before repository code claims or edits, use real workspace tools first: ReadSnippets/Read for known files, SourcePack/Grep/Glob for discovery, Bash/Diff/RunVerification for verification. Pre-engine tools remain available only as a secondary precision aid after real-tool evidence, not as the first repository-analysis step."
+    : "RepositoryAnalysisWorkflow=Before broad Grep/Read exploration for repository analysis work, get structured evidence first: use codebase-memory index tools when ready, then pre-engine for AST precision. If the task names a concrete function, class, method, command, or file-level anchor, call pre_context on that anchor first; use pre_plan first only when no concrete anchor is known. When a pre-engine result includes answer_pack with high/medium confidence and little missing_evidence, use it as the primary evidence map; suggested_minimal_reads are line-window hints, so prefer ReadSnippets for those ranges and avoid broad Grep/full-file Read unless explicit evidence is missing.";
   const preEngineToolsLine =
     preEngineToolNames.length > 0
-      ? `\nPreEngineRepositoryTools=${JSON.stringify({
-          discovered: true,
-          tools: preEngineToolNames,
-          invocation:
-            "These pre-engine tools are first-class readonly model tools; call them directly when useful. ExecuteExtraTool remains available for deferred-tool dispatch.",
-          indexCoordination:
-            "If codebase-memory index is ready, use index-backed tools for broad repository discovery first, then pre-engine for AST precision; if the index is missing or stale, use pre-engine as the fast repository-analysis entry.",
-          useFor: [
-            "repository code understanding",
-            "impact analysis",
-            "edit planning",
-            "quick verification",
-          ],
-        })}\nRepositoryAnalysisWorkflow=Before broad Grep/Read exploration for repository analysis work, get structured evidence first: use codebase-memory index tools when ready, then pre-engine for AST precision. If the task names a concrete function, class, method, command, or file-level anchor, call pre_context on that anchor first; use pre_plan first only when no concrete anchor is known. When a pre-engine result includes answer_pack with high/medium confidence and little missing_evidence, use it as the primary evidence map; suggested_minimal_reads are line-window hints, so prefer ReadSnippets for those ranges and avoid broad Grep/full-file Read unless explicit evidence is missing.`
+      ? `\nPreEngineRepositoryTools=${JSON.stringify(preEngineRepositoryTools)}\n${repositoryAnalysisWorkflow}`
       : "";
   const worktreeContextLine = `${preEngineToolsLine}${
     worktreeContextSummary && worktreeContextSummary.isWorktree === true

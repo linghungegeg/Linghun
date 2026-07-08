@@ -1200,6 +1200,7 @@ export {
   __testSendMessage,
   handleNaturalInput,
   handleRemoteInboundMessage,
+  recordPreEngineFallbackPreference,
 } from "./model-stream-runtime.js";
 export {
   __testRenderInteractiveChoiceLines,

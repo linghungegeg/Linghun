@@ -118,6 +118,7 @@ import {
   processRemoteBindCommand,
   processRemoteInbound,
   recordModelUsage,
+  recordPreEngineFallbackPreference,
   runAutoLearningOnTurnEnd,
   runCommandCaptureForTest,
   runHeadlessTask,
@@ -25739,6 +25740,22 @@ console.log(JSON.stringify({ ok: true }));
     expect(context.discoveredDeferredToolNames.has("pre_plan")).toBe(true);
     expect(context.discoveredDeferredToolNames.has("pre_verify")).toBe(true);
     expect(context.discoveredDeferredToolNames.has("index_repository")).toBe(false);
+  });
+
+  it("D.13I system prompt injection: pre-engine fallback preference makes later same-repo turns real-tool first", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    recordPreEngineFallbackPreference(context);
+
+    const prompt = createModelSystemPrompt("hello", context, { runtime: "test" });
+    expect(prompt).toContain("fallback_required");
+    expect(prompt).toContain("use real workspace tools first");
+    expect(prompt).toContain("not as the first repository-analysis step");
+    expect(prompt).toContain("ReadSnippets/Read for known files");
+    expect(prompt).not.toContain("Before broad Grep/Read exploration");
   });
 
   it("D.13I searchDeferredTools / findDeferredTool helpers behave deterministically", () => {

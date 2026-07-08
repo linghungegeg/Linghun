@@ -419,6 +419,16 @@ export type TuiContext = {
   // ExecuteExtraTool 必须先看 Set，命中后再走白名单/适配器/必填参数检查。
   // 这是"已发现"的唯一证据；listDeferredTools 仅作为白名单存在性，不能等同于"发现过"。
   discoveredDeferredToolNames: Set<string>;
+  /**
+   * Session-local repository analysis preference. Set after pre-engine reports
+   * fallback_required for this project so later turns prefer real workspace tools first.
+   */
+  preEngineFallbackPreference?: {
+    projectPath: string;
+    active: boolean;
+    activatedAt: string;
+    reason: "fallback_required";
+  };
   toolResultBudgetState?: ToolResultBudgetState;
   sessionStoreVerifiedId?: string;
   // D.13J Block 3 — codebase-memory mutating 工具的 session 权限授予标记。

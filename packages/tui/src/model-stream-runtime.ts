@@ -338,18 +338,34 @@ function createToolFailureRecoveryReminder(language: Language): string {
       ].join("\n");
 }
 
-function createToolFallbackRecoveryReminder(language: Language): string {
+export function createToolFallbackRecoveryReminder(language: Language, previousFallbacks = 0): string {
+  const repeated = previousFallbacks > 0;
   return language === "en-US"
     ? [
-        "The repository pre-analysis tool reported fallback_required and did not complete the task.",
-        "Continue now by calling real workspace tools such as Read, ReadSnippets, SourcePack, Grep, Glob, or Bash to gather evidence and perform the requested work.",
-        "Do not call the same pre-engine tool again unless a real-tool result shows it is still needed.",
+        repeated
+          ? "Pre-analysis fallback mode is already active for this task."
+          : "The repository pre-analysis tool reported fallback_required and did not complete the task.",
+        "For the rest of this task, default to real workspace tools instead of pre-engine analysis.",
+        "Your next response MUST call at least one real workspace tool such as Read, ReadSnippets, SourcePack, Grep, Glob, Bash, Diff, or RunVerification.",
+        "Do not produce a final natural-language answer and do not call pre_context/pre_plan/pre_impact/pre_verify again unless a real-tool result shows it is still needed.",
       ].join("\n")
     : [
-        "仓库 pre 预分析工具返回了 fallback_required，任务还没有完成。",
-        "现在必须继续调用真实工作区工具，例如 Read、ReadSnippets、SourcePack、Grep、Glob 或 Bash，拿到证据并推进用户请求。",
-        "除非真实工具结果证明仍然需要，否则不要重复调用同一个 pre 工具。",
+        repeated
+          ? "当前任务已经进入 pre 降级恢复模式。"
+          : "仓库 pre 预分析工具返回了 fallback_required，任务还没有完成。",
+        "本任务后续默认改用真实工作区工具推进，不再优先使用 pre 预分析。",
+        "你的下一轮回复必须至少调用一个真实工作区工具，例如 Read、ReadSnippets、SourcePack、Grep、Glob、Bash、Diff 或 RunVerification。",
+        "不要输出自然语言最终回答；除非真实工具结果证明仍然需要，否则不要再调用 pre_context/pre_plan/pre_impact/pre_verify。",
       ].join("\n");
+}
+
+export function recordPreEngineFallbackPreference(context: TuiContext): void {
+  context.preEngineFallbackPreference = {
+    projectPath: context.projectPath,
+    active: true,
+    activatedAt: new Date().toISOString(),
+    reason: "fallback_required",
+  };
 }
 
 export function createToolBatchFailFastSkippedResult(
@@ -2417,6 +2433,7 @@ export async function sendMessage(
     let toolFailureRetries = 0;
     let toolFailureRecoveryState: ToolFailureRecoveryState = { repeatedFailureRounds: 0 };
     let toolFailureNoToolRecoveryPrompts = 0;
+    let preFallbackRecoveryPrompts = 0;
     let highReasoningToolsEmptyRetried = false;
     let reactiveCompactRetried = false;
     const _suggestedMax = metaSchedulerDecision.suggestedMaxTodoRounds;
@@ -3022,13 +3039,15 @@ export async function sendMessage(
           break;
         }
       } else if (roundNeedsRealToolFallback) {
+        recordPreEngineFallbackPreference(context);
         toolFailureRetries = 0;
         toolFailureRecoveryState = { repeatedFailureRounds: 0 };
         toolFailureNoToolRecoveryPrompts = 0;
         messagesForProvider.push({
           role: "user",
-          content: createToolFallbackRecoveryReminder(context.language),
+          content: createToolFallbackRecoveryReminder(context.language, preFallbackRecoveryPrompts),
         });
+        preFallbackRecoveryPrompts += 1;
         await appendSystemEvent(
           context,
           sessionId,
@@ -4447,6 +4466,7 @@ export async function continueModelAfterToolResults(
     let toolCallingDegradedForRuntime: string | undefined;
     let highReasoningToolsEmptyRetried = false;
     let reactiveCompactRetried = false;
+    let preFallbackRecoveryPrompts = 0;
     const _suggestedMax = context.lastMetaSchedulerDecision?.suggestedMaxTodoRounds ?? MAX_TODO_ONLY_CODE_FACT;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
@@ -4950,7 +4970,12 @@ export async function continueModelAfterToolResults(
       const roundNeedsRealToolFallback =
         toolCalls.length > 0 && !roundHadRealFallbackToolProgress && roundFallbackRequiredCount > 0;
       if (roundNeedsRealToolFallback) {
-        continuation.messages.push({ role: "user", content: createToolFallbackRecoveryReminder(context.language) });
+        recordPreEngineFallbackPreference(context);
+        continuation.messages.push({
+          role: "user",
+          content: createToolFallbackRecoveryReminder(context.language, preFallbackRecoveryPrompts),
+        });
+        preFallbackRecoveryPrompts += 1;
         await appendSystemEvent(
           context,
           sessionId,
