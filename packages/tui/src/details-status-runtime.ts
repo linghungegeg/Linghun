@@ -538,7 +538,7 @@ export function __testCreateShellBlockOutput(
   terminalFirstAssistantSink?: TerminalFirstAssistantSink,
 ): Writable & {
   beginAssistantStream(id: string, options?: AssistantStreamOptions): void;
-  appendAssistantDelta(text: string): void;
+  appendAssistantDelta(text: string, id?: string): void;
   endAssistantStream(): void;
   cancelAssistantStream(): void;
   // D.13V — 暴露 retry/downgrade 路径上的 streaming block 操作，便于单测验证

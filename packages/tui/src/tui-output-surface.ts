@@ -222,11 +222,15 @@ export class ShellBlockOutput extends Writable {
    * 将一段 assistant_text_delta 追加到当前 streaming preview。
    * - delta 先进入 display state，稳定行由 commit tick 渐进写入历史 ProductBlock
    * - mutable live tail 保持为独立 preview，避免全量正文反复作为热渲染单元
-   * - 找不到 active id 时静默 fallback 到 _write，保持非交互回退
+   * - 真实模型流带 expectedId；取消/换轮后 id 不匹配的迟到 delta 直接丢弃
+   * - 测试/非交互直接调用不带 expectedId 时，找不到 active id 再 fallback 到 _write
    */
-  appendAssistantDelta(text: string): void {
+  appendAssistantDelta(text: string, expectedId?: string): void {
     if (!text) return;
     const id = this.assistantBlockId;
+    if (expectedId && id !== expectedId) {
+      return;
+    }
     if (!id) {
       this._write(text, "utf8", () => {});
       return;
@@ -1251,11 +1255,11 @@ export function beginAssistantStream(
   }
 }
 
-export function writeAssistantDelta(output: Writable, _id: string, text: string): void {
+export function writeAssistantDelta(output: Writable, id: string, text: string): void {
   if (!text) return;
-  const candidate = output as { appendAssistantDelta?: (text: string) => void };
+  const candidate = output as { appendAssistantDelta?: (text: string, id?: string) => void };
   if (typeof candidate.appendAssistantDelta === "function") {
-    candidate.appendAssistantDelta(text);
+    candidate.appendAssistantDelta(text, id);
     return;
   }
   output.write(text);
@@ -1353,7 +1357,7 @@ export function createShellBlockOutputForTest(
   terminalFirstAssistantSink?: TerminalFirstAssistantSink,
 ): Writable & {
   beginAssistantStream(id: string, options?: AssistantStreamOptions): void;
-  appendAssistantDelta(text: string): void;
+  appendAssistantDelta(text: string, id?: string): void;
   endAssistantStream(): void;
   cancelAssistantStream(): void;
   discardAssistantBlock(id: string): void;

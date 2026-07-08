@@ -13,6 +13,7 @@ import { createStructuredToolOutput, formatToolOutput } from "../tool-output-pre
 import {
   commitTerminalFirstUserBlock,
   createTerminalFirstAssistantSink,
+  writeAssistantDelta,
 } from "../tui-output-surface.js";
 import {
   bufferInsert,
@@ -5404,6 +5405,29 @@ describe("ShellBlockOutput — assistant streaming block", () => {
       "第一轮 preview\n",
     );
     expect(ctx.streamingAssistant?.text).not.toContain("第一轮");
+  });
+
+  it("cancelled stream id drops late SSE deltas and cannot contaminate the next stream", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    output.beginAssistantStream("assistant-stream-old");
+    writeAssistantDelta(output, "assistant-stream-old", "旧流半截");
+    expect(ctx.streamingAssistant?.text).toContain("旧流半截");
+
+    output.cancelAssistantStream();
+    writeAssistantDelta(output, "assistant-stream-old", "迟到旧 SSE");
+    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(JSON.stringify(blocks)).not.toContain("迟到旧 SSE");
+
+    output.beginAssistantStream("assistant-stream-new");
+    writeAssistantDelta(output, "assistant-stream-old", "串到新轮的旧 SSE");
+    writeAssistantDelta(output, "assistant-stream-new", "新流正文");
+
+    expect(ctx.streamingAssistant?.id).toBe("assistant-stream-new");
+    expect(ctx.streamingAssistant?.text).toBe("新流正文");
+    expect(JSON.stringify(blocks)).not.toContain("串到新轮的旧 SSE");
   });
 
   it("commit tick updates stable text and refreshes the live tail boundary", () => {
