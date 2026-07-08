@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Writable } from "node:stream";
@@ -14,11 +15,14 @@ import type { TuiContext } from "./index.js";
 import {
   applyMemoryExtractionDecision,
   decideMemoryExtraction,
+  findUnsavableReason,
   refreshAutoMemoryFiles,
+  topicForSummary,
   writeAutoMemoryFiles,
+  type MemoryExtractionDecision,
 } from "./memory-extraction-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
-import type { MemoryCandidate, MemoryLearningRun } from "./tui-data-types.js";
+import type { MemoryCandidate, MemoryLearningRun, MemoryTaxonomy } from "./tui-data-types.js";
 import {
   createEvidenceBackedMemoryCandidates,
   createLinghunMdTemplate,
@@ -38,6 +42,7 @@ import {
   writeMemoryRecord,
 } from "./tui-memory-runtime.js";
 import { writeErrorLine } from "./tui-output-surface.js";
+import { getSelectedModelRuntime } from "./tui-model-runtime.js";
 import { pathExists, summarizeProjectRules } from "./tui-state-runtime.js";
 
 export type MemoryCommandRuntimeDeps = {
@@ -589,12 +594,15 @@ export async function runAutoLearningOnTurnEnd(
     };
   }
 
-  const decision = decideMemoryExtraction({
+  const deterministicDecision = decideMemoryExtraction({
     recentMessages: [userInput],
     accepted: context.memory.accepted,
     disabled: context.memory.disabled,
     candidates: context.memory.candidates,
   });
+  const decision =
+    (await decideMemoryExtractionWithSemanticClassifier(context, userInput)) ??
+    deterministicDecision;
 
   if (decision.action === "create" || decision.action === "update") {
     const existing = context.memory.accepted.find((item) => item.id === decision.id);
@@ -694,6 +702,263 @@ export async function runAutoLearningOnTurnEnd(
         : "no_learnable_content",
     createdAt: new Date().toISOString(),
   };
+}
+
+async function decideMemoryExtractionWithSemanticClassifier(
+  context: TuiContext,
+  userInput: string,
+): Promise<MemoryExtractionDecision | undefined> {
+  if (!context.modelGateway) return undefined;
+  if (userInput.trim().length < 8 || userInput.length > 2400) return undefined;
+  const prompt = buildSemanticMemoryClassifierPrompt(context, userInput);
+  const text = await streamSemanticMemoryJson(
+    context,
+    "You are Linghun's memory extraction classifier. Return exactly one compact JSON object and no prose.",
+    prompt,
+    500,
+  );
+  if (!text) return undefined;
+  const decision = parseSemanticMemoryDecision(text, context, userInput);
+  if (!decision || decision.action === "no-op") return decision;
+  const vetoed = await shouldVetoMemoryWriteForCurrentTurn(context, userInput, decision);
+  if (vetoed === true) {
+    return { action: "no-op", reason: "semantic_current_turn_memory_control" };
+  }
+  return decision;
+}
+
+async function streamSemanticMemoryJson(
+  context: TuiContext,
+  system: string,
+  prompt: string,
+  maxOutputTokens: number,
+): Promise<string | undefined> {
+  if (!context.modelGateway) return undefined;
+  const runtime = getSelectedModelRuntime(context);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    let text = "";
+    for await (const event of context.modelGateway.stream(
+      runtime.provider,
+      {
+        model: runtime.model,
+        endpointProfile: runtime.endpointProfile,
+        maxOutputTokens,
+        toolChoice: "none",
+        requestContext: "agent",
+        messages: [
+          {
+            role: "system",
+            content: system,
+          },
+          { role: "user", content: prompt },
+        ],
+      },
+      controller.signal,
+    )) {
+      if (event.type === "assistant_text_delta") text += event.text;
+      if (event.type === "error") return undefined;
+    }
+    return text;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function buildSemanticMemoryClassifierPrompt(context: TuiContext, userInput: string): string {
+  const accepted = context.memory.accepted.slice(0, 20).map((item) => ({
+    id: item.id,
+    scope: item.scope,
+    taxonomy: item.taxonomy,
+    topic: item.topic,
+    summary: item.summary,
+  }));
+  const disabled = context.memory.disabled.slice(0, 20).map((item) => ({
+    id: item.id,
+    scope: item.scope,
+    taxonomy: item.taxonomy,
+    topic: item.topic,
+    summary: item.summary,
+  }));
+  return JSON.stringify({
+    task:
+      "Decide whether the latest user message should create, update, delete, or skip long-lived memory. This is semantic; do not rely on surface keywords.",
+    rules: [
+      "If the latest message asks to answer without memory, ignore memory, not use memory, or not remember the current message, return no-op even if it contains preference-like text.",
+      "Save only stable long-lived user preferences, feedback, project facts not derivable from code/git, or reference pointers.",
+      "Do not save questions about memory, requests to ignore or not use memory, temporary task state, code structure, git history, logs, secrets, API keys, tokens, or full dumps.",
+      "If the user asks to forget/remove/delete a remembered fact, return delete and reference the existing accepted id.",
+      "If the user asks to change/update an existing preference/fact, return update and reference the existing accepted id. Do not create when no existing target matches.",
+      "Prefer no-op over guessing. For update/delete, id must come from accepted.",
+    ],
+    outputSchema: {
+      action: "no-op | create | update | delete",
+      reason: "short_machine_reason",
+      id: "existing id for update/delete, omit for create/no-op",
+      taxonomy: "user | feedback | project | reference",
+      summary: "required for create/update; concise stable memory summary",
+    },
+    accepted,
+    disabled,
+    latestUserMessage: userInput,
+  });
+}
+
+async function shouldVetoMemoryWriteForCurrentTurn(
+  context: TuiContext,
+  userInput: string,
+  decision: Exclude<MemoryExtractionDecision, { action: "no-op" }>,
+): Promise<boolean | undefined> {
+  const prompt = JSON.stringify({
+    task:
+      "Decide whether this latest user message contains a current-turn memory control instruction that should veto writing long-lived memory.",
+    rules: [
+      "Return veto=true when the user asks to answer without memory, ignore memory, not use memory, or not remember/save the current message.",
+      "Return veto=false for ordinary remember/save/update/delete requests.",
+      "A forget/delete/remove request targeting an existing remembered fact is a memory action, not a veto.",
+      "Use semantic meaning across Chinese and English. Do not rely on surface keywords.",
+    ],
+    outputSchema: {
+      veto: "boolean",
+      reason: "short_machine_reason",
+    },
+    proposedDecision: {
+      action: decision.action,
+      id: decision.id,
+      taxonomy: decision.taxonomy,
+      summary: decision.summary,
+    },
+    latestUserMessage: userInput,
+  });
+  const text = await streamSemanticMemoryJson(
+    context,
+    "You are Linghun's memory-control veto classifier. Return exactly one compact JSON object and no prose.",
+    prompt,
+    200,
+  );
+  const parsed = text ? parseJsonObject(text) : undefined;
+  return typeof parsed?.veto === "boolean" ? parsed.veto : undefined;
+}
+
+function parseSemanticMemoryDecision(
+  rawText: string,
+  context: TuiContext,
+  userInput: string,
+): MemoryExtractionDecision | undefined {
+  const parsed = parseJsonObject(rawText);
+  if (!parsed) return undefined;
+  const action = readString(parsed.action);
+  if (action === "no-op") {
+    return { action: "no-op", reason: readString(parsed.reason) ?? "semantic_no_op" };
+  }
+  if (action !== "create" && action !== "update" && action !== "delete") return undefined;
+  const taxonomy = readMemoryTaxonomy(parsed.taxonomy);
+  if (!taxonomy) return undefined;
+  const inputBlocked = findUnsavableReason(userInput);
+  if (inputBlocked) {
+    return { action: "no-op", reason: "semantic_unsaveable_input", blockedBy: inputBlocked };
+  }
+  if (action === "delete") {
+    const id = readString(parsed.id);
+    const existing = context.memory.accepted.find((item) => item.id === id);
+    if (!existing) return { action: "no-op", reason: "semantic_delete_target_not_found" };
+    return {
+      action: "delete",
+      id: existing.id,
+      taxonomy: existing.taxonomy ?? taxonomy,
+      topic: existing.topic ?? topicForSummary(existing.summary, existing.taxonomy ?? taxonomy),
+      scope: existing.scope === "session" ? "project" : existing.scope,
+      summary: existing.summary,
+      source: "memory-extraction:semantic-turn",
+      sourceRefs: ["turn:recent"],
+      matchedExistingId: existing.id,
+    };
+  }
+  const summary = readString(parsed.summary)?.trim();
+  if (!summary || summary.length < 8 || summary.length > 240) return undefined;
+  const summaryBlocked = findUnsavableReason(summary);
+  if (summaryBlocked) {
+    return { action: "no-op", reason: "semantic_unsaveable_summary", blockedBy: summaryBlocked };
+  }
+  if (action === "update") {
+    const id = readString(parsed.id);
+    const existing = context.memory.accepted.find((item) => item.id === id);
+    if (!existing) return { action: "no-op", reason: "semantic_update_target_not_found" };
+    return {
+      action: "update",
+      id: existing.id,
+      taxonomy,
+      topic: topicForSummary(summary, taxonomy),
+      scope: existing.scope === "session" ? "project" : existing.scope,
+      summary,
+      source: "memory-extraction:semantic-turn",
+      sourceRefs: ["turn:recent"],
+      matchedExistingId: existing.id,
+    };
+  }
+  if (hasSemanticSummaryMatch(context.memory.disabled, taxonomy, summary)) {
+    return { action: "no-op", reason: "semantic_disabled_existing_memory" };
+  }
+  if (
+    hasSemanticSummaryMatch([...context.memory.accepted, ...context.memory.candidates], taxonomy, summary)
+  ) {
+    return { action: "no-op", reason: "semantic_duplicate_existing_memory" };
+  }
+  return {
+    action: "create",
+    id: randomUUID(),
+    taxonomy,
+    topic: topicForSummary(summary, taxonomy),
+    scope: taxonomy === "user" || taxonomy === "feedback" ? "user" : "project",
+    summary,
+    source: "memory-extraction:semantic-turn",
+    sourceRefs: ["turn:recent"],
+  };
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  const trimmed = text.trim();
+  const match = trimmed.match(/\{[\s\S]*\}/u);
+  if (!match) return undefined;
+  try {
+    const parsed = JSON.parse(match[0]) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readMemoryTaxonomy(value: unknown): MemoryCandidate["taxonomy"] | undefined {
+  return value === "user" || value === "feedback" || value === "project" || value === "reference"
+    ? value
+    : undefined;
+}
+
+function hasSemanticSummaryMatch(
+  memories: MemoryCandidate[],
+  taxonomy: MemoryTaxonomy,
+  summary: string,
+): boolean {
+  const topic = topicForSummary(summary, taxonomy);
+  const normalized = normalizeSemanticSummary(summary);
+  return memories.some((item) => {
+    if (item.taxonomy && item.taxonomy !== taxonomy) return false;
+    if (item.topic && item.topic === topic) return true;
+    return normalizeSemanticSummary(item.summary) === normalized;
+  });
+}
+
+function normalizeSemanticSummary(text: string): string {
+  return text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
 }
 
 export async function initLinghunMd(context: TuiContext, output: Writable): Promise<boolean> {

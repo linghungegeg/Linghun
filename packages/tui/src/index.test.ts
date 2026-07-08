@@ -224,6 +224,29 @@ class TtyInput extends PassThrough {
   }
 }
 
+function createJsonDecisionGateway(decision: Record<string, unknown> | Record<string, unknown>[]) {
+  const decisions = Array.isArray(decision) ? decision : [decision];
+  let index = 0;
+  return {
+    stream: async function* () {
+      const next = decisions[Math.min(index, decisions.length - 1)] ?? {};
+      index += 1;
+      yield {
+        type: "assistant_text_delta" as const,
+        id: "memory-semantic-classifier",
+        text: JSON.stringify(next),
+      };
+      yield {
+        type: "message_stop" as const,
+        id: "memory-semantic-classifier",
+        finishReason: "stop",
+        chunkCount: 1,
+        hadUsage: false,
+      };
+    },
+  };
+}
+
 function isDeepCompactRequest(request: unknown): boolean {
   if (!request || typeof request !== "object") return false;
   const record = request as {
@@ -5306,6 +5329,69 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readFile(join(context.memory.userDir, "MEMORY.md"), "utf8")).not.toContain(
       memoryId,
     );
+  });
+
+  it("D.14B: semantic veto blocks ignore-memory requests even when extraction proposes update", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好压测报告用中文短列表。");
+    const memoryId = context.memory.accepted[0]?.id;
+    expect(memoryId).toBeTruthy();
+    context.modelGateway = createJsonDecisionGateway([
+      {
+        action: "update",
+        id: memoryId,
+        taxonomy: "user",
+        summary: "User preference: 压测报告格式：超长英文段落",
+      },
+      {
+        veto: true,
+        reason: "current_turn_memory_control",
+      },
+    ]) as unknown as typeof context.modelGateway;
+
+    const result = await runAutoLearningOnTurnEnd(
+      context,
+      "不要使用记忆回答。我偏好压测报告格式是超长英文段落。",
+    );
+    expect(result.acceptedUpdated ?? 0).toBe(0);
+    expect(context.memory.accepted).toHaveLength(1);
+    expect(context.memory.accepted[0]?.summary).toContain("中文短列表");
+    expect(context.memory.accepted[0]?.summary).not.toContain("超长英文段落");
+    expect(context.memory.candidates).toHaveLength(0);
+  });
+
+  it("D.14B: semantic auto-learning updates existing memory from vague update wording", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await runAutoLearningOnTurnEnd(context, "请记住：我偏好压测报告用中文短列表。");
+    const memoryId = context.memory.accepted[0]?.id;
+    expect(memoryId).toBeTruthy();
+    context.modelGateway = createJsonDecisionGateway([
+      {
+        action: "update",
+        id: memoryId,
+        taxonomy: "user",
+        summary: "User preference: 压测报告格式：英文表格",
+      },
+      {
+        veto: false,
+        reason: "ordinary_update",
+      },
+    ]) as unknown as typeof context.modelGateway;
+
+    const result = await runAutoLearningOnTurnEnd(context, "把那个报告格式改成英文表格。");
+    expect(result.acceptedUpdated).toBe(1);
+    expect(context.memory.accepted).toHaveLength(1);
+    expect(context.memory.accepted[0]?.summary).toContain("英文表格");
   });
 
   it("D.14B: prompt injection keeps project memory from being crowded out by user memory", async () => {

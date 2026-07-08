@@ -466,7 +466,7 @@ function keywords(text: string): Set<string> {
   );
 }
 
-function topicForSummary(summary: string, taxonomy: MemoryTaxonomy): string {
+export function topicForSummary(summary: string, taxonomy: MemoryTaxonomy): string {
   const normalized = normalizeText(summary)
     .replace(/[^a-z0-9\u4e00-\u9fa5]+/giu, "-")
     .replace(/^-+|-+$/g, "")
