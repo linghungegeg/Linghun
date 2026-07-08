@@ -79,6 +79,26 @@ describe("memory extraction runtime", () => {
     }
   });
 
+  it("does not save memory lookup questions as preferences", () => {
+    const cases = [
+      "我偏好的压测报告格式是什么？不要调用工具；如果没有记忆就说没有记忆。",
+      "我有没有记住中断测试代号？如果没有这条记忆就回答没有。",
+      "What is my preference for stress-test reports?",
+    ];
+
+    for (const text of cases) {
+      const decision = decideMemoryExtraction({
+        recentMessages: [text],
+        accepted: [],
+        disabled: [],
+      });
+      expect(decision).toMatchObject({
+        action: "no-op",
+        reason: "memory_lookup_question",
+      });
+    }
+  });
+
   it("refreshes markdown manifest after disable and delete", async () => {
     const dir = await mkdtemp(join(tmpdir(), "linghun-memory-refresh-"));
     const memory = makeMemory({

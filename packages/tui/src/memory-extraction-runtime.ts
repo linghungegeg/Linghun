@@ -96,6 +96,9 @@ export function decideMemoryExtraction(input: MemoryExtractionInput): MemoryExtr
 
   const blocked = findUnsavableReason(text);
   if (blocked) return { action: "no-op", reason: "unsaveable_content", blockedBy: blocked };
+  if (isMemoryLookupQuestion(text)) {
+    return { action: "no-op", reason: "memory_lookup_question" };
+  }
 
   const taxonomy = classifyTaxonomy(text);
   if (!taxonomy) return { action: "no-op", reason: "no_long_lived_fact" };
@@ -228,6 +231,18 @@ export async function refreshAutoMemoryFiles(
 
 export function findUnsavableReason(text: string): string | undefined {
   return UNSAVEABLE_PATTERNS.find((item) => item.pattern.test(text))?.id;
+}
+
+function isMemoryLookupQuestion(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return (
+    /(?:我(?:的|有没有|是否|之前|刚才)?.{0,30}(?:偏好|习惯|喜欢|希望|记住|记忆).{0,40}(?:什么|吗|？|\?))/iu.test(
+      normalized,
+    ) ||
+    /(?:what(?:'s| is).{0,40}(?:my|user).{0,30}(?:preference|default|memory)|did you remember.{0,60}(?:my|that))/iu.test(
+      normalized,
+    )
+  );
 }
 
 function classifyTaxonomy(text: string): MemoryTaxonomy | undefined {
