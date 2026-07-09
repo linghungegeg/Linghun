@@ -278,6 +278,26 @@ describe("model-loop-runtime", () => {
       expect(runWorkflow?.description).toContain("broad Glob with zero matches is not enough");
     });
 
+    it("exposes explicit fork-team context mode on RunWorkflow without making it default", () => {
+      const runWorkflow = createModelToolDefinitions().find((d) => d.name === "RunWorkflow");
+      const schema = runWorkflow?.inputSchema as {
+        properties?: {
+          contextMode?: { enum?: string[]; description?: string };
+          context_mode?: { enum?: string[] };
+          forkTeam?: { type?: string };
+          fork_team?: { type?: string };
+          mode?: { enum?: string[] };
+        };
+      };
+
+      expect(schema.properties?.contextMode?.enum).toContain("full_fork");
+      expect(schema.properties?.contextMode?.description).toContain("explicit fork-team");
+      expect(schema.properties?.context_mode?.enum).toContain("full_fork");
+      expect(schema.properties?.forkTeam?.type).toBe("boolean");
+      expect(schema.properties?.fork_team?.type).toBe("boolean");
+      expect(schema.properties?.mode?.enum).toContain("fork_team");
+    });
+
     it("documents exact-path evidence boundaries for Read and Glob", () => {
       const defs = createModelToolDefinitions();
       const read = defs.find((d) => d.name === "Read");

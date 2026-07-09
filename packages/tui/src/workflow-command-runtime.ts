@@ -946,6 +946,7 @@ type RunWorkflowExecutionOptions = {
   multiAgent?: boolean;
   runningCap?: number;
   teamName?: string;
+  contextMode?: "handoff" | "full_fork";
   __testRunId?: string;
   confirmedPhaseStopPoints?: string[];
   ignoreForegroundModelGuard?: boolean;
@@ -1057,6 +1058,7 @@ async function runWorkflowPlanSteps(
       agents: options.agents,
       runningCap: getWorkflowRunningCap(plan, options, phase.id),
       teamName: options.teamName,
+      contextMode: options.contextMode,
     },
     createdAt: startedAt,
   });
@@ -1819,10 +1821,19 @@ async function executeWorkflowStep(
         };
       }
       const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand([req.role, req.task], context, output, {
-        workflowRunId,
-        ...(run?.engineeringSignal ? { engineeringSignal: run.engineeringSignal } : {}),
-      });
+      await handleForkCommand(
+        [
+          req.role,
+          req.task,
+          ...(options.contextMode === "full_fork" ? ["--context-mode", "full_fork"] : []),
+        ],
+        context,
+        output,
+        {
+          workflowRunId,
+          ...(run?.engineeringSignal ? { engineeringSignal: run.engineeringSignal } : {}),
+        },
+      );
       const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
       const agentTask = agent
         ? context.backgroundTasks.find((task) => task.id === agent.id)
@@ -1941,6 +1952,7 @@ async function executeWorkflowStep(
             ...(req.maxTokens ? ["--tokens", String(req.maxTokens)] : []),
             ...(req.maxDurationMs ? ["--timeout", String(req.maxDurationMs)] : []),
             ...(req.runningCap ? ["--running-cap", String(req.runningCap)] : []),
+            ...(options.contextMode === "full_fork" ? ["--context-mode", "full_fork"] : []),
             ...(req.requestedAgents && req.requestedAgents > 1
               ? ["--multi-agent", "--agents", String(req.requestedAgents)]
               : []),

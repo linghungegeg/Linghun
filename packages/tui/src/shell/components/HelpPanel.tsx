@@ -41,7 +41,7 @@ const HINT_TEXT = {
 export function HelpPanel({
   panel,
   controller: _controller,
-  width: _width,
+  width,
   noColor,
   language,
 }: {
@@ -58,6 +58,7 @@ export function HelpPanel({
 }): React.ReactNode {
   const theme = createShellTheme(noColor);
   const hint = HINT_TEXT[language] ?? HINT_TEXT["zh-CN"];
+  const innerWidth = Math.max(20, Math.min(width - 2, 76));
 
   useInput(() => undefined, { isActive: false });
 
@@ -73,7 +74,7 @@ export function HelpPanel({
   return (
     <Box flexDirection="column" paddingX={1} marginTop={1}>
       <Text color={accent} bold>
-        {fitText(hint.title, 76)}
+        {fitText(hint.title, innerWidth)}
       </Text>
 
       {/* Group tabs — current group underlined with accent, others muted */}
@@ -119,7 +120,7 @@ export function HelpPanel({
 
       {/* Nav hint */}
       <Text color={theme.dim ?? theme.muted} dimColor>
-        {fitText(hint.nav, 76)}
+        {fitText(hint.nav, innerWidth)}
       </Text>
 
       {/* Entry list — virtual window */}
@@ -133,7 +134,7 @@ export function HelpPanel({
             const realIdx = scrollOffset + vi;
             const active = realIdx === panel.cursor;
             const slashWidth = Math.min(
-              22,
+              Math.max(12, Math.min(22, Math.floor(innerWidth * 0.4))),
               Math.max(12, ...panel.entries.map((e) => [...e.slash].length)) + 2,
             );
             const slashCol = entry.slash.padEnd(slashWidth);
@@ -144,7 +145,7 @@ export function HelpPanel({
                 color={active ? accent : undefined}
                 bold={active}
               >
-                {fitText(line, 76)}
+                {fitText(line, innerWidth)}
               </Text>
             );
           })}

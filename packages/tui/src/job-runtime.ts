@@ -63,6 +63,7 @@ export type ParsedJobRunOptions = {
   allowBash: boolean;
   allowMultiAgent: boolean;
   isolation?: "worktree";
+  contextMode?: "handoff" | "full_fork";
   // P1-5 — 仅当用户显式传入 --tokens / --max-steps / --timeout 时为 true。
   // 未显式设置时 /job 没有用户可见预算，enforcement 不触发，UI 显示"budget: not set"。
   budgetExplicit: { tokens: boolean; steps: boolean; runtime: boolean };
@@ -91,6 +92,7 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
   let allowBash = false;
   let allowMultiAgent = false;
   let isolation: "worktree" | undefined;
+  let contextMode: "handoff" | "full_fork" | undefined;
   const budgetExplicit = { tokens: false, steps: false, runtime: false };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -147,6 +149,16 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
       allowMultiAgent = true;
       continue;
     }
+    if (arg === "--full-context") {
+      contextMode = "full_fork";
+      continue;
+    }
+    if (arg === "--context-mode") {
+      const value = args[index + 1];
+      if (value === "handoff" || value === "full_fork") contextMode = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--isolation") {
       if (args[index + 1] === "worktree") isolation = "worktree";
       index += 1;
@@ -175,6 +187,7 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
     allowBash,
     allowMultiAgent,
     isolation,
+    ...(contextMode ? { contextMode } : {}),
     budgetExplicit,
   };
 }

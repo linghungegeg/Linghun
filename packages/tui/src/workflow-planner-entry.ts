@@ -38,6 +38,7 @@ export type WorkflowPlannerGoal = {
   multiAgent?: boolean;
   runningCap?: number;
   teamName?: string;
+  contextMode?: "handoff" | "full_fork";
   controlledMemoryRef?: { rulesFound: boolean; summary?: string };
   selfLearningHints?: string[];
   failureLearningRefs?: Array<{ lesson: string; source: string }>;

@@ -2559,7 +2559,7 @@ function formatFooterCache(language: Language, hitRate: number | null): string {
 
 function formatFooterCacheTone(hitRate: number | null): "default" | "warning" | "dim" {
   if (hitRate === null || hitRate === undefined) return "dim";
-  return Math.max(0, Math.min(100, Math.round(hitRate * 100))) < 50 ? "warning" : "default";
+  return "default";
 }
 
 function formatCachePercent(hitRate: number): string {

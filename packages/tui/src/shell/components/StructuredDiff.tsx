@@ -3,10 +3,13 @@ import type React from "react";
 import {
   type DiffLineKind,
   type ParsedDiffLine,
+  computeWordHighlights,
   computeLineNumberWidth,
+  type DiffBodyHighlight,
   formatLineNumber,
   markerFor,
   parseDiffLines,
+  tokenizeDiffBody,
 } from "../diff-renderer.js";
 import {
   type SyntaxDiffLine,
@@ -41,6 +44,7 @@ export function StructuredDiff({
   const safeWrapWidth = Math.max(8, Math.floor(wrapWidth));
   const contentWidth = Math.max(8, safeWrapWidth - gutterWidth - 2);
   const syntaxHighlights = computeStructuredSyntaxHighlights(lines, rawLines, theme, contentWidth);
+  const wordHighlights = computeWordHighlights(lines);
   const borderChar = "┈";
   const borderLine = borderChar.repeat(safeWrapWidth);
 
@@ -106,13 +110,20 @@ export function StructuredDiff({
                   <Text color={theme.dim ?? theme.muted} dimColor>
                     {wIdx === 0 ? gutter : continuationGutter}
                   </Text>
-                  <Text
-                    color={useSyntaxHighlight ? undefined : lineColor}
-                    backgroundColor={lineBg}
-                    dimColor={useSyntaxHighlight ? dim : dim || line.kind === "context"}
-                  >
-                    {useSyntaxHighlight ? padDisplay(syntaxHighlight, contentWidth) : paddedLine}
-                  </Text>
+                  {useSyntaxHighlight ? (
+                    <Text backgroundColor={lineBg} dimColor={dim}>
+                      {padDisplay(syntaxHighlight, contentWidth)}
+                    </Text>
+                  ) : (
+                    renderStructuredDiffBody({
+                      text: paddedLine,
+                      line,
+                      highlight: wordHighlights.get(line),
+                      color: lineColor,
+                      backgroundColor: lineBg,
+                      dim: dim || line.kind === "context",
+                    })
+                  )}
                 </Box>
               );
             })}
@@ -123,6 +134,45 @@ export function StructuredDiff({
         {borderLine}
       </Text>
     </Box>
+  );
+}
+
+function renderStructuredDiffBody({
+  text,
+  line,
+  highlight,
+  color,
+  backgroundColor,
+  dim,
+}: {
+  text: string;
+  line: ParsedDiffLine;
+  highlight: DiffBodyHighlight | undefined;
+  color: string | undefined;
+  backgroundColor: string | undefined;
+  dim: boolean;
+}): React.ReactNode {
+  if (!highlight || (line.kind !== "add" && line.kind !== "remove")) {
+    return (
+      <Text color={color} backgroundColor={backgroundColor} dimColor={dim}>
+        {text}
+      </Text>
+    );
+  }
+  return (
+    <Text color={color} backgroundColor={backgroundColor} dimColor={dim}>
+      {tokenizeDiffBody(text).map((part, index) => (
+        <Text
+          key={`${index}-${part}`}
+          bold={highlight.changedParts.has(part)}
+          color={color}
+          backgroundColor={backgroundColor}
+          dimColor={dim}
+        >
+          {part}
+        </Text>
+      ))}
+    </Text>
   );
 }
 

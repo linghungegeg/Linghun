@@ -827,6 +827,7 @@ export type DurableJobState = {
   allowBash: boolean;
   allowMultiAgent: boolean;
   isolation?: "worktree";
+  contextMode?: "handoff" | "full_fork";
   status: DurableJobStatus;
   pauseReason?: string;
   agents: DurableJobAgent[];

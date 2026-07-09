@@ -286,13 +286,15 @@ describe("tool-output-presenter", () => {
       );
     });
 
-    it("长 Bash 输出主屏折叠为 5 行，但 formatted 正文不携带 Ctrl+O 提示", () => {
+    it("长 Bash 输出主屏折叠为尾部线索，但 formatted 正文不携带 Ctrl+O 提示", () => {
       const text = Array.from({ length: 8 }, (_, index) => `bash line ${index + 1}`).join("\n");
       const formatted = formatToolOutput("Bash", { text, data: { exitCode: 0 } }, "zh-CN");
 
-      expect(formatted).toContain("bash line 1");
-      expect(formatted).toContain("bash line 5");
-      expect(formatted).not.toContain("bash line 6");
+      expect(formatted).toContain("尾部：");
+      expect(formatted).not.toContain("bash line 1");
+      expect(formatted).not.toContain("bash line 5");
+      expect(formatted).toContain("bash line 6");
+      expect(formatted).toContain("bash line 8");
       expect(formatted).not.toContain("Ctrl+O");
     });
 
@@ -437,6 +439,7 @@ describe("tool-output-presenter", () => {
 
       expect(formatted).toContain("```diff");
       expect(formatted).toContain("--- src/app.ts");
+      expect(formatted).not.toContain("changed 1 file");
       expect(formatted).toContain("@@ -6,3 +6,3 @@");
       expect(formatted).toContain(" const id = 1;");
       expect(formatted).toContain("-const label = 'old';");

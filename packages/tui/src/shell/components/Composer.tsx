@@ -1909,16 +1909,25 @@ export function formatComposerRenderLines({
   const visualLines = renderedLines.map((line, index) => {
     const isTopTruncated = index === 0 && truncatedAbove > 0;
     const isBottomTruncated = index === renderedLines.length - 1 && truncatedBelow > 0;
-    return isTopTruncated || isBottomTruncated
-      ? bracketTruncatedComposerLine(line, wrapped.contentWidth)
-      : line;
+    if (isTopTruncated) return bracketTruncatedComposerLine(line, wrapped.contentWidth, truncatedAbove);
+    if (isBottomTruncated) return bracketTruncatedComposerLine(line, wrapped.contentWidth, truncatedBelow);
+    return line;
   });
   const cursorLineMarked =
     (cursorVisibleRow === 0 && truncatedAbove > 0) ||
     (cursorVisibleRow === renderedLines.length - 1 && truncatedBelow > 0);
+  const cursorHiddenCount =
+    cursorVisibleRow === 0 && truncatedAbove > 0
+      ? truncatedAbove
+      : cursorVisibleRow === renderedLines.length - 1 && truncatedBelow > 0
+        ? truncatedBelow
+        : 0;
   const rawCursorCol = Math.min(wrapped.cursorCol, Math.max(4, wrapped.contentWidth));
   const cursorCol = cursorLineMarked
-    ? Math.min(rawCursorCol + 1, displayWidthOf(visualLines[cursorVisibleRow] ?? ""))
+    ? Math.min(
+        rawCursorCol + truncatedComposerLineInset(cursorHiddenCount),
+        displayWidthOf(visualLines[cursorVisibleRow] ?? ""),
+      )
     : rawCursorCol;
 
   return {
@@ -1934,10 +1943,19 @@ export function formatComposerRenderLines({
   };
 }
 
-function bracketTruncatedComposerLine(line: string, maxWidth: number): string {
+function bracketTruncatedComposerLine(line: string, maxWidth: number, hiddenCount: number): string {
   const safeWidth = Math.max(0, Math.floor(maxWidth));
   if (safeWidth < 4) return line;
-  return `[${clipDisplayWidth(line, safeWidth - 2)}]`;
+  const label = truncatedComposerLineLabel(hiddenCount);
+  return `[${label}${clipDisplayWidth(line, safeWidth - displayWidthOf(label) - 2)}]`;
+}
+
+function truncatedComposerLineLabel(hiddenCount: number): string {
+  return `+${Math.max(1, Math.floor(hiddenCount))} `;
+}
+
+function truncatedComposerLineInset(hiddenCount: number): number {
+  return displayWidthOf(`[${truncatedComposerLineLabel(hiddenCount)}`);
 }
 
 function clipDisplayWidth(value: string, maxWidth: number): string {

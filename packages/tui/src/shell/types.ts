@@ -434,6 +434,7 @@ export type AgentProgressTreeView = {
     branch: "middle" | "last";
     name: string;
     status: string;
+    modeLabel?: string;
     activity?: string;
     elapsed?: string;
     toolUses: number;
@@ -468,6 +469,9 @@ export type WorkflowProgressView = {
     id: string;
     goal: string;
     status: string;
+    modeLabel?: string;
+    completedSteps: number;
+    totalSteps: number;
     elapsed?: string;
     currentStepId?: string;
     steps: { id: string; title: string; status: string; active: boolean }[];

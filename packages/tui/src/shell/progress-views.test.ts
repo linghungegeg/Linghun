@@ -41,6 +41,24 @@ describe("Phase R3 progress view projectors", () => {
     expect(view?.rows[0]?.elapsed).toMatch(/\d+s/);
   });
 
+  it("projects agent team and full-fork context labels", () => {
+    const ctx = createContext();
+    ctx.agents = [
+      {
+        id: "agent-1",
+        displayName: "Fork Worker",
+        teamName: "review",
+        contextMode: "full_fork",
+        status: "running",
+        mailbox: [],
+      },
+    ] as unknown as TuiContext["agents"];
+
+    const view = buildAgentProgressTreeView(ctx);
+
+    expect(view?.rows[0]?.modeLabel).toBe("team:review · full-fork");
+  });
+
   it("projects todos with owner and blocked-by fields when present", () => {
     const ctx = createContext();
     ctx.tools.todos = [
@@ -97,7 +115,28 @@ describe("Phase R3 progress view projectors", () => {
 
     expect(view?.runs[0]?.currentStepId).toBe("s2");
     expect(view?.runs[0]?.elapsed).toMatch(/\d+m\d{2}s/);
+    expect(view?.runs[0]?.completedSteps).toBe(1);
+    expect(view?.runs[0]?.totalSteps).toBe(2);
     expect(view?.runs[0]?.steps[1]).toMatchObject({ title: "Implement", active: true });
+  });
+
+  it("projects multi-agent workflow mode labels", () => {
+    const ctx = createContext();
+    ctx.workflows.activeRuns = [
+      {
+        id: "wf-1",
+        goal: "multi-agent audit",
+        status: "running",
+        multiAgent: true,
+        steps: [{ id: "s1", title: "Plan", status: "running" }],
+      },
+    ] as unknown as NonNullable<TuiContext["workflows"]["activeRuns"]>;
+
+    const view = buildWorkflowProgressView(ctx);
+
+    expect(view?.runs[0]?.modeLabel).toBe("multi-agent");
+    expect(view?.runs[0]?.completedSteps).toBe(0);
+    expect(view?.runs[0]?.totalSteps).toBe(1);
   });
 
   it("projects one current todo with overall progress and folds the rest", () => {

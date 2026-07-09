@@ -195,6 +195,19 @@ describe("parseJobRunOptions", () => {
     expect(result.allowMultiAgent).toBe(true);
   });
 
+  it("parses explicit full fork context mode for durable job agents", () => {
+    const result = parseJobRunOptions([
+      "--multi-agent",
+      "--agents",
+      "3",
+      "--context-mode",
+      "full_fork",
+      "do coordinated fork work",
+    ]);
+    expect(result.requestedAgents).toBe(3);
+    expect(result.contextMode).toBe("full_fork");
+  });
+
   it("generates plan array", () => {
     const result = parseJobRunOptions(["fix bug"]);
     expect(result.plan).toHaveLength(4);

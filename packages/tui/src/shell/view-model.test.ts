@@ -3270,7 +3270,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
 
   it("truncated multiline shows line count and correct cursor row", () => {
     const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
-    const { lines, truncatedAbove, truncatedBelow, cursorRow } = formatComposerRenderLines({
+    const { lines, visualLines, truncatedAbove, truncatedBelow, cursorCol, cursorRow } = formatComposerRenderLines({
       buffer: createEditBuffer(text),
       placeholder: "placeholder",
       masking: false,
@@ -3280,7 +3280,10 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     // 8 lines, cursor at line 7 → window covers lines 3..7 → 3 lines above truncated.
     expect(truncatedAbove + truncatedBelow).toBe(3);
     expect(lines).toHaveLength(5);
+    expect(visualLines[0]?.text).toContain("[+3 ");
+    expect(visualLines.at(-1)?.text).not.toContain("[");
     expect(cursorRow).toBe(4);
+    expect(cursorCol).toBe(5);
   });
 
   it("plain renderer Home hero fallback is reasonable in no-color", () => {
@@ -7409,7 +7412,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     expect(view.taskFooter?.modelDim).toBe(true);
   });
 
-  it("cache 命中率 < 50% 时 footer cacheTone='warning'", () => {
+  it("cache 命中率 < 50% 时 footer cacheTone 保持 default", () => {
     const ctx = createContext();
     (ctx as unknown as { cache: { history: { hitRate: number }[] } }).cache.history.push({
       hitRate: 0.4,
@@ -7418,7 +7421,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       width: 120,
       viewMode: "task",
     });
-    expect(view.taskFooter?.cacheTone).toBe("warning");
+    expect(view.taskFooter?.cacheTone).toBe("default");
   });
 
   it("task footer cache uses recent 20-turn aggregate", () => {
@@ -8849,6 +8852,8 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     expect(source).toContain("Enter · x · Esc");
     expect(source).not.toContain("Ctrl+O 展开详情");
     expect(source).toContain("Ctrl+O details");
+    expect(source).toContain('wrapText(`→ ${action}`, innerWidth)');
+    expect(source).not.toContain("Actions  ");
     expect(source).toContain('[hint, hasDetailsText ? detailsHint : ""].filter(Boolean).join');
   });
 
@@ -9376,6 +9381,8 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     const source = await readFile(join(SRC_ROOT, "shell/components/StructuredDiff.tsx"), "utf8");
 
     expect(source).toContain("parseDiffLines");
+    expect(source).toContain("computeWordHighlights");
+    expect(source).toContain("tokenizeDiffBody");
     expect(source).toContain("../diff-renderer.js");
     expect(source).not.toContain("function parseDiffLines(");
     expect(source).not.toContain("type DiffLine =");

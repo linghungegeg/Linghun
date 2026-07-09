@@ -292,7 +292,7 @@ export const SEND_MESSAGE_DESCRIPTION =
   "Send a text message to a running or idle Linghun agent mailbox by id/name. Use this to continue an agent whose context overlaps with the next step, to correct a failed attempt with concrete error details, or to assign a focused follow-up task. Team broadcast is fail-closed unless targetType=team or broadcastTeam=true is explicit, and has a small delivery limit. Ambiguous id/name/team matches return candidates instead of broadcasting.";
 
 export const RUN_WORKFLOW_DESCRIPTION =
-  "Run a real Linghun workflow for requests such as splitting work into a workflow or executing workflow steps. Supports explicit multi-agent intent (agents/multiAgent/runningCap/teamName) and records that intent in workflow/tool transcript events. Emits workflow start/step/result/failure events and returns completed/partial/blocked status with evidence refs. Workflow lifecycle completion is orchestration evidence only; do not treat it as verification PASS or final task completion unless separate tool/test/evidence records support that claim. If the user names an exact file path, verify that path directly with Read or a read-only Bash existence check before concluding it is missing; a broad Glob with zero matches is not enough.";
+  "Run a real Linghun workflow for requests such as splitting work into a workflow or executing workflow steps. Supports explicit multi-agent intent (agents/multiAgent/runningCap/teamName) and explicit fork-team context inheritance (contextMode=full_fork or forkTeam=true) while keeping daily workflow defaults on handoff. Emits workflow start/step/result/failure events and returns completed/partial/blocked status with evidence refs. Workflow lifecycle completion is orchestration evidence only; do not treat it as verification PASS or final task completion unless separate tool/test/evidence records support that claim. If the user names an exact file path, verify that path directly with Read or a read-only Bash existence check before concluding it is missing; a broad Glob with zero matches is not enough.";
 
 export const INDEX_OPERATION_DESCRIPTION =
   "Run a real Linghun index operation for requests such as inspect index status, refresh index, initialize fast index, or repair index ignore rules. Mutating operations use the existing permission pipeline.";
@@ -496,6 +496,15 @@ export function createRunWorkflowInputSchema(): unknown {
       running_cap: { type: "number" },
       teamName: { type: "string" },
       team_name: { type: "string" },
+      contextMode: {
+        type: "string",
+        enum: ["handoff", "full_fork"],
+        description: "Use full_fork only for explicit fork-team workflows that must inherit parent conversation context.",
+      },
+      context_mode: { type: "string", enum: ["handoff", "full_fork"] },
+      forkTeam: { type: "boolean" },
+      fork_team: { type: "boolean" },
+      mode: { type: "string", enum: ["workflow", "fork_team"] },
     },
   };
 }

@@ -8,6 +8,7 @@ import {
   __testBuildStartAgentToolResult,
   __testBuildWorkflowToolResultData,
   __testFormatPreEnginePrimaryText,
+  __testParseRunWorkflowToolInput,
   __testParseStartAgentToolInput,
   rememberSourcePackCandidatesFromToolData,
   rememberToolFiles,
@@ -229,6 +230,33 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
         "full_fork",
       ]);
     }
+  });
+
+  it("parses explicit RunWorkflow fork-team mode without changing daily defaults", () => {
+    const defaultParsed = __testParseRunWorkflowToolInput({ goal: "normal workflow" });
+    expect(defaultParsed).toMatchObject({
+      ok: true,
+      goal: "normal workflow",
+      multiAgent: false,
+    });
+    if (defaultParsed.ok) {
+      expect(defaultParsed.contextMode).toBeUndefined();
+    }
+
+    const forkParsed = __testParseRunWorkflowToolInput({
+      goal: "parallel implementation",
+      forkTeam: true,
+      agents: 4,
+      running_cap: 2,
+    });
+    expect(forkParsed).toMatchObject({
+      ok: true,
+      goal: "parallel implementation",
+      agents: 4,
+      runningCap: 2,
+      multiAgent: true,
+      contextMode: "full_fork",
+    });
   });
 
   it("marks running StartAgent results as started-only instead of completion", () => {

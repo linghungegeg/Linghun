@@ -1722,6 +1722,7 @@ function buildWorkflowToolResultData(
   multiAgent?: boolean;
   runningCap?: number;
   teamName?: string;
+  contextMode?: "handoff" | "full_fork";
   lifecycleStatus: "not_started" | "running" | "terminal";
   terminal: boolean;
   completionClaimAllowed: false;
@@ -1738,6 +1739,7 @@ function buildWorkflowToolResultData(
     multiAgent: run?.multiAgent ?? input.multiAgent,
     runningCap: input.runningCap,
     teamName: input.teamName,
+    contextMode: input.contextMode,
     lifecycleStatus,
     terminal,
     completionClaimAllowed: false,
@@ -2028,6 +2030,7 @@ function parseRunWorkflowToolInput(input: unknown):
       multiAgent: boolean;
       runningCap?: number;
       teamName?: string;
+      contextMode?: "handoff" | "full_fork";
     }
   | { ok: false; text: string } {
   const obj =
@@ -2049,6 +2052,17 @@ function parseRunWorkflowToolInput(input: unknown):
       : typeof obj.team_name === "string" && obj.team_name.trim()
         ? obj.team_name.trim()
         : undefined;
+  const rawContextMode =
+    obj.contextMode === "full_fork" || obj.contextMode === "handoff"
+      ? obj.contextMode
+      : obj.context_mode === "full_fork" || obj.context_mode === "handoff"
+        ? obj.context_mode
+        : undefined;
+  const forkTeam =
+    obj.forkTeam === true ||
+    obj.fork_team === true ||
+    obj.mode === "fork_team";
+  const contextMode = rawContextMode ?? (forkTeam ? "full_fork" : undefined);
   if (!goal && !workflowId) {
     return { ok: false, text: "RunWorkflow requires goal or workflowId." };
   }
@@ -2062,9 +2076,13 @@ function parseRunWorkflowToolInput(input: unknown):
     runInBackground: obj.runInBackground === true || obj.run_in_background === true,
     ...(agents ? { agents } : {}),
     multiAgent:
-      obj.multiAgent === true || obj.multi_agent === true || Boolean(agents && agents > 1),
+      obj.multiAgent === true ||
+      obj.multi_agent === true ||
+      forkTeam ||
+      Boolean(agents && agents > 1),
     ...(runningCap ? { runningCap } : {}),
     ...(teamName ? { teamName } : {}),
+    ...(contextMode ? { contextMode } : {}),
   };
 }
 

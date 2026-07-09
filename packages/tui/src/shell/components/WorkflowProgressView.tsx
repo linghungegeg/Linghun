@@ -28,9 +28,10 @@ export function WorkflowProgressView({
       </Text>
       {workflow.runs.map((run) => {
         const isCompleted = run.status === "completed" || run.status === "cancelled";
+        const progress = `${run.completedSteps}/${run.totalSteps}`;
         // Completed/cancelled workflows collapse to a single summary line
         if (isCompleted) {
-          const completedText = `✓ ${run.goal} completed${run.elapsed ? ` · ${run.elapsed}` : ""}`;
+          const completedText = `✓ ${run.goal}${run.modeLabel ? ` · ${run.modeLabel}` : ""} · ${progress} completed${run.elapsed ? ` · ${run.elapsed}` : ""}`;
           return (
             <Text key={run.id} color={theme.muted} dimColor>
               {fitText(completedText, innerWidth)}
@@ -41,7 +42,7 @@ export function WorkflowProgressView({
           <Box key={run.id} flexDirection="column">
             <Text color={theme.dim ?? theme.muted} dimColor>
               {fitText(
-                `${run.goal} · ${run.status}${run.elapsed ? ` · ${workLabel} ${run.elapsed}` : ""}`,
+                `${run.goal}${run.modeLabel ? ` · ${run.modeLabel}` : ""} · ${run.status} · ${progress}${run.elapsed ? ` · ${workLabel} ${run.elapsed}` : ""}`,
                 innerWidth,
               )}
             </Text>

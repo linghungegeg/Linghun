@@ -50,7 +50,7 @@ export function AgentProgressTree({
 
         // Completed agents: collapse to single-line summary
         if (completed && !expanded) {
-          const completedText = `✓ ${row.name} · ${row.toolUses} tools${row.elapsed ? ` · ${row.elapsed}` : ""}`;
+          const completedText = `✓ ${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""} · ${row.toolUses} tools${row.elapsed ? ` · ${row.elapsed}` : ""}`;
           return (
             <Box key={row.id}>
               <Text color={theme.muted} dimColor>
@@ -60,16 +60,9 @@ export function AgentProgressTree({
           );
         }
 
-        // CCB: highlighted → ╞═/╘═, normal → ├─/└─
         const isLast = index === tree.rows.length - 1;
-        const treeChar = selected
-          ? isLast
-            ? "╘═"
-            : "╞═"
-          : isLast
-            ? "└─"
-            : "├─";
-        const rowText = `${row.name}${row.activity ? `: ${row.activity}` : ""}${
+        const treeChar = isLast ? "└─" : "├─";
+        const rowText = `${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""}${row.activity ? `: ${row.activity}` : ""}${
           row.elapsed ? ` · ${workLabel} ${row.elapsed}` : ""
         }`;
 
@@ -87,7 +80,7 @@ export function AgentProgressTree({
               <Text color={theme.dim ?? theme.muted} dimColor={!selected}>
                 {treeChar}{" "}
               </Text>
-              <Text color={theme.dim ?? theme.muted} dimColor={!selected || completed}>
+              <Text color={selected ? theme.accent : (theme.dim ?? theme.muted)} bold={selected} dimColor={!selected || completed}>
                 {fitText(rowText, innerWidth - 2)}
               </Text>
             </Box>

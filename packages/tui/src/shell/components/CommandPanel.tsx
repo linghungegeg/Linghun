@@ -38,7 +38,6 @@ const DETAILS_HINT_TEXT = {
 } as const;
 
 const MAX_SELECTABLE_ROWS = 8;
-const MIN_PANEL_WIDTH = 56;
 const MAX_PANEL_WIDTH = 108;
 
 export function CommandPanel({
@@ -73,10 +72,8 @@ export function CommandPanel({
     ? (selectedDetailsText ?? panel.detailsText)
     : undefined;
 
-  const cardWidth = Math.max(
-    Math.min(width - 2, MIN_PANEL_WIDTH),
-    Math.min(width - 2, MAX_PANEL_WIDTH),
-  );
+  const availableWidth = Math.max(20, width - 2);
+  const cardWidth = Math.min(availableWidth, MAX_PANEL_WIDTH);
   const innerWidth = Math.max(20, cardWidth - 4);
   const tone = panel.tone ?? "neutral";
   const borderColor =
@@ -181,7 +178,7 @@ export function CommandPanel({
         <Box flexDirection="column" marginTop={1}>
           {panel.actions.map((action, idx) => (
             <Box key={`action-${idx}-${action}`} flexDirection="column">
-              {wrapText(`${idx === 0 ? "Actions  " : "         "}${action}`, innerWidth).map(
+              {wrapText(`→ ${action}`, innerWidth).map(
                 (part, lineIdx) => (
                   <Text
                     key={`action-${idx}-${lineIdx}-${part}`}

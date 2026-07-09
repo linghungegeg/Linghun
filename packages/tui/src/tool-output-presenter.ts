@@ -37,7 +37,7 @@ export type StructuredToolOutput = {
 };
 
 const TODO_OUTPUT_ITEM_LIMIT = 8;
-const BASH_TAIL_LINE_LIMIT = 0;
+const BASH_TAIL_LINE_LIMIT = 3;
 const PRIMARY_PREVIEW_LINE_CAP = 5;
 const DIAGNOSTICS_SUMMARY_LIMIT = 3;
 const DIAGNOSTICS_EVIDENCE_LIMIT = 120;
@@ -900,12 +900,13 @@ function createSummaryFirstPreview(
     const removedLines = readNumber(metadata, "removedLines") ?? 0;
     const changedFiles = readStringList(metadata, "changedFiles");
     const readGuard = readStringValue(metadata, "readGuard");
+    const diffFence = createCompactDiffFence(output);
     stats.push(
       language === "en-US"
         ? `patch +${addedLines} -${removedLines}`
         : `补丁 +${addedLines} -${removedLines}`,
     );
-    if (changedFiles.length > 0) {
+    if (!diffFence && changedFiles.length > 0) {
       stats.push(
         language === "en-US"
           ? `changed ${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"}`
@@ -931,17 +932,13 @@ function createSummaryFirstPreview(
     };
   }
   if (name === "Bash" && !looksLikeMojibake(text)) {
-    const tail = formatBashTail(lines, language);
-    if (tail.length > 0) {
-      return { text: [`- ${stats.join("; ")}`, ...tail].join("\n"), truncated: false };
-    }
     // Cap inline Bash output to PRIMARY_PREVIEW_LINE_CAP lines; excess folds into details.
     if (text.trim().length > 0) {
       const nonEmpty = lines.filter((l) => l.trim().length > 0);
       if (nonEmpty.length > PRIMARY_PREVIEW_LINE_CAP) {
-        const capped = nonEmpty.slice(0, PRIMARY_PREVIEW_LINE_CAP).join("\n");
+        const tail = formatBashTail(lines, language);
         return {
-          text: [`- ${stats.join("; ")}`, capped].join("\n"),
+          text: [`- ${stats.join("; ")}`, ...tail].filter(Boolean).join("\n"),
           truncated: true,
         };
       }
@@ -980,7 +977,6 @@ function formatToolLineStat(
 }
 
 function formatBashTail(lines: string[], language: Language): string[] {
-  if (BASH_TAIL_LINE_LIMIT === 0) return [];
   const tail = lines
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0)

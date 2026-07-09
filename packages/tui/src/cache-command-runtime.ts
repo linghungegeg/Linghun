@@ -43,21 +43,12 @@ export function buildCacheStatusPanel(
     summary.push(isEn ? `Cache hit rate: ${pct}` : `缓存命中率：${pct}`);
   }
   const isLow = typeof hitRate === "number" && Number.isFinite(hitRate) && hitRate < 0.3;
-  const tone: "neutral" | "warning" = isLow ? "warning" : "neutral";
+  const tone: "neutral" = "neutral";
   if (isLow) {
     summary.push(
       isEn
-        ? "Hit rate is low — try /cache warmup or check provider usage."
-        : "命中率偏低 — 可运行 /cache warmup 或核对 provider usage。",
-    );
-  }
-  const promptSections = context.cache.lastPromptSections;
-  if (promptSections) {
-    const dynamicPct = Math.round((promptSections.dynamicChars / Math.max(promptSections.totalChars, 1)) * 100);
-    summary.push(
-      isEn
-        ? `Prompt dynamic share: ${dynamicPct}% · largest ${promptSections.largestSection ?? "none"}`
-        : `Prompt 动态占比：${dynamicPct}% · 最大段 ${promptSections.largestSection ?? "无"}`,
+        ? "Hit rate is still warming. Details can confirm whether this is a real break."
+        : "命中率仍在预热中。详情里可确认是否是真实断点。",
     );
   }
   return {
@@ -73,13 +64,40 @@ export function formatCacheLog(context: TuiContext): string {
   if (context.cache.history.length === 0) {
     return "最近缓存日志为空。真实 usage 需要 provider 返回 token/cache 字段；可用 /cache warmup 尝试预热。";
   }
+  const isEn = context.language === "en-US";
+  const rows = context.cache.history.map((item) =>
+    [
+      `#${item.turn}`,
+      formatTablePercent(item.hitRate),
+      `${formatCompactTokenCount(item.inputTokens)}/${formatCompactTokenCount(item.outputTokens)}`,
+      `${formatCompactTokenCount(item.cacheReadTokens)}/${formatCompactTokenCount(item.cacheWriteTokens)}`,
+      formatCacheWriteSource(item.cacheWriteTokensSource),
+      `${item.model} · ${item.provider}`,
+    ].join(" | "),
+  );
   return [
-    `Cache log 最近 ${context.cache.history.length}/${context.cache.config.maxTurns} 轮：`,
-    ...context.cache.history.map(
-      (item) =>
-        `#${item.turn} 命中率 ${formatPercent(item.hitRate)} 输入 ${item.inputTokens} 输出 ${item.outputTokens} 缓存读取 ${item.cacheReadTokens} 缓存写入 ${item.cacheWriteTokens} 来源 ${formatCacheWriteSource(item.cacheWriteTokensSource)} 模型 ${item.model} provider ${item.provider}`,
-    ),
+    isEn
+      ? `Cache log · recent ${context.cache.history.length}/${context.cache.config.maxTurns} turns`
+      : `Cache log · 最近 ${context.cache.history.length}/${context.cache.config.maxTurns} 轮`,
+    isEn
+      ? "| Turn | Hit | In/Out | Read/Write | Source | Model |"
+      : "| 轮次 | 命中 | 输入/输出 | 读/写 | 来源 | 模型 |",
+    "| --- | ---: | ---: | ---: | --- | --- |",
+    ...rows.map((row) => `| ${row} |`),
   ].join("\n");
+}
+
+function formatCompactTokenCount(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `${Math.round(value / 100_000) / 10}m`;
+  if (abs >= 1_000) return `${Math.round(value / 100) / 10}k`;
+  return `${Math.round(value)}`;
+}
+
+function formatTablePercent(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+  return `${Math.round(value * 100)}%`;
 }
 
 function formatCacheWriteSource(source: string): string {

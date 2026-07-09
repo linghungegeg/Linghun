@@ -1,7 +1,13 @@
 import type { CacheFreshness } from "@linghun/core";
 import { defaultConfig } from "@linghun/config";
 import { describe, expect, it } from "vitest";
-import { formatCacheStatus, formatCompactStatus, collectLightHints } from "./cache-command-runtime.js";
+import {
+  buildCacheStatusPanel,
+  collectLightHints,
+  formatCacheLog,
+  formatCacheStatus,
+  formatCompactStatus,
+} from "./cache-command-runtime.js";
 import type { CacheRequestObservation } from "./cache-policy-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 
@@ -190,6 +196,27 @@ function makeContext(): TuiContext {
 }
 
 describe("cache-command-runtime", () => {
+  it("formats /cache log as a compact markdown table", () => {
+    const text = formatCacheLog(makeContext());
+
+    expect(text).toContain("Cache log · 最近 1/8 轮");
+    expect(text).toContain("| 轮次 | 命中 | 输入/输出 | 读/写 | 来源 | 模型 |");
+    expect(text).toContain("| #1 | 40% | 25/12 | 70/5 | provider reported | gpt-5.5 · openai-compatible |");
+    expect(text).not.toContain("命中率 40% 输入 25 输出 12");
+  });
+
+  it("keeps cache status primary panel calm and leaves prompt-section internals in details", () => {
+    const context = makeContext();
+    context.cache.history[0].hitRate = 0.2;
+    const panel = buildCacheStatusPanel(context, freshness);
+
+    expect(panel.tone).toBe("neutral");
+    const summary = panel.summary ?? [];
+    expect(summary.join("\n")).toContain("命中率仍在预热中");
+    expect(summary.join("\n")).not.toContain("Prompt 动态占比");
+    expect(panel.detailsText).toContain("prompt sections: stable 1000 chars; dynamic 500 chars");
+  });
+
   it("shows unified cache telemetry and drift reasons in /cache status details", () => {
     const text = formatCacheStatus(makeContext(), freshness);
 

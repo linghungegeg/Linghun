@@ -86,6 +86,7 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
       status: agent.lastTerminalStatus === "completed" && agent.status === "idle"
         ? "completed"
         : agent.status,
+      modeLabel: formatAgentModeLabel(agent),
       activity: agent.activitySummary ?? agent.activeTask?.summary ?? agent.lastResultSummary,
       elapsed: typeof agent.startedAt === "string" ? formatElapsedSince(agent.startedAt, now) : undefined,
       toolUses: agent.mailbox.length,
@@ -176,6 +177,9 @@ export function buildWorkflowProgressView(context: TuiContext): WorkflowProgress
         id: run.id,
         goal: run.goal,
         status: run.status,
+        modeLabel: run.multiAgent ? "multi-agent" : undefined,
+        completedSteps: run.steps.filter((step) => step.status === "completed").length,
+        totalSteps: run.steps.length,
         elapsed: typeof run.startedAt === "string" ? formatElapsedSince(run.startedAt, now) : undefined,
         currentStepId: current?.id,
         steps: steps.visible.map((step) => ({
@@ -189,6 +193,13 @@ export function buildWorkflowProgressView(context: TuiContext): WorkflowProgress
     }),
     hiddenPending: sliced.hiddenPending,
   };
+}
+
+function formatAgentModeLabel(agent: AgentRun): string | undefined {
+  const labels: string[] = [];
+  if (agent.teamName) labels.push(`team:${agent.teamName}`);
+  if (agent.contextMode === "full_fork") labels.push("full-fork");
+  return labels.length > 0 ? labels.join(" · ") : undefined;
 }
 
 export function buildBackgroundTaskOverlayView(

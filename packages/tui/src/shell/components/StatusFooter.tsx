@@ -125,7 +125,7 @@ export function StatusFooter({
           {rightSegments.map((seg, idx) => (
             <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
               {idx > 0 ? <Text dimColor> · </Text> : null}
-              {fitText(seg.text, Math.max(6, Math.floor((width - 4) / rightSegments.length) - 3))}
+              {fitText(seg.text, getNarrowSegmentWidth(seg, width, rightSegments.length))}
             </Text>
           ))}
         </Text>
@@ -207,4 +207,16 @@ function pickColor(
   if (tone === "warning") return theme.warning ?? theme.status.fail;
   if (tone === "dim") return theme.dim ?? theme.muted;
   return theme.brand;
+}
+
+function getNarrowSegmentWidth(
+  segment: StatusFooterSegment,
+  width: number,
+  segmentCount: number,
+): number {
+  const shared = Math.max(6, Math.floor((width - 4) / Math.max(1, segmentCount)) - 3);
+  if (segment.key === "model") return Math.max(shared, Math.min(24, Math.floor(width * 0.36)));
+  if (segment.key === "context") return Math.max(shared, Math.min(18, Math.floor(width * 0.28)));
+  if (segment.key === "cache") return Math.max(shared, 10);
+  return shared;
 }

@@ -243,7 +243,7 @@ export function markerFor(kind: DiffLineKind): string {
   return " ";
 }
 
-type DiffBodyHighlight = {
+export type DiffBodyHighlight = {
   changedParts: Set<string>;
 };
 
@@ -302,7 +302,7 @@ function syntaxThemeKey(theme: ShellTheme | undefined): string {
   return [theme?.mode ?? "default", theme?.inlineCode ?? "", theme?.accent ?? ""].join(":");
 }
 
-function computeWordHighlights(lines: ParsedDiffLine[]): Map<ParsedDiffLine, DiffBodyHighlight> {
+export function computeWordHighlights(lines: ParsedDiffLine[]): Map<ParsedDiffLine, DiffBodyHighlight> {
   const changed = lines.filter((line) => line.kind === "add" || line.kind === "remove");
   const changedChars = changed.reduce((total, line) => total + line.text.length, 0);
   if (
@@ -329,7 +329,7 @@ function computeWordHighlights(lines: ParsedDiffLine[]): Map<ParsedDiffLine, Dif
   return highlights;
 }
 
-function tokenizeDiffBody(value: string): string[] {
+export function tokenizeDiffBody(value: string): string[] {
   return value.match(/\w+|\s+|[^\w\s]+/gu) ?? [value];
 }
 
