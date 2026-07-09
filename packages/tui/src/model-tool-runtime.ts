@@ -1811,6 +1811,7 @@ function parseStartAgentToolInput(
       runInBackground: boolean;
       cwd?: string;
       isolation?: "worktree";
+      contextMode?: "handoff" | "full_fork";
       registryAgentId?: string;
     }
   | { ok: false; text: string } {
@@ -1841,6 +1842,12 @@ function parseStartAgentToolInput(
   }
   const isolation = obj.isolation === "worktree" ? "worktree" : undefined;
   const cwd = typeof obj.cwd === "string" && obj.cwd.trim() ? obj.cwd.trim() : undefined;
+  const rawContextMode =
+    obj.contextMode === "full_fork" || obj.contextMode === "handoff"
+      ? obj.contextMode
+      : obj.context_mode === "full_fork" || obj.context_mode === "handoff"
+        ? obj.context_mode
+        : undefined;
   return {
     ok: true,
     role,
@@ -1854,6 +1861,7 @@ function parseStartAgentToolInput(
     runInBackground: obj.runInBackground === true || obj.run_in_background === true,
     ...(cwd && !isolation ? { cwd } : {}),
     ...(isolation ? { isolation } : {}),
+    ...(rawContextMode ? { contextMode: rawContextMode } : {}),
     ...(registryAgent ? { registryAgentId: registryAgent.id } : {}),
   };
 }
@@ -1869,6 +1877,13 @@ export function __testFormatStartAgentDidNotStartMessage(
   context: TuiContext,
 ): string {
   return formatStartAgentDidNotStartMessage(input, context);
+}
+
+export function __testParseStartAgentToolInput(
+  input: unknown,
+  context: TuiContext,
+): ReturnType<typeof parseStartAgentToolInput> {
+  return parseStartAgentToolInput(input, context);
 }
 
 function formatStartAgentDidNotStartMessage(
@@ -1903,6 +1918,7 @@ function buildForkArgsFromStartAgentInput(
   if (input.teamName) args.push("--team", input.teamName);
   if (input.cwd && !input.isolation) args.push("--cwd", input.cwd);
   if (input.isolation) args.push("--isolation", input.isolation);
+  if (input.contextMode === "full_fork") args.push("--context-mode", "full_fork");
   return args;
 }
 

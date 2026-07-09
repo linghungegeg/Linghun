@@ -205,6 +205,7 @@ export const AGENT_TEAM_BROADCAST_MAX = 5;
 const AGENT_PERMISSION_BRIDGE_TOOLS = new Set<ToolName>(["Bash", "Edit", "Write", "MultiEdit"]);
 const AGENT_IDLE_STATUSES = new Set<AgentRun["status"]>(["idle", "completed"]);
 const AGENT_ASSIGNABLE_STATUSES = new Set<AgentRun["status"]>(["running", "idle", "completed"]);
+const FULL_CONTEXT_FORK_MARKER = "<linghun-full-context-fork>";
 
 function getAgentRunsDir(context: TuiContext): string {
   return resolveStoragePaths(context.config, context.projectPath).agentRuns;
@@ -2433,6 +2434,7 @@ export async function handleForkCommand(
     parentSessionId,
     forkedFrom: packet.id,
     task: effectiveTask,
+    ...(options.contextMode ? { contextMode: options.contextMode } : {}),
     engineeringSignal,
     model: effectiveModel,
     ...(registryAgent ? { registryAgentId: registryAgent.id } : {}),
@@ -3038,12 +3040,7 @@ export async function runModelBackedAgent(
         },
         resolveCachePolicy("agent-child"),
       );
-      providerRequest = applyLastCacheSafePrefix({
-        state: context.cache,
-        request: providerRequest,
-        inheritSystemPrefix: true,
-        inheritTools: true,
-      }).request;
+      providerRequest = applyAgentCacheSafePrefix(context, agent, providerRequest);
       providerRequest = applyCacheWritePolicyToRequest(
         providerRequest,
         resolveCachePolicy("agent-child"),
@@ -3697,6 +3694,56 @@ function createReadonlyAuditToolHint(agent: AgentRun): string {
 
 function buildAgentUserMessage(agent: AgentRun): string {
   return agent.task;
+}
+
+function applyAgentCacheSafePrefix(
+  context: TuiContext,
+  agent: AgentRun,
+  request: ModelRequest,
+): ModelRequest {
+  if (agent.contextMode === "full_fork" && !parentPrefixHasFullContextForkMarker(context)) {
+    const fullFork = applyLastCacheSafePrefix({
+      state: context.cache,
+      request: {
+        ...request,
+        messages: [
+          {
+            role: "user",
+            content: buildFullContextForkUserMessage(agent, context),
+          },
+        ],
+      },
+      inheritMessages: true,
+    });
+    if (fullFork.status === "applied") return fullFork.request;
+  }
+  return applyLastCacheSafePrefix({
+    state: context.cache,
+    request,
+    inheritSystemPrefix: true,
+    inheritTools: true,
+  }).request;
+}
+
+function parentPrefixHasFullContextForkMarker(context: TuiContext): boolean {
+  return Boolean(
+    context.cache.lastCacheSafePrefix?.messages.some(
+      (message) =>
+        typeof message.content === "string" &&
+        message.content.includes(FULL_CONTEXT_FORK_MARKER),
+    ),
+  );
+}
+
+function buildFullContextForkUserMessage(agent: AgentRun, context: TuiContext): string {
+  return [
+    FULL_CONTEXT_FORK_MARKER,
+    `You are a Linghun ${agent.type} child agent inheriting the parent conversation as read-only context.`,
+    "Use the inherited conversation only to understand the task state; do not replay or summarize it unless needed.",
+    createAgentLoopSystemPrompt(agent, context),
+    "Child task:",
+    agent.task,
+  ].join("\n");
 }
 
 async function consumeAgentMailbox(
@@ -4608,6 +4655,7 @@ type ForkCommandOptions = {
   runInBackground: boolean;
   cwd?: string;
   isolation?: "worktree";
+  contextMode?: "handoff" | "full_fork";
 };
 
 function parseForkCommandArgs(args: string[]): ForkCommandOptions {
@@ -4621,12 +4669,17 @@ function parseForkCommandArgs(args: string[]): ForkCommandOptions {
       options.runInBackground = true;
       continue;
     }
+    if (arg === "--full-context") {
+      options.contextMode = "full_fork";
+      continue;
+    }
     if (
       (arg === "--name" ||
         arg === "--team" ||
         arg === "--team-name" ||
         arg === "--cwd" ||
-        arg === "--isolation") &&
+        arg === "--isolation" ||
+        arg === "--context-mode") &&
       args[index + 1]
     ) {
       const value = args[index + 1];
@@ -4635,6 +4688,7 @@ function parseForkCommandArgs(args: string[]): ForkCommandOptions {
       if (arg === "--team" || arg === "--team-name") options.teamName = value;
       if (arg === "--cwd") options.cwd = value;
       if (arg === "--isolation" && value === "worktree") options.isolation = "worktree";
+      if (arg === "--context-mode" && value === "full_fork") options.contextMode = "full_fork";
       continue;
     }
     taskParts.push(arg);

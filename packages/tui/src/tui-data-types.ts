@@ -665,6 +665,7 @@ export type AgentRun = {
   parentSessionId?: string;
   forkedFrom?: string;
   task: string;
+  contextMode?: "handoff" | "full_fork";
   engineeringSignal?: EngineeringSignalSnapshot;
   model: string;
   registryAgentId?: string;

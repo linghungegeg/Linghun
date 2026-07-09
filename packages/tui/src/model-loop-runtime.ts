@@ -427,6 +427,15 @@ export function createStartAgentInputSchema(): unknown {
         enum: ["worktree"],
         description: "Create a managed worktree for the agent; omit cwd with this option.",
       },
+      contextMode: {
+        type: "string",
+        enum: ["handoff", "full_fork"],
+        description: "Use full_fork only when the child must inherit the current parent conversation context.",
+      },
+      context_mode: {
+        type: "string",
+        enum: ["handoff", "full_fork"],
+      },
     },
     required: ["task"],
   };

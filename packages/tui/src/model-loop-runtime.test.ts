@@ -245,6 +245,8 @@ describe("model-loop-runtime", () => {
           subagent_type?: { description?: string };
           cwd?: { description?: string };
           isolation?: { description?: string };
+          contextMode?: { enum?: string[]; description?: string };
+          context_mode?: { enum?: string[] };
         };
       };
 
@@ -256,6 +258,9 @@ describe("model-loop-runtime", () => {
       expect(schema.properties?.subagent_type?.description).toContain("Custom agent");
       expect(schema.properties?.cwd?.description).toContain("Do not send");
       expect(schema.properties?.isolation?.description).toContain("omit cwd");
+      expect(schema.properties?.contextMode?.enum).toContain("full_fork");
+      expect(schema.properties?.contextMode?.description).toContain("inherit");
+      expect(schema.properties?.context_mode?.enum).toContain("full_fork");
     });
 
     it("documents agent/workflow orchestration state boundaries in model tool descriptions", () => {

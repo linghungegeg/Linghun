@@ -8,6 +8,7 @@ import {
   __testBuildStartAgentToolResult,
   __testBuildWorkflowToolResultData,
   __testFormatPreEnginePrimaryText,
+  __testParseStartAgentToolInput,
   rememberSourcePackCandidatesFromToolData,
   rememberToolFiles,
 } from "./model-tool-runtime.js";
@@ -206,6 +207,28 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
       "worktree",
     ]);
     expect(args).not.toContain("--cwd");
+  });
+
+  it("passes explicit full context fork mode from StartAgent to slash fork", () => {
+    const parsed = __testParseStartAgentToolInput(
+      { role: "planner", task: "inspect inherited state", context_mode: "full_fork" },
+      { agentRegistry: { agents: [] } } as unknown as TuiContext,
+    );
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      role: "planner",
+      task: "inspect inherited state",
+      contextMode: "full_fork",
+    });
+    if (parsed.ok) {
+      expect(__testBuildForkArgsFromStartAgentInput(parsed, {} as TuiContext)).toEqual([
+        "planner",
+        "inspect inherited state",
+        "--context-mode",
+        "full_fork",
+      ]);
+    }
   });
 
   it("marks running StartAgent results as started-only instead of completion", () => {

@@ -4,12 +4,13 @@ import { join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { defaultConfig } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
-import type { ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
-import { createToolContext } from "@linghun/tools";
+import type { ModelGateway, ModelMessage, ModelRequest, ModelToolCall } from "@linghun/providers";
+import { builtInTools, createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
+import { rememberCacheSafePrefix } from "./cache-policy-runtime.js";
 import {
   configureJobAgentCommandRuntime,
   runModelBackedAgent,
@@ -25,6 +26,7 @@ import {
   SEND_MESSAGE_TOOL_NAME,
   START_AGENT_TOOL_NAME,
   WRITE_REPORT_TOOL_NAME,
+  createModelToolDefinitionsForTools,
   createSolutionCompletenessStatus,
 } from "./model-loop-runtime.js";
 import { __testSendMessage } from "./model-stream-runtime.js";
@@ -416,6 +418,97 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(recovered.summary).toContain("recovered with final answer");
   });
 
+  it("runModelBackedAgent keeps default handoff separate from explicit full-context fork", async () => {
+    const parentMessages: ModelMessage[] = [
+      { role: "system", content: "PARENT_SYSTEM_SENTINEL stable runtime" },
+      { role: "user", content: "PARENT_USER_SENTINEL original task" },
+      { role: "assistant", content: "PARENT_ASSISTANT_SENTINEL progress" },
+    ];
+    const parentTools = createModelToolDefinitionsForTools([builtInTools.Read, builtInTools.Todo]);
+
+    const defaultRequests: ModelRequest[] = [];
+    const defaultContext = await createTestContext(undefined, (request) => {
+      defaultRequests.push(request);
+    });
+    rememberCacheSafePrefix(defaultContext.cache, {
+      messages: parentMessages,
+      model: "deepseek-chat",
+      endpointProfile: "chat_completions",
+      tools: parentTools,
+      toolChoice: "auto",
+    });
+    await runModelBackedAgent(createAgentRun(defaultContext), defaultContext, new MemoryOutput());
+
+    expect(defaultRequests[0]?.messages.map((message) => message.content)).toEqual([
+      "PARENT_SYSTEM_SENTINEL stable runtime",
+      expect.stringContaining("Linghun planner child agent"),
+      "inspect",
+    ]);
+    expect(defaultRequests[0]?.messages.map((message) => message.content)).not.toContain(
+      "PARENT_USER_SENTINEL original task",
+    );
+
+    const fullForkRequests: ModelRequest[] = [];
+    const fullForkContext = await createTestContext(undefined, (request) => {
+      fullForkRequests.push(request);
+    });
+    rememberCacheSafePrefix(fullForkContext.cache, {
+      messages: parentMessages,
+      model: "deepseek-chat",
+      endpointProfile: "chat_completions",
+      tools: parentTools,
+      toolChoice: "auto",
+    });
+    await runModelBackedAgent(
+      createAgentRun(fullForkContext, {
+        contextMode: "full_fork",
+        task: "CHILD_TASK_SENTINEL inspect current implementation",
+      }),
+      fullForkContext,
+      new MemoryOutput(),
+    );
+
+    const fullForkContents = fullForkRequests[0]?.messages.map((message) => message.content) ?? [];
+    expect(fullForkContents).toEqual([
+      "PARENT_SYSTEM_SENTINEL stable runtime",
+      "PARENT_USER_SENTINEL original task",
+      "PARENT_ASSISTANT_SENTINEL progress",
+      expect.stringContaining("CHILD_TASK_SENTINEL inspect current implementation"),
+    ]);
+    expect(fullForkContents.at(-1)).toContain("<linghun-full-context-fork>");
+  });
+
+  it("runModelBackedAgent does not recursively inherit a full-context fork prefix", async () => {
+    const requests: ModelRequest[] = [];
+    const context = await createTestContext(undefined, (request) => {
+      requests.push(request);
+    });
+    rememberCacheSafePrefix(context.cache, {
+      messages: [
+        { role: "system", content: "PARENT_SYSTEM_SENTINEL stable runtime" },
+        { role: "user", content: "<linghun-full-context-fork>\nPARENT_USER_FROM_PRIOR_FORK" },
+      ],
+      model: "deepseek-chat",
+      endpointProfile: "chat_completions",
+      tools: createModelToolDefinitionsForTools([builtInTools.Read, builtInTools.Todo]),
+      toolChoice: "auto",
+    });
+
+    await runModelBackedAgent(
+      createAgentRun(context, { contextMode: "full_fork" }),
+      context,
+      new MemoryOutput(),
+    );
+
+    const contents = requests[0]?.messages.map((message) => message.content) ?? [];
+    expect(contents).toEqual([
+      "PARENT_SYSTEM_SENTINEL stable runtime",
+      expect.stringContaining("Linghun planner child agent"),
+      "inspect",
+    ]);
+    expect(contents).not.toContain("<linghun-full-context-fork>\nPARENT_USER_FROM_PRIOR_FORK");
+  });
+
   it("covers slash command runtime routing for ten common commands", async () => {
     const context = await createTestContext();
     const output = new MemoryOutput();
@@ -674,9 +767,14 @@ function call(name: string, input: unknown): ModelToolCall {
   return { id: `tc-${name}-${Math.random().toString(16).slice(2)}`, name, input };
 }
 
-function gateway(events: TestStreamEvent[]): ModelGateway {
+function gateway(
+  events: TestStreamEvent[],
+  onRequest?: (request: ModelRequest) => void,
+): ModelGateway {
   return {
-    async *stream() {
+    async *stream(...args: unknown[]) {
+      const request = findModelRequestArg(args);
+      if (request) onRequest?.(request);
       for (const event of events) yield event;
     },
     async countMessagesTokensWithAPI() {
@@ -685,10 +783,15 @@ function gateway(events: TestStreamEvent[]): ModelGateway {
   } as unknown as ModelGateway;
 }
 
-function gatewayByTurn(turns: TestStreamEvent[][]): ModelGateway {
+function gatewayByTurn(
+  turns: TestStreamEvent[][],
+  onRequest?: (request: ModelRequest) => void,
+): ModelGateway {
   let index = 0;
   return {
-    async *stream() {
+    async *stream(...args: unknown[]) {
+      const request = findModelRequestArg(args);
+      if (request) onRequest?.(request);
       const events = turns[index] ?? [];
       index += 1;
       for (const event of events) yield event;
@@ -697,6 +800,13 @@ function gatewayByTurn(turns: TestStreamEvent[][]): ModelGateway {
       return { source: "unavailable", reason: "test" };
     },
   } as unknown as ModelGateway;
+}
+
+function findModelRequestArg(args: unknown[]): ModelRequest | undefined {
+  return args.find(
+    (arg): arg is ModelRequest =>
+      Boolean(arg && typeof arg === "object" && Array.isArray((arg as ModelRequest).messages)),
+  );
 }
 
 function abortingGateway(context: TuiContext, events: TestStreamEvent[]): ModelGateway {
@@ -880,6 +990,7 @@ function rewriteApprovalSession(
 
 async function createTestContext(
   agentEvents?: TestStreamEvent[] | TestStreamEvent[][],
+  onAgentRequest?: (request: ModelRequest) => void,
 ): Promise<TuiContext> {
   const projectPath = await mkdtemp(join(tmpdir(), "linghun-phase-e-main-"));
   await mkdir(resolve(projectPath, ".linghun"), { recursive: true });
@@ -887,11 +998,11 @@ async function createTestContext(
   const session = await store.create({ model: "deepseek-chat" });
   const memory = await createMemoryState(defaultConfig, projectPath);
   const agentGateway = Array.isArray(agentEvents?.[0])
-    ? gatewayByTurn(agentEvents as TestStreamEvent[][])
+    ? gatewayByTurn(agentEvents as TestStreamEvent[][], onAgentRequest)
     : gateway((agentEvents as TestStreamEvent[] | undefined) ?? [
         { type: "assistant_text_delta", text: "agent final" },
         { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
-      ]);
+      ], onAgentRequest);
   const context = {
     store,
     sessionId: session.id,
