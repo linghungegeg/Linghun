@@ -1942,7 +1942,13 @@ export async function executeExtraTool(
       };
     }
     const result = isSse
-      ? await runMcpSseToolCall(serverConfig as McpServerConfig, parsed.tool, params)
+      ? await runMcpSseToolCall(
+          serverConfig as McpServerConfig,
+          parsed.tool,
+          params,
+          undefined,
+          context.tools.abortSignal,
+        )
       : await runMcpStdioToolCall(
           serverConfig as McpServerConfig,
           parsed.tool,

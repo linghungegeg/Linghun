@@ -1576,8 +1576,27 @@ describe("Phase 05 core tools", () => {
     }
 
     expect(Object.keys(context.readSnapshots ?? {})).toHaveLength(100);
-    expect(context.readSnapshots?.["file-0.txt"]).toBeUndefined();
-    expect(context.readSnapshots?.["file-104.txt"]).toBeDefined();
+    expect(Object.values(context.readSnapshots ?? {}).some((item) => item.path === "file-0.txt")).toBe(false);
+    expect(Object.values(context.readSnapshots ?? {}).some((item) => item.path === "file-104.txt")).toBe(true);
+  });
+
+  it("scopes readSnapshots by workspace root so shared agent contexts do not collide", async () => {
+    const projectA = await mkdtemp(join(tmpdir(), "linghun-tools-project-a-"));
+    const projectB = await mkdtemp(join(tmpdir(), "linghun-tools-project-b-"));
+    const contextA = createToolContext(projectA);
+    const contextB = createToolContext(projectB);
+    contextB.readSnapshots = contextA.readSnapshots;
+    contextB.readSnapshotOrder = contextA.readSnapshotOrder;
+    await writeFile(join(projectA, "same.txt"), "from-a\n", "utf8");
+    await writeFile(join(projectB, "same.txt"), "from-b\n", "utf8");
+
+    await runTool("Read", { path: "same.txt", limit: 1 }, contextA);
+    contextB.readSnapshots = contextA.readSnapshots;
+    contextB.readSnapshotOrder = contextA.readSnapshotOrder;
+    const second = await runTool("Read", { path: "same.txt", limit: 1 }, contextB);
+
+    expect(second.output.text).toContain("from-b");
+    expect(second.output.text).not.toContain("file_unchanged");
   });
 
   it("supports common leading (?i) case-insensitive Grep patterns", async () => {

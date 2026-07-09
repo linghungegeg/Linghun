@@ -54,6 +54,7 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
     }));
   context.evidence = [...evidence.reverse(), ...context.evidence].slice(0, 20);
   restoreCheckpoints(context, transcript);
+  restoreToolResultBudgetLedger(context, transcript);
   const handoff = [...transcript].reverse().find((event) => event.type === "handoff_packet");
   if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
     context.memory.lastHandoff = sanitizeHandoffPacket(handoff.packet);
@@ -94,6 +95,124 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
       }
     }
   }
+}
+
+function restoreToolResultBudgetLedger(context: TuiContext, transcript: TranscriptEvent[]): void {
+  const sessionId = context.sessionId;
+  if (!sessionId) return;
+  for (const event of transcript) {
+    if (event.type !== "tool_result" || typeof event.content !== "string") continue;
+    if (!event.content.startsWith("<persisted-tool-result>")) continue;
+    const metadata = parsePersistedToolResultSummary(event.content);
+    if (!metadata) continue;
+    const record = {
+      toolUseId: event.toolUseId,
+      originalChars: metadata.originalChars,
+      replacementChars: event.content.length,
+      reason: metadata.reason,
+      artifact: {
+        id: metadata.artifactId,
+        path: join(context.projectPath, metadata.artifactPath),
+        relativePath: metadata.artifactPath,
+        toolUseId: event.toolUseId,
+        chars: metadata.originalChars,
+        bytes: metadata.originalBytes,
+        sha256: metadata.sha256,
+        preview: metadata.preview,
+        previewChars: metadata.previewChars,
+        hasMore: metadata.hasMore,
+        createdAt: event.createdAt,
+      },
+    };
+    const replacement = { summary: event.content, record };
+    context.toolResultBudgetState ??= { seenIds: new Set(), replacements: new Map() };
+    context.toolResultBudgetState.replacements.set(
+      [sessionId, event.toolUseId, metadata.originalChars, metadata.originalBytes, metadata.sha256].join("\0"),
+      {
+        ...replacement,
+        fingerprint: [sessionId, event.toolUseId, metadata.originalChars, metadata.originalBytes, metadata.sha256].join("\0"),
+      },
+    );
+    context.toolResultBudgetState.contentReplacements ??= new Map();
+    context.toolResultBudgetState.contentReplacements.set(
+      [sessionId, metadata.originalChars, metadata.originalBytes, metadata.sha256].join("\0"),
+      {
+        ...replacement,
+        fingerprint: [sessionId, metadata.originalChars, metadata.originalBytes, metadata.sha256].join("\0"),
+      },
+    );
+  }
+}
+
+function parsePersistedToolResultSummary(content: string):
+  | {
+      artifactId: string;
+      artifactPath: string;
+      originalChars: number;
+      originalBytes: number;
+      sha256: string;
+      previewChars: number;
+      preview: string;
+      hasMore: boolean;
+      reason: "single_result" | "aggregate_message" | "pressure_age";
+    }
+  | undefined {
+  const reason = readPersistedToolResultReason(content);
+  const artifactId = readPersistedToolResultField(content, "artifactId");
+  const artifactPath = readPersistedToolResultField(content, "artifactPath");
+  const originalChars = Number(readPersistedToolResultField(content, "originalChars"));
+  const originalBytes = Number(readPersistedToolResultField(content, "originalBytes"));
+  const sha256 = readPersistedToolResultField(content, "sha256");
+  const previewChars = Number(readPersistedToolResultField(content, "previewChars"));
+  const preview = readPersistedToolResultPreview(content);
+  if (
+    !artifactId ||
+    !artifactPath ||
+    !sha256 ||
+    !Number.isFinite(originalChars) ||
+    !Number.isFinite(originalBytes) ||
+    !Number.isFinite(previewChars)
+  ) {
+    return undefined;
+  }
+  return {
+    artifactId,
+    artifactPath,
+    originalChars,
+    originalBytes,
+    sha256,
+    previewChars,
+    preview: preview.preview,
+    hasMore: preview.hasMore,
+    reason,
+  };
+}
+
+function readPersistedToolResultField(content: string, name: string): string | undefined {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = content.match(new RegExp(`^${escaped}:\\s*(.+)$`, "mu"));
+  return match?.[1]?.trim();
+}
+
+function readPersistedToolResultReason(
+  content: string,
+): "single_result" | "aggregate_message" | "pressure_age" {
+  const reason = readPersistedToolResultField(content, "reason");
+  return reason === "aggregate_message" || reason === "pressure_age" ? reason : "single_result";
+}
+
+function readPersistedToolResultPreview(content: string): { preview: string; hasMore: boolean } {
+  const marker = "\npreview:\n";
+  const start = content.indexOf(marker);
+  if (start < 0) return { preview: "", hasMore: true };
+  const bodyStart = start + marker.length;
+  const endMarker = "\n</persisted-tool-result>";
+  const end = content.lastIndexOf(endMarker);
+  if (end < bodyStart) return { preview: "", hasMore: true };
+  const body = content.slice(bodyStart, end);
+  if (body === "...") return { preview: "", hasMore: true };
+  if (body.endsWith("\n...")) return { preview: body.slice(0, -4), hasMore: true };
+  return { preview: body, hasMore: false };
 }
 
 function restoreCheckpoints(context: TuiContext, transcript: TranscriptEvent[]): void {
@@ -157,6 +276,7 @@ function restoreSessionAcceptedMemory(context: TuiContext, transcript: Transcrip
     if (event.type !== "memory_accepted") continue;
     const memory = parseResumeAcceptedMemory(event.memory);
     if (!memory) continue;
+    if (memory.scope !== "session") continue;
     if (known.has(memory.id)) continue;
     const finalAction = finalActions.get(memory.id);
     if (finalAction && finalAction !== "accepted" && finalAction !== "rollback") continue;

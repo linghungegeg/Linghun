@@ -1495,6 +1495,7 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
   const initialModel = resolveInitialModel(config);
   const context: TuiContext = {
     store,
+    runtimeContextId: randomUUID(),
     model: initialModel,
     permissionMode: config.permission.defaultMode,
     projectPath,
@@ -1593,10 +1594,12 @@ async function hydrateRuntimeContext(context: TuiContext): Promise<void> {
 }
 
 function attachProviderRuntimeHooks(context: TuiContext): void {
+  context.runtimeContextId ??= randomUUID();
   registerProviderHooks({
     onRetry: (info) => {
       // Agent/workflow background retries must not overwrite main-screen status.
       if (info.requestContext === "agent") return;
+      if (info.requestContextId && info.requestContextId !== context.runtimeContextId) return;
       const orchestration = resolveMetaOrchestrationAction(context, "provider-retry");
       if (orchestration.shouldStop) {
         void recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {

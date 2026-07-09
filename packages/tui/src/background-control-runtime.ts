@@ -115,6 +115,7 @@ export function refreshBackgroundLifecycle(context: TuiContext): void {
 // - 文案、报告、UI、smoke 全部应避免把 "resource guard" 称为 "permission mode" 或第五权限。
 // - This constant is the source-level assertion anchor for resource guard wording.
 export const RESOURCE_GUARD_KIND = "concurrency-cap" as const;
+const FOREGROUND_ABORT_CONFIRMATION_GRACE_MS = 1_500;
 
 export function checkResourceGuard(
   context: TuiContext,
@@ -123,7 +124,10 @@ export function checkResourceGuard(
 ): string | null {
   refreshBackgroundLifecycle(context);
   if (kind === "model") {
-    return context.activeAbortController
+    const abortPending =
+      typeof context.foregroundAbortPendingUntilMs === "number" &&
+      context.foregroundAbortPendingUntilMs > Date.now();
+    return context.activeAbortController || abortPending
       ? "并发上限：已有前台模型请求正在运行；请等待完成或使用 /interrupt 取消后再继续。这是 resource/concurrency cap，不是权限拒绝。"
       : null;
   }
@@ -506,6 +510,7 @@ export async function interruptAllActiveWork(
   if (context.activeAbortController) {
     context.activeAbortController.abort();
     context.activeAbortController = undefined;
+    context.foregroundAbortPendingUntilMs = Date.now() + FOREGROUND_ABORT_CONFIRMATION_GRACE_MS;
     clearRequestActivity(context);
     context.interrupt = { type: "idle" };
     cancelled += 1;

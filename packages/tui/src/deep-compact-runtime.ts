@@ -206,6 +206,9 @@ export async function runDeepCompact(input: {
     {
       messages: requestMessages,
       model: input.runtime.model,
+      requestContext: "agent",
+      requestContextId: input.context.runtimeContextId,
+      sessionId: input.sessionId,
       toolChoice: "none",
     },
     resolveCachePolicy("deep-compact"),

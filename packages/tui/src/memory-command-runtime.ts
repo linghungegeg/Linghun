@@ -750,6 +750,8 @@ async function streamSemanticMemoryJson(
         maxOutputTokens,
         toolChoice: "none",
         requestContext: "agent",
+        requestContextId: context.runtimeContextId,
+        sessionId: context.sessionId,
         messages: [
           {
             role: "system",

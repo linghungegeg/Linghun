@@ -1060,11 +1060,10 @@ async function readSnippetsTool(
     const rangeLineTruncated = boundedEnd < requestedEnd;
     try {
       const filePath = resolveWorkspacePath(context.workspaceRoot, range.path);
-      const content = await readFile(filePath, "utf8");
       const info = await stat(filePath);
-      rememberReadSnapshot(context, filePath, content, info);
-      const lines = splitContentLines(content);
-      const selected = lines.slice(range.start - 1, boundedEnd);
+      const window = await readTextWindow(filePath, info, range.start - 1, boundedEnd - range.start + 1);
+      rememberReadSnapshotHash(context, filePath, window.hash, info, { source: "read" });
+      const selected = window.selected;
       const actualEnd = selected.length > 0 ? range.start + selected.length - 1 : range.start - 1;
       const numbered = selected.map((line, index) => `${range.start + index}\t${line}`).join("\n");
       const capped = applySnippetSafetyCap(numbered, remainingChars);
@@ -1077,7 +1076,7 @@ async function readSnippetsTool(
         content: capped.content,
         requestedStart: range.start,
         requestedEnd,
-        totalLines: lines.length,
+        totalLines: window.totalLines,
         truncated: rangeLineTruncated || capped.truncated,
       });
       if (capped.truncated) {
@@ -1199,12 +1198,12 @@ async function sourcePackTool(input: SourcePackInput, context: ToolContext): Pro
     seen.add(key);
     try {
       const filePath = resolveWorkspacePath(context.workspaceRoot, match.path);
-      const content = await readFile(filePath, "utf8");
       const info = await stat(filePath);
-      rememberReadSnapshot(context, filePath, content, info);
-      const lines = splitContentLines(content);
-      const boundedEnd = Math.min(end, lines.length);
-      const selected = lines.slice(start - 1, boundedEnd);
+      const maxWindowLines = Math.max(end - start + 1, 1);
+      const window = await readTextWindow(filePath, info, start - 1, maxWindowLines);
+      rememberReadSnapshotHash(context, filePath, window.hash, info, { source: "read" });
+      const boundedEnd = Math.min(end, window.totalLines);
+      const selected = window.selected;
       const numbered = selected.map((line, index) => `${start + index}\t${line}`).join("\n");
       const capped = applySnippetSafetyCap(numbered, remainingChars);
       remainingChars -= capped.usedChars;
@@ -1216,7 +1215,7 @@ async function sourcePackTool(input: SourcePackInput, context: ToolContext): Pro
         content: capped.content,
         requestedStart: start,
         requestedEnd: end,
-        totalLines: lines.length,
+        totalLines: window.totalLines,
         truncated: capped.truncated,
         reason: match.reason ?? `matched "${match.term}" at line ${match.line}`,
         confidence: estimateSourcePackConfidence(input.query, match),
@@ -3131,7 +3130,7 @@ function ensureReadBeforeEdit(
     }
     return { source: "expectedHash", beforeHash: before.hash };
   }
-  const snapshot = context.readSnapshots?.[rel];
+  const snapshot = context.readSnapshots?.[readSnapshotKey(context, filePath)];
   if (!snapshot) {
     throw new Error(
       `编辑前未读取：${rel}。建议：先运行 Read 获取最新内容，或传入 expectedHash 后再执行写入。`,
@@ -3156,7 +3155,8 @@ function createUnchangedReadOutput(
   limit: number,
 ): ToolOutput | undefined {
   const rel = relativePath(context.workspaceRoot, filePath);
-  const snapshot = context.readSnapshots?.[rel];
+  const key = readSnapshotKey(context, filePath);
+  const snapshot = context.readSnapshots?.[key];
   if (
     !snapshot ||
     snapshot.source !== "read" ||
@@ -3167,7 +3167,7 @@ function createUnchangedReadOutput(
   ) {
     return undefined;
   }
-  touchReadSnapshot(context, rel);
+  touchReadSnapshot(context, key);
   return {
     text: `file_unchanged: ${rel} unchanged for requested range offset=${offset} limit=${limit}. Reuse the previous Read result.`,
     summary: `Read ${rel}: file unchanged`,
@@ -3201,6 +3201,7 @@ function rememberReadSnapshotHash(
   options: { offset?: number; limit?: number; source?: ReadSnapshot["source"] } = {},
 ): void {
   const rel = relativePath(context.workspaceRoot, filePath);
+  const key = readSnapshotKey(context, filePath);
   const next = {
     path: rel,
     hash,
@@ -3212,15 +3213,19 @@ function rememberReadSnapshotHash(
   };
   context.readSnapshots = {
     ...(context.readSnapshots ?? {}),
-    [rel]: next,
+    [key]: next,
   };
-  touchReadSnapshot(context, rel);
+  touchReadSnapshot(context, key);
   evictReadSnapshots(context);
 }
 
-function touchReadSnapshot(context: ToolContext, rel: string): void {
-  const order = (context.readSnapshotOrder ?? []).filter((item) => item !== rel);
-  order.push(rel);
+function readSnapshotKey(context: ToolContext, filePath: string): string {
+  return `${resolve(context.workspaceRoot)}\0${resolve(filePath)}`;
+}
+
+function touchReadSnapshot(context: ToolContext, key: string): void {
+  const order = (context.readSnapshotOrder ?? []).filter((item) => item !== key);
+  order.push(key);
   context.readSnapshotOrder = order;
 }
 

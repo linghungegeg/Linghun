@@ -181,6 +181,33 @@ describe("Phase F MCP duplicate, schema, and SSE coverage", () => {
     expect(listCalls).toBe(1);
   });
 
+  it("passes caller abort signals into MCP SSE requests", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        if (init.signal?.aborted) {
+          throw new DOMException("aborted", "AbortError");
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+
+    await expect(
+      runMcpSseToolCall(
+        { command: "", transport: "sse", url: "https://example.com/abort-signal" },
+        "demo",
+        {},
+        15_000,
+        controller.signal,
+      ),
+    ).resolves.toMatchObject({ ok: false, errorCode: "ETIMEDOUT" });
+  });
+
   it("fails closed for skill/plugin deferred entries without safe executors", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "linghun-deferred-extension-"));
     const context = minimalContext(workspace);

@@ -178,6 +178,10 @@ export type ModelRequest = {
   promptCacheKey?: string;
   /** Request context for retry differentiation. "foreground" = user waiting (default); "agent" = sub-agent. */
   requestContext?: "foreground" | "agent";
+  /** Process-local owner for retry hooks; prevents one TUI context from observing another context's retries. */
+  requestContextId?: string;
+  /** Logical session owner for diagnostics and retry hook scoping. */
+  sessionId?: string;
 };
 
 export type TokenCountResult =
@@ -839,6 +843,8 @@ export class OpenAiCompatibleProvider implements Provider {
           signal: requestSignal,
         },
         request.requestContext,
+        request.requestContextId,
+        request.sessionId,
       );
 
       if (!response.ok) {
@@ -936,6 +942,8 @@ export class OpenAiCompatibleProvider implements Provider {
         signal: requestSignal,
       },
       request.requestContext,
+      request.requestContextId,
+      request.sessionId,
     );
 
     if (!response.ok) {
@@ -1330,6 +1338,8 @@ async function fetchWithProviderRetry(
   url: string,
   init: RequestInit,
   requestContext?: "foreground" | "agent",
+  requestContextId?: string,
+  sessionId?: string,
 ): Promise<Response> {
   try {
     const response = await fetchWithRequestTimeout(url, init, PROVIDER_REQUEST_TIMEOUT_MS);
@@ -1342,6 +1352,8 @@ async function fetchWithProviderRetry(
         delayMs,
         statusCode: response.status,
         requestContext,
+        requestContextId,
+        sessionId,
       });
     }
     return response;
@@ -1353,6 +1365,8 @@ async function fetchWithProviderRetry(
         delayMs: PROVIDER_BASE_RETRY_MS,
         statusCode: 0,
         requestContext,
+        requestContextId,
+        sessionId,
       });
     }
     throw error;
@@ -1519,6 +1533,8 @@ async function tryNonStreamingFallback(input: {
       signal: input.requestSignal,
     },
     input.request.requestContext,
+    input.request.requestContextId,
+    input.request.sessionId,
   );
   if (!response.ok) {
     return undefined;

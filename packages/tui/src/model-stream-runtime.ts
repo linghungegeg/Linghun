@@ -2256,6 +2256,7 @@ export async function sendMessage(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
+  context.runtimeContextId ??= randomUUID();
   const modelGuard = checkResourceGuard(context, "model");
   if (modelGuard) {
     writeLine(output, modelGuard);
@@ -2576,6 +2577,7 @@ export async function sendMessage(
       if (preflight.blocked) {
         clearRequestActivity(context);
         context.activeAbortController = undefined;
+        context.foregroundAbortPendingUntilMs = undefined;
         context.tools.abortSignal = undefined;
         context.interrupt = { type: "idle" };
         writeLine(output, preflight.message);
@@ -2597,6 +2599,7 @@ export async function sendMessage(
         );
         clearRequestActivity(context);
         context.activeAbortController = undefined;
+        context.foregroundAbortPendingUntilMs = undefined;
         context.tools.abortSignal = undefined;
         context.interrupt = { type: "idle" };
         writeLine(output, warning);
@@ -2608,6 +2611,9 @@ export async function sendMessage(
         messages: requestMessages,
         model: selectedRuntime.model,
         endpointProfile: selectedRuntime.endpointProfile,
+        requestContext: "foreground",
+        requestContextId: context.runtimeContextId,
+        sessionId,
         ...(selectedRuntime.reasoningSent
           ? { reasoningLevel: selectedRuntime.reasoningLevel }
           : {}),
@@ -3199,6 +3205,7 @@ export async function sendMessage(
     }
     clearRequestActivity(context);
     context.activeAbortController = undefined;
+    context.foregroundAbortPendingUntilMs = undefined;
     context.tools.abortSignal = undefined;
     context.interrupt = { type: "idle" };
     context.currentUserActionConstraints = previousUserActionConstraints;
@@ -4145,6 +4152,9 @@ async function streamFinalModelAnswerWithoutTools(
         messages: preflight.messages,
         model: continuation.model,
         endpointProfile: continuation.endpointProfile,
+        requestContext: "foreground",
+        requestContextId: context.runtimeContextId,
+        sessionId,
         ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
         toolChoice: "none",
         ...promptCacheFields,
@@ -4560,6 +4570,7 @@ export async function continueModelAfterToolResults(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
+  context.runtimeContextId ??= randomUUID();
   const controller = new AbortController();
   const originalContProvider = continuation.provider;
   const originalContModel = continuation.model;
@@ -4639,6 +4650,9 @@ export async function continueModelAfterToolResults(
         messages: requestMessages,
         model: continuation.model,
         endpointProfile: continuation.endpointProfile,
+        requestContext: "foreground",
+        requestContextId: context.runtimeContextId,
+        sessionId,
         ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
         ...(continuationToolsEnabled
           ? {
@@ -5314,6 +5328,7 @@ export async function continueModelAfterToolResults(
     }
     clearRequestActivity(context);
     context.activeAbortController = undefined;
+    context.foregroundAbortPendingUntilMs = undefined;
     context.tools.abortSignal = undefined;
     context.interrupt = { type: "idle" };
   }

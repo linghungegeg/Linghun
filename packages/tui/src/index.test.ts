@@ -24,6 +24,7 @@ import { type ToolOutput, createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { enqueueAgentCompletionNotice } from "./agent-completion-finalizer.js";
 import {
+  checkResourceGuard,
   finishBackgroundTaskFromToolOutput,
   handleInterruptCommand,
 } from "./background-control-runtime.js";
@@ -5114,6 +5115,7 @@ describe("Phase 06 TUI slash commands", () => {
   it("restores transcript memory on resume without duplicating accepted candidates", () => {
     const project = join(tmpdir(), "linghun-resume-memory");
     const context = {
+      sessionId: "session-1",
       projectPath: project,
       memory: {
         candidates: [],
@@ -5158,6 +5160,29 @@ describe("Phase 06 TUI slash commands", () => {
         createdAt: "2026-06-01T00:00:00.000Z",
       },
       {
+        type: "tool_result",
+        toolUseId: "toolu-budget-1",
+        toolName: "Read",
+        content: [
+          "<persisted-tool-result>",
+          "reason: single_result",
+          "toolUseId: toolu-budget-1",
+          "artifactId: artifact-1",
+          "artifactPath: .linghun/tool-results/artifact-1.txt",
+          "originalChars: 50000",
+          "originalBytes: 50000",
+          "sha256: abc123",
+          "previewChars: 2000",
+          "read: use /details output with the evidence id or read the artifact path if you need the full tool output.",
+          "preview:",
+          "preview text",
+          "...",
+          "</persisted-tool-result>",
+        ].join("\n"),
+        isError: false,
+        createdAt: "2026-06-01T00:00:00.250Z",
+      },
+      {
         type: "memory_candidate",
         candidate: makeCandidate("session-accepted", "session"),
         createdAt: "2026-06-01T00:00:00.500Z",
@@ -5179,6 +5204,14 @@ describe("Phase 06 TUI slash commands", () => {
           status: "accepted",
         },
         createdAt: "2026-06-01T00:00:02.500Z",
+      },
+      {
+        type: "memory_accepted",
+        memory: {
+          ...makeCandidate("deleted-persistent", "project"),
+          status: "accepted",
+        },
+        createdAt: "2026-06-01T00:00:02.550Z",
       },
       {
         type: "system_event",
@@ -5250,6 +5283,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.checkpoints.map((checkpoint) => checkpoint.id)).toEqual([
       "checkpoint-undefined-context",
     ]);
+    expect(context.toolResultBudgetState?.replacements.size).toBe(1);
+    expect(context.toolResultBudgetState?.contentReplacements?.size).toBe(1);
+    expect([...(context.toolResultBudgetState?.replacements.values() ?? [])][0]?.record.artifact.preview).toBe("preview text");
   });
 
   it("D.14B: auto-learning accepts stable taxonomy memory from user input when active", async () => {
@@ -28233,6 +28269,19 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).toContain(
       "已请求中断",
     );
+  });
+
+  it("foreground abort pending state keeps model guard active until confirmation grace expires", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-interrupt-pending-guard-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.foregroundAbortPendingUntilMs = Date.now() + 1_000;
+    expect(checkResourceGuard(context, "model")).toContain("并发上限");
+
+    context.foregroundAbortPendingUntilMs = Date.now() - 1;
+    expect(checkResourceGuard(context, "model")).toBeNull();
   });
 
   it("suppressLastFullOutputCapture=true 时 discard/replace 不会写穿 lastFullOutput", () => {

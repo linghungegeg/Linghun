@@ -313,6 +313,7 @@ export function createSingleToolCallContinuation(
 export type TuiContext = {
   store: SessionStore;
   sessionId?: string;
+  runtimeContextId?: string;
   sessionEnded?: boolean;
   model: string;
   permissionMode: PermissionMode;
@@ -348,6 +349,7 @@ export type TuiContext = {
   activePlan?: PlanProposal;
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
+  foregroundAbortPendingUntilMs?: number;
   activeVerificationAbortController?: AbortController;
   pendingNaturalCommand?: PendingNaturalCommand;
   pendingLocalApproval?: PendingLocalApproval;

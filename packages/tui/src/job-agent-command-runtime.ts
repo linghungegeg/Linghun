@@ -3034,6 +3034,8 @@ export async function runModelBackedAgent(
           model: currentRuntime.model,
           endpointProfile: currentRuntime.endpointProfile,
           requestContext: "agent",
+          requestContextId: context.runtimeContextId,
+          sessionId: agent.transcriptSessionId,
           ...(currentRuntime.reasoningSent
             ? { reasoningLevel: currentRuntime.reasoningLevel }
             : {}),

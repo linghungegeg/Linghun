@@ -23,11 +23,12 @@ export async function runMcpSseToolCall(
   toolName: string,
   params: Record<string, unknown>,
   timeoutMs = MCP_SSE_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<McpSseResult> {
   if (!server.url) {
     return { ok: false, summary: "MCP SSE server url is missing", errorCode: "MCP_SSE_URL_MISSING" };
   }
-  const list = await getMcpSseToolNames(server.url, timeoutMs);
+  const list = await getMcpSseToolNames(server.url, timeoutMs, signal);
   if (!list.ok) return list;
   const toolNames = list.toolNames;
   if (!toolNames.includes(toolName)) {
@@ -42,6 +43,7 @@ export async function runMcpSseToolCall(
     "tools/call",
     { name: toolName, arguments: params },
     timeoutMs,
+    signal,
   );
   if (!result.ok) return result;
   return { ok: true, summary: `tools/call ${toolName} ok`, data: result.data };
@@ -50,13 +52,14 @@ export async function runMcpSseToolCall(
 async function getMcpSseToolNames(
   url: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; toolNames: string[] } | { ok: false; summary: string; errorCode?: string }> {
   const cached = toolListCache.get(url);
   const now = Date.now();
   if (cached && cached.expiresAt > now) {
     return { ok: true, toolNames: [...cached.toolNames] };
   }
-  const list = await mcpSseRequest(url, "tools/list", {}, timeoutMs);
+  const list = await mcpSseRequest(url, "tools/list", {}, timeoutMs, signal);
   if (!list.ok) {
     return { ok: false, summary: list.summary, errorCode: list.errorCode };
   }
@@ -73,8 +76,12 @@ async function mcpSseRequest(
   method: string,
   params: unknown,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<McpSseResult> {
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abortFromCaller();
+  else signal?.addEventListener("abort", abortFromCaller, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const id = nextMcpSseRequestId();
   try {
@@ -102,6 +109,7 @@ async function mcpSseRequest(
     };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", abortFromCaller);
   }
 }
 
