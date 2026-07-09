@@ -3313,6 +3313,36 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(shouldDeleteLongInputChip(middleChip, inMiddle, "backspace")).toBe(false);
   });
 
+  it("truncated long input does not treat a middle collapsed row as a delete boundary", () => {
+    const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
+    const cursorInsideMiddleLine = Array.from("line0\nline1\nline2\nli").length;
+    const buffer = { chars: Array.from(text), cursor: cursorInsideMiddleLine };
+    const layout = {
+      width: 80,
+      paddingLeft: 2,
+      paddingRight: 2,
+      prefixWidth: 2,
+      minContentWidth: 4,
+    };
+
+    const { visualLines } = formatComposerRenderLines({
+      buffer,
+      placeholder: "placeholder",
+      masking: false,
+      noColor: true,
+      layout,
+      maxVisibleLines: 1,
+    });
+    const chip = getComposerLongInputChipState({ buffer, layout, maxVisibleLines: 1 });
+
+    expect(visualLines[0]?.text).toContain("[+");
+    expect(chip.active).toBe(true);
+    expect(chip.cursorOnLeadingChip).toBe(false);
+    expect(chip.cursorOnTrailingChip).toBe(false);
+    expect(shouldDeleteLongInputChip(chip, buffer, "backspace")).toBe(false);
+    expect(shouldDeleteLongInputChip(chip, buffer, "delete")).toBe(false);
+  });
+
   it("plain renderer Home hero fallback is reasonable in no-color", () => {
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);

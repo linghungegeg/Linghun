@@ -1882,11 +1882,8 @@ export function getComposerLongInputChipState({
   const active = rendered.truncatedAbove > 0 || rendered.truncatedBelow > 0;
   return {
     active,
-    cursorOnLeadingChip: active && rendered.cursorRow === 0 && rendered.truncatedAbove > 0,
-    cursorOnTrailingChip:
-      active &&
-      rendered.cursorRow === rendered.visualLines.length - 1 &&
-      rendered.truncatedBelow > 0,
+    cursorOnLeadingChip: active && buffer.cursor === 0,
+    cursorOnTrailingChip: active && buffer.cursor >= buffer.chars.length,
   };
 }
 
