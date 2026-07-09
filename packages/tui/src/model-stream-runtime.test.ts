@@ -366,6 +366,123 @@ describe("model message prompt cache layout", () => {
     expect(serialized).not.toContain("INTERNAL_DETAILS_SHOULD_NOT_REACH_MODEL");
     expect(serialized).not.toContain("hash-after");
   });
+
+  it("keeps persisted tool_result previews out of model-visible history", async () => {
+    const leakedPreview = "MODEL_HISTORY_PREVIEW_SHOULD_NOT_LEAK";
+    const persisted = [
+      "<persisted-tool-result>",
+      "reason: single_result",
+      "toolUseId: call-read",
+      "artifactId: call-read-abc123",
+      "artifactPath: .linghun/session/tool-results/session-preview/call-read-abc123.txt",
+      "originalChars: 90000",
+      "originalBytes: 90000",
+      "sha256: abc123",
+      "read: use /details output with the evidence id or read the artifact path if you need the full tool output.",
+      "preview:",
+      leakedPreview,
+      "</persisted-tool-result>",
+    ].join("\n");
+    const context = {
+      projectPath: await mkdtemp(join(tmpdir(), "linghun-model-history-preview-")),
+      model: "test-model",
+      cache: { history: [] },
+      evidence: [],
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            {
+              type: "tool_call_start",
+              id: "call-read",
+              name: "Read",
+              input: { path: "large.log" },
+            },
+            {
+              type: "tool_result",
+              toolUseId: "call-read",
+              toolName: "Read",
+              isError: false,
+              evidenceId: "ev-read",
+              content: persisted,
+            },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-preview",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "continue",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(serialized).toContain("artifactPath");
+    expect(serialized).toContain("omitted from model history");
+    expect(serialized).not.toContain(leakedPreview);
+  });
+
+  it("strips newly budgeted large tool_result previews before provider history reuse", async () => {
+    const leakedPreview = "NEW_BUDGET_PREVIEW_SHOULD_NOT_LEAK";
+    const context = {
+      projectPath: await mkdtemp(join(tmpdir(), "linghun-model-history-budget-")),
+      model: "test-model",
+      cache: { history: [] },
+      evidence: [],
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            {
+              type: "tool_call_start",
+              id: "call-bash",
+              name: "Bash",
+              input: { command: "large output" },
+            },
+            {
+              type: "tool_result",
+              toolUseId: "call-bash",
+              toolName: "Bash",
+              isError: false,
+              evidenceId: "ev-bash",
+              content: `${leakedPreview}\n${"x".repeat(70_000)}`,
+            },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-budget-preview",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "continue",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(serialized).toContain("<persisted-tool-result>");
+    expect(serialized).toContain("artifactPath");
+    expect(serialized).toContain("omitted from model history");
+    expect(serialized).not.toContain(leakedPreview);
+  });
 });
 
 describe("responses prompt cache key", () => {

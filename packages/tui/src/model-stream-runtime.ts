@@ -4034,6 +4034,44 @@ function toSystemMessages(systemPrompt: SystemPromptInput): ModelMessage[] {
   });
 }
 
+function compactToolResultContentForModelHistory(content: unknown, depth = 0): unknown {
+  if (depth > 4) return content;
+  if (typeof content === "string") return stripPersistedToolResultPreview(content);
+  if (!content || typeof content !== "object") return content;
+  if (Array.isArray(content)) {
+    return content.map((item) => compactToolResultContentForModelHistory(item, depth + 1));
+  }
+  const record = content as Record<string, unknown>;
+  let changed = false;
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    const nextValue = compactToolResultContentForModelHistory(value, depth + 1);
+    compact[key] = nextValue;
+    changed = changed || nextValue !== value;
+  }
+  return changed ? compact : content;
+}
+
+function stripPersistedToolResultPreview(content: string): string {
+  if (!content.startsWith("<persisted-tool-result>")) return content;
+  const previewStart = content.indexOf("\npreview:");
+  if (previewStart < 0) return content;
+  const endTag = "\n</persisted-tool-result>";
+  const endIndex = content.indexOf(endTag, previewStart);
+  if (endIndex < 0) return content;
+  return [
+    content.slice(0, previewStart),
+    "\npreview: <omitted from model history; read artifactPath for full output>",
+    content.slice(endIndex),
+  ].join("");
+}
+
+function compactModelMessageForHistory(message: ModelMessage): ModelMessage {
+  if (message.role !== "assistant" && message.role !== "tool") return message;
+  const content = stripPersistedToolResultPreview(message.content);
+  return content === message.content ? message : { ...message, content };
+}
+
 export async function buildModelMessagesWithRecentContext(
   context: TuiContext,
   sessionId: string,
@@ -4102,7 +4140,9 @@ export async function buildModelMessagesWithRecentContext(
         historyMessages.push({ role: "assistant", content: event.text });
       }
       if (event.type === "tool_result") {
-        const modelHistoryContent = compactToolResultForModelHistory(event.toolName, event.content);
+        const modelHistoryContent = compactToolResultContentForModelHistory(
+          compactToolResultForModelHistory(event.toolName, event.content),
+        );
         const toolCall = toolCalls.get(event.toolUseId);
         if (!toolCall) {
           const content = await budgetToolResultTranscriptContent(
@@ -4239,7 +4279,7 @@ async function budgetRecentContextToolResults(
   for (const record of budgeted.records) {
     await recordToolResultBudgetEvidence(context, sessionId, record);
   }
-  return budgeted.messages;
+  return budgeted.messages.map(compactModelMessageForHistory);
 }
 
 async function streamFinalModelAnswerWithoutTools(
