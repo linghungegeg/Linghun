@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, createWriteStream, openSync } from "node:fs";
+import { closeSync, createReadStream, createWriteStream, openSync } from "node:fs";
 import { mkdir, appendFile, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -256,6 +256,8 @@ const SEARCH_EXCLUDED_FILE_SUFFIXES = [".tsbuildinfo"];
 const RG_TIMEOUT_MS = 30_000;
 const READ_SNAPSHOT_MAX_ENTRIES = 100;
 const READ_SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024;
+const READ_FAST_PATH_MAX_BYTES = 10 * 1024 * 1024;
+const READ_TARGETED_STREAM_BYTES = READ_FAST_PATH_MAX_BYTES / 4;
 
 export function createToolContext(
   workspaceRoot = process.cwd(),
@@ -899,16 +901,15 @@ async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOut
   const limit = Math.max(input.limit ?? DEFAULT_LIMIT, 1);
   const unchanged = createUnchangedReadOutput(context, filePath, info, offset, limit);
   if (unchanged) return unchanged;
-  const content = await readFile(filePath, "utf8");
-  rememberReadSnapshot(context, filePath, content, info, { offset, limit, source: "read" });
-  const lines = splitContentLines(content);
-  const selected = lines.slice(offset, offset + limit);
-  const windowTruncated = offset > 0 || offset + limit < lines.length;
+  const window = await readTextWindow(filePath, info, offset, limit);
+  rememberReadSnapshotHash(context, filePath, window.hash, info, { offset, limit, source: "read" });
+  const selected = window.selected;
+  const windowTruncated = offset > 0 || offset + limit < window.totalLines;
   const textLines = selected.map((line, index) => `${offset + index + 1}\t${line}`);
   let text = textLines.join("\n");
   const budgetTruncated = text.length > DEFAULT_TOOL_TEXT_LIMIT;
   if (windowTruncated || budgetTruncated) {
-    const marker = `...（只显示读取窗口：选中 ${selected.length} 行 / 全文 ${lines.length} 行；不是完整文件）`;
+    const marker = `...（只显示读取窗口：选中 ${selected.length} 行 / 全文 ${window.totalLines} 行；不是完整文件）`;
     if (budgetTruncated) {
       text = `${text.slice(0, DEFAULT_TOOL_TEXT_LIMIT - marker.length - 1)}\n${marker}`;
     } else {
@@ -922,13 +923,115 @@ async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOut
       lines: selected.length,
       selectedLines: selected.length,
       windowLines: selected.length,
-      totalLines: lines.length,
-      contentLines: lines.length,
-      hash: hashText(content),
-      newline: detectNewlineStyle(content),
+      totalLines: window.totalLines,
+      contentLines: window.totalLines,
+      hash: window.hash,
+      newline: window.newline,
     },
     truncated: windowTruncated || budgetTruncated,
   };
+}
+
+type ReadWindow = {
+  selected: string[];
+  totalLines: number;
+  hash: string;
+  newline: "lf" | "crlf" | "mixed" | "none";
+};
+
+async function readTextWindow(
+  filePath: string,
+  info: { size: number },
+  offset: number,
+  limit: number,
+): Promise<ReadWindow> {
+  if (shouldStreamRead(info.size, offset, limit)) {
+    return readTextWindowStreaming(filePath, offset, limit);
+  }
+  const content = await readFile(filePath, "utf8");
+  const lines = splitContentLines(content);
+  return {
+    selected: lines.slice(offset, offset + limit),
+    totalLines: lines.length,
+    hash: hashText(content),
+    newline: detectNewlineStyle(content),
+  };
+}
+
+function shouldStreamRead(size: number, offset: number, limit: number): boolean {
+  if (size >= READ_FAST_PATH_MAX_BYTES) return true;
+  return (offset > 0 || limit > 0) && size > READ_TARGETED_STREAM_BYTES;
+}
+
+function readTextWindowStreaming(
+  filePath: string,
+  offset: number,
+  limit: number,
+): Promise<ReadWindow> {
+  return new Promise((resolvePromise, reject) => {
+    const hash = createHash("sha256");
+    const selected: string[] = [];
+    const end = offset + limit;
+    let lineIndex = 0;
+    let carry = "";
+    let sawContent = false;
+    let crlf = 0;
+    let lf = 0;
+    let pendingCr = false;
+
+    const stream = createReadStream(filePath, { encoding: "utf8" });
+    const pushLine = (line: string) => {
+      const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
+      if (lineIndex >= offset && lineIndex < end) {
+        selected.push(normalized);
+      }
+      lineIndex += 1;
+    };
+    const countNewlines = (chunk: string) => {
+      for (const char of chunk) {
+        if (char === "\n") {
+          if (pendingCr) crlf += 1;
+          else lf += 1;
+          pendingCr = false;
+          continue;
+        }
+        pendingCr = char === "\r";
+      }
+    };
+
+    stream.on("data", (chunk) => {
+      const textChunk = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      sawContent = sawContent || textChunk.length > 0;
+      hash.update(textChunk, "utf8");
+      countNewlines(textChunk);
+      carry += textChunk;
+      let newlineIndex = carry.indexOf("\n");
+      while (newlineIndex !== -1) {
+        pushLine(carry.slice(0, newlineIndex));
+        carry = carry.slice(newlineIndex + 1);
+        newlineIndex = carry.indexOf("\n");
+      }
+    });
+    stream.once("error", reject);
+    stream.once("end", () => {
+      if (carry.length > 0 || (sawContent && lineIndex === 0)) {
+        pushLine(carry);
+      }
+      resolvePromise({
+        selected,
+        totalLines: lineIndex,
+        hash: hash.digest("hex"),
+        newline: newlineFromCounts(crlf, lf),
+      });
+    });
+  });
+}
+
+function newlineFromCounts(crlf: number, lf: number): "lf" | "crlf" | "mixed" | "none" {
+  if (crlf > 0 && lf > 0) return "mixed";
+  if (crlf > 0) return "crlf";
+  if (lf > 0) return "lf";
+  return "none";
 }
 
 type SnippetRangeOutput = {
@@ -3036,7 +3139,6 @@ function ensureReadBeforeEdit(
   }
   if (
     snapshot.hash !== before.hash ||
-    snapshot.mtimeMs !== before.mtimeMs ||
     snapshot.size !== before.size
   ) {
     throw new Error(
@@ -3088,10 +3190,20 @@ function rememberReadSnapshot(
   info: { mtimeMs: number; size: number },
   options: { offset?: number; limit?: number; source?: ReadSnapshot["source"] } = {},
 ): void {
+  rememberReadSnapshotHash(context, filePath, hashText(content), info, options);
+}
+
+function rememberReadSnapshotHash(
+  context: ToolContext,
+  filePath: string,
+  hash: string,
+  info: { mtimeMs: number; size: number },
+  options: { offset?: number; limit?: number; source?: ReadSnapshot["source"] } = {},
+): void {
   const rel = relativePath(context.workspaceRoot, filePath);
   const next = {
     path: rel,
-    hash: hashText(content),
+    hash,
     mtimeMs: info.mtimeMs,
     size: info.size,
     offset: options.offset,

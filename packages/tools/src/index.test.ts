@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -1526,6 +1526,45 @@ describe("Phase 05 core tools", () => {
       offset: 1,
       limit: 1,
     });
+  });
+
+  it("reads large offset windows without changing the Read output contract", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const lines = Array.from({ length: 260_000 }, (_, index) => `line-${index + 1}`);
+    await writeFile(join(project, "large-window.txt"), `${lines.join("\n")}\n`, "utf8");
+
+    const first = await runTool("Read", { path: "large-window.txt", offset: 259_990, limit: 3 }, context);
+    const second = await runTool("Read", { path: "large-window.txt", offset: 259_990, limit: 3 }, context);
+
+    expect(first.output.text).toContain("259991\tline-259991");
+    expect(first.output.text).toContain("259993\tline-259993");
+    expect(first.output.data).toMatchObject({
+      selectedLines: 3,
+      windowLines: 3,
+      totalLines: 260_000,
+      contentLines: 260_000,
+      newline: "lf",
+    });
+    expect(second.output.text).toContain("file_unchanged: large-window.txt");
+  });
+
+  it("allows edits when only the file timestamp changed after a read", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const filePath = join(project, "mtime-only.txt");
+    const context = createToolContext(project);
+    await writeFile(filePath, "alpha\nbeta\n", "utf8");
+    await runTool("Read", { path: "mtime-only.txt" }, context);
+    await utimes(filePath, new Date(), new Date(Date.now() + 5_000));
+
+    const edit = await runTool(
+      "Edit",
+      { path: "mtime-only.txt", oldText: "beta", newText: "gamma" },
+      context,
+    );
+
+    expect(edit.output.summary).toContain("+1 -1");
+    expect(await readFile(filePath, "utf8")).toBe("alpha\ngamma\n");
   });
 
   it("keeps readSnapshots bounded with least-recently-used eviction", async () => {
