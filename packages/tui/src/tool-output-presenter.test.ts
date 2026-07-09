@@ -298,6 +298,55 @@ describe("tool-output-presenter", () => {
       expect(formatted).not.toContain("Ctrl+O");
     });
 
+    it("normalizes wrapped ANSI text before summary-first routing", () => {
+      const bash = createLayeredToolOutput(
+        "Bash",
+        { text: '{"text":"\\u001b[32m✓\\u001b[39m ok\\nnext"}', data: { exitCode: 0 } },
+        "zh-CN",
+      );
+      const artifactLine = createLayeredToolOutput(
+        "Bash",
+        {
+          text: '.linghun/session/tool-results/run/result.txt:{"text":"\\u001b[31mFAIL\\u001b[39m"}',
+          data: { exitCode: 1 },
+        },
+        "zh-CN",
+      );
+
+      expect(bash.preview).toContain("✓ ok");
+      expect(bash.preview).not.toContain('{"text"');
+      expect(bash.preview).not.toContain("\\u001b");
+      expect(bash.preview).not.toContain("[32m");
+      expect(artifactLine.preview).toContain("FAIL");
+      expect(artifactLine.preview).not.toContain('{"text"');
+      expect(artifactLine.preview).not.toContain("\\u001b");
+      expect(artifactLine.preview).not.toContain("[31m");
+    });
+
+    it("summarizes test reporter JSON before Bash summary-first routing", () => {
+      const layered = createLayeredToolOutput(
+        "Bash",
+        {
+          text: '{"numTotalTests":10,"numPassedTests":8,"numFailedTests":1,"numPendingTests":1,"numTodoTests":0,"testResults":[]}',
+          data: { exitCode: 1 },
+        },
+        "zh-CN",
+      );
+
+      expect(layered.preview).toContain("Tests [██████████] 10/10 · ✓ 8 · ✗ 1 · ○ 1");
+      expect(layered.preview).not.toContain("testResults");
+    });
+
+    it("preserves ordinary JSON in summary-first output", () => {
+      const layered = createLayeredToolOutput(
+        "Bash",
+        { text: '{"ok":true,"value":1}', data: { exitCode: 0 } },
+        "zh-CN",
+      );
+
+      expect(layered.preview).toContain('{"ok":true,"value":1}');
+    });
+
     it("短 Read 输出没有隐藏内容时不显示 Ctrl+O", () => {
       const layered = createLayeredToolOutput(
         "Read",

@@ -251,6 +251,40 @@ describe("shell view model", () => {
     expect(rendered).not.toContain("sk-shell-output-secret");
   });
 
+  it("normalizes artifact wrapper JSON at the legacy output block boundary", () => {
+    const block = createOutputBlock(
+      '{"text":"\\u001b[32m✓\\u001b[39m ok\\r\\nnext"}',
+      "en-US",
+      "artifact-output",
+    );
+
+    expect(block.fullText).toContain("✓ ok");
+    expect(block.fullText).toContain("next");
+    expect(block.summary).not.toContain('{"text"');
+    expect(block.summary).not.toContain("\\u001b");
+    expect(block.summary).not.toContain("[32m");
+    expect(block.fullText).not.toContain('{"text"');
+    expect(block.fullText).not.toContain("\\u001b");
+    expect(block.fullText).not.toContain("\u001B");
+  });
+
+  it("summarizes test reporter JSON at the legacy output block boundary", () => {
+    const block = createOutputBlock(
+      '{"numTotalTests":5,"numPassedTests":5,"numFailedTests":0,"numPendingTests":0,"numTodoTests":0,"testResults":[]}',
+      "en-US",
+      "test-reporter-output",
+    );
+
+    expect(block.fullText).toBe("Tests [██████████] 5/5 · ✓ 5 · ✗ 0");
+    expect(block.summary).not.toContain("testResults");
+  });
+
+  it("preserves ordinary JSON at the legacy output block boundary", () => {
+    const block = createOutputBlock('{"ok":true,"value":1}', "en-US", "json-output");
+
+    expect(block.fullText).toBe('{"ok":true,"value":1}');
+  });
+
   it("maps legacy single-line tool start banners to running tool_call blocks", () => {
     const block = createOutputBlock("Bash(git status)", "en-US", "tool-call-out");
 

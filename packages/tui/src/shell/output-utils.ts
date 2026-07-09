@@ -4,6 +4,7 @@
  */
 
 import type { Language } from "@linghun/shared";
+import { normalizeVisibleToolText } from "./visible-output-normalizer.js";
 
 const MAX_LINES_TO_SHOW = 3;
 const PADDING_TO_PREVENT_OVERFLOW = 10;
@@ -161,12 +162,13 @@ export function tryFormatJsonLine(line: string): string {
  * Try to format content as JSON (line by line)
  */
 export function tryJsonFormatContent(content: string): string {
+  const normalized = normalizeVisibleToolText(content);
   const MAX_JSON_FORMAT_LENGTH = 10_000;
-  if (content.length > MAX_JSON_FORMAT_LENGTH) {
-    return content;
+  if (normalized.length > MAX_JSON_FORMAT_LENGTH) {
+    return normalized;
   }
 
-  const lines = content.split("\n");
+  const lines = normalized.split("\n");
   return lines.map(tryFormatJsonLine).join("\n");
 }
 

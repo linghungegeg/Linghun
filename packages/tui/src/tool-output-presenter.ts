@@ -1,6 +1,7 @@
 import type { Language } from "@linghun/shared";
 import type { ToolName, ToolOutput } from "@linghun/tools";
 import type { DisplayBlock } from "./shell/types.js";
+import { normalizeVisibleToolText } from "./shell/visible-output-normalizer.js";
 
 export type TuiOutputLayer = "primary" | "details" | "debug";
 
@@ -674,7 +675,7 @@ function createToolOutputPreview(
   language: Language,
   output?: ToolOutput,
 ): { text: string; truncated: boolean } {
-  const cleanedText = stripLegacyFoldHints(text);
+  const cleanedText = normalizeVisibleToolText(stripLegacyFoldHints(text));
   if (name === "Todo") {
     const structured = createTodoSurfacePreview(output, language);
     if (structured) return structured;
@@ -870,7 +871,7 @@ function createSummaryFirstPreview(
   language: Language,
   output?: ToolOutput,
 ): { text: string; truncated: boolean } {
-  const previewText = name === "Bash" ? normalizeBashPreviewText(text) : text;
+  const previewText = text;
   const lines = previewText.length > 0 ? previewText.split(/\r?\n/u) : [];
   const metadata = output?.data && typeof output.data === "object" ? output.data : undefined;
   const count = readNumber(metadata, "count");
@@ -948,21 +949,6 @@ function createSummaryFirstPreview(
     }
   }
   return { text: `- ${stats.join("; ")}`, truncated: false };
-}
-
-function normalizeBashPreviewText(text: string): string {
-  if (!text) return text;
-  const decoded = text
-    .replace(/\\u001b/giu, "\u001B")
-    .replace(/\\x1b/giu, "\u001B")
-    .replace(/\\r\\n/gu, "\n")
-    .replace(/\\n/gu, "\n")
-    .replace(/\\r/gu, "\r");
-  return stripAnsi(decoded);
-}
-
-function stripAnsi(text: string): string {
-  return text.replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, "");
 }
 
 function formatToolLineStat(

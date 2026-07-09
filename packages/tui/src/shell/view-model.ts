@@ -41,6 +41,7 @@ import {
 } from "./progress-views.js";
 import { shouldUseNativeScrollbackTaskFrame } from "./native-scrollback-frame.js";
 import { charWidth, truncateMiddle } from "./text-utils.js";
+import { normalizeVisibleToolText } from "./visible-output-normalizer.js";
 import type {
   BackgroundTaskSummary,
   CommandPanelView,
@@ -1180,7 +1181,7 @@ export function createOutputBlock(
   id = `output-${Date.now()}`,
 ): ProductBlockViewModel {
   const rawNormalized = sanitizeMainScreenLeakage(
-    redactSensitiveText(text.replace(/\r/g, "").trim()),
+    redactSensitiveText(normalizeVisibleToolText(text).replace(/\r/g, "").trim()),
     language,
   );
   // P1-1 — Ctrl+O hint 单一来源：tool-output-presenter 在正文里自带一行折叠
