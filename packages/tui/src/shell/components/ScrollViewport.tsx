@@ -55,11 +55,29 @@ export function TranscriptViewport({
   const viewportRef = useRef<DOMElement | null>(null);
   const contentRef = useRef<DOMElement | null>(null);
   const [maxOffset, setMaxOffset] = useState(0);
+  const [layoutRecoveryPulse, setLayoutRecoveryPulse] = useState(0);
   const maxOffsetRef = useRef(0);
   const lastReportedOverflow = useRef<boolean | undefined>(undefined);
   const lastReportedMeasure = useRef<string | undefined>(undefined);
   const lastReportedGeometry = useRef<string | undefined>(undefined);
   const lastDimKey = useRef("");
+  const lastRecoveryKey = useRef("");
+  const recoveryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const scheduleLayoutRecovery = (key: string): void => {
+    if (lastRecoveryKey.current === key) return;
+    lastRecoveryKey.current = key;
+    if (recoveryTimer.current) clearTimeout(recoveryTimer.current);
+    recoveryTimer.current = setTimeout(() => {
+      recoveryTimer.current = undefined;
+      setLayoutRecoveryPulse((pulse) => pulse + 1);
+    }, 0);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (recoveryTimer.current) clearTimeout(recoveryTimer.current);
+    };
+  }, []);
 
   // Measure after layout. measureElement() returns 0 during render, so we read
   // the computed yoga layout in a post-render effect and store maxOffset. The
@@ -67,20 +85,28 @@ export function TranscriptViewport({
   // re-measure; we only setState when the derived ceiling actually changes to
   // avoid a render loop.
   useEffect(() => {
+    void layoutRecoveryPulse;
     const viewportNode = viewportRef.current?.yogaNode;
     const contentNode = contentRef.current?.yogaNode;
     if (!viewportNode || !contentNode) return;
     const viewportHeight = viewportNode.getComputedHeight();
     const viewportWidth = viewportNode.getComputedWidth();
     const measuredContentHeight = contentNode.getComputedHeight();
+    if (viewportHeight <= 0 || viewportWidth <= 0) {
+      scheduleLayoutRecovery(`zero:${viewportWidth}:${viewportHeight}:${measuredContentHeight}`);
+      return;
+    }
     const contentHeight = virtualRange?.estimatedContentHeight ?? measuredContentHeight;
     const dimKey = `${viewportWidth}:${viewportHeight}:${contentHeight}`;
-    if (dimKey === lastDimKey.current) return;
-    lastDimKey.current = dimKey;
     const nextMax = Math.max(0, Math.floor(contentHeight - viewportHeight));
     const nextOffset = computeScrollViewportOffset(nextMax, scroll);
+    const dimensionsChanged = dimKey !== lastDimKey.current;
+    if (dimensionsChanged) {
+      lastDimKey.current = dimKey;
+      scheduleLayoutRecovery(`settle:${dimKey}`);
+    }
     const measureKey = `${viewportHeight}:${contentHeight}`;
-    if (onMeasure && lastReportedMeasure.current !== measureKey) {
+    if (dimensionsChanged && onMeasure && lastReportedMeasure.current !== measureKey) {
       lastReportedMeasure.current = measureKey;
       onMeasure({ viewportHeight, contentHeight });
     }
@@ -100,12 +126,12 @@ export function TranscriptViewport({
         onGeometry(geometry);
       }
     }
-    if (maxOffsetRef.current !== nextMax) {
+    if (dimensionsChanged && maxOffsetRef.current !== nextMax) {
       maxOffsetRef.current = nextMax;
       setMaxOffset(nextMax);
     }
     const hasOverflow = nextMax > 0;
-    if (onOverflowChange && lastReportedOverflow.current !== hasOverflow) {
+    if (dimensionsChanged && onOverflowChange && lastReportedOverflow.current !== hasOverflow) {
       lastReportedOverflow.current = hasOverflow;
       onOverflowChange(hasOverflow);
     }

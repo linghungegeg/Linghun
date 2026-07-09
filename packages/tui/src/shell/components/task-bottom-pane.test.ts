@@ -7,7 +7,11 @@ import {
   nativeScrollbackTaskFrameHeight,
   taskBottomPaneBudget,
 } from "../native-scrollback-frame.js";
-import { allocateBottomPaneBudget } from "./TaskBottomPane.js";
+import {
+  allocateBottomPaneBudget,
+  isAgentProgressPaneActive,
+  isWorkflowProgressPaneActive,
+} from "./TaskBottomPane.js";
 
 describe("TaskBottomPane budget allocation", () => {
   it("keeps full mode within the frame budget while allowing optional rows", () => {
@@ -21,6 +25,110 @@ describe("TaskBottomPane budget allocation", () => {
     expect(allocation.maxRows).toBe(16 - MIN_TRANSCRIPT_ROWS);
     expect(allocation.composerMaxVisibleLines).toBeGreaterThan(1);
     expect(allocation.showAgentProgress || allocation.showWorkflowProgress).toBe(true);
+  });
+
+  it("evicts completed agent and workflow progress from the bottom pane budget", () => {
+    expect(
+      isAgentProgressPaneActive({
+        rows: [
+          {
+            id: "agent-1",
+            branch: "last",
+            name: "agent 1",
+            status: "completed",
+            toolUses: 1,
+            tokens: 10,
+          },
+        ],
+        hiddenPending: 0,
+        cursor: -1,
+      }),
+    ).toBe(false);
+    expect(
+      isAgentProgressPaneActive({
+        rows: [
+          {
+            id: "agent-running",
+            branch: "last",
+            name: "agent running",
+            status: "running",
+            toolUses: 0,
+            tokens: 0,
+          },
+        ],
+        hiddenPending: 0,
+        cursor: -1,
+      }),
+    ).toBe(true);
+    expect(
+      isAgentProgressPaneActive({
+        rows: [
+          {
+            id: "agent-failed",
+            branch: "last",
+            name: "agent failed",
+            status: "failed",
+            toolUses: 1,
+            tokens: 10,
+          },
+        ],
+        hiddenPending: 0,
+        cursor: -1,
+      }),
+    ).toBe(true);
+    expect(
+      isWorkflowProgressPaneActive({
+        runs: [
+          {
+            id: "workflow-1",
+            goal: "done",
+            status: "completed",
+            completedSteps: 2,
+            totalSteps: 2,
+            steps: [],
+          },
+          {
+            id: "workflow-2",
+            goal: "cancelled",
+            status: "cancelled",
+            completedSteps: 1,
+            totalSteps: 2,
+            steps: [],
+          },
+        ],
+        hiddenPending: 0,
+      }),
+    ).toBe(false);
+    expect(
+      isWorkflowProgressPaneActive({
+        runs: [
+          {
+            id: "workflow-running",
+            goal: "run",
+            status: "running",
+            completedSteps: 1,
+            totalSteps: 2,
+            steps: [],
+          },
+        ],
+        hiddenPending: 0,
+      }),
+    ).toBe(true);
+    expect(
+      isWorkflowProgressPaneActive({
+        runs: [
+          {
+            id: "workflow-failed",
+            goal: "failed",
+            status: "failed",
+            completedSteps: 1,
+            totalSteps: 2,
+            steps: [],
+          },
+        ],
+        hiddenPending: 0,
+      }),
+    ).toBe(true);
   });
 
   it("uses compact mode at 10 rows and keeps composer/status ahead of optional rows", () => {
@@ -251,5 +359,15 @@ describe("TaskBottomPane budget allocation", () => {
     expect(source).toContain("const bottomPaneStatus = view.bottomPaneStatus ?? legacyStatusFromActivity(view.activity)");
     expect(source).not.toContain("const bottomPaneStatus = view.permission");
     expect(source).not.toContain("? undefined");
+  });
+
+  it("keeps ScrollViewport resilient after fullscreen panel teardown and scroll-only updates", () => {
+    const source = readFileSync(new URL("./ScrollViewport.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("scheduleLayoutRecovery(`zero:");
+    expect(source).toContain("scheduleLayoutRecovery(`settle:");
+    expect(source).toContain("const dimensionsChanged = dimKey !== lastDimKey.current;");
+    expect(source).toContain("const geometryKey =");
+    expect(source).not.toContain("if (dimKey === lastDimKey.current) return;");
   });
 });

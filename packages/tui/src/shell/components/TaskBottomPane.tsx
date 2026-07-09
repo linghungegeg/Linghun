@@ -154,8 +154,8 @@ export function TaskBottomPane({
     notificationRows: (view.notifications?.length ?? 0) > 0 ? 1 : 0,
     runtimeSummaryRows: view.taskRuntimeSummary ? 2 : 0,
     taskListRows: estimateTaskListRows(view.taskListView, statusActive),
-    agentProgressRows: view.agentProgressTree ? 2 : 0,
-    workflowProgressRows: view.workflowProgressView ? 2 : 0,
+    agentProgressRows: isAgentProgressPaneActive(view.agentProgressTree) ? 2 : 0,
+    workflowProgressRows: isWorkflowProgressPaneActive(view.workflowProgressView) ? 2 : 0,
   };
   const allocation = allocateBottomPaneBudget(frameHeight, {
     ...slotEstimates,
@@ -171,7 +171,7 @@ export function TaskBottomPane({
 
   return (
     <Box flexShrink={0} flexDirection="column">
-      {allocation.showAgentProgress && view.agentProgressTree ? (
+      {allocation.showAgentProgress && isAgentProgressPaneActive(view.agentProgressTree) ? (
         <Box width={view.width} paddingX={2}>
           <AgentProgressTree
             tree={view.agentProgressTree}
@@ -182,7 +182,7 @@ export function TaskBottomPane({
         </Box>
       ) : null}
 
-      {allocation.showWorkflowProgress && view.workflowProgressView ? (
+      {allocation.showWorkflowProgress && isWorkflowProgressPaneActive(view.workflowProgressView) ? (
         <Box width={view.width} paddingX={2}>
           <WorkflowProgressView
             workflow={view.workflowProgressView}
@@ -269,6 +269,24 @@ export function TaskBottomPane({
 
 function isBottomPaneStatusVisible(status: ShellViewModel["bottomPaneStatus"]): boolean {
   return Boolean(status);
+}
+
+export function isAgentProgressPaneActive(
+  tree: ShellViewModel["agentProgressTree"],
+): tree is NonNullable<ShellViewModel["agentProgressTree"]> {
+  if (!tree || tree.rows.length === 0) return false;
+  return tree.rows.some((row) => !isTerminalProgressStatus(row.status));
+}
+
+export function isWorkflowProgressPaneActive(
+  workflow: ShellViewModel["workflowProgressView"],
+): workflow is NonNullable<ShellViewModel["workflowProgressView"]> {
+  if (!workflow || workflow.runs.length === 0) return false;
+  return workflow.runs.some((run) => !isTerminalProgressStatus(run.status));
+}
+
+function isTerminalProgressStatus(status: string): boolean {
+  return status === "completed" || status === "cancelled";
 }
 
 function estimateTaskListRows(
