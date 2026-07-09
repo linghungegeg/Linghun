@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
+import type { TranscriptEvent } from "@linghun/core";
 import type {
   EndpointProfile,
   ModelGateway,
@@ -52,6 +53,10 @@ import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime
 import { getProviderContextMaxChars } from "./compact-preflight-runtime.js";
 import { getAutoCompactTriggerChars } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
+import {
+  formatDeepCompactPromptSummary,
+  isDeepCompactPacket,
+} from "./deep-compact-runtime.js";
 import { createUserMessageEvent, ensureSession, t, writeStatus } from "./details-status-runtime.js";
 import {
   appendSystemEvent,
@@ -4082,6 +4087,41 @@ function compactModelMessageForHistory(message: ModelMessage): ModelMessage {
   return content === message.content ? message : { ...message, content };
 }
 
+const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
+
+function isModelHistoryCompactBoundary(event: TranscriptEvent): boolean {
+  return (
+    event.type === "deep_compact_packet" ||
+    (event.type === "system_event" && event.message.startsWith(COMPACT_PROJECTION_EVENT_PREFIX))
+  );
+}
+
+function modelHistoryCompactSummary(event: TranscriptEvent | undefined): ModelMessage | undefined {
+  if (event?.type === "deep_compact_packet" && isDeepCompactPacket(event.packet)) {
+    const content = formatDeepCompactPromptSummary(event.packet);
+    return content ? { role: "user", content } : undefined;
+  }
+  if (event?.type !== "system_event" || !event.message.startsWith(COMPACT_PROJECTION_EVENT_PREFIX)) {
+    return undefined;
+  }
+  try {
+    const projection = JSON.parse(event.message.slice(COMPACT_PROJECTION_EVENT_PREFIX.length)) as {
+      summary?: unknown;
+      restoreContext?: unknown;
+    };
+    if (typeof projection.summary !== "string") return undefined;
+    const restoreMetadata = projection.restoreContext
+      ? `\n[Context restore metadata]\n${JSON.stringify(projection.restoreContext)}`
+      : "";
+    return {
+      role: "user",
+      content: `Context compact projection\n${projection.summary}${restoreMetadata}`,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export async function buildModelMessagesWithRecentContext(
   context: TuiContext,
   sessionId: string,
@@ -4099,14 +4139,23 @@ export async function buildModelMessagesWithRecentContext(
         event.type === "assistant_text_delta" ||
         event.type === "tool_call_start" ||
         event.type === "tool_result" ||
-        event.type === "interrupt",
+        event.type === "interrupt" ||
+        isModelHistoryCompactBoundary(event),
     });
     const recent = recentTranscript.events;
-    const lastRecent = recent.at(-1);
+    let compactBoundaryIndex = -1;
+    for (let index = recent.length - 1; index >= 0; index -= 1) {
+      if (!isModelHistoryCompactBoundary(recent[index])) continue;
+      compactBoundaryIndex = index;
+      break;
+    }
+    const compactSummary = modelHistoryCompactSummary(recent[compactBoundaryIndex]);
+    const activeRecent = compactBoundaryIndex >= 0 ? recent.slice(compactBoundaryIndex + 1) : recent;
+    const lastRecent = activeRecent.at(-1);
     const withoutCurrent =
       lastRecent?.type === "user_message" && lastRecent.text === currentUserText
-        ? recent.slice(0, -1)
-        : recent;
+        ? activeRecent.slice(0, -1)
+        : activeRecent;
     let lastAssistantIndex = -1;
     let lastInterruptedTurnMessage: string | undefined;
     for (let index = 0; index < withoutCurrent.length; index += 1) {
@@ -4190,6 +4239,7 @@ export async function buildModelMessagesWithRecentContext(
       sessionId,
       historyMessages,
     );
+    if (compactSummary) messages.push(compactSummary);
     messages.push(...budgetedHistory);
     if (lastInterruptedTurnMessage) {
       const reason = lastInterruptedTurnMessage.match(/reason=([^;\s]+)/u)?.[1] ?? "unknown";

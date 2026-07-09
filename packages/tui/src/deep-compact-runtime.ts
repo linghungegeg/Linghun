@@ -124,16 +124,27 @@ async function runDeepCompactIfNeeded(input: {
   }
 
   const resumed = await input.context.store.resume(input.sessionId);
-  if (!shouldRunDeepCompact(input.context, resumed.transcript, input.trigger)) {
+  const activeTranscript = resumed.transcript.filter(
+    (event) => !isCompactCommandControlEvent(event),
+  );
+  if (!shouldRunDeepCompact(input.context, activeTranscript, input.trigger)) {
     return input.context.cache.deepCompact
       ? { ok: true, packet: input.context.cache.deepCompact }
       : failMessage(input.context, "Deep compact skipped: transcript pressure is below trigger.");
   }
   return runDeepCompact({
     ...input,
-    transcript: resumed.transcript,
+    transcript: activeTranscript,
     signal: input.signal,
   });
+}
+
+function isCompactCommandControlEvent(event: TranscriptEvent): boolean {
+  return (
+    event.type === "system_event" &&
+    event.message.startsWith("meta_orchestration:slash-command;") &&
+    /summary=command=\/(?:compact|context)(?:;|$)/u.test(event.message)
+  );
 }
 
 async function getReusableDeepCompactPacketFromTail(

@@ -121,6 +121,29 @@ export async function prepareMessagesForProviderPreflight(input: {
       afterChars: budgetedChars,
     },
   ];
+  const previousStrategy = input.context.cache.compactStrategy;
+  const hasRetriggerGuard = previousStrategy?.steps.some(
+    (step) => step.reason === "post_compact_will_retrigger_next_turn",
+  );
+  const hasCompactProjection = budgeted.some(
+    (message) =>
+      typeof message.content === "string" &&
+      message.content.startsWith("Context compact projection\n"),
+  );
+  const retriggerTailGrowthThreshold = Math.max(
+    COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
+    Math.floor(Math.max(0, contextMaxChars - triggerChars) / 2),
+  );
+  if (
+    input.trigger !== "reactive" &&
+    previousStrategy &&
+    hasRetriggerGuard &&
+    hasCompactProjection &&
+    budgetedChars <= contextMaxChars &&
+    budgetedChars - previousStrategy.finalChars < retriggerTailGrowthThreshold
+  ) {
+    return { blocked: false, messages: budgeted };
+  }
   if (input.trigger !== "reactive" && budgetedChars <= triggerChars) {
     const withDeep = await injectDeepCompactContext(budgeted, input.context);
     const withDeepChars = estimateModelMessageChars(withDeep);
@@ -379,6 +402,19 @@ export async function prepareMessagesForProviderPreflight(input: {
         afterChars: providerMessageChars,
       });
     }
+    const willRetriggerNextTurn = providerMessageChars >= triggerChars;
+    if (willRetriggerNextTurn) {
+      strategySteps.push({
+        layer: "full_summary",
+        status: "failed",
+        reason: "post_compact_will_retrigger_next_turn",
+        beforeChars: providerMessageChars,
+        afterChars: providerMessageChars,
+      });
+      projection.risks.push(
+        "post-compact provider context remains at or above the auto-compact trigger",
+      );
+    }
     recordCompactStrategy(input.context, {
       runtime: input.runtime,
       trigger: input.trigger,
@@ -443,6 +479,14 @@ export async function prepareMessagesForProviderPreflight(input: {
       projection,
       baseline: input.context.cache.lastRequestObservationByKind?.main,
     });
+    if (willRetriggerNextTurn) {
+      await input.deps.appendSystemEvent(
+        input.context,
+        input.sessionId,
+        `context_compact_retrigger_risk: providerMessageChars=${providerMessageChars}; triggerChars=${triggerChars}; next full_summary suppressed until active tail grows by ${retriggerTailGrowthThreshold} chars`,
+        "warning",
+      );
+    }
     if (replacementProjectionEnabled) {
       await appendCompactProjectionEvents(input.context, input.sessionId, projection, input.deps);
     }
@@ -820,7 +864,10 @@ function refreshCompactProjectionAcceptance(
     !budgetHit ||
     (replacementProjectionEnabled && !replacementActive) ||
     terminalVisibleProjection === "not-reduced" ||
-    !projection.toolPairingSafe;
+    !projection.toolPairingSafe ||
+    projection.risks.includes(
+      "post-compact provider context remains at or above the auto-compact trigger",
+    );
 
   projection.acceptance = {
     budget: budgetHit ? "hit" : "miss",
@@ -956,7 +1003,13 @@ function recordCompactStrategy(
     triggerChars: input.triggerChars,
     postCompactTargetChars: input.postCompactTargetChars,
     finalChars: input.finalChars,
-    cacheStablePrefixRisk: appliedLayers.includes("full_summary") ? "medium" : "low",
+    cacheStablePrefixRisk: input.steps.some(
+      (step) => step.reason === "post_compact_will_retrigger_next_turn",
+    )
+      ? "high"
+      : appliedLayers.includes("full_summary")
+        ? "medium"
+        : "low",
     steps: input.steps,
   };
   context.cache.contextUsage = {

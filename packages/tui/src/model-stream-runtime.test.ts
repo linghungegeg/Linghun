@@ -261,6 +261,119 @@ describe("model message prompt cache layout", () => {
     expect(messages[3]).toMatchObject({ promptCache: "volatile" });
   });
 
+  it("cuts model history at the latest compact projection boundary", async () => {
+    const projection = {
+      boundaryId: "compact-boundary-test",
+      summary: "STABLE_COMPACT_SUMMARY",
+      restoreContext: { currentTask: "continue after compact" },
+    };
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            { type: "user_message", text: "RAW_OLD_CONTEXT user" },
+            { type: "assistant_text_delta", text: "RAW_OLD_CONTEXT assistant" },
+            {
+              type: "tool_result",
+              toolUseId: "old-call",
+              toolName: "Read",
+              content: "RAW_OLD_CONTEXT tool_result",
+            },
+            {
+              type: "system_event",
+              level: "info",
+              message: `compact_projection:${JSON.stringify(projection)}`,
+            },
+            { type: "user_message", text: "new request after compact" },
+            { type: "assistant_text_delta", text: "new answer after compact" },
+            { type: "user_message", text: "current user" },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-compact-boundary",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(serialized).toContain("STABLE_COMPACT_SUMMARY");
+    expect(serialized).toContain("new request after compact");
+    expect(serialized).toContain("new answer after compact");
+    expect(serialized).not.toContain("RAW_OLD_CONTEXT");
+  });
+
+  it("cuts model history at a deep compact packet boundary", async () => {
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            { type: "user_message", text: "RAW_OLD_DEEP_CONTEXT" },
+            {
+              type: "deep_compact_packet",
+              packet: {
+                id: "deep-boundary-test",
+                kind: "deep",
+                scope: "full transcript semantic compact",
+                summary: "STABLE_DEEP_COMPACT_SUMMARY",
+                preservedEvidenceRefs: ["ev-deep"],
+                preservedFiles: ["src/deep.ts"],
+                activeAgentsWorkflows: [],
+                pendingItems: [],
+                decisions: [],
+                risks: [],
+                createdAt: "2026-07-10T00:00:00.000Z",
+                model: "test-model",
+                provider: "test",
+                trigger: "request",
+                transcriptEventCount: 1,
+              },
+            },
+            { type: "assistant_text_delta", text: "new deep-boundary answer" },
+            { type: "user_message", text: "current user" },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-deep-boundary",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(serialized).toContain("STABLE_DEEP_COMPACT_SUMMARY");
+    expect(serialized).toContain("new deep-boundary answer");
+    expect(serialized).not.toContain("RAW_OLD_DEEP_CONTEXT");
+  });
+
   it("adds a narrow boundary hint after an interrupted foreground turn", async () => {
     const context = {
       model: "test-model",

@@ -724,8 +724,6 @@ function projectMainScreenAfterCompact(
   context: TuiContext,
   blocks: ProductBlockViewModel[],
 ): { beforeCount: number; afterCount: number } {
-  const beforeCount = blocks.length;
-  if (beforeCount === 0) return { beforeCount, afterCount: 0 };
   context.transcriptSource ??= createTranscriptSource();
   for (const block of blocks) {
     const kind = transcriptSourceKindForBlock(block);
@@ -737,14 +735,32 @@ function projectMainScreenAfterCompact(
       rawText: transcriptSourceRawTextForBlock(block),
     });
   }
+  const sourceCells = context.transcriptSource.cells;
+  const beforeCount = sourceCells.length;
+  let sourceBoundaryIndex = -1;
+  for (let index = sourceCells.length - 1; index >= 0; index -= 1) {
+    if (sourceCells[index]?.kind !== "compact_boundary") continue;
+    sourceBoundaryIndex = index;
+    break;
+  }
+  const sourceBoundary = sourceBoundaryIndex >= 0 ? sourceCells[sourceBoundaryIndex] : undefined;
+  const recentSourceCells = sourceCells
+    .slice(sourceBoundaryIndex >= 0 ? sourceBoundaryIndex + 1 : 0)
+    .slice(-POST_COMPACT_VISIBLE_BLOCKS);
+  sourceCells.splice(
+    0,
+    sourceCells.length,
+    ...(sourceBoundary ? [sourceBoundary, ...recentSourceCells] : recentSourceCells),
+  );
   const boundaries = blocks.filter((block) => block.messageKind === "compact_boundary");
   const latestBoundary = boundaries.at(-1);
+  const blockBoundaryIndex = latestBoundary ? blocks.lastIndexOf(latestBoundary) : -1;
   const recent = blocks
-    .filter((block) => block !== latestBoundary)
+    .slice(blockBoundaryIndex + 1)
     .slice(-POST_COMPACT_VISIBLE_BLOCKS);
   const selected = latestBoundary ? [latestBoundary, ...recent] : recent;
   blocks.splice(0, blocks.length, ...selected);
-  return { beforeCount, afterCount: blocks.length };
+  return { beforeCount, afterCount: sourceCells.length };
 }
 
 function trimOutputBlocks(blocks: ProductBlockViewModel[]): void {

@@ -467,6 +467,83 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     ]);
   });
 
+  it("marks post-compact retrigger risk and suppresses consecutive full summaries", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 13_100);
+    const events: string[] = [];
+    const deps = {
+      ...compactDeps(),
+      appendSystemEvent: async (_context: TuiContext, _sessionId: string, message: string) => {
+        events.push(message);
+      },
+    };
+    const staleContext = "RETRIGGER_OLD_CONTEXT".repeat(3_000);
+    const first = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: staleContext },
+        { role: "assistant", content: staleContext },
+        { role: "user", content: "compact now" },
+      ],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+
+    expect(first.blocked).toBe(false);
+    if (first.blocked) throw new Error("provider preflight unexpectedly blocked");
+    expect(context.cache.compactStrategy?.cacheStablePrefixRisk).toBe("high");
+    expect(context.cache.compactStrategy?.steps).toContainEqual(
+      expect.objectContaining({
+        layer: "full_summary",
+        status: "failed",
+        reason: "post_compact_will_retrigger_next_turn",
+      }),
+    );
+    expect(context.cache.compactProjection?.acceptance?.uiNotice).toBe("needs-attention");
+    expect(events.some((event) => event.startsWith("context_compact_retrigger_risk:"))).toBe(true);
+    const boundaryCount = context.cache.compactBoundaries.length;
+
+    const second = await prepareMessagesForProviderPreflight({
+      messages: [...first.messages, { role: "user", content: "second small follow-up" }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+    const third = await prepareMessagesForProviderPreflight({
+      messages: [...second.messages, { role: "user", content: "third small follow-up" }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+
+    expect(second.blocked).toBe(false);
+    expect(third.blocked).toBe(false);
+    expect(context.cache.compactBoundaries).toHaveLength(boundaryCount);
+    expect(context.cache.compactStrategy?.steps).toContainEqual(
+      expect.objectContaining({ reason: "post_compact_will_retrigger_next_turn" }),
+    );
+
+    const largeFollowUp = await prepareMessagesForProviderPreflight({
+      messages: [...third.messages, { role: "user", content: "x".repeat(30_000) }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+
+    expect(largeFollowUp.blocked || context.cache.compactBoundaries.length > boundaryCount).toBe(
+      true,
+    );
+  });
+
   it("can roll back provider-visible replacement projection with a feature flag", async () => {
     const context = await createTestContext();
     context.config = {

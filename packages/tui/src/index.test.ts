@@ -303,7 +303,11 @@ function isDeepCompactRequest(request: unknown): boolean {
 }
 
 function nonDeepRequests<T>(requests: T[]): T[] {
-  return requests.filter((request) => !isDeepCompactRequest(request));
+  return requests.filter(
+    (request) =>
+      !isDeepCompactRequest(request) &&
+      !JSON.stringify(request).includes("You are Linghun's memory extraction classifier."),
+  );
 }
 
 function createTestModelConfig(overrides: Partial<LinghunConfig> = {}): LinghunConfig {
@@ -4140,7 +4144,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(compactOutput.text).toContain("Deep compact 完成。");
     expect(compactOutput.text).toContain("progress: compact");
     expect(compactOutput.text).toContain("complete");
-    expect(compactOutput.text).toContain("保留：1 条 evidence 引用；1 个文件线索");
+    expect(compactOutput.text).toContain("保留：2 条 evidence 引用；2 个文件线索");
     expect(compactOutput.text).not.toContain("Context Compact status");
     expect(compactOutput.text).not.toContain("deep scope: full transcript semantic compact");
     expect(compactOutput.text).not.toContain("projection scope: provider-visible recent context projection");
@@ -4157,8 +4161,17 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.cache.compactProgress).toBeUndefined();
     expect(context.cache.compactBoundaries).toHaveLength(1);
     expect(context.cache.compactBoundaries[0]?.kind).toBe("manual");
-    expect(context.cache.compactBoundaries[0]?.preservedEvidenceRefs).toEqual(["ev-compact"]);
-    expect(context.cache.compactBoundaries[0]?.preservedFiles).toEqual(["README.md"]);
+    const budgetEvidence = context.evidence.find((item) =>
+      item.supportsClaims.includes("tool_result_budget"),
+    );
+    expect(budgetEvidence).toBeDefined();
+    if (!budgetEvidence) throw new Error("tool_result_budget evidence missing after compact status");
+    expect(context.cache.compactBoundaries[0]?.preservedEvidenceRefs).toEqual(
+      expect.arrayContaining(["ev-compact", budgetEvidence.id]),
+    );
+    expect(context.cache.compactBoundaries[0]?.preservedFiles).toEqual(
+      expect.arrayContaining(["README.md", budgetEvidence.source]),
+    );
     expect(context.cache.deepCompact?.scope).toBe("full transcript semantic compact");
     expect(context.cache.deepCompact?.summary).toContain("RAW_OLDER_TRANSCRIPT_ONLY");
     expect(context.cache.deepCompact?.summary).not.toContain(project);
@@ -4353,6 +4366,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(promptText).toContain("Full transcript semantic outline");
     expect(promptText).toContain("transcript events 122");
     expect(promptText).toContain(marker);
+    expect(promptText).not.toContain("summary=command=/compact");
     expect(context.cache.deepCompact?.scope).toBe("full transcript semantic compact");
     expect(context.cache.deepCompact?.summary).toContain(marker);
     const hydratedContext = await createTestContext(project, store, session, config);
@@ -4551,7 +4565,10 @@ describe("Phase 06 TUI slash commands", () => {
     const projectionMessage = result.messages.find(
       (message) => typeof message.content === "string" && message.content.includes("Context compact projection"),
     );
-    expect(projectionMessage?.content).toContain("[Compact boundary diagnostics]");
+    expect(projectionMessage?.content).toContain("[Context restore metadata]");
+    expect(projectionMessage?.content).toContain(
+      "anti hallucination: do not claim compact failure as PASS evidence",
+    );
     const projectionPrefix = String(projectionMessage?.content ?? "")
       .split("\n")
       .slice(0, 8)
@@ -4767,7 +4784,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(result.blocked).toBe(false);
     const providerText = JSON.stringify(result.messages);
     expect(providerText).toContain("Deep compact context");
-    expect(providerText).toContain("id deep-final-test");
+    expect(providerText).toContain("role older context continuity");
+    expect(providerText).not.toContain("id deep-final-test");
     expect(providerText).toContain("scope full transcript semantic compact");
     expect(providerText).toContain("never treat it as PASS engineering evidence");
     const verdict = createPhase15BetaVerdictScope(
@@ -12510,8 +12528,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requestText).toContain("scope full transcript semantic compact");
     expect(requestText).toContain("Context compact projection");
     expect(requestText).toContain("Linghun compact summary");
-    expect(requestText).toContain("files or evidence refs");
-    expect(requestText).toContain("failure learning");
+    expect(requestText).toContain("preserved evidence refs");
+    expect(requestText).toContain("preserved files");
+    expect(requestText).toContain(
+      "anti hallucination: Use deep compact only for context continuity",
+    );
     expect(requestText).not.toContain("RAW_TRANSCRIPT_SECRET_SHOULD_NOT_REACH_PROVIDER");
     expect(output.text).toContain("压缩后继续");
     expect(output.text).not.toContain("48000");
@@ -28528,7 +28549,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(compacted.fullText).toMatch(/compacted-tui-block-output|persisted-tui-block-output/);
   });
 
-  it("projects compacted main-screen blocks while preserving transcript source", async () => {
+  it("projects compacted main-screen blocks and transcript source into a new epoch", async () => {
     const { createShellBlockOutputForTest } = await import("../src/tui-output-surface.js");
     const blocks: ProductBlockViewModel[] = Array.from({ length: 30 }, (_, i) => ({
       id: `visible-${i}`,
@@ -28544,6 +28565,17 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const firstId = blocks[0]?.id;
     expect(firstId).toBeTruthy();
     blocks.push(createCompactBoundaryBlock(20_000, 4_000, "zh-CN"));
+    blocks.push(
+      ...Array.from({ length: 6 }, (_, i) => ({
+        id: `post-compact-${i}`,
+        kind: "details" as const,
+        status: "info" as const,
+        title: `post compact block ${i}`,
+        summary: `post compact block ${i}`,
+        fullText: `post compact block ${i}`,
+        messageKind: "assistant_text" as const,
+      })),
+    );
 
     const counts = await output.compactOutputMemory({ projectMainScreen: true });
 
@@ -28551,15 +28583,22 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(blocks).toHaveLength(5);
     expect(blocks[0]?.messageKind).toBe("compact_boundary");
     expect(blocks.slice(1).map((block) => block.id)).toEqual([
-      "visible-26",
-      "visible-27",
-      "visible-28",
-      "visible-29",
+      "post-compact-2",
+      "post-compact-3",
+      "post-compact-4",
+      "post-compact-5",
     ]);
-    expect(ctx.transcriptSource?.cells.length).toBeGreaterThanOrEqual(30);
+    expect(ctx.transcriptSource?.cells).toHaveLength(5);
     const transcriptSource = ctx.transcriptSource;
     if (!transcriptSource || !firstId) throw new Error("missing transcript source cell input");
-    expect(findTranscriptSourceCell(transcriptSource, firstId)).toBeTruthy();
+    expect(transcriptSource.cells[0]?.kind).toBe("compact_boundary");
+    expect(transcriptSource.cells.slice(1).map((cell) => cell.id)).toEqual([
+      "post-compact-2",
+      "post-compact-3",
+      "post-compact-4",
+      "post-compact-5",
+    ]);
+    expect(findTranscriptSourceCell(transcriptSource, firstId)).toBeUndefined();
   });
 
   it("binds compact output memory without dropping projection options", async () => {
