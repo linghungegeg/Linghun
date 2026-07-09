@@ -84,6 +84,7 @@ export type ProviderCompatibilityProfile =
   | "anthropic_messages";
 export type ProviderRuntimeProfile =
   | "deepseek_chat_completions"
+  | "deepseek_anthropic_messages"
   | "strict_openai_compatible_chat_completions"
   | "permissive_openai_compatible_chat_completions"
   | "openai_responses"
@@ -215,6 +216,7 @@ export type OpenAiChatRequest = {
   parallel_tool_calls?: boolean;
   reasoning?: { effort: string };
   stream_options?: { include_usage: true };
+  web_search_options?: Record<string, never>;
 };
 
 export type OpenAiResponsesRequest = {
@@ -248,12 +250,21 @@ type OpenAiToolDefinition = {
   };
 };
 
-type OpenAiResponsesToolDefinition = {
+type OpenAiResponsesFunctionToolDefinition = {
   type: "function";
   name: string;
   description: string;
   parameters: unknown;
 };
+
+type OpenAiResponsesWebSearchToolDefinition = {
+  type: "web_search";
+  external_web_access?: boolean;
+};
+
+type OpenAiResponsesToolDefinition =
+  | OpenAiResponsesFunctionToolDefinition
+  | OpenAiResponsesWebSearchToolDefinition;
 
 type PendingResponsesToolCall = {
   id: string;
@@ -315,9 +326,11 @@ export type AnthropicSystemBlock = {
 };
 
 export type AnthropicToolDefinition = {
+  type?: "web_search_20250305";
   name: string;
-  description: string;
-  input_schema: unknown;
+  description?: string;
+  input_schema?: unknown;
+  max_uses?: number;
   cache_control?: AnthropicCacheControl;
 };
 
@@ -393,7 +406,7 @@ type AnthropicUsage = {
 export type ProviderRuntimeContract = {
   profile: ProviderRuntimeProfile;
   endpointProfile: EndpointProfile;
-  endpoint: "/chat/completions" | "/responses" | "/v1/messages";
+  endpoint: "/chat/completions" | "/responses" | "/v1/messages" | "/anthropic/v1/messages";
   compatibilityProfile: ProviderCompatibilityProfile;
   supportsTools: boolean;
   sendReasoning: boolean;
@@ -583,6 +596,9 @@ export function resolveProviderBaseUrlDiagnostic(
   } else if (normalizedBaseUrl.endsWith("/responses")) {
     normalizedBaseUrl = normalizedBaseUrl.slice(0, -"/responses".length);
     fullEndpointSuffix = "responses";
+  } else if (normalizedBaseUrl.endsWith("/anthropic/v1/messages")) {
+    normalizedBaseUrl = normalizedBaseUrl.slice(0, -"/anthropic/v1/messages".length);
+    fullEndpointSuffix = "anthropic_messages";
   } else if (normalizedBaseUrl.endsWith("/v1/messages")) {
     normalizedBaseUrl = normalizedBaseUrl.slice(0, -"/v1/messages".length);
     fullEndpointSuffix = "anthropic_messages";
@@ -1025,6 +1041,29 @@ export function resolveProviderRuntimeContract(
 ): ProviderRuntimeContract {
   const supportsTools = config.supportsTools !== false;
   if (config.type === "deepseek") {
+    const endpointProfile =
+      request.endpointProfile === "anthropic_messages" ||
+      config.endpointProfile === "anthropic_messages" ||
+      inferEndpointProfileFromBaseUrl(config.baseUrl) === "anthropic_messages"
+        ? "anthropic_messages"
+        : "chat_completions";
+    if (endpointProfile === "anthropic_messages") {
+      return {
+        profile: "deepseek_anthropic_messages",
+        endpointProfile,
+        endpoint: "/anthropic/v1/messages",
+        compatibilityProfile: "anthropic_messages",
+        supportsTools,
+        sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
+        includeUsage: false,
+        toolSchemaShape: supportsTools ? "anthropic_tools" : "tools_disabled",
+        toolResultShape: supportsTools ? "anthropic_tool_result" : "tools_disabled",
+        retryStatuses: [...PROVIDER_RETRY_STATUSES],
+        maxAttempts: PROVIDER_MAX_ATTEMPTS,
+        requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+        streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+      };
+    }
     return {
       profile: "deepseek_chat_completions",
       endpointProfile: "chat_completions",
@@ -1275,6 +1314,7 @@ export function resolveEffectiveEndpointProfile(input: {
 function inferEndpointProfileFromBaseUrl(baseUrl: string | undefined): EndpointProfile | undefined {
   if (!baseUrl) return undefined;
   const trimmed = baseUrl.replace(/\/+$/, "");
+  if (trimmed.endsWith("/anthropic/v1/messages")) return "anthropic_messages";
   if (trimmed.endsWith("/v1/messages")) return "anthropic_messages";
   if (trimmed.endsWith("/chat/completions")) return "chat_completions";
   if (trimmed.endsWith("/responses")) return "responses";
@@ -1679,6 +1719,9 @@ function createChatProfileRequest(
       : request.toolChoice === "none"
         ? { tool_choice: "none" as const }
         : {}),
+    ...(shouldAttachChatNativeWebSearch(request, config, contract)
+      ? { web_search_options: {} }
+      : {}),
     ...(contract.sendReasoning
       ? createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
       : {}),
@@ -1746,7 +1789,12 @@ function createAnthropicMessagesProfileRequest(
     configModel: config.model,
     requestModel: request.model,
   }).endpointProfile;
-  if (effectiveProfile !== "anthropic_messages") {
+  const deepSeekAnthropicMessages =
+    config.type === "deepseek" &&
+    (request.endpointProfile === "anthropic_messages" ||
+      config.endpointProfile === "anthropic_messages" ||
+      inferEndpointProfileFromBaseUrl(config.baseUrl) === "anthropic_messages");
+  if (effectiveProfile !== "anthropic_messages" && !deepSeekAnthropicMessages) {
     throw new LinghunError({
       code: "PROVIDER_PROFILE_MISMATCH",
       message:
@@ -1760,7 +1808,10 @@ function createAnthropicMessagesProfileRequest(
   // D.13G：anthropic_messages 现在原生支持 tools；只有 contract.supportsTools=false（用户
   // 显式禁用）时才让 assertToolCapability 抛 MODEL_TOOLS_UNSUPPORTED；否则直接放过。
   assertToolCapability(request, contract);
-  const model = normalizeProviderRequestModel(request.model ?? config.model, config);
+  const model =
+    config.type === "deepseek"
+      ? (request.model ?? config.model)
+      : normalizeProviderRequestModel(request.model ?? config.model, config);
   // Anthropic 的 system prompt 是顶层字段；从 messages 中抽出第一个 system 文本，
   // 其余 system 消息合并到 system 字段，剩下 user/assistant 按顺序保留。
   const systemSegments: Array<{
@@ -2004,12 +2055,15 @@ function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] 
   const { stableTools, dynamicTools } = partitionAnthropicCacheTools(tools);
   const sortedTools = [...stableTools, ...dynamicTools];
   const cacheControlToolIndex = stableTools.length - 1;
-  return sortedTools.map((tool, index) => ({
+  const customTools = sortedTools.map((tool, index) => ({
     ...getCachedAnthropicToolBase(tool),
     ...(request.promptCacheEnabled && index === cacheControlToolIndex
       ? { cache_control: createAnthropicCacheControl(request) }
       : {}),
   }));
+  return shouldAttachHostedWebSearch(request)
+    ? [...customTools, createAnthropicWebSearchTool()]
+    : customTools;
 }
 
 function partitionAnthropicCacheTools(tools: ModelToolDefinition[]): {
@@ -2173,9 +2227,44 @@ function createOpenAiResponsesTools(
   // D.13F：与 chat tools 一致，按 name 字典序稳定排序。
   const tools = request.tools;
   if (!tools) return undefined;
-  return [...tools]
+  const customTools = [...tools]
     .sort(compareToolCacheIdentity)
     .map((tool) => getCachedOpenAiResponsesToolBase(tool));
+  return shouldAttachHostedWebSearch(request)
+    ? [...customTools, createOpenAiResponsesWebSearchTool()]
+    : customTools;
+}
+
+function shouldAttachHostedWebSearch(request: ModelRequest): boolean {
+  return request.toolChoice !== "none" && Boolean(request.tools?.length);
+}
+
+function createOpenAiResponsesWebSearchTool(): OpenAiResponsesWebSearchToolDefinition {
+  return {
+    type: "web_search",
+    external_web_access: true,
+  };
+}
+
+function createAnthropicWebSearchTool(): AnthropicToolDefinition {
+  return {
+    type: "web_search_20250305",
+    name: "web_search",
+    max_uses: 8,
+  };
+}
+
+function shouldAttachChatNativeWebSearch(
+  request: ModelRequest,
+  config: ProviderConfig,
+  contract: ProviderRuntimeContract,
+): boolean {
+  return (
+    request.toolChoice !== "none" &&
+    Boolean(request.tools?.length) &&
+    config.type === "openai-compatible" &&
+    contract.endpointProfile === "chat_completions"
+  );
 }
 
 function assertToolCapability(request: ModelRequest, contract: ProviderRuntimeContract): void {

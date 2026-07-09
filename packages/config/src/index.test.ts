@@ -490,6 +490,20 @@ describe("config directories", () => {
     expect(config.providers["openai-compatible"]?.includeUsage).toBe(true);
   });
 
+  it("loads deepseek endpoint profile from env", async () => {
+    vi.stubEnv("LINGHUN_DEEPSEEK_BASE_URL", "https://api.deepseek.com");
+    vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", "sk-deepseek-secret");
+    vi.stubEnv("LINGHUN_DEEPSEEK_MODEL", "deepseek-v4-pro");
+    vi.stubEnv("LINGHUN_DEEPSEEK_ENDPOINT_PROFILE", "anthropic-messages");
+    vi.resetModules();
+    const { loadConfig: envLoadConfig } = await import("./index.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    const config = await envLoadConfig(project);
+
+    expect(config.providers.deepseek?.endpointProfile).toBe("anthropic_messages");
+  });
+
   it("keeps empty endpoint profile as the chat_completions default", async () => {
     vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", " ");
     vi.resetModules();
@@ -680,6 +694,7 @@ describe("config directories", () => {
     expect(template).toContain("LINGHUN_INFERENCE_LEVEL=High");
     expect(template).toContain("# LINGHUN_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1");
     expect(template).toContain("# LINGHUN_DEEPSEEK_MODEL=deepseek-chat");
+    expect(template).toContain("# LINGHUN_DEEPSEEK_ENDPOINT_PROFILE=anthropic_messages");
     expect(template).toContain("LINGHUN_AUX_MODEL=");
 
     await envSaveProviderEnvSetup(

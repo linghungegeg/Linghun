@@ -120,6 +120,7 @@ describe("OpenAI compatible provider", () => {
         function: { name: "Read", description: "Read a file", parameters: { type: "object" } },
       },
     ]);
+    expect(request.web_search_options).toEqual({});
     expect(request.tool_choice).toBe("auto");
     expect(request.messages).toEqual([
       {
@@ -249,6 +250,7 @@ describe("OpenAI compatible provider", () => {
           description: "Read a file",
           parameters: { type: "object" },
         },
+        { type: "web_search", external_web_access: true },
       ],
       tool_choice: "auto",
       reasoning: { effort: "medium" },
@@ -293,7 +295,34 @@ describe("OpenAI compatible provider", () => {
 
     expect(request.reasoning).toEqual({ effort: "high" });
     expect(request.parallel_tool_calls).toBe(false);
-    expect(request.tools).toHaveLength(1);
+    expect(request.tools).toHaveLength(2);
+    expect(request.tools?.at(-1)).toEqual({ type: "web_search", external_web_access: true });
+  });
+
+  it("adds hosted web search to Responses tool schemas", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+    });
+
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "search current docs" }],
+      tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
+    });
+
+    expect(request.tools).toEqual([
+      {
+        type: "function",
+        name: "Read",
+        description: "Read a file",
+        parameters: { type: "object" },
+      },
+      { type: "web_search", external_web_access: true },
+    ]);
   });
 
   it("converts responses tool results to function_call_output input items", () => {
@@ -1983,6 +2012,62 @@ describe("resolveProviderRuntimeContract anthropic_messages branch", () => {
     expect(diagnostic.normalizedBaseUrl).toBe("https://api.anthropic.com");
     expect(diagnostic.profileMismatch).toBe(false);
   });
+
+  it("adds Anthropic server-side web search to tool schemas", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-opus-4-6",
+      endpointProfile: "anthropic_messages",
+    });
+
+    const request = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "search current docs" }],
+      tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
+    });
+
+    expect(request.tools).toEqual([
+      {
+        name: "Read",
+        description: "Read a file",
+        input_schema: { type: "object" },
+      },
+      { type: "web_search_20250305", name: "web_search", max_uses: 8 },
+    ]);
+  });
+
+  it("routes explicit DeepSeek Anthropic-compatible requests through the search endpoint", () => {
+    const provider = new DeepSeekProvider({
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "test-key",
+      model: "deepseek-v4-pro",
+      endpointProfile: "anthropic_messages",
+    });
+    const contract = resolveProviderRuntimeContract({
+      id: "deepseek",
+      type: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "test-key",
+      model: "deepseek-v4-pro",
+      endpointProfile: "anthropic_messages",
+    });
+
+    const request = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "search current docs" }],
+      tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
+    });
+
+    expect(contract.profile).toBe("deepseek_anthropic_messages");
+    expect(contract.endpoint).toBe("/anthropic/v1/messages");
+    expect(request.model).toBe("deepseek-v4-pro");
+    expect(request.tools?.at(-1)).toEqual({
+      type: "web_search_20250305",
+      name: "web_search",
+      max_uses: 8,
+    });
+  });
 });
 
 describe("Anthropic Messages stream parser", () => {
@@ -2150,7 +2235,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     });
     expect(body.tools).toBeDefined();
     // tools 必须按 name 字典序稳定排序（用于稳定 prompt cache 前缀 hash）。
-    expect(body.tools?.map((tool) => tool.name)).toEqual(["Bash", "Read"]);
+    expect(body.tools?.map((tool) => tool.name)).toEqual(["Bash", "Read", "web_search"]);
     // tools 走 Anthropic 原生 schema：{name, description, input_schema}，
     // 而不是 OpenAI 的 {type:"function", function:{...}} 包装。
     expect(body.tools?.[0]).toMatchObject({
@@ -2413,7 +2498,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
       toolChoice: "auto",
     });
 
-    expect(cached.tools?.map((tool) => tool.name)).toEqual(["Bash", "Read"]);
+    expect(cached.tools?.map((tool) => tool.name)).toEqual(["Bash", "Read", "web_search"]);
     expect(cached.tools?.[0]).toMatchObject({
       name: "Bash",
       input_schema: { type: "object" },
@@ -2423,6 +2508,11 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
       name: "Read",
       input_schema: { type: "object" },
       cache_control: { type: "ephemeral", ttl: "1h" },
+    });
+    expect(cached.tools?.[2]).toEqual({
+      type: "web_search_20250305",
+      name: "web_search",
+      max_uses: 8,
     });
 
     const uncached = provider.createAnthropicMessagesRequest({
@@ -2461,10 +2551,12 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
       "mcp__search",
       "plugin__deploy",
       "skill__notes",
+      "web_search",
     ]);
     expect(body.tools?.map((tool) => tool.cache_control)).toEqual([
       undefined,
       { type: "ephemeral" },
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -2535,9 +2627,10 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
       ],
     });
 
-    expect(body.tools?.map((tool) => tool.name)).toEqual(["Read", "Read"]);
+    expect(body.tools?.map((tool) => tool.name)).toEqual(["Read", "Read", "web_search"]);
     expect(body.tools?.map((tool) => tool.cache_control)).toEqual([
       { type: "ephemeral" },
+      undefined,
       undefined,
     ]);
     expect(JSON.stringify(body.tools)).not.toContain("schemaHash");
@@ -3319,8 +3412,11 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
         { name: "Mike", description: "m", inputSchema: { type: "object" } },
       ],
     });
-    const names = request.tools?.map((tool) => tool.name);
+    const names = request.tools
+      ?.filter((tool) => tool.type === "function")
+      .map((tool) => tool.name);
     expect(names).toEqual(["Alpha", "Mike", "Zeta"]);
+    expect(request.tools?.at(-1)).toEqual({ type: "web_search", external_web_access: true });
   });
 
   it("keeps OpenAI chat/responses bodies free of Anthropic-only cache fields", () => {

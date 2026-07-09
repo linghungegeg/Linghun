@@ -140,6 +140,8 @@ describe("model-loop-runtime", () => {
       expect(defs.some((d) => d.name === "SourcePack")).toBe(true);
       expect(defs.some((d) => d.name === "Write")).toBe(true);
       expect(defs.some((d) => d.name === "Bash")).toBe(true);
+      expect(defs.some((d) => d.name === "WebSearch")).toBe(false);
+      expect(defs.some((d) => d.name === "WebFetch")).toBe(true);
     });
 
     it("each definition has name, description, inputSchema", () => {

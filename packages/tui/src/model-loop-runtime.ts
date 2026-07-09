@@ -658,7 +658,7 @@ export function createModelToolDefinitions(): ModelToolDefinition[] {
 export function createModelToolDefinitionsForTools(
   tools: (typeof builtInTools)[ToolName][],
 ): ModelToolDefinition[] {
-  return tools.map((tool) => {
+  return tools.filter((tool) => tool.name !== "WebSearch").map((tool) => {
     let description =
       typeof tool.prompt === "function"
         ? `${tool.description}\n${tool.prompt()}`
@@ -752,7 +752,7 @@ export function readToolInputString(input: unknown, key: string): string | undef
 // 末尾，污染 transcript。
 //
 // 反幻觉边界改放在 system prompt + evidence rule：
-// - 模型自己负责决定是否调 WebSearch / WebFetch；
+// - 模型自己负责决定是否调原生搜索 / WebFetch；
 // - 没有 web_source 证据的"外部当前事实"在 system prompt 里规定不能断言；
 // - 本地事实（git/branch、文件、配置）走本地工具证据，不需要 web_source。
 

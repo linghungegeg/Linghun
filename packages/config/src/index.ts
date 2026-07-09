@@ -471,6 +471,7 @@ const providerEnvKeys = new Set([
   "LINGHUN_DEEPSEEK_BASE_URL",
   "LINGHUN_DEEPSEEK_API_KEY",
   "LINGHUN_DEEPSEEK_MODEL",
+  "LINGHUN_DEEPSEEK_ENDPOINT_PROFILE",
   "LINGHUN_INFERENCE_LEVEL",
   "LINGHUN_AUX_MODEL",
 ]);
@@ -495,6 +496,8 @@ LINGHUN_OPENAI_INCLUDE_USAGE=false
 # LINGHUN_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 # LINGHUN_DEEPSEEK_API_KEY=
 # LINGHUN_DEEPSEEK_MODEL=deepseek-chat
+# Optional: use anthropic_messages for DeepSeek Anthropic-compatible search.
+# LINGHUN_DEEPSEEK_ENDPOINT_PROFILE=anthropic_messages
 
 # Supported reasoning levels: Low, Medium, High.
 LINGHUN_INFERENCE_LEVEL=High
@@ -1112,7 +1115,9 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
     hasCompleteShellDeepSeekProvider ||
       values.LINGHUN_DEEPSEEK_BASE_URL ||
       values.LINGHUN_DEEPSEEK_API_KEY ||
-      values.LINGHUN_DEEPSEEK_MODEL,
+      values.LINGHUN_DEEPSEEK_MODEL ||
+      values.LINGHUN_DEEPSEEK_ENDPOINT_PROFILE ||
+      process.env.LINGHUN_DEEPSEEK_ENDPOINT_PROFILE,
   );
   if (!hasMainProviderValue && !hasDeepSeekProviderValue) {
     return {};
@@ -1155,6 +1160,13 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
       deepSeekProvider.baseUrl = values.LINGHUN_DEEPSEEK_BASE_URL;
     if (values.LINGHUN_DEEPSEEK_API_KEY) deepSeekProvider.apiKey = values.LINGHUN_DEEPSEEK_API_KEY;
     if (values.LINGHUN_DEEPSEEK_MODEL) deepSeekProvider.model = values.LINGHUN_DEEPSEEK_MODEL;
+    const deepSeekEndpointProfile =
+      process.env.LINGHUN_DEEPSEEK_ENDPOINT_PROFILE ?? values.LINGHUN_DEEPSEEK_ENDPOINT_PROFILE;
+    if (deepSeekEndpointProfile) {
+      deepSeekProvider.endpointProfile = normalizeEndpointProfile(
+        deepSeekEndpointProfile,
+      );
+    }
     providerConfig.deepseek = {
       type: "deepseek",
       model: process.env.LINGHUN_DEEPSEEK_MODEL ?? deepSeekProvider.model ?? defaultDeepSeekModel,
