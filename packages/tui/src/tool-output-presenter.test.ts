@@ -384,6 +384,41 @@ describe("tool-output-presenter", () => {
       expect(layered.preview).not.toContain("2 行");
     });
 
+    it("ReadSnippets 主屏显示读取文件和行范围，并限制目标数量", () => {
+      const ranges = [
+        { path: "src/alpha.ts", start: 10, end: 20, content: "PRIVATE_SNIPPET_BODY" },
+        { path: "src/beta.ts", start: 30, end: 40, content: "beta" },
+        { path: "src/gamma.ts", start: 50, end: 60, content: "gamma" },
+        { path: "src/delta.ts", start: 70, end: 80, content: "delta" },
+      ];
+      const layered = createLayeredToolOutput(
+        "ReadSnippets",
+        { text: "snippet output", data: { count: 4, ranges } },
+        "zh-CN",
+      );
+
+      expect(layered.preview).toContain("范围: src/alpha.ts:10-20; src/beta.ts:30-40; src/gamma.ts:50-60");
+      expect(layered.preview).toContain("另 1 个");
+      expect(layered.preview).not.toContain("src/delta.ts:70-80");
+      expect(layered.preview).not.toContain("PRIVATE_SNIPPET_BODY");
+    });
+
+    it("ReadSnippets English preview labels visible ranges", () => {
+      const layered = createLayeredToolOutput(
+        "ReadSnippets",
+        {
+          text: "snippet output",
+          data: {
+            count: 1,
+            ranges: [{ path: "src/alpha.ts", start: 10, end: 20, content: "alpha" }],
+          },
+        },
+        "en-US",
+      );
+
+      expect(layered.preview).toContain("Ranges: src/alpha.ts:10-20");
+    });
+
     it("evidenceId 透传到 layered.evidenceId（保留诊断信息）", () => {
       const layered = createLayeredToolOutput(
         "Read",

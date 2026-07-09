@@ -40,6 +40,7 @@ export type StructuredToolOutput = {
 const TODO_OUTPUT_ITEM_LIMIT = 8;
 const BASH_TAIL_LINE_LIMIT = 3;
 const PRIMARY_PREVIEW_LINE_CAP = 5;
+const READ_SNIPPET_TARGET_LIMIT = 3;
 const DIAGNOSTICS_SUMMARY_LIMIT = 3;
 const DIAGNOSTICS_EVIDENCE_LIMIT = 120;
 const RAW_TOOL_USE_PATTERNS = [
@@ -890,6 +891,8 @@ function createSummaryFirstPreview(
       truncated: Boolean(output?.truncated),
     }),
   ];
+  const readSnippetTargets =
+    name === "ReadSnippets" ? formatReadSnippetTargets(metadata, language) : undefined;
   if (count !== undefined) {
     stats.push(language === "en-US" ? `${count} match(es)` : `${count} 条结果`);
   }
@@ -930,7 +933,9 @@ function createSummaryFirstPreview(
       name === "Bash" && !looksLikeMojibake(previewText) ? formatBashTail(lines, language) : [];
     const diffFence = isEditingTool(name) ? createCompactDiffFence(output) : "";
     return {
-      text: [`- ${stats.join("; ")}`, ...tail, diffFence].filter(Boolean).join("\n"),
+      text: [`- ${stats.join("; ")}`, readSnippetTargets, ...tail, diffFence]
+        .filter(Boolean)
+        .join("\n"),
       truncated: true,
     };
   }
@@ -948,7 +953,38 @@ function createSummaryFirstPreview(
       return { text: [`- ${stats.join("; ")}`, previewText].join("\n"), truncated: false };
     }
   }
-  return { text: `- ${stats.join("; ")}`, truncated: false };
+  return {
+    text: [`- ${stats.join("; ")}`, readSnippetTargets].filter(Boolean).join("\n"),
+    truncated: false,
+  };
+}
+
+function formatReadSnippetTargets(
+  metadata: object | undefined,
+  language: Language,
+): string | undefined {
+  if (!metadata) return undefined;
+  const ranges = (metadata as { ranges?: unknown }).ranges;
+  if (!Array.isArray(ranges)) return undefined;
+  const targets = ranges.flatMap((value): string[] => {
+    if (!value || typeof value !== "object") return [];
+    const path = readStringValue(value, "path");
+    const start = readNumber(value, "start");
+    const end = readNumber(value, "end");
+    if (!path || start === undefined || end === undefined) return [];
+    return [`${path}:${start}-${end}`];
+  });
+  if (targets.length === 0) return undefined;
+  const visibleTargets = targets.slice(0, READ_SNIPPET_TARGET_LIMIT).join("; ");
+  const hiddenCount = targets.length - READ_SNIPPET_TARGET_LIMIT;
+  const suffix =
+    hiddenCount > 0
+      ? language === "en-US"
+        ? `; +${hiddenCount} more`
+        : `；另 ${hiddenCount} 个`
+      : "";
+  const label = language === "en-US" ? "Ranges" : "范围";
+  return `- ${label}: ${visibleTargets}${suffix}`;
 }
 
 function formatToolLineStat(
