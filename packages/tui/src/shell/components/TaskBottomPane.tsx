@@ -201,7 +201,7 @@ export function TaskBottomPane({
         />
       ) : null}
 
-      {allocation.showTaskList && view.taskListView ? (
+      {allocation.showTaskList && isTaskListPaneActive(view.taskListView) ? (
         <Box paddingX={2} marginBottom={statusActive ? TASK_STATUS_GAP_ROWS : 0}>
           <TaskListView
             list={view.taskListView}
@@ -293,8 +293,15 @@ function estimateTaskListRows(
   taskListView: ShellViewModel["taskListView"],
   hasFollowingStatus = false,
 ): number {
-  if (!taskListView || taskListView.rows.length === 0) return 0;
+  if (!isTaskListPaneActive(taskListView)) return 0;
   return 1 + TASK_LIST_TOP_GAP_ROWS + (hasFollowingStatus ? TASK_STATUS_GAP_ROWS : 0);
+}
+
+export function isTaskListPaneActive(
+  taskListView: ShellViewModel["taskListView"],
+): taskListView is NonNullable<ShellViewModel["taskListView"]> {
+  if (!taskListView || taskListView.rows.length === 0) return false;
+  return taskListView.rows.some((row) => !isTerminalProgressStatus(row.status));
 }
 
 function legacyStatusFromActivity(

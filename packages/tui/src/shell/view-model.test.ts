@@ -6807,7 +6807,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     const blocksIndex = source.indexOf("transcriptBlocks.map(");
     const previewIndex = source.indexOf("streamingAssistantText ? (", blocksIndex);
-    const activityIndex = source.indexOf("activity ? (", previewIndex);
+    const activityIndex = source.indexOf("activity && !bottomStatusActive ? (", previewIndex);
     expect(blocksIndex).toBeGreaterThan(0);
     expect(previewIndex).toBeGreaterThan(blocksIndex);
     expect(activityIndex).toBeGreaterThan(previewIndex);
@@ -9392,9 +9392,11 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     );
 
     expect(taskBody).toContain("const contentWidth = taskContentWidth(view.width)");
+    expect(taskBody).toContain("const bottomStatusActive = Boolean(view.bottomPaneStatus ?? view.activity)");
     expect(taskBody).toContain("contentWidth={contentWidth}");
     expect(activityBody).toContain("wrapWidth={contentWidth}");
     expect(activityBody).toContain("<ActivityIndicator");
+    expect(activityBody).toContain("activity && !bottomStatusActive");
     expect(bottomPaneSource).toContain("width={contentWidth}");
     expect(taskBody).toContain("flexGrow={1}");
     expect(taskBody).toContain("minHeight={0}");

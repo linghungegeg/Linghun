@@ -64,6 +64,7 @@ import {
   type VerificationReport,
   __testBindCompactOutputMemoryForShell,
   __testBuildExplicitDetailsCommandPanel,
+  __testCloseCommandPanelState,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
   __testFormatStartAgentDidNotStartMessage,
@@ -18044,11 +18045,33 @@ describe("Phase 06 TUI slash commands", () => {
       indexSrc.indexOf('if (commandResult === "message")'),
       indexSrc.indexOf("const naturalResult", indexSrc.indexOf('if (commandResult === "message")')),
     );
-    expect(naturalPath).toContain("context.commandPanelState = undefined");
+    expect(naturalPath).toContain("closeCommandPanelState(context)");
     expect(naturalPath).toContain("context.helpPanelState = undefined");
     expect(naturalPath).toContain("context.configPanelState = undefined");
     expect(naturalPath).toContain("context.btwPanelState = undefined");
     expect(naturalPath).toContain("context.sessionsPanelState = undefined");
+  });
+
+  it("CommandPanel close clears stale viewport geometry for the next transcript measure", () => {
+    const context = {
+      commandPanelState: {
+        title: "/cache",
+        summary: ["cache status"],
+      },
+      transcriptViewportGeometry: {
+        x: 2,
+        y: 10,
+        width: 80,
+        height: 12,
+        contentHeight: 40,
+        topOffset: 8,
+      },
+    } as unknown as TuiContext;
+
+    __testCloseCommandPanelState(context);
+
+    expect(context.commandPanelState).toBeUndefined();
+    expect(context.transcriptViewportGeometry).toBeUndefined();
   });
 
   it("shows only canonical modes and normalizes legacy aliases", async () => {

@@ -121,6 +121,7 @@ function TaskLayout({
   const visibleTranscriptBlocks = normalScreenNativeScrollback
     ? view.blocks
     : transcriptBlocks;
+  const bottomStatusActive = Boolean(view.bottomPaneStatus ?? view.activity);
   const expandedTranscriptBlock =
     view.ctrlOExpand?.active && view.ctrlOExpand.blockId
       ? visibleTranscriptBlocks.find((block) => block.id === view.ctrlOExpand?.blockId)
@@ -166,6 +167,7 @@ function TaskLayout({
           <Box flexDirection="column" flexShrink={0} paddingX={2} paddingTop={1}>
             <TaskActivityRegion
               activity={undefined}
+              bottomStatusActive={false}
               expandedTranscriptBlock={expandedTranscriptBlock}
               framePulse={framePulse}
               limitations={view.limitations}
@@ -201,6 +203,7 @@ function TaskLayout({
             <Box flexDirection="column" paddingX={2}>
               <TaskActivityRegion
                 activity={view.activity}
+                bottomStatusActive={bottomStatusActive}
                 expandedTranscriptBlock={expandedTranscriptBlock}
                 framePulse={framePulse}
                 limitations={view.limitations}
@@ -249,6 +252,7 @@ function taskContentWidth(viewWidth: number): number {
 
 function TaskActivityRegion({
   activity,
+  bottomStatusActive,
   contentWidth,
   capability,
   expandedTranscriptBlock,
@@ -264,6 +268,7 @@ function TaskActivityRegion({
   viewWidth,
 }: {
   activity: ShellViewModel["activity"];
+  bottomStatusActive: boolean;
   contentWidth: number;
   capability: TerminalCapability;
   expandedTranscriptBlock: ShellViewModel["blocks"][number] | undefined;
@@ -319,7 +324,7 @@ function TaskActivityRegion({
         </Box>
       ) : null}
 
-      {activity ? (
+      {activity && !bottomStatusActive ? (
         <Box marginTop={1}>
           <ActivityIndicator
             activity={activity}

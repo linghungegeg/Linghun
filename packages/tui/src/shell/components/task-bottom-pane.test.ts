@@ -10,6 +10,7 @@ import {
 import {
   allocateBottomPaneBudget,
   isAgentProgressPaneActive,
+  isTaskListPaneActive,
   isWorkflowProgressPaneActive,
 } from "./TaskBottomPane.js";
 
@@ -129,6 +130,47 @@ describe("TaskBottomPane budget allocation", () => {
         hiddenPending: 0,
       }),
     ).toBe(true);
+  });
+
+  it("evicts stale completed task-list views from the bottom pane budget", () => {
+    expect(
+      isTaskListPaneActive({
+        rows: [
+          {
+            id: "todo-done",
+            subject: "done",
+            status: "completed",
+          },
+        ],
+        hiddenPending: 0,
+        totalCount: 1,
+        currentIndex: 1,
+        completedCount: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isTaskListPaneActive({
+        rows: [
+          {
+            id: "todo-active",
+            subject: "active",
+            status: "in_progress",
+          },
+        ],
+        hiddenPending: 0,
+        totalCount: 1,
+        currentIndex: 1,
+        completedCount: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not allocate task-list rows for stale completed task-list views", () => {
+    const source = readFileSync(new URL("./TaskBottomPane.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("taskListRows: estimateTaskListRows(view.taskListView, statusActive)");
+    expect(source).toContain("if (!isTaskListPaneActive(taskListView)) return 0;");
+    expect(source).toContain("allocation.showTaskList && isTaskListPaneActive(view.taskListView)");
   });
 
   it("uses compact mode at 10 rows and keeps composer/status ahead of optional rows", () => {

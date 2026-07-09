@@ -2561,6 +2561,15 @@ function isSameTranscriptViewportGeometry(
   );
 }
 
+function closeCommandPanelState(
+  context: Pick<TuiContext, "commandPanelState" | "transcriptViewportGeometry">,
+): void {
+  context.commandPanelState = undefined;
+  context.transcriptViewportGeometry = undefined;
+}
+
+export const __testCloseCommandPanelState = closeCommandPanelState;
+
 export function __testBindCompactOutputMemoryForShell(
   context: TuiContext,
   shellOutput: {
@@ -2713,7 +2722,7 @@ async function runInkShell(
             context.activeBtwAbortController.abort();
             context.activeBtwAbortController = undefined;
           }
-          context.commandPanelState = undefined;
+          closeCommandPanelState(context);
           context.helpPanelState = undefined;
           context.configPanelState = undefined;
           context.btwPanelState = undefined;
@@ -2829,7 +2838,7 @@ async function runInkShell(
       }
       // ─── D.13Q-UX Task Surface — CommandPanel 关闭 ──────────────────────────
       if (event.type === "command-panel-close") {
-        context.commandPanelState = undefined;
+        closeCommandPanelState(context);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2914,7 +2923,7 @@ async function runInkShell(
             cursor: 0,
           };
           await stopCommandPanelSelection(context, output);
-          context.commandPanelState = undefined;
+          closeCommandPanelState(context);
         }
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -3588,7 +3597,7 @@ async function runInkShell(
         context.handledTaskSuggestionIds.add(suggestion.id);
         context.taskSuggestionCursor = 0;
         if (suggestion.action.kind === "slash") {
-          context.commandPanelState = undefined;
+          closeCommandPanelState(context);
           pushCommandTranscriptBlock(suggestion.action.command);
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
@@ -3662,7 +3671,7 @@ async function runInkShell(
         dismissCurrentFailureSuggestion(context, blocks);
       }
       if (event.type === "submit" && !event.text.startsWith("/")) {
-        context.commandPanelState = undefined;
+        closeCommandPanelState(context);
         context.helpPanelState = undefined;
         context.configPanelState = undefined;
         context.btwPanelState = undefined;
@@ -3827,7 +3836,7 @@ async function processTuiLine(
     const promptCommand = context.pendingPromptCommand;
     context.pendingPromptCommand = undefined;
     const messageText = promptCommand?.prompt ?? text;
-    context.commandPanelState = undefined;
+    closeCommandPanelState(context);
     context.helpPanelState = undefined;
     context.configPanelState = undefined;
     context.btwPanelState = undefined;
