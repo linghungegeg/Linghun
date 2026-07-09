@@ -3289,7 +3289,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(cursorCol).toBe(5);
   });
 
-  it("truncated long input exposes chip state and atomic boundary deletion", () => {
+  it("truncated long input exposes chip state without atomic boundary deletion", () => {
     const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
     const atEnd = createEditBuffer(text);
     const atStart = { ...atEnd, cursor: 0 };
@@ -3308,8 +3308,8 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
 
     expect(endChip.active).toBe(true);
     expect(startChip.active).toBe(true);
-    expect(shouldDeleteLongInputChip(endChip, atEnd, "backspace")).toBe(true);
-    expect(shouldDeleteLongInputChip(startChip, atStart, "delete")).toBe(true);
+    expect(shouldDeleteLongInputChip(endChip, atEnd, "backspace")).toBe(false);
+    expect(shouldDeleteLongInputChip(startChip, atStart, "delete")).toBe(false);
     expect(shouldDeleteLongInputChip(middleChip, inMiddle, "backspace")).toBe(false);
   });
 
@@ -4538,8 +4538,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     expect(view.taskFooter?.cache).toBe("缓存 84%");
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 [█████─────] 50% ↓38%",
-      narrow: "上下文 [███───] 50% ↓38%",
+      wide: "上下文 [█████─────] 50% (50k/100k) ↓38%",
+      narrow: "上下文 [███───] 50% (50k/100k) ↓38%",
       minimal: "上下文 50% ↓38%",
       ratio: 0.5,
     });
@@ -4570,8 +4570,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 [█████─────] 50%",
-      narrow: "上下文 [███───] 50%",
+      wide: "上下文 [█████─────] 50% (50k/100k)",
+      narrow: "上下文 [███───] 50% (50k/100k)",
       minimal: "上下文 50%",
       ratio: 0.5,
     });
@@ -4602,8 +4602,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 [███───────] 25%",
-      narrow: "上下文 [██────] 25%",
+      wide: "上下文 [███───────] 25% (50k/200k)",
+      narrow: "上下文 [██────] 25% (50k/200k)",
       minimal: "上下文 25%",
       ratio: 0.25,
     });
@@ -4638,8 +4638,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 [████████──] 80%",
-      narrow: "上下文 [█████─] 80%",
+      wide: "上下文 [████████──] 80% (200k/250k)",
+      narrow: "上下文 [█████─] 80% (200k/250k)",
       minimal: "上下文 80%",
       ratio: 0.8,
     });

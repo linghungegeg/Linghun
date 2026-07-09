@@ -2583,14 +2583,23 @@ function formatFooterContextUsage(
   if (!contextUsage) return undefined;
   const label = language === "en-US" ? "ctx" : "上下文";
   const percent = `${Math.round(contextUsage.ratio * 100)}%`;
+  const tokenWindow = `(${formatFooterContextTokens(contextUsage.usedTokens)}/${formatFooterContextTokens(contextUsage.maxTokens)})`;
   const savings = formatFooterContextSavings(contextUsage.savingsRatio);
   const suffix = savings ? ` ${savings}` : "";
   return {
-    wide: `${label} ${formatContextProgressBar(contextUsage.ratio, 10)} ${percent}${suffix}`,
-    narrow: `${label} ${formatContextProgressBar(contextUsage.ratio, 6)} ${percent}${suffix}`,
+    wide: `${label} ${formatContextProgressBar(contextUsage.ratio, 10)} ${percent} ${tokenWindow}${suffix}`,
+    narrow: `${label} ${formatContextProgressBar(contextUsage.ratio, 6)} ${percent} ${tokenWindow}${suffix}`,
     minimal: `${label} ${percent}${suffix}`,
     ratio: contextUsage.ratio,
   };
+}
+
+function formatFooterContextTokens(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  const safeValue = Math.max(0, Math.round(value));
+  if (safeValue >= 1_000_000) return `${Math.round(safeValue / 100_000) / 10}m`;
+  if (safeValue >= 1_000) return `${Math.round(safeValue / 1_000)}k`;
+  return String(safeValue);
 }
 
 function formatFooterContextSavings(savingsRatio: number | undefined): string | undefined {

@@ -1995,11 +1995,14 @@ export function formatComposerRenderLines({
         : 0;
   const rawCursorCol = Math.min(wrapped.cursorCol, Math.max(4, wrapped.contentWidth));
   const visualLineWidth = displayWidthOf(visualLines[cursorVisibleRow] ?? "");
+  const rawCursorLineWidth = displayWidthOf(renderedLines[cursorVisibleRow] ?? "");
   const cursorCol = cursorLineMarked
-    ? Math.min(
-        rawCursorCol + truncatedComposerLineInset(cursorHiddenCount),
-        Math.max(0, visualLineWidth - 1),
-      )
+    ? rawCursorCol >= rawCursorLineWidth
+      ? visualLineWidth
+      : Math.min(
+          rawCursorCol + truncatedComposerLineInset(cursorHiddenCount),
+          visualLineWidth,
+        )
     : rawCursorCol;
 
   return {

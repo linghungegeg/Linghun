@@ -463,8 +463,8 @@ describe("Composer dispatcher behavior boundaries", () => {
       const cursorLine = r.visualLines[r.cursorRow]?.text ?? "";
 
       expect(cursorLine).toMatch(/^\[\+\d+ lines .*]$/);
-      expect(r.cursorCol).toBe(cursorLine.length - 1);
-      expect(cursorLine.at(r.cursorCol)).toBe("]");
+      expect(r.cursorCol).toBe(cursorLine.length);
+      expect(cursorLine.at(r.cursorCol - 1)).toBe("]");
     });
 
     it("does not treat long-input chips as whole-buffer delete targets", () => {
@@ -486,6 +486,33 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(endChip.cursorOnTrailingChip).toBe(true);
       expect(shouldDeleteLongInputChip(startChip, start, "delete")).toBe(false);
       expect(shouldDeleteLongInputChip(endChip, end, "backspace")).toBe(false);
+    });
+
+    it("keeps folded trailing boundary insert and deletion aligned with the real cursor", () => {
+      const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
+      const line3End = Array.from("line0\nline1\nline2\nline3").length;
+      const boundary = { ...createEditBuffer(text), cursor: line3End };
+      const rendered = formatComposerRenderLines({
+        buffer: boundary,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        maxWidth: 80,
+        maxVisibleLines: 2,
+      });
+      const cursorLine = rendered.visualLines[rendered.cursorRow]?.text ?? "";
+      const inserted = bufferInsert(boundary, "!");
+      const backspaced = bufferBackspace(boundary);
+      const deleted = bufferDelete(boundary);
+
+      expect(cursorLine.at(rendered.cursorCol - 1)).toBe("]");
+      expect(rendered.cursorCol).toBe(cursorLine.length);
+      expect(bufferToString(inserted)).toBe(`${text.slice(0, line3End)}!${text.slice(line3End)}`);
+      expect(inserted.cursor).toBe(line3End + 1);
+      expect(bufferToString(backspaced)).toBe(`${text.slice(0, line3End - 1)}${text.slice(line3End)}`);
+      expect(backspaced.cursor).toBe(line3End - 1);
+      expect(bufferToString(deleted)).toBe(`${text.slice(0, line3End)}${text.slice(line3End + 1)}`);
+      expect(deleted.cursor).toBe(line3End);
     });
 
     it("Home and Task composer layout params produce stable but separate wrapping", () => {
