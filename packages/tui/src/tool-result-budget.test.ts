@@ -548,6 +548,58 @@ describe("tool_result budget", () => {
     await expect(readFile(evidence?.fullOutputPath ?? "", "utf8")).resolves.toContain(tail);
   });
 
+  it("reuses transcript-budgeted tool content for current continuation without a second artifact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-current-"));
+    const events: unknown[] = [];
+    const large = `READ_SNIPPETS_START\n${"x".repeat(45_000)}\nREAD_SNIPPETS_END`;
+    const context = {
+      projectPath: project,
+      evidence: [],
+      tools: { recentDiagnostics: [] },
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    };
+
+    const modelContent = await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-current",
+      "call-read-snippets",
+      "ReadSnippets",
+      { text: large, data: { ranges: [{ path: "src/a.ts", start: 1, end: 500, content: large }] } },
+      false,
+      "ev-read-snippets",
+    );
+
+    expect(JSON.stringify(modelContent)).toContain("<persisted-tool-result>");
+    const result = await applyToolResultBudgetToMessages(
+      [
+        {
+          role: "tool",
+          tool_call_id: "call-read-snippets",
+          content: JSON.stringify({
+            ok: true,
+            tool: "ReadSnippets",
+            evidenceId: "ev-read-snippets",
+            content: modelContent,
+          }),
+        },
+      ],
+      {
+        projectPath: project,
+        sessionId: "session-current",
+        state: { seenIds: new Set(), replacements: new Map() },
+      },
+    );
+
+    expect(result.records).toHaveLength(0);
+    expect(result.messages[0]?.role === "tool" ? result.messages[0].content : "").toContain(
+      "<persisted-tool-result>",
+    );
+  });
+
   it("stores edit tool_results as compact model history instead of rich diff payloads", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-edit-"));
     const events: unknown[] = [];

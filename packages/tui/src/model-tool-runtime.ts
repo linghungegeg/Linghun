@@ -715,7 +715,14 @@ export async function executeApprovedModelToolUse(
   output: Writable,
   preflight?: string,
   reportWriteGuard?: ReportWriteGuard,
-): Promise<{ ok: boolean; tool: string; text: string; data?: unknown; evidenceId?: string }> {
+): Promise<{
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+  modelContent?: unknown;
+}> {
   if (preflight) {
     writeLine(output, preflight);
   }
@@ -798,7 +805,7 @@ export async function executeApprovedModelToolUse(
       }
       await appendBackgroundTaskEvent(context, sessionId, task);
     }
-    await appendToolResultEvent(
+    const modelContent = await appendToolResultEvent(
       context,
       sessionId,
       toolCall.id,
@@ -851,6 +858,7 @@ export async function executeApprovedModelToolUse(
       text: result.output.text,
       data: result.output.data,
       evidenceId: evidence?.id,
+      modelContent,
     };
   } catch (error) {
     progress.restore();

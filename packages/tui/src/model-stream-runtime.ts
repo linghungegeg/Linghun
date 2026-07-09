@@ -208,6 +208,7 @@ type ModelToolExecutionResult = {
   text: string;
   data?: unknown;
   evidenceId?: string;
+  modelContent?: unknown;
   pendingApproval?: boolean;
 };
 
@@ -442,10 +443,19 @@ function pushToolResultMessage(
   toolCall: ModelToolCall,
   result: ModelToolExecutionResult,
 ): void {
+  const payload =
+    result.modelContent === undefined
+      ? result
+      : {
+          ok: result.ok,
+          tool: result.tool,
+          evidenceId: result.evidenceId,
+          content: result.modelContent,
+        };
   messages.push({
     role: "tool",
     tool_call_id: toolCall.id,
-    content: JSON.stringify(result),
+    content: JSON.stringify(payload),
   });
 }
 

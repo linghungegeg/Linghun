@@ -963,7 +963,7 @@ export async function appendToolResultEvent(
   content: unknown,
   isError: boolean,
   evidenceId?: string,
-): Promise<void> {
+): Promise<unknown> {
   rememberRecentDiagnostics(context, toolName, content, toolUseId, evidenceId);
   rememberToolEvidenceData(context, evidenceId, content);
   const contentWithDiagnostics = appendToolResultContentDiagnostics(content);
@@ -984,6 +984,7 @@ export async function appendToolResultEvent(
     evidenceId,
     createdAt: new Date().toISOString(),
   });
+  return budgetedContent;
 }
 
 export function compactToolResultForModelHistory(
@@ -1185,9 +1186,21 @@ export async function budgetToolResultTranscriptContent(
   for (const record of budgeted.records) {
     await recordToolResultBudgetEvidence(context, sessionId, record);
   }
-  if (contentFits) return content;
   const replacement = budgeted.messages[0];
+  if (contentFits && hasCompactModelHistoryData(content)) return content;
+  if (replacement?.role === "tool" && replacement.content.startsWith("<persisted-tool-result>")) {
+    return replacement.content;
+  }
+  if (contentFits) return content;
   return replacement?.role === "tool" ? replacement.content : content;
+}
+
+function hasCompactModelHistoryData(content: unknown): boolean {
+  if (!content || typeof content !== "object") return false;
+  const record = content as { data?: unknown; changedFiles?: unknown };
+  if (Array.isArray(record.changedFiles) && record.changedFiles.length > 0) return true;
+  if (!record.data || typeof record.data !== "object") return false;
+  return Object.keys(record.data as Record<string, unknown>).length > 0;
 }
 
 export function stringifyToolResultContentForBudget(content: unknown): string | null {

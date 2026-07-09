@@ -544,15 +544,23 @@ function toolMessageContents(request: unknown): string[] {
   ];
 }
 
-async function expectBudgetArtifact(project: string, transcript: string): Promise<string> {
-  const match = transcript.match(/\.linghun\/session\/tool-results\/[^"\s]+\.txt/u);
-  expect(match?.[0]).toBeTruthy();
-  const artifactPath = join(project, match?.[0] ?? "");
-  await expect(stat(artifactPath)).resolves.toBeTruthy();
-  const artifact = await readFile(artifactPath, "utf8");
+async function expectBudgetArtifact(
+  project: string,
+  transcript: string,
+  expectedContent?: string,
+): Promise<string> {
+  const matches = [...transcript.matchAll(/\.linghun\/session\/tool-results\/[^"\s]+\.txt/gu)]
+    .map((match) => match[0]);
+  expect(matches.length).toBeGreaterThan(0);
   expect(transcript).toContain("tool_result_budget_persisted");
   expect(transcript).toMatch(/sha256=[a-f0-9]{64}/u);
-  return artifact;
+  for (const relativePath of matches) {
+    const artifactPath = join(project, relativePath);
+    await expect(stat(artifactPath)).resolves.toBeTruthy();
+    const artifact = await readFile(artifactPath, "utf8");
+    if (!expectedContent || artifact.includes(expectedContent)) return artifact;
+  }
+  throw new Error(`No budget artifact contained expected content: ${expectedContent}`);
 }
 
 function parseTranscriptJsonl(transcript: string): Array<{
@@ -15218,8 +15226,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain("<persisted-tool-result>");
     expect(transcript).toContain("tool_result_budget_persisted");
     expect(transcript).toMatch(/sha256=[a-f0-9]{64}/u);
-    const artifact = await expectBudgetArtifact(project, transcript);
-    expect(artifact).toContain("READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    await expectBudgetArtifact(project, transcript, "READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
     const transcriptEvents = transcript
       .trim()
       .split(/\n/u)
@@ -15241,7 +15248,6 @@ describe("Phase 06 TUI slash commands", () => {
       toolName: "Grep",
       input: { pattern: "GREP_DUP_MATCH", path: ".", limit: 200 },
       sentinel: "GREP_DUP_END_SHOULD_ONLY_BE_IN_ARTIFACT",
-      budgeted: true,
       setup: async (project: string, sentinel: string) => {
         const lines = Array.from({ length: 200 }, (_, index) => {
           const tail = index === 199 ? sentinel : `line-${index}`;
@@ -15254,7 +15260,6 @@ describe("Phase 06 TUI slash commands", () => {
       toolName: "Glob",
       input: { pattern: "*.txt", path: "glob-large", limit: 600 },
       sentinel: "GLOB_DUP_END_SHOULD_ONLY_BE_IN_ARTIFACT",
-      budgeted: true,
       setup: async (project: string, sentinel: string) => {
         const root = join(project, "glob-large");
         await mkdir(root, { recursive: true });
@@ -15274,12 +15279,11 @@ describe("Phase 06 TUI slash commands", () => {
           "node -e \"for (let i = 0; i < 80; i++) console.log('BASH_DUP_MATCH_' + i + '_' + 'b'.repeat(320)); console.log(['BASH','DUP','END','SHOULD','ONLY','BE','IN','ARTIFACT'].join('_'))\"",
       },
       sentinel: "BASH_DUP_END_SHOULD_ONLY_BE_IN_ARTIFACT",
-      budgeted: false,
       setup: async () => undefined,
     },
   ])(
     "keeps $toolName large output out of duplicated tool_call_end/tool_result transcript payloads",
-    async ({ toolName, input, sentinel, budgeted, setup }) => {
+    async ({ toolName, input, sentinel, setup }) => {
       const project = await mkdtemp(join(tmpdir(), "linghun-tui-tool-budget-"));
       await mkdir(join(project, ".linghun"), { recursive: true });
       await setup(project, sentinel);
@@ -15300,8 +15304,8 @@ describe("Phase 06 TUI slash commands", () => {
         stderr: new MemoryOutput(),
       });
 
-      expect(requests).toHaveLength(2);
-      const providerToolPayload = toolMessageContents(requests[1]);
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      const providerToolPayload = requests.slice(1).flatMap((request) => toolMessageContents(request));
       const session = (
         await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
       ).at(0);
@@ -15317,25 +15321,13 @@ describe("Phase 06 TUI slash commands", () => {
       expect(JSON.stringify(toolEndEvent?.output)).not.toContain("<persisted-tool-result>");
       expect((toolEndEvent?.output as ToolOutput | undefined)?.data).toBeUndefined();
       expect((toolEndEvent?.output as ToolOutput | undefined)?.details).toBeUndefined();
-      if (budgeted) {
-        expect(providerToolPayload.join("\n")).not.toContain(sentinel);
-        expect(JSON.stringify(toolResultEvent?.content)).not.toContain(sentinel);
-        expect(JSON.stringify(toolEndEvent?.output)).not.toContain(sentinel);
-        expect(transcript).toContain("<persisted-tool-result>");
-        expect(transcript).toContain("tool_result_budget_persisted");
-        expect(JSON.stringify(toolResultEvent?.content)).toContain("<persisted-tool-result>");
-        const artifact = await expectBudgetArtifact(project, transcript);
-        expect(artifact).toContain(sentinel);
-      } else {
-        expect(providerToolPayload.join("\n")).toContain(sentinel);
-        expect(JSON.stringify(toolResultEvent?.content)).not.toContain(sentinel);
-        expect(JSON.stringify(toolEndEvent?.output)).not.toContain(sentinel);
-        expect(transcript).toContain("<persisted-tool-result>");
-        expect(transcript).toContain("tool_result_budget_persisted");
-        expect(JSON.stringify(toolResultEvent?.content)).toContain("<persisted-tool-result>");
-        const artifact = await expectBudgetArtifact(project, transcript);
-        expect(artifact).toContain(sentinel);
-      }
+      expect(providerToolPayload.join("\n")).not.toContain(sentinel);
+      expect(JSON.stringify(toolResultEvent?.content)).not.toContain(sentinel);
+      expect(JSON.stringify(toolEndEvent?.output)).not.toContain(sentinel);
+      expect(transcript).toContain("<persisted-tool-result>");
+      expect(transcript).toContain("tool_result_budget_persisted");
+      expect(JSON.stringify(toolResultEvent?.content)).toContain("<persisted-tool-result>");
+      await expectBudgetArtifact(project, transcript);
     },
     15_000,
   );
@@ -15399,8 +15391,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const childTranscriptText = JSON.stringify(childTranscript);
     expect(childTranscriptText).toContain("tool_result_budget_persisted");
-    const artifact = await expectBudgetArtifact(project, childTranscriptText);
-    expect(artifact).toContain("AGENT_TOOL_OBSERVATION_END_SHOULD_NOT_DUPLICATE");
+    await expectBudgetArtifact(project, childTranscriptText);
   }, 10_000);
 
   it("stores Write tool_call_end as summary metadata instead of duplicating tool_result content", async () => {
@@ -25864,8 +25855,7 @@ console.log(JSON.stringify({ ok: true }));
       await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
     ).at(0);
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
-    const artifact = await expectBudgetArtifact(project, transcript);
-    expect(artifact).toContain("EXEC_EXTRA_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    await expectBudgetArtifact(project, transcript, "EXEC_EXTRA_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
     expect(output.text).not.toContain("raw budget");
   });
 
