@@ -1597,8 +1597,8 @@ function attachProviderRuntimeHooks(context: TuiContext): void {
   context.runtimeContextId ??= randomUUID();
   registerProviderHooks({
     onRetry: (info) => {
-      // Agent/workflow background retries must not overwrite main-screen status.
-      if (info.requestContext === "agent") return;
+      // Background provider retries must not overwrite main-screen status.
+      if (info.requestContext && info.requestContext !== "foreground") return;
       if (info.requestContextId) {
         if (!context.currentRequestTurnId) return;
         if (info.requestContextId !== context.currentRequestTurnId) return;

@@ -50,4 +50,29 @@ describe("request activity timing", () => {
     expect(context.retryInfo).toBeUndefined();
     expect(context.requestActivityPhase).toBeUndefined();
   });
+
+  it("keeps background activity from overwriting the foreground owner", () => {
+    const context = { language: "zh-CN" } as TuiContext;
+
+    startRequestActivity(new MemoryWritable(), context, "request_started", {
+      requestTurnId: "turn-a",
+    });
+    startRequestActivity(new MemoryWritable(), context, "tool_running", {
+      ownerKind: "background",
+      toolName: "Agent",
+    });
+
+    expect(context.requestActivityPhase).toBe("request_started");
+    expect(context.requestActivityOwner).toEqual({
+      kind: "foreground",
+      requestTurnId: "turn-a",
+    });
+
+    clearRequestActivity(context, { kind: "background" });
+    expect(context.requestActivityPhase).toBe("request_started");
+
+    clearRequestActivity(context, { kind: "foreground", requestTurnId: "turn-a" });
+    expect(context.requestActivityPhase).toBeUndefined();
+    expect(context.requestActivityOwner).toBeUndefined();
+  });
 });

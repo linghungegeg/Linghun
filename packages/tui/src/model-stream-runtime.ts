@@ -2120,7 +2120,53 @@ export async function handleNaturalInput(
   return "message";
 }
 
-export function clearRequestActivity(context: TuiContext): void {
+type RequestActivityOwner = NonNullable<TuiContext["requestActivityOwner"]>;
+
+function resolveRequestActivityOwner(
+  context: TuiContext,
+  values: { ownerKind?: RequestActivityOwner["kind"]; requestTurnId?: string } = {},
+): RequestActivityOwner {
+  const requestTurnId =
+    values.ownerKind === "background" ? undefined : values.requestTurnId ?? context.currentRequestTurnId;
+  return {
+    kind: values.ownerKind ?? (requestTurnId ? "foreground" : "background"),
+    ...(requestTurnId ? { requestTurnId } : {}),
+  };
+}
+
+function sameRequestActivityOwner(
+  left: RequestActivityOwner | undefined,
+  right: RequestActivityOwner | undefined,
+): boolean {
+  if (!left || !right) return false;
+  if (left.kind !== right.kind) return false;
+  return left.requestTurnId === right.requestTurnId;
+}
+
+function shouldStartRequestActivity(
+  context: TuiContext,
+  nextOwner: RequestActivityOwner,
+): boolean {
+  const currentOwner = context.requestActivityOwner;
+  if (!currentOwner || sameRequestActivityOwner(currentOwner, nextOwner)) return true;
+  if (currentOwner.kind === "foreground" && nextOwner.kind !== "foreground") return false;
+  if (
+    currentOwner.kind === "foreground" &&
+    nextOwner.kind === "foreground" &&
+    currentOwner.requestTurnId !== nextOwner.requestTurnId
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function clearRequestActivity(
+  context: TuiContext,
+  owner?: RequestActivityOwner,
+): void {
+  if (owner && context.requestActivityOwner && !sameRequestActivityOwner(context.requestActivityOwner, owner)) {
+    return;
+  }
   const timer = context.requestActivity?.slowTimer;
   if (timer) {
     clearTimeout(timer);
@@ -2149,6 +2195,7 @@ export function clearRequestActivity(context: TuiContext): void {
   context.requestActivityToolName = undefined;
   context.requestActivityToolLines = undefined;
   context.requestActivityToolBytes = undefined;
+  context.requestActivityOwner = undefined;
   (context as { requestActivityStartedAt?: number }).requestActivityStartedAt = undefined;
   (context as { requestActivityFirstDeltaAt?: number }).requestActivityFirstDeltaAt = undefined;
   (context as { requestActivityFirstDeltaType?: string }).requestActivityFirstDeltaType =
@@ -2184,7 +2231,7 @@ function isCurrentForegroundRequestTurn(context: TuiContext, requestTurnId: stri
 
 function clearForegroundRequestState(context: TuiContext, requestTurnId: string): void {
   if (!isCurrentForegroundRequestTurn(context, requestTurnId)) return;
-  clearRequestActivity(context);
+  clearRequestActivity(context, { kind: "foreground", requestTurnId });
   context.activeAbortController = undefined;
   context.foregroundAbortPendingUntilMs = undefined;
   context.tools.abortSignal = undefined;
@@ -2226,9 +2273,20 @@ export function startRequestActivity(
   output: Writable,
   context: TuiContext,
   phase: RequestActivityPhase,
-  values: { reportPath?: string; toolName?: string; toolTarget?: string } = {},
+  values: {
+    reportPath?: string;
+    toolName?: string;
+    toolTarget?: string;
+    ownerKind?: RequestActivityOwner["kind"];
+    requestTurnId?: string;
+  } = {},
 ): void {
+  const owner = resolveRequestActivityOwner(context, values);
+  if (!shouldStartRequestActivity(context, owner)) {
+    return;
+  }
   clearRequestActivity(context);
+  context.requestActivityOwner = owner;
   context.requestActivityPhase = phase;
   context.requestActivityToolName = values.toolName;
   (context as { requestActivityToolTarget?: string }).requestActivityToolTarget = values.toolTarget;
@@ -2280,6 +2338,7 @@ async function prepareMessagesForProviderPreflightWithActivity(
   input: Parameters<typeof prepareMessagesForProviderPreflight>[0],
 ): Promise<Awaited<ReturnType<typeof prepareMessagesForProviderPreflight>>> {
   const previousPhase = context.requestActivityPhase;
+  const previousOwner = context.requestActivityOwner;
   const preflightInput = shouldForceCompactFromConfirmedUsage(context)
     ? { ...input, trigger: "reactive" as const }
     : input;
@@ -2291,11 +2350,11 @@ async function prepareMessagesForProviderPreflightWithActivity(
   } finally {
     if (context.requestActivityPhase === "compacting_context") {
       if (result?.blocked) {
-        clearRequestActivity(context);
+        clearRequestActivity(context, previousOwner);
       } else if (previousPhase) {
-        startRequestActivity(output, context, previousPhase);
+        startRequestActivity(output, context, previousPhase, previousOwner);
       } else {
-        clearRequestActivity(context);
+        clearRequestActivity(context, previousOwner);
       }
     }
   }

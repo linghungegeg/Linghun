@@ -405,6 +405,10 @@ export type TuiContext = {
   solutionCompleteness: SolutionCompletenessStatus;
   currentArchitectureCard?: ArchitectureCard;
   requestActivity?: { slowHintShown: boolean; slowTimer?: ReturnType<typeof setTimeout> };
+  requestActivityOwner?: {
+    kind: "foreground" | "background";
+    requestTurnId?: string;
+  };
   requestActivityPhase?: RequestActivityPhase;
   requestActivityToolName?: string;
   requestActivityToolLines?: number;

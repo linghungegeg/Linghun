@@ -483,13 +483,16 @@ export async function interruptAllActiveWork(
       createdAt: new Date().toISOString(),
     });
   };
+  const markAbortSignalSent = () => {
+    cancelled += 1;
+    abortSignalsSent += 1;
+    context.interrupt = { type: "idle" };
+  };
 
   if (context.activeVerificationAbortController) {
     context.activeVerificationAbortController.abort();
     context.activeVerificationAbortController = undefined;
-    cancelled += 1;
-    abortSignalsSent += 1;
-    context.interrupt = { type: "idle" };
+    markAbortSignalSent();
     const verificationTasks = context.backgroundTasks.filter(
       (task) => task.kind === "verification" && isActiveBackgroundStatus(task.status),
     );
@@ -518,10 +521,12 @@ export async function interruptAllActiveWork(
     });
     context.activeAbortController = undefined;
     context.foregroundAbortPendingUntilMs = Date.now() + FOREGROUND_ABORT_CONFIRMATION_GRACE_MS;
-    clearRequestActivity(context);
-    context.interrupt = { type: "idle" };
-    cancelled += 1;
-    abortSignalsSent += 1;
+    if (requestTurnId) {
+      clearRequestActivity(context, { kind: "foreground", requestTurnId });
+    } else {
+      clearRequestActivity(context);
+    }
+    markAbortSignalSent();
   }
 
   if (context.activeBtwAbortController) {
@@ -534,8 +539,7 @@ export async function interruptAllActiveWork(
         error: context.language === "en-US" ? "Side question cancelled." : "临时插问已取消。",
       };
     }
-    cancelled += 1;
-    abortSignalsSent += 1;
+    markAbortSignalSent();
   }
 
   const workflowRuns = getWorkflowRuns(context).filter((run) => run.status === "running");
