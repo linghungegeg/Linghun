@@ -74,9 +74,16 @@ describe("D.14H-E workflow planner entry", () => {
       if (!result.ok) continue;
       const slices = result.plan.phases[0].slices;
       expect(slices.some((slice) => slice.id === "slice-implement")).toBe(false);
-      expect(slices.find((slice) => slice.id === "slice-verify")?.dependsOnSliceIds).toEqual([
-        "slice-architecture-review",
-      ]);
+      const verify = slices.find((slice) => slice.id === "slice-verify");
+      expect(verify?.dependsOnSliceIds).toEqual(["slice-architecture-review"]);
+      expect(verify?.targetRuntime).toMatchObject({
+        kind: "details",
+        view: "evidence",
+        mutating: false,
+      });
+      expect(
+        result.bridgeResult.requests.some((request) => request.request?.mainChain === "verification"),
+      ).toBe(false);
     }
 
     const fixResult = generateWorkflowPlanPreview(goal({ goal: "请修复 workflow blocked 问题" }));
@@ -119,6 +126,24 @@ describe("D.14H-E workflow planner entry", () => {
     if (!result.ok) return;
     expect(result.plan.title).toContain("修复");
     expect(result.surface.summaryText).toBeDefined();
+  });
+
+  it("honors user constraints that forbid executable verification", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({ goal: "帮我修复这个问题，但不要跑测试和 typecheck" }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const slices = result.plan.phases[0].slices;
+    expect(slices.some((slice) => slice.id === "slice-implement")).toBe(true);
+    expect(slices.find((slice) => slice.id === "slice-verify")?.targetRuntime).toMatchObject({
+      kind: "details",
+      view: "evidence",
+      mutating: false,
+    });
+    expect(
+      result.bridgeResult.requests.some((request) => request.request?.mainChain === "verification"),
+    ).toBe(false);
   });
 
   it("raw command strings do not enter plan targetRuntime", () => {

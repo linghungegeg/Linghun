@@ -13,6 +13,11 @@ import {
   type WorkflowTaskSurfaceResult,
   projectWorkflowTaskSurface,
 } from "./workflow-task-surface.js";
+import {
+  forbidsVerificationEvidence,
+  hasReadOnlyUserConstraint,
+  parseUserActionConstraints,
+} from "./user-action-constraints.js";
 
 export type WorkflowPlannerEntryResult =
   | {
@@ -235,7 +240,12 @@ function buildSlicesForGoal(
   options: { requestedAgents?: number; runningCap?: number; multiAgent: boolean; teamName?: string; language?: "zh-CN" | "en-US" },
 ) {
   const lang = options.language ?? "zh-CN";
+  const constraints = parseUserActionConstraints(goal);
   const readonlyAuditGoal = isReadonlyAuditGoal(goal);
+  const verificationAdviceOnly =
+    readonlyAuditGoal ||
+    hasReadOnlyUserConstraint(constraints) ||
+    forbidsVerificationEvidence(constraints);
   const multiSliceGoal =
     options.multiAgent ||
     (options.requestedAgents ?? 0) > 1 ||
@@ -354,12 +364,14 @@ function buildSlicesForGoal(
     dependsOnSliceIds: [lastExecutionSlice],
     independent: false,
     canRunInParallel: false,
-    targetRuntime: { kind: "verification", level: "typecheck", mutating: false },
-    acceptanceCriteria: readonlyAuditGoal
-      ? ["run lightweight verification after readonly audit"]
+    targetRuntime: verificationAdviceOnly
+      ? { kind: "details", view: "evidence", mutating: false }
+      : { kind: "verification", level: "typecheck", mutating: false },
+    acceptanceCriteria: verificationAdviceOnly
+      ? ["review existing verification evidence and recommend checks without running commands"]
       : ["run typecheck/tests after execution"],
-    nextAction: readonlyAuditGoal
-      ? "Run lightweight verification after readonly audit."
+    nextAction: verificationAdviceOnly
+      ? "Review existing verification evidence and recommend checks without executing commands."
       : "Run typecheck and tests after execution.",
   });
 

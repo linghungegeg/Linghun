@@ -43,6 +43,10 @@ import {
 } from "./tui-agent-job-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import { WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT } from "./tui-context-runtime.js";
+import {
+  forbidsVerificationEvidence,
+  hasReadOnlyUserConstraint,
+} from "./user-action-constraints.js";
 import type {
   BackgroundTaskState,
   DurableJobState,
@@ -1903,7 +1907,15 @@ async function executeWorkflowStep(
         };
       }
     } else if (req.mainChain === "verification") {
-      const report = await runWorkflowVerificationStep(req.level, context, output);
+      const constraints = context.currentUserActionConstraints;
+      const verificationBlockedByUser =
+        constraints !== undefined &&
+        (hasReadOnlyUserConstraint(constraints) || forbidsVerificationEvidence(constraints));
+      const report = await runWorkflowVerificationStep(
+        verificationBlockedByUser ? "plan-only" : req.level,
+        context,
+        output,
+      );
       const status = workflowStepStatusFromVerification(report.status);
       if (status !== "completed") {
         const summary = formatWorkflowStepSummary(
