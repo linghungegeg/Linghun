@@ -1159,6 +1159,21 @@ describe("Phase 05 core tools", () => {
     expect(edit.output.changedFiles).toEqual(["a.ts"]);
   });
 
+  it("ReadSnippets returns file_unchanged for repeated same-range snippets", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "stable.ts"), "one\ntwo\nthree\n", "utf8");
+    const context = createToolContext(project);
+    const input = { ranges: [{ path: "stable.ts", start: 2, end: 3 }] };
+
+    const first = await runTool("ReadSnippets", input, context);
+    const second = await runTool("ReadSnippets", input, context);
+    const ranges = (second.output.data as { ranges: Array<{ fileUnchanged?: boolean }> }).ranges;
+
+    expect(first.output.text).toContain("2\ttwo");
+    expect(second.output.text).toContain("file_unchanged: stable.ts");
+    expect(ranges[0]?.fileUnchanged).toBe(true);
+  });
+
   it("ReadSnippets truncates ranges over the per-range line limit", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const content = Array.from({ length: 130 }, (_, index) => `line-${index + 1}`).join("\n");
@@ -1260,6 +1275,31 @@ describe("Phase 05 core tools", () => {
       source: "index",
       confidence: 0.9,
     });
+  });
+
+  it("SourcePack returns file_unchanged for repeated same snippet windows", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    context.sourcePackCandidates = [
+      {
+        path: "stable-source.ts",
+        start: 1,
+        end: 2,
+        reason: "index symbol hit: stableNeedle",
+        confidence: 0.9,
+      },
+    ];
+    await writeFile(join(project, "stable-source.ts"), "const stableNeedle = 1;\nexport default stableNeedle;\n", "utf8");
+
+    const first = await runTool("SourcePack", { query: "stableNeedle", limit: 1 }, context);
+    const second = await runTool("SourcePack", { query: "stableNeedle", limit: 1 }, context);
+    const snippets = (
+      second.output.data as { snippets: Array<{ fileUnchanged?: boolean; content: string }> }
+    ).snippets;
+
+    expect(first.output.text).toContain("stableNeedle");
+    expect(second.output.text).toContain("file_unchanged: stable-source.ts");
+    expect(snippets[0]?.fileUnchanged).toBe(true);
   });
 
   it("SourcePack returns rg query hits with reasons and empty results clearly", async () => {

@@ -996,7 +996,11 @@ describe("cache-policy-runtime", () => {
 
       expect(policy.write.allowWrite, kind).toBe(expectedWrite);
       expect(shaped.promptCacheEnabled === true, kind).toBe(expectedWrite);
-      expect(body.tools?.map((tool) => tool.name), kind).toEqual(["Read", "mcp__search"]);
+      const expectedToolNames =
+        request.toolChoice === "none"
+          ? ["Read", "mcp__search"]
+          : ["Read", "mcp__search", "web_search"];
+      expect(body.tools?.map((tool) => tool.name), kind).toEqual(expectedToolNames);
 
       if (expectedWrite) {
         expect(shaped.promptCacheTtl, kind).toBe("1h");
@@ -1004,19 +1008,19 @@ describe("cache-policy-runtime", () => {
         expect(shaped.endpointProfile, kind).toBe("anthropic_messages");
         expect(shaped.reasoningLevel, kind).toBe("high");
         expect(Array.isArray(body.system), kind).toBe(true);
-        expect(body.tools?.map((tool) => tool.cache_control), kind).toEqual([
-          { type: "ephemeral", ttl: "1h" },
-          undefined,
-        ]);
+        expect(body.tools?.map((tool) => tool.cache_control), kind).toEqual(
+          expectedToolNames.map((_, index) =>
+            index === 0 ? { type: "ephemeral", ttl: "1h" } : undefined,
+          ),
+        );
         expect(JSON.stringify(body), kind).toContain("linghun-break-cache:main-nonce");
       } else {
         expect(shaped.promptCacheTtl, kind).toBeUndefined();
         expect(shaped.cacheBreakNonce, kind).toBeUndefined();
         expect(typeof body.system, kind).toBe("string");
-        expect(body.tools?.map((tool) => tool.cache_control), kind).toEqual([
-          undefined,
-          undefined,
-        ]);
+        expect(body.tools?.map((tool) => tool.cache_control), kind).toEqual(
+          expectedToolNames.map(() => undefined),
+        );
         expect(JSON.stringify(body), kind).not.toContain("linghun-break-cache");
       }
     }

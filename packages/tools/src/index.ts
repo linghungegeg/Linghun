@@ -1043,6 +1043,7 @@ type SnippetRangeOutput = {
   requestedEnd: number;
   totalLines?: number;
   truncated: boolean;
+  fileUnchanged?: boolean;
   error?: string;
 };
 
@@ -1061,8 +1062,24 @@ async function readSnippetsTool(
     try {
       const filePath = resolveWorkspacePath(context.workspaceRoot, range.path);
       const info = await stat(filePath);
-      const window = await readTextWindow(filePath, info, range.start - 1, boundedEnd - range.start + 1);
-      rememberReadSnapshotHash(context, filePath, window.hash, info, { source: "read" });
+      const offset = range.start - 1;
+      const limit = boundedEnd - range.start + 1;
+      const unchanged = createUnchangedReadOutput(context, filePath, info, offset, limit);
+      if (unchanged) {
+        ranges.push({
+          path: relativePath(context.workspaceRoot, filePath),
+          start: range.start,
+          end: boundedEnd,
+          content: unchanged.text,
+          requestedStart: range.start,
+          requestedEnd,
+          truncated: rangeLineTruncated,
+          fileUnchanged: true,
+        });
+        continue;
+      }
+      const window = await readTextWindow(filePath, info, offset, limit);
+      rememberReadSnapshotHash(context, filePath, window.hash, info, { offset, limit, source: "read" });
       const selected = window.selected;
       const actualEnd = selected.length > 0 ? range.start + selected.length - 1 : range.start - 1;
       const numbered = selected.map((line, index) => `${range.start + index}\t${line}`).join("\n");
@@ -1200,8 +1217,35 @@ async function sourcePackTool(input: SourcePackInput, context: ToolContext): Pro
       const filePath = resolveWorkspacePath(context.workspaceRoot, match.path);
       const info = await stat(filePath);
       const maxWindowLines = Math.max(end - start + 1, 1);
+      const unchanged = createUnchangedReadOutput(context, filePath, info, start - 1, maxWindowLines);
+      if (unchanged) {
+        const capped = applySnippetSafetyCap(unchanged.text, remainingChars);
+        remainingChars -= capped.usedChars;
+        safetyTruncated ||= capped.truncated;
+        snippets.push({
+          path: relativePath(context.workspaceRoot, filePath),
+          start,
+          end,
+          content: capped.content,
+          requestedStart: start,
+          requestedEnd: end,
+          truncated: capped.truncated,
+          reason: match.reason ?? `matched "${match.term}" at line ${match.line}`,
+          confidence: estimateSourcePackConfidence(input.query, match),
+          source: match.source,
+          fileUnchanged: true,
+        });
+        if (capped.truncated) {
+          break;
+        }
+        continue;
+      }
       const window = await readTextWindow(filePath, info, start - 1, maxWindowLines);
-      rememberReadSnapshotHash(context, filePath, window.hash, info, { source: "read" });
+      rememberReadSnapshotHash(context, filePath, window.hash, info, {
+        offset: start - 1,
+        limit: maxWindowLines,
+        source: "read",
+      });
       const boundedEnd = Math.min(end, window.totalLines);
       const selected = window.selected;
       const numbered = selected.map((line, index) => `${start + index}\t${line}`).join("\n");
