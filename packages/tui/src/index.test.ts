@@ -24552,7 +24552,7 @@ describe("D.8 provider circuit breaker integration", () => {
     }
   });
 
-  it("Policy: provider cooldown records an internal strategy event without calling the gateway", async () => {
+  it("Policy: provider cooldown records an internal strategy event while allowing the gateway", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-policy-cooldown-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -24567,18 +24567,26 @@ describe("D.8 provider circuit breaker integration", () => {
     }
     const gateway = {
       stream: vi.fn(async function* () {
-        yield { type: "assistant_text_delta", text: "should not stream" } as const;
+        yield { type: "assistant_text_delta", text: "continued" } as const;
+        yield {
+          type: "message_stop",
+          id: "stop-cooldown-advisory",
+          chunkCount: 1,
+          hadUsage: false,
+        } as const;
       }),
     } as unknown as Parameters<typeof __testSendMessage>[2];
 
     await __testSendMessage("请继续", context, gateway, new MemoryOutput());
 
-    expect(gateway.stream).not.toHaveBeenCalled();
+    expect(gateway.stream).toHaveBeenCalledTimes(1);
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
     expect(notifications).not.toContain("策略：Provider 冷却中");
     expect(notifications).not.toContain("policy_decision");
     const transcript = (await store.resume(session.id)).transcript;
-    expect(JSON.stringify(transcript)).toContain("provider 冷却阻塞");
+    const transcriptText = JSON.stringify(transcript);
+    expect(transcriptText).toContain("strategy:");
+    expect(transcriptText).not.toContain("provider 冷却阻塞");
   });
 
   it("PROVIDER_AUTH_ERROR and PROVIDER_SCHEMA_ERROR do not trigger breaker", async () => {

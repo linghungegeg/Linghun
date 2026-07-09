@@ -13,7 +13,8 @@ type McpSseResult =
       errorCode?: string;
     };
 
-const MCP_SSE_TIMEOUT_MS = 15_000;
+const MCP_SSE_CONNECTION_TIMEOUT_MS = 15_000;
+const MCP_SSE_TOOL_CALL_TIMEOUT_MS = 100_000_000;
 const MCP_SSE_TOOL_LIST_CACHE_TTL_MS = 5_000;
 let nextJsonRpcId = 1;
 const toolListCache = new Map<string, { expiresAt: number; toolNames: string[] }>();
@@ -22,13 +23,13 @@ export async function runMcpSseToolCall(
   server: McpServerConfig,
   toolName: string,
   params: Record<string, unknown>,
-  timeoutMs = MCP_SSE_TIMEOUT_MS,
+  timeoutMs = MCP_SSE_TOOL_CALL_TIMEOUT_MS,
   signal?: AbortSignal,
 ): Promise<McpSseResult> {
   if (!server.url) {
     return { ok: false, summary: "MCP SSE server url is missing", errorCode: "MCP_SSE_URL_MISSING" };
   }
-  const list = await getMcpSseToolNames(server.url, timeoutMs, signal);
+  const list = await getMcpSseToolNames(server.url, MCP_SSE_CONNECTION_TIMEOUT_MS, signal);
   if (!list.ok) return list;
   const toolNames = list.toolNames;
   if (!toolNames.includes(toolName)) {

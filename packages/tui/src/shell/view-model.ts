@@ -1650,20 +1650,20 @@ export function mapBottomPaneStatusToView(
   );
   if (compactFailure && (compactFailure.blocked || compactCooldownUntil > Date.now())) {
     return {
-      kind: "blocked",
+      kind: "completed_partial",
       source: "resource",
-      text: isEn ? "Context budget blocked" : "上下文预算受限",
+      text: isEn ? "Context recovery cooldown" : "上下文恢复冷却中",
       reason: compactFailure.reason,
       nextAction: isEn
-        ? "Retry after cooldown or reduce context pressure."
-        : "等待冷却后重试，或降低上下文压力。",
+        ? "Main work can continue; retry compact later or reduce context pressure."
+        : "主链可继续；稍后重试压缩，或降低上下文压力。",
     };
   }
 
   const fallback = context.lastProviderFallbackAttempt;
   if (fallback?.status === "attempted" || fallback?.status === "failed") {
     return {
-      kind: fallback.status === "failed" ? "failed" : "blocked",
+      kind: fallback.status === "failed" ? "failed" : "running",
       source: "provider",
       text: isEn ? "Provider fallback active" : "Provider fallback 生效中",
       reason: fallback.summary,
@@ -1681,11 +1681,17 @@ export function mapBottomPaneStatusToView(
   ) {
     const rateLimited = providerFailure.code === "PROVIDER_RATE_LIMITED";
     return {
-      kind: rateLimited ? "blocked" : "failed",
+      kind: "failed",
       source: "provider",
       text: isEn ? "Provider request failed" : "Provider 请求失败",
       reason: providerFailure.summary,
-      nextAction: isEn ? "Run /model doctor or retry after cooldown." : "运行 /model doctor，或冷却后重试。",
+      nextAction: rateLimited
+        ? isEn
+          ? "Retry later or use /model doctor; other work can continue."
+          : "稍后重试或运行 /model doctor；其他工作可继续。"
+        : isEn
+          ? "Run /model doctor or retry."
+          : "运行 /model doctor，或重试。",
     };
   }
 

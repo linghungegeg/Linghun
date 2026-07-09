@@ -51,7 +51,8 @@ type McpStdioToolListResult = {
   errorCode?: string;
 };
 
-const MCP_STDIO_CALL_TIMEOUT_MS = 15_000;
+const MCP_STDIO_CONNECTION_TIMEOUT_MS = 15_000;
+const MCP_STDIO_TOOL_CALL_TIMEOUT_MS = 100_000_000;
 
 const MCP_STDIO_PROTOCOL_VERSION = "2025-06-18";
 
@@ -65,6 +66,7 @@ type McpStdioRunnerOptions<T> = {
   server: McpServerConfig;
   cwd: string;
   timeoutMs: number;
+  requestTimeoutMs?: (method: string) => number | undefined;
   label: string;
   timeoutSummary: string;
   captureStderr: boolean;
@@ -147,11 +149,32 @@ export async function createMcpStdioRunner<T>(
     const sendRequest = (method: string, params2?: unknown): Promise<unknown> => {
       return new Promise((resolveReq, rejectReq) => {
         const id = nextId++;
-        pending.set(id, { resolve: resolveReq, reject: rejectReq });
+        let requestTimer: ReturnType<typeof setTimeout> | undefined;
+        const settleRequest = (settle: () => void): void => {
+          if (requestTimer) clearTimeout(requestTimer);
+          settle();
+        };
+        pending.set(id, {
+          resolve: (value) => settleRequest(() => resolveReq(value)),
+          reject: (error) => settleRequest(() => rejectReq(error)),
+        });
+        const perRequestTimeoutMs = options.requestTimeoutMs?.(method);
+        if (perRequestTimeoutMs !== undefined && perRequestTimeoutMs > 0) {
+          requestTimer = setTimeout(() => {
+            pending.delete(id);
+            rejectReq(
+              new McpStdioStructuredError(
+                `MCP stdio ${method} timeout after ${perRequestTimeoutMs}ms`,
+                "ETIMEDOUT",
+              ),
+            );
+          }, perRequestTimeoutMs);
+        }
         const message = JSON.stringify({ jsonrpc: "2.0", id, method, params: params2 });
         try {
           stdin.write(`${message}\n`);
         } catch (error) {
+          if (requestTimer) clearTimeout(requestTimer);
           pending.delete(id);
           rejectReq(error as Error);
         }
@@ -254,12 +277,14 @@ export async function runMcpStdioToolCall(
   toolName: string,
   params: Record<string, unknown>,
   cwd: string,
-  timeoutMs: number = MCP_STDIO_CALL_TIMEOUT_MS,
+  timeoutMs: number = MCP_STDIO_TOOL_CALL_TIMEOUT_MS,
 ): Promise<McpStdioResult> {
   const result = await createMcpStdioRunner({
     server,
     cwd,
     timeoutMs,
+    requestTimeoutMs: (method) =>
+      method === "tools/call" ? timeoutMs : MCP_STDIO_CONNECTION_TIMEOUT_MS,
     label: `mcp-stdio:${server.command}`,
     timeoutSummary: `MCP stdio timeout after ${timeoutMs}ms (no result for tools/call ${toolName})`,
     captureStderr: true,

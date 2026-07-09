@@ -567,16 +567,22 @@ export async function* withProviderRetry(
           continue;
         }
         if (gate.reason === "cooldown") {
-          yield {
-            type: "error",
-            error: new LinghunError({
-              code: gate.reasonCode,
-              message: `Provider ${provider}/${model} is in cooldown (${Math.ceil(gate.remainingMs / 1000)}s remaining).`,
-              recoverable: true,
-              suggestion: "Wait for cooldown to expire, or switch provider/model with /model.",
-            }),
-          };
-          return;
+          if (cooldownScope === "main") {
+            // Main-chain cooldown is advisory: let the request try once so the
+            // caller can recover via normal fallback/degrade paths instead of
+            // turning a transient outage into a hard local block.
+          } else {
+            yield {
+              type: "error",
+              error: new LinghunError({
+                code: gate.reasonCode,
+                message: `Provider ${provider}/${model} is in cooldown (${Math.ceil(gate.remainingMs / 1000)}s remaining).`,
+                recoverable: true,
+                suggestion: "Wait for cooldown to expire, or switch provider/model with /model.",
+              }),
+            };
+            return;
+          }
         }
       }
     }

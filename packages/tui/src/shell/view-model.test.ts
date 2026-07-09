@@ -1632,7 +1632,7 @@ describe("mapBottomPaneStatusToView — unified bottom status", () => {
     expect(status?.nextAction).toContain("scrollback");
   });
 
-  it("maps compact cooldown/resource cap to blocked with next action", () => {
+  it("maps compact cooldown/resource cap to resumable partial with next action", () => {
     const ctx = createContext();
     ctx.cache.compactFailure = {
       at: new Date().toISOString(),
@@ -1644,9 +1644,9 @@ describe("mapBottomPaneStatusToView — unified bottom status", () => {
 
     const status = mapBottomPaneStatusToView(ctx);
 
-    expect(status).toMatchObject({ kind: "blocked", source: "resource" });
+    expect(status).toMatchObject({ kind: "completed_partial", source: "resource" });
     expect(status?.reason).toContain("context_compact");
-    expect(status?.nextAction).toContain("冷却");
+    expect(status?.nextAction).toContain("主链可继续");
   });
 
   it("maps active blocked background task to blocked", () => {

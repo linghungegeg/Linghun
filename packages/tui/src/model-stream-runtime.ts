@@ -2288,10 +2288,7 @@ export async function sendMessage(
   const selectedRuntimeForCooldown = getSelectedModelRuntime(context);
   if (checkAndWriteProviderCooldown(context, selectedRuntimeForCooldown, output)) {
     const cooldownSessionId = await ensureSession(context);
-    await appendRuntimePolicyHint(context, cooldownSessionId, text, {
-      providerCooldownBlocked: true,
-    });
-    return;
+    await appendRuntimePolicyHint(context, cooldownSessionId, text, {});
   }
   const sessionId = await ensureSession(context);
   context.sessionEnded = false;
@@ -2830,9 +2827,7 @@ export async function sendMessage(
             context.model = selectedRuntime.model;
             selectedTools = currentModelSupportsTools(context, selectedRuntime);
             toolCallingDegradedForRuntime = undefined;
-            if (checkAndWriteProviderCooldown(context, selectedRuntime, output)) {
-              return;
-            }
+            checkAndWriteProviderCooldown(context, selectedRuntime, output);
             continue modelRoundLoop;
           }
           writeErrorLine(
@@ -4150,9 +4145,7 @@ async function streamFinalModelAnswerWithoutTools(
     writeLine(output, preflight.message);
     return "";
   }
-  if (checkAndWriteProviderCooldown(context, runtime, output)) {
-    return "";
-  }
+  checkAndWriteProviderCooldown(context, runtime, output);
   continuation.messages = preflight.messages;
   startRequestActivity(output, context, "checking_final_evidence");
   const promptCacheFields = await buildPromptCacheRequestFields(context);
@@ -4292,9 +4285,7 @@ async function streamFinalModelAnswerWithoutTools(
         continuation.endpointProfile = fallback.runtime.endpointProfile;
         continuation.reasoningLevel = fallback.runtime.reasoningLevel;
         continuation.reasoningSent = fallback.runtime.reasoningSent;
-        if (checkAndWriteProviderCooldown(context, fallback.runtime, output)) {
-          return assistantText;
-        }
+        checkAndWriteProviderCooldown(context, fallback.runtime, output);
         return (
           assistantText +
           (await streamFinalModelAnswerWithoutTools(
@@ -4647,11 +4638,7 @@ export async function continueModelAfterToolResults(
         writeStatus(output, context);
         return;
       }
-      if (checkAndWriteProviderCooldown(context, continuationRuntime, output)) {
-        clearRequestActivity(context);
-        writeStatus(output, context);
-        return;
-      }
+      checkAndWriteProviderCooldown(context, continuationRuntime, output);
       continuation.messages = preflight.messages;
       const requestMessages = preflight.messages;
       const promptCacheFields = await buildPromptCacheRequestFields(context);
@@ -4866,10 +4853,7 @@ export async function continueModelAfterToolResults(
             continuation.reasoningSent = fallback.runtime.reasoningSent;
             continuationToolsEnabled = currentModelSupportsTools(context, fallback.runtime);
             toolCallingDegradedForRuntime = undefined;
-            if (checkAndWriteProviderCooldown(context, fallback.runtime, output)) {
-              writeStatus(output, context);
-              return;
-            }
+            checkAndWriteProviderCooldown(context, fallback.runtime, output);
             continue continuationRoundLoop;
           }
           writeErrorLine(
