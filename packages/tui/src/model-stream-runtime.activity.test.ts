@@ -6,6 +6,7 @@ import {
   recordRequestFirstDelta,
   startRequestActivity,
 } from "./model-stream-runtime.js";
+import { REQUEST_SLOW_HINT_MS } from "./tui-context-runtime.js";
 
 class MemoryWritable extends Writable {
   override _write(_chunk: Buffer | string, _encoding: BufferEncoding, callback: () => void): void {
@@ -74,5 +75,15 @@ describe("request activity timing", () => {
     clearRequestActivity(context, { kind: "foreground", requestTurnId: "turn-a" });
     expect(context.requestActivityPhase).toBeUndefined();
     expect(context.requestActivityOwner).toBeUndefined();
+  });
+
+  it("promotes slow first-byte waits into a real waiting activity", () => {
+    vi.useFakeTimers();
+    const context = { language: "zh-CN" } as TuiContext;
+
+    startRequestActivity(new MemoryWritable(), context, "request_started");
+    vi.advanceTimersByTime(REQUEST_SLOW_HINT_MS);
+
+    expect(context.requestActivityPhase).toBe("waiting_first_delta");
   });
 });

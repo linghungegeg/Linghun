@@ -2325,6 +2325,13 @@ export function startRequestActivity(
       return;
     }
     context.requestActivity = { slowHintShown: true };
+    if (
+      context.requestActivityPhase === "request_started" ||
+      context.requestActivityPhase === "request_started_report" ||
+      context.requestActivityPhase === "continuing_after_tool"
+    ) {
+      context.requestActivityPhase = "waiting_first_delta";
+    }
     if (!isInkOutput) {
       writeLine(output, formatRequestActivity("waiting_first_delta", context.language, values));
     }
