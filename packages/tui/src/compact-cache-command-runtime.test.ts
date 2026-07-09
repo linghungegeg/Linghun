@@ -51,7 +51,7 @@ function makeContext(provider: "deepseek" | "openai-compatible" = "deepseek"): T
 }
 
 describe("context usage ledger", () => {
-  it("persists and restores recent cache usage history for local footer display", async () => {
+  it("keeps persisted cache history out of new terminal runtime state", async () => {
     const dir = await mkdtemp(join(tmpdir(), "linghun-cache-history-"));
     try {
       const context = makeContext();
@@ -87,14 +87,10 @@ describe("context usage ledger", () => {
       restored.cache.config.persistPath = context.cache.config.persistPath;
       await loadPersistedCacheHistory(restored);
 
-      expect(restored.cache.history).toHaveLength(1);
-      expect(restored.cache.history[0]?.hitRate).toBe(0.96);
-      expect(restored.cache.nextTurn).toBe(8);
-      expect(restored.cache.contextUsage).toMatchObject({
-        source: "provider_usage",
-        confirmedUsedTokens: 100,
-        lastConfirmedTurn: 7,
-      });
+      expect(restored.cache.history).toHaveLength(0);
+      expect(restored.cache.nextTurn).toBe(7);
+      expect(restored.cache.lastFreshness).toBeUndefined();
+      expect(restored.cache.contextUsage).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

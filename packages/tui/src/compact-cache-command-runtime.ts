@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import type { CacheFreshness, CacheTurnStats, CacheWriteTokensSource } from "@linghun/core";
@@ -735,25 +735,8 @@ export async function appendUsageEvents(
   await persistCacheHistory(context);
 }
 
-export async function loadPersistedCacheHistory(context: TuiContext): Promise<void> {
-  try {
-    const raw = await readFile(context.cache.config.persistPath, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return;
-    const history = parsed.filter(isCacheTurnStats).slice(-context.cache.config.maxTurns);
-    if (history.length === 0) return;
-    context.cache.history = history;
-    context.cache.nextTurn = Math.max(...history.map((item) => item.turn), 0) + 1;
-    const latest = history.at(-1);
-    if (latest?.freshness && isObjectRecord(latest.freshness)) {
-      context.cache.lastFreshness = latest.freshness as CacheFreshness;
-    }
-    if (latest) {
-      restoreContextUsageFromCacheHistory(context, latest);
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-  }
+export async function loadPersistedCacheHistory(_context: TuiContext): Promise<void> {
+  // Cache footer state is terminal-local. Persisted history is kept for writes/diagnostics only.
 }
 
 export async function persistCacheHistory(context: TuiContext): Promise<void> {
@@ -770,49 +753,11 @@ export async function persistCacheHistory(context: TuiContext): Promise<void> {
   }
 }
 
-function isCacheTurnStats(value: unknown): value is CacheTurnStats {
-  if (!isObjectRecord(value)) return false;
-  return (
-    Number.isFinite(value.turn) &&
-    Number.isFinite(value.timestamp) &&
-    Number.isFinite(value.hitRate) &&
-    Number.isFinite(value.inputTokens) &&
-    Number.isFinite(value.outputTokens) &&
-    Number.isFinite(value.cacheReadTokens) &&
-    Number.isFinite(value.cacheWriteTokens) &&
-    typeof value.model === "string" &&
-    typeof value.provider === "string" &&
-    typeof value.endpoint === "string" &&
-    typeof value.source === "string" &&
-    typeof value.compacted === "boolean" &&
-    isObjectRecord(value.freshness)
-  );
-}
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function restoreContextUsageFromCacheHistory(context: TuiContext, latest: CacheTurnStats): void {
-  const confirmedUsedTokens = Math.max(
-    0,
-    latest.inputTokens + latest.cacheReadTokens + latest.cacheWriteTokens,
-  );
-  if (confirmedUsedTokens <= 0) return;
-  const contextWindowTokens = getContextWindowTokens(context);
-  context.cache.contextUsage = {
-    estimatedChars: confirmedUsedTokens * LINGHUN_BYTES_PER_TOKEN,
-    maxChars: contextWindowTokens * LINGHUN_BYTES_PER_TOKEN,
-    updatedAt: new Date(latest.timestamp).toISOString(),
-    source: "provider_usage",
-    confirmedUsedTokens,
-    contextWindowTokens,
-    compactTriggerTokens: getCompactTriggerTokens(context),
-    usageRatio: Number((confirmedUsedTokens / Math.max(1, contextWindowTokens)).toFixed(3)),
-    staleReason: undefined,
-    lastConfirmedTurn: latest.turn,
-  };
-}
 
 export function refreshCacheFreshness(context: TuiContext): void {
   const freshness = getCurrentFreshness(context);
@@ -964,7 +909,7 @@ export const compactPreflightDeps = {
 };
 
 function normalizePath(path: string): string {
-  return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
+  return path.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
 }
 
 function classifyCacheWriteTokensSource(usage: ModelUsage): CacheWriteTokensSource {
