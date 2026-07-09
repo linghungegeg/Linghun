@@ -1083,20 +1083,15 @@ export function MessageMarkdown({
     });
   }
   if (isStreaming) {
-    const lines = text.replace(/\r/g, "").split("\n");
-    const color = baseColor(theme, dim, tone);
     const effectiveWrapWidth = wrapWidth ?? 80;
-    return (
-      <Box flexDirection="column">
-        {lines.flatMap((line, i) =>
-          wrapText(line, effectiveWrapWidth).map((wrapped, wrappedIndex) => (
-            <Text key={`s${i}-${wrappedIndex}-${wrapped}`} color={color} dimColor={dim}>
-              {wrapped}
-            </Text>
-          )),
-        )}
-      </Box>
-    );
+    return renderStreamingUnstableMarkdown({
+      text: stripLowValueDiagnosticNoise(text.replace(/\r/g, "")),
+      theme,
+      dim,
+      tone,
+      wrapWidth: effectiveWrapWidth,
+      useAsciiBorders,
+    });
   }
   const effectiveWrapWidth = wrapWidth ?? 80;
   const normalized = stripLowValueDiagnosticNoise(text.replace(/\r/g, ""));
@@ -1162,6 +1157,113 @@ export function MessageMarkdown({
       )}
     </Box>
   );
+}
+
+function renderStreamingUnstableMarkdown({
+  text,
+  theme,
+  dim,
+  tone,
+  wrapWidth,
+  useAsciiBorders,
+}: {
+  text: string;
+  theme: ShellTheme;
+  dim: boolean;
+  tone: MessageMarkdownProps["tone"];
+  wrapWidth: number;
+  useAsciiBorders: boolean;
+}): React.ReactNode {
+  const openFence = findOpenStreamingCodeFence(text);
+  if (openFence) {
+    return (
+      <Box flexDirection="column">
+        {openFence.before ? (
+          <Box flexDirection="column">
+            {renderStreamingInlineMarkdown(openFence.before, theme, dim, tone, wrapWidth)}
+          </Box>
+        ) : null}
+        {renderCodeBlock({
+          code: openFence.code,
+          lang: openFence.lang,
+          theme,
+          dim,
+          wrapWidth,
+          useAsciiBorders,
+          blockKey: "streaming-open-fence",
+        })}
+      </Box>
+    );
+  }
+
+  const segments = splitRawDiffSections(text);
+  if (segments.some((segment) => segment.kind === "diff")) {
+    return (
+      <Box flexDirection="column">
+        {segments.map((segment, index) =>
+          segment.kind === "diff" ? (
+            <StructuredDiff
+              key={`streaming-raw-diff-${index}`}
+              code={segment.text}
+              theme={theme}
+              wrapWidth={wrapWidth}
+              dim={dim}
+            />
+          ) : (
+            <Box key={`streaming-inline-${index}`} flexDirection="column">
+              {renderStreamingInlineMarkdown(segment.text, theme, dim, tone, wrapWidth)}
+            </Box>
+          ),
+        )}
+      </Box>
+    );
+  }
+
+  return <Box flexDirection="column">{renderStreamingInlineMarkdown(text, theme, dim, tone, wrapWidth)}</Box>;
+}
+
+function renderStreamingInlineMarkdown(
+  text: string,
+  theme: ShellTheme,
+  dim: boolean,
+  tone: MessageMarkdownProps["tone"],
+  wrapWidth: number,
+): React.ReactNode[] {
+  return text.split("\n").map((line, i) => (
+    <InlineRow
+      key={`streaming-inline-${i}-${line}`}
+      value={line.length === 0 ? " " : line}
+      theme={theme}
+      dim={dim}
+      tone={tone}
+      wrapWidth={wrapWidth}
+    />
+  ));
+}
+
+export function findOpenStreamingCodeFence(
+  text: string,
+): { before: string; lang?: string; code: string } | undefined {
+  const lines = text.split("\n");
+  let openLineIndex = -1;
+  let lang: string | undefined;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index]?.match(/^\s*```\s*([A-Za-z0-9_+-]*)\s*$/u);
+    if (!match) continue;
+    if (openLineIndex >= 0) {
+      openLineIndex = -1;
+      lang = undefined;
+      continue;
+    }
+    openLineIndex = index;
+    lang = match[1] ? match[1] : undefined;
+  }
+  if (openLineIndex < 0) return undefined;
+  return {
+    before: lines.slice(0, openLineIndex).join("\n"),
+    lang,
+    code: lines.slice(openLineIndex + 1).join("\n"),
+  };
 }
 
 function renderSelectablePlainMarkdown({

@@ -22,11 +22,14 @@ import {
   composerCursorAnchorRowOffset,
   createEditBuffer,
   formatComposerRenderLines,
+  getComposerLongInputChipState,
   handleComposerInput,
+  shouldDeleteLongInputChip,
 } from "./components/Composer.js";
 import {
   __testSplitRawDiffSections,
   __testWrapInlineMarkdownRows,
+  findOpenStreamingCodeFence,
   splitStreamingMarkdownForRender,
 } from "./components/MessageMarkdown.js";
 import { renderInkShell, resolveAlternateScreen, shouldUseInkShell } from "./ink-renderer.js";
@@ -3286,6 +3289,30 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(cursorCol).toBe(5);
   });
 
+  it("truncated long input exposes chip state and atomic boundary deletion", () => {
+    const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
+    const atEnd = createEditBuffer(text);
+    const atStart = { ...atEnd, cursor: 0 };
+    const inMiddle = { ...atEnd, cursor: 8 };
+    const layout = {
+      width: 80,
+      paddingLeft: 2,
+      paddingRight: 2,
+      prefixWidth: 2,
+      minContentWidth: 4,
+    };
+
+    const endChip = getComposerLongInputChipState({ buffer: atEnd, layout, maxVisibleLines: 5 });
+    const startChip = getComposerLongInputChipState({ buffer: atStart, layout, maxVisibleLines: 5 });
+    const middleChip = getComposerLongInputChipState({ buffer: inMiddle, layout, maxVisibleLines: 5 });
+
+    expect(endChip.active).toBe(true);
+    expect(startChip.active).toBe(true);
+    expect(shouldDeleteLongInputChip(endChip, atEnd, "backspace")).toBe(true);
+    expect(shouldDeleteLongInputChip(startChip, atStart, "delete")).toBe(true);
+    expect(shouldDeleteLongInputChip(middleChip, inMiddle, "backspace")).toBe(false);
+  });
+
   it("plain renderer Home hero fallback is reasonable in no-color", () => {
     const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
@@ -4881,6 +4908,15 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     // Shift+Tab path uses Ink's key.tab && key.shift, not raw \x1b[Z parsing.
     expect(source).toContain('type: "cycle-permission-mode"');
     expect(source).not.toContain("\\x1b[Z");
+  });
+
+  it("Composer long-input chip keeps Ctrl+E available for external editing", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
+
+    expect(source).toContain("if (longInputChip.active)");
+    expect(source).toContain('emitInput({ type: "external-editor" });');
+    expect(source).toContain("shouldDeleteLongInputChip(longInputChip, buffer");
   });
 
   it("/model handler no longer calls writeStatus (Task-mode denoise)", async () => {
@@ -7056,6 +7092,21 @@ describe("StreamingMarkdown stable prefix", () => {
     expect(state.stablePrefix).toContain("const stable = true;");
     expect(state.stablePrefix).toContain("| B | 完成 |");
     expect(text.slice(state.stablePrefix.length)).toBe("表格后正文");
+  });
+
+  it("detects open streaming code fences for temporary code rendering", () => {
+    const open = findOpenStreamingCodeFence("说明\n```ts\nconst value = 1;");
+    expect(open).toEqual({
+      before: "说明",
+      lang: "ts",
+      code: "const value = 1;",
+    });
+
+    expect(findOpenStreamingCodeFence("```diff\n-old\n+new")).toMatchObject({
+      lang: "diff",
+      code: "-old\n+new",
+    });
+    expect(findOpenStreamingCodeFence("```ts\nconst value = 1;\n```\n完成")).toBeUndefined();
   });
 });
 
@@ -9424,7 +9475,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
 
     expect(source).toContain("padDisplay(wrapped, wrapWidth)");
     expect(source).toContain("displayWidth(stripAnsi(value))");
-    expect(source).toContain("wrapText(line, effectiveWrapWidth)");
+    expect(source).toContain("renderStreamingInlineMarkdown");
   });
 
   it("MessageMarkdown table header cells are centered", async () => {
@@ -9441,6 +9492,17 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     const source = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
 
     expect(source).not.toContain("<Text color={theme.accent}>{\"▌\"}</Text>");
+  });
+
+  it("StreamingMarkdown unstable suffix keeps inline markdown and open-fence rendering", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/MessageMarkdown.tsx"), "utf8");
+
+    expect(source).toContain("renderStreamingUnstableMarkdown");
+    expect(source).toContain("findOpenStreamingCodeFence");
+    expect(source).toContain("renderStreamingInlineMarkdown");
+    expect(source).toContain('blockKey: "streaming-open-fence"');
+    expect(source).not.toContain("wrapText(line, effectiveWrapWidth).map((wrapped");
   });
 
   it("wheel scroll runtime dispatches microtask batches without slow row quantization", async () => {

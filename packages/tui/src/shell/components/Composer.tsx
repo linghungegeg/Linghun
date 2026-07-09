@@ -791,6 +791,12 @@ export function Composer({
       const buffer = bufferRef.current;
       const text = bufferToString(buffer);
       const terminalAction = normalizeTerminalInput(input, key);
+      const longInputChip = getComposerLongInputChipState({
+        buffer,
+        maxWidth,
+        layout: composerLayout,
+        maxVisibleLines: composerMaxVisibleLines,
+      });
       // D.13E Step 2 — Owner-priority dispatcher 显式化：
       // 用 selectInputOwner 决定本次事件归属，permission > panel > paste > slash > composer。
       const owner = selectInputOwner(input, key, {
@@ -1350,6 +1356,10 @@ export function Composer({
 
       // Navigation: arrow keys / Ctrl+B/F
       if (key.leftArrow || (key.ctrl && input === "b")) {
+        if (!key.ctrl && !key.meta && longInputChip.cursorOnLeadingChip) {
+          setBufferAndResetSelection(bufferHome(buffer));
+          return;
+        }
         if ((key.ctrl && key.leftArrow) || key.meta) {
           setBufferAndResetSelection(bufferWordLeft(buffer));
         } else {
@@ -1358,6 +1368,10 @@ export function Composer({
         return;
       }
       if (key.rightArrow || (key.ctrl && input === "f")) {
+        if (!key.ctrl && !key.meta && longInputChip.cursorOnTrailingChip) {
+          setBufferAndResetSelection(bufferEnd(buffer));
+          return;
+        }
         if ((key.ctrl && key.rightArrow) || key.meta) {
           setBufferAndResetSelection(bufferWordRight(buffer));
         } else {
@@ -1450,6 +1464,10 @@ export function Composer({
         return;
       }
       if (key.ctrl && input === "e") {
+        if (longInputChip.active) {
+          emitInput({ type: "external-editor" });
+          return;
+        }
         setBufferAndResetSelection(bufferEnd(buffer));
         return;
       }
@@ -1508,10 +1526,18 @@ export function Composer({
       }
 
       if (terminalAction.type === "backspace") {
+        if (shouldDeleteLongInputChip(longInputChip, buffer, "backspace")) {
+          updateBufferAndResetSelection(() => bufferClearLine(buffer));
+          return;
+        }
         setBufferAndResetSelection(bufferBackspace(buffer));
         return;
       }
       if (terminalAction.type === "delete") {
+        if (shouldDeleteLongInputChip(longInputChip, buffer, "delete")) {
+          updateBufferAndResetSelection(() => bufferClearLine(buffer));
+          return;
+        }
         setBufferAndResetSelection(bufferDelete(buffer));
         return;
       }
@@ -1827,6 +1853,55 @@ export type ComposerRenderResult = {
   cursorRow: number;
 };
 
+export type ComposerLongInputChipState = {
+  active: boolean;
+  cursorOnLeadingChip: boolean;
+  cursorOnTrailingChip: boolean;
+};
+
+export function getComposerLongInputChipState({
+  buffer,
+  maxWidth,
+  layout,
+  maxVisibleLines,
+}: {
+  buffer: EditBuffer;
+  maxWidth?: number;
+  layout?: ComposerLayout;
+  maxVisibleLines?: number;
+}): ComposerLongInputChipState {
+  const rendered = formatComposerRenderLines({
+    buffer,
+    placeholder: "",
+    masking: false,
+    noColor: true,
+    maxWidth,
+    layout,
+    maxVisibleLines,
+  });
+  const active = rendered.truncatedAbove > 0 || rendered.truncatedBelow > 0;
+  return {
+    active,
+    cursorOnLeadingChip: active && rendered.cursorRow === 0 && rendered.truncatedAbove > 0,
+    cursorOnTrailingChip:
+      active &&
+      rendered.cursorRow === rendered.visualLines.length - 1 &&
+      rendered.truncatedBelow > 0,
+  };
+}
+
+export function shouldDeleteLongInputChip(
+  chip: ComposerLongInputChipState,
+  buffer: EditBuffer,
+  action: "backspace" | "delete",
+): boolean {
+  if (!chip.active) return false;
+  if (chip.cursorOnLeadingChip || chip.cursorOnTrailingChip) return true;
+  if (action === "delete" && buffer.cursor === 0) return true;
+  if (action === "backspace" && buffer.cursor >= buffer.chars.length) return true;
+  return false;
+}
+
 export function composerSlashOverlayRows({
   visible,
   candidateCount,
@@ -1951,7 +2026,7 @@ function bracketTruncatedComposerLine(line: string, maxWidth: number, hiddenCoun
 }
 
 function truncatedComposerLineLabel(hiddenCount: number): string {
-  return `+${Math.max(1, Math.floor(hiddenCount))} `;
+  return `+${Math.max(1, Math.floor(hiddenCount))} lines `;
 }
 
 function truncatedComposerLineInset(hiddenCount: number): number {
