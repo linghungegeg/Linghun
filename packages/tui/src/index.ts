@@ -1010,6 +1010,7 @@ import {
   handleCacheLogCommand,
   handleClaimCheckCommand,
   handleCompactCommand,
+  loadPersistedCacheHistory,
   recordModelUsage,
 } from "./compact-cache-command-runtime.js";
 import {
@@ -1582,6 +1583,7 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
 }
 
 async function hydrateRuntimeContext(context: TuiContext): Promise<void> {
+  await loadPersistedCacheHistory(context);
   await refreshIndexStatus(context);
   await hydrateDurableJobBackgroundTasks(context);
   await hydratePersistentAgents(context);

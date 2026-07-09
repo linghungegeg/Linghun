@@ -428,6 +428,22 @@ describe("TUI Interaction Contract — Ctrl+O 提示真实性", () => {
     );
     expect(layered.truncated).toBe(true);
   });
+
+  it("Bash preview cleans JSON-escaped ANSI output", async () => {
+    const { createLayeredToolOutput } = await import("../../tool-output-presenter.js");
+    const layered = createLayeredToolOutput(
+      "Bash",
+      {
+        text: "\\u001b[32m✓\\u001b[39m ok\\n\\u001b[31m×\\u001b[39m fail",
+        data: { exitCode: 1, lines: 2 },
+      },
+      "zh-CN",
+    );
+    expect(layered.preview).toContain("✓ ok");
+    expect(layered.preview).toContain("× fail");
+    expect(layered.preview).not.toContain("\\u001b");
+    expect(layered.preview).not.toContain("[32m");
+  });
 });
 
 describe("TUI Interaction Contract — Todo 预算分类", () => {

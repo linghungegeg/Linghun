@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import type { CacheFreshness, CacheTurnStats, CacheWriteTokensSource } from "@linghun/core";
@@ -732,6 +732,86 @@ export async function appendUsageEvents(
   const createdAt = new Date().toISOString();
   await context.store.appendEvent(sessionId, { type: "usage", usage: stats, createdAt });
   await context.store.appendEvent(sessionId, { type: "cache_update", stats, createdAt });
+  await persistCacheHistory(context);
+}
+
+export async function loadPersistedCacheHistory(context: TuiContext): Promise<void> {
+  try {
+    const raw = await readFile(context.cache.config.persistPath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return;
+    const history = parsed.filter(isCacheTurnStats).slice(-context.cache.config.maxTurns);
+    if (history.length === 0) return;
+    context.cache.history = history;
+    context.cache.nextTurn = Math.max(...history.map((item) => item.turn), 0) + 1;
+    const latest = history.at(-1);
+    if (latest?.freshness && isObjectRecord(latest.freshness)) {
+      context.cache.lastFreshness = latest.freshness as CacheFreshness;
+    }
+    if (latest) {
+      restoreContextUsageFromCacheHistory(context, latest);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+  }
+}
+
+export async function persistCacheHistory(context: TuiContext): Promise<void> {
+  try {
+    trimCacheHistory(context.cache);
+    await mkdir(dirname(context.cache.config.persistPath), { recursive: true });
+    await writeFile(
+      context.cache.config.persistPath,
+      `${JSON.stringify(context.cache.history, null, 2)}\n`,
+      "utf8",
+    );
+  } catch {
+    // Cache history is only a local display/diagnostic aid; never block model flow.
+  }
+}
+
+function isCacheTurnStats(value: unknown): value is CacheTurnStats {
+  if (!isObjectRecord(value)) return false;
+  return (
+    Number.isFinite(value.turn) &&
+    Number.isFinite(value.timestamp) &&
+    Number.isFinite(value.hitRate) &&
+    Number.isFinite(value.inputTokens) &&
+    Number.isFinite(value.outputTokens) &&
+    Number.isFinite(value.cacheReadTokens) &&
+    Number.isFinite(value.cacheWriteTokens) &&
+    typeof value.model === "string" &&
+    typeof value.provider === "string" &&
+    typeof value.endpoint === "string" &&
+    typeof value.source === "string" &&
+    typeof value.compacted === "boolean" &&
+    isObjectRecord(value.freshness)
+  );
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function restoreContextUsageFromCacheHistory(context: TuiContext, latest: CacheTurnStats): void {
+  const confirmedUsedTokens = Math.max(
+    0,
+    latest.inputTokens + latest.cacheReadTokens + latest.cacheWriteTokens,
+  );
+  if (confirmedUsedTokens <= 0) return;
+  const contextWindowTokens = getContextWindowTokens(context);
+  context.cache.contextUsage = {
+    estimatedChars: confirmedUsedTokens * LINGHUN_BYTES_PER_TOKEN,
+    maxChars: contextWindowTokens * LINGHUN_BYTES_PER_TOKEN,
+    updatedAt: new Date(latest.timestamp).toISOString(),
+    source: "provider_usage",
+    confirmedUsedTokens,
+    contextWindowTokens,
+    compactTriggerTokens: getCompactTriggerTokens(context),
+    usageRatio: Number((confirmedUsedTokens / Math.max(1, contextWindowTokens)).toFixed(3)),
+    staleReason: undefined,
+    lastConfirmedTurn: latest.turn,
+  };
 }
 
 export function refreshCacheFreshness(context: TuiContext): void {

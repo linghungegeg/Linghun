@@ -21,6 +21,7 @@ import {
   createEditBuffer,
   createInputHistory,
   formatComposerRenderLines,
+  getComposerLongInputChipState,
   historyAdd,
   historyCurrentText,
   historyDown,
@@ -30,6 +31,7 @@ import {
   sanitizeComposerInput,
   sanitizeComposerPasteInput,
   shouldEnterPastePath,
+  shouldDeleteLongInputChip,
   shouldUnstickSlashHidden,
   splitLineAtDisplayCol,
 } from "./Composer.js";
@@ -435,11 +437,55 @@ describe("Composer dispatcher behavior boundaries", () => {
       });
 
       expect(r.lines).toEqual(["line3", "line4", "line5"]);
-      expect(r.visualLines.map((line) => line.text)).toEqual(["[line3]", "line4", "[line5]"]);
+      expect(r.visualLines.map((line) => line.text)).toEqual([
+        "[+3 lines line3]",
+        "line4",
+        "[+2 lines line5]",
+      ]);
       expect(r.truncatedAbove).toBe(3);
       expect(r.truncatedBelow).toBe(2);
       expect(r.cursorRow).toBe(1);
       expect(r.cursorCol).toBe(5);
+    });
+
+    it("keeps the cursor on the editable side of a trailing long-input chip boundary", () => {
+      const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
+      const line3End = Array.from("line0\nline1\nline2\nline3").length;
+      const buf: EditBuffer = { ...createEditBuffer(text), cursor: line3End };
+      const r = formatComposerRenderLines({
+        buffer: buf,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        maxWidth: 80,
+        maxVisibleLines: 2,
+      });
+      const cursorLine = r.visualLines[r.cursorRow]?.text ?? "";
+
+      expect(cursorLine).toMatch(/^\[\+\d+ lines .*]$/);
+      expect(r.cursorCol).toBe(cursorLine.length - 1);
+      expect(cursorLine.at(r.cursorCol)).toBe("]");
+    });
+
+    it("does not treat long-input chips as whole-buffer delete targets", () => {
+      const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
+      const start = bufferHome(createEditBuffer(text));
+      const end = bufferEnd(start);
+      const startChip = getComposerLongInputChipState({
+        buffer: start,
+        maxWidth: 80,
+        maxVisibleLines: 2,
+      });
+      const endChip = getComposerLongInputChipState({
+        buffer: end,
+        maxWidth: 80,
+        maxVisibleLines: 2,
+      });
+
+      expect(startChip.cursorOnLeadingChip).toBe(true);
+      expect(endChip.cursorOnTrailingChip).toBe(true);
+      expect(shouldDeleteLongInputChip(startChip, start, "delete")).toBe(false);
+      expect(shouldDeleteLongInputChip(endChip, end, "backspace")).toBe(false);
     });
 
     it("Home and Task composer layout params produce stable but separate wrapping", () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Writable } from "node:stream";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import { createToolContext } from "@linghun/tools";
 import {
   __testApplyPromptCacheKey,
   __testBuildModelMessagesWithRecentContext,
+  __testScheduleApiTokenCountDiagnostics,
   __testRunFinalGateEvidenceAction,
   __testStreamFinalModelAnswerWithoutTools,
   buildAggregatedDowngradedFinalAnswer,
@@ -1968,4 +1969,115 @@ describe("natural input routing", () => {
       expect(output.text).toBe("");
     },
   );
+});
+
+describe("api token count diagnostics", () => {
+  it("does not wait for token count before preserving cache history", async () => {
+    let resolveCount: ((value: { source: "api"; inputTokens: number }) => void) | undefined;
+    const countStarted: string[] = [];
+    const gateway = {
+      countMessagesTokensWithAPI: async (provider: string) => {
+        countStarted.push(provider);
+        return await new Promise<{ source: "api"; inputTokens: number }>((resolve) => {
+          resolveCount = resolve;
+        });
+      },
+    } as unknown as ModelGateway;
+    const context = {
+      currentRequestTurnId: "turn-current",
+      cache: { history: [{ provider: "kept", createdAt: "before" }] },
+    } as never;
+
+    __testScheduleApiTokenCountDiagnostics({
+      context,
+      gateway,
+      runtime: { provider: "test", model: "model" },
+      messages: [{ role: "user", content: "hello" }],
+      signal: new AbortController().signal,
+      requestTurnId: "turn-current",
+    });
+
+    expect(countStarted).toEqual(["test"]);
+    expect((context as { cache: { history: unknown[] }; lastApiTokenCount?: unknown }).cache.history).toEqual([
+      { provider: "kept", createdAt: "before" },
+    ]);
+    expect((context as { lastApiTokenCount?: unknown }).lastApiTokenCount).toBeUndefined();
+
+    resolveCount?.({ source: "api", inputTokens: 7 });
+    await vi.waitFor(() => {
+      expect((context as { lastApiTokenCount?: { source?: string; inputTokens?: number } }).lastApiTokenCount).toMatchObject({
+        source: "api",
+        inputTokens: 7,
+      });
+    });
+
+    expect((context as { cache: { history: unknown[] } }).cache.history).toEqual([
+      { provider: "kept", createdAt: "before" },
+    ]);
+  });
+
+  it("does not let a late final-answer token count overwrite a newer runtime context", async () => {
+    let resolveCount: ((value: { source: "api"; inputTokens: number }) => void) | undefined;
+    const gateway = {
+      countMessagesTokensWithAPI: async () =>
+        await new Promise<{ source: "api"; inputTokens: number }>((resolve) => {
+          resolveCount = resolve;
+        }),
+    } as unknown as ModelGateway;
+    const context = {
+      runtimeContextId: "final-old",
+      cache: { history: [] },
+      lastApiTokenCount: {
+        provider: "newer",
+        model: "model",
+        source: "api",
+        inputTokens: 99,
+        createdAt: "newer",
+      },
+    } as never;
+
+    __testScheduleApiTokenCountDiagnostics({
+      context,
+      gateway,
+      runtime: { provider: "old-final", model: "model" },
+      messages: [{ role: "user", content: "hello" }],
+      signal: new AbortController().signal,
+      runtimeContextId: "final-old",
+    });
+
+    (context as { runtimeContextId: string }).runtimeContextId = "final-new";
+    resolveCount?.({ source: "api", inputTokens: 7 });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((context as { lastApiTokenCount?: { provider?: string; inputTokens?: number } }).lastApiTokenCount).toMatchObject({
+      provider: "newer",
+      inputTokens: 99,
+    });
+    expect((context as { cache: { history: unknown[] } }).cache.history).toEqual([]);
+  });
+
+  it("does not let a late failed token count overwrite a newer foreground turn", async () => {
+    const gateway = {
+      countMessagesTokensWithAPI: async () => {
+        throw new Error("token count unavailable");
+      },
+    } as unknown as ModelGateway;
+    const context = { currentRequestTurnId: "turn-newer", cache: { history: [] } } as never;
+
+    __testScheduleApiTokenCountDiagnostics({
+      context,
+      gateway,
+      runtime: { provider: "test", model: "model" },
+      messages: [{ role: "user", content: "hello" }],
+      signal: new AbortController().signal,
+      requestTurnId: "turn-old",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((context as { lastApiTokenCount?: unknown }).lastApiTokenCount).toBeUndefined();
+    expect((context as { cache: { history: unknown[] } }).cache.history).toEqual([]);
+  });
 });

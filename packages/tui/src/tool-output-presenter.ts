@@ -870,7 +870,8 @@ function createSummaryFirstPreview(
   language: Language,
   output?: ToolOutput,
 ): { text: string; truncated: boolean } {
-  const lines = text.length > 0 ? text.split(/\r?\n/u) : [];
+  const previewText = name === "Bash" ? normalizeBashPreviewText(text) : text;
+  const lines = previewText.length > 0 ? previewText.split(/\r?\n/u) : [];
   const metadata = output?.data && typeof output.data === "object" ? output.data : undefined;
   const count = readNumber(metadata, "count");
   const dataLines = readNumber(metadata, "lines");
@@ -892,7 +893,7 @@ function createSummaryFirstPreview(
     stats.push(language === "en-US" ? `${count} match(es)` : `${count} 条结果`);
   }
   // 退出码已移至 end summary，只在失败时显示，避免重复
-  if (name === "Bash" && looksLikeMojibake(text)) {
+  if (name === "Bash" && looksLikeMojibake(previewText)) {
     stats.push(language === "en-US" ? "possible encoding issue" : "疑似编码问题");
   }
   if (isEditingTool(name)) {
@@ -924,16 +925,17 @@ function createSummaryFirstPreview(
     lines.length > 100 ||
     text.length > 10000;
   if (hasHiddenContent) {
-    const tail = name === "Bash" && !looksLikeMojibake(text) ? formatBashTail(lines, language) : [];
+    const tail =
+      name === "Bash" && !looksLikeMojibake(previewText) ? formatBashTail(lines, language) : [];
     const diffFence = isEditingTool(name) ? createCompactDiffFence(output) : "";
     return {
       text: [`- ${stats.join("; ")}`, ...tail, diffFence].filter(Boolean).join("\n"),
       truncated: true,
     };
   }
-  if (name === "Bash" && !looksLikeMojibake(text)) {
+  if (name === "Bash" && !looksLikeMojibake(previewText)) {
     // Cap inline Bash output to PRIMARY_PREVIEW_LINE_CAP lines; excess folds into details.
-    if (text.trim().length > 0) {
+    if (previewText.trim().length > 0) {
       const nonEmpty = lines.filter((l) => l.trim().length > 0);
       if (nonEmpty.length > PRIMARY_PREVIEW_LINE_CAP) {
         const tail = formatBashTail(lines, language);
@@ -942,10 +944,25 @@ function createSummaryFirstPreview(
           truncated: true,
         };
       }
-      return { text: [`- ${stats.join("; ")}`, text].join("\n"), truncated: false };
+      return { text: [`- ${stats.join("; ")}`, previewText].join("\n"), truncated: false };
     }
   }
   return { text: `- ${stats.join("; ")}`, truncated: false };
+}
+
+function normalizeBashPreviewText(text: string): string {
+  if (!text) return text;
+  const decoded = text
+    .replace(/\\u001b/giu, "\u001B")
+    .replace(/\\x1b/giu, "\u001B")
+    .replace(/\\r\\n/gu, "\n")
+    .replace(/\\n/gu, "\n")
+    .replace(/\\r/gu, "\r");
+  return stripAnsi(decoded);
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, "");
 }
 
 function formatToolLineStat(

@@ -2853,13 +2853,14 @@ export async function sendMessage(
           recordCacheUsageObservation(context, "main", event.usage);
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
-          await recordApiTokenCountIfAvailable(
+          scheduleApiTokenCountDiagnostics({
             context,
             gateway,
-            selectedRuntime,
-            requestMessages,
-            controller.signal,
-          );
+            runtime: selectedRuntime,
+            messages: requestMessages,
+            signal: controller.signal,
+            requestTurnId,
+          });
           continue;
         }
         if (event.type === "message_stop") {
@@ -4422,13 +4423,14 @@ async function streamFinalModelAnswerWithoutTools(
       recordCacheUsageObservation(context, "final", event.usage);
       const stats = recordModelUsage(context, event.usage);
       await appendUsageEvents(context, sessionId, stats);
-      await recordApiTokenCountIfAvailable(
+      scheduleApiTokenCountDiagnostics({
         context,
         gateway,
-        runtimeFromContinuation(continuation),
-        preflight.messages,
+        runtime: runtimeFromContinuation(continuation),
+        messages: preflight.messages,
         signal,
-      );
+        runtimeContextId: context.runtimeContextId,
+      });
       continue;
     }
     if (event.type === "message_stop") {
@@ -4960,13 +4962,14 @@ export async function continueModelAfterToolResults(
           recordCacheUsageObservation(context, "continuation", event.usage);
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
-          await recordApiTokenCountIfAvailable(
+          scheduleApiTokenCountDiagnostics({
             context,
             gateway,
-            runtimeFromContinuation(continuation),
-            preflight.messages,
-            controller.signal,
-          );
+            runtime: runtimeFromContinuation(continuation),
+            messages: preflight.messages,
+            signal: controller.signal,
+            requestTurnId,
+          });
           continue;
         }
         if (event.type === "message_stop") {
@@ -5668,13 +5671,29 @@ async function buildGitStatusSummary(cwd: string): Promise<string | undefined> {
   return truncateForGitPrompt(lines.join("; "), GIT_PROMPT_MAX_CHARS);
 }
 
-async function recordApiTokenCountIfAvailable(
-  context: TuiContext,
-  gateway: ModelGateway,
-  runtime: { provider: string; model: string; endpointProfile?: EndpointProfile },
-  messages: ModelMessage[],
-  signal: AbortSignal,
-): Promise<void> {
+type ApiTokenCountDiagnosticsInput = {
+  context: TuiContext;
+  gateway: ModelGateway;
+  runtime: { provider: string; model: string; endpointProfile?: EndpointProfile };
+  messages: ModelMessage[];
+  signal: AbortSignal;
+  requestTurnId?: string;
+  runtimeContextId?: string;
+};
+
+function scheduleApiTokenCountDiagnostics(input: ApiTokenCountDiagnosticsInput): void {
+  void recordApiTokenCountIfAvailable(input);
+}
+
+async function recordApiTokenCountIfAvailable({
+  context,
+  gateway,
+  runtime,
+  messages,
+  signal,
+  requestTurnId,
+  runtimeContextId,
+}: ApiTokenCountDiagnosticsInput): Promise<void> {
   const result = await gateway
     .countMessagesTokensWithAPI(
       runtime.provider,
@@ -5689,6 +5708,8 @@ async function recordApiTokenCountIfAvailable(
       source: "unavailable" as const,
       reason: error instanceof Error ? error.message : "count_tokens_failed",
     }));
+  if (requestTurnId && !isCurrentForegroundRequestTurn(context, requestTurnId)) return;
+  if (runtimeContextId !== undefined && context.runtimeContextId !== runtimeContextId) return;
   context.lastApiTokenCount =
     result.source === "api"
       ? {
@@ -5706,6 +5727,8 @@ async function recordApiTokenCountIfAvailable(
           createdAt: new Date().toISOString(),
         };
 }
+
+export const __testScheduleApiTokenCountDiagnostics = scheduleApiTokenCountDiagnostics;
 
 async function readGitPromptValue(cwd: string, args: string[]): Promise<string> {
   const result = await gitPromptRunner(cwd, args);

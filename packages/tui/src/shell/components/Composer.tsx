@@ -1892,10 +1892,9 @@ export function shouldDeleteLongInputChip(
   buffer: EditBuffer,
   action: "backspace" | "delete",
 ): boolean {
-  if (!chip.active) return false;
-  if (chip.cursorOnLeadingChip || chip.cursorOnTrailingChip) return true;
-  if (action === "delete" && buffer.cursor === 0) return true;
-  if (action === "backspace" && buffer.cursor >= buffer.chars.length) return true;
+  void chip;
+  void buffer;
+  void action;
   return false;
 }
 
@@ -1995,10 +1994,11 @@ export function formatComposerRenderLines({
         ? truncatedBelow
         : 0;
   const rawCursorCol = Math.min(wrapped.cursorCol, Math.max(4, wrapped.contentWidth));
+  const visualLineWidth = displayWidthOf(visualLines[cursorVisibleRow] ?? "");
   const cursorCol = cursorLineMarked
     ? Math.min(
         rawCursorCol + truncatedComposerLineInset(cursorHiddenCount),
-        displayWidthOf(visualLines[cursorVisibleRow] ?? ""),
+        Math.max(0, visualLineWidth - 1),
       )
     : rawCursorCol;
 
