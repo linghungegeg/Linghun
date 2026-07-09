@@ -2167,6 +2167,61 @@ export function recordRequestFirstDelta(context: TuiContext, type: string, nowMs
   state.requestActivityFirstDeltaType = type;
 }
 
+export function beginForegroundRequestTurn(
+  context: TuiContext,
+  userMessageId?: string,
+): string {
+  const requestTurnId = randomUUID();
+  context.runtimeContextId = requestTurnId;
+  context.currentRequestTurnId = requestTurnId;
+  context.currentRequestUserMessageId = userMessageId;
+  return requestTurnId;
+}
+
+function isCurrentForegroundRequestTurn(context: TuiContext, requestTurnId: string): boolean {
+  return context.currentRequestTurnId === requestTurnId;
+}
+
+function clearForegroundRequestState(context: TuiContext, requestTurnId: string): void {
+  if (!isCurrentForegroundRequestTurn(context, requestTurnId)) return;
+  clearRequestActivity(context);
+  context.activeAbortController = undefined;
+  context.foregroundAbortPendingUntilMs = undefined;
+  context.tools.abortSignal = undefined;
+  context.interrupt = { type: "idle" };
+  context.currentRequestTurnId = undefined;
+  context.currentRequestUserMessageId = undefined;
+}
+
+export async function recordInterruptedForegroundTurn(
+  context: TuiContext,
+  sessionId: string,
+  input: {
+    requestTurnId?: string;
+    reason: NonNullable<TuiContext["lastInterruptedTurn"]>["reason"];
+    userMessageId?: string;
+  },
+): Promise<void> {
+  const requestTurnId = input.requestTurnId ?? context.currentRequestTurnId;
+  if (!requestTurnId) return;
+  if (context.lastInterruptedTurn?.requestTurnId === requestTurnId) return;
+  const at = new Date().toISOString();
+  const userMessageId = input.userMessageId ?? context.currentRequestUserMessageId;
+  context.lastInterruptedTurn = {
+    requestTurnId,
+    reason: input.reason,
+    ...(userMessageId ? { userMessageId } : {}),
+    at,
+  };
+  await context.store.appendEvent(sessionId, {
+    type: "interrupt",
+    id: randomUUID(),
+    status: "cancelled",
+    message: `turn_interrupted: requestTurnId=${requestTurnId}; reason=${input.reason}; userMessageId=${userMessageId ?? "-"}`,
+    createdAt: at,
+  });
+}
+
 export function startRequestActivity(
   output: Writable,
   context: TuiContext,
@@ -2266,7 +2321,6 @@ export async function sendMessage(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
-  context.runtimeContextId ??= randomUUID();
   const modelGuard = checkResourceGuard(context, "model");
   if (modelGuard) {
     writeLine(output, modelGuard);
@@ -2292,7 +2346,14 @@ export async function sendMessage(
   }
   const sessionId = await ensureSession(context);
   context.sessionEnded = false;
-  await context.store.appendEvent(sessionId, createUserMessageEvent(text));
+  const userMessageEvent = createUserMessageEvent(text) as {
+    type: "user_message";
+    id: string;
+    text: string;
+    createdAt: string;
+  };
+  const requestTurnId = beginForegroundRequestTurn(context, userMessageEvent.id);
+  await context.store.appendEvent(sessionId, userMessageEvent);
   let selectedRuntime = getSelectedModelRuntime(context);
   // Remember the original provider+model for correct breaker clear after fallback.
   const originalProvider = selectedRuntime.provider;
@@ -2485,6 +2546,7 @@ export async function sendMessage(
       "meta_scheduler:blocked_runtime_stop",
       "warning",
     );
+    clearForegroundRequestState(context, requestTurnId);
     return;
   }
   const gitStatusSummary = await buildGitStatusSummary(context.projectPath);
@@ -2582,11 +2644,7 @@ export async function sendMessage(
       });
       metaSchedulerDecision.internalEvents.push(`perf:preflight_ms=${Date.now() - _tPreflight0}`);
       if (preflight.blocked) {
-        clearRequestActivity(context);
-        context.activeAbortController = undefined;
-        context.foregroundAbortPendingUntilMs = undefined;
-        context.tools.abortSignal = undefined;
-        context.interrupt = { type: "idle" };
+        clearForegroundRequestState(context, requestTurnId);
         writeLine(output, preflight.message);
         writeStatus(output, context);
         return;
@@ -2604,11 +2662,7 @@ export async function sendMessage(
           `context_still_too_large_after_compaction: model=${selectedRuntime.model} inputTooLarge=${text.length > contextMaxChars ? "yes" : "no"}`,
           "warning",
         );
-        clearRequestActivity(context);
-        context.activeAbortController = undefined;
-        context.foregroundAbortPendingUntilMs = undefined;
-        context.tools.abortSignal = undefined;
-        context.interrupt = { type: "idle" };
+        clearForegroundRequestState(context, requestTurnId);
         writeLine(output, warning);
         writeStatus(output, context);
         return;
@@ -2619,7 +2673,7 @@ export async function sendMessage(
         model: selectedRuntime.model,
         endpointProfile: selectedRuntime.endpointProfile,
         requestContext: "foreground",
-        requestContextId: context.runtimeContextId,
+        requestContextId: requestTurnId,
         sessionId,
         ...(selectedRuntime.reasoningSent
           ? { reasoningLevel: selectedRuntime.reasoningLevel }
@@ -2673,9 +2727,16 @@ export async function sendMessage(
         },
       )) {
         if (controller.signal.aborted) {
-          clearRequestActivity(context);
-          cancelAssistantStream(output);
-          writeLine(output, t(context, "toolInterrupted"));
+          await recordInterruptedForegroundTurn(context, sessionId, {
+            requestTurnId,
+            reason: "model_abort",
+            userMessageId: userMessageEvent.id,
+          });
+          if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+            clearForegroundRequestState(context, requestTurnId);
+            cancelAssistantStream(output);
+            writeLine(output, t(context, "toolInterrupted"));
+          }
           return;
         }
         recordRequestFirstDelta(context, event.type);
@@ -2830,11 +2891,18 @@ export async function sendMessage(
             checkAndWriteProviderCooldown(context, selectedRuntime, output);
             continue modelRoundLoop;
           }
-          writeErrorLine(
-            output,
-            formatProviderFailurePrimary(event.error, context.language),
-            formatProviderFailureTitle(context.language),
-          );
+          await recordInterruptedForegroundTurn(context, sessionId, {
+            requestTurnId,
+            reason: "provider_disconnect",
+            userMessageId: userMessageEvent.id,
+          });
+          if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+            writeErrorLine(
+              output,
+              formatProviderFailurePrimary(event.error, context.language),
+              formatProviderFailureTitle(context.language),
+            );
+          }
           return;
         }
       }
@@ -3208,12 +3276,10 @@ export async function sendMessage(
     if (!modelLoopCompleted || !assistantText) {
       endAssistantStream(output);
     }
-    clearRequestActivity(context);
-    context.activeAbortController = undefined;
-    context.foregroundAbortPendingUntilMs = undefined;
-    context.tools.abortSignal = undefined;
-    context.interrupt = { type: "idle" };
-    context.currentUserActionConstraints = previousUserActionConstraints;
+    if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+      context.currentUserActionConstraints = previousUserActionConstraints;
+    }
+    clearForegroundRequestState(context, requestTurnId);
   }
 
   // Successful response — clear the circuit breaker for both the current and original provider+model.
@@ -3925,7 +3991,8 @@ export async function buildModelMessagesWithRecentContext(
         event.type === "user_message" ||
         event.type === "assistant_text_delta" ||
         event.type === "tool_call_start" ||
-        event.type === "tool_result",
+        event.type === "tool_result" ||
+        event.type === "interrupt",
     });
     const recent = recentTranscript.events;
     const lastRecent = recent.at(-1);
@@ -3933,6 +4000,21 @@ export async function buildModelMessagesWithRecentContext(
       lastRecent?.type === "user_message" && lastRecent.text === currentUserText
         ? recent.slice(0, -1)
         : recent;
+    let lastAssistantIndex = -1;
+    let lastInterruptedTurnMessage: string | undefined;
+    for (let index = 0; index < withoutCurrent.length; index += 1) {
+      const event = withoutCurrent[index];
+      if (event.type === "assistant_text_delta") {
+        lastAssistantIndex = index;
+      }
+      if (
+        event.type === "interrupt" &&
+        event.message.startsWith("turn_interrupted:") &&
+        index > lastAssistantIndex
+      ) {
+        lastInterruptedTurnMessage = event.message;
+      }
+    }
     const toolCalls = new Map<string, ModelToolCall>();
     let added = 0;
     for (const event of withoutCurrent.slice().reverse()) {
@@ -4000,6 +4082,14 @@ export async function buildModelMessagesWithRecentContext(
       historyMessages,
     );
     messages.push(...budgetedHistory);
+    if (lastInterruptedTurnMessage) {
+      const reason = lastInterruptedTurnMessage.match(/reason=([^;\s]+)/u)?.[1] ?? "unknown";
+      messages.push({
+        role: "system",
+        content:
+          `Previous foreground turn was interrupted (reason: ${reason}). Treat the latest user message as the authoritative task. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.`,
+      });
+    }
   } catch (error) {
     await appendSystemEvent(
       context,
@@ -4571,7 +4661,7 @@ export async function continueModelAfterToolResults(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
-  context.runtimeContextId ??= randomUUID();
+  const requestTurnId = beginForegroundRequestTurn(context);
   const controller = new AbortController();
   const originalContProvider = continuation.provider;
   const originalContModel = continuation.model;
@@ -4648,7 +4738,7 @@ export async function continueModelAfterToolResults(
         model: continuation.model,
         endpointProfile: continuation.endpointProfile,
         requestContext: "foreground",
-        requestContextId: context.runtimeContextId,
+        requestContextId: requestTurnId,
         sessionId,
         ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
         ...(continuationToolsEnabled
@@ -4703,9 +4793,15 @@ export async function continueModelAfterToolResults(
         // continuation messages。与 sendMessage 顶层的 controller.signal.aborted
         // 早返回保持一致。
         if (controller.signal.aborted) {
-          clearRequestActivity(context);
-          cancelAssistantStream(output);
-          writeLine(output, t(context, "toolInterrupted"));
+          await recordInterruptedForegroundTurn(context, sessionId, {
+            requestTurnId,
+            reason: "model_abort",
+          });
+          if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+            clearForegroundRequestState(context, requestTurnId);
+            cancelAssistantStream(output);
+            writeLine(output, t(context, "toolInterrupted"));
+          }
           return;
         }
         recordRequestFirstDelta(context, event.type);
@@ -4856,11 +4952,17 @@ export async function continueModelAfterToolResults(
             checkAndWriteProviderCooldown(context, fallback.runtime, output);
             continue continuationRoundLoop;
           }
-          writeErrorLine(
-            output,
-            formatProviderFailurePrimary(event.error, context.language),
-            formatProviderFailureTitle(context.language),
-          );
+          await recordInterruptedForegroundTurn(context, sessionId, {
+            requestTurnId,
+            reason: "provider_disconnect",
+          });
+          if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+            writeErrorLine(
+              output,
+              formatProviderFailurePrimary(event.error, context.language),
+              formatProviderFailureTitle(context.language),
+            );
+          }
           return;
         }
       }
@@ -5320,11 +5422,7 @@ export async function continueModelAfterToolResults(
     if (!continuationLoopCompleted || !assistantText) {
       endAssistantStream(output);
     }
-    clearRequestActivity(context);
-    context.activeAbortController = undefined;
-    context.foregroundAbortPendingUntilMs = undefined;
-    context.tools.abortSignal = undefined;
-    context.interrupt = { type: "idle" };
+    clearForegroundRequestState(context, requestTurnId);
   }
 }
 

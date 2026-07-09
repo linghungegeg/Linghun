@@ -13,6 +13,7 @@ import {
   __testStreamFinalModelAnswerWithoutTools,
   buildAggregatedDowngradedFinalAnswer,
   buildEvidenceBackedFinalBoundaryAnswer,
+  beginForegroundRequestTurn,
   canRunToolCallInParallelReadonlyBatch,
   createToolFallbackRecoveryReminder,
   createToolFailureRecoveryFingerprint,
@@ -26,6 +27,7 @@ import {
   isToolBatchFailure,
   isToolBatchFallbackRequired,
   planFinalGateEvidenceGapAction,
+  recordInterruptedForegroundTurn,
   shouldContinueAfterFinalGateEvidenceAction,
   shouldRewriteFinalGateClaimAlignment,
   shouldContinueAfterToolFailureWithoutToolCall,
@@ -171,6 +173,51 @@ function makeNaturalInputContext(language: "zh-CN" | "en-US" = "zh-CN") {
 }
 
 describe("model message prompt cache layout", () => {
+  it("tracks foreground turn ids and records interrupted turns once", async () => {
+    const appended: unknown[] = [];
+    const context = {
+      tools: createToolContext(process.cwd()),
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          appended.push(event);
+        },
+      },
+    };
+
+    const firstTurnId = beginForegroundRequestTurn(context as never, "user-1");
+    const secondTurnId = beginForegroundRequestTurn(context as never, "user-2");
+
+    expect(firstTurnId).not.toBe(secondTurnId);
+    expect((context as { runtimeContextId?: string }).runtimeContextId).toBe(secondTurnId);
+    expect((context as { currentRequestTurnId?: string }).currentRequestTurnId).toBe(secondTurnId);
+    expect((context as { currentRequestUserMessageId?: string }).currentRequestUserMessageId).toBe(
+      "user-2",
+    );
+
+    await recordInterruptedForegroundTurn(context as never, "session-turn", {
+      requestTurnId: secondTurnId,
+      reason: "user_interrupt",
+      userMessageId: "user-2",
+    });
+    await recordInterruptedForegroundTurn(context as never, "session-turn", {
+      requestTurnId: secondTurnId,
+      reason: "model_abort",
+      userMessageId: "user-2",
+    });
+
+    expect(appended).toHaveLength(1);
+    expect(appended[0]).toMatchObject({
+      type: "interrupt",
+      status: "cancelled",
+      message: expect.stringContaining(`requestTurnId=${secondTurnId}`),
+    });
+    expect((context as { lastInterruptedTurn?: unknown }).lastInterruptedTurn).toMatchObject({
+      requestTurnId: secondTurnId,
+      reason: "user_interrupt",
+      userMessageId: "user-2",
+    });
+  });
+
   it("keeps volatile system diagnostics after reusable transcript history", async () => {
     const context = {
       model: "test-model",
@@ -211,6 +258,48 @@ describe("model message prompt cache layout", () => {
     ]);
     expect(messages[0]).toMatchObject({ promptCache: "cacheable" });
     expect(messages[3]).toMatchObject({ promptCache: "volatile" });
+  });
+
+  it("adds a narrow boundary hint after an interrupted foreground turn", async () => {
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            { type: "user_message", text: "old task" },
+            {
+              type: "interrupt",
+              status: "cancelled",
+              message:
+                "turn_interrupted: requestTurnId=turn-old; reason=user_interrupt; userMessageId=user-old",
+            },
+            { type: "user_message", text: "current user" },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-interrupted-boundary",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+
+    expect(messages.map((message) => message.content)).toContain(
+      "Previous foreground turn was interrupted (reason: user_interrupt). Treat the latest user message as the authoritative task. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.",
+    );
+    expect(messages.at(-1)).toMatchObject({ role: "user", content: "current user" });
   });
 
   it("keeps legacy edit tool_result internals out of model-visible history", async () => {

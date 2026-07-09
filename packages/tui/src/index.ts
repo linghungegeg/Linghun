@@ -1599,7 +1599,10 @@ function attachProviderRuntimeHooks(context: TuiContext): void {
     onRetry: (info) => {
       // Agent/workflow background retries must not overwrite main-screen status.
       if (info.requestContext === "agent") return;
-      if (info.requestContextId && info.requestContextId !== context.runtimeContextId) return;
+      if (info.requestContextId) {
+        if (!context.currentRequestTurnId) return;
+        if (info.requestContextId !== context.currentRequestTurnId) return;
+      }
       const orchestration = resolveMetaOrchestrationAction(context, "provider-retry");
       if (orchestration.shouldStop) {
         void recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {

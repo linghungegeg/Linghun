@@ -13,7 +13,7 @@ import {
 import { formatBackgroundDetails } from "./job-runner-presenter.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
 import { appendJobLog, rescheduleDurableJobAgents } from "./job-runtime.js";
-import { clearRequestActivity } from "./model-stream-runtime.js";
+import { clearRequestActivity, recordInterruptedForegroundTurn } from "./model-stream-runtime.js";
 import {
   type RunnerContext,
   type RunnerRuntimeDeps,
@@ -508,7 +508,14 @@ export async function interruptAllActiveWork(
   }
 
   if (context.activeAbortController) {
+    const requestTurnId = context.currentRequestTurnId;
+    const userMessageId = context.currentRequestUserMessageId;
     context.activeAbortController.abort();
+    await recordInterruptedForegroundTurn(context, sessionId, {
+      requestTurnId,
+      reason: "user_interrupt",
+      userMessageId,
+    });
     context.activeAbortController = undefined;
     context.foregroundAbortPendingUntilMs = Date.now() + FOREGROUND_ABORT_CONFIRMATION_GRACE_MS;
     clearRequestActivity(context);

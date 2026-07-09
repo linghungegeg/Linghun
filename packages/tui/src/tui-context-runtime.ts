@@ -314,6 +314,14 @@ export type TuiContext = {
   store: SessionStore;
   sessionId?: string;
   runtimeContextId?: string;
+  currentRequestTurnId?: string;
+  currentRequestUserMessageId?: string;
+  lastInterruptedTurn?: {
+    requestTurnId: string;
+    reason: "user_interrupt" | "provider_disconnect" | "model_abort";
+    userMessageId?: string;
+    at: string;
+  };
   sessionEnded?: boolean;
   model: string;
   permissionMode: PermissionMode;
