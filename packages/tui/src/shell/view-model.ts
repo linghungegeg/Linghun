@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import type { CacheTurnStats } from "@linghun/core";
 import { type Language, type PermissionMode, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
+import type { CacheRequestObservation } from "../cache-policy-runtime.js";
 import { calculateContextPercentages, formatContextProgressBar } from "../context-window-runtime.js";
 import type { BackgroundTaskState, TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
@@ -464,7 +465,7 @@ export function createShellViewModel(
     cyclePermHint,
     effectiveModel: context.model,
     setupNeeded,
-    cacheHitRate: computeRecentCacheHitRate(context.cache?.history ?? []),
+    cacheStatus: computeFooterCacheStatus(context.cache),
     indexStatus: context.index.status,
     reasoningLevel: options.reasoningLevel,
     reasoningSent: options.reasoningSent,
@@ -2430,10 +2431,14 @@ function selectFooterContextUsage(context: TuiContext): FooterContextUsageInput 
 
   const pressure = context.cache.compactPressure;
   if (pressure) {
+    const maxChars =
+      usage?.updatedAt === pressure.updatedAt && Number.isFinite(usage.maxChars)
+        ? usage.maxChars
+        : pressure.maxChars;
     return {
       ...calculateContextPercentages(
         Math.ceil(pressure.estimatedChars / 4),
-        Math.ceil(pressure.maxChars / 4),
+        Math.ceil(maxChars / 4),
       ),
       ...(usage?.updatedAt === pressure.updatedAt ? { savingsRatio: usage.savingsRatio } : {}),
     };
@@ -2454,13 +2459,18 @@ type TaskFooterInput = {
   cyclePermHint: string;
   effectiveModel: string | undefined;
   setupNeeded: boolean;
-  cacheHitRate: number | null;
+  cacheStatus: FooterCacheStatus;
   indexStatus: string;
   reasoningLevel?: string;
   reasoningSent?: boolean;
   estimatedCostCny?: number;
   contextUsage?: FooterContextUsageInput;
   isRemoteMode: boolean;
+};
+
+type FooterCacheStatus = {
+  hitRate: number | null;
+  fallback: "none" | "local_stable" | "sampling";
 };
 
 export function computeRecentCacheHitRate(
@@ -2496,6 +2506,39 @@ export function computeRecentCacheHitRate(
   return validHitRates.reduce((sum, value) => sum + value, 0) / validHitRates.length;
 }
 
+function computeFooterCacheStatus(
+  cache: TuiContext["cache"] | undefined,
+): FooterCacheStatus {
+  const hitRate = computeRecentCacheHitRate(cache?.history ?? []);
+  if (hitRate !== null) return { hitRate, fallback: "none" };
+
+  const observation =
+    cache?.lastMainChainRequestObservation ??
+    cache?.lastRequestObservationByKind?.main ??
+    cache?.lastRequestObservationByKind?.continuation ??
+    cache?.lastRequestObservationByKind?.final ??
+    cache?.lastRequestObservation;
+  if (!observation?.promptCacheEnabled) return { hitRate: null, fallback: "none" };
+  return {
+    hitRate: null,
+    fallback: isLocallyStableCacheObservation(observation) ? "local_stable" : "sampling",
+  };
+}
+
+function isLocallyStableCacheObservation(observation: CacheRequestObservation): boolean {
+  if (observation.hasCacheBreakNonce) return false;
+  const changed = new Set(observation.fingerprint.changedKeys ?? []);
+  const stableKeys: Array<keyof CacheRequestObservation["fingerprint"]> = [
+    "systemPrefixHash",
+    "stableToolSchemaHash",
+    "modelHash",
+    "reasoningHash",
+    "cacheConfigHash",
+    "promptCacheKeyHash",
+  ];
+  return stableKeys.every((key) => !changed.has(key));
+}
+
 function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
   const modelInfo = formatFooterModel(
     input.language,
@@ -2509,8 +2552,8 @@ function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
     cyclePermHint: input.cyclePermHint,
     model: modelInfo.text,
     modelDim: modelInfo.dim,
-    cache: formatFooterCache(input.language, input.cacheHitRate),
-    cacheTone: formatFooterCacheTone(input.cacheHitRate),
+    cache: formatFooterCache(input.language, input.cacheStatus),
+    cacheTone: formatFooterCacheTone(input.cacheStatus),
     index: formatFooterIndex(input.language, input.indexStatus),
     reasoning: formatFooterReasoning(input.language, input.reasoningLevel, input.reasoningSent),
     contextUsage: formatFooterContextUsage(input.language, input.contextUsage),
@@ -2557,14 +2600,26 @@ function formatFooterContextSavings(savingsRatio: number | undefined): string | 
   return `↓${Math.round(Math.min(1, savingsRatio) * 100)}%`;
 }
 
-function formatFooterCache(language: Language, hitRate: number | null): string {
+function formatFooterCache(language: Language, status: FooterCacheStatus): string {
   const label = language === "en-US" ? "Cache" : "缓存";
-  if (hitRate === null || hitRate === undefined) return `${label}?`;
+  const hitRate = status.hitRate;
+  if (hitRate === null || hitRate === undefined) {
+    if (status.fallback === "local_stable") {
+      return language === "en-US" ? `${label} local` : `${label} 本地稳定`;
+    }
+    if (status.fallback === "sampling") {
+      return language === "en-US" ? `${label} sampling` : `${label} 采样中`;
+    }
+    return `${label}?`;
+  }
   return `${label} ${formatCachePercent(hitRate)}`;
 }
 
-function formatFooterCacheTone(hitRate: number | null): "default" | "warning" | "dim" {
-  if (hitRate === null || hitRate === undefined) return "dim";
+function formatFooterCacheTone(status: FooterCacheStatus): "default" | "warning" | "dim" {
+  const hitRate = status.hitRate;
+  if (hitRate === null || hitRate === undefined) {
+    return status.fallback === "none" ? "dim" : "default";
+  }
   return "default";
 }
 

@@ -2748,6 +2748,7 @@ export async function sendMessage(
           ? {
               tools: createProviderToolDefinitionsForContext(context, reportWriteGuard),
               toolChoice: "auto" as const,
+              parallelToolCalls: false,
             }
           : {}),
         ...promptCacheFields,
@@ -2785,6 +2786,7 @@ export async function sendMessage(
         providerRequest,
         controller.signal,
         {
+          stopAfterToolUse: providerRequest.parallelToolCalls === false,
           onRetry: (info) => {
             resetAssistantDraftForProviderRetry();
             showProviderRetryActivity(context, info);
@@ -4851,6 +4853,7 @@ export async function continueModelAfterToolResults(
           ? {
               tools: createProviderToolDefinitionsForContext(context, continuation.reportWriteGuard),
               toolChoice: "auto" as const,
+              parallelToolCalls: false,
             }
           : {}),
         ...promptCacheFields,
@@ -4888,6 +4891,7 @@ export async function continueModelAfterToolResults(
         providerRequest,
         controller.signal,
         {
+          stopAfterToolUse: providerRequest.parallelToolCalls === false,
           onRetry: (info) => {
             resetAssistantDraftForProviderRetry();
             showProviderRetryActivity(context, info);

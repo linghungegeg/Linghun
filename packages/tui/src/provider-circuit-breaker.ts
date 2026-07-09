@@ -528,7 +528,8 @@ export async function* withProviderRetry(
     skipGate?: boolean;
     skipCooldownCheck?: boolean;
     streamEventIdleMs?: number;
-      onRetry?: (info: {
+    stopAfterToolUse?: boolean;
+    onRetry?: (info: {
       attempt: number;
       maxAttempts: number;
       delayMs: number;
@@ -599,8 +600,7 @@ export async function* withProviderRetry(
 
     let streamError: unknown;
     let streamCompleted = false;
-    const deferredEvents: LinghunEvent[] = [];
-    let deferringAfterToolUse = false;
+    let yieldedToolUse = false;
 
     try {
       const streamController = new AbortController();
@@ -624,18 +624,16 @@ export async function* withProviderRetry(
           const event = next.value;
           if (event.type === "error") {
             streamError = event.error;
-            deferredEvents.length = 0;
             break;
           }
-          // Once a tool_use appears, defer it and all subsequent events
-          // so that the original order is preserved on flush.
           if (event.type === "tool_use") {
-            deferringAfterToolUse = true;
-          }
-          if (deferringAfterToolUse) {
-            deferredEvents.push(event);
-            if (event.type === "message_stop") {
+            yieldedToolUse = true;
+            yield event;
+            if (opts?.stopAfterToolUse) {
               streamCompleted = true;
+              clearProviderBreaker(state, provider, model, cooldownScope);
+              streamController.abort("tool_use_early_dispatch");
+              return;
             }
             continue;
           }
@@ -652,7 +650,6 @@ export async function* withProviderRetry(
       }
     } catch (error) {
       streamError = error;
-      deferredEvents.length = 0;
     } finally {
       releaseProviderSlot(state, provider, model);
     }
@@ -666,9 +663,7 @@ export async function* withProviderRetry(
     }
 
     if (!streamError) {
-      // Success — flush deferred events (tool_use + subsequent) in original order.
       clearProviderBreaker(state, provider, model, cooldownScope);
-      for (const ev of deferredEvents) yield ev;
       return;
     }
 
@@ -683,7 +678,7 @@ export async function* withProviderRetry(
     const kind = classifyProviderFailure(streamError);
     const code = getProviderErrorCode(streamError);
 
-    if (!shouldAttemptSameProviderRetry(code) || attempt >= maxRetries) {
+    if (yieldedToolUse || !shouldAttemptSameProviderRetry(code) || attempt >= maxRetries) {
       recordProviderFailure(state, provider, model, code, cooldownScope);
       // Non-retryable or retries exhausted — yield the error as-is.
       const error =

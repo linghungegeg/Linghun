@@ -154,16 +154,37 @@ export async function prepareMessagesForProviderPreflight(input: {
 
   const now = Date.now();
   if (input.context.cache.compactCooldownUntil && input.context.cache.compactCooldownUntil > now) {
-    const message =
-      input.context.language === "en-US"
-        ? "Context compact is cooling down after a previous failure. I will not send an oversized partial context to the provider; retry after the cooldown or run /compact status."
-        : "上一次上下文压缩失败后仍在冷却中。我不会把超压的半截上下文继续发给 provider；请稍后重试或运行 /compact status 查看。";
     await input.deps.appendSystemEvent(
       input.context,
       input.sessionId,
       "context_compact_cooldown_active",
       "warning",
     );
+    if (budgetedChars <= contextMaxChars) {
+      recordCompactStrategy(input.context, {
+        runtime: input.runtime,
+        trigger: input.trigger,
+        contextMaxChars,
+        triggerChars,
+        postCompactTargetChars,
+        finalChars: budgetedChars,
+        steps: [
+          ...strategySteps,
+          {
+            layer: "full_summary",
+            status: "skipped",
+            reason: "compact_cooldown_budgeted_context_within_provider_limit",
+            beforeChars: budgetedChars,
+            afterChars: budgetedChars,
+          },
+        ],
+      });
+      return { blocked: false, messages: budgeted };
+    }
+    const message =
+      input.context.language === "en-US"
+        ? "Context compact is cooling down after a previous failure. I will not send an oversized partial context to the provider; retry after the cooldown or run /compact status."
+        : "上一次上下文压缩失败后仍在冷却中。我不会把超压的半截上下文继续发给 provider；请稍后重试或运行 /compact status 查看。";
     return { blocked: true, messages: budgeted, message };
   }
 
@@ -252,14 +273,18 @@ export async function prepareMessagesForProviderPreflight(input: {
           finalChars: afterDeep,
           steps: strategySteps,
         });
+        const blocked = budgetedChars > contextMaxChars;
         await recordCompactFailure(
           input.context,
           input.sessionId,
           `deep_compact_failed:${deepMessage}`,
-          true,
+          blocked,
           input.deps,
         );
-        return { blocked: true, messages: budgeted, message: deepMessage };
+        if (blocked) {
+          return { blocked: true, messages: budgeted, message: deepMessage };
+        }
+        return { blocked: false, messages: await injectDeepCompactContext(budgeted, input.context) };
       }
       strategySteps.push({
         layer: "semantic_deep",
@@ -424,7 +449,11 @@ export async function prepareMessagesForProviderPreflight(input: {
     return { blocked: false, messages: providerMessages };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    await recordCompactFailure(input.context, input.sessionId, reason, true, input.deps);
+    const blocked = budgetedChars > contextMaxChars;
+    await recordCompactFailure(input.context, input.sessionId, reason, blocked, input.deps);
+    if (!blocked) {
+      return { blocked: false, messages: budgeted };
+    }
     const message =
       input.context.language === "en-US"
         ? "Context compact failed, so this provider request is blocked instead of continuing with partial context."
@@ -968,8 +997,9 @@ async function recordCompactFailure(
     category: "resource_cap",
     failureSummary: "context compact failed before provider request",
     rootCauseGuess: context.cache.compactFailure.reason,
-    avoidNextTime:
-      "Do not continue with partial context after compact failure; retry after cooldown or reduce context pressure",
+    avoidNextTime: blocked
+      ? "Do not continue with partial context after compact failure; retry after cooldown or reduce context pressure"
+      : "Compact failed but the budgeted context stayed within the provider limit; continue with budgeted context and retry compact later",
     sourceRef: "system_event:context_compact_failed",
     relatedTarget: "context compact",
     severity: "medium",

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
-import type { ModelGateway } from "@linghun/providers";
+import type { ModelGateway, ModelMessage } from "@linghun/providers";
 import type { PermissionMode } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 import {
@@ -14,7 +14,9 @@ import { ensureSession, t, writeStatus } from "./details-status-runtime.js";
 import {
   appendDeferredToolResultEvent,
   appendToolResultEvent,
+  getToolResultBudgetState,
   recordToolFailureEvidence,
+  recordToolResultBudgetEvidence,
 } from "./evidence-runtime.js";
 import { appendSystemEvent, recordModelToolFailureForMetaScheduler } from "./evidence-runtime.js";
 import {
@@ -47,6 +49,7 @@ import {
 } from "./permission-continuation-runtime.js";
 import { formatLocalToolPermissionPrompt } from "./permission-presenter.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
+import { LINGHUN_PROVIDER_TOOL_RESULT_CHARS } from "./runtime-budget.js";
 import {
   createWorktreeRemoveResolveDeps,
   executeImageGeneration,
@@ -55,6 +58,7 @@ import {
   startPendingAutopilot,
 } from "./slash-command-runtime.js";
 import { writeLine } from "./startup-runtime.js";
+import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import { isRuntimeActiveBackgroundTask } from "./tui-agent-job-runtime.js";
 import type { PendingLocalApproval, TuiContext } from "./tui-context-runtime.js";
@@ -67,6 +71,30 @@ import {
   savePermissionState,
   toPermissionPromptView,
 } from "./tui-permission-runtime.js";
+
+async function appendBudgetedToolResultToContinuation(
+  context: TuiContext,
+  sessionId: string,
+  messages: ModelMessage[],
+  toolCallId: string,
+  result: unknown,
+): Promise<void> {
+  const toolMessage: ModelMessage = {
+    role: "tool",
+    tool_call_id: toolCallId,
+    content: JSON.stringify(result),
+  };
+  const budgeted = await applyToolResultBudgetToMessages([toolMessage], {
+    projectPath: context.projectPath,
+    sessionId,
+    state: getToolResultBudgetState(context),
+    singleResultChars: LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
+  });
+  for (const record of budgeted.records) {
+    await recordToolResultBudgetEvidence(context, sessionId, record);
+  }
+  messages.push(...budgeted.messages);
+}
 
 export async function handleTuiKeypress(
   key: "escape" | "return" | "shift-tab",
@@ -525,11 +553,13 @@ export async function executePermissionApprove(
       reportWriteGuard.completed = true;
     }
     if (gateway && approval.continuation) {
-      approval.continuation.messages.push({
-        role: "tool",
-        tool_call_id: approval.toolCall.id,
-        content: JSON.stringify(result),
-      });
+      await appendBudgetedToolResultToContinuation(
+        context,
+        approval.sessionId,
+        approval.continuation.messages,
+        approval.toolCall.id,
+        result,
+      );
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     } else if (approval.continuation) {
       await appendApprovalContinuationWarning(
@@ -560,11 +590,13 @@ export async function executePermissionApprove(
       reportWriteGuard.completed = true;
     }
     if (gateway && approval.continuation) {
-      approval.continuation.messages.push({
-        role: "tool",
-        tool_call_id: approval.toolCall.id,
-        content: JSON.stringify(result),
-      });
+      await appendBudgetedToolResultToContinuation(
+        context,
+        approval.sessionId,
+        approval.continuation.messages,
+        approval.toolCall.id,
+        result,
+      );
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     } else if (approval.continuation) {
       await appendApprovalContinuationWarning(
@@ -608,11 +640,13 @@ export async function executePermissionApprove(
       output,
     );
     if (gateway && approval.continuation) {
-      approval.continuation.messages.push({
-        role: "tool",
-        tool_call_id: approval.toolCall.id,
-        content: JSON.stringify(result),
-      });
+      await appendBudgetedToolResultToContinuation(
+        context,
+        approval.sessionId,
+        approval.continuation.messages,
+        approval.toolCall.id,
+        result,
+      );
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     } else if (approval.continuation) {
       await appendApprovalContinuationWarning(
@@ -643,11 +677,13 @@ export async function executePermissionApprove(
       reportWriteGuard.completed = true;
     }
     if (gateway && approval.continuation) {
-      approval.continuation.messages.push({
-        role: "tool",
-        tool_call_id: approval.toolCall.id,
-        content: JSON.stringify(result),
-      });
+      await appendBudgetedToolResultToContinuation(
+        context,
+        approval.sessionId,
+        approval.continuation.messages,
+        approval.toolCall.id,
+        result,
+      );
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     } else if (approval.continuation) {
       await appendApprovalContinuationWarning(

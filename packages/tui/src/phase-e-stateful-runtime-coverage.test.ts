@@ -39,7 +39,10 @@ import {
   recordVerificationEvidence,
 } from "./evidence-runtime.js";
 import { ensureSession } from "./details-status-runtime.js";
-import { createFailureLearningState } from "./failure-learning-runtime.js";
+import {
+  type FailureLearningInput,
+  createFailureLearningState,
+} from "./failure-learning-runtime.js";
 import { hydrateResumeContext, loadOrCreateHandoffPacket } from "./handoff-session-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { runMcpStdioToolCall } from "./mcp-stdio-runtime.js";
@@ -756,6 +759,93 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(
       sanitizeCompactSummaryText(context, `${context.projectPath}\\secret sk-abc123`, 200),
     ).not.toContain("sk-abc123");
+  });
+
+  it("continues through compact cooldown and deep compact failure when budgeted context fits", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 20_000);
+    const events: string[] = [];
+    const deps = {
+      ...compactDeps(),
+      appendSystemEvent: async (_context: TuiContext, _sessionId: string, message: string) => {
+        events.push(message);
+      },
+    };
+    const triggerChars = getAutoCompactTriggerChars(context, runtime());
+    const contextMaxChars = getProviderContextMaxChars(context, runtime());
+    const inLimitContent = "x".repeat(Math.min(triggerChars + 2_000, contextMaxChars - 8_000));
+    expect(estimateModelMessageChars([{ role: "user", content: inLimitContent }])).toBeLessThan(
+      contextMaxChars,
+    );
+
+    context.cache.compactCooldownUntil = Date.now() + 60_000;
+    const cooled = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "s" },
+        { role: "user", content: inLimitContent },
+      ],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+
+    expect(cooled.blocked).toBe(false);
+    expect(events).toContain("context_compact_cooldown_active");
+    expect(context.cache.compactStrategy?.steps.at(-1)).toMatchObject({
+      reason: "compact_cooldown_budgeted_context_within_provider_limit",
+    });
+
+    const deepContext = await createTestContext();
+    setExecutorMaxInputTokens(deepContext, 20_000);
+    deepContext.modelGateway = gateway([
+      { type: "tool_use", id: "tc-deep", name: "Read", input: {} },
+    ]);
+    const deepEvents: string[] = [];
+    const deepLearnings: string[] = [];
+    const deepTriggerChars = getAutoCompactTriggerChars(deepContext, runtime());
+    const deepContextMaxChars = getProviderContextMaxChars(deepContext, runtime());
+    const deepInLimitContent = "y".repeat(
+      Math.min(deepTriggerChars + 2_000, deepContextMaxChars - 8_000),
+    );
+
+    const deepFailed = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "s" },
+        { role: "user", content: deepInLimitContent },
+      ],
+      context: deepContext,
+      sessionId: deepContext.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: {
+        ...compactDeps(),
+        appendSystemEvent: async (_context: TuiContext, _sessionId: string, message: string) => {
+          deepEvents.push(message);
+        },
+        captureFailureLearning: async (
+          _context: TuiContext,
+          _sessionId: string,
+          input: FailureLearningInput,
+        ) => {
+          deepLearnings.push(input.avoidNextTime);
+        },
+        runDeepCompact: {
+          ...deepDeps(),
+          appendSystemEvent: async (_context: TuiContext, _sessionId: string, message: string) => {
+            deepEvents.push(message);
+          },
+        },
+      },
+    });
+
+    expect(deepFailed.blocked).toBe(false);
+    expect(deepContext.cache.compactFailure).toMatchObject({ blocked: false });
+    expect(deepEvents.some((event) => event.includes("context compact failed: blocked no"))).toBe(
+      true,
+    );
+    expect(deepLearnings.at(-1)).toContain("budgeted context stayed within the provider limit");
   });
 
   it("covers deep compact should-run, success, tool_use failure, and missing gateway paths", async () => {

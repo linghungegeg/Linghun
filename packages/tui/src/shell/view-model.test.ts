@@ -1379,7 +1379,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     const ctx = createContext({
       requestActivityPhase: "request_started",
       requestActivityStartedAt: Date.now(),
-    } as Partial<TuiContext>);
+    } as unknown as Partial<TuiContext>);
     const result = mapRequestActivityToView(ctx);
     expect(result?.phase).toBe("thinking");
     expect(result?.elapsed).toBe("0s");
@@ -1407,7 +1407,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
       requestActivityPhase: "tool_running",
       requestActivityToolName: "Write",
       requestActivityStartedAt: startedAt,
-    } as Partial<TuiContext>);
+    } as unknown as Partial<TuiContext>);
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("tool_running");
@@ -1437,7 +1437,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
   it("maps continuing_after_tool to continuing phase", () => {
     const ctx = createContext({
       requestActivityPhase: "continuing_after_tool",
-    } as Partial<TuiContext>);
+    } as unknown as Partial<TuiContext>);
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("continuing");
@@ -1447,7 +1447,7 @@ describe("mapRequestActivityToView — real context field mapping", () => {
   it("maps final answer verification to a clear waiting state", () => {
     const ctx = createContext({
       requestActivityPhase: "verifying_final_answer",
-    } as Partial<TuiContext>);
+    } as unknown as Partial<TuiContext>);
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("continuing");
@@ -4577,6 +4577,38 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     });
   });
 
+  it("task footer uses the provider window denominator for current compact pressure", () => {
+    const view = createShellViewModel(
+      createContext({
+        cache: {
+          history: [{ hitRate: 0.84 }],
+          compactPressure: {
+            estimatedChars: 200_000,
+            maxChars: 400_000,
+            triggerChars: 360_000,
+            ratio: 0.5,
+            toolPairingSafe: true,
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+          contextUsage: {
+            estimatedChars: 200_000,
+            maxChars: 800_000,
+            updatedAt: "2026-01-01T00:00:01.000Z",
+            source: "compact",
+          },
+        },
+      } as Partial<TuiContext>),
+      { width: 120, viewMode: "task" },
+    );
+
+    expect(view.taskFooter?.contextUsage).toMatchObject({
+      wide: "上下文 [███───────] 25%",
+      narrow: "上下文 [██────] 25%",
+      minimal: "上下文 25%",
+      ratio: 0.25,
+    });
+  });
+
   it("task footer keeps provider-confirmed long context usage over compact pressure", () => {
     const view = createShellViewModel(
       createContext({
@@ -7554,6 +7586,49 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     });
 
     expect(view.taskFooter?.cache).toBe("Cache 53%");
+    expect(view.taskFooter?.cacheTone).toBe("default");
+  });
+
+  it("task footer falls back to local stable cache state when provider usage is unavailable", () => {
+    const ctx = createContext(({
+      cache: {
+        history: [],
+        lastMainChainRequestObservation: {
+          promptCacheEnabled: true,
+          hasCacheBreakNonce: false,
+          fingerprint: { changedKeys: ["requestHash", "latestMessageHash"] },
+        },
+      },
+    } as unknown) as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, {
+      width: 120,
+      viewMode: "task",
+    });
+
+    expect(view.taskFooter?.cache).toBe("缓存 本地稳定");
+    expect(view.taskFooter?.cacheTone).toBe("default");
+  });
+
+  it("task footer shows cache sampling when local stable cache shape changed without usage", () => {
+    const ctx = createContext(({
+      language: "en-US",
+      cache: {
+        history: [],
+        lastMainChainRequestObservation: {
+          promptCacheEnabled: true,
+          hasCacheBreakNonce: false,
+          fingerprint: { changedKeys: ["systemPrefixHash"] },
+        },
+      },
+    } as unknown) as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, {
+      width: 120,
+      viewMode: "task",
+    });
+
+    expect(view.taskFooter?.cache).toBe("Cache sampling");
     expect(view.taskFooter?.cacheTone).toBe("default");
   });
 
