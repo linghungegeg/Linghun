@@ -14,7 +14,7 @@ function footer(overrides: Partial<TaskFooterView> = {}): TaskFooterView {
     cyclePermHint: "（Shift+Tab 切换模式）",
     reasoning: "推理 High",
     contextUsage: {
-      wide: "上下文 [██░░░░░░░░] 12% ↓40%",
+      wide: "上下文 12% ↓40%",
       narrow: "上下文 12% ↓40%",
       minimal: "上下文 12% ↓40%",
       ratio: 0.12,
@@ -52,7 +52,7 @@ describe("StatusFooter collapse rules", () => {
     expect(segments[0]?.text).toBe("上下文 12% ↓40%");
   });
 
-  it("wide mode includes the context progress bar after cache", () => {
+  it("wide mode includes context usage after cache", () => {
     const segments = selectStatusFooterSegments({
       footer: footer({ isRemoteMode: true }),
       width: 100,
@@ -68,6 +68,6 @@ describe("StatusFooter collapse rules", () => {
       "branch",
       "reasoning",
     ]);
-    expect(segments[3]?.text).toBe("上下文 [██░░░░░░░░] 12% ↓40%");
+    expect(segments[3]?.text).toBe("上下文 12% ↓40%");
   });
 });

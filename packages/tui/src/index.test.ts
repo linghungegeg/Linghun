@@ -8176,6 +8176,11 @@ describe("Phase 06 TUI slash commands", () => {
     context.activeBtwAbortController = btwController;
     context.btwPanelState = { question: "side question", phase: "loading" };
     context.backgroundTasks = [createBackgroundTaskFixture("bash", { id: "bash-no-controller" })];
+    context.tools.todos = [
+      { id: "todo-active", content: "active task", status: "in_progress" },
+      { id: "todo-pending", content: "queued task", status: "pending", evidence: "queued" },
+      { id: "todo-done", content: "done task", status: "completed" },
+    ];
 
     const { interruptAllActiveWork } = await import("./background-control-runtime.js");
     const result = await interruptAllActiveWork(context);
@@ -8191,6 +8196,12 @@ describe("Phase 06 TUI slash commands", () => {
       status: "stale",
       result: "partial",
     });
+    expect(context.tools.todos).toEqual([
+      expect.objectContaining({ id: "todo-active", status: "blocked" }),
+      expect.objectContaining({ id: "todo-pending", status: "blocked", evidence: expect.stringContaining("queued") }),
+      expect.objectContaining({ id: "todo-done", status: "completed" }),
+    ]);
+    expect(context.tools.todos[0]?.evidence).toContain("Esc");
   });
 
   it("runs /workflows run through real workflow steps while /workflows plan stays preview-only", async () => {

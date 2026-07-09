@@ -488,6 +488,17 @@ export async function interruptAllActiveWork(
     abortSignalsSent += 1;
     context.interrupt = { type: "idle" };
   };
+  const pauseActiveTodosForInterrupt = () => {
+    const pauseText =
+      context.language === "en-US"
+        ? "Interrupted by Esc; waiting for the next user action."
+        : "已由 Esc 中断；等待用户下一步操作。";
+    for (const todo of context.tools?.todos ?? []) {
+      if (todo.status !== "in_progress" && todo.status !== "pending") continue;
+      todo.status = "blocked";
+      todo.evidence = todo.evidence ? `${todo.evidence}; ${pauseText}` : pauseText;
+    }
+  };
 
   if (context.activeVerificationAbortController) {
     context.activeVerificationAbortController.abort();
@@ -616,5 +627,8 @@ export async function interruptAllActiveWork(
       ? t(context, "interruptIdle")
       : `${t(context, "interruptCancelled")} abort_signal_sent=${abortSignalsSent}; marked_stale=${markedOnly}; confirmed_exited=${confirmedExited}`,
   );
+  if (cancelled > 0) {
+    pauseActiveTodosForInterrupt();
+  }
   return { cancelled, abortSignalsSent, markedOnly };
 }

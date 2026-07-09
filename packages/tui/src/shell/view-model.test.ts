@@ -4538,8 +4538,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     expect(view.taskFooter?.cache).toBe("缓存 84%");
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 [█████─────] 50% (50k/100k) ↓38%",
-      narrow: "上下文 [███───] 50% (50k/100k) ↓38%",
+      wide: "上下文 50% (50k/100k) ↓38%",
+      narrow: "上下文 50% (50k/100k) ↓38%",
       minimal: "上下文 50% ↓38%",
       ratio: 0.5,
     });
@@ -4570,8 +4570,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 [█████─────] 50% (50k/100k)",
-      narrow: "上下文 [███───] 50% (50k/100k)",
+      wide: "上下文 50% (50k/100k)",
+      narrow: "上下文 50% (50k/100k)",
       minimal: "上下文 50%",
       ratio: 0.5,
     });
@@ -4602,8 +4602,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 [███───────] 25% (50k/200k)",
-      narrow: "上下文 [██────] 25% (50k/200k)",
+      wide: "上下文 25% (50k/200k)",
+      narrow: "上下文 25% (50k/200k)",
       minimal: "上下文 25%",
       ratio: 0.25,
     });
@@ -4638,8 +4638,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 [████████──] 80% (200k/250k)",
-      narrow: "上下文 [█████─] 80% (200k/250k)",
+      wide: "上下文 80% (200k/250k)",
+      narrow: "上下文 80% (200k/250k)",
       minimal: "上下文 80%",
       ratio: 0.8,
     });

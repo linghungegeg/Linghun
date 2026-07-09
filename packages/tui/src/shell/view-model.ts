@@ -2587,8 +2587,8 @@ function formatFooterContextUsage(
   const savings = formatFooterContextSavings(contextUsage.savingsRatio);
   const suffix = savings ? ` ${savings}` : "";
   return {
-    wide: `${label} ${formatContextProgressBar(contextUsage.ratio, 10)} ${percent} ${tokenWindow}${suffix}`,
-    narrow: `${label} ${formatContextProgressBar(contextUsage.ratio, 6)} ${percent} ${tokenWindow}${suffix}`,
+    wide: `${label} ${percent} ${tokenWindow}${suffix}`,
+    narrow: `${label} ${percent} ${tokenWindow}${suffix}`,
     minimal: `${label} ${percent}${suffix}`,
     ratio: contextUsage.ratio,
   };
