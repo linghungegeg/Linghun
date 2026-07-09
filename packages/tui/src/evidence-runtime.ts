@@ -36,6 +36,16 @@ export const MAX_ROUND_ASSISTANT_CHARS_FOR_PROVIDER = 16_000;
 export const ROUND_ASSISTANT_HEAD_CHARS = 4_000;
 export const ROUND_ASSISTANT_TAIL_CHARS = 4_000;
 const RECENT_DIAGNOSTICS_LIMIT = 20;
+const MODEL_HISTORY_EDIT_DATA_KEYS = [
+  "operation",
+  "editCount",
+  "addedLines",
+  "removedLines",
+  "changedFiles",
+  "readGuard",
+  "newlineBefore",
+  "newlineAfter",
+] as const;
 type CompactDiagnostic = {
   type: string;
   severity?: string;
@@ -957,11 +967,12 @@ export async function appendToolResultEvent(
   rememberRecentDiagnostics(context, toolName, content, toolUseId, evidenceId);
   rememberToolEvidenceData(context, evidenceId, content);
   const contentWithDiagnostics = appendToolResultContentDiagnostics(content);
+  const modelHistoryContent = compactToolResultForModelHistory(toolName, contentWithDiagnostics);
   const budgetedContent = await budgetToolResultTranscriptContent(
     context,
     sessionId,
     toolUseId,
-    contentWithDiagnostics,
+    modelHistoryContent,
     content,
   );
   await context.store.appendEvent(sessionId, {
@@ -973,6 +984,44 @@ export async function appendToolResultEvent(
     evidenceId,
     createdAt: new Date().toISOString(),
   });
+}
+
+export function compactToolResultForModelHistory(
+  toolName: ToolName | string,
+  content: unknown,
+): unknown {
+  if (!isEditingToolName(toolName) || !content || typeof content !== "object") {
+    return content;
+  }
+  const output = content as ToolOutput;
+  const data = output.data && typeof output.data === "object"
+    ? (output.data as Record<string, unknown>)
+    : {};
+  const compactData: Record<string, unknown> = {};
+  for (const key of MODEL_HISTORY_EDIT_DATA_KEYS) {
+    if (data[key] !== undefined) compactData[key] = data[key];
+  }
+  if (Array.isArray(output.changedFiles) && compactData.changedFiles === undefined) {
+    compactData.changedFiles = output.changedFiles;
+  }
+  const text = output.summary || output.preview || firstNonEmptyLine(output.text) || `${toolName} completed`;
+  return {
+    text,
+    summary: output.summary ?? text,
+    data: Object.keys(compactData).length > 0 ? compactData : undefined,
+    changedFiles: output.changedFiles,
+    truncated: output.truncated,
+    evidenceId: output.evidenceId,
+  };
+}
+
+function isEditingToolName(toolName: ToolName | string): boolean {
+  return toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit";
+}
+
+function firstNonEmptyLine(text: unknown): string | undefined {
+  if (typeof text !== "string") return undefined;
+  return text.split(/\r?\n/u).find((line) => line.trim())?.trim();
 }
 
 function rememberToolEvidenceData(
@@ -1105,16 +1154,25 @@ export async function budgetToolResultTranscriptContent(
   content: unknown,
   artifactContent: unknown = content,
 ): Promise<unknown> {
-  const contentText = stringifyToolResultContentForBudget(artifactContent);
-  if (!contentText || contentText.startsWith("<persisted-tool-result>")) return content;
-  if (
+  const contentText = stringifyToolResultContentForBudget(content);
+  const artifactTextForBudget = stringifyToolResultContentForBudget(artifactContent);
+  if (!artifactTextForBudget || artifactTextForBudget.startsWith("<persisted-tool-result>")) {
+    return content;
+  }
+  const contentFits =
+    !!contentText &&
     contentText.length <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS &&
-    Buffer.byteLength(contentText, "utf8") <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
+    Buffer.byteLength(contentText, "utf8") <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS;
+  if (
+    contentFits &&
+    artifactTextForBudget.length <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS &&
+    Buffer.byteLength(artifactTextForBudget, "utf8") <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
   ) {
     return content;
   }
 
-  const artifactText = stringifyToolResultContentForArtifact(artifactContent) ?? contentText;
+  const artifactText =
+    stringifyToolResultContentForArtifact(artifactContent) ?? artifactTextForBudget;
   const budgeted = await applyToolResultBudgetToMessages(
     [{ role: "tool", tool_call_id: toolUseId, content: artifactText }],
     {
@@ -1127,6 +1185,7 @@ export async function budgetToolResultTranscriptContent(
   for (const record of budgeted.records) {
     await recordToolResultBudgetEvidence(context, sessionId, record);
   }
+  if (contentFits) return content;
   const replacement = budgeted.messages[0];
   return replacement?.role === "tool" ? replacement.content : content;
 }

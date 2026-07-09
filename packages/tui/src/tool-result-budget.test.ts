@@ -548,6 +548,64 @@ describe("tool_result budget", () => {
     await expect(readFile(evidence?.fullOutputPath ?? "", "utf8")).resolves.toContain(tail);
   });
 
+  it("stores edit tool_results as compact model history instead of rich diff payloads", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-edit-"));
+    const events: unknown[] = [];
+    const tail = "EDIT_ARTIFACT_TAIL_SHOULD_BE_PRESERVED";
+    const largeDetails = `${"x".repeat(12_000)}${tail}`;
+    const context = {
+      projectPath: project,
+      evidence: [],
+      tools: { recentDiagnostics: [] },
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    };
+
+    await appendToolResultEvent(
+      context as unknown as Parameters<typeof appendToolResultEvent>[0],
+      "session-edit-compact",
+      "call-edit",
+      "Edit",
+      {
+        text: "Edit 已完成：sample.ts",
+        summary: "Edit sample.ts: +1 -1; changed files 1",
+        details: largeDetails,
+        data: {
+          operation: "Edit",
+          addedLines: 1,
+          removedLines: 1,
+          readGuard: "read-snapshot",
+          structuredPatch: { files: [{ path: "sample.ts", hunks: ["RAW_PATCH"] }] },
+          patchHunks: ["RAW_HUNK"],
+          afterHash: "hash-after",
+          largePayload: largeDetails,
+        },
+        changedFiles: ["sample.ts"],
+      },
+      false,
+      "ev-edit",
+    );
+
+    const toolResult = events.find((event) => (event as { type?: string }).type === "tool_result") as
+      | { content?: unknown }
+      | undefined;
+    const serialized = JSON.stringify(toolResult?.content);
+    expect(serialized).toContain("Edit sample.ts");
+    expect(serialized).toContain("changedFiles");
+    expect(serialized).not.toContain("<persisted-tool-result>");
+    expect(serialized).not.toContain("structuredPatch");
+    expect(serialized).not.toContain("patchHunks");
+    expect(serialized).not.toContain(tail);
+    expect(serialized).not.toContain("hash-after");
+    const evidence = events.find((event) => (event as { type?: string }).type === "evidence_record") as
+      | { fullOutputPath?: string }
+      | undefined;
+    await expect(readFile(evidence?.fullOutputPath ?? "", "utf8")).resolves.toContain(tail);
+  });
+
   it("preserves compact diagnostics in transcript tool_end output", () => {
     const diagnostics = Array.from({ length: 6 }, (_, index) => ({
       type: index === 0 ? "diagnostic_alpha" : `diagnostic_${index}`,

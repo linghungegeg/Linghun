@@ -212,6 +212,71 @@ describe("model message prompt cache layout", () => {
     expect(messages[0]).toMatchObject({ promptCache: "cacheable" });
     expect(messages[3]).toMatchObject({ promptCache: "volatile" });
   });
+
+  it("keeps legacy edit tool_result internals out of model-visible history", async () => {
+    const context = {
+      projectPath: await mkdtemp(join(tmpdir(), "linghun-model-history-")),
+      model: "test-model",
+      cache: { history: [] },
+      evidence: [],
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            {
+              type: "tool_call_start",
+              id: "call-edit",
+              name: "Edit",
+              input: { path: "sample.ts", oldText: "old", newText: "new" },
+            },
+            {
+              type: "tool_result",
+              toolUseId: "call-edit",
+              toolName: "Edit",
+              isError: false,
+              evidenceId: "ev-edit",
+              content: {
+                text: "Edit 已完成：sample.ts",
+                details: "INTERNAL_DETAILS_SHOULD_NOT_REACH_MODEL",
+                data: {
+                  operation: "Edit",
+                  addedLines: 1,
+                  removedLines: 1,
+                  structuredPatch: { files: [{ path: "sample.ts", hunks: ["RAW_PATCH"] }] },
+                  patchHunks: ["RAW_HUNK"],
+                  afterHash: "hash-after",
+                },
+                changedFiles: ["sample.ts"],
+              },
+            },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-model-history",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "continue",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(serialized).toContain("Edit");
+    expect(serialized).toContain("sample.ts");
+    expect(serialized).not.toContain("structuredPatch");
+    expect(serialized).not.toContain("patchHunks");
+    expect(serialized).not.toContain("INTERNAL_DETAILS_SHOULD_NOT_REACH_MODEL");
+    expect(serialized).not.toContain("hash-after");
+  });
 });
 
 describe("responses prompt cache key", () => {

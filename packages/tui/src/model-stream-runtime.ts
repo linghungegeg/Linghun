@@ -57,6 +57,7 @@ import {
   appendSystemEvent,
   budgetToolResultTranscriptContent,
   captureFailureLearning,
+  compactToolResultForModelHistory,
   createEvidenceRecord,
   getToolResultBudgetState,
   recordArchitectureRuntimeCard,
@@ -3948,12 +3949,14 @@ export async function buildModelMessagesWithRecentContext(
         historyMessages.push({ role: "assistant", content: event.text });
       }
       if (event.type === "tool_result") {
+        const modelHistoryContent = compactToolResultForModelHistory(event.toolName, event.content);
         const toolCall = toolCalls.get(event.toolUseId);
         if (!toolCall) {
           const content = await budgetToolResultTranscriptContent(
             context,
             sessionId,
             event.toolUseId,
+            modelHistoryContent,
             event.content,
           );
           historyMessages.push({
@@ -3974,7 +3977,7 @@ export async function buildModelMessagesWithRecentContext(
             tool: event.toolName,
             isError: event.isError ?? false,
             evidenceId: event.evidenceId,
-            content: event.content,
+            content: modelHistoryContent,
           }),
         });
       }

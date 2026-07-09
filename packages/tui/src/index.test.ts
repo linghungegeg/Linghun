@@ -15428,7 +15428,8 @@ describe("Phase 06 TUI slash commands", () => {
         event.type === "tool_call_end" && JSON.stringify(event.output).includes("Write note.txt"),
     );
 
-    expect(JSON.stringify(toolResultEvent?.content)).toContain(content);
+    expect(JSON.stringify(toolResultEvent?.content)).toContain("Write note.txt");
+    expect(JSON.stringify(toolResultEvent?.content)).not.toContain(content);
     expect(JSON.stringify(toolEndEvent?.output)).not.toContain(content);
     expect((toolEndEvent?.output as ToolOutput | undefined)?.data).toBeUndefined();
     expect((toolEndEvent?.output as ToolOutput | undefined)?.details).toBeUndefined();

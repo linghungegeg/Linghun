@@ -66,6 +66,9 @@ export type ReadSnapshot = {
   hash: string;
   mtimeMs: number;
   size: number;
+  offset?: number;
+  limit?: number;
+  source?: "read" | "write";
 };
 
 export type SourcePackCandidate = {
@@ -106,6 +109,7 @@ export type ToolContext = {
   changedFiles: string[];
   todos: TodoItem[];
   readSnapshots?: Record<string, ReadSnapshot>;
+  readSnapshotOrder?: string[];
   sourcePackCandidates?: SourcePackCandidate[];
   patchSummaries?: Record<string, DiffSummary>;
   recentDiagnostics?: RecentToolDiagnostic[];
@@ -250,6 +254,8 @@ const SEARCH_EXCLUDED_DIR_NAMES = ["node_modules", "dist", ".git", ".codebase-me
 const SEARCH_EXCLUDED_PATH_PREFIXES = [".linghun/logs", ".linghun/agent-runs", ".linghun/failures"];
 const SEARCH_EXCLUDED_FILE_SUFFIXES = [".tsbuildinfo"];
 const RG_TIMEOUT_MS = 30_000;
+const READ_SNAPSHOT_MAX_ENTRIES = 100;
+const READ_SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024;
 
 export function createToolContext(
   workspaceRoot = process.cwd(),
@@ -260,6 +266,7 @@ export function createToolContext(
     changedFiles: [],
     todos: [],
     readSnapshots: {},
+    readSnapshotOrder: [],
     sourcePackCandidates: options.sourcePackCandidates,
     patchSummaries: {},
     recentDiagnostics: [],
@@ -887,12 +894,14 @@ function readOptionalStringArray(
 
 async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOutput> {
   const filePath = resolveWorkspacePath(context.workspaceRoot, input.path);
-  const content = await readFile(filePath, "utf8");
   const info = await stat(filePath);
-  rememberReadSnapshot(context, filePath, content, info);
-  const lines = splitContentLines(content);
   const offset = Math.max(input.offset ?? 0, 0);
   const limit = Math.max(input.limit ?? DEFAULT_LIMIT, 1);
+  const unchanged = createUnchangedReadOutput(context, filePath, info, offset, limit);
+  if (unchanged) return unchanged;
+  const content = await readFile(filePath, "utf8");
+  rememberReadSnapshot(context, filePath, content, info, { offset, limit, source: "read" });
+  const lines = splitContentLines(content);
   const selected = lines.slice(offset, offset + limit);
   const windowTruncated = offset > 0 || offset + limit < lines.length;
   const textLines = selected.map((line, index) => `${offset + index + 1}\t${line}`);
@@ -3037,17 +3046,97 @@ function ensureReadBeforeEdit(
   return { source: "read-snapshot", beforeHash: before.hash };
 }
 
+function createUnchangedReadOutput(
+  context: ToolContext,
+  filePath: string,
+  info: { mtimeMs: number; size: number },
+  offset: number,
+  limit: number,
+): ToolOutput | undefined {
+  const rel = relativePath(context.workspaceRoot, filePath);
+  const snapshot = context.readSnapshots?.[rel];
+  if (
+    !snapshot ||
+    snapshot.source !== "read" ||
+    snapshot.offset !== offset ||
+    snapshot.limit !== limit ||
+    snapshot.mtimeMs !== info.mtimeMs ||
+    snapshot.size !== info.size
+  ) {
+    return undefined;
+  }
+  touchReadSnapshot(context, rel);
+  return {
+    text: `file_unchanged: ${rel} unchanged for requested range offset=${offset} limit=${limit}. Reuse the previous Read result.`,
+    summary: `Read ${rel}: file unchanged`,
+    data: {
+      path: rel,
+      fileUnchanged: true,
+      offset,
+      limit,
+      hash: snapshot.hash,
+      mtimeMs: snapshot.mtimeMs,
+      size: snapshot.size,
+    },
+  };
+}
+
 function rememberReadSnapshot(
   context: ToolContext,
   filePath: string,
   content: string,
   info: { mtimeMs: number; size: number },
+  options: { offset?: number; limit?: number; source?: ReadSnapshot["source"] } = {},
 ): void {
   const rel = relativePath(context.workspaceRoot, filePath);
+  const next = {
+    path: rel,
+    hash: hashText(content),
+    mtimeMs: info.mtimeMs,
+    size: info.size,
+    offset: options.offset,
+    limit: options.limit,
+    source: options.source ?? "write",
+  };
   context.readSnapshots = {
     ...(context.readSnapshots ?? {}),
-    [rel]: { path: rel, hash: hashText(content), mtimeMs: info.mtimeMs, size: info.size },
+    [rel]: next,
   };
+  touchReadSnapshot(context, rel);
+  evictReadSnapshots(context);
+}
+
+function touchReadSnapshot(context: ToolContext, rel: string): void {
+  const order = (context.readSnapshotOrder ?? []).filter((item) => item !== rel);
+  order.push(rel);
+  context.readSnapshotOrder = order;
+}
+
+function evictReadSnapshots(context: ToolContext): void {
+  const snapshots = context.readSnapshots;
+  if (!snapshots) return;
+  let order = (context.readSnapshotOrder ?? Object.keys(snapshots)).filter(
+    (key) => snapshots[key] !== undefined,
+  );
+  while (
+    order.length > READ_SNAPSHOT_MAX_ENTRIES ||
+    estimateReadSnapshotBytes(snapshots, order) > READ_SNAPSHOT_MAX_BYTES
+  ) {
+    const oldest = order.shift();
+    if (!oldest) break;
+    delete snapshots[oldest];
+  }
+  context.readSnapshotOrder = order;
+}
+
+function estimateReadSnapshotBytes(
+  snapshots: Record<string, ReadSnapshot>,
+  order: string[],
+): number {
+  return order.reduce((total, key) => {
+    const snapshot = snapshots[key];
+    return total + (snapshot ? Buffer.byteLength(JSON.stringify(snapshot), "utf8") : 0);
+  }, 0);
 }
 
 function createEditOutput(

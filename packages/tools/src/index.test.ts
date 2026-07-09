@@ -1510,6 +1510,37 @@ describe("Phase 05 core tools", () => {
     expect(read.output.text).not.toContain("只显示读取窗口");
   });
 
+  it("returns file_unchanged for repeated same-range Read when the file did not change", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(join(project, "stable.txt"), "alpha\nbeta\ngamma\n", "utf8");
+
+    const first = await runTool("Read", { path: "stable.txt", offset: 1, limit: 1 }, context);
+    const second = await runTool("Read", { path: "stable.txt", offset: 1, limit: 1 }, context);
+
+    expect(first.output.text).toContain("2\tbeta");
+    expect(second.output.text).toContain("file_unchanged: stable.txt");
+    expect(second.output.data).toMatchObject({
+      path: "stable.txt",
+      fileUnchanged: true,
+      offset: 1,
+      limit: 1,
+    });
+  });
+
+  it("keeps readSnapshots bounded with least-recently-used eviction", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    for (let index = 0; index < 105; index += 1) {
+      await writeFile(join(project, `file-${index}.txt`), `value-${index}\n`, "utf8");
+      await runTool("Read", { path: `file-${index}.txt`, limit: 1 }, context);
+    }
+
+    expect(Object.keys(context.readSnapshots ?? {})).toHaveLength(100);
+    expect(context.readSnapshots?.["file-0.txt"]).toBeUndefined();
+    expect(context.readSnapshots?.["file-104.txt"]).toBeDefined();
+  });
+
   it("supports common leading (?i) case-insensitive Grep patterns", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
