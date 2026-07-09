@@ -14924,6 +14924,7 @@ describe("Phase 06 TUI slash commands", () => {
         "openai-compatible",
         "child-fallback-model",
         "PROVIDER_RATE_LIMITED",
+        "sidechain",
       );
     }
     const output = new MemoryOutput();
