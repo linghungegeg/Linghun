@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { TranscriptEvent } from "@linghun/core";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
 import { isDeepCompactPacket } from "./deep-compact-runtime.js";
@@ -17,9 +17,19 @@ import type {
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
 import { isRecord } from "./tui-state-runtime.js";
-import { createToolResultBudgetFingerprint } from "./tool-result-budget.js";
+import {
+  createToolResultBudgetFingerprint,
+  parseToolResultBudgetLedgerData,
+  type ToolResultBudgetRecord,
+} from "./tool-result-budget.js";
 
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
+type PersistedEvidenceEvent = Extract<TranscriptEvent, { type: "evidence_record" }> & {
+  fullOutputPath?: string;
+  outputPath?: string;
+  logPath?: string;
+  data?: unknown;
+};
 const HANDOFF_KEY_FILE_LIMIT = 12;
 const DEFAULT_HANDOFF_KEY_FILES = [
   "README.md",
@@ -48,22 +58,24 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
       )
       .map((event) => event.evidenceId as string),
   );
+  const completedToolUseIds = new Set(
+    transcript
+      .filter(
+        (event): event is Extract<TranscriptEvent, { type: "tool_result" }> =>
+          event.type === "tool_result",
+      )
+      .map((event) => event.toolUseId),
+  );
   const evidence = transcript
     .filter(
-      (event): event is Extract<TranscriptEvent, { type: "evidence_record" }> =>
+      (event): event is PersistedEvidenceEvent =>
         event.type === "evidence_record" &&
-        (!event.toolUseId || completedEvidenceIds.has(event.id)),
+        (!event.toolUseId ||
+          completedEvidenceIds.has(event.id) ||
+          isCompletedToolResultBudgetEvidence(event, completedToolUseIds)),
     )
     .slice(-10)
-    .map((event) => ({
-      id: event.id,
-      kind: event.kind,
-      summary: event.summary,
-      source: event.source,
-      ...(event.toolUseId ? { toolUseId: event.toolUseId } : {}),
-      supportsClaims: event.supportsClaims,
-      createdAt: event.createdAt,
-    }));
+    .map((event) => restoreEvidenceRecord(context, event));
   context.evidence = [...evidence.reverse(), ...context.evidence].slice(0, 20);
   restoreCheckpoints(context, transcript);
   restoreToolResultBudgetLedger(context, transcript);
@@ -112,10 +124,63 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
 function restoreToolResultBudgetLedger(context: TuiContext, transcript: TranscriptEvent[]): void {
   const sessionId = context.sessionId;
   if (!sessionId) return;
+  const completedToolUseIds = new Set(
+    transcript
+      .filter(
+        (event): event is Extract<TranscriptEvent, { type: "tool_result" }> =>
+          event.type === "tool_result",
+      )
+      .map((event) => event.toolUseId),
+  );
+  const legacyBudgetToolUseIds = new Set<string>();
+  for (const event of transcript) {
+    if (event.type !== "evidence_record" || !event.toolUseId) continue;
+    const evidenceEvent = event as PersistedEvidenceEvent;
+    const ledger = parseToolResultBudgetLedgerData(evidenceEvent.data);
+    if (
+      ledger &&
+      ledger.record.toolUseId === event.toolUseId &&
+      completedToolUseIds.has(event.toolUseId)
+    ) {
+      const artifactPath = resolveProjectArtifactPath(
+        context.projectPath,
+        ledger.record.artifact.relativePath,
+      );
+      if (!artifactPath) {
+        legacyBudgetToolUseIds.add(event.toolUseId);
+        continue;
+      }
+      rememberRestoredToolResultBudgetReplacement(
+        context,
+        sessionId,
+        ledger.replacement,
+        {
+          toolUseId: ledger.record.toolUseId,
+          originalChars: ledger.record.originalChars,
+          replacementChars: ledger.record.replacementChars,
+          reason: ledger.record.reason,
+          artifact: {
+            ...ledger.record.artifact,
+            toolUseId: ledger.record.toolUseId,
+            path: artifactPath,
+          },
+        },
+      );
+      continue;
+    }
+    if (evidenceEvent.supportsClaims.includes("tool_result_budget")) {
+      legacyBudgetToolUseIds.add(event.toolUseId);
+    }
+  }
   for (const event of transcript) {
     if (event.type !== "tool_result") continue;
     context.toolResultBudgetState ??= { seenIds: new Set(), replacements: new Map() };
     if (typeof event.content !== "string" || !event.content.startsWith("<persisted-tool-result>")) {
+      if (legacyBudgetToolUseIds.has(event.toolUseId)) {
+        context.toolResultBudgetState.forcedToolUseIds ??= new Set();
+        context.toolResultBudgetState.forcedToolUseIds.add(event.toolUseId);
+        continue;
+      }
       const providerContent = JSON.stringify({
         tool: event.toolName,
         isError: event.isError ?? false,
@@ -148,31 +213,90 @@ function restoreToolResultBudgetLedger(context: TuiContext, transcript: Transcri
         createdAt: event.createdAt,
       },
     };
-    const replacement = { summary: event.content, record };
-    const fingerprint = [
-      sessionId,
-      event.toolUseId,
-      metadata.originalChars,
-      metadata.originalBytes,
-      metadata.sha256,
-    ].join("\0");
-    context.toolResultBudgetState.seenIds.add(fingerprint);
-    context.toolResultBudgetState.replacements.set(
-      fingerprint,
-      {
-        ...replacement,
-        fingerprint,
-      },
-    );
-    context.toolResultBudgetState.contentReplacements ??= new Map();
-    context.toolResultBudgetState.contentReplacements.set(
-      [sessionId, metadata.originalChars, metadata.originalBytes, metadata.sha256].join("\0"),
-      {
-        ...replacement,
-        fingerprint: [sessionId, metadata.originalChars, metadata.originalBytes, metadata.sha256].join("\0"),
-      },
-    );
+    rememberRestoredToolResultBudgetReplacement(context, sessionId, event.content, record);
   }
+}
+
+function isCompletedToolResultBudgetEvidence(
+  event: PersistedEvidenceEvent,
+  completedToolUseIds: ReadonlySet<string>,
+): boolean {
+  if (!event.toolUseId || !completedToolUseIds.has(event.toolUseId)) return false;
+  const ledger = parseToolResultBudgetLedgerData(event.data);
+  return (
+    ledger?.record.toolUseId === event.toolUseId ||
+    event.supportsClaims.includes("tool_result_budget")
+  );
+}
+
+function restoreEvidenceRecord(
+  context: TuiContext,
+  event: PersistedEvidenceEvent,
+) {
+  const ledger = parseToolResultBudgetLedgerData(event.data);
+  const restoredArtifactPath = ledger
+    ? resolveProjectArtifactPath(context.projectPath, ledger.record.artifact.relativePath)
+    : event.supportsClaims.includes("tool_result_budget")
+      ? resolveProjectArtifactPath(context.projectPath, event.source)
+      : undefined;
+  return {
+    id: event.id,
+    kind: event.kind,
+    summary: event.summary,
+    source: event.source,
+    ...(event.toolUseId ? { toolUseId: event.toolUseId } : {}),
+    ...(restoredArtifactPath || event.fullOutputPath
+      ? { fullOutputPath: restoredArtifactPath ?? event.fullOutputPath }
+      : {}),
+    ...(restoredArtifactPath || event.outputPath
+      ? { outputPath: restoredArtifactPath ?? event.outputPath }
+      : {}),
+    ...(event.logPath ? { logPath: event.logPath } : {}),
+    ...(event.data !== undefined ? { data: event.data } : {}),
+    supportsClaims: event.supportsClaims,
+    createdAt: event.createdAt,
+  };
+}
+
+function rememberRestoredToolResultBudgetReplacement(
+  context: TuiContext,
+  sessionId: string,
+  summary: string,
+  record: ToolResultBudgetRecord,
+): void {
+  context.toolResultBudgetState ??= { seenIds: new Set(), replacements: new Map() };
+  const fingerprint = [
+    sessionId,
+    record.toolUseId,
+    record.originalChars,
+    record.artifact.bytes,
+    record.artifact.sha256,
+  ].join("\0");
+  const replacement = { summary, record, fingerprint };
+  context.toolResultBudgetState.seenIds.add(fingerprint);
+  if (!context.toolResultBudgetState.replacements.has(fingerprint)) {
+    context.toolResultBudgetState.replacements.set(fingerprint, replacement);
+  }
+  const contentFingerprint = [
+    sessionId,
+    record.originalChars,
+    record.artifact.bytes,
+    record.artifact.sha256,
+  ].join("\0");
+  context.toolResultBudgetState.contentReplacements ??= new Map();
+  if (!context.toolResultBudgetState.contentReplacements.has(contentFingerprint)) {
+    context.toolResultBudgetState.contentReplacements.set(contentFingerprint, {
+      ...replacement,
+      fingerprint: contentFingerprint,
+    });
+  }
+}
+
+function resolveProjectArtifactPath(projectPath: string, relativePath: string): string | undefined {
+  const path = resolve(projectPath, relativePath);
+  const relativeToProject = relative(projectPath, path);
+  if (relativeToProject.startsWith("..") || isAbsolute(relativeToProject)) return undefined;
+  return path;
 }
 
 function parsePersistedToolResultSummary(content: string):
@@ -393,7 +517,7 @@ function parseMemoryLifecycleEvent(
   if (event.type !== "system_event") return undefined;
   const match = event.message.match(/\bmemory_lifecycle action=(\w+) id=([^\s]+)/u);
   if (!match) return undefined;
-  const action = match[1];
+  const action = match[1] === "auto_deleted" ? "deleted" : match[1];
   if (
     action !== "accepted" &&
     action !== "rejected" &&

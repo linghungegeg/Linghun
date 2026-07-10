@@ -77,6 +77,33 @@ type McpStdioRunnerOptions<T> = {
   run: (sendRequest: McpStdioRequestSender) => Promise<T>;
 };
 
+function isMcpJsonRpcResponse(
+  value: unknown,
+): value is { jsonrpc: "2.0"; id: number; result?: unknown; error?: unknown } {
+  if (!value || typeof value !== "object") return false;
+  const response = value as Record<string, unknown>;
+  const hasResult = Object.prototype.hasOwnProperty.call(response, "result");
+  const hasError = Object.prototype.hasOwnProperty.call(response, "error");
+  return (
+    response.jsonrpc === "2.0" &&
+    typeof response.id === "number" &&
+    Number.isFinite(response.id) &&
+    hasResult !== hasError
+  );
+}
+
+function isMcpProgressNotification(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const notification = value as Record<string, unknown>;
+  return (
+    notification.jsonrpc === "2.0" &&
+    notification.method === "notifications/progress" &&
+    !Object.prototype.hasOwnProperty.call(notification, "id") &&
+    notification.params !== null &&
+    typeof notification.params === "object"
+  );
+}
+
 class McpStdioStructuredError extends Error {
   constructor(
     message: string,
@@ -115,6 +142,12 @@ export async function createMcpStdioRunner<T>(
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let hardTimer: ReturnType<typeof setTimeout> | undefined;
     let abortFromCaller: (() => void) | undefined;
+    type Pending = {
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+      heartbeat: () => void;
+    };
+    const pending = new Map<number, Pending>();
     const settle = (result: McpStdioRunnerResult<T>): void => {
       if (settled) return;
       settled = true;
@@ -125,6 +158,11 @@ export async function createMcpStdioRunner<T>(
         guard.requestStop(false);
       } catch {
         // ignore
+      }
+      if (!result.ok) {
+        const error = new McpStdioStructuredError(result.summary, result.errorCode);
+        for (const handler of pending.values()) handler.reject(error);
+        pending.clear();
       }
       resolvePromise(result);
     };
@@ -171,12 +209,6 @@ export async function createMcpStdioRunner<T>(
       });
     }, options.timeoutMs);
 
-    type Pending = {
-      resolve: (value: unknown) => void;
-      reject: (error: Error) => void;
-      heartbeat: () => void;
-    };
-    const pending = new Map<number, Pending>();
     let nextId = 1;
 
     const sendRequest = (method: string, params2?: unknown): Promise<unknown> => {
@@ -247,11 +279,9 @@ export async function createMcpStdioRunner<T>(
             result?: unknown;
             error?: { message?: string; code?: number | string };
           };
-          const responseHandler = typeof obj.id === "number" ? pending.get(obj.id) : undefined;
-          const isProgress =
-            obj.jsonrpc === "2.0" &&
-            obj.method === "notifications/progress" &&
-            Boolean(obj.params);
+          const isResponse = isMcpJsonRpcResponse(obj);
+          const responseHandler = isResponse ? pending.get(obj.id) : undefined;
+          const isProgress = isMcpProgressNotification(obj);
           if (obj.jsonrpc === "2.0" && (responseHandler || isProgress)) {
             armInactivityTimeout();
             receivedBytes += Buffer.byteLength(line, "utf8");
@@ -265,14 +295,15 @@ export async function createMcpStdioRunner<T>(
               for (const handler of pending.values()) handler.heartbeat();
             }
           }
-          if (typeof obj.id === "number") {
+          if (isResponse) {
             const handler = pending.get(obj.id);
             if (handler) {
               pending.delete(obj.id);
-              if (obj.error) {
+              if (Object.prototype.hasOwnProperty.call(obj, "error")) {
+                const rpcError = obj.error as { message?: string; code?: number | string };
                 handler.reject(
                   new Error(
-                    `MCP error id=${obj.id}: ${sanitizeDiagnosticText(obj.error.message ?? "unknown")}`,
+                    `MCP error id=${obj.id}: ${sanitizeDiagnosticText(rpcError?.message ?? "unknown")}`,
                   ),
                 );
               } else {

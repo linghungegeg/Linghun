@@ -119,6 +119,7 @@ function buildMemoryStatusPanel(context: TuiContext): import("./shell/types.js")
   const disabled = context.memory.disabled.length;
   const rejected = context.memory.rejected.length;
   const learning = context.memory.learningMode === "active";
+  const unreadableScopes = [...(context.memory.tombstones?.unreadableScopes ?? [])];
   const summary: string[] = [
     isEn
       ? `Memory · accepted ${accepted} · candidates ${candidates} · disabled ${disabled}${rejected > 0 ? ` · rejected ${rejected}` : ""}`
@@ -126,6 +127,20 @@ function buildMemoryStatusPanel(context: TuiContext): import("./shell/types.js")
     isEn
       ? `Auto-learning: ${learning ? "on" : "off"}`
       : `自动学习：${learning ? "已开启" : "已关闭"}`,
+    ...(context.memory.learningModeDiagnostic
+      ? [
+          isEn
+            ? "Auto-learning fail-closed: learning state is invalid or unreadable."
+            : "自动学习已故障关闭：learning state 无效或不可读。",
+        ]
+      : []),
+    ...(unreadableScopes.length > 0
+      ? [
+          isEn
+            ? `Memory deletion ledger fail-closed: ${unreadableScopes.join(", ")}.`
+            : `记忆删除账本已故障关闭：${unreadableScopes.join(", ")}。`,
+        ]
+      : []),
   ];
   const actions: string[] = [];
   if (candidates > 0) actions.push("/memory review");
@@ -394,6 +409,8 @@ export async function resumeSessionWithHandoff(
     bindSessionRuntimeStorage(context, resumed.session.id);
     context.sessionEnded = isSessionEnded(resumed.transcript);
     context.model = resumed.session.model;
+    context.evidence = [];
+    context.toolResultBudgetState = undefined;
     hydrateResumeContext(context, resumed.transcript);
     deps().refreshCacheFreshness(context);
     const packet = context.memory.lastHandoff ?? createHandoffPacket(context, resumed.transcript);
@@ -631,8 +648,7 @@ export async function runAutoLearningOnTurnEnd(
   }
   const decision =
     semanticDecision ??
-    (owner &&
-    (deterministicDecision.action === "create" || deterministicDecision.action === "update")
+    (owner && deterministicDecision.action !== "no-op"
       ? { action: "no-op" as const, reason: "semantic_classifier_unavailable" }
       : deterministicDecision);
 
@@ -649,17 +665,11 @@ export async function runAutoLearningOnTurnEnd(
     if (!applied.memory) {
       throw new Error("memory extraction returned no accepted memory");
     }
-    if (!isMemoryLearningOwnerCurrent(context, owner)) {
-      return createSkippedMemoryLearningRun("stale_request_owner");
-    }
     await writeMemoryRecord(applied.memory, context);
     context.memory.accepted = [
       applied.memory,
       ...context.memory.accepted.filter((item) => item.id !== applied.memory?.id),
     ];
-    if (!isMemoryLearningOwnerCurrent(context, owner)) {
-      return createSkippedMemoryLearningRun("stale_request_owner");
-    }
     const sessionId = owner?.sessionId ?? (await deps().ensureSession(context));
     await context.store.appendEvent(sessionId, {
       type: "memory_accepted",
@@ -726,10 +736,7 @@ export async function runAutoLearningOnTurnEnd(
         context.memory.disabled.filter((item) => item.scope === existing.scope),
       );
     }
-    if (!isMemoryLearningOwnerCurrent(context, owner)) {
-      return createSkippedMemoryLearningRun("stale_request_owner");
-    }
-    await appendMemoryLifecycleEvent(context, sessionId, "auto_deleted", existing);
+    await appendMemoryLifecycleEvent(context, sessionId, "deleted", existing);
     await deps().recordMemoryMutationEvidence(context, sessionId, "auto_deleted", existing);
     const run: MemoryLearningRun = {
       trigger: "evidence",
@@ -862,6 +869,7 @@ function buildSemanticMemoryClassifierPrompt(context: TuiContext, userInput: str
       "Save only stable long-lived user preferences, feedback, project facts not derivable from code/git, or reference pointers.",
       "Do not save questions about memory, requests to ignore or not use memory, temporary task state, code structure, git history, logs, secrets, API keys, tokens, or full dumps.",
       "If the user asks to forget/remove/delete a remembered fact, return delete and reference the existing accepted id.",
+      "Delete is valid only for a direct memory-control request; set turnKind=memory_control. Quoted text, audits, tests, and examples must return no-op.",
       "If the user asks to change/update an existing preference/fact, return update and reference the existing accepted id. Do not create when no existing target matches.",
       "Prefer no-op over guessing. For update/delete, id must come from accepted.",
       "For create/update, classify the turn semantically and require a stable long-lived fact. Queries, audits, and temporary tasks are not stable memory.",
@@ -946,6 +954,10 @@ function parseSemanticMemoryDecision(
     return { action: "no-op", reason: "semantic_unsaveable_input", blockedBy: inputBlocked };
   }
   if (action === "delete") {
+    const turnKind = readSemanticMemoryTurnKind(parsed.turnKind);
+    if (turnKind !== "memory_control") {
+      return { action: "no-op", reason: "semantic_delete_not_memory_control" };
+    }
     const id = readString(parsed.id);
     const existing = context.memory.accepted.find((item) => item.id === id);
     if (!existing) return { action: "no-op", reason: "semantic_delete_target_not_found" };

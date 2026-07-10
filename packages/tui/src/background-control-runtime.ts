@@ -561,6 +561,15 @@ export async function interruptAllActiveWork(
     markAbortSignalSent();
   }
 
+  const activeRemoteCommand = context.remote?.activeCommand;
+  if (activeRemoteCommand) {
+    activeRemoteCommand.controller.abort();
+    if (context.remote?.activeCommand === activeRemoteCommand) {
+      context.remote.activeCommand = undefined;
+    }
+    markAbortSignalSent();
+  }
+
   if (context.activeBtwAbortController) {
     context.activeBtwAbortController.abort();
     context.activeBtwAbortController = undefined;

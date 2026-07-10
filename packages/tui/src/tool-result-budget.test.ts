@@ -6,11 +6,39 @@ import { describe, expect, it } from "vitest";
 import { checkClaimSupport } from "./final-answer-gate.js";
 import { appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
 import {
+  createToolResultBudgetLedgerData,
+  parseToolResultBudgetLedgerData,
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
 } from "./tool-result-budget.js";
 
 describe("tool_result budget", () => {
+  it("rejects replacement ledger data that disagrees with its artifact record", () => {
+    const data = createToolResultBudgetLedgerData({
+      toolUseId: "call-ledger",
+      originalChars: 12,
+      replacementChars: 0,
+      reason: "single_result",
+      artifact: {
+        id: "artifact-ledger",
+        toolUseId: "call-ledger",
+        path: "tool-results/call-ledger.txt",
+        relativePath: "tool-results/call-ledger.txt",
+        bytes: 12,
+        chars: 12,
+        sha256: "a".repeat(64),
+        previewChars: 7,
+        preview: "preview",
+        hasMore: true,
+      },
+    });
+    data.record.replacementChars = data.replacement.length;
+    expect(parseToolResultBudgetLedgerData(data)).toBeDefined();
+
+    data.record.artifact.relativePath = "tool-results/other.txt";
+    expect(parseToolResultBudgetLedgerData(data)).toBeUndefined();
+  });
+
   it("persists a single oversized Read tool_result and preserves tool role pairing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
     await mkdir(join(project, ".linghun"), { recursive: true });

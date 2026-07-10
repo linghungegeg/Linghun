@@ -22,6 +22,7 @@ import type { TuiContext } from "./index.js";
 import { deriveAgentDisplayName } from "./job-runtime.js";
 import type { LogArtifactRequest } from "./log-artifact.js";
 import { formatDisplayPath, sanitizeDisplayPaths, truncateDisplay } from "./startup-runtime.js";
+import { parseToolResultBudgetLedgerData } from "./tool-result-budget.js";
 import type { AgentRun, EvidenceRecord } from "./tui-data-types.js";
 
 export function findEvidence(
@@ -85,13 +86,24 @@ export function createLogArtifactRegistry(context: TuiContext) {
       outputPath: task.outputPath,
       logPath: task.logPath,
     })),
-    evidence: context.evidence.map((evidence) => ({
-      id: evidence.id,
-      source: evidence.source,
-      fullOutputPath: evidence.fullOutputPath,
-      outputPath: evidence.outputPath,
-      logPath: evidence.logPath,
-    })),
+    evidence: context.evidence.map((evidence) => {
+      const ledger = parseToolResultBudgetLedgerData(evidence.data);
+      return {
+        id: evidence.id,
+        source: evidence.source,
+        fullOutputPath: evidence.fullOutputPath,
+        outputPath: evidence.outputPath,
+        logPath: evidence.logPath,
+        ...(ledger
+          ? {
+              integrity: {
+                bytes: ledger.record.artifact.bytes,
+                sha256: ledger.record.artifact.sha256,
+              },
+            }
+          : {}),
+      };
+    }),
   };
 }
 

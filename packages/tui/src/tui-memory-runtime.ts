@@ -128,6 +128,7 @@ export async function writeMemoryLearningMode(context: TuiContext): Promise<void
   );
   context.memory.userDir = userDir;
   context.memory.learningModeSource = "persisted";
+  context.memory.learningModeDiagnostic = undefined;
 }
 
 export async function removeMemoryRecord(
@@ -192,11 +193,21 @@ export function formatMemoryStatus(context: TuiContext): string {
   const injected = createControlledMemoryInjection(context);
   const learningLabel = context.memory.learningMode === "active" ? "on" : "off";
   const learningSource = context.memory.learningModeSource ?? "default";
+  const unreadableScopes = [...(context.memory.tombstones?.unreadableScopes ?? [])];
+  const tombstoneDiagnosticCount = context.memory.tombstones?.diagnostics.length ?? 0;
   return [
     "Memory status",
     `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}; summary ${formatProjectRulesContext(context)}`,
     `- review queue: candidates ${context.memory.candidates.length}; accepted ${context.memory.accepted.length}; disabled ${context.memory.disabled.length}; rejected ${context.memory.rejected.length}`,
     `- auto learning: ${learningLabel}; auto extraction accepted for stable taxonomy memory; source ${learningSource}; uncertain content stays candidate-only`,
+    ...(context.memory.learningModeDiagnostic
+      ? [`- auto learning diagnostic: ${context.memory.learningModeDiagnostic}`]
+      : []),
+    ...(unreadableScopes.length > 0 || tombstoneDiagnosticCount > 0
+      ? [
+          `- tombstone ledger: fail-closed; unreadable scopes ${unreadableScopes.join(", ") || "none"}; diagnostics ${tombstoneDiagnosticCount}`,
+        ]
+      : []),
     `- prompt injection: accepted-only topK ${MEMORY_PROMPT_TOP_K}; injected ${injected.items.length}; estimated tokens ${estimateMemoryTokens(injected.text)}; details /memory stats`,
     "- next: /memory review to accept/reject; /memory disable <id> to pause accepted memory; /memory rollback <id> to re-enable",
     `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,

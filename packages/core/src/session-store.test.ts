@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,6 +77,66 @@ describe("SessionStore", () => {
 
     const resumed = await store.resume(session.id);
     expect(resumed.transcript.some((event) => event.type === "tool_result")).toBe(false);
+  });
+
+  it("linearizes the final owner guard with the transcript append", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+    let guardCalls = 0;
+    let transcriptObservedAfterGuard = "";
+
+    await store.appendEvent(
+      session.id,
+      {
+        type: "user_message",
+        id: "linearized-message",
+        text: "linearized",
+        createdAt: new Date(0).toISOString(),
+      },
+      () => {
+        guardCalls += 1;
+        if (guardCalls === 2) {
+          queueMicrotask(() => {
+            transcriptObservedAfterGuard = readFileSync(session.transcriptPath, "utf8");
+          });
+        }
+        return true;
+      },
+    );
+
+    expect(transcriptObservedAfterGuard).toContain("linearized-message");
+  });
+
+  it("keeps alternating valid and stale owned appends as valid JSONL", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+
+    await Promise.all(
+      Array.from({ length: 200 }, (_, index) =>
+        store.appendEvent(
+          session.id,
+          {
+            type: "user_message",
+            id: `owned-${index}`,
+            text: `owned ${index}`,
+            createdAt: new Date(index).toISOString(),
+          },
+          () => index % 2 === 0,
+        ),
+      ),
+    );
+
+    const resumed = await store.resume(session.id);
+    const messages = resumed.transcript.filter((event) => event.type === "user_message");
+    expect(messages).toHaveLength(100);
+    expect(messages.every((event) => Number(event.id.slice("owned-".length)) % 2 === 0)).toBe(
+      true,
+    );
+    expect(resumed.diagnostics).toEqual([]);
   });
 
   it("indexes runtime transcript events into the session ledger", async () => {

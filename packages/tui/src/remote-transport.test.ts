@@ -368,4 +368,60 @@ describe("D.14E remote transport — delivery distinguishes failure causes", () 
       status: "failed",
     });
   });
+
+  it("forwards caller abort to official CLI and keeps cancellation recoverable", async () => {
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const runner: RemoteCliRunner = async (_command, _args, _timeoutMs, signal) => {
+      receivedSignal = signal;
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { code: "ABORT_ERR" })),
+          { once: true },
+        );
+      });
+      return { stdout: "", stderr: "" };
+    };
+    const pending = deliverOfficialCli("feishu-cli", ["im"], runner, 10_000, controller.signal);
+    controller.abort();
+
+    await expect(pending).resolves.toEqual({
+      status: "failed",
+      detail: "official CLI delivery cancelled",
+    });
+    expect(receivedSignal).toBe(controller.signal);
+
+    const alreadyAborted = new AbortController();
+    alreadyAborted.abort();
+    await expect(
+      deliverOfficialCli(
+        "missing-cli",
+        ["im"],
+        async () => {
+          throw Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+        },
+        10_000,
+        alreadyAborted.signal,
+      ),
+    ).resolves.toEqual({
+      status: "failed",
+      detail: "official CLI delivery cancelled",
+    });
+  });
+
+  it("terminates the default official CLI child well before its timeout", async () => {
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const pending = defaultRemoteTransportDeps().runCli(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      10_000,
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 100);
+
+    await expect(pending).rejects.toMatchObject({ code: "ABORT_ERR" });
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+  });
 });

@@ -1040,6 +1040,11 @@ export type RemoteState = {
   sessionDisabledChannelIds: string[];
   pairings: RemotePairingState[];
   inbox: RemoteInboxItem[];
+  activeCommand?: {
+    ownerId: string;
+    sessionId: string;
+    controller: AbortController;
+  };
   localReplBridge?: import("./remote-repl-bridge-runtime.js").ReplBridgeState;
   localReplBridgeSocket?: import("./remote-repl-bridge-runtime.js").ReplBridgeSocketServer;
   lastDoctor?: string;
@@ -1115,6 +1120,7 @@ export type MemoryState = {
   tombstones?: MemoryTombstoneIndex;
   learningMode: MemoryLearningMode;
   learningModeSource?: "default" | "persisted";
+  learningModeDiagnostic?: string;
   lastLearningRun?: MemoryLearningRun;
   lastHandoff?: HandoffPacket;
   lastResumeReadonly?: boolean;

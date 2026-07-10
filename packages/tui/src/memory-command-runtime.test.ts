@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
+import { defaultConfig } from "@linghun/config";
 import { describe, expect, it } from "vitest";
 import type { TuiContext } from "./index.js";
 import {
@@ -92,7 +93,7 @@ describe("memory-command-runtime", () => {
     expect(await readFile(join(directory, "tombstones.jsonl"), "utf8")).toContain(memory.id);
   });
 
-  it("keeps auto-delete state unchanged when the owner expires after staging", async () => {
+  it("keeps auto-delete state unchanged when the owned classifier is unavailable", async () => {
     const directory = await mkdtemp(join(tmpdir(), "linghun-memory-auto-delete-stale-"));
     const memory = makeMemory({
       scope: "user",
@@ -125,12 +126,136 @@ describe("memory-command-runtime", () => {
       { requestTurnId: "turn-memory-test", sessionId: "session-memory-test", signal },
     );
 
-    expect(result.skippedReason).toBe("memory_extraction:stale_request_owner");
+    expect(result.skippedReason).toBe("memory_extraction:semantic_classifier_unavailable");
     expect(await readFile(ledgerPath, "utf8")).toBe("existing-ledger\n");
     expect(await readFile(recordPath, "utf8")).toContain(memory.id);
     expect(context.memory.accepted).toEqual([memory]);
     expect(systemEvents).toEqual([]);
     expect(evidenceEvents).toEqual([]);
+  });
+
+  it("fails closed for owned delete when the semantic classifier is unavailable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-delete-classifier-offline-"));
+    const memory = makeMemory({
+      scope: "session",
+      taxonomy: "user",
+      topic: "user-report-format",
+      summary: "User preference: 中文短列表",
+      inferred: true,
+    });
+    const context = makeContext(directory, memory);
+    context.memory.learningMode = "active";
+    context.sessionId = "session-memory-test";
+    configureMemoryDeps();
+
+    const result = await runAutoLearningOnTurnEnd(
+      context,
+      "引用用户原话：请忘记我偏好中文短列表。",
+      {
+        requestTurnId: "turn-memory-test",
+        sessionId: "session-memory-test",
+        signal: new AbortController().signal,
+      },
+    );
+
+    expect(result.skippedReason).toContain("semantic_classifier_unavailable");
+    expect(context.memory.accepted).toEqual([memory]);
+    await expect(readFile(join(directory, "tombstones.jsonl"), "utf8")).rejects.toThrow();
+  });
+
+  it("rejects semantic delete unless the structured turn kind is memory_control", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-delete-turn-kind-"));
+    const memory = makeMemory({
+      scope: "session",
+      taxonomy: "user",
+      topic: "user-report-format",
+      summary: "User preference: 中文短列表",
+      inferred: true,
+    });
+    const context = makeContext(directory, memory);
+    context.memory.learningMode = "active";
+    context.sessionId = "session-memory-test";
+    context.config = defaultConfig;
+    context.model = defaultConfig.defaultModel;
+    context.modelGateway = {
+      stream: async function* () {
+        yield {
+          type: "assistant_text_delta" as const,
+          id: "memory-delete-audit",
+          text: JSON.stringify({
+            action: "delete",
+            id: memory.id,
+            taxonomy: "user",
+            turnKind: "audit",
+            stability: "stable",
+          }),
+        };
+      },
+    } as unknown as TuiContext["modelGateway"];
+    configureMemoryDeps();
+
+    const result = await runAutoLearningOnTurnEnd(
+      context,
+      "审计样本引用：请忘记我偏好中文短列表。",
+      {
+        requestTurnId: "turn-memory-test",
+        sessionId: "session-memory-test",
+        signal: new AbortController().signal,
+      },
+    );
+
+    expect(result.skippedReason).toContain("semantic_delete_not_memory_control");
+    expect(context.memory.accepted).toEqual([memory]);
+  });
+
+  it("accepts a structured memory_control delete and records the committed lifecycle", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-delete-control-"));
+    const memory = makeMemory({
+      scope: "session",
+      taxonomy: "user",
+      topic: "user-report-format",
+      summary: "User preference: 中文短列表",
+      inferred: true,
+    });
+    const context = makeContext(directory, memory);
+    context.memory.learningMode = "active";
+    context.sessionId = "session-memory-test";
+    context.config = defaultConfig;
+    context.model = defaultConfig.defaultModel;
+    let classifierCalls = 0;
+    context.modelGateway = {
+      stream: async function* () {
+        classifierCalls += 1;
+        yield {
+          type: "assistant_text_delta" as const,
+          id: `memory-delete-control-${classifierCalls}`,
+          text:
+            classifierCalls === 1
+              ? JSON.stringify({
+                  action: "delete",
+                  id: memory.id,
+                  taxonomy: "user",
+                  turnKind: "memory_control",
+                  stability: "stable",
+                })
+              : JSON.stringify({ veto: false, reason: "direct_memory_control" }),
+        };
+      },
+    } as unknown as TuiContext["modelGateway"];
+    const systemEvents: string[] = [];
+    const evidenceEvents: string[] = [];
+    configureMemoryDeps({ systemEvents, evidenceEvents });
+
+    const result = await runAutoLearningOnTurnEnd(context, "请忘记我偏好中文短列表。", {
+      requestTurnId: "turn-memory-test",
+      sessionId: "session-memory-test",
+      signal: new AbortController().signal,
+    });
+
+    expect(result.acceptedDeleted).toBe(1);
+    expect(context.memory.accepted).toEqual([]);
+    expect(systemEvents).toContainEqual(expect.stringContaining("action=deleted"));
+    expect(evidenceEvents).toEqual(["auto_deleted"]);
   });
 });
 

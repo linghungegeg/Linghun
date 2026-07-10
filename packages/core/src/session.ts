@@ -219,6 +219,10 @@ export type TranscriptEvent =
       source: string;
       supportsClaims: string[];
       toolUseId?: string;
+      fullOutputPath?: string;
+      outputPath?: string;
+      logPath?: string;
+      data?: unknown;
       createdAt: string;
     }
   | {

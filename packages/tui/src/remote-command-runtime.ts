@@ -55,6 +55,7 @@ export type RemoteCommandRuntimeDeps = {
     sessionId: string,
     message: string,
     level: "info" | "warning",
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   ensureSession: (context: TuiContext) => Promise<string>;
   handleRemoteInboundMessage?: (
@@ -77,7 +78,7 @@ export function configureRemoteCommandRuntime(deps: RemoteCommandRuntimeDeps): v
   runtimeDeps = deps;
 }
 
-export function configureRemoteTransport(deps: RemoteTransportDeps): void {
+export function configureRemoteTransport(deps: RemoteTransportDeps | undefined): void {
   remoteTransportDeps = deps;
 }
 
@@ -106,6 +107,8 @@ export async function handleRemoteCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
+  context.remote.activeCommand?.controller.abort();
+  context.remote.activeCommand = undefined;
   refreshRemoteState(context);
   const action = args[0] ?? "status";
   if (action === "status") {
@@ -176,31 +179,55 @@ export async function handleRemoteCommand(
       writeLine(output, "Remote test：未识别通道。用法：/remote test feishu|wecom|dingtalk");
       return;
     }
-    const event = createRemoteEvent(
-      channel,
-      "job_status",
-      "Remote channel test: Linghun redacted summary only.",
-      [],
-      5 * 60 * 1000,
-    );
-    const result = await sendRemoteEventReal(context, event, undefined, context.tools.abortSignal);
-    const ok = result.status === "sent";
-    await appendRemoteSystemEvent(
-      context,
-      `remote_test channel=${channel.id} status=${result.status} detail=${result.deliveryDetail ?? "none"} summary=${event.redactedSummary}`,
-      ok ? "info" : "warning",
-    );
-    // D.14D-E — /remote test 结果走降噪 CommandPanel：完整结果进 detailsText。
-    showCommandPanel(context, output, {
-      title: "/remote test",
-      tone: ok ? "neutral" : result.status === "mock" ? "neutral" : "warning",
-      summary: [
-        context.language === "en-US"
-          ? `Remote test ${channel.id} · ${result.status} — Ctrl+O for details.`
-          : `远程测试 ${channel.id} · ${result.status} — Ctrl+O 查看详情。`,
-      ],
-      detailsText: formatRemoteTestResult(channel, result),
-    });
+    const owner = {
+      ownerId: randomUUID(),
+      sessionId: await deps().ensureSession(context),
+      controller: new AbortController(),
+    };
+    context.remote.activeCommand = owner;
+    const isOwner = (): boolean =>
+      context.remote.activeCommand === owner &&
+      context.sessionId === owner.sessionId &&
+      !owner.controller.signal.aborted;
+    try {
+      const event = createRemoteEvent(
+        channel,
+        "job_status",
+        "Remote channel test: Linghun redacted summary only.",
+        [],
+        5 * 60 * 1000,
+      );
+      const result = await sendRemoteEventReal(
+        context,
+        event,
+        undefined,
+        owner.controller.signal,
+        isOwner,
+      );
+      if (!isOwner()) return;
+      const ok = result.status === "sent";
+      await appendRemoteSystemEvent(
+        context,
+        `remote_test channel=${channel.id} status=${result.status} detail=${result.deliveryDetail ?? "none"} summary=${event.redactedSummary}`,
+        ok ? "info" : "warning",
+        owner.sessionId,
+        isOwner,
+      );
+      if (!isOwner()) return;
+      // D.14D-E — /remote test 结果走降噪 CommandPanel：完整结果进 detailsText。
+      showCommandPanel(context, output, {
+        title: "/remote test",
+        tone: ok ? "neutral" : result.status === "mock" ? "neutral" : "warning",
+        summary: [
+          context.language === "en-US"
+            ? `Remote test ${channel.id} · ${result.status} — Ctrl+O for details.`
+            : `远程测试 ${channel.id} · ${result.status} — Ctrl+O 查看详情。`,
+        ],
+        detailsText: formatRemoteTestResult(channel, result),
+      });
+    } finally {
+      if (context.remote.activeCommand === owner) context.remote.activeCommand = undefined;
+    }
     return;
   }
   if (action === "disable") {
@@ -1513,6 +1540,7 @@ export async function sendRemoteEventReal(
   event: RemoteEvent,
   depsOverride?: RemoteTransportDeps,
   signal?: AbortSignal,
+  commitGuard?: () => boolean,
 ): Promise<RemoteEvent> {
   const transport = depsOverride ?? remoteTransportDeps ?? defaultRemoteTransportDeps();
   const channel = context.remote.channels.find((item) => item.id === event.channel);
@@ -1520,6 +1548,7 @@ export async function sendRemoteEventReal(
   const finalize = (status: RemoteEventStatus, detail: string): RemoteEvent => {
     next.status = status;
     next.deliveryDetail = detail;
+    if (commitGuard && !commitGuard()) return next;
     context.remote.events.unshift(next);
     context.remote.events = context.remote.events.slice(0, 20);
     return next;
@@ -1556,7 +1585,13 @@ export async function sendRemoteEventReal(
         : "official CLI path is not configured",
     );
   }
-  const result = await deliverOfficialCli(invocation.command, invocation.args, transport.runCli);
+  const result = await deliverOfficialCli(
+    invocation.command,
+    invocation.args,
+    transport.runCli,
+    undefined,
+    signal,
+  );
   const status: RemoteEventStatus =
     result.status === "sent" ? "sent" : result.status === "blocked" ? "blocked" : "failed";
   return finalize(status, result.detail);
@@ -1891,11 +1926,15 @@ export async function appendRemoteSystemEvent(
   context: TuiContext,
   message: string,
   level: "info" | "warning",
+  sessionId?: string,
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   await deps().appendSystemEvent(
     context,
-    await deps().ensureSession(context),
+    sessionId ?? (await deps().ensureSession(context)),
     remoteTranscriptSummary(message),
     level,
+    commitGuard,
   );
 }

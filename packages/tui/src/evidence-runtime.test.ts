@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { SessionStore } from "@linghun/core";
@@ -13,6 +13,9 @@ import {
   stringifyToolResultContentForBudget,
 } from "./evidence-runtime.js";
 import { readRuntimeLedgerRecords } from "./runtime-storage.js";
+import { hydrateResumeContext } from "./handoff-session-runtime.js";
+import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
+import type { TuiContext } from "./tui-context-runtime.js";
 
 describe("evidence-runtime", () => {
   it("links persisted large-result evidence to its tool use", async () => {
@@ -24,7 +27,7 @@ describe("evidence-runtime", () => {
           events.push(event);
         },
       },
-    } as never;
+    } as unknown as TuiContext;
 
     await recordToolResultBudgetEvidence(context, "session-1", {
       toolUseId: "tool-large",
@@ -46,8 +49,84 @@ describe("evidence-runtime", () => {
     });
 
     expect(events).toContainEqual(
-      expect.objectContaining({ type: "evidence_record", toolUseId: "tool-large" }),
+      expect.objectContaining({
+        type: "evidence_record",
+        toolUseId: "tool-large",
+        fullOutputPath: "F:/tmp/tool-large.txt",
+        outputPath: "F:/tmp/tool-large.txt",
+        data: expect.objectContaining({
+          kind: "tool_result_budget_replacement",
+          version: 1,
+          replacement: expect.stringContaining("<persisted-tool-result>"),
+        }),
+      }),
     );
+  });
+
+  it("restores legacy budget artifact evidence by structured claim and tool use", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-legacy-budget-evidence-"));
+    const relativePath = ".linghun/session/tool-results/session-1/call-legacy.txt";
+    const artifactPath = join(projectPath, relativePath);
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, "legacy artifact", "utf8");
+    const context = {
+      projectPath,
+      sessionId: "session-1",
+      evidence: [],
+      checkpoints: [],
+      cache: { history: [], compactBoundaries: [] },
+      tools: { todos: [] },
+      memory: { candidates: [], accepted: [], rejected: [], disabled: [], retired: [] },
+    } as unknown as TuiContext;
+
+    hydrateResumeContext(context, [
+      {
+        type: "tool_result",
+        toolUseId: "call-legacy",
+        toolName: "Read",
+        content: "legacy raw result",
+        isError: false,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        type: "evidence_record",
+        id: "evidence-legacy-budget",
+        kind: "command_output",
+        summary: "legacy budget evidence",
+        source: relativePath,
+        toolUseId: "call-legacy",
+        supportsClaims: ["tool_result_budget", "artifact"],
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    expect(context.evidence).toContainEqual(
+      expect.objectContaining({
+        id: "evidence-legacy-budget",
+        fullOutputPath: artifactPath,
+        outputPath: artifactPath,
+      }),
+    );
+    expect(context.toolResultBudgetState?.seenIds.size).toBe(0);
+    expect(context.toolResultBudgetState?.forcedToolUseIds).toContain("call-legacy");
+
+    const budgeted = await applyToolResultBudgetToMessages(
+      [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-legacy", name: "Read", input: { path: "legacy.txt" } }],
+        },
+        { role: "tool", tool_call_id: "call-legacy", content: "legacy raw result" },
+      ],
+      {
+        projectPath,
+        sessionId: "session-1",
+        state: context.toolResultBudgetState,
+      },
+    );
+    expect(budgeted.messages[1]?.content).toContain("<persisted-tool-result>");
+    expect(budgeted.messages[1]?.content).not.toBe("legacy raw result");
   });
 
   it("records read-only tool evidence with low-noise summaries", async () => {

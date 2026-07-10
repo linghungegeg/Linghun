@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
@@ -190,7 +191,7 @@ export class SessionStore {
       }
 
       if (commitGuard && !commitGuard()) return;
-      await appendJsonl(session.transcriptPath, event);
+      appendFileSync(session.transcriptPath, `${JSON.stringify(event)}\n`, "utf8");
       await this.appendRuntimeLedgerBestEffort(
         this.getSessionDir(project.projectId, sessionId),
         sessionId,

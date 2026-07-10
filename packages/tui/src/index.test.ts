@@ -142,6 +142,7 @@ import {
   writeLightHintsForTest,
 } from "./index.js";
 import { createControlledMemoryInjection } from "./tui-memory-runtime.js";
+import { configureRemoteTransport } from "./remote-command-runtime.js";
 import {
   recoverDurableJobForContext,
   handleForkCommand,
@@ -4820,6 +4821,60 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(`已恢复会话：${previous.id}`);
     expect(output.text).toContain("不会把完整 transcript 塞回上下文");
     expect(output.text).toContain("Resume context package");
+  });
+
+  it("replaces session-scoped evidence and tool budget state across repeated resumes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-resume-ledger-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const current = await store.create({ model: "deepseek-v4-flash" });
+    const sessionA = await store.create({ model: "deepseek-v4-flash" });
+    const sessionB = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, current);
+    const output = new MemoryOutput();
+
+    for (const [session, toolUseId] of [
+      [sessionA, "call-session-a"],
+      [sessionB, "call-session-b"],
+    ] as const) {
+      const relativePath = `.linghun/session/tool-results/${session.id}/${toolUseId}.txt`;
+      const artifactPath = join(project, relativePath);
+      await mkdir(dirname(artifactPath), { recursive: true });
+      await writeFile(artifactPath, `${toolUseId} artifact`, "utf8");
+      await store.appendEvent(session.id, {
+        type: "tool_result",
+        toolUseId,
+        toolName: "Read",
+        content: `${toolUseId} raw`,
+        isError: false,
+        createdAt: new Date().toISOString(),
+      });
+      await store.appendEvent(session.id, {
+        type: "evidence_record",
+        id: `evidence-${toolUseId}`,
+        kind: "command_output",
+        summary: `${toolUseId} legacy budget evidence`,
+        source: relativePath,
+        toolUseId,
+        supportsClaims: ["tool_result_budget", "artifact"],
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    for (let iteration = 0; iteration < 10; iteration += 1) {
+      await handleSlashCommand(`/sessions resume ${sessionA.id}`, context, output);
+      await handleSlashCommand(`/sessions resume ${sessionA.id}`, context, output);
+      expect(context.evidence.filter((item) => item.toolUseId === "call-session-a")).toHaveLength(1);
+      expect(context.toolResultBudgetState?.forcedToolUseIds).toEqual(
+        new Set(["call-session-a"]),
+      );
+
+      await handleSlashCommand(`/sessions resume ${sessionB.id}`, context, output);
+      expect(context.evidence.some((item) => item.toolUseId === "call-session-a")).toBe(false);
+      expect(context.evidence.filter((item) => item.toolUseId === "call-session-b")).toHaveLength(1);
+      expect(context.toolResultBudgetState?.forcedToolUseIds).toEqual(
+        new Set(["call-session-b"]),
+      );
+    }
   });
 
   it("uses bare /fork for a session fork while preserving role-based agent forks", async () => {
@@ -23314,6 +23369,106 @@ describe("Phase 06 TUI slash commands", () => {
       stubDeps(200),
     );
     expect(rejected.status).toBe("rejected");
+  });
+
+  it("drops a late remote test result after interrupt and preserves the newer command panel", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-remote-late-result-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          wecom: {
+            ...defaultConfig.remote.channels.wecom,
+            enabled: true,
+            transport: "webhook",
+            endpoint: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=KEY",
+            bindingUserId: "wecom-user",
+            trustedSources: ["wecom-user"],
+          },
+          dingtalk: {
+            ...defaultConfig.remote.channels.dingtalk,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: process.execPath,
+            bindingUserId: "dingtalk-user",
+            trustedSources: ["dingtalk-user"],
+          },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    const remoteOutput = new MemoryOutput();
+    let resolveFetch: ((value: { status: number; text: () => Promise<string> }) => void) | undefined;
+    const deferredFetch = new Promise<{ status: number; text: () => Promise<string> }>(
+      (resolve) => {
+        resolveFetch = resolve;
+      },
+    );
+    configureRemoteTransport({
+      fetch: async () => await deferredFetch,
+      runCli: async () => ({ stdout: "", stderr: "" }),
+      resolveSecret: () => undefined,
+      nowMs: () => 1_700_000_000_000,
+    });
+
+    try {
+      const pending = handleSlashCommand("/remote test wecom", context, remoteOutput);
+      await waitForTestCondition(() => Boolean(context.remote.activeCommand));
+      await handleSlashCommand("/interrupt", context, new MemoryOutput());
+      const statusOutput = new MemoryOutput();
+      await handleSlashCommand("/remote status", context, statusOutput);
+      const statusText = statusOutput.text;
+      expect(statusText).toContain("Remote Channels");
+
+      resolveFetch?.({ status: 200, text: async () => "{}" });
+      await pending;
+
+      expect(context.remote.events).toEqual([]);
+      expect(statusOutput.text).toBe(statusText);
+      expect(remoteOutput.text).not.toContain("远程测试 wecom");
+      const transcript = (await store.resume(session.id)).transcript;
+      expect(
+        transcript.some(
+          (event) => event.type === "system_event" && event.message.includes("remote_test"),
+        ),
+      ).toBe(false);
+
+      let cliSignal: AbortSignal | undefined;
+      let resolveCli: ((value: { stdout: string; stderr: string }) => void) | undefined;
+      const deferredCli = new Promise<{ stdout: string; stderr: string }>((resolve) => {
+        resolveCli = resolve;
+      });
+      configureRemoteTransport({
+        fetch: async () => ({ status: 200, text: async () => "{}" }),
+        runCli: async (_command, _args, _timeoutMs, signal) => {
+          cliSignal = signal;
+          return await deferredCli;
+        },
+        resolveSecret: () => undefined,
+        nowMs: () => 1_700_000_000_000,
+      });
+      const cliOutput = new MemoryOutput();
+      const pendingCli = handleSlashCommand("/remote test dingtalk", context, cliOutput);
+      await waitForTestCondition(() => Boolean(context.remote.activeCommand) && Boolean(cliSignal));
+      await handleSlashCommand("/interrupt", context, new MemoryOutput());
+      expect(cliSignal?.aborted).toBe(true);
+      resolveCli?.({ stdout: "", stderr: "" });
+      await pendingCli;
+
+      expect(context.remote.events).toEqual([]);
+      expect(cliOutput.text).not.toContain("远程测试 dingtalk");
+      expect(
+        (await store.resume(session.id)).transcript.some(
+          (event) => event.type === "system_event" && event.message.includes("remote_test"),
+        ),
+      ).toBe(false);
+    } finally {
+      configureRemoteTransport(undefined);
+    }
   });
 
   it("D.14E inbound validation rejects expired/replay/bad-nonce/bad-sig/source/binding and only resumes existing pending approval", async () => {

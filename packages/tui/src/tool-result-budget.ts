@@ -42,10 +42,34 @@ export type ToolResultBudgetReplacement = {
   fingerprint: string;
 };
 
+export type ToolResultBudgetLedgerData = {
+  kind: "tool_result_budget_replacement";
+  version: 1;
+  replacement: string;
+  replacementSha256: string;
+  record: {
+    toolUseId: string;
+    originalChars: number;
+    replacementChars: number;
+    reason: ToolResultBudgetRecord["reason"];
+    artifact: {
+      id: string;
+      relativePath: string;
+      bytes: number;
+      chars: number;
+      sha256: string;
+      previewChars: number;
+      preview: string;
+      hasMore: boolean;
+    };
+  };
+};
+
 export type ToolResultBudgetState = {
   seenIds: Set<string>;
   replacements: Map<string, ToolResultBudgetReplacement>;
   contentReplacements?: Map<string, ToolResultBudgetReplacement>;
+  forcedToolUseIds?: Set<string>;
 };
 
 const TOOL_RESULTS_DIR = "tool-results";
@@ -95,7 +119,7 @@ export async function applyToolResultBudgetToMessages(
     if (existingByContent) {
       cachedReplacements.set(
         candidate.toolUseId,
-        buildToolResultBudgetSummary(
+        formatToolResultBudgetReplacement(
           existingByContent.record.artifact,
           existingByContent.record.reason,
           candidate.toolUseId,
@@ -112,7 +136,9 @@ export async function applyToolResultBudgetToMessages(
 
   const selected = new Map<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>();
   for (const candidate of freshCandidates) {
-    if (candidate.chars > singleResultChars || candidate.bytes > singleResultBytes) {
+    if (state?.forcedToolUseIds?.has(candidate.toolUseId)) {
+      selected.set(candidate.toolUseId, { ...candidate, reason: "pressure_age" });
+    } else if (candidate.chars > singleResultChars || candidate.bytes > singleResultBytes) {
       selected.set(candidate.toolUseId, { ...candidate, reason: "single_result" });
     }
   }
@@ -171,7 +197,7 @@ export async function applyToolResultBudgetToMessages(
   const records: ToolResultBudgetRecord[] = [];
   for (const candidate of Array.from(selected.values())) {
     const artifact = await writeToolResultArtifact(candidate, options);
-    const replacement = buildToolResultBudgetSummary(artifact, candidate.reason);
+    const replacement = formatToolResultBudgetReplacement(artifact, candidate.reason);
     replacements.set(candidate.toolUseId, replacement);
     const record = {
       toolUseId: candidate.toolUseId,
@@ -197,6 +223,7 @@ export async function applyToolResultBudgetToMessages(
   }
   for (const candidate of freshCandidates) {
     options.state?.seenIds.add(getCandidateStateKey(candidate, options.sessionId));
+    options.state?.forcedToolUseIds?.delete(candidate.toolUseId);
   }
 
   return {
@@ -432,7 +459,7 @@ async function writeToolResultArtifact(
   };
 }
 
-function buildToolResultBudgetSummary(
+export function formatToolResultBudgetReplacement(
   artifact: ToolResultBudgetArtifact,
   reason: ToolResultBudgetRecord["reason"],
   toolUseId = artifact.toolUseId,
@@ -455,6 +482,108 @@ function buildToolResultBudgetSummary(
   ]
     .filter((line) => line !== "")
     .join("\n");
+}
+
+export function createToolResultBudgetLedgerData(
+  record: ToolResultBudgetRecord,
+): ToolResultBudgetLedgerData {
+  const replacement = formatToolResultBudgetReplacement(record.artifact, record.reason);
+  return {
+    kind: "tool_result_budget_replacement",
+    version: 1,
+    replacement,
+    replacementSha256: createHash("sha256").update(replacement).digest("hex"),
+    record: {
+      toolUseId: record.toolUseId,
+      originalChars: record.originalChars,
+      replacementChars: record.replacementChars,
+      reason: record.reason,
+      artifact: {
+        id: record.artifact.id,
+        relativePath: record.artifact.relativePath,
+        bytes: record.artifact.bytes,
+        chars: record.artifact.chars,
+        sha256: record.artifact.sha256,
+        previewChars: record.artifact.previewChars,
+        preview: record.artifact.preview,
+        hasMore: record.artifact.hasMore,
+      },
+    },
+  };
+}
+
+export function parseToolResultBudgetLedgerData(
+  value: unknown,
+): ToolResultBudgetLedgerData | undefined {
+  if (!isRecord(value) || value.kind !== "tool_result_budget_replacement" || value.version !== 1) {
+    return undefined;
+  }
+  if (
+    typeof value.replacement !== "string" ||
+    typeof value.replacementSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value.replacementSha256) ||
+    !isRecord(value.record)
+  ) {
+    return undefined;
+  }
+  const record = value.record;
+  const artifact = isRecord(record.artifact) ? record.artifact : undefined;
+  if (
+    typeof record.toolUseId !== "string" ||
+    !isNonNegativeNumber(record.originalChars) ||
+    !isNonNegativeNumber(record.replacementChars) ||
+    (record.reason !== "single_result" &&
+      record.reason !== "aggregate_message" &&
+      record.reason !== "pressure_age") ||
+    !artifact ||
+    typeof artifact.id !== "string" ||
+    artifact.id.length === 0 ||
+    typeof artifact.relativePath !== "string" ||
+    artifact.relativePath.length === 0 ||
+    !isNonNegativeNumber(artifact.bytes) ||
+    !isNonNegativeNumber(artifact.chars) ||
+    typeof artifact.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(artifact.sha256) ||
+    !isNonNegativeNumber(artifact.previewChars) ||
+    typeof artifact.preview !== "string" ||
+    typeof artifact.hasMore !== "boolean"
+  ) {
+    return undefined;
+  }
+  const expectedReplacement = formatToolResultBudgetReplacement(
+    {
+      id: artifact.id,
+      toolUseId: record.toolUseId,
+      path: artifact.relativePath,
+      relativePath: artifact.relativePath,
+      bytes: artifact.bytes,
+      chars: artifact.chars,
+      sha256: artifact.sha256,
+      previewChars: artifact.previewChars,
+      preview: artifact.preview,
+      hasMore: artifact.hasMore,
+    },
+    record.reason,
+  );
+  if (
+    record.originalChars !== artifact.chars ||
+    record.replacementChars !== value.replacement.length ||
+    artifact.previewChars !== artifact.preview.length ||
+    value.replacement !== expectedReplacement ||
+    value.replacement.length > TOOL_RESULT_SUMMARY_ESTIMATE_CHARS + 2_000 ||
+    createHash("sha256").update(value.replacement).digest("hex") !== value.replacementSha256
+  ) {
+    return undefined;
+  }
+  return value as unknown as ToolResultBudgetLedgerData;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 function replaceToolResults(

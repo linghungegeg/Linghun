@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
@@ -44,6 +45,7 @@ export type LogArtifactRegistry = {
     fullOutputPath?: string;
     outputPath?: string;
     logPath?: string;
+    integrity?: { bytes: number; sha256: string };
   }>;
 };
 
@@ -79,6 +81,7 @@ export async function readLogArtifactSlice(
   if (!info.isFile()) {
     throw new Error(`日志 artifact 不是文件：${sourcePath}。`);
   }
+  await verifyEvidenceArtifactIntegrity(source, sourcePath, info.size, registry);
 
   if (request.mode === "tail") {
     return readTail(sourcePath, info.size, request);
@@ -87,6 +90,28 @@ export async function readLogArtifactSlice(
     return readGrep(sourcePath, info.size, request, compileUserPattern(request.pattern));
   }
   return readErrors(sourcePath, info.size, request);
+}
+
+async function verifyEvidenceArtifactIntegrity(
+  source: LogArtifactSource,
+  sourcePath: string,
+  actualBytes: number,
+  registry: LogArtifactRegistry,
+): Promise<void> {
+  if (!source.evidenceId) return;
+  const evidence = registry.evidence?.find(
+    (item) => item.id === source.evidenceId || item.id.endsWith(source.evidenceId ?? ""),
+  );
+  const integrity = evidence?.integrity;
+  if (!integrity) return;
+  if (actualBytes !== integrity.bytes) {
+    throw new Error("Evidence artifact integrity check failed: size mismatch; artifact may be stale or changed.");
+  }
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(sourcePath)) hash.update(chunk);
+  if (hash.digest("hex") !== integrity.sha256) {
+    throw new Error("Evidence artifact integrity check failed: SHA256 mismatch; artifact may be stale or changed.");
+  }
 }
 
 export function formatLogArtifactSlice(

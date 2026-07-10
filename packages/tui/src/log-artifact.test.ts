@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -97,6 +98,51 @@ describe("Log Artifact Runtime Lite", () => {
     expect(slice.content).toContain("before two");
     expect(slice.content).not.toContain("sk-secret123456789");
     expect(slice.content).toContain("[REDACTED]");
+  });
+
+  it("verifies structured evidence artifact integrity before bounded reads", async () => {
+    const { logPath, registry } = await createRegistry();
+    const content = "ORIGINAL_LINE\nTAIL_LINE";
+    await writeFile(logPath, content, "utf8");
+    const integrityRegistry: LogArtifactRegistry = {
+      ...registry,
+      evidence: [
+        {
+          id: "ev-integrity",
+          fullOutputPath: logPath,
+          integrity: {
+            bytes: Buffer.byteLength(content, "utf8"),
+            sha256: createHash("sha256").update(content).digest("hex"),
+          },
+        },
+      ],
+    };
+
+    await expect(
+      readLogArtifactSlice(
+        { evidenceId: "ev-integrity" },
+        { mode: "tail", lines: 1 },
+        integrityRegistry,
+      ),
+    ).resolves.toMatchObject({ mode: "tail" });
+
+    await writeFile(logPath, "TAMPERED_LINE\nTAIL_LINE", "utf8");
+    await expect(
+      readLogArtifactSlice(
+        { evidenceId: "ev-integrity" },
+        { mode: "tail", lines: 1 },
+        integrityRegistry,
+      ),
+    ).rejects.toThrow("SHA256 mismatch");
+
+    await writeFile(logPath, "short", "utf8");
+    await expect(
+      readLogArtifactSlice(
+        { evidenceId: "ev-integrity" },
+        { mode: "tail", lines: 1 },
+        integrityRegistry,
+      ),
+    ).rejects.toThrow("size mismatch");
   });
 
   it("greps the bounded tail window so late failures are visible", async () => {

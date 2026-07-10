@@ -56,6 +56,7 @@ export type RemoteCliRunner = (
   command: string,
   args: string[],
   timeoutMs: number,
+  signal?: AbortSignal,
 ) => Promise<{ stdout: string; stderr: string }>;
 
 export type RemoteSecretResolver = (ref: string) => string | undefined;
@@ -260,11 +261,15 @@ export async function deliverOfficialCli(
   args: string[],
   runner: RemoteCliRunner,
   timeoutMs: number = DEFAULT_CLI_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<RemoteDeliveryResult> {
   try {
-    await runner(command, args, timeoutMs);
+    await runner(command, args, timeoutMs, signal);
     return { status: "sent", detail: "official CLI accepted the redacted send" };
   } catch (error) {
+    if (signal?.aborted) {
+      return { status: "failed", detail: "official CLI delivery cancelled" };
+    }
     if (isCliMissing(error)) {
       return { status: "blocked", detail: "official CLI not found; install and authenticate it" };
     }
@@ -304,12 +309,12 @@ const defaultFetch: RemoteFetch = async (url, init) => {
   }
 };
 
-const defaultRunCli: RemoteCliRunner = (command, args, timeoutMs) =>
+const defaultRunCli: RemoteCliRunner = (command, args, timeoutMs, signal) =>
   new Promise((resolve, reject) => {
     nodeExecFile(
       command,
       args,
-      { timeout: timeoutMs, windowsHide: true },
+      { timeout: timeoutMs, windowsHide: true, signal },
       (error, stdout, stderr) => {
         if (error) {
           reject(error);

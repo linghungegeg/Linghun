@@ -388,17 +388,35 @@ async function loadMemoryByStatus(
 
 async function loadMemoryLearningMode(
   paths: ReturnType<typeof resolveStoragePaths>,
-): Promise<{ learningMode: MemoryState["learningMode"]; learningModeSource: "persisted" } | null> {
+): Promise<{
+  learningMode: MemoryState["learningMode"];
+  learningModeSource: "persisted";
+  learningModeDiagnostic?: string;
+} | null> {
+  let raw: string;
   try {
-    const value = JSON.parse(
-      await readFile(join(paths.memoryUser, MEMORY_LEARNING_STATE_FILE), "utf8"),
-    ) as unknown;
-    if (!isRecord(value)) return null;
-    if (value.learningMode !== "active" && value.learningMode !== "off") return null;
-    return { learningMode: value.learningMode, learningModeSource: "persisted" };
-  } catch {
-    return null;
+    raw = await readFile(join(paths.memoryUser, MEMORY_LEARNING_STATE_FILE), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return {
+      learningMode: "off",
+      learningModeSource: "persisted",
+      learningModeDiagnostic: "learning-state unreadable; auto-learning fail-closed off",
+    };
   }
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (isRecord(value) && (value.learningMode === "active" || value.learningMode === "off")) {
+      return { learningMode: value.learningMode, learningModeSource: "persisted" };
+    }
+  } catch {
+    // handled by the fail-closed result below
+  }
+  return {
+    learningMode: "off",
+    learningModeSource: "persisted",
+    learningModeDiagnostic: "learning-state invalid; auto-learning fail-closed off",
+  };
 }
 
 async function loadMemoryDirByStatus(

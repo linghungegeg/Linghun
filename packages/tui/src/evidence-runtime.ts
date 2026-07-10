@@ -16,6 +16,7 @@ import {
   type ToolResultBudgetRecord,
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
+  createToolResultBudgetLedgerData,
   formatToolResultBudgetEvidenceSummary,
   formatToolResultBudgetSystemEvent,
 } from "./tool-result-budget.js";
@@ -401,7 +402,7 @@ export async function recordToolFailureEvidence(
   commitGuard?: () => boolean,
   toolUseId?: string,
 ): Promise<EvidenceRecord> {
-  const evidence = {
+  const evidence: EvidenceRecord = {
     ...createEvidenceRecord(
       "command_output",
       `${name} failure: ${truncateDisplay(summary.replace(/\s+/g, " "), 140)}`,
@@ -764,9 +765,10 @@ export async function recordToolResultBudgetEvidence(
       ["tool_result_budget", "artifact", `toolUseId:${record.toolUseId}`],
     ),
     toolUseId: record.toolUseId,
+    fullOutputPath: record.artifact.path,
+    outputPath: record.artifact.path,
+    data: createToolResultBudgetLedgerData(record),
   };
-  evidence.fullOutputPath = record.artifact.path;
-  evidence.outputPath = record.artifact.path;
   if (commitGuard && !commitGuard()) return evidence.id;
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",

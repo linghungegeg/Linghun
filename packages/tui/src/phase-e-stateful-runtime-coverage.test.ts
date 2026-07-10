@@ -36,16 +36,17 @@ import {
 import {
   captureFailureLearning,
   recordProviderFailureEvidence,
+  recordToolResultBudgetEvidence,
   recordVerificationEvidence,
 } from "./evidence-runtime.js";
-import { ensureSession } from "./details-status-runtime.js";
+import { ensureSession, handleDetailsCommand } from "./details-status-runtime.js";
 import {
   type FailureLearningInput,
   createFailureLearningState,
 } from "./failure-learning-runtime.js";
 import { hydrateResumeContext, loadOrCreateHandoffPacket } from "./handoff-session-runtime.js";
 import { createIndexState } from "./index-runtime.js";
-import { runMcpStdioToolCall } from "./mcp-stdio-runtime.js";
+import { createMcpStdioRunner, runMcpStdioToolCall } from "./mcp-stdio-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { buildModelMessagesWithRecentContext } from "./model-stream-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
@@ -132,6 +133,89 @@ describe("Phase E MCP stdio runtime coverage", () => {
     });
   });
 
+  it("rejects pending request work immediately when the runner is aborted", async () => {
+    const server = await createMcpServerScript(`
+      setTimeout(() => {}, 10_000);
+    `);
+    const controller = new AbortController();
+    let runFinalized = false;
+    const pending = createMcpStdioRunner({
+      server,
+      cwd: server.cwd,
+      timeoutMs: 30_000,
+      requestTimeoutMs: () => 30_000,
+      label: "mcp-stdio-abort-test",
+      timeoutSummary: "timeout",
+      captureStderr: false,
+      signal: controller.signal,
+      run: async (sendRequest) => {
+        try {
+          await sendRequest("initialize", {});
+          return true;
+        } finally {
+          runFinalized = true;
+        }
+      },
+    });
+    setTimeout(() => controller.abort(), 50);
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      errorCode: "MCP_STDIO_ABORTED",
+    });
+    await Promise.resolve();
+    expect(runFinalized).toBe(true);
+  });
+
+  it("ignores malformed matching-id frames until a valid response arrives", async () => {
+    const server = await createMcpServerScript(`
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const req = JSON.parse(line);
+        if (req.method === "initialize") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: {} }));
+        if (req.method === "tools/list") {
+          console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, malformed: true }));
+          setTimeout(() => console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { tools: [{ name: "demo_tool" }] } })), 50);
+        }
+        if (req.method === "tools/call") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { content: "ok" } }));
+      });
+    `);
+
+    await expect(
+      runMcpStdioToolCall(server, "demo_tool", {}, server.cwd, 5_000),
+    ).resolves.toMatchObject({ ok: true, summary: "tools/call demo_tool ok" });
+  });
+
+  it("does not let malformed matching-id frames renew the idle timeout", async () => {
+    const server = await createMcpServerScript(`
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const req = JSON.parse(line);
+        if (req.method === "initialize") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: {} }));
+        if (req.method === "tools/list") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { tools: [{ name: "demo_tool" }] } }));
+        if (req.method === "tools/call") setInterval(() => console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, method: "notifications/progress", params: {} })), 30);
+      });
+    `);
+
+    const startedAt = Date.now();
+    const result = await runMcpStdioToolCall(
+      server,
+      "demo_tool",
+      {},
+      server.cwd,
+      2_000,
+      undefined,
+      {
+        idleTimeoutMs: 250,
+      },
+    );
+    expect(result).toMatchObject({ ok: false, errorCode: "ETIMEDOUT" });
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+  });
+
   it("treats MCP stdio progress frames as heartbeat during a long tool call", async () => {
     const server = await createMcpServerScript(`
       const readline = require("node:readline");
@@ -141,18 +225,18 @@ describe("Phase E MCP stdio runtime coverage", () => {
         if (req.method === "initialize") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: {} }));
         if (req.method === "tools/list") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { tools: [{ name: "demo_tool" }] } }));
         if (req.method === "tools/call") {
-          const heartbeat = setInterval(() => console.log(JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: {} })), 50);
+          const heartbeat = setInterval(() => console.log(JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: {} })), 100);
           setTimeout(() => {
             clearInterval(heartbeat);
             console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { content: "ok" } }));
-          }, 450);
+          }, 1_500);
         }
       });
     `);
 
     await expect(
       runMcpStdioToolCall(server, "demo_tool", {}, server.cwd, 5_000, undefined, {
-        idleTimeoutMs: 300,
+        idleTimeoutMs: 1_000,
       }),
     ).resolves.toMatchObject({ ok: true, summary: "tools/call demo_tool ok" });
   });
@@ -851,6 +935,108 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     for (let index = 0; index < oldResults.length; index += 1) {
       expect(resumed.messages[index * 2 + 1]?.content).toBe(providerContent(oldResults[index] ?? ""));
     }
+  });
+
+  it("restores provider-preflight replacements and artifact details across resume", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const raw = `LEDGER_RAW_START\n${`${"r".repeat(200)}\n`.repeat(100)}LEDGER_RAW_END`;
+    const providerContent = JSON.stringify({ tool: "Read", isError: false, content: raw });
+    const messages: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call-ledger", name: "Read", input: { path: "large.txt" } }],
+      },
+      { role: "tool", tool_call_id: "call-ledger", content: providerContent },
+    ];
+    await context.store.appendEvent(sessionId, {
+      type: "tool_result",
+      toolUseId: "call-ledger",
+      toolName: "Read",
+      content: raw,
+      isError: false,
+      createdAt: new Date().toISOString(),
+    });
+    const deps = {
+      ...compactDeps(),
+      recordToolResultBudgetEvidence,
+    };
+    const first = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId,
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+    expect(first.blocked).toBe(false);
+    if (first.blocked) throw new Error("provider preflight unexpectedly blocked");
+    const firstReplacement = first.messages.find((message) => message.role === "tool")?.content;
+    expect(firstReplacement).toContain("<persisted-tool-result>");
+    expect(firstReplacement).not.toContain("LEDGER_RAW_END");
+
+    const transcript = (await context.store.resume(sessionId)).transcript;
+    const resumed = await createTestContext();
+    resumed.projectPath = context.projectPath;
+    resumed.store = context.store;
+    resumed.sessionId = sessionId;
+    resumed.evidence = [];
+    resumed.toolResultBudgetState = undefined;
+    hydrateResumeContext(resumed, transcript);
+    const evidence = resumed.evidence.find((item) => item.toolUseId === "call-ledger");
+    expect(evidence).toMatchObject({
+      fullOutputPath: expect.any(String),
+      outputPath: expect.any(String),
+      data: expect.objectContaining({ kind: "tool_result_budget_replacement", version: 1 }),
+    });
+    expect(await readFile(evidence?.fullOutputPath ?? "", "utf8")).toContain("LEDGER_RAW_END");
+
+    const resumedPreflight = await prepareMessagesForProviderPreflight({
+      messages,
+      context: resumed,
+      sessionId,
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+    expect(resumedPreflight.blocked).toBe(false);
+    if (resumedPreflight.blocked) throw new Error("resumed preflight unexpectedly blocked");
+    expect(resumedPreflight.messages.find((message) => message.role === "tool")?.content).toBe(
+      firstReplacement,
+    );
+
+    const output = new MemoryOutput();
+    await handleDetailsCommand(["output", evidence?.id ?? ""], resumed, output);
+    expect(output.text).toContain("tool_result persisted artifact=");
+    expect(output.text).toContain("tool-results");
+    expect(output.text).not.toContain("未找到 output");
+
+    const slicedOutput = new MemoryOutput();
+    await handleDetailsCommand(
+      ["output", evidence?.id ?? "", "--tail", "5"],
+      resumed,
+      slicedOutput,
+    );
+    expect(slicedOutput.text).toContain("Log artifact tail 切片");
+    expect(slicedOutput.text).toContain("Complete artifact withheld");
+    expect(slicedOutput.text).toContain("完整日志不会进入主屏、prompt、memory 或 handoff");
+    expect(slicedOutput.text).not.toContain("LEDGER_RAW_END");
+
+    const artifactContent = await readFile(evidence?.fullOutputPath ?? "", "utf8");
+    await writeFile(
+      evidence?.fullOutputPath ?? "",
+      artifactContent.replace("LEDGER_RAW_START", "TAMPER_RAW_START"),
+      "utf8",
+    );
+    const tamperedOutput = new MemoryOutput();
+    await handleDetailsCommand(
+      ["output", evidence?.id ?? "", "--tail", "5"],
+      resumed,
+      tamperedOutput,
+    );
+    expect(tamperedOutput.text).toContain("SHA256 mismatch");
+    expect(tamperedOutput.text).not.toContain("TAMPER_RAW_START");
   });
 
   it("can roll back provider-visible replacement projection with a feature flag", async () => {

@@ -17,6 +17,7 @@ import {
 } from "./memory-tombstone-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type { MemoryCandidate } from "./tui-data-types.js";
+import { formatMemoryStatus, writeMemoryLearningMode } from "./tui-memory-runtime.js";
 import { createMemoryState } from "./tui-state-runtime.js";
 
 describe("memory tombstone runtime", () => {
@@ -71,6 +72,51 @@ describe("memory tombstone runtime", () => {
 
     expect(state.accepted.some((item) => item.id === stale.id)).toBe(false);
     expect(state.tombstones?.unreadableScopes.has("project")).toBe(true);
+    const status = formatMemoryStatus({ memory: state } as unknown as TuiContext);
+    expect(status).toContain("tombstone ledger: fail-closed");
+    expect(status).toContain("unreadable scopes project");
+  });
+
+  it("fails corrupted learning state closed while keeping missing state defaults", async () => {
+    const project = await createTempDirectory("linghun-memory-learning-corrupt-");
+    const config = {
+      ...defaultConfig,
+      storage: {
+        ...defaultConfig.storage,
+        memory: {
+          ...defaultConfig.storage.memory,
+          user: { scope: "project" as const },
+        },
+      },
+    };
+    const paths = resolveStoragePaths(config, project);
+    const missing = await createMemoryState(config, project);
+    expect(missing.learningMode).toBe("active");
+    expect(missing.learningModeSource).toBe("default");
+
+    await mkdir(paths.memoryUser, { recursive: true });
+    await writeFile(join(paths.memoryUser, "learning-state.json"), "{broken", "utf8");
+    const corrupted = await createMemoryState(config, project);
+    expect(corrupted.learningMode).toBe("off");
+    expect(corrupted.learningModeSource).toBe("persisted");
+    expect(corrupted.learningModeDiagnostic).toContain("fail-closed off");
+    expect(
+      formatMemoryStatus({ memory: corrupted } as unknown as TuiContext),
+    ).toContain("auto learning diagnostic");
+    corrupted.learningMode = "active";
+    await writeMemoryLearningMode({
+      config,
+      projectPath: project,
+      memory: corrupted,
+    } as unknown as TuiContext);
+    expect(corrupted.learningModeDiagnostic).toBeUndefined();
+
+    await writeFile(
+      join(paths.memoryUser, "learning-state.json"),
+      JSON.stringify({ learningMode: "unexpected" }),
+      "utf8",
+    );
+    expect((await createMemoryState(config, project)).learningMode).toBe("off");
   });
 
   it("does not commit a tombstone when its owner expires during directory preparation", async () => {
@@ -273,6 +319,41 @@ describe("memory tombstone runtime", () => {
     );
 
     expect(context.memory.accepted).toEqual([sessionMemory]);
+  });
+
+  it("does not restore session memory after a legacy auto_deleted lifecycle", () => {
+    const sessionMemory = makeMemory({ id: "auto-deleted-session", scope: "session" });
+    const context = {
+      memory: {
+        candidates: [],
+        accepted: [],
+        rejected: [],
+        disabled: [],
+        retired: [],
+        tombstones: createEmptyMemoryTombstoneIndex(),
+      },
+      evidence: [],
+      checkpoints: [],
+      cache: { history: [], compactBoundaries: [] },
+      tools: { todos: [] },
+    } as unknown as TuiContext;
+
+    hydrateResumeContext(context, [
+      {
+        type: "memory_accepted",
+        memory: sessionMemory,
+        createdAt: sessionMemory.createdAt,
+      },
+      {
+        type: "system_event",
+        id: "auto-delete-session",
+        level: "info",
+        message: `memory_lifecycle action=auto_deleted id=${sessionMemory.id} scope=session status=accepted source=test`,
+        createdAt: sessionMemory.createdAt,
+      },
+    ] as TranscriptEvent[]);
+
+    expect(context.memory.accepted).toEqual([]);
   });
 
   it("does not re-import a deleted structured source under a new UUID", async () => {
