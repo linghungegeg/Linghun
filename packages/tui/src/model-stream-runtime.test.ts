@@ -526,6 +526,60 @@ describe("model message prompt cache layout", () => {
     expect(serialized).not.toContain("RAW_OLD_CONTEXT");
   });
 
+  it("keeps the latest compact boundary when the active tail exceeds the recent window", async () => {
+    const projection = {
+      boundaryId: "compact-boundary-outside-tail",
+      summary: "STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL",
+      restoreContext: { currentTask: "continue beyond the bounded tail" },
+    };
+    const boundary = {
+      type: "system_event",
+      level: "info",
+      message: `compact_projection:${JSON.stringify(projection)}`,
+    };
+    const activeTail = [
+      ...Array.from({ length: 30 }, (_, index) => ({
+        type: "assistant_text_delta",
+        text: `post-boundary answer ${index}`,
+      })),
+      { type: "user_message", text: "current user" },
+    ];
+    const readLimits: number[] = [];
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async (_sessionId: string, input: { limit: number }) => {
+          readLimits.push(input.limit);
+          return input.limit === 1
+            ? { events: [boundary] }
+            : { events: activeTail.slice(-input.limit) };
+        },
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-boundary-outside-tail",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(readLimits).toEqual([25, 1]);
+    expect(serialized).toContain("STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL");
+    expect(serialized).toContain("post-boundary answer 29");
+  });
+
   it("revalidates compacted memory constraints against the current accepted store", async () => {
     const projection = {
       boundaryId: "compact-memory-boundary",

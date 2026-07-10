@@ -4338,7 +4338,16 @@ export async function buildModelMessagesWithRecentContext(
         event.type === "interrupt" ||
         isModelHistoryCompactBoundary(event),
     });
-    const recent = recentTranscript.events;
+    let recent = recentTranscript.events;
+    if (!recent.some(isModelHistoryCompactBoundary)) {
+      const latestBoundary = await context.store.readRecentTranscriptEvents(sessionId, {
+        limit: 1,
+        predicate: isModelHistoryCompactBoundary,
+      });
+      if (latestBoundary.events[0] && isModelHistoryCompactBoundary(latestBoundary.events[0])) {
+        recent = [latestBoundary.events[0], ...recent];
+      }
+    }
     let compactBoundaryIndex = -1;
     for (let index = recent.length - 1; index >= 0; index -= 1) {
       if (!isModelHistoryCompactBoundary(recent[index])) continue;

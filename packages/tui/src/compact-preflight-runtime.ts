@@ -121,19 +121,16 @@ export async function prepareMessagesForProviderPreflight(input: {
       afterChars: budgetedChars,
     },
   ];
-  const previousStrategy = input.context.cache.compactStrategy;
   const persistedRetriggerGuard = input.context.cache.compactProjection?.retriggerGuard;
-  const previousStrategyHasRetriggerGuard = previousStrategy?.steps.some(
-    (step) => step.reason === "post_compact_will_retrigger_next_turn",
-  );
-  const retriggerBaselineChars = previousStrategyHasRetriggerGuard && previousStrategy
-    ? previousStrategy.finalChars
-    : persistedRetriggerGuard?.baselineChars;
-  const hasCompactProjection = budgeted.some(
+  const compactProjectionIndex = budgeted.findIndex(
     (message) =>
       typeof message.content === "string" &&
       message.content.startsWith("Context compact projection\n"),
   );
+  const activeTailChars =
+    compactProjectionIndex >= 0
+      ? estimateModelMessageChars(budgeted.slice(compactProjectionIndex + 1))
+      : budgetedChars;
   const retriggerTailGrowthThreshold = Math.max(
     COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
     Math.floor(Math.max(0, contextMaxChars - triggerChars) / 2),
@@ -144,12 +141,15 @@ export async function prepareMessagesForProviderPreflight(input: {
     input.trigger === "reactive" && input.context.lastProviderFailure !== undefined;
   if (
     !reactiveProviderFailureActive &&
-    retriggerBaselineChars !== undefined &&
-    hasCompactProjection &&
+    persistedRetriggerGuard &&
+    compactProjectionIndex >= 0 &&
     budgetedChars <= contextMaxChars &&
-    budgetedChars - retriggerBaselineChars < activeRetriggerTailGrowthThreshold
+    activeTailChars < activeRetriggerTailGrowthThreshold
   ) {
-    return { blocked: false, messages: budgeted };
+    const guardedMessages = await injectDeepCompactContext(budgeted, input.context);
+    if (estimateModelMessageChars(guardedMessages) <= contextMaxChars) {
+      return { blocked: false, messages: guardedMessages };
+    }
   }
   if (input.trigger !== "reactive" && budgetedChars <= triggerChars) {
     const withDeep = await injectDeepCompactContext(budgeted, input.context);
@@ -412,7 +412,7 @@ export async function prepareMessagesForProviderPreflight(input: {
     const willRetriggerNextTurn = providerMessageChars >= triggerChars;
     if (willRetriggerNextTurn) {
       projection.retriggerGuard = {
-        baselineChars: providerMessageChars,
+        baselineChars: 0,
         tailGrowthThreshold: retriggerTailGrowthThreshold,
       };
       strategySteps.push({

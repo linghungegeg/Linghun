@@ -47,6 +47,7 @@ import { hydrateResumeContext, loadOrCreateHandoffPacket } from "./handoff-sessi
 import { createIndexState } from "./index-runtime.js";
 import { runMcpStdioToolCall } from "./mcp-stdio-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+import { buildModelMessagesWithRecentContext } from "./model-stream-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type {
@@ -550,8 +551,15 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     const events: string[] = [];
     const deps = {
       ...compactDeps(),
-      appendSystemEvent: async (_context: TuiContext, _sessionId: string, message: string) => {
+      appendSystemEvent: async (target: TuiContext, sessionId: string, message: string) => {
         events.push(message);
+        await target.store.appendEvent(sessionId, {
+          type: "system_event",
+          id: `compact-retrigger-${events.length}`,
+          level: "info",
+          message,
+          createdAt: new Date().toISOString(),
+        });
       },
     };
     const staleContext = "RETRIGGER_OLD_CONTEXT".repeat(3_000);
@@ -582,9 +590,26 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(context.cache.compactProjection?.acceptance?.uiNotice).toBe("needs-attention");
     expect(events.some((event) => event.startsWith("context_compact_retrigger_risk:"))).toBe(true);
     const boundaryCount = context.cache.compactBoundaries.length;
+    let round = 0;
+    const rebuildMessages = async (text: string): Promise<ModelMessage[]> => {
+      round += 1;
+      await context.store.appendEvent(context.sessionId ?? "session", {
+        type: "user_message",
+        id: `post-compact-round-${round}`,
+        text,
+        createdAt: new Date().toISOString(),
+      });
+      return buildModelMessagesWithRecentContext(
+        context,
+        context.sessionId ?? "session",
+        "stable system",
+        text,
+        runtime(),
+      );
+    };
 
     const second = await prepareMessagesForProviderPreflight({
-      messages: [...first.messages, { role: "user", content: "second small follow-up" }],
+      messages: await rebuildMessages("second small follow-up"),
       context,
       sessionId: context.sessionId ?? "session",
       runtime: runtime(),
@@ -592,7 +617,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       deps,
     });
     const third = await prepareMessagesForProviderPreflight({
-      messages: [...second.messages, { role: "user", content: "third small follow-up" }],
+      messages: await rebuildMessages("third small follow-up"),
       context,
       sessionId: context.sessionId ?? "session",
       runtime: runtime(),
@@ -608,7 +633,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     );
 
     const largeFollowUp = await prepareMessagesForProviderPreflight({
-      messages: [...third.messages, { role: "user", content: "x".repeat(30_000) }],
+      messages: await rebuildMessages("x".repeat(30_000)),
       context,
       sessionId: context.sessionId ?? "session",
       runtime: runtime(),
@@ -643,7 +668,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     if (first.blocked) throw new Error("provider preflight unexpectedly blocked");
     const projection = context.cache.compactProjection;
     expect(projection?.retriggerGuard).toEqual({
-      baselineChars: estimateModelMessageChars(first.messages),
+      baselineChars: 0,
       tailGrowthThreshold: expect.any(Number),
     });
 
@@ -661,9 +686,33 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(resumed.cache.compactStrategy).toBeUndefined();
     expect(resumed.cache.compactProjection?.retriggerGuard).toEqual(projection?.retriggerGuard);
     const boundaryCount = resumed.cache.compactBoundaries.length;
+    await resumed.store.appendEvent(resumed.sessionId ?? "session", {
+      type: "system_event",
+      id: "compact-resume-projection",
+      level: "info",
+      message: `compact_projection:${JSON.stringify(projection)}`,
+      createdAt: projection?.createdAt ?? new Date().toISOString(),
+    });
+    let resumedRound = 0;
+    const rebuildResumedMessages = async (text: string): Promise<ModelMessage[]> => {
+      resumedRound += 1;
+      await resumed.store.appendEvent(resumed.sessionId ?? "session", {
+        type: "user_message",
+        id: `compact-resume-round-${resumedRound}`,
+        text,
+        createdAt: new Date().toISOString(),
+      });
+      return buildModelMessagesWithRecentContext(
+        resumed,
+        resumed.sessionId ?? "session",
+        "stable system",
+        text,
+        runtime(),
+      );
+    };
 
     const smallFollowUp = await prepareMessagesForProviderPreflight({
-      messages: [...first.messages, { role: "user", content: "small follow-up after resume" }],
+      messages: await rebuildResumedMessages("small follow-up after resume"),
       context: resumed,
       sessionId: resumed.sessionId ?? "session",
       runtime: runtime(),
@@ -675,7 +724,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(resumed.cache.compactBoundaries).toHaveLength(boundaryCount);
 
     const largeFollowUp = await prepareMessagesForProviderPreflight({
-      messages: [...smallFollowUp.messages, { role: "user", content: "x".repeat(30_000) }],
+      messages: await rebuildResumedMessages("x".repeat(30_000)),
       context: resumed,
       sessionId: resumed.sessionId ?? "session",
       runtime: runtime(),
@@ -686,6 +735,62 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(largeFollowUp.blocked || resumed.cache.compactBoundaries.length > boundaryCount).toBe(
       true,
     );
+  });
+
+  it("injects one deep summary and restore context after rebuilding from its boundary", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    await writeFile(join(context.projectPath, "restore.txt"), "RESTORED_WORKING_CONTEXT", "utf8");
+    context.recentlyMentionedFiles = ["restore.txt"];
+    const packet = createDeepCompactPacket({
+      context,
+      transcript: [
+        {
+          type: "user_message",
+          id: "manual-deep-old-user",
+          text: "old context before manual deep compact",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      summary: "MANUAL_DEEP_STABLE_SUMMARY",
+      runtime: runtime(),
+      trigger: "manual",
+    });
+    context.cache.deepCompact = packet;
+    await context.store.appendEvent(sessionId, {
+      type: DEEP_COMPACT_EVENT_TYPE,
+      packet,
+      createdAt: packet.createdAt,
+    } as never);
+    await context.store.appendEvent(sessionId, {
+      type: "user_message",
+      id: "manual-deep-follow-up",
+      text: "continue after manual deep compact",
+      createdAt: new Date().toISOString(),
+    });
+    const rebuilt = await buildModelMessagesWithRecentContext(
+      context,
+      sessionId,
+      "stable system",
+      "continue after manual deep compact",
+      runtime(),
+    );
+
+    const result = await prepareMessagesForProviderPreflight({
+      messages: rebuilt,
+      context,
+      sessionId,
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+
+    expect(result.blocked).toBe(false);
+    const providerText = JSON.stringify(result.messages);
+    expect(providerText.match(/Deep compact context/g)).toHaveLength(1);
+    expect(providerText).toContain("MANUAL_DEEP_STABLE_SUMMARY");
+    expect(providerText).toContain("Post-compact restored context");
+    expect(providerText).toContain("RESTORED_WORKING_CONTEXT");
   });
 
   it("restores raw tool_result fingerprints before aggregate budgeting", async () => {
@@ -1312,6 +1417,10 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     const context = await createTestContext();
     const sessionId = context.sessionId ?? "session";
     const projections: Array<{ projectMainScreen?: boolean }> = [];
+    const pushedMessageKinds: Array<string | undefined> = [];
+    context.pushTranscriptBlock = (block) => {
+      pushedMessageKinds.push(block.messageKind);
+    };
     let releaseProjection!: () => void;
     let markProjectionStarted!: () => void;
     const projectionStarted = new Promise<void>((resolve) => {
@@ -1358,12 +1467,14 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     await Promise.resolve();
 
     expect(completed).toBe(false);
+    expect(pushedMessageKinds).toEqual(["compact_boundary"]);
     expect(projections).toContainEqual({ projectMainScreen: true });
     releaseProjection();
     const result = await run;
 
     expect(result.ok).toBe(true);
     expect(projectionCompleted).toBe(true);
+    expect(pushedMessageKinds).toEqual(["compact_boundary"]);
   });
 });
 

@@ -21,6 +21,7 @@ import {
   sanitizeDisplayPaths,
   truncateDisplay,
 } from "./startup-runtime.js";
+import { createCompactBoundaryBlock } from "./shell/view-model.js";
 import type {
   CompactProgressSnapshot,
   CompactProgressStage,
@@ -313,6 +314,13 @@ export async function runDeepCompact(input: {
     handoffPacketId: input.context.memory.lastHandoff?.id,
   });
   input.deps.recordCompactBoundary(input.context, boundary);
+  input.context.pushTranscriptBlock?.(
+    createCompactBoundaryBlock(
+      preChars,
+      Math.min(preChars, packet.summary.length),
+      input.context.language,
+    ),
+  );
   await projectDeepCompactMainScreen(input.context, input.deps, input.sessionId);
   advanceDeepCompactProgress(input.context, "restore_context");
   input.context.cache.deepCompact = packet;
@@ -436,6 +444,24 @@ export function injectDeepCompactSummary(
 ): ModelMessage[] {
   const summary = formatDeepCompactPromptSummary(packet);
   if (!summary) return messages;
+  const existingSummaryIndex = messages.findIndex(
+    (message) => message.role === "user" && message.content === summary,
+  );
+  if (existingSummaryIndex >= 0) {
+    const missingAdditionalMessages = additionalMessages.filter(
+      (additional) =>
+        !messages.some(
+          (message) =>
+            message.role === additional.role && message.content === additional.content,
+        ),
+    );
+    if (missingAdditionalMessages.length === 0) return messages;
+    return [
+      ...messages.slice(0, existingSummaryIndex + 1),
+      ...missingAdditionalMessages,
+      ...messages.slice(existingSummaryIndex + 1),
+    ];
+  }
   const summaryMessage: ModelMessage = {
     role: "user",
     content: summary,
