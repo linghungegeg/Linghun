@@ -5,6 +5,7 @@ import { createPostCompactCacheWarmup } from "./cache-policy-runtime.js";
 import { type CompactBoundary, compactMessagesToFit } from "./compact-context.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import {
+  buildStableContextUsageSnapshot,
   getContextWindowForModel,
   getNativeContextWindowForModel,
 } from "./context-window-runtime.js";
@@ -1023,13 +1024,20 @@ function recordCompactStrategy(
         : "low",
     steps: input.steps,
   };
-  context.cache.contextUsage = {
+  context.cache.contextUsage = buildStableContextUsageSnapshot({
+    previous: context.cache.contextUsage,
     estimatedChars: input.finalChars,
     maxChars: windowChars,
     updatedAt,
-    source: appliedLayers.length > 0 ? "compact" : "pressure",
+    compacted: input.steps.some(
+      (step) =>
+        step.status === "applied" &&
+        (step.layer === "full_summary" ||
+          step.layer === "reactive" ||
+          (step.layer === "semantic_deep" && step.reason === "semantic_compact_ready")),
+    ),
     ...(input.savingsRatio !== undefined ? { savingsRatio: input.savingsRatio } : {}),
-  };
+  });
 }
 
 function toDeepCompactTrigger(trigger: CompactPreflightTrigger): DeepCompactTrigger {

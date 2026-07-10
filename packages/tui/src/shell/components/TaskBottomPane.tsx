@@ -319,8 +319,8 @@ function QueuedInputPreview({
   const hidden = Math.max(0, items.length - visible.length);
   const title =
     language === "en-US"
-      ? `Queued follow-ups ${items.length} · Alt+↑ edit latest`
-      : `后续输入排队 ${items.length} 条 · Alt+↑ 编辑末条`;
+      ? `Queued follow-ups ${items.length} · Alt+↑ edit · Alt+Del delete latest`
+      : `后续输入排队 ${items.length} 条 · Alt+↑ 编辑 · Alt+Del 删除末条`;
   return (
     <Box flexDirection="column" width={width} paddingX={2}>
       <Text color={theme.muted} dimColor>

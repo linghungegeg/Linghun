@@ -2582,6 +2582,27 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("deletes the latest queued follow-up with Alt+Delete", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      composer: { ...baseTaskView().composer, busy: true },
+      queuedInputs: [
+        { id: "queued-input-1", text: "first follow-up" },
+        { id: "queued-input-2", text: "latest follow-up" },
+      ],
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    await writeInput(input, shell, "\x1b[3;3~");
+
+    expect(events).toContainEqual({
+      type: "queued-input-delete-latest",
+      id: "queued-input-2",
+    });
+    shell.unmount();
+  });
+
   it("keeps empty composer number input as text instead of globally selecting suggestions", async () => {
     const view: ShellViewModel = {
       ...baseTaskView(),

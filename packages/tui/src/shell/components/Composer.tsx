@@ -1271,6 +1271,15 @@ export function Composer({
       }
 
       const latestQueuedInput = view.queuedInputs?.at(-1);
+      const altDelete =
+        (key.delete && key.meta) || input === "\x1B[3;3~" || input === "[3;3~";
+      if (altDelete && latestQueuedInput) {
+        emitInput({ type: "queued-input-delete-latest", id: latestQueuedInput.id });
+        showHintNotice(
+          view.language === "en-US" ? "Deleted the latest queued input." : "已删除最后一条排队输入。",
+        );
+        return;
+      }
       if (key.upArrow && key.meta && latestQueuedInput) {
         resetBuffer(latestQueuedInput.text);
         emitInput({ type: "queued-input-edit-latest", id: latestQueuedInput.id });

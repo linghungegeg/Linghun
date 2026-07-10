@@ -503,21 +503,9 @@ function selectStatusContextUsage(
 ): ReturnType<typeof calculateContextPercentages> | undefined {
   const maxTokens = getNativeContextWindowForModel(context.model);
   const usage = context.cache.contextUsage;
-  if (usage?.source === "provider_usage") {
-    return calculateContextPercentages(
-      usage.confirmedUsedTokens ?? Math.ceil(usage.estimatedChars / 4),
-      maxTokens,
-    );
-  }
-  if (context.cache.compactPressure) {
-    return calculateContextPercentages(
-      Math.ceil(context.cache.compactPressure.estimatedChars / 4),
-      maxTokens,
-    );
-  }
   if (!usage) return undefined;
   return calculateContextPercentages(
-    usage.confirmedUsedTokens ?? Math.ceil(usage.estimatedChars / 4),
+    Math.ceil(usage.estimatedChars / 4),
     maxTokens,
   );
 }

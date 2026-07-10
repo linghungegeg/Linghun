@@ -1013,7 +1013,6 @@ import {
   handleCacheLogCommand,
   handleClaimCheckCommand,
   handleCompactCommand,
-  loadPersistedCacheHistory,
   recordModelUsage,
 } from "./compact-cache-command-runtime.js";
 import {
@@ -1588,7 +1587,6 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
 export const __testCreateTuiRuntimeContext = createTuiRuntimeContext;
 
 async function hydrateRuntimeContext(context: TuiContext): Promise<void> {
-  await loadPersistedCacheHistory(context);
   await refreshIndexStatus(context);
   await hydrateDurableJobBackgroundTasks(context);
   await hydratePersistentAgents(context);
@@ -2786,6 +2784,12 @@ async function runInkShell(
       if (event.type === "queued-input-edit-latest") {
         const latest = queuedInputQueue.takeLatest(event.id);
         if (latest) composerDraftText = latest.text;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "queued-input-delete-latest") {
+        queuedInputQueue.takeLatest(event.id);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

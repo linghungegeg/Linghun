@@ -2471,31 +2471,10 @@ function selectFooterContextUsage(
   currentContextWindowTokens: number,
 ): FooterContextUsageInput | undefined {
   const usage = context.cache.contextUsage;
-  if (usage?.source === "provider_usage") {
-    return {
-      ...calculateContextPercentages(
-        usage.confirmedUsedTokens ?? Math.ceil(usage.estimatedChars / 4),
-        currentContextWindowTokens,
-      ),
-      savingsRatio: usage.savingsRatio,
-    };
-  }
-
-  const pressure = context.cache.compactPressure;
-  if (pressure) {
-    return {
-      ...calculateContextPercentages(
-        Math.ceil(pressure.estimatedChars / 4),
-        currentContextWindowTokens,
-      ),
-      ...(usage?.updatedAt === pressure.updatedAt ? { savingsRatio: usage.savingsRatio } : {}),
-    };
-  }
-
   if (!usage) return undefined;
   return {
     ...calculateContextPercentages(
-      usage.confirmedUsedTokens ?? Math.ceil(usage.estimatedChars / 4),
+      Math.ceil(usage.estimatedChars / 4),
       currentContextWindowTokens,
     ),
     savingsRatio: usage.savingsRatio,
@@ -2612,11 +2591,7 @@ function formatFooterCache(language: Language, status: FooterCacheStatus): strin
   if (hitRate === null || hitRate === undefined) {
     return language === "en-US" ? `${label} sampling` : `${label} 采样中`;
   }
-  const freshness =
-    status.freshness === "changed"
-      ? language === "en-US" ? "changed" : "变化"
-      : language === "en-US" ? "stable" : "稳定";
-  return `${label} ${formatCachePercent(hitRate)} · ${freshness}`;
+  return `${label} ${formatCachePercent(hitRate)}`;
 }
 
 function formatFooterCacheTone(status: FooterCacheStatus): "default" | "warning" | "dim" {

@@ -558,7 +558,7 @@ describe("shell view model", () => {
       bordered: true,
     });
     expect(view.taskFooter?.model).toMatch(/^Model\s+\S/u);
-    expect(view.taskFooter?.cache).toBe("Cache 84% · stable");
+    expect(view.taskFooter?.cache).toBe("Cache 84%");
     expect(view.taskFooter?.contextUsage?.wide).toBe("ctx 2% (3k/200k)");
     expect(view.taskFooter?.contextUsage?.ratio).toBe(0.015);
     expect(rendered).toContain("长中文段落用于验证窄终端换行");
@@ -3231,6 +3231,16 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(blocks[0]?.summary).toBe("正常输出");
   });
 
+  it("drops truncated model status dumps before they enter the Task transcript", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const ctx = createContext();
+    const sink = __testCreateShellBlockOutput(ctx, blocks, () => undefined);
+    sink.write(
+      "[Linghun] 模型 gpt-5.6-sol · 模式 自动审核 · 缓存 30% · 稳定 · 上下文 [━━━─] 9% (19k/200k) · 索引 r…\n",
+    );
+    expect(blocks.length).toBe(0);
+  });
+
   it("D13E-P3 #4: ShellBlockOutput silently drops 'Status: Session …' English variant", () => {
     const blocks: ProductBlockViewModel[] = [];
     const ctx = createContext({ language: "en-US" });
@@ -4641,7 +4651,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       { width: 120, viewMode: "task" },
     );
 
-    expect(view.taskFooter?.cache).toBe("缓存 84% · 稳定");
+    expect(view.taskFooter?.cache).toBe("缓存 84%");
     expect(view.taskFooter?.contextUsage).toMatchObject({
       wide: "上下文 25% (50k/200k) ↓38%",
       narrow: "上下文 25% (50k/200k) ↓38%",
@@ -4650,7 +4660,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     });
   });
 
-  it("task footer prefers compact pressure over stale context usage", () => {
+  it("task footer uses the current-window context ledger instead of compact pressure", () => {
     const view = createShellViewModel(
       createContext({
         cache: {
@@ -4675,10 +4685,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 25% (50k/200k)",
-      narrow: "上下文 25% (50k/200k)",
-      minimal: "上下文 25%",
-      ratio: 0.25,
+      wide: "上下文 100% (200k/200k)",
+      narrow: "上下文 100% (200k/200k)",
+      minimal: "上下文 100%",
+      ratio: 1,
     });
   });
 
@@ -4714,7 +4724,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     });
   });
 
-  it("task footer rebases provider-confirmed usage onto the current model window", () => {
+  it("task footer ignores provider calibration and keeps the stable context total", () => {
     const view = createShellViewModel(
       createContext({
         cache: {
@@ -4728,7 +4738,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
             updatedAt: "2026-01-01T00:00:01.000Z",
           },
           contextUsage: {
-            estimatedChars: 800_000,
+            estimatedChars: 80_000,
             maxChars: 1_000_000,
             updatedAt: "2026-01-01T00:00:00.000Z",
             source: "provider_usage",
@@ -4743,10 +4753,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 100% (200k/200k)",
-      narrow: "上下文 100% (200k/200k)",
-      minimal: "上下文 100%",
-      ratio: 1,
+      wide: "上下文 10% (20k/200k)",
+      narrow: "上下文 10% (20k/200k)",
+      minimal: "上下文 10%",
+      ratio: 0.1,
     });
   });
 
@@ -7940,7 +7950,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       viewMode: "task",
     });
 
-    expect(view.taskFooter?.cache).toBe("缓存 76% · 稳定");
+    expect(view.taskFooter?.cache).toBe("缓存 76%");
     expect(view.taskFooter?.cacheTone).toBe("default");
   });
 
@@ -7956,7 +7966,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       viewMode: "task",
     });
 
-    expect(view.taskFooter?.cache).toBe("Cache 53% · stable");
+    expect(view.taskFooter?.cache).toBe("Cache 53%");
     expect(view.taskFooter?.cacheTone).toBe("default");
   });
 
@@ -8020,7 +8030,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
 
     const view = createShellViewModel(ctx, { width: 120, viewMode: "task" });
 
-    expect(view.taskFooter?.cache).toBe("缓存 80% · 稳定");
+    expect(view.taskFooter?.cache).toBe("缓存 80%");
   });
 
   it("task footer updates when the local 20-turn window rolls forward", () => {
@@ -8040,8 +8050,8 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     );
     const after = createShellViewModel(ctx, { width: 120, viewMode: "task" });
 
-    expect(before.taskFooter?.cache).toBe("缓存 100% · 稳定");
-    expect(after.taskFooter?.cache).toBe("缓存 95% · 稳定");
+    expect(before.taskFooter?.cache).toBe("缓存 100%");
+    expect(after.taskFooter?.cache).toBe("缓存 95%");
   });
 
   it("task footer keeps the trusted ratio and marks stable cache-key changes", () => {
@@ -8060,7 +8070,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
 
     const view = createShellViewModel(ctx, { width: 120, viewMode: "task" });
 
-    expect(view.taskFooter?.cache).toBe("缓存 80% · 变化");
+    expect(view.taskFooter?.cache).toBe("缓存 80%");
   });
 
   it("recent cache aggregate only uses the latest 20 records", () => {

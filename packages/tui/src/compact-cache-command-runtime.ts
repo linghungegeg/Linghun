@@ -135,18 +135,15 @@ export function recordConfirmedContextUsage(context: TuiContext, usage: ModelUsa
   const confirmedUsedTokens = getProviderConfirmedContextTokens(usage, provider);
   const contextWindowTokens = getContextWindowTokens(context);
   const compactTriggerTokens = getCompactTriggerTokens(context);
-  const estimatedChars = confirmedUsedTokens * LINGHUN_BYTES_PER_TOKEN;
+  const existing = context.cache.contextUsage;
   context.cache.contextUsage = {
-    ...(context.cache.contextUsage ?? {
-      estimatedChars,
+    ...(existing ?? {
+      estimatedChars: confirmedUsedTokens * LINGHUN_BYTES_PER_TOKEN,
       maxChars: contextWindowTokens * LINGHUN_BYTES_PER_TOKEN,
       updatedAt: new Date().toISOString(),
       source: "provider_usage" as const,
     }),
-    estimatedChars,
-    maxChars: contextWindowTokens * LINGHUN_BYTES_PER_TOKEN,
     updatedAt: new Date().toISOString(),
-    source: "provider_usage",
     confirmedUsedTokens,
     contextWindowTokens,
     compactTriggerTokens,
@@ -744,25 +741,6 @@ export async function appendUsageEvents(
   const createdAt = new Date().toISOString();
   await context.store.appendEvent(sessionId, { type: "usage", usage: stats, createdAt });
   await context.store.appendEvent(sessionId, { type: "cache_update", stats, createdAt });
-  await persistCacheHistory(context);
-}
-
-export async function loadPersistedCacheHistory(_context: TuiContext): Promise<void> {
-  // Cache footer state is terminal-local. Persisted history is kept for writes/diagnostics only.
-}
-
-export async function persistCacheHistory(context: TuiContext): Promise<void> {
-  try {
-    trimCacheHistory(context.cache);
-    await mkdir(dirname(context.cache.config.persistPath), { recursive: true });
-    await writeFile(
-      context.cache.config.persistPath,
-      `${JSON.stringify(context.cache.history, null, 2)}\n`,
-      "utf8",
-    );
-  } catch {
-    // Cache history is only a local display/diagnostic aid; never block model flow.
-  }
 }
 
 

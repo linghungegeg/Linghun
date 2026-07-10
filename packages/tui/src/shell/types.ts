@@ -730,6 +730,7 @@ export type ShellInputEvent =
   | { type: "submit"; text: string }
   | { type: "queue-submit"; text: string }
   | { type: "queued-input-edit-latest"; id: string }
+  | { type: "queued-input-delete-latest"; id: string }
   | { type: "empty-submit" }
   | { type: "escape" }
   | { type: "interrupt" }

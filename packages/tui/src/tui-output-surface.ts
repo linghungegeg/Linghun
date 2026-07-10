@@ -93,9 +93,9 @@ export function isNativeScrollbackEnabled(env: NodeJS.ProcessEnv = process.env):
 
 function isRuntimeStatusDump(line: string): boolean {
   if (line.startsWith("[Linghun] 会话 ")) return true;
-  if (line.startsWith("[Linghun] 模型 ") && line.includes(" · 后台 ")) return true;
+  if (line.startsWith("[Linghun] 模型 ")) return true;
   if (line.startsWith("Status: Session ")) return true;
-  if (line.startsWith("Status: Model ") && line.includes(" · background ")) return true;
+  if (line.startsWith("Status: Model ")) return true;
   if (line.includes("确认 ") && line.includes("后台 ")) return true;
   if (line.includes("Gate ") && line.includes("BG ")) return true;
   return false;

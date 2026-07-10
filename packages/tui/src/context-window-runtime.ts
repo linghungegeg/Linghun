@@ -11,6 +11,27 @@ export type ContextPercentage = {
   bar: string;
 };
 
+export function buildStableContextUsageSnapshot(input: {
+  previous?: ContextUsageSnapshot;
+  estimatedChars: number;
+  maxChars: number;
+  updatedAt: string;
+  compacted: boolean;
+  savingsRatio?: number;
+}): ContextUsageSnapshot {
+  const previous = input.compacted ? undefined : input.previous;
+  return {
+    ...previous,
+    estimatedChars: input.compacted
+      ? input.estimatedChars
+      : Math.max(previous?.estimatedChars ?? 0, input.estimatedChars),
+    maxChars: input.maxChars,
+    updatedAt: input.updatedAt,
+    source: input.compacted ? "compact" : "pressure",
+    ...(input.savingsRatio !== undefined ? { savingsRatio: input.savingsRatio } : {}),
+  };
+}
+
 const DEFAULT_CONTEXT_WINDOW_TOKENS = readPositiveIntEnv("LINGHUN_CONTEXT_WINDOW_TOKENS", 200_000);
 const CONTEXT_1M_TOKENS = 1_000_000;
 
