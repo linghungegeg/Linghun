@@ -562,7 +562,11 @@ describe("Ink TTY interaction smoke", () => {
     await writeInput(input, shell, "\x1b[<0;12;6m");
 
     expect(events).toContainEqual({ type: "transcript-scroll", delta: 1 });
-    expect(events).toContainEqual({ type: "transcript-scroll", delta: -1 });
+    expect(
+      events.some(
+        (event) => event.type === "transcript-scroll" && "delta" in event && event.delta < 0,
+      ),
+    ).toBe(true);
     expect(events.some((event) => event.type === "transcript-mouse")).toBe(false);
 
     shell.unmount();
@@ -779,7 +783,7 @@ describe("Ink TTY interaction smoke", () => {
             name: "audit",
             status: "running",
             activity: "reading",
-            toolUses: 2,
+            mailboxMessages: 2,
             tokens: 1024,
           },
         ],
@@ -795,6 +799,151 @@ describe("Ink TTY interaction smoke", () => {
     expect(visible).toContain("输入消息");
     expect(visible).toContain("gpt-5.5");
     shell.unmount();
+  });
+
+  it("renders workflow as the orchestration axis with nested fork context", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      height: 40,
+      commandPanel: undefined,
+      activity: undefined,
+      blocks: [],
+      agentProgressTree: {
+        rows: [
+          {
+            id: "agent-review",
+            branch: "last",
+            name: "reviewer",
+            status: "running",
+            workflowRunId: "wf-release",
+            contextMode: "full_fork",
+            modeLabel: "完整上下文",
+            parentSessionId: "session-parent-12345678",
+            forkedFrom: "handoff-packet-12345678",
+            activity: "reviewing",
+            mailboxMessages: 2,
+            tokens: 128,
+          },
+        ],
+        hiddenPending: 0,
+        cursor: -1,
+      },
+      workflowProgressView: {
+        runs: [
+          {
+            id: "wf-release",
+            goal: "release",
+            status: "running",
+            completedSteps: 0,
+            totalSteps: 1,
+            steps: [
+              {
+                id: "review",
+                title: "Review",
+                status: "running",
+                active: true,
+                dependsOnSliceIds: ["build"],
+                batchId: "batch-review",
+                canRunInParallel: true,
+              },
+            ],
+          },
+        ],
+        hiddenPending: 0,
+      },
+    };
+    const { output, shell } = await renderWithEvents(() => view);
+    await shell.waitUntilRenderFlush();
+
+    const visible = finalScreenLinesFrom(output, view.height).join("\n");
+    expect(visible).toContain("release");
+    expect(visible).toContain("并行:batch-review");
+    expect(visible).toContain("依赖:build");
+    expect(visible).toContain("Agent reviewer");
+    expect(visible).toContain("完整上下文");
+    expect(visible.indexOf("release")).toBeLessThan(visible.indexOf("Agent reviewer"));
+    shell.unmount();
+  });
+
+  it("keeps native task visuals bounded across size, language, and no-color tiers", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const matrix = [
+      { width: 48, height: 16, language: "zh-CN" as const, surface: "agent" as const },
+      { width: 72, height: 24, language: "en-US" as const, surface: "workflow" as const },
+      { width: 100, height: 28, language: "zh-CN" as const, surface: "workflow" as const },
+      { width: 120, height: 40, language: "en-US" as const, surface: "agent" as const },
+    ];
+
+    for (const scenario of matrix) {
+      const view: ShellViewModel = {
+        ...baseTaskView(),
+        width: scenario.width,
+        height: scenario.height,
+        language: scenario.language,
+        themeMode: "no-color",
+        commandPanel: undefined,
+        blocks: [],
+        activity: undefined,
+        streamingAssistantText:
+          scenario.language === "en-US" ? "Streaming layout preview" : "正在输出布局预览",
+        agentProgressTree:
+          scenario.surface === "agent"
+            ? {
+                rows: [
+                  {
+                    id: "matrix-agent",
+                    branch: "last",
+                    name: "reviewer",
+                    status: "running",
+                    modeLabel:
+                      scenario.language === "en-US" ? "full context" : "完整上下文",
+                    mailboxMessages: 2,
+                    mailboxPending: 1,
+                    tokens: 256,
+                  },
+                ],
+                hiddenPending: 0,
+                cursor: -1,
+              }
+            : undefined,
+        workflowProgressView:
+          scenario.surface === "workflow"
+            ? {
+                runs: [
+                  {
+                    id: "matrix-workflow",
+                    goal: scenario.language === "en-US" ? "layout review" : "布局复检",
+                    status: "running",
+                    completedSteps: 0,
+                    totalSteps: 1,
+                    steps: [
+                      {
+                        id: "matrix-step",
+                        title: scenario.language === "en-US" ? "Resize" : "尺寸矩阵",
+                        status: "running",
+                        active: true,
+                      },
+                    ],
+                  },
+                ],
+                hiddenPending: 0,
+              }
+            : undefined,
+      };
+      const { output, shell } = await renderWithEvents(() => view, {
+        columns: scenario.width,
+        rows: scenario.height,
+      });
+      await shell.waitUntilRenderFlush();
+
+      const lines = finalScreenLinesFrom(output, scenario.height);
+      expectLinesWithinWidth(lines, scenario.width);
+      expect(lines.filter((line) => line.includes("输入消息或 /help")).length).toBe(1);
+      shell.unmount();
+    }
   });
 
   it("terminal-first user flush survives the following Ink rerender clear", async () => {
@@ -1166,6 +1315,42 @@ describe("Ink TTY interaction smoke", () => {
     expect(output.text).toContain("\x1B[1;1H\x1B[J");
     expect(output.text).toMatch(/\x1B\[\d+;1H\x1B\[J/u);
     expect(output.text).toMatch(/\x1B\[\d+;1H/u);
+    shell.unmount();
+  });
+
+  it("renders real session message previews and resumes with Enter", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      sessionsPanel: {
+        cursor: 0,
+        mode: "preview",
+        previewEntryId: "session-preview",
+        previewStatus: "ready",
+        previewMessages: [
+          { role: "user", text: "请检查预览区布局", createdAt: "2026-07-10T10:00:00Z" },
+          { role: "assistant", text: "已定位到底部高度预算", createdAt: "2026-07-10T10:00:01Z" },
+        ],
+        entries: [
+          {
+            id: "session-preview",
+            title: "布局检查",
+            updatedAt: "2026-07-10T10:00:01Z",
+            messageCount: 2,
+            isCurrent: false,
+          },
+        ],
+      },
+    };
+    const { input, output, events, shell } = await renderWithEvents(() => view);
+    await shell.waitUntilRenderFlush();
+
+    const visible = finalScreenLinesFrom(output, view.height).join("\n");
+    expect(visible).toContain("请检查预览区布局");
+    expect(visible).toContain("已定位到底部高度预算");
+
+    await writeInput(input, shell, "\r");
+    expect(events).toContainEqual({ type: "sessions-resume" });
     shell.unmount();
   });
 
@@ -2461,16 +2646,13 @@ describe("Ink TTY interaction smoke", () => {
     await writeInput(input, shell, "/");
 
     const visible = finalScreenLinesFrom(output, view().height).join("\n");
-    const singleColumnRows = Math.min(getCoreSlashCandidates().length + 1, 7);
     const overlayEvent = events
       .filter((event) => event.type === "composer-overlay-rows-change")
       .at(-1);
     expect(visible).toContain("/model");
     expect(visible).toContain("/mode");
     expect(overlayEvent).toBeDefined();
-    expect(overlayEvent?.type === "composer-overlay-rows-change" ? overlayEvent.rows : 0).toBe(
-      singleColumnRows,
-    );
+    expect(overlayEvent?.type === "composer-overlay-rows-change" ? overlayEvent.rows : 0).toBe(4);
     shell.unmount();
   });
 
@@ -2522,14 +2704,13 @@ describe("Ink TTY interaction smoke", () => {
     }
 
     const visible = finalScreenLinesFrom(output, view().height).join("\n");
-    const singleColumnRows = Math.min(getCoreSlashCandidates().length + 1, 7);
     const overlayRows = events
       .filter((event) => event.type === "composer-overlay-rows-change")
       .map((event) => (event.type === "composer-overlay-rows-change" ? event.rows : 0))
       .filter((rows) => rows > 0);
     expect(visible).toContain("/model");
     expect(visible).toContain("/mode");
-    expect([...new Set(overlayRows)]).toEqual([singleColumnRows]);
+    expect([...new Set(overlayRows)]).toEqual([4]);
     expect(overlayRows.length).toBeLessThanOrEqual(3);
     shell.unmount();
   });

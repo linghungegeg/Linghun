@@ -526,6 +526,9 @@ export type TuiContext = {
     mode?: "search" | "preview";
     searchQuery?: string;
     previewEntryId?: string;
+    previewStatus?: "loading" | "ready" | "error";
+    previewMessages?: import("./shell/types.js").SessionPreviewMessageView[];
+    previewError?: string;
     entries: {
       id: string;
       title: string;

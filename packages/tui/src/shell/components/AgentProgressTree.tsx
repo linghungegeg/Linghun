@@ -50,7 +50,8 @@ export function AgentProgressTree({
 
         // Completed agents: collapse to single-line summary
         if (completed && !expanded) {
-          const completedText = `✓ ${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""} · ${row.toolUses} tools${row.elapsed ? ` · ${row.elapsed}` : ""}`;
+          const mailboxLabel = language === "en-US" ? "messages" : "消息";
+          const completedText = `✓ ${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""} · ${row.mailboxMessages} ${mailboxLabel}${row.elapsed ? ` · ${row.elapsed}` : ""}`;
           return (
             <Box key={row.id}>
               <Text color={theme.muted} dimColor>
@@ -62,7 +63,8 @@ export function AgentProgressTree({
 
         const isLast = index === tree.rows.length - 1;
         const treeChar = isLast ? "└─" : "├─";
-        const rowText = `${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""}${row.activity ? `: ${row.activity}` : ""}${
+        const statusText = row.status === "running" ? "" : ` · ${row.status}`;
+        const rowText = `${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""}${statusText}${row.activity ? `: ${row.activity}` : ""}${
           row.elapsed ? ` · ${workLabel} ${row.elapsed}` : ""
         }`;
 
@@ -75,7 +77,7 @@ export function AgentProgressTree({
                 bold={selected}
                 dimColor={!selected}
               >
-                {completed ? "✓" : selected ? "▶" : " "}
+                {selected ? "▶" : agentStatusMarker(row.status)}
               </Text>
               <Text color={theme.dim ?? theme.muted} dimColor={!selected}>
                 {treeChar}{" "}
@@ -88,10 +90,10 @@ export function AgentProgressTree({
             {expanded ? (
               <Box paddingLeft={4}>
                 <Text color={theme.muted} dimColor>
-                  {text.r3AgentDetailStatus}: {row.status}
-                  {" · "}
-                  {text.r3AgentDetailTools}: {row.toolUses}
-                  {row.elapsed ? ` · ${workLabel} ${row.elapsed}` : ""}
+                  {fitText(
+                    agentDetailText(row, language, workLabel),
+                    Math.max(8, innerWidth - 4),
+                  )}
                 </Text>
               </Box>
             ) : null}
@@ -101,7 +103,7 @@ export function AgentProgressTree({
       {tree.hiddenPending > 0 ? (
         <Box paddingLeft={2}>
           <Text color={theme.muted} dimColor>
-            {`… +${tree.hiddenPending} ${text.r3PendingHiddenSuffix}`}
+            {fitText(`… +${tree.hiddenPending} ${text.r3PendingHiddenSuffix}`, innerWidth - 2)}
           </Text>
         </Box>
       ) : null}
@@ -109,20 +111,54 @@ export function AgentProgressTree({
       {tree.cursor >= 0 ? (
         <Box paddingLeft={3}>
           <Text color={theme.muted} dimColor>
-            {language === "en-US"
-              ? "↑↓ select · enter view · x close · esc cancel"
-              : "↑↓ 选择 · Enter 查看 · x 关闭 · Esc 取消"}
+            {fitText(
+              language === "en-US"
+                ? "↑↓ select · enter view · x close · esc cancel"
+                : "↑↓ 选择 · Enter 查看 · x 关闭 · Esc 取消",
+              innerWidth - 3,
+            )}
           </Text>
         </Box>
       ) : tree.rows.some((r) => r.status === "running") ? (
         <Box paddingLeft={2}>
           <Text color={theme.muted} dimColor>
-            {language === "en-US"
-              ? "↑↓ navigate · x stop · esc cancel"
-              : "↑↓ 导航 · x 停止 · Esc 取消"}
+            {fitText(
+              language === "en-US"
+                ? "↑↓ navigate · x stop · esc cancel"
+                : "↑↓ 导航 · x 停止 · Esc 取消",
+              innerWidth - 2,
+            )}
           </Text>
         </Box>
       ) : null}
     </Box>
   );
+}
+
+function agentStatusMarker(status: string): string {
+  if (status === "completed") return "✓";
+  if (status === "failed") return "x";
+  if (status === "blocked") return "!";
+  if (status === "stale") return "~";
+  return "●";
+}
+
+function agentDetailText(
+  row: AgentProgressTreeView["rows"][number],
+  language: "zh-CN" | "en-US",
+  workLabel: string,
+): string {
+  const mailbox = language === "en-US" ? "mailbox" : "消息";
+  const tokens = language === "en-US" ? "tokens" : "令牌";
+  const parent = row.parentSessionId ? ` · parent:${shortId(row.parentSessionId)}` : "";
+  const fork = row.forkedFrom ? ` · fork:${shortId(row.forkedFrom)}` : "";
+  const elapsed = row.elapsed ? ` · ${workLabel} ${row.elapsed}` : "";
+  const mailboxCount = row.mailboxPending === undefined
+    ? String(row.mailboxMessages)
+    : `${row.mailboxPending}/${row.mailboxMessages}`;
+  return `${row.status} · ${mailbox} ${mailboxCount} · ${tokens} ${row.tokens}${parent}${fork}${elapsed}`;
+}
+
+function shortId(value: string): string {
+  return value.length > 12 ? `…${value.slice(-8)}` : value;
 }

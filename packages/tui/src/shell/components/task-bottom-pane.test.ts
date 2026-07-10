@@ -1,11 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  COMPACT_TRANSCRIPT_ROWS,
   COMPACT_FRAME_ROWS,
   MIN_TRANSCRIPT_ROWS,
   TINY_TRANSCRIPT_ROWS,
+  estimateAgentProgressRows,
+  estimateWorkflowProgressRows,
   nativeScrollbackTaskFrameHeight,
   taskBottomPaneBudget,
+  taskTranscriptReserve,
 } from "../native-scrollback-frame.js";
 import {
   allocateBottomPaneBudget,
@@ -16,14 +20,14 @@ import {
 
 describe("TaskBottomPane budget allocation", () => {
   it("keeps full mode within the frame budget while allowing optional rows", () => {
-    const allocation = allocateBottomPaneBudget(16, {
+    const allocation = allocateBottomPaneBudget(20, {
       workingRows: 1,
       agentProgressRows: 2,
       workflowProgressRows: 2,
     });
 
     expect(allocation.mode).toBe("full");
-    expect(allocation.maxRows).toBe(16 - MIN_TRANSCRIPT_ROWS);
+    expect(allocation.maxRows).toBe(20 - taskTranscriptReserve(20));
     expect(allocation.composerMaxVisibleLines).toBeGreaterThan(1);
     expect(allocation.showAgentProgress || allocation.showWorkflowProgress).toBe(true);
   });
@@ -37,7 +41,7 @@ describe("TaskBottomPane budget allocation", () => {
             branch: "last",
             name: "agent 1",
             status: "completed",
-            toolUses: 1,
+            mailboxMessages: 1,
             tokens: 10,
           },
         ],
@@ -53,7 +57,7 @@ describe("TaskBottomPane budget allocation", () => {
             branch: "last",
             name: "agent running",
             status: "running",
-            toolUses: 0,
+            mailboxMessages: 0,
             tokens: 0,
           },
         ],
@@ -69,7 +73,7 @@ describe("TaskBottomPane budget allocation", () => {
             branch: "last",
             name: "agent failed",
             status: "failed",
-            toolUses: 1,
+            mailboxMessages: 1,
             tokens: 10,
           },
         ],
@@ -188,6 +192,16 @@ describe("TaskBottomPane budget allocation", () => {
     expect(allocation.maxRows).toBeLessThanOrEqual(10 - MIN_TRANSCRIPT_ROWS);
   });
 
+  it("keeps workflow as the orchestration axis when only one progress surface fits", () => {
+    const allocation = allocateBottomPaneBudget(14, {
+      workflowProgressRows: 4,
+      agentProgressRows: 3,
+    });
+
+    expect(allocation.showWorkflowProgress).toBe(true);
+    expect(allocation.showAgentProgress).toBe(false);
+  });
+
   it("does not break the transcript reserve at the compact boundary", () => {
     const allocation = allocateBottomPaneBudget(6, {
       workingRows: 1,
@@ -196,7 +210,7 @@ describe("TaskBottomPane budget allocation", () => {
     });
 
     expect(allocation.mode).toBe("compact");
-    expect(allocation.maxRows).toBe(6 - MIN_TRANSCRIPT_ROWS);
+    expect(allocation.maxRows).toBe(6 - COMPACT_TRANSCRIPT_ROWS);
     expect(allocation.footerRows).toBe(0);
     expect(allocation.workingRows).toBe(1);
     expect(allocation.slashMaxRows + allocation.composerMaxVisibleLines + allocation.footerRows).toBeLessThanOrEqual(
@@ -204,28 +218,25 @@ describe("TaskBottomPane budget allocation", () => {
     );
   });
 
-  it("shows the one-line task summary only when its real spacing fits the compact budget", () => {
-    const allocation = allocateBottomPaneBudget(13, {
+  it("shows the one-line task summary only when its real spacing fits after preview", () => {
+    const allocation = allocateBottomPaneBudget(14, {
       workingRows: 1,
       taskListRows: 2,
       agentProgressRows: 2,
-      workflowProgressRows: 2,
     });
 
     expect(allocation.mode).toBe("compact");
     expect(allocation.footerRows).toBe(1);
     expect(allocation.workingRows).toBe(1);
     expect(allocation.showAgentProgress).toBe(true);
-    expect(allocation.showWorkflowProgress).toBe(true);
     expect(allocation.showTaskList).toBe(true);
   });
 
-  it("does not show the task summary when higher-priority progress rows use the compact budget", () => {
-    const allocation = allocateBottomPaneBudget(13, {
+  it("does not show the task summary when higher-priority rows use the post-preview budget", () => {
+    const allocation = allocateBottomPaneBudget(14, {
       workingRows: 1,
       taskListRows: 3,
       agentProgressRows: 2,
-      workflowProgressRows: 2,
       backgroundOverlayRows: 2,
     });
 
@@ -233,7 +244,6 @@ describe("TaskBottomPane budget allocation", () => {
     expect(allocation.footerRows).toBe(1);
     expect(allocation.workingRows).toBe(1);
     expect(allocation.showAgentProgress).toBe(true);
-    expect(allocation.showWorkflowProgress).toBe(true);
     expect(allocation.showBackgroundOverlay).toBe(true);
     expect(allocation.showTaskList).toBe(false);
   });
@@ -264,12 +274,12 @@ describe("TaskBottomPane budget allocation", () => {
     });
 
     expect(withBlockedStatus.mode).toBe("compact");
-    expect(withBlockedStatus.slashMaxRows).toBe(6);
-    expect(withoutBlockedStatus.slashMaxRows).toBe(7);
+    expect(withBlockedStatus.slashMaxRows).toBe(3);
+    expect(withoutBlockedStatus.slashMaxRows).toBe(4);
   });
 
   it("uses optional rows only after composer, status, footer, and slash budget", () => {
-    const allocation = allocateBottomPaneBudget(16, {
+    const allocation = allocateBottomPaneBudget(22, {
       workingRows: 1,
       slashRows: 5,
       taskListRows: 1,
@@ -338,10 +348,89 @@ describe("TaskBottomPane budget allocation", () => {
   });
 
   it("exports the same budget function used by the pane", () => {
-    expect(taskBottomPaneBudget(6)).toBe(6 - MIN_TRANSCRIPT_ROWS);
+    expect(taskBottomPaneBudget(6)).toBe(6 - COMPACT_TRANSCRIPT_ROWS);
     expect(taskBottomPaneBudget(10)).toBe(10 - MIN_TRANSCRIPT_ROWS);
-    expect(taskBottomPaneBudget(16)).toBe(16 - MIN_TRANSCRIPT_ROWS);
+    expect(taskBottomPaneBudget(16)).toBe(16 - taskTranscriptReserve(16));
     expect(taskBottomPaneBudget(4)).toBe(4 - TINY_TRANSCRIPT_ROWS);
+  });
+
+  it("reserves more live preview rows as the frame grows", () => {
+    expect(taskTranscriptReserve(4)).toBe(TINY_TRANSCRIPT_ROWS);
+    expect(taskTranscriptReserve(6)).toBe(COMPACT_TRANSCRIPT_ROWS);
+    expect(taskTranscriptReserve(10)).toBe(MIN_TRANSCRIPT_ROWS);
+    expect(taskTranscriptReserve(14)).toBe(5);
+    expect(taskTranscriptReserve(40)).toBe(5);
+  });
+
+  it("uses the rendered agent and workflow row counts instead of fixed estimates", () => {
+    const agentRows = estimateAgentProgressRows({
+      rows: [
+        { id: "agent-1", branch: "middle", name: "one", status: "running", mailboxMessages: 0, tokens: 0 },
+        { id: "agent-2", branch: "last", name: "two", status: "completed", mailboxMessages: 1, tokens: 2 },
+      ],
+      hiddenPending: 3,
+      cursor: 0,
+      expandedId: "agent-1",
+    });
+    const workflowRows = estimateWorkflowProgressRows({
+      runs: [
+        {
+          id: "workflow-1",
+          goal: "ship",
+          status: "running",
+          completedSteps: 1,
+          totalSteps: 3,
+          steps: [
+            { id: "step-1", title: "one", status: "completed", active: false },
+            { id: "step-2", title: "two", status: "running", active: true },
+            { id: "step-3", title: "three", status: "pending", active: false },
+          ],
+          hiddenSteps: 2,
+        },
+      ],
+      hiddenPending: 1,
+    });
+
+    expect(agentRows).toBe(6);
+    expect(workflowRows).toBe(8);
+    const allocation = allocateBottomPaneBudget(14, {
+      workingRows: 1,
+      agentProgressRows: agentRows,
+      workflowProgressRows: workflowRows,
+    });
+    expect(allocation.showAgentProgress).toBe(false);
+    expect(allocation.showWorkflowProgress).toBe(false);
+    expect(allocation.maxRows).toBe(9);
+  });
+
+  it("expands live preview frames consistently across terminal height tiers", () => {
+    for (const height of [16, 24, 28, 40]) {
+      const idleHeight = nativeScrollbackTaskFrameHeight({
+        height,
+        blocks: [],
+      } as never);
+      const streamingHeight = nativeScrollbackTaskFrameHeight({
+        height,
+        blocks: [],
+        streamingAssistantText: "live",
+      } as never);
+      const agentHeight = nativeScrollbackTaskFrameHeight({
+        height,
+        blocks: [],
+        agentProgressTree: {
+          rows: [
+            { id: "agent", branch: "last", name: "agent", status: "running", mailboxMessages: 0, tokens: 0 },
+          ],
+          hiddenPending: 0,
+          cursor: -1,
+        },
+      } as never);
+
+      expect(idleHeight).toBe(COMPACT_FRAME_ROWS);
+      expect(streamingHeight).toBe(14);
+      expect(agentHeight).toBe(14);
+      expect(taskTranscriptReserve(streamingHeight)).toBe(5);
+    }
   });
 
   it("accounts for blocked status rows when bootstrapping slash suggestions", () => {
@@ -368,8 +457,10 @@ describe("TaskBottomPane budget allocation", () => {
   it("keeps slash bootstrap rows available before the overlay reports measured rows", () => {
     const source = readFileSync(new URL("./TaskBottomPane.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain("const bootstrapSlashRows =");
-    expect(source).toMatch(/slashMaxRows = slashRows > 0 \? allocation\.slashMaxRows : bootstrapSlashRows/);
+    expect(source).toContain("const slashAllocation = slashRows > 0");
+    expect(source).toContain("frameHeight < view.height");
+    expect(source).toContain("nativeScrollbackTaskFrameHeight({ ...view, composerOverlayRows: 1 })");
+    expect(source).toContain("const slashMaxRows = slashAllocation.slashMaxRows;");
     expect(source).toContain("const TASK_LIST_TOP_GAP_ROWS = 1;");
     expect(source).toContain("const TASK_STATUS_GAP_ROWS = 1;");
     expect(source).toContain(

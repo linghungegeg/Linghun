@@ -3362,7 +3362,34 @@ async function runInkShell(
           ...context.sessionsPanelState,
           mode: "preview",
           previewEntryId: target.id,
+          previewStatus: "loading",
+          previewMessages: undefined,
+          previewError: undefined,
         };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        try {
+          const recent = await context.store.readRecentTranscriptEvents(target.id, {
+            limit: 80,
+            predicate: (item) =>
+              item.type === "user_message" || item.type === "assistant_text_delta",
+          });
+          const { buildSessionPreviewMessages } = await import("./shell/models/session-panel.js");
+          if (context.sessionsPanelState?.previewEntryId !== target.id) return;
+          context.sessionsPanelState = {
+            ...context.sessionsPanelState,
+            previewStatus: "ready",
+            previewMessages: buildSessionPreviewMessages(recent.events),
+          };
+        } catch (error) {
+          if (context.sessionsPanelState?.previewEntryId !== target.id) return;
+          context.sessionsPanelState = {
+            ...context.sessionsPanelState,
+            previewStatus: "error",
+            previewMessages: undefined,
+            previewError: error instanceof Error ? error.message : String(error),
+          };
+        }
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -3373,6 +3400,9 @@ async function runInkShell(
           ...context.sessionsPanelState,
           mode: undefined,
           previewEntryId: undefined,
+          previewStatus: undefined,
+          previewMessages: undefined,
+          previewError: undefined,
         };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -4176,6 +4206,7 @@ export async function handleSlashCommand(
       const entries = buildSessionPanelEntries(
         sessions.map((s) => ({
           id: s.id,
+          createdAt: s.createdAt,
           updatedAt: s.updatedAt,
           summary: s.summary ?? undefined,
           messageCount:

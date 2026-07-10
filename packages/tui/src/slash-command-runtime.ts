@@ -1947,6 +1947,7 @@ export async function handleResumeCommand(
     const entries = buildSessionPanelEntries(
       sessions.map((s) => ({
         id: s.id,
+        createdAt: s.createdAt,
         updatedAt: s.updatedAt,
         summary: s.summary ?? undefined,
         messageCount:

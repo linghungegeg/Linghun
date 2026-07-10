@@ -21,6 +21,12 @@ export function slashSuggestionRowCount(
   return Math.min(uncapped, Math.max(0, Math.floor(maxRows) - 1));
 }
 
+export function slashSuggestionLabelWidth(commands: string[], width: number): number {
+  const widest = commands.reduce((max, command) => Math.max(max, command.length), 0);
+  const cap = width >= 72 ? 24 : 14;
+  return Math.min(Math.max(widest + 2, 12), cap);
+}
+
 export function computeScrollWindow(
   total: number,
   selected: number,
@@ -74,8 +80,10 @@ export function SlashSuggestions({
   if (visibleCandidates.length === 0) return null;
   const hasBefore = window.start > 0;
   const hasAfter = window.end < candidates.length;
-  const widest = visibleCandidates.reduce((acc, item) => Math.max(acc, item.slash.length), 0);
-  const labelWidth = Math.min(Math.max(widest + 2, 12), 14);
+  const labelWidth = slashSuggestionLabelWidth(
+    visibleCandidates.map((item) => item.slash),
+    width,
+  );
   const columnCount = slashSuggestionColumnCount(width);
   const rowCount = slashSuggestionRowCount(visibleCandidates.length, width);
   const colWidth = Math.max(18, Math.floor(width / columnCount));

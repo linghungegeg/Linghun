@@ -21,7 +21,7 @@ function createContext(): TuiContext {
 }
 
 describe("Phase R3 progress view projectors", () => {
-  it("projects agent progress as a tree with tool and token counts", () => {
+  it("projects agent progress with truthful mailbox and token counts", () => {
     const ctx = createContext();
     ctx.agents = [
       {
@@ -30,14 +30,20 @@ describe("Phase R3 progress view projectors", () => {
         status: "running",
         activitySummary: "reading files",
         startedAt: new Date(Date.now() - 12_000).toISOString(),
-        mailbox: [{ id: "m1" }, { id: "m2" }],
+        mailbox: [{ id: "m1", status: "pending" }, { id: "m2", status: "consumed" }],
         cost: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
       },
     ] as unknown as TuiContext["agents"];
 
     const view = buildAgentProgressTreeView(ctx);
 
-    expect(view?.rows[0]).toMatchObject({ name: "Explore", status: "running", toolUses: 2, tokens: 0 });
+    expect(view?.rows[0]).toMatchObject({
+      name: "Explore",
+      status: "running",
+      mailboxMessages: 2,
+      mailboxPending: 1,
+      tokens: 15,
+    });
     expect(view?.rows[0]?.elapsed).toMatch(/\d+s/);
   });
 
@@ -49,14 +55,29 @@ describe("Phase R3 progress view projectors", () => {
         displayName: "Fork Worker",
         teamName: "review",
         contextMode: "full_fork",
+        parentSessionId: "session-parent",
+        forkedFrom: "handoff-packet",
         status: "running",
         mailbox: [],
       },
     ] as unknown as TuiContext["agents"];
+    ctx.backgroundTasks = [
+      {
+        id: "agent-1",
+        kind: "agent",
+        workflowRunId: "wf-1",
+      },
+    ] as unknown as TuiContext["backgroundTasks"];
 
     const view = buildAgentProgressTreeView(ctx);
 
-    expect(view?.rows[0]?.modeLabel).toBe("team:review · full-fork");
+    expect(view?.rows[0]?.modeLabel).toBe("team:review · 完整上下文");
+    expect(view?.rows[0]).toMatchObject({
+      workflowRunId: "wf-1",
+      parentSessionId: "session-parent",
+      forkedFrom: "handoff-packet",
+      contextMode: "full_fork",
+    });
   });
 
   it("projects todos with owner and blocked-by fields when present", () => {
@@ -106,7 +127,14 @@ describe("Phase R3 progress view projectors", () => {
         startedAt: new Date(Date.now() - 65_000).toISOString(),
         steps: [
           { id: "s1", title: "Scan", status: "completed" },
-          { id: "s2", title: "Implement", status: "running" },
+          {
+            id: "s2",
+            title: "Implement",
+            status: "running",
+            dependsOnSliceIds: ["s1"],
+            batchId: "batch-2",
+            canRunInParallel: true,
+          },
         ],
       },
     ] as unknown as NonNullable<TuiContext["workflows"]["activeRuns"]>;
@@ -117,7 +145,13 @@ describe("Phase R3 progress view projectors", () => {
     expect(view?.runs[0]?.elapsed).toMatch(/\d+m\d{2}s/);
     expect(view?.runs[0]?.completedSteps).toBe(1);
     expect(view?.runs[0]?.totalSteps).toBe(2);
-    expect(view?.runs[0]?.steps[1]).toMatchObject({ title: "Implement", active: true });
+    expect(view?.runs[0]?.steps[1]).toMatchObject({
+      title: "Implement",
+      active: true,
+      dependsOnSliceIds: ["s1"],
+      batchId: "batch-2",
+      canRunInParallel: true,
+    });
   });
 
   it("projects multi-agent workflow mode labels", () => {
@@ -226,7 +260,7 @@ describe("Phase R3 progress view projectors", () => {
     expect(overlay?.summary).toContain("运行中 1");
   });
 
-  it("agent tree shows running agents only, hides completed (eviction=0)", () => {
+  it("keeps blocked, failed, and stale agent outcomes visible", () => {
     const ctx = createContext();
     ctx.agents = [
       {
@@ -247,22 +281,30 @@ describe("Phase R3 progress view projectors", () => {
       },
       {
         id: "agent-3",
-        displayName: "Done",
-        status: "completed",
+        displayName: "Failed",
+        status: "failed",
         activitySummary: undefined,
+        mailbox: [],
+        cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      },
+      {
+        id: "agent-4",
+        displayName: "Stale",
+        status: "stale",
+        activitySummary: "resume available",
         mailbox: [],
         cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
       },
     ] as unknown as TuiContext["agents"];
 
-    // Completed agent, even just now, is excluded with eviction delay = 0.
-    ctx.agentCompletedAt = { "agent-3": Date.now() };
-
     const view = buildAgentProgressTreeView(ctx);
 
-    // Runner (running) only — completed agents are evicted immediately.
-    expect(view?.rows).toHaveLength(1);
-    expect(view?.rows[0]?.name).toBe("Runner");
+    expect(view?.rows.map((row) => row.status)).toEqual([
+      "running",
+      "blocked",
+      "failed",
+      "stale",
+    ]);
   });
 
   it("returns undefined when no agents are running (completed agents are evicted immediately)", () => {

@@ -19628,7 +19628,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.solutionCompleteness.triggered).toBeFalsy();
   });
 
-  it("D.13Q-UX Closure: /sessions ink path opens SessionsPanel sorted by updatedAt with current session marked", async () => {
+  it("D.13Q-UX Closure: /sessions ink path opens SessionsPanel sorted by latest activity with current session marked", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const sessionA = await store.create({ model: "deepseek-v4-flash", summary: "A 较早" });
@@ -19653,9 +19653,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(panel).toBeDefined();
     // ink 路径不逐行 writeLine 主屏。
     expect(output.text).toBe("");
-    // 按 updatedAt 倒序：C 最新在前，A 最早在后。
+    // /sessions 的 slash-command 编排事件会刷新当前会话 B；随后是创建更晚的 C，A 最早。
     const ids = (panel?.entries ?? []).map((e) => e.id);
-    expect(ids[0]).toBe(sessionC.id);
+    expect(ids.slice(0, 2)).toEqual([sessionB.id, sessionC.id]);
     expect(ids[ids.length - 1]).toBe(sessionA.id);
     // 当前 session 有 isCurrent=true，其它没有。
     const current = (panel?.entries ?? []).filter((e) => e.isCurrent);

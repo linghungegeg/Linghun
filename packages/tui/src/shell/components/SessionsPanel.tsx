@@ -1,8 +1,9 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type { Language } from "@linghun/shared";
 import type React from "react";
-import { fitText } from "../text-utils.js";
+import { fitText, lineChar } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
+import type { SessionPreviewMessageView } from "../types.js";
 
 /**
  * SessionsPanel — D.13Q-UX Closure + Phase 8 enhancement
@@ -10,7 +11,7 @@ import { createShellTheme } from "../theme.js";
  * Phase 8 adds:
  * - Search input (via Composer dispatch / key → search mode)
  * - Time grouping headers (Today / Yesterday / Older)
- * - Ctrl+V preview mode (first 10 messages metadata)
+ * - Ctrl+V preview mode (recent 10 user/assistant messages)
  *
  * Search/text input flows through Composer → index.ts events, not local useInput.
  */
@@ -29,6 +30,9 @@ const HINT_TEXT = {
     search: "搜索：",
     previewTitle: "预览 · Ctrl+V",
     previewNav: "Esc 返回 · Enter 恢复",
+    previewLoading: "正在读取最近消息…",
+    previewEmpty: "（该会话暂无可预览的对话消息）",
+    previewError: "预览读取失败",
   },
   "en-US": {
     title: "/sessions",
@@ -43,6 +47,9 @@ const HINT_TEXT = {
     search: "Search: ",
     previewTitle: "Preview · Ctrl+V",
     previewNav: "Esc back · Enter resume",
+    previewLoading: "Loading recent messages…",
+    previewEmpty: "(no conversation messages to preview)",
+    previewError: "Preview unavailable",
   },
 } as const;
 
@@ -67,6 +74,9 @@ export function SessionsPanel({
     mode?: "search" | "preview";
     searchQuery?: string;
     previewEntryId?: string;
+    previewStatus?: "loading" | "ready" | "error";
+    previewMessages?: SessionPreviewMessageView[];
+    previewError?: string;
   };
   controller: unknown;
   width: number;
@@ -77,6 +87,7 @@ export function SessionsPanel({
   const hint = HINT_TEXT[language] ?? HINT_TEXT["zh-CN"];
   const cardWidth = Math.min(width, 84);
   const innerWidth = Math.max(20, cardWidth - 4);
+  const rule = lineChar(noColor);
 
   // ─── Time grouping ──────────────────────────────────────────────────
   const getTimeGroup = (iso: string): "today" | "yesterday" | "older" => {
@@ -120,7 +131,7 @@ export function SessionsPanel({
       return (
         <Box flexDirection="column" paddingX={1} marginTop={1} width={cardWidth}>
           <Text color={theme.dim ?? theme.muted} dimColor>
-            {"─".repeat(Math.min(cardWidth, 80))}
+            {rule.repeat(Math.min(cardWidth, 80))}
           </Text>
           <Text color={theme.dim ?? theme.muted} dimColor>
             {fitText(hint.noMatch, innerWidth)}
@@ -129,20 +140,56 @@ export function SessionsPanel({
       );
     }
     const ts = formatSessionTime(entry.updatedAt, language);
+    const previewCount = panel.previewMessages?.length ?? 0;
+    const messageCountText = entry.messageCount > 0
+      ? `${entry.messageCount} ${language === "en-US" ? "msgs" : "条"}`
+      : previewCount > 0
+        ? `${language === "en-US" ? "recent" : "最近"} ${previewCount} ${language === "en-US" ? "msgs" : "条"}`
+        : language === "en-US" ? "no messages" : "暂无消息";
     return (
       <Box flexDirection="column" paddingX={1} marginTop={1} width={cardWidth}>
         <Text color={theme.dim ?? theme.muted} dimColor>
-          {"─".repeat(Math.min(cardWidth, 80))}
+          {rule.repeat(Math.min(cardWidth, 80))}
         </Text>
         <Text bold color={theme.accent}>
           {fitText(`${hint.previewTitle}: ${entry.title}`, innerWidth)}
         </Text>
         <Text dimColor color={theme.muted}>
           {fitText(
-            `${ts} · ${entry.messageCount} ${language === "en-US" ? "msgs" : "条"} · ${entry.id.slice(0, 10)}`,
+            `${ts} · ${messageCountText} · ${entry.id.slice(0, 10)}`,
             innerWidth,
           )}
         </Text>
+        <Box flexDirection="column" marginTop={1}>
+          {panel.previewStatus === "loading" ? (
+            <Text color={theme.muted} dimColor>
+              {fitText(hint.previewLoading, innerWidth)}
+            </Text>
+          ) : panel.previewStatus === "error" ? (
+            <Text color={theme.error ?? theme.status.fail}>
+              {fitText(
+                `${hint.previewError}${panel.previewError ? `: ${panel.previewError}` : ""}`,
+                innerWidth,
+              )}
+            </Text>
+          ) : (panel.previewMessages?.length ?? 0) === 0 ? (
+            <Text color={theme.muted} dimColor>
+              {fitText(hint.previewEmpty, innerWidth)}
+            </Text>
+          ) : (
+            panel.previewMessages?.map((message, index) => {
+              const user = message.role === "user";
+              const role = user
+                ? language === "en-US" ? "You" : "你"
+                : language === "en-US" ? "Assistant" : "助手";
+              return (
+                <Text key={`${message.createdAt}-${index}`} color={user ? theme.accent : undefined}>
+                  {fitText(`${user ? "›" : "·"} ${role}  ${message.text}`, innerWidth)}
+                </Text>
+              );
+            })
+          )}
+        </Box>
         <Box marginTop={1}>
           <Text dimColor color={theme.muted}>
             {fitText(hint.previewNav, innerWidth)}
@@ -210,7 +257,7 @@ export function SessionsPanel({
   return (
     <Box flexDirection="column" paddingX={1} marginTop={1} width={cardWidth}>
       <Text color={theme.dim ?? theme.muted} dimColor>
-        {"─".repeat(Math.min(cardWidth, 80))}
+        {rule.repeat(Math.min(cardWidth, 80))}
       </Text>
       <Text color={theme.accent} bold>
         {fitText(hint.title, innerWidth)}

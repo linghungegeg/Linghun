@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeScrollWindow, slashSuggestionRowCount } from "./SlashSuggestions.js";
+import {
+  computeScrollWindow,
+  slashSuggestionLabelWidth,
+  slashSuggestionRowCount,
+} from "./SlashSuggestions.js";
 
 describe("SlashSuggestions sliding window", () => {
   it("returns an empty window for no candidates", () => {
@@ -26,5 +30,11 @@ describe("SlashSuggestions sliding window", () => {
   it("counts maxRows as the total popup budget including the hint row", () => {
     expect(slashSuggestionRowCount(20, 80, 9) + 1).toBe(9);
     expect(slashSuggestionRowCount(20, 80, 4) + 1).toBe(4);
+  });
+
+  it("gives long commands more label space on wide terminals", () => {
+    const commands = ["/model", "/workflow-checkpoint"];
+    expect(slashSuggestionLabelWidth(commands, 60)).toBe(14);
+    expect(slashSuggestionLabelWidth(commands, 100)).toBe(22);
   });
 });

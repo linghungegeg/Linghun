@@ -71,27 +71,38 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
       now - completedMap[a.id] < AGENT_EVICTION_DELAY_MS,
   );
 
-  const running = allAgents.filter((a) => a.status === "running");
-  const agents = [...running, ...recentlyCompleted];
+  const active = allAgents.filter((agent) => isVisibleAgentStatus(resolveAgentStatus(agent)));
+  const agents = dedupeById([...active, ...recentlyCompleted]);
   if (agents.length === 0) return undefined;
-  const visible = smartSlice(agents, MAX_AGENT_ROWS, (agent) => agent.status === "running");
+  const visible = smartSlice(agents, MAX_AGENT_ROWS, (agent) =>
+    isVisibleAgentStatus(resolveAgentStatus(agent)),
+  );
 
   const cursor = context.agentTreeState?.cursor ?? -1;
   const state = context.agentTreeState;
   return {
-    rows: visible.visible.map((agent, index) => ({
-      id: agent.id,
-      branch: index === visible.visible.length - 1 ? "last" : "middle",
-      name: agent.displayName ?? agent.addressableName ?? agent.id,
-      status: agent.lastTerminalStatus === "completed" && agent.status === "idle"
-        ? "completed"
-        : agent.status,
-      modeLabel: formatAgentModeLabel(agent),
-      activity: agent.activitySummary ?? agent.activeTask?.summary ?? agent.lastResultSummary,
-      elapsed: typeof agent.startedAt === "string" ? formatElapsedSince(agent.startedAt, now) : undefined,
-      toolUses: agent.mailbox.length,
-      tokens: 0,
-    })),
+    rows: visible.visible.map((agent, index) => {
+      const background = context.backgroundTasks.find(
+        (task) => task.kind === "agent" && task.id === agent.id,
+      );
+      return {
+        id: agent.id,
+        branch: index === visible.visible.length - 1 ? "last" : "middle",
+        name: agent.displayName ?? agent.addressableName ?? agent.id,
+        status: resolveAgentStatus(agent),
+        modeLabel: formatAgentModeLabel(agent, context.language),
+        workflowRunId: background?.workflowRunId,
+        parentSessionId: agent.parentSessionId,
+        forkedFrom: agent.forkedFrom,
+        contextMode: agent.contextMode,
+        activity: agent.activitySummary ?? agent.activeTask?.summary ?? agent.lastResultSummary,
+        elapsed:
+          typeof agent.startedAt === "string" ? formatElapsedSince(agent.startedAt, now) : undefined,
+        mailboxMessages: agent.mailbox.length,
+        mailboxPending: agent.mailbox.filter((message) => message.status === "pending").length,
+        tokens: (agent.cost?.inputTokens ?? 0) + (agent.cost?.outputTokens ?? 0),
+      };
+    }),
     hiddenPending: visible.hiddenPending,
     activitySummary: summarizeActivity(allAgents),
     cursor,
@@ -187,6 +198,9 @@ export function buildWorkflowProgressView(context: TuiContext): WorkflowProgress
           title: step.title,
           status: step.status,
           active: step.id === current?.id,
+          dependsOnSliceIds: step.dependsOnSliceIds,
+          batchId: step.batchId,
+          canRunInParallel: step.canRunInParallel,
         })),
         hiddenSteps: steps.hiddenPending,
       };
@@ -195,11 +209,27 @@ export function buildWorkflowProgressView(context: TuiContext): WorkflowProgress
   };
 }
 
-function formatAgentModeLabel(agent: AgentRun): string | undefined {
+function formatAgentModeLabel(
+  agent: AgentRun,
+  language: TuiContext["language"],
+): string | undefined {
   const labels: string[] = [];
   if (agent.teamName) labels.push(`team:${agent.teamName}`);
-  if (agent.contextMode === "full_fork") labels.push("full-fork");
+  if (agent.contextMode === "full_fork") {
+    labels.push(language === "en-US" ? "full context" : "完整上下文");
+  } else if (agent.contextMode === "handoff") {
+    labels.push(language === "en-US" ? "handoff summary" : "交接摘要");
+  }
   return labels.length > 0 ? labels.join(" · ") : undefined;
+}
+
+function resolveAgentStatus(agent: AgentRun): string {
+  if (agent.status === "idle" && agent.lastTerminalStatus) return agent.lastTerminalStatus;
+  return agent.status;
+}
+
+function isVisibleAgentStatus(status: string): boolean {
+  return status === "running" || status === "blocked" || status === "failed" || status === "stale";
 }
 
 export function buildBackgroundTaskOverlayView(

@@ -1,6 +1,9 @@
 import { Box, Text } from "@linghun/ink-runtime";
 import type React from "react";
 import {
+  estimateAgentProgressRows,
+  estimateWorkflowProgressRows,
+  nativeScrollbackTaskFrameHeight,
   taskBottomPaneBudget,
   taskBottomPaneMode,
   type TaskBottomPaneMode,
@@ -104,8 +107,8 @@ export function allocateBottomPaneBudget(
     return true;
   };
 
-  const showAgentProgress = take(slotEstimates.agentProgressRows);
   const showWorkflowProgress = take(slotEstimates.workflowProgressRows);
+  const showAgentProgress = take(slotEstimates.agentProgressRows);
   const showBackgroundOverlay = take(slotEstimates.backgroundOverlayRows);
   const showTaskList = take(slotEstimates.taskListRows);
   const showRuntimeSummary = take(slotEstimates.runtimeSummaryRows);
@@ -154,27 +157,30 @@ export function TaskBottomPane({
     notificationRows: (view.notifications?.length ?? 0) > 0 ? 1 : 0,
     runtimeSummaryRows: view.taskRuntimeSummary ? 2 : 0,
     taskListRows: estimateTaskListRows(view.taskListView, statusActive),
-    agentProgressRows: isAgentProgressPaneActive(view.agentProgressTree) ? 2 : 0,
-    workflowProgressRows: isWorkflowProgressPaneActive(view.workflowProgressView) ? 2 : 0,
+    agentProgressRows: estimateAgentProgressRows(view.agentProgressTree),
+    workflowProgressRows: estimateWorkflowProgressRows(view.workflowProgressView),
   };
   const allocation = allocateBottomPaneBudget(frameHeight, {
     ...slotEstimates,
     slashRows: slashRows > 0 ? FULL_SLASH_ROWS : 0,
   });
-  const bootstrapSlashRows =
-    allocation.mode === "full"
-      ? FULL_SLASH_ROWS
-      : allocation.mode === "compact"
-        ? COMPACT_SLASH_ROWS
-        : 0;
-  const slashMaxRows = slashRows > 0 ? allocation.slashMaxRows : bootstrapSlashRows;
+  const slashAllocation = slashRows > 0
+    ? allocation
+    : allocateBottomPaneBudget(
+        frameHeight < view.height
+          ? nativeScrollbackTaskFrameHeight({ ...view, composerOverlayRows: 1 })
+          : frameHeight,
+        { ...slotEstimates, slashRows: FULL_SLASH_ROWS },
+      );
+  const slashMaxRows = slashAllocation.slashMaxRows;
 
   return (
     <Box flexShrink={0} flexDirection="column">
-      {allocation.showAgentProgress && isAgentProgressPaneActive(view.agentProgressTree) ? (
+      {allocation.showWorkflowProgress && isWorkflowProgressPaneActive(view.workflowProgressView) ? (
         <Box width={view.width} paddingX={2}>
-          <AgentProgressTree
-            tree={view.agentProgressTree}
+          <WorkflowProgressView
+            workflow={view.workflowProgressView}
+            agents={allocation.showAgentProgress ? view.agentProgressTree : undefined}
             width={contentWidth}
             noColor={noColor}
             language={view.language}
@@ -182,10 +188,12 @@ export function TaskBottomPane({
         </Box>
       ) : null}
 
-      {allocation.showWorkflowProgress && isWorkflowProgressPaneActive(view.workflowProgressView) ? (
+      {allocation.showAgentProgress &&
+      !allocation.showWorkflowProgress &&
+      isAgentProgressPaneActive(view.agentProgressTree) ? (
         <Box width={view.width} paddingX={2}>
-          <WorkflowProgressView
-            workflow={view.workflowProgressView}
+          <AgentProgressTree
+            tree={view.agentProgressTree}
             width={contentWidth}
             noColor={noColor}
             language={view.language}

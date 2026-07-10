@@ -438,9 +438,14 @@ export type AgentProgressTreeView = {
     name: string;
     status: string;
     modeLabel?: string;
+    workflowRunId?: string;
+    parentSessionId?: string;
+    forkedFrom?: string;
+    contextMode?: "handoff" | "full_fork";
     activity?: string;
     elapsed?: string;
-    toolUses: number;
+    mailboxMessages: number;
+    mailboxPending?: number;
     tokens: number;
   }[];
   hiddenPending: number;
@@ -477,7 +482,15 @@ export type WorkflowProgressView = {
     totalSteps: number;
     elapsed?: string;
     currentStepId?: string;
-    steps: { id: string; title: string; status: string; active: boolean }[];
+    steps: {
+      id: string;
+      title: string;
+      status: string;
+      active: boolean;
+      dependsOnSliceIds?: string[];
+      batchId?: string;
+      canRunInParallel?: boolean;
+    }[];
     hiddenSteps?: number;
   }[];
   hiddenPending: number;
@@ -640,6 +653,9 @@ export type ShellViewModel = {
     mode?: "search" | "preview";
     searchQuery?: string;
     previewEntryId?: string;
+    previewStatus?: "loading" | "ready" | "error";
+    previewMessages?: SessionPreviewMessageView[];
+    previewError?: string;
   };
   /**
    * R4 — HistorySearchPanel UI 状态。Ctrl+R 打开交互式历史搜索。
@@ -667,6 +683,12 @@ export type ShellViewModel = {
    * the concrete views that ShellApp renders.
    */
   visibleWorkState?: VisibleWorkState;
+};
+
+export type SessionPreviewMessageView = {
+  role: "user" | "assistant";
+  text: string;
+  createdAt: string;
 };
 
 /**

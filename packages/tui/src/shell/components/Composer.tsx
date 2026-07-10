@@ -1041,9 +1041,10 @@ export function Composer({
             }
             return;
           }
-          // Phase 8: preview mode — only Esc to return to list.
+          // Phase 8: preview mode — Esc returns, Enter resumes the previewed session.
           if (view.sessionsPanel.mode === "preview") {
             if (key.escape) emitInput({ type: "sessions-preview-close" });
+            else if (key.return) emitInput({ type: "sessions-resume" });
             return;
           }
           // List mode: navigation + enter search/preview.
