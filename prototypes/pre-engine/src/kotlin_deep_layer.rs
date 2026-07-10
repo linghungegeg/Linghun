@@ -86,6 +86,15 @@ impl KotlinDeepLayer {
     }
 }
 
+fn map_helper_status(status: &str, has_issues: bool) -> &'static str {
+    match status {
+        "clean" if !has_issues => "active",
+        "kotlin_error" if has_issues => "active",
+        "tool_missing" | "unavailable" => "tool_missing",
+        _ => "partially_verified",
+    }
+}
+
 pub fn run(layer: &mut Option<KotlinDeepLayer>, root: &Path, files: &[String]) -> KotlinDeepLayerResult {
     let start = Instant::now();
 
@@ -112,16 +121,23 @@ pub fn run(layer: &mut Option<KotlinDeepLayer>, root: &Path, files: &[String]) -
                 .unwrap_or_default();
             let status_str = val.get("status")
                 .and_then(|v| v.as_str())
-                .unwrap_or("active");
-            let reason = val.get("reason")
+                .unwrap_or("missing");
+            let helper_reason = val.get("reason")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let helper_error = val.get("error")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
-            let final_status = if status_str == "unavailable" {
-                "unavailable"
+            let final_status = map_helper_status(status_str, !issues.is_empty());
+            let reason = if final_status == "partially_verified" {
+                Some(helper_error.unwrap_or_else(|| format!("unexpected helper status: {status_str}")))
             } else {
-                "active"
+                helper_reason.or(helper_error)
             };
+            if final_status == "partially_verified" {
+                *layer = None;
+            }
 
             KotlinDeepLayerResult {
                 issues,
@@ -134,10 +150,25 @@ pub fn run(layer: &mut Option<KotlinDeepLayer>, root: &Path, files: &[String]) -
             *layer = None;
             KotlinDeepLayerResult {
                 issues: vec![],
-                status: "unavailable",
+                status: "partially_verified",
                 reason: Some(reason),
                 elapsed_ms: start.elapsed().as_millis(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_helper_status;
+
+    #[test]
+    fn maps_only_confirmed_kotlin_results_to_active() {
+        assert_eq!(map_helper_status("clean", false), "active");
+        assert_eq!(map_helper_status("kotlin_error", true), "active");
+        assert_eq!(map_helper_status("tool_missing", false), "tool_missing");
+        assert_eq!(map_helper_status("error", false), "partially_verified");
+        assert_eq!(map_helper_status("unknown", false), "partially_verified");
+        assert_eq!(map_helper_status("clean", true), "partially_verified");
     }
 }

@@ -21,6 +21,44 @@ pub struct DartDeepLayerResult {
     pub elapsed_ms: u128,
 }
 
+fn normalize_status(
+    status: Option<&str>,
+    issues_present: bool,
+    has_issues: bool,
+) -> (&'static str, Option<&'static str>) {
+    if !issues_present {
+        return ("partially_verified", Some("Dart helper response omitted issues"));
+    }
+    match (status, has_issues) {
+        (Some("clean"), false) | (Some("dart_error"), true) => ("active", None),
+        (Some("unavailable" | "tool_missing"), false) => ("tool_missing", None),
+        (Some("clean"), true) => (
+            "partially_verified",
+            Some("Dart helper reported clean with issues"),
+        ),
+        (Some("dart_error"), false) => (
+            "partially_verified",
+            Some("Dart helper reported dart_error without issues"),
+        ),
+        (Some("unavailable" | "tool_missing"), true) => (
+            "partially_verified",
+            Some("Dart helper reported tool missing with issues"),
+        ),
+        (Some("error"), _) => (
+            "partially_verified",
+            Some("Dart helper reported an execution error"),
+        ),
+        (Some(_), _) => (
+            "partially_verified",
+            Some("Dart helper returned an unknown status"),
+        ),
+        (None, _) => (
+            "partially_verified",
+            Some("Dart helper response omitted status"),
+        ),
+    }
+}
+
 fn find_script(root: &Path) -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let candidate = exe.parent()?.join("dart-deep-layer.cjs");
@@ -95,7 +133,7 @@ pub fn run(layer: &mut Option<DartDeepLayer>, root: &Path, files: &[String]) -> 
             Err(reason) => {
                 return DartDeepLayerResult {
                     issues: vec![],
-                    status: "unavailable",
+                    status: "tool_missing",
                     reason: Some(reason),
                     elapsed_ms: start.elapsed().as_millis(),
                 };
@@ -106,21 +144,21 @@ pub fn run(layer: &mut Option<DartDeepLayer>, root: &Path, files: &[String]) -> 
     let l = layer.as_mut().unwrap();
     match l.query(root, files) {
         Ok(val) => {
-            let issues = val.get("issues")
-                .and_then(|v| v.as_array())
+            let issues_value = val.get("issues").and_then(|v| v.as_array());
+            let issues = issues_value
                 .cloned()
                 .unwrap_or_default();
-            let status_str = val.get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("active");
+            let status = val.get("status").and_then(|v| v.as_str());
             let reason = val.get("reason")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let final_status = if status_str == "unavailable" {
-                "unavailable"
-            } else {
-                "active"
+                .map(|s| s.to_string())
+                .or_else(|| val.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()));
+            let (final_status, consistency_reason) =
+                normalize_status(status, issues_value.is_some(), !issues.is_empty());
+            let reason = match (consistency_reason, reason) {
+                (Some(consistency), Some(reason)) => Some(format!("{consistency}: {reason}")),
+                (Some(consistency), None) => Some(consistency.to_string()),
+                (None, reason) => reason,
             };
 
             DartDeepLayerResult {
@@ -134,10 +172,39 @@ pub fn run(layer: &mut Option<DartDeepLayer>, root: &Path, files: &[String]) -> 
             *layer = None;
             DartDeepLayerResult {
                 issues: vec![],
-                status: "unavailable",
+                status: "partially_verified",
                 reason: Some(reason),
                 elapsed_ms: start.elapsed().as_millis(),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_status;
+
+    #[test]
+    fn maps_only_consistent_dart_results_to_active() {
+        assert_eq!(normalize_status(Some("clean"), true, false).0, "active");
+        assert_eq!(normalize_status(Some("dart_error"), true, true).0, "active");
+        assert_eq!(normalize_status(Some("unavailable"), true, false).0, "tool_missing");
+        assert_eq!(normalize_status(Some("tool_missing"), true, false).0, "tool_missing");
+    }
+
+    #[test]
+    fn treats_errors_unknown_and_contradictions_as_partial() {
+        for result in [
+            normalize_status(Some("clean"), true, true),
+            normalize_status(Some("dart_error"), true, false),
+            normalize_status(Some("unavailable"), true, true),
+            normalize_status(Some("error"), true, false),
+            normalize_status(Some("unknown"), true, false),
+            normalize_status(None, true, false),
+            normalize_status(Some("clean"), false, false),
+        ] {
+            assert_eq!(result.0, "partially_verified");
+            assert!(result.1.is_some());
         }
     }
 }

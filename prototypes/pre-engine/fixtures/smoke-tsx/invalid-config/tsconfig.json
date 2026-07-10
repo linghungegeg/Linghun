@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "jsx": "not-a-jsx-mode",
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["*.tsx", "*.d.ts"]
+}

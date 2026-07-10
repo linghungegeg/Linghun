@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "missing-runtime-package",
+    "moduleResolution": "node",
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true
+  },
+  "include": ["*.tsx"]
+}
