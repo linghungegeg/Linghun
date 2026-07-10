@@ -8,11 +8,79 @@ import type { TuiContext } from "./index.js";
 import {
   configureMemoryCommandRuntime,
   executeMemoryMutation,
+  resumeSessionWithHandoff,
   runAutoLearningOnTurnEnd,
 } from "./memory-command-runtime.js";
+import { createIndexState } from "./index-runtime.js";
+import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+import { createCacheState } from "./tui-state-runtime.js";
 import type { MemoryCandidate } from "./tui-data-types.js";
 
 describe("memory-command-runtime", () => {
+  it("clears prior session cache state before hydrating a resumed session", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-resume-cache-"));
+    const config = structuredClone(defaultConfig);
+    config.storage = {
+      projectData: { scope: "project" },
+      userData: { scope: "project" },
+      sessions: { scope: "project" },
+      memory: {
+        project: { scope: "project" },
+        user: { scope: "project" },
+        session: { scope: "project" },
+      },
+      index: { scope: "project" },
+      logs: { scope: "project" },
+      jobs: { scope: "project" },
+      cache: { scope: "project" },
+    };
+    const context = {
+      projectPath: directory,
+      config,
+      model: "old-model",
+      cache: createCacheState(directory, "old-model", [], config),
+      deepCompactInFlight: {
+        sessionId: "old-session",
+        promise: Promise.resolve({ ok: false, reason: "old" }),
+      },
+      mcp: { enabled: false, servers: [], tools: [] },
+      memory: makeContext(directory, makeMemory()).memory,
+      tools: { todos: [], changedFiles: [] },
+      evidence: [],
+      checkpoints: [],
+      index: createIndexState(config),
+      permissionMode: "default",
+      solutionCompleteness: createSolutionCompletenessStatus(),
+      store: {
+        resume: async () => ({
+          session: { id: "target-session", model: "target-model" },
+          transcript: [],
+        }),
+      },
+    } as unknown as TuiContext;
+    context.cache.deepCompact = { id: "old-deep" } as never;
+    context.cache.compactProjection = { boundaryId: "old-projection" } as never;
+    context.cache.systemPromptLatch = { compactBoundaryKey: "old" } as never;
+    context.cache.postCompactRestoreLatch = { deepCompactId: "old-deep", content: "old" };
+    context.cache.postCompactCacheWarmup = { status: "warming" } as never;
+    context.cache.lastCacheSafePrefix = { prefixHash: "old" } as never;
+    configureMemoryDeps();
+    const output = new MockWritable();
+
+    await resumeSessionWithHandoff("target-session", context, output, "resume");
+
+    expect(context.sessionId).toBe("target-session");
+    expect(context.model).toBe("target-model");
+    expect(context.deepCompactInFlight).toBeUndefined();
+    expect(context.cache.deepCompact).toBeUndefined();
+    expect(context.cache.compactProjection).toBeUndefined();
+    expect(context.cache.systemPromptLatch).toBeUndefined();
+    expect(context.cache.postCompactRestoreLatch).toBeUndefined();
+    expect(context.cache.postCompactCacheWarmup).toBeUndefined();
+    expect(context.cache.lastCacheSafePrefix).toBeUndefined();
+    expect(output.text).toContain("target-session");
+  });
+
   it("fails closed for unknown memory mutation actions", async () => {
     await expect(
       executeMemoryMutation({} as TuiContext, new MockWritable(), {
@@ -260,7 +328,10 @@ describe("memory-command-runtime", () => {
 });
 
 class MockWritable extends Writable {
-  _write(_chunk: Buffer | string, _encoding: string, callback: () => void): void {
+  text = "";
+
+  _write(chunk: Buffer | string, _encoding: string, callback: () => void): void {
+    this.text += String(chunk);
     callback();
   }
 }

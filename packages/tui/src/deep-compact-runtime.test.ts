@@ -37,6 +37,7 @@ describe("deep compact prompt insertion", () => {
     const messages: ModelMessage[] = [
       { role: "system", content: "stable system" },
       { role: "system", content: "dynamic system" },
+      { role: "user", content: "Context compact projection\nstable recent summary" },
       { role: "user", content: "current request" },
     ];
 
@@ -50,6 +51,7 @@ describe("deep compact prompt insertion", () => {
       "user",
       "user",
       "user",
+      "user",
     ]);
     expect(result[0]?.content).toBe("stable system");
     expect(result[1]?.content).toBe("dynamic system");
@@ -57,8 +59,9 @@ describe("deep compact prompt insertion", () => {
     expect(result[2]?.content).toContain("latest user request");
     expect(result[2]?.content).not.toContain("[Deep compact diagnostics]");
     expect(result[2]?.content).not.toContain("id deep-test");
-    expect(result[3]?.content).toContain("Post-compact restored context");
-    expect(result[4]?.content).toBe("current request");
+    expect(result[3]?.content).toContain("Context compact projection");
+    expect(result[4]?.content).toContain("Post-compact restored context");
+    expect(result[5]?.content).toBe("current request");
   });
 
   it("keeps dynamic packet diagnostics out of the stable provider prefix", () => {

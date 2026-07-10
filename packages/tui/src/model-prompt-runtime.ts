@@ -80,6 +80,7 @@ export function createModelSystemPrompt(
     failureLearningSummary,
     metaSchedulerDirective,
     gitStatusSummary,
+    { latch: false },
   );
   return `${segments.stable}\n${segments.dynamic}`;
 }
@@ -93,6 +94,7 @@ export function createModelSystemPromptSegments(
   failureLearningSummary?: { count: number; text: string } | null,
   metaSchedulerDirective?: string,
   gitStatusSummary?: string,
+  options: { latch?: boolean } = {},
 ): ModelSystemPromptSegments {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
@@ -176,27 +178,27 @@ export function createModelSystemPromptSegments(
     {
       name: "runtime_status",
       text: `RuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}`,
-      volatile: true,
+      volatile: false,
     },
-    { name: "memory", text: `ControlledMemorySummary=${memorySummary}`, volatile: true },
+    { name: "memory", text: `ControlledMemorySummary=${memorySummary}`, volatile: false },
     {
       name: "memory_boundary",
       text: `MemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; autoExtractionRuntime; dedicatedMemoryDir; manualLearnCandidateOnly; noSecretsOrFullDumps`,
       volatile: false,
     },
-    { name: "evidence", text: `EvidenceSummary=${createEvidenceSummaryForModel(context)}`, volatile: true },
+    { name: "evidence", text: `EvidenceSummary=${createEvidenceSummaryForModel(context)}`, volatile: false },
     {
       name: "solution_completeness",
       text: `SolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}`,
-      volatile: true,
+      volatile: false,
     },
-    { name: "architecture", text: architectureDirective ?? "", volatile: true },
+    { name: "architecture", text: architectureDirective ?? "", volatile: false },
     { name: "deferred_tools", text: deferredReminder ? `DeferredToolsReminder=${deferredReminder}` : "", volatile: false },
-    { name: "worktree", text: worktreeContextLine.trim(), volatile: true },
-    { name: "git_status", text: gitStatusLine, volatile: true },
-    { name: "agent_completion", text: agentCompletionLine, volatile: true },
-    { name: "failure_learning", text: failureLearningLine.trim(), volatile: true },
-    { name: "meta_scheduler", text: metaSchedulerLine, volatile: true },
+    { name: "worktree", text: worktreeContextLine.trim(), volatile: false },
+    { name: "git_status", text: gitStatusLine, volatile: false },
+    { name: "agent_completion", text: agentCompletionLine, volatile: false },
+    { name: "failure_learning", text: failureLearningLine.trim(), volatile: false },
+    { name: "meta_scheduler", text: metaSchedulerLine, volatile: false },
   ]);
   const dynamic = dynamicSections.map((section) => section.text).join("\n");
   const cacheableSections = dynamicSections.filter((section) => !section.volatile);
@@ -212,8 +214,35 @@ export function createModelSystemPromptSegments(
     content: section.text,
     promptCache: "volatile" as const,
   }));
-  context.cache.lastPromptSections = createPromptSectionSnapshot(stable, dynamicSections);
-  return { stable, dynamic, cacheable, volatile };
+  if (options.latch === false) {
+    context.cache.lastPromptSections = createPromptSectionSnapshot(stable, dynamicSections);
+    return { stable, dynamic, cacheable, volatile };
+  }
+  const compactBoundaryKey = [
+    context.cache.deepCompact?.id ?? "no-deep-compact",
+    context.cache.compactProjection?.boundaryId ?? "no-compact-projection",
+  ].join(":");
+  if (context.cache.systemPromptLatch?.compactBoundaryKey !== compactBoundaryKey) {
+    context.cache.systemPromptLatch = {
+      compactBoundaryKey,
+      stable,
+      dynamic: cacheableSections.map((section) => section.text).join("\n"),
+      cacheable: cacheable.map((segment) => segment.content),
+    };
+    context.cache.lastPromptSections = createPromptSectionSnapshot(stable, dynamicSections);
+  }
+  const latched = context.cache.systemPromptLatch;
+  return {
+    stable: latched.stable,
+    dynamic: [latched.dynamic, ...volatile.map((segment) => segment.content)]
+      .filter(Boolean)
+      .join("\n"),
+    cacheable: latched.cacheable.map((content) => ({
+      content,
+      promptCache: "cacheable" as const,
+    })),
+    volatile,
+  };
 }
 
 function buildPromptSections(sections: PromptSectionInput[]): PromptSection[] {

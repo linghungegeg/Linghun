@@ -142,6 +142,30 @@ describe("Compact Lite context boundaries", () => {
     assertNoSplitToolPairs(result.messages);
   });
 
+  it.each([
+    ["micro", microCompactMessages],
+    ["full", compactMessagesToFit],
+  ] as const)("%s compact preserves every leading system segment", (_kind, compact) => {
+    const systems: ModelMessage[] = [
+      { role: "system", content: "stable core", promptCache: "cacheable" },
+      { role: "system", content: "stable memory", promptCache: "cacheable" },
+      { role: "system", content: "runtime snapshot", promptCache: "volatile" },
+    ];
+    const result = compact(
+      [
+        ...systems,
+        { role: "user", content: "old context ".repeat(400) },
+        { role: "assistant", content: "old answer ".repeat(400) },
+        { role: "user", content: "current request" },
+      ],
+      { maxChars: 200, preserveRecentMessages: 1, kind: "micro" },
+    );
+
+    expect(result.changed).toBe(true);
+    expect(result.messages.slice(0, systems.length)).toEqual(systems);
+    expect(result.messages.at(-1)?.content).toBe("current request");
+  });
+
   it("estimateModelMessagesChars does not underestimate deeply nested tool input (depth > 6)", () => {
     const bigString = "x".repeat(5_000);
     const deepInput = {

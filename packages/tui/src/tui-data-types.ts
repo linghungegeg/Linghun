@@ -248,6 +248,19 @@ export type PromptSectionSnapshot = {
   createdAt: string;
 };
 
+export type SystemPromptLatch = {
+  compactBoundaryKey: string;
+  stable: string;
+  dynamic: string;
+  cacheable: string[];
+};
+
+export type PostCompactRestoreLatch = {
+  deepCompactId: string;
+  compactProjectionBoundaryId?: string;
+  content: string | null;
+};
+
 export type CacheState = {
   config: CacheHistoryConfig;
   history: CacheTurnStats[];
@@ -267,6 +280,8 @@ export type CacheState = {
   compactProjection?: CompactProjection;
   postCompactCacheWarmup?: PostCompactCacheWarmupState;
   lastPromptSections?: PromptSectionSnapshot;
+  systemPromptLatch?: SystemPromptLatch;
+  postCompactRestoreLatch?: PostCompactRestoreLatch;
   compactProgress?: CompactProgressSnapshot;
   compactStrategy?: CompactStrategySnapshot;
   deepCompact?: DeepCompactPacket;

@@ -78,8 +78,16 @@ export function microCompactMessages(
     }
   }
 
-  const system = messages[0]?.role === "system" ? messages[0] : undefined;
-  const finalMessages = system && selected[0] !== system ? [system, ...selected] : selected;
+  const firstConversationIndex = messages.findIndex((message) => message.role !== "system");
+  const leadingSystemMessages = messages.slice(
+    0,
+    firstConversationIndex === -1 ? messages.length : firstConversationIndex,
+  );
+  const selectedSet = new Set(selected);
+  const finalMessages = [
+    ...leadingSystemMessages.filter((message) => !selectedSet.has(message)),
+    ...selected,
+  ];
 
   // Use a Set for O(1) membership check instead of O(n×m) includes
   const finalSet = new Set(finalMessages);

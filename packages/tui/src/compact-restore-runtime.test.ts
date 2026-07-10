@@ -118,4 +118,32 @@ describe("post compact restore runtime", () => {
     expect(payload.files[0]?.truncated).toBe(true);
     expect(payload.files[0]?.content.length).toBeLessThanOrEqual(5_000);
   });
+
+  it("keeps restore bytes stable until a new compact boundary", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
+    await mkdir(join(project, "src"));
+    const file = join(project, "src", "current.ts");
+    await writeFile(file, "export const current = 1;\n", "utf8");
+    const context = makeContext(project, {
+      recentlyMentionedFiles: ["src/current.ts"],
+      tools: { changedFiles: ["src/current.ts"], todos: [], workspaceRoot: project },
+    });
+    context.cache.deepCompact = { id: "deep-1" } as never;
+
+    const first = await buildPostCompactRestoreMessage(context);
+    await writeFile(file, "export const current = 2;\n", "utf8");
+    const second = await buildPostCompactRestoreMessage(context);
+
+    expect(second).toEqual(first);
+    expect(second?.content).toContain("current = 1");
+
+    context.cache.compactProjection = { boundaryId: "projection-1" } as never;
+    const afterProjectionCompact = await buildPostCompactRestoreMessage(context);
+    expect(afterProjectionCompact?.content).toContain("current = 2");
+
+    await writeFile(file, "export const current = 3;\n", "utf8");
+    context.cache.deepCompact = { id: "deep-2" } as never;
+    const afterCompact = await buildPostCompactRestoreMessage(context);
+    expect(afterCompact?.content).toContain("current = 3");
+  });
 });

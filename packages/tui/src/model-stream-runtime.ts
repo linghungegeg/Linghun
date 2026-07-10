@@ -190,7 +190,6 @@ import {
   runtimeFromContinuation,
 } from "./tui-context-runtime.js";
 import {
-  MAX_CONTEXT_MESSAGES,
   MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
   REQUEST_SLOW_HINT_MS,
   TODO_ONLY_KILL_GRACE,
@@ -4360,7 +4359,6 @@ function isModelHistoryCompactBoundary(event: TranscriptEvent): boolean {
 
 function modelHistoryCompactSummary(
   event: TranscriptEvent | undefined,
-  context: TuiContext,
 ): ModelMessage | undefined {
   if (event?.type === "deep_compact_packet" && isDeepCompactPacket(event.packet)) {
     const content = formatDeepCompactPromptSummary(event.packet);
@@ -4385,80 +4383,16 @@ function modelHistoryCompactSummary(
       };
     };
     if (typeof projection.summary !== "string") return undefined;
-    const restored = revalidateCompactProjectionMemory(
-      { ...projection, summary: projection.summary },
-      context,
-    );
-    const restoreMetadata = restored.restoreContext
-      ? `\n[Context restore metadata]\n${JSON.stringify(restored.restoreContext)}`
+    const restoreMetadata = projection.restoreContext
+      ? `\n[Context restore metadata]\n${JSON.stringify(projection.restoreContext)}`
       : "";
     return {
       role: "user",
-      content: `Context compact projection\n${restored.summary}${restoreMetadata}`,
+      content: `Context compact projection\n${projection.summary}${restoreMetadata}`,
     };
   } catch {
     return undefined;
   }
-}
-
-function revalidateCompactProjectionMemory(
-  projection: {
-    summary: string;
-    postCompactTargetChars?: unknown;
-    restoreContext?: {
-      goal?: unknown;
-      currentTask?: unknown;
-      phaseStatus?: unknown;
-      userConstraints?: unknown;
-      keyFiles?: unknown;
-      memoryStatus?: unknown;
-      verificationRequirement?: unknown;
-      [key: string]: unknown;
-    };
-  },
-  context: TuiContext,
-): { summary: string; restoreContext?: Record<string, unknown> } {
-  const restore = projection.restoreContext;
-  if (
-    !restore ||
-    !Array.isArray(restore.userConstraints) ||
-    typeof restore.goal !== "string" ||
-    typeof restore.currentTask !== "string" ||
-    typeof restore.phaseStatus !== "string" ||
-    !Array.isArray(restore.keyFiles) ||
-    typeof restore.verificationRequirement !== "string"
-  ) {
-    return { summary: projection.summary, ...(restore ? { restoreContext: restore } : {}) };
-  }
-  const userConstraints = context.memory.accepted
-    .filter((item) => item.scope === "user" || item.taxonomy === "user")
-    .slice(0, 4)
-    .map((item) => item.summary.replace(/\s+/gu, " ").trim().slice(0, 160));
-  const restoreContext = {
-    ...restore,
-    userConstraints,
-    memoryStatus: `${context.memory.accepted.length} accepted memories`,
-  };
-  const targetTokens =
-    typeof projection.postCompactTargetChars === "number"
-      ? Math.ceil(projection.postCompactTargetChars / 4)
-      : "unknown";
-  return {
-    summary: [
-      "Linghun compact summary",
-      "scope provider-visible recent context projection",
-      "role compacted recent provider context",
-      `user goal ${restore.goal}`,
-      `current task ${restore.currentTask}`,
-      `phase status ${restore.phaseStatus}`,
-      `user constraints ${userConstraints.join("; ") || "none recorded"}`,
-      `key files ${restore.keyFiles.filter((item): item is string => typeof item === "string").join(", ") || "none"}`,
-      `target budget tokens ${targetTokens}`,
-      "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
-      `verification requirement ${restore.verificationRequirement}`,
-    ].join("\n"),
-    restoreContext,
-  };
 }
 
 export async function buildModelMessagesWithRecentContext(
@@ -4469,10 +4403,13 @@ export async function buildModelMessagesWithRecentContext(
   runtime = getSelectedModelRuntime(context),
   volatileSystemPrompt: readonly ModelSystemPromptSegment[] = [],
 ): Promise<ModelMessage[]> {
-  const messages: ModelMessage[] = toSystemMessages(systemPrompt);
+  const messages: ModelMessage[] = [
+    ...toSystemMessages(systemPrompt),
+    ...toSystemMessages(volatileSystemPrompt),
+  ];
   try {
     const recentTranscript = await context.store.readRecentTranscriptEvents(sessionId, {
-      limit: MAX_CONTEXT_MESSAGES * 2 + 1,
+      limit: Number.MAX_SAFE_INTEGER,
       predicate: (event) =>
         event.type === "user_message" ||
         event.type === "assistant_text_delta" ||
@@ -4497,51 +4434,32 @@ export async function buildModelMessagesWithRecentContext(
       compactBoundaryIndex = index;
       break;
     }
-    const compactSummary = modelHistoryCompactSummary(recent[compactBoundaryIndex], context);
+    const compactSummary = modelHistoryCompactSummary(recent[compactBoundaryIndex]);
     const activeRecent = compactBoundaryIndex >= 0 ? recent.slice(compactBoundaryIndex + 1) : recent;
     const lastRecent = activeRecent.at(-1);
     const withoutCurrent =
       lastRecent?.type === "user_message" && lastRecent.text === currentUserText
         ? activeRecent.slice(0, -1)
         : activeRecent;
-    let lastAssistantIndex = -1;
-    let lastInterruptedTurnMessage: string | undefined;
-    for (let index = 0; index < withoutCurrent.length; index += 1) {
-      const event = withoutCurrent[index];
-      if (event.type === "assistant_text_delta") {
-        lastAssistantIndex = index;
-      }
-      if (
-        event.type === "interrupt" &&
-        event.message.startsWith("turn_interrupted:") &&
-        index > lastAssistantIndex
-      ) {
-        lastInterruptedTurnMessage = event.message;
-      }
-    }
     const toolCalls = new Map<string, ModelToolCall>();
-    let added = 0;
-    for (const event of withoutCurrent.slice().reverse()) {
-      if (added >= MAX_CONTEXT_MESSAGES) {
-        break;
-      }
+    for (const event of withoutCurrent) {
       if (event.type === "tool_call_start") {
         toolCalls.set(event.id, { id: event.id, name: event.name, input: event.input });
-        continue;
-      }
-      if (event.type === "user_message" || event.type === "assistant_text_delta") {
-        added += 1;
-        continue;
-      }
-      if (event.type === "tool_result" && toolCalls.has(event.toolUseId)) {
-        added += 2;
       }
     }
-    const selected = withoutCurrent.slice(-Math.max(MAX_CONTEXT_MESSAGES, added + toolCalls.size));
     const historyMessages: ModelMessage[] = [];
-    for (const event of selected) {
+    let interruptedTurnReason: string | undefined;
+    for (const event of withoutCurrent) {
+      if (event.type === "interrupt" && event.message.startsWith("turn_interrupted:")) {
+        interruptedTurnReason = event.message.match(/reason=([^;\s]+)/u)?.[1] ?? "unknown";
+        continue;
+      }
       if (event.type === "user_message") {
-        historyMessages.push({ role: "user", content: event.text });
+        historyMessages.push({
+          role: "user",
+          content: appendInterruptedTurnBoundaryHint(event.text, interruptedTurnReason),
+        });
+        interruptedTurnReason = undefined;
       }
       if (event.type === "assistant_text_delta") {
         historyMessages.push({ role: "assistant", content: event.text });
@@ -4589,14 +4507,7 @@ export async function buildModelMessagesWithRecentContext(
     );
     if (compactSummary) messages.push(compactSummary);
     messages.push(...budgetedHistory);
-    if (lastInterruptedTurnMessage) {
-      const reason = lastInterruptedTurnMessage.match(/reason=([^;\s]+)/u)?.[1] ?? "unknown";
-      messages.push({
-        role: "system",
-        content:
-          `Previous foreground turn was interrupted (reason: ${reason}). Treat the latest user message as the authoritative task. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.`,
-      });
-    }
+    currentUserText = appendInterruptedTurnBoundaryHint(currentUserText, interruptedTurnReason);
   } catch (error) {
     await appendSystemEvent(
       context,
@@ -4605,9 +4516,13 @@ export async function buildModelMessagesWithRecentContext(
       "warning",
     );
   }
-  messages.push(...toSystemMessages(volatileSystemPrompt));
   messages.push({ role: "user", content: currentUserText });
   return messages;
+}
+
+function appendInterruptedTurnBoundaryHint(text: string, reason: string | undefined): string {
+  if (!reason) return text;
+  return `${text}\n\nPrevious foreground turn was interrupted (reason: ${reason}). Treat this user message as the authoritative task. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.`;
 }
 
 export const __testBuildModelMessagesWithRecentContext = buildModelMessagesWithRecentContext;
@@ -4678,16 +4593,24 @@ async function budgetRecentContextToolResults(
   sessionId: string,
   messages: ModelMessage[],
 ): Promise<ModelMessage[]> {
-  const budgeted = await applyToolResultBudgetToMessages(messages, {
-    projectPath: context.projectPath,
-    sessionId,
-    state: getToolResultBudgetState(context),
-    singleResultChars: LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
-  });
-  for (const record of budgeted.records) {
-    await recordToolResultBudgetEvidence(context, sessionId, record);
+  const budgetedMessages: ModelMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== "tool") {
+      budgetedMessages.push(message);
+      continue;
+    }
+    const budgeted = await applyToolResultBudgetToMessages([message], {
+      projectPath: context.projectPath,
+      sessionId,
+      state: getToolResultBudgetState(context),
+      singleResultChars: LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
+    });
+    for (const record of budgeted.records) {
+      await recordToolResultBudgetEvidence(context, sessionId, record);
+    }
+    budgetedMessages.push(...budgeted.messages);
   }
-  return budgeted.messages.map(compactModelMessageForHistory);
+  return budgetedMessages.map(compactModelMessageForHistory);
 }
 
 async function streamFinalModelAnswerWithoutTools(

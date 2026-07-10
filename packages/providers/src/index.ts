@@ -311,6 +311,7 @@ export type AnthropicToolUseBlock = {
   id: string;
   name: string;
   input: unknown;
+  cache_control?: AnthropicCacheControl;
 };
 
 export type AnthropicToolResultBlock = {
@@ -318,6 +319,7 @@ export type AnthropicToolResultBlock = {
   tool_use_id: string;
   content: string;
   is_error?: boolean;
+  cache_control?: AnthropicCacheControl;
 };
 
 export type AnthropicContentBlock =
@@ -1911,8 +1913,12 @@ function createAnthropicMessagesProfileRequest(
     if (message.role === "assistant") {
       const toolCalls = message.toolCalls ?? [];
       if (toolCalls.length === 0) {
-        // 纯文本 assistant：保留 string 形态，避免对纯对话场景产生 block-array 噪声。
-        conversation.push({ role: "assistant", content: message.content });
+        conversation.push({
+          role: "assistant",
+          content: request.promptCacheEnabled
+            ? [{ type: "text", text: message.content }]
+            : message.content,
+        });
         continue;
       }
       const blocks: AnthropicContentBlock[] = [];
@@ -2014,7 +2020,7 @@ function createAnthropicMessagesProfileRequest(
           };
   }
   if (request.promptCacheEnabled) {
-    const messageBreakpoint = findStableUserMessageCacheBreakpoint(conversation);
+    const messageBreakpoint = findLatestMessageCacheBreakpoint(conversation);
     if (messageBreakpoint) {
       messageBreakpoint.cache_control = createAnthropicCacheControl(request);
     }
@@ -2059,46 +2065,18 @@ function selectAnthropicSystemCacheControlIndex(
   return undefined;
 }
 
-function findStableUserMessageCacheBreakpoint(
+function findLatestMessageCacheBreakpoint(
   conversation: AnthropicMessage[],
-): AnthropicTextBlock | undefined {
-  return (
-    findCompactStableUserMessageCacheBreakpoint(conversation) ??
-    findLatestUserMessageCacheBreakpoint(conversation)
-  );
-}
-
-function findCompactStableUserMessageCacheBreakpoint(
-  conversation: AnthropicMessage[],
-): AnthropicTextBlock | undefined {
-  let breakpoint: AnthropicTextBlock | undefined;
-  for (const message of conversation) {
-    if (!message || message.role !== "user" || !Array.isArray(message.content)) return breakpoint;
-    const block = message.content.find((item) => item.type === "text");
-    if (!block || !isCompactStableUserMessageText(block.text)) return breakpoint;
-    breakpoint = block;
-  }
-  return breakpoint;
-}
-
-function findLatestUserMessageCacheBreakpoint(
-  conversation: AnthropicMessage[],
-): AnthropicTextBlock | undefined {
-  // Cache the latest provider-visible user text. The next turn can then read this
-  // prefix instead of waiting one extra turn before a message-level cache point exists.
+): AnthropicContentBlock | undefined {
   for (let index = conversation.length - 1; index >= 0; index -= 1) {
     const message = conversation[index];
-    if (!message || message.role !== "user" || !Array.isArray(message.content)) continue;
+    if (!message || !Array.isArray(message.content)) continue;
     for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex -= 1) {
       const block = message.content[blockIndex];
-      if (block?.type === "text") return block;
+      if (block) return block;
     }
   }
   return undefined;
-}
-
-function isCompactStableUserMessageText(text: string): boolean {
-  return text.startsWith("Deep compact context") || text.startsWith("Context compact projection");
 }
 
 function createAnthropicCacheControl(request: ModelRequest): AnthropicCacheControl {

@@ -122,7 +122,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(context.cache.lastPromptSections?.largestSection).toBeTruthy();
   });
 
-  it("keeps memory and failure learning outside the cacheable prompt boundary", () => {
+  it("session-latches runtime sections inside the cacheable prompt boundary", () => {
     const context = createPromptTestContext({
       memory: {
         ...createPromptTestContext().memory,
@@ -151,18 +151,16 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
       { count: 1, text: '[{"category":"tool_failure","avoid":"retry blindly","severity":"medium","count":1}]' },
     );
 
-    expect(segments.cacheable.map((segment) => segment.content).join("\n")).not.toContain(
+    expect(segments.cacheable.map((segment) => segment.content).join("\n")).toContain(
       "ControlledMemorySummary=",
     );
-    expect(segments.cacheable.map((segment) => segment.content).join("\n")).not.toContain(
+    expect(segments.cacheable.map((segment) => segment.content).join("\n")).toContain(
       "FailureLearningSummary=",
     );
-    expect(segments.volatile.map((segment) => segment.content).join("\n")).toContain(
-      "ControlledMemorySummary=",
+    expect(segments.cacheable.map((segment) => segment.content).join("\n")).toContain(
+      "RuntimeStatusForModel=",
     );
-    expect(segments.volatile.map((segment) => segment.content).join("\n")).toContain(
-      "FailureLearningSummary=",
-    );
+    expect(segments.volatile).toEqual([]);
   });
 
   it("does not inject deferred pre-engine guidance during pre fallback recovery", () => {
@@ -199,6 +197,47 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(segments.dynamic).toContain("[meta_scheduler truncated:");
     const meta = context.cache.lastPromptSections?.sections.find((section) => section.name === "meta_scheduler");
     expect(meta?.truncated).toBe(true);
+  });
+
+  it("keeps system prompt bytes stable until the compact boundary changes", () => {
+    const context = createPromptTestContext();
+    const first = createModelSystemPromptSegments(
+      "继续",
+      context,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      "MetaSchedulerForModel=first",
+    );
+    const second = createModelSystemPromptSegments(
+      "继续",
+      context,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      "MetaSchedulerForModel=second",
+    );
+
+    expect(second.cacheable).toEqual(first.cacheable);
+    expect(second.volatile).toEqual([]);
+    expect(second.dynamic).toBe(first.dynamic);
+
+    context.cache.compactProjection = { boundaryId: "compact-1" } as never;
+    const afterCompact = createModelSystemPromptSegments(
+      "继续",
+      context,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      "MetaSchedulerForModel=after-compact",
+    );
+
+    expect(afterCompact.dynamic).toContain("MetaSchedulerForModel=after-compact");
+    expect(afterCompact.dynamic).not.toBe(first.dynamic);
+    expect(afterCompact.cacheable).not.toEqual(first.cacheable);
   });
 
   it("returns text unchanged when no internal tokens are present", () => {

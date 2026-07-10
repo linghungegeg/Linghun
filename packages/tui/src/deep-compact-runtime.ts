@@ -456,10 +456,11 @@ export function injectDeepCompactSummary(
         ),
     );
     if (missingAdditionalMessages.length === 0) return messages;
+    const insertionIndex = findCompactRestoreInsertionIndex(messages, existingSummaryIndex);
     return [
-      ...messages.slice(0, existingSummaryIndex + 1),
+      ...messages.slice(0, insertionIndex),
       ...missingAdditionalMessages,
-      ...messages.slice(existingSummaryIndex + 1),
+      ...messages.slice(insertionIndex),
     ];
   }
   const summaryMessage: ModelMessage = {
@@ -468,12 +469,29 @@ export function injectDeepCompactSummary(
   };
   let index = 0;
   while (messages[index]?.role === "system") index += 1;
-  return [
+  const withSummary = [
     ...messages.slice(0, index),
     summaryMessage,
-    ...additionalMessages,
     ...messages.slice(index),
   ];
+  const insertionIndex = findCompactRestoreInsertionIndex(withSummary, index);
+  return [
+    ...withSummary.slice(0, insertionIndex),
+    ...additionalMessages,
+    ...withSummary.slice(insertionIndex),
+  ];
+}
+
+function findCompactRestoreInsertionIndex(messages: ModelMessage[], summaryIndex: number): number {
+  let index = summaryIndex + 1;
+  while (
+    messages[index]?.role === "user" &&
+    typeof messages[index].content === "string" &&
+    messages[index].content.startsWith("Context compact projection")
+  ) {
+    index += 1;
+  }
+  return index;
 }
 
 export function insertAfterLeadingSystemMessages(

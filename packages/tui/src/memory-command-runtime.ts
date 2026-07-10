@@ -50,7 +50,12 @@ import {
 } from "./tui-memory-runtime.js";
 import { writeErrorLine } from "./tui-output-surface.js";
 import { getSelectedModelRuntime } from "./tui-model-runtime.js";
-import { createMemoryState, pathExists, summarizeProjectRules } from "./tui-state-runtime.js";
+import {
+  createCacheState,
+  createMemoryState,
+  pathExists,
+  summarizeProjectRules,
+} from "./tui-state-runtime.js";
 
 export type MemoryCommandRuntimeDeps = {
   appendSystemEvent: (
@@ -404,6 +409,13 @@ export async function resumeSessionWithHandoff(
   try {
     const resumed = await context.store.resume(sessionId);
     context.memory = await createMemoryState(context.config, context.projectPath);
+    context.deepCompactInFlight = undefined;
+    context.cache = createCacheState(
+      context.projectPath,
+      resumed.session.model,
+      context.mcp.tools,
+      context.config,
+    );
     context.sessionId = resumed.session.id;
     context.sessionStoreVerifiedId = resumed.session.id;
     bindSessionRuntimeStorage(context, resumed.session.id);

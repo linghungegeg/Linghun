@@ -30,8 +30,26 @@ export type CompactRestorePayload = {
 export async function buildPostCompactRestoreMessage(
   context: TuiContext,
 ): Promise<ModelMessage | undefined> {
+  const deepCompactId = context.cache.deepCompact?.id;
+  const compactProjectionBoundaryId = context.cache.compactProjection?.boundaryId;
+  const restoreLatch = context.cache.postCompactRestoreLatch;
+  if (
+    deepCompactId &&
+    restoreLatch?.deepCompactId === deepCompactId &&
+    restoreLatch.compactProjectionBoundaryId === compactProjectionBoundaryId
+  ) {
+    const content = restoreLatch.content;
+    return content ? { role: "user", content } : undefined;
+  }
   const payload = await buildPostCompactRestorePayload(context);
   const content = formatPostCompactRestorePayload(payload);
+  if (deepCompactId) {
+    context.cache.postCompactRestoreLatch = {
+      deepCompactId,
+      compactProjectionBoundaryId,
+      content: content ?? null,
+    };
+  }
   return content ? { role: "user", content } : undefined;
 }
 

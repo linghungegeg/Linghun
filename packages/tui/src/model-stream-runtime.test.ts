@@ -238,6 +238,136 @@ async function makeSendMessageContext() {
 }
 
 describe("model message prompt cache layout", () => {
+  it("grows provider messages as an append-only prefix across turns", async () => {
+    let events: Array<{ type: "user_message" | "assistant_text_delta"; text: string }> = [];
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({ events }),
+        appendEvent: async () => undefined,
+      },
+    };
+    const runtime = {
+      role: "executor" as const,
+      provider: "test",
+      model: "test-model",
+      endpointProfile: "responses" as const,
+      reasoningSent: false,
+      reasoningStatus: "off" as const,
+    };
+    const systemPrompt = [
+      { content: "stable system", promptCache: "cacheable" as const },
+      { content: "session-latched runtime", promptCache: "cacheable" as const },
+    ];
+
+    const first = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-append-only",
+      systemPrompt,
+      "first user",
+      runtime,
+    );
+    events = [
+      { type: "user_message", text: "first user" },
+      { type: "assistant_text_delta", text: "first assistant" },
+    ];
+    const second = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-append-only",
+      systemPrompt,
+      "second user",
+      runtime,
+    );
+
+    expect(second.slice(0, first.length)).toEqual(first);
+  });
+
+  it("keeps the complete append-only conversation beyond twelve messages", async () => {
+    const events = Array.from({ length: 14 }, (_, index) => ({
+      type: index % 2 === 0 ? "user_message" as const : "assistant_text_delta" as const,
+      text: `history ${index}`,
+    }));
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async (_sessionId: string, input: { limit: number }) => ({
+          events: events.slice(-input.limit),
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-beyond-twelve",
+      "stable system",
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+
+    expect(messages.map((message) => message.content)).toEqual([
+      "stable system",
+      ...events.map((event) => event.text),
+      "current user",
+    ]);
+  });
+
+  it("keeps a tool call and result paired beyond the former history window", async () => {
+    const events = [
+      ...Array.from({ length: 13 }, (_, index) => ({
+        type: index % 2 === 0 ? "user_message" as const : "assistant_text_delta" as const,
+        text: `history ${index}`,
+      })),
+      { type: "tool_call_start" as const, id: "call-late", name: "Read", input: { path: "late.ts" } },
+      {
+        type: "tool_result" as const,
+        toolUseId: "call-late",
+        toolName: "Read",
+        content: { text: "late result" },
+      },
+    ];
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      evidence: [],
+      store: {
+        readRecentTranscriptEvents: async () => ({ events }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-tool-pair-beyond-twelve",
+      "stable system",
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+
+    expect(messages.at(-3)).toMatchObject({
+      role: "assistant",
+      toolCalls: [{ id: "call-late", name: "Read" }],
+    });
+    expect(messages.at(-2)).toMatchObject({ role: "tool", tool_call_id: "call-late" });
+    expect(messages.at(-1)).toMatchObject({ role: "user", content: "current user" });
+  });
+
   it("tracks foreground turn ids and records interrupted turns once", async () => {
     const appended: unknown[] = [];
     const context = {
@@ -429,7 +559,7 @@ describe("model message prompt cache layout", () => {
     expect(blocks.some((block) => block.failureDomain === "provider")).toBe(false);
   }, 30_000);
 
-  it("keeps volatile system diagnostics after reusable transcript history", async () => {
+  it("keeps session-latched system diagnostics before append-only transcript history", async () => {
     const context = {
       model: "test-model",
       cache: { history: [] },
@@ -462,13 +592,13 @@ describe("model message prompt cache layout", () => {
 
     expect(messages.map((message) => `${message.role}:${message.content}`)).toEqual([
       "system:stable system",
+      "system:volatile diagnostics",
       "user:previous user",
       "assistant:previous assistant",
-      "system:volatile diagnostics",
       "user:current user",
     ]);
     expect(messages[0]).toMatchObject({ promptCache: "cacheable" });
-    expect(messages[3]).toMatchObject({ promptCache: "volatile" });
+    expect(messages[1]).toMatchObject({ promptCache: "volatile" });
   });
 
   it("cuts model history at the latest compact projection boundary", async () => {
@@ -527,7 +657,7 @@ describe("model message prompt cache layout", () => {
     expect(serialized).not.toContain("RAW_OLD_CONTEXT");
   });
 
-  it("keeps the latest compact boundary when the active tail exceeds the recent window", async () => {
+  it("keeps the latest compact boundary with the complete active conversation", async () => {
     const projection = {
       boundaryId: "compact-boundary-outside-tail",
       summary: "STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL",
@@ -576,12 +706,13 @@ describe("model message prompt cache layout", () => {
     );
     const serialized = JSON.stringify(messages);
 
-    expect(readLimits).toEqual([25, 1]);
+    expect(readLimits).toEqual([Number.MAX_SAFE_INTEGER, 1]);
     expect(serialized).toContain("STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL");
+    expect(serialized).toContain("post-boundary answer 0");
     expect(serialized).toContain("post-boundary answer 29");
   });
 
-  it("revalidates compacted memory constraints against the current accepted store", async () => {
+  it("keeps persisted compact memory constraints immutable across later memory changes", async () => {
     const projection = {
       boundaryId: "compact-memory-boundary",
       summary: "Linghun compact summary\nuser constraints OLD_DELETED_MEMORY",
@@ -644,8 +775,8 @@ describe("model message prompt cache layout", () => {
     );
     const serialized = JSON.stringify(messages);
 
-    expect(serialized).toContain("CURRENT_MEMORY");
-    expect(serialized).not.toContain("OLD_DELETED_MEMORY");
+    expect(serialized).toContain("OLD_DELETED_MEMORY");
+    expect(serialized).not.toContain("CURRENT_MEMORY");
   });
 
   it("cuts model history at a deep compact packet boundary", async () => {
@@ -705,7 +836,7 @@ describe("model message prompt cache layout", () => {
     expect(serialized).not.toContain("RAW_OLD_DEEP_CONTEXT");
   });
 
-  it("adds a narrow boundary hint after an interrupted foreground turn", async () => {
+  it("keeps an interrupted-turn hint on the append-only user message", async () => {
     const context = {
       model: "test-model",
       cache: { history: [] },
@@ -741,10 +872,61 @@ describe("model message prompt cache layout", () => {
       },
     );
 
-    expect(messages.map((message) => message.content)).toContain(
-      "Previous foreground turn was interrupted (reason: user_interrupt). Treat the latest user message as the authoritative task. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.",
+    expect(messages.filter((message) => message.role === "system")).toHaveLength(1);
+    expect(messages.at(-1)).toMatchObject({ role: "user" });
+    expect(messages.at(-1)?.content).toContain("current user");
+    expect(messages.at(-1)?.content).toContain(
+      "Previous foreground turn was interrupted (reason: user_interrupt). Treat this user message as the authoritative task.",
     );
-    expect(messages.at(-1)).toMatchObject({ role: "user", content: "current user" });
+  });
+
+  it("rebuilds the same interrupted user tail as stable history on the next turn", async () => {
+    let events: Array<Record<string, unknown>> = [
+      { type: "user_message", text: "old task" },
+      {
+        type: "interrupt",
+        message: "turn_interrupted: requestTurnId=turn-old; reason=user_interrupt; userMessageId=user-old",
+      },
+      { type: "user_message", text: "replacement task" },
+    ];
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({ events }),
+        appendEvent: async () => undefined,
+      },
+    };
+    const runtime = {
+      role: "executor" as const,
+      provider: "test",
+      model: "test-model",
+      endpointProfile: "responses" as const,
+      reasoningSent: false,
+      reasoningStatus: "off" as const,
+    };
+
+    const first = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-interrupt-prefix",
+      "stable system",
+      "replacement task",
+      runtime,
+    );
+    events = [
+      ...events,
+      { type: "assistant_text_delta", text: "replacement answer" },
+      { type: "user_message", text: "next task" },
+    ];
+    const second = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-interrupt-prefix",
+      "stable system",
+      "next task",
+      runtime,
+    );
+
+    expect(second.slice(0, first.length)).toEqual(first);
   });
 
   it("keeps legacy edit tool_result internals out of model-visible history", async () => {
@@ -927,6 +1109,82 @@ describe("model message prompt cache layout", () => {
     expect(serialized).toContain("artifactPath");
     expect(serialized).toContain("omitted from model history");
     expect(serialized).not.toContain(leakedPreview);
+  });
+
+  it("does not rewrite earlier tool_result history when later results add pressure", async () => {
+    const toolResult = "x".repeat(10_000);
+    let events: Array<Record<string, unknown>> = Array.from({ length: 7 }, (_, index) => [
+      {
+        type: "tool_call_start",
+        id: `call-${index}`,
+        name: "Read",
+        input: { path: `file-${index}.txt` },
+      },
+      {
+        type: "tool_result",
+        toolUseId: `call-${index}`,
+        toolName: "Read",
+        content: toolResult,
+      },
+    ]).flat();
+    const context = {
+      projectPath: await mkdtemp(join(tmpdir(), "linghun-model-history-pressure-")),
+      model: "test-model",
+      cache: { history: [] },
+      evidence: [],
+      store: {
+        readRecentTranscriptEvents: async () => ({ events }),
+        appendEvent: async () => undefined,
+      },
+    };
+    const runtime = {
+      role: "executor" as const,
+      provider: "test",
+      model: "test-model",
+      endpointProfile: "responses" as const,
+      reasoningSent: false,
+      reasoningStatus: "off" as const,
+    };
+
+    const first = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-tool-pressure-prefix",
+      "stable system",
+      "first user",
+      runtime,
+    );
+    events = [
+      ...events,
+      { type: "user_message", text: "first user" },
+      { type: "assistant_text_delta", text: "first answer" },
+      ...Array.from({ length: 6 }, (_, offset) => {
+        const index = offset + 7;
+        return [
+          {
+            type: "tool_call_start",
+            id: `call-${index}`,
+            name: "Read",
+            input: { path: `file-${index}.txt` },
+          },
+          {
+            type: "tool_result",
+            toolUseId: `call-${index}`,
+            toolName: "Read",
+            content: toolResult,
+          },
+        ];
+      }).flat(),
+    ];
+    const second = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-tool-pressure-prefix",
+      "stable system",
+      "second user",
+      runtime,
+    );
+
+    expect(second.slice(0, first.length)).toEqual(first);
+    expect(JSON.stringify(first)).not.toContain("<persisted-tool-result>");
   });
 });
 

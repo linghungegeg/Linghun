@@ -3275,13 +3275,14 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
     });
   });
 
-  it("prefers the compact stable summary for Anthropic message cache_control", () => {
+  it("advances Anthropic message cache_control past compact summaries to the latest user", () => {
     const provider = buildAnthropicProvider();
     const body = provider.createAnthropicMessagesRequest({
       messages: [
         { role: "system", content: "alpha" },
         { role: "user", content: "Deep compact context\nsummary stable older context" },
         { role: "user", content: "Context compact projection\nsummary stable recent context" },
+        { role: "user", content: "Post-compact restored context\nfrozen restore snapshot" },
         { role: "user", content: "rolling recent window" },
         { role: "assistant", content: "ack" },
         { role: "user", content: "current dynamic request" },
@@ -3308,11 +3309,95 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
     expect(projectionBlocks[0]).toEqual({
       type: "text",
       text: "Context compact projection\nsummary stable recent context",
-      cache_control: { type: "ephemeral" },
     });
     expect(currentUserBlocks[0]).toEqual({
       type: "text",
       text: "current dynamic request",
+      cache_control: { type: "ephemeral" },
+    });
+  });
+
+  it("advances one Anthropic message marker through compact restore and a tool round", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "stable core" },
+        { role: "system", content: "stable runtime" },
+        { role: "user", content: "Deep compact context\nolder summary" },
+        { role: "user", content: "Context compact projection\nrecent summary" },
+        { role: "user", content: "Post-compact restored context\nfrozen restore" },
+        {
+          role: "assistant",
+          content: "checking",
+          toolCalls: [{ id: "call-1", name: "Read", input: { path: "README.md" } }],
+        },
+        { role: "tool", tool_call_id: "call-1", content: '{"ok":true}' },
+      ],
+      promptCacheEnabled: true,
+    });
+    const serialized = JSON.stringify(body.messages);
+    const markerCount = serialized.match(/cache_control/g)?.length ?? 0;
+    const finalBlocks = body.messages.at(-1)?.content as Array<{
+      type: string;
+      cache_control?: { type: "ephemeral" };
+    }>;
+
+    expect(markerCount).toBe(1);
+    expect(finalBlocks.at(-1)).toMatchObject({
+      type: "tool_result",
+      cache_control: { type: "ephemeral" },
+    });
+  });
+
+  it("marks the synthesized tool_result after an unpaired final assistant tool_use", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "user", content: "inspect" },
+        {
+          role: "assistant",
+          content: "reading",
+          toolCalls: [{ id: "call-1", name: "Read", input: { path: "README.md" } }],
+        },
+      ],
+      promptCacheEnabled: true,
+    });
+    const assistantBlocks = body.messages[1]?.content as Array<{
+      type: string;
+      cache_control?: { type: "ephemeral" };
+    }>;
+    const repairBlocks = body.messages.at(-1)?.content as Array<{
+      type: string;
+      cache_control?: { type: "ephemeral" };
+    }>;
+
+    expect(assistantBlocks.at(-1)).toMatchObject({ type: "tool_use" });
+    expect(assistantBlocks.at(-1)?.cache_control).toBeUndefined();
+    expect(repairBlocks.at(-1)).toMatchObject({
+      type: "tool_result",
+      cache_control: { type: "ephemeral" },
+    });
+  });
+
+  it("marks the final assistant text block when it is the last provider message", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "final answer" },
+      ],
+      promptCacheEnabled: true,
+    });
+    const assistantBlocks = body.messages.at(-1)?.content as Array<{
+      type: string;
+      text: string;
+      cache_control?: { type: "ephemeral" };
+    }>;
+
+    expect(assistantBlocks.at(-1)).toEqual({
+      type: "text",
+      text: "final answer",
+      cache_control: { type: "ephemeral" },
     });
   });
 
