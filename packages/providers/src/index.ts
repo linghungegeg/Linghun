@@ -2250,7 +2250,10 @@ function createOpenAiChatTools(
   // 可由 TUI 注入稳定 promptCacheKey。
   const tools = request.tools;
   if (!tools) return undefined;
-  const customTools = [...tools]
+  const customTools = tools
+    .filter(
+      (tool) => contract.compatibilityProfile !== "gemini" || tool.name !== "WebSearch",
+    )
     .sort(compareToolCacheIdentity)
     .map((tool) => getCachedOpenAiChatToolBase(tool));
   return contract.compatibilityProfile === "gemini" && request.toolChoice !== "none"
@@ -2266,7 +2269,8 @@ function createOpenAiResponsesTools(
   // D.13F：与 chat tools 一致，按 name 字典序稳定排序。
   const tools = request.tools;
   if (!tools) return undefined;
-  const customTools = [...tools]
+  const customTools = tools
+    .filter((tool) => contract.compatibilityProfile !== "grok" || tool.name !== "WebSearch")
     .sort(compareToolCacheIdentity)
     .map((tool) => getCachedOpenAiResponsesToolBase(tool));
   return shouldAttachHostedWebSearch(request)

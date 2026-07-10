@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
-import { resolveEffectiveEndpointProfile } from "@linghun/providers";
+import { resolveProviderRuntimeContract } from "@linghun/providers";
 import { getRoleRoute, inferProviderForRouteModel } from "./model-doctor-runtime.js";
 import { checkProviderCooldown, formatCooldownMessage } from "./provider-circuit-breaker.js";
 import {
@@ -37,24 +37,13 @@ function createRuntimeForFallbackModel(
   const provider = inferProviderForRouteModel(fallbackModel, context.config);
   const providerConfig = context.config.providers[provider];
   if (!providerConfig) return undefined;
-  const rawEndpointProfile = providerConfig.endpointProfile ?? "chat_completions";
-  const endpointProfile = resolveEffectiveEndpointProfile({
-    requestEndpointProfile: undefined,
-    configEndpointProfile: rawEndpointProfile,
-    configBaseUrl: providerConfig.baseUrl,
-    configModel: providerConfig.model,
-    requestModel: fallbackModel,
-  }).endpointProfile;
-  const compatibilityProfile =
-    providerConfig.compatibilityProfile ??
-    (providerConfig.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
-  const reasoningLevel = providerConfig.reasoningLevel;
-  const reasoningSent = Boolean(
-    reasoningLevel &&
-      (endpointProfile === "responses" ||
-        compatibilityProfile === "permissive_openai_compatible" ||
-        endpointProfile === "anthropic_messages"),
+  const contract = resolveProviderRuntimeContract(
+    { ...providerConfig, id: provider },
+    { messages: [], model: fallbackModel },
   );
+  const endpointProfile = contract.endpointProfile;
+  const reasoningLevel = providerConfig.reasoningLevel;
+  const reasoningSent = Boolean(reasoningLevel && contract.sendReasoning);
   return {
     role: baseRuntime.role,
     provider,

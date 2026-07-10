@@ -9,6 +9,7 @@ import {
   getModelSetupPromptMessage,
   getNextModelSetupStep,
   looksLikeModelSetupInput,
+  normalizeModelSetupProviderType,
   normalizeModelSetupReasoningLevel,
   parseModelSetupPrefill,
   validateModelSetupPartial,
@@ -16,21 +17,31 @@ import {
 
 describe("model-setup-runtime", () => {
   describe("getNextModelSetupStep", () => {
-    it("returns baseUrl when no values", () => {
-      expect(getNextModelSetupStep({})).toBe("baseUrl");
+    it("returns provider when no values", () => {
+      expect(getNextModelSetupStep({})).toBe("provider");
     });
     it("returns apiKey when baseUrl present", () => {
-      expect(getNextModelSetupStep({ baseUrl: "https://api.example.com/v1" })).toBe("apiKey");
+      expect(
+        getNextModelSetupStep({
+          providerType: "openai-compatible",
+          baseUrl: "https://api.example.com/v1",
+        }),
+      ).toBe("apiKey");
     });
     it("returns model when baseUrl and apiKey present", () => {
       expect(
-        getNextModelSetupStep({ baseUrl: "https://api.example.com/v1", apiKey: "sk-test" }),
+        getNextModelSetupStep({
+          providerType: "openai-compatible",
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "sk-test",
+        }),
       ).toBe("model");
     });
     it("returns reasoning when baseUrl, apiKey, model present", () => {
       expect(
         getNextModelSetupStep({
           baseUrl: "https://api.example.com/v1",
+          providerType: "openai-compatible",
           apiKey: "sk-test",
           model: "gpt-4o",
         }),
@@ -40,9 +51,20 @@ describe("model-setup-runtime", () => {
       expect(
         getNextModelSetupStep({
           baseUrl: "https://api.example.com/v1",
+          providerType: "openai-compatible",
           apiKey: "sk-test",
           model: "gpt-4o",
           reasoningLevel: "Medium",
+        }),
+      ).toBe("confirm");
+    });
+    it("skips configurable reasoning for Grok", () => {
+      expect(
+        getNextModelSetupStep({
+          providerType: "grok",
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "sk-test",
+          model: "grok-4.20-reasoning",
         }),
       ).toBe("confirm");
     });
@@ -52,6 +74,12 @@ describe("model-setup-runtime", () => {
     it("extracts URL", () => {
       const result = parseModelSetupPrefill("配置 https://api.deepseek.com/v1");
       expect(result.baseUrl).toBe("https://api.deepseek.com/v1");
+    });
+    it("extracts native provider type", () => {
+      expect(parseModelSetupPrefill("provider=gemini").providerType).toBe("gemini");
+      expect(normalizeModelSetupProviderType("grok")).toBe("grok");
+      expect(normalizeModelSetupProviderType("openai")).toBe("openai-compatible");
+      expect(() => normalizeModelSetupProviderType("unknown")).toThrow("provider 可选");
     });
     it("extracts model name", () => {
       const result = parseModelSetupPrefill("model=deepseek-chat");
@@ -222,6 +250,7 @@ describe("model-setup-runtime", () => {
         providerEnvPath: "/tmp/provider.env",
         createdTemplate: false,
         values: {
+          providerType: "gemini",
           baseUrl: "https://api.example.com/v1",
           apiKey: "sk-secret-key-12345678",
           model: "gpt-4o",
@@ -232,6 +261,7 @@ describe("model-setup-runtime", () => {
       expect(msg).toContain("base URL present");
       expect(msg).toContain("api key present");
       expect(msg).toContain("model gpt-4o");
+      expect(msg).toContain("provider gemini");
       expect(msg).not.toContain("sk-secret-key-12345678");
     });
     it("shows missing for absent values", () => {

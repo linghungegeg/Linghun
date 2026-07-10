@@ -3,7 +3,7 @@
  * Pure functions with no IO, no TuiContext mutation.
  * Extracted from index.ts (Slice D.10E) — behavior-preserving move only.
  */
-import type { ProviderEnvSetup } from "@linghun/config";
+import type { ProviderEnvSetup, ProviderSetupType } from "@linghun/config";
 import { validateProviderEnvSetup } from "@linghun/config";
 import type { Language } from "@linghun/shared";
 
@@ -11,7 +11,14 @@ import type { Language } from "@linghun/shared";
 // Types
 // ---------------------------------------------------------------------------
 
-export type ModelSetupStep = "baseUrl" | "apiKey" | "model" | "reasoning" | "auxModel" | "confirm";
+export type ModelSetupStep =
+  | "provider"
+  | "baseUrl"
+  | "apiKey"
+  | "model"
+  | "reasoning"
+  | "auxModel"
+  | "confirm";
 
 export type PendingModelSetup = {
   step: ModelSetupStep;
@@ -24,6 +31,7 @@ export type ModelSetupPrefill = Partial<ProviderEnvSetup>;
 
 export type ModelSetupMessageKey =
   | "intro"
+  | "providerPrompt"
   | "baseUrlPrompt"
   | "apiKeyPrompt"
   | "modelPrompt"
@@ -38,10 +46,11 @@ export type ModelSetupMessageKey =
 // ---------------------------------------------------------------------------
 
 export function getNextModelSetupStep(values: Partial<ProviderEnvSetup>): ModelSetupStep {
+  if (!values.providerType) return "provider";
   if (!values.baseUrl) return "baseUrl";
   if (!values.apiKey) return "apiKey";
   if (!values.model) return "model";
-  if (!values.reasoningLevel) return "reasoning";
+  if (values.providerType !== "grok" && !values.reasoningLevel) return "reasoning";
   return "confirm";
 }
 
@@ -51,6 +60,10 @@ export function getNextModelSetupStep(values: Partial<ProviderEnvSetup>): ModelS
 
 export function parseModelSetupPrefill(text: string): ModelSetupPrefill {
   const prefill: ModelSetupPrefill = {};
+  const provider = text.match(
+    /(?:provider|供应商)\s*[=:：]?\s*(openai-compatible|openai|gemini|grok)\b/iu,
+  )?.[1];
+  if (provider) prefill.providerType = normalizeModelSetupProviderType(provider);
   const url = text.match(/https?:\/\/[^\s，,]+/iu)?.[0];
   if (url) prefill.baseUrl = url;
 
@@ -70,6 +83,16 @@ export function parseModelSetupPrefill(text: string): ModelSetupPrefill {
   if (key) prefill.apiKey = key;
 
   return prefill;
+}
+
+export function normalizeModelSetupProviderType(value: string): ProviderSetupType {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "openai" || normalized === "openai-compatible") {
+    return "openai-compatible";
+  }
+  if (normalized === "gemini") return "gemini";
+  if (normalized === "grok") return "grok";
+  throw new Error("provider 可选 openai-compatible / gemini / grok。");
 }
 
 export function normalizeModelSetupReasoningLevel(value: string): "Low" | "Medium" | "High" {
@@ -104,6 +127,7 @@ export function applyModelSetupValues(setup: PendingModelSetup, values: ModelSet
 export function validateModelSetupPartial(values: Partial<ProviderEnvSetup>): void {
   if (values.baseUrl !== undefined) {
     validateProviderEnvSetup({
+      providerType: values.providerType,
       baseUrl: values.baseUrl,
       apiKey: "temporary-validation-key",
       model: "temporary-model",
@@ -112,6 +136,7 @@ export function validateModelSetupPartial(values: Partial<ProviderEnvSetup>): vo
   }
   if (values.apiKey !== undefined) {
     validateProviderEnvSetup({
+      providerType: values.providerType,
       baseUrl: "https://example.com/v1",
       apiKey: values.apiKey,
       model: "temporary-model",
@@ -120,6 +145,7 @@ export function validateModelSetupPartial(values: Partial<ProviderEnvSetup>): vo
   }
   if (values.model !== undefined || values.reasoningLevel !== undefined) {
     validateProviderEnvSetup({
+      providerType: values.providerType,
       baseUrl: "https://example.com/v1",
       apiKey: "temporary-validation-key",
       model: values.model ?? "temporary-model",
@@ -137,6 +163,7 @@ export function validateModelSetupPartial(values: Partial<ProviderEnvSetup>): vo
 
 export function getModelSetupPromptMessage(setup: PendingModelSetup, language: Language): string {
   const keyByStep: Record<ModelSetupStep, ModelSetupMessageKey> = {
+    provider: "providerPrompt",
     baseUrl: "baseUrlPrompt",
     apiKey: "apiKeyPrompt",
     model: "modelPrompt",
@@ -173,6 +200,9 @@ export function formatModelSetupMessage(
         ]
           .filter(Boolean)
           .join("\n"),
+    providerPrompt: english
+      ? "Provider: openai-compatible / gemini / grok."
+      : "请选择 provider：openai-compatible / gemini / grok。",
     baseUrlPrompt: english
       ? "API base URL is missing. Enter the root API URL, for example https://example.com/v1."
       : "缺少 API 地址。请输入 root API 地址，例如 https://example.com/v1。",
@@ -223,7 +253,7 @@ export function formatModelSetupSummary(setup: PendingModelSetup, language: Lang
   const english = language === "en-US";
   return [
     english ? "Model setup summary" : "模型配置摘要",
-    "- provider openai-compatible",
+    `- provider ${setup.values.providerType ?? "missing"}`,
     `- base URL ${setup.values.baseUrl ? "present" : "missing"}`,
     `- api key ${setup.values.apiKey ? "present" : "missing"}`,
     `- model ${setup.values.model ?? "missing"}`,

@@ -249,6 +249,34 @@ describe("config directories", () => {
     );
   });
 
+  it("requires provider qualification when model names collide", () => {
+    const providers = {
+      ...defaultConfig.providers,
+      "openai-compatible": {
+        ...defaultConfig.providers["openai-compatible"],
+        model: "shared-model",
+      },
+      gemini: { ...defaultConfig.providers.gemini, model: "shared-model" },
+    };
+
+    expect(() => resolveModelSelection("shared-model", providers)).toThrow(
+      "请使用 provider:model 明确选择",
+    );
+    expect(resolveModelSelection("gemini:shared-model", providers)).toMatchObject({
+      provider: "gemini",
+      model: "shared-model",
+    });
+    expect(
+      resolveModelSelection("ollama:latest", {
+        ...providers,
+        local: { ...defaultConfig.providers["openai-compatible"], model: "ollama:latest" },
+      }),
+    ).toMatchObject({ provider: "local", model: "ollama:latest" });
+    expect(() => resolveModelSelection("gemini:", providers)).toThrow(
+      "provider gemini 未配置模型",
+    );
+  });
+
   it("allows env to override default DeepSeek model and Linghun default model", async () => {
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
@@ -695,6 +723,8 @@ describe("config directories", () => {
     expect(template).toContain("# LINGHUN_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1");
     expect(template).toContain("# LINGHUN_DEEPSEEK_MODEL=deepseek-chat");
     expect(template).toContain("# LINGHUN_DEEPSEEK_ENDPOINT_PROFILE=anthropic_messages");
+    expect(template).toContain("# LINGHUN_GEMINI_MODEL=gemini-3.5-flash");
+    expect(template).toContain("# LINGHUN_GROK_MODEL=grok-4.20-reasoning");
     expect(template).toContain("LINGHUN_AUX_MODEL=");
 
     await envSaveProviderEnvSetup(
@@ -712,6 +742,64 @@ describe("config directories", () => {
     expect(raw).toContain("LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1");
     expect(raw).toContain("LINGHUN_INFERENCE_LEVEL=Medium");
     expect(values.LINGHUN_OPENAI_API_KEY).toBe("sk-provider-secret");
+  });
+
+  it.each([
+    ["gemini", "LINGHUN_GEMINI", "gemini-3.5-flash", "chat_completions"],
+    ["grok", "LINGHUN_GROK", "grok-4.20-reasoning", "responses"],
+  ] as const)(
+    "saves and loads the %s native provider from provider.env",
+    async (providerType, prefix, model, endpointProfile) => {
+      const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+      const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+      vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+      vi.resetModules();
+      const indexModule = await import("./index.js");
+
+      await indexModule.saveProviderEnvSetup(
+        {
+          providerType,
+          baseUrl: "https://provider.invalid/v1",
+          apiKey: "sk-provider-secret",
+          model,
+          reasoningLevel: "Medium",
+        },
+        home,
+      );
+      const raw = await readFile(indexModule.getProviderEnvPath(home), "utf8");
+      const config = await indexModule.loadConfig(project);
+
+      expect(raw).toContain(`${prefix}_MODEL=${model}`);
+      expect(raw).not.toContain("LINGHUN_OPENAI_MODEL=");
+      expect(config.providers[providerType].model).toBe(model);
+      expect(config.providers[providerType].endpointProfile).toBe(endpointProfile);
+      expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.provider).toBe(
+        providerType,
+      );
+    },
+  );
+
+  it("keeps shell reasoning priority for Gemini loaded from provider.env", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "High");
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+
+    await indexModule.saveProviderEnvSetup(
+      {
+        providerType: "gemini",
+        baseUrl: "https://provider.invalid/v1",
+        apiKey: "sk-provider-secret",
+        model: "gemini-3.5-flash",
+        reasoningLevel: "Low",
+      },
+      home,
+    );
+    const config = await indexModule.loadConfig(project);
+
+    expect(config.providers.gemini.reasoningLevel).toBe("High");
   });
 
   it("loads supported DeepSeek fields from provider.env", async () => {

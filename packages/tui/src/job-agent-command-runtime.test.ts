@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  createAgentRuntimeForFallbackModel,
   evaluateChildAgentSummaryClaims,
+  resolveAgentRuntimeForModel,
   resolveAgentDispatchRuntimePolicy,
 } from "./job-agent-command-runtime.js";
+import type { TuiContext } from "./tui-context-runtime.js";
 import { formatAgentRunToolResultData } from "./model-tool-runtime.js";
 import { formatAgentSummary } from "./tui-agent-job-runtime.js";
 import type { AgentRun, EvidenceRecord } from "./tui-data-types.js";
@@ -164,6 +167,48 @@ describe("agent dispatch runtime policy", () => {
       action: "block",
       reason:
         "degrade reason; refusing to change requested worker agent into planner without explicit confirmation",
+    });
+  });
+});
+
+describe("agent provider reasoning contract", () => {
+  const runtime = {
+    provider: "gemini",
+    model: "gemini-test",
+    endpointProfile: "chat_completions" as const,
+    reasoningLevel: "High",
+    reasoningSent: false,
+  };
+
+  it("uses the Gemini contract for the selected agent model", () => {
+    const context = {
+      config: {
+        providers: {
+          gemini: { type: "gemini", model: "gemini-test", reasoningLevel: "High" },
+        },
+      },
+    } as unknown as TuiContext;
+
+    expect(resolveAgentRuntimeForModel(context, runtime, "gemini-test")).toMatchObject({
+      endpointProfile: "chat_completions",
+      reasoningSent: true,
+    });
+  });
+
+  it("uses the Grok contract for an agent fallback model", () => {
+    const context = {
+      config: {
+        providers: {
+          gemini: { type: "gemini", model: "gemini-test", reasoningLevel: "High" },
+          grok: { type: "grok", model: "grok-test", reasoningLevel: "High" },
+        },
+      },
+    } as unknown as TuiContext;
+
+    expect(createAgentRuntimeForFallbackModel(context, runtime, "grok-test")).toMatchObject({
+      provider: "grok",
+      endpointProfile: "responses",
+      reasoningSent: false,
     });
   });
 });
