@@ -96,6 +96,41 @@ describe("agent-completion-finalizer", () => {
     expect(formatAgentCompletionDigest(context)).toBeNull();
   });
 
+  it("keeps completion notices scoped to their owner session and reports each once", () => {
+    const context = createContext();
+    const noticeA = enqueueAgentCompletionNotice(context, {
+      agent: createAgent({ id: "agent-a", parentSessionId: "session-a" }),
+      status: "completed",
+      summary: "session A result",
+      evidenceRefs: ["ev-a"],
+      now: "2026-01-01T00:00:01.000Z",
+    });
+    const noticeB = enqueueAgentCompletionNotice(context, {
+      agent: createAgent({ id: "agent-b", parentSessionId: "session-b" }),
+      status: "completed",
+      summary: "session B result",
+      evidenceRefs: ["ev-b"],
+      now: "2026-01-01T00:00:02.000Z",
+    });
+
+    context.sessionId = "session-b";
+    expect(collectPendingAgentCompletionNotices(context).map((notice) => notice.id)).toEqual([
+      noticeB.id,
+    ]);
+    expect(formatAgentCompletionMainChainContext(context)).toContain("session B result");
+    expect(formatAgentCompletionMainChainContext(context)).not.toContain("session A result");
+    markAgentCompletionNoticeReported(context, noticeB.id);
+
+    context.sessionId = "session-a";
+    expect(collectPendingAgentCompletionNotices(context).map((notice) => notice.id)).toEqual([
+      noticeA.id,
+    ]);
+    expect(formatAgentCompletionDigest(context)).toContain("session A result");
+    expect(formatAgentCompletionDigest(context)).not.toContain("session B result");
+    markAgentCompletionNoticeReported(context, noticeA.id);
+    expect(collectPendingAgentCompletionNotices(context)).toEqual([]);
+  });
+
   it("does not push a pass ProductBlock into the main transcript by default", () => {
     const transcriptBlocks: Array<{ id: string; kind: string; status: string; title: string; summary: string }> = [];
     const context = createContext();
@@ -186,7 +221,7 @@ describe("appendAgentCompletionSystemEvent — reliable parent transcript write"
     const appendEvent = vi.fn(async (sessionId: string, event: unknown) => {
       events.push({ sessionId, event });
     });
-    const context = createStoreContext(appendEvent);
+    const context = createStoreContext(appendEvent, "session-test");
 
     const result = await appendAgentCompletionSystemEvent(context, {
       agentId: "agent-a",
@@ -298,7 +333,7 @@ describe("appendAgentCompletionSystemEvent — reliable parent transcript write"
 
   it("multiple completions with digest still produces correct pending notices", async () => {
     const appendEvent = vi.fn(async () => {});
-    const context = createStoreContext(appendEvent);
+    const context = createStoreContext(appendEvent, "session-test");
 
     enqueueAgentCompletionNotice(context, {
       agent: createAgent({ id: "a1", displayName: "reviewer" }),

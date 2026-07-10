@@ -49,6 +49,8 @@ export type BackgroundTaskStatus =
 export type BackgroundTaskState = {
   id: string;
   kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp" | "index";
+  ownerSessionId?: string;
+  ownerAgentId?: string;
   title: string;
   status: BackgroundTaskStatus;
   currentStep?: string;
@@ -1221,6 +1223,7 @@ export type WorkflowTemplate = {
 
 export type WorkflowRunState = {
   id: string;
+  ownerSessionId?: string;
   goal: string;
   planId: string;
   status: "running" | "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale";

@@ -320,10 +320,18 @@ async function stopSingleBackgroundTask(
   const sessionId = await ensureSession(context);
   const now = new Date().toISOString();
   let aborted = false;
-  if (task.kind === "verification" && context.activeVerificationAbortController) {
-    context.activeVerificationAbortController.abort();
-    context.activeVerificationAbortController = undefined;
-    context.interrupt = { type: "idle" };
+  const verificationController =
+    task.kind === "verification"
+      ? context.activeVerificationAbortControllers?.get(task.id)
+      : undefined;
+  if (verificationController) {
+    verificationController.abort();
+    if (context.activeVerificationAbortControllers?.get(task.id) === verificationController) {
+      context.activeVerificationAbortControllers.delete(task.id);
+    }
+    if (context.interrupt?.type === "running" && context.interrupt.taskId === task.id) {
+      context.interrupt = { type: "idle" };
+    }
     aborted = true;
   } else {
     aborted = abortBackgroundTask(context, task.id);
@@ -499,15 +507,29 @@ export async function interruptAllActiveWork(
       todo.evidence = todo.evidence ? `${todo.evidence}; ${pauseText}` : pauseText;
     }
   };
+  const ownedByCurrentSession = (task: BackgroundTaskState): boolean => {
+    if (task.ownerSessionId) return task.ownerSessionId === sessionId;
+    return task.kind !== "agent" && task.kind !== "verification" && task.kind !== "job";
+  };
 
-  if (context.activeVerificationAbortController) {
-    context.activeVerificationAbortController.abort();
-    context.activeVerificationAbortController = undefined;
-    markAbortSignalSent();
-    const verificationTasks = context.backgroundTasks.filter(
-      (task) => task.kind === "verification" && isActiveBackgroundStatus(task.status),
-    );
-    for (const verificationTask of verificationTasks) {
+  const verificationTasks = context.backgroundTasks.filter(
+    (task) =>
+      task.kind === "verification" &&
+      ownedByCurrentSession(task) &&
+      isActiveBackgroundStatus(task.status),
+  );
+  for (const verificationTask of verificationTasks) {
+    const controller = context.activeVerificationAbortControllers?.get(verificationTask.id);
+    if (controller) {
+      controller.abort();
+      if (context.activeVerificationAbortControllers?.get(verificationTask.id) === controller) {
+        context.activeVerificationAbortControllers.delete(verificationTask.id);
+      }
+      markAbortSignalSent();
+    } else {
+      cancelled += 1;
+      markedOnly += 1;
+    }
       verificationTask.status = "cancelled";
       verificationTask.result = "cancelled";
       verificationTask.updatedAt = now;
@@ -517,8 +539,7 @@ export async function interruptAllActiveWork(
         context.language === "en-US"
           ? "Abort signal sent; process exit is not confirmed yet. Review the verification log, then rerun /verify if needed."
           : "已发送取消信号；尚未确认进程退出。先查看验证日志，必要时复跑 /verify。";
-      await appendBackgroundTaskEvent(context, sessionId, verificationTask);
-    }
+    await appendBackgroundTaskEvent(context, sessionId, verificationTask);
   }
 
   if (context.activeAbortController) {
@@ -553,7 +574,9 @@ export async function interruptAllActiveWork(
     markAbortSignalSent();
   }
 
-  const workflowRuns = getWorkflowRuns(context).filter((run) => run.status === "running");
+  const workflowRuns = getWorkflowRuns(context).filter(
+    (run) => run.status === "running" && run.ownerSessionId === sessionId,
+  );
   const workflowRunIds = new Set(workflowRuns.map((run) => run.id));
   for (const workflowRun of workflowRuns) {
     const workflowTask =
@@ -578,7 +601,13 @@ export async function interruptAllActiveWork(
     context.agents.filter((agent) => agent.status === "running").map((agent) => agent.id),
   );
   const activeTasks = context.backgroundTasks
-    .filter((task) => isRuntimeActiveBackgroundTask(task) && !workflowRunIds.has(task.id))
+    .filter(
+      (task) =>
+        ownedByCurrentSession(task) &&
+        task.kind !== "verification" &&
+        isRuntimeActiveBackgroundTask(task) &&
+        !workflowRunIds.has(task.id),
+    )
     .filter((task) => !runningAgentIds.has(task.id));
   for (const task of activeTasks) {
     const aborted = abortBackgroundTask(context, task.id);
@@ -615,7 +644,9 @@ export async function interruptAllActiveWork(
     await appendBackgroundTaskEvent(context, sessionId, task);
   }
 
-  for (const agent of context.agents.filter((item) => item.status === "running")) {
+  for (const agent of context.agents.filter(
+    (item) => item.status === "running" && item.parentSessionId === sessionId,
+  )) {
     const hadController = Boolean(context.backgroundAbortControllers?.has(agent.id));
     await cancelAgentByRef(agent.id, context, createSilentOutput());
     cancelled += 1;

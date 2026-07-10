@@ -1559,7 +1559,7 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
       task.confirmedExitedAt = new Date().toISOString();
       task.cancelState = "confirmed_exited";
     }
-    const sessionId = context.sessionId;
+    const sessionId = task.ownerSessionId ?? context.sessionId;
     if (sessionId) {
       void appendBackgroundTaskEvent(context, sessionId, task).catch(() => {});
       const evidence = createEvidenceRecord(
@@ -1568,7 +1568,7 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
         result.outputPath,
         result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
       );
-      rememberEvidence(context, evidence);
+      if (context.sessionId === sessionId) rememberEvidence(context, evidence);
       void context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence }).catch(() => {});
     }
   };
@@ -1581,6 +1581,8 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
   );
   return { context, store };
 }
+
+export const __testCreateTuiRuntimeContext = createTuiRuntimeContext;
 
 async function hydrateRuntimeContext(context: TuiContext): Promise<void> {
   await loadPersistedCacheHistory(context);

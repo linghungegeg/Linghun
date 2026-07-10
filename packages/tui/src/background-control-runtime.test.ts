@@ -1,6 +1,8 @@
 import { Writable } from "node:stream";
+import { defaultConfig } from "@linghun/config";
 import { builtInTools, createToolContext, type ToolOutput } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
+import { interruptAllActiveWork } from "./background-control-runtime.js";
 import { executeApprovedModelToolUse } from "./model-tool-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 
@@ -116,4 +118,57 @@ describe("foreground delayed tool ownership", () => {
       await runDelayedReadIsolationIteration(iteration);
     }
   }, 30_000);
+});
+
+describe("session-scoped background interrupt", () => {
+  it("does not cancel another session's background owner", async () => {
+    const events: unknown[] = [];
+    const context = makeContext(events);
+    context.sessionId = "session-b";
+    context.sessionStoreVerifiedId = "session-b";
+    context.projectPath = process.cwd();
+    context.config = defaultConfig;
+    context.memory = { sessionDir: "" } as TuiContext["memory"];
+    context.agents = [];
+    context.workflows = {
+      enabled: true,
+      templates: [],
+      disabledIds: [],
+      activeRuns: [],
+    };
+    const taskA = {
+      id: "background-a",
+      kind: "bash" as const,
+      ownerSessionId: "session-a",
+      title: "session A task",
+      status: "running" as const,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      heartbeatIntervalMs: 30_000,
+      staleAfterMs: 120_000,
+      hasOutput: false,
+      userVisibleSummary: "A running",
+    };
+    const taskB = {
+      ...taskA,
+      id: "background-b",
+      ownerSessionId: "session-b",
+      title: "session B task",
+    };
+    context.backgroundTasks = [taskA, taskB];
+    const controllerA = new AbortController();
+    const controllerB = new AbortController();
+    context.backgroundAbortControllers = new Map([
+      [taskA.id, controllerA],
+      [taskB.id, controllerB],
+    ]);
+
+    const result = await interruptAllActiveWork(context);
+
+    expect(result).toEqual({ cancelled: 1, abortSignalsSent: 1, markedOnly: 0 });
+    expect(controllerA.signal.aborted).toBe(false);
+    expect(taskA.status).toBe("running");
+    expect(controllerB.signal.aborted).toBe(true);
+    expect(taskB.status).toBe("cancelled");
+  });
 });

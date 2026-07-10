@@ -200,7 +200,7 @@ export async function reevaluatePendingLocalApprovalAfterModeChange(
 
 function hasActiveInterruptibleWork(context: TuiContext): boolean {
   if (context.activeAbortController) return true;
-  if (context.activeVerificationAbortController) return true;
+  if (context.activeVerificationAbortControllers?.size) return true;
   if (context.backgroundAbortControllers && context.backgroundAbortControllers.size > 0)
     return true;
   if (context.interrupt?.type === "running") return true;
@@ -511,6 +511,11 @@ export async function executePermissionApprove(
       context,
       approval.sessionId,
     );
+    if (result.cancelled) {
+      writeLine(output, `agent ${agent.id} 已取消，未回灌 ${approval.toolName} 结果。`);
+      writeStatus(output, context);
+      return;
+    }
     await appendToolResultEvent(
       context,
       approval.sessionId,

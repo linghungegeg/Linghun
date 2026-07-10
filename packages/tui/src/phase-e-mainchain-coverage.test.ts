@@ -5,7 +5,7 @@ import { Writable } from "node:stream";
 import { defaultConfig } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import type { ModelGateway, ModelMessage, ModelRequest, ModelToolCall } from "@linghun/providers";
-import { builtInTools, createToolContext } from "@linghun/tools";
+import { builtInTools, createToolContext, type ToolOutput } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
@@ -13,6 +13,8 @@ import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
 import { rememberCacheSafePrefix } from "./cache-policy-runtime.js";
 import {
   configureJobAgentCommandRuntime,
+  cancelAgent,
+  executeApprovedAgentToolUse,
   runModelBackedAgent,
 } from "./job-agent-command-runtime.js";
 import {
@@ -49,6 +51,11 @@ import type {
   VerificationReport,
 } from "./tui-data-types.js";
 import { decidePermission } from "./tui-permission-runtime.js";
+import {
+  createAgentBackgroundTask,
+  registerBackgroundAbortController,
+  rememberBackgroundTask,
+} from "./tui-agent-job-runtime.js";
 import {
   createCacheState,
   createMcpState,
@@ -418,6 +425,136 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(recovered.summary).toContain("recovered with final answer");
   });
 
+  it("isolates concurrent agent tool abort owners and drops cancelled late results", async () => {
+    const context = await createTestContext([
+      [
+        { type: "tool_use", id: "tool-a", name: "Read", input: { path: "agent-a.txt" } },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "tool_calls" },
+      ],
+      [
+        { type: "tool_use", id: "tool-b", name: "Read", input: { path: "agent-b.txt" } },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "tool_calls" },
+      ],
+      [
+        { type: "assistant_text_delta", text: "agent B final" },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
+    ]);
+    const childA = await context.store.create({ model: context.model });
+    const childB = await context.store.create({ model: context.model });
+    const agentA = createAgentRun(context, {
+      id: "agent-owner-a",
+      maxTurns: 2,
+      transcriptPath: childA.transcriptPath,
+      transcriptSessionId: childA.id,
+    });
+    const agentB = createAgentRun(context, {
+      id: "agent-owner-b",
+      maxTurns: 2,
+      transcriptPath: childB.transcriptPath,
+      transcriptSessionId: childB.id,
+    });
+    context.agents.push(agentA, agentB);
+    const taskA = createAgentBackgroundTask(agentA, context);
+    const taskB = createAgentBackgroundTask(agentB, context);
+    rememberBackgroundTask(context, taskA);
+    rememberBackgroundTask(context, taskB);
+    const controllerA = registerBackgroundAbortController(context, agentA.id);
+    const controllerB = registerBackgroundAbortController(context, agentB.id);
+    const foregroundController = new AbortController();
+    context.tools.abortSignal = foregroundController.signal;
+    const delayedA = deferred<ToolOutput>();
+    const delayedB = deferred<ToolOutput>();
+    const startedA = deferred<void>();
+    const startedB = deferred<void>();
+    const seenSignals = new Map<string, AbortSignal | undefined>();
+    const originalRead = builtInTools.Read.call;
+    builtInTools.Read.call = (async (input: unknown, toolContext: { abortSignal?: AbortSignal }) => {
+      const path = (input as { path?: string }).path ?? "";
+      seenSignals.set(path, toolContext.abortSignal);
+      if (path === "agent-a.txt") {
+        startedA.resolve();
+        return delayedA.promise;
+      }
+      startedB.resolve();
+      return delayedB.promise;
+    }) as typeof originalRead;
+
+    try {
+      const runA = runModelBackedAgent(agentA, context, new MemoryOutput());
+      await startedA.promise;
+      const runB = runModelBackedAgent(agentB, context, new MemoryOutput());
+      await startedB.promise;
+
+      await cancelAgent(agentA, context, new MemoryOutput());
+      expect(controllerA.signal.aborted).toBe(true);
+      expect(controllerB.signal.aborted).toBe(false);
+      expect(foregroundController.signal.aborted).toBe(false);
+      expect(seenSignals.get("agent-a.txt")).toBe(controllerA.signal);
+      expect(seenSignals.get("agent-b.txt")).toBe(controllerB.signal);
+
+      delayedB.resolve({ text: "B read complete" });
+      const resultB = await runB;
+      expect(resultB.status).toBe("completed");
+      delayedA.resolve({ text: "A late read must be dropped" });
+      const resultA = await runA;
+      expect(resultA.status).toBe("blocked");
+
+      const transcriptA = (await context.store.resume(childA.id)).transcript;
+      expect(transcriptA.some((event) => event.type === "tool_call_end")).toBe(false);
+      expect(transcriptA.some((event) => event.type === "tool_result")).toBe(false);
+      expect(context.evidence.some((item) => item.summary.includes("A late read"))).toBe(false);
+    } finally {
+      builtInTools.Read.call = originalRead;
+    }
+  });
+
+  it("cancels an approved agent tool owner and drops its late result", async () => {
+    const context = await createTestContext([]);
+    const child = await context.store.create({ model: context.model });
+    const agent = createAgentRun(context, {
+      id: "agent-approved-owner",
+      transcriptPath: child.transcriptPath,
+      transcriptSessionId: child.id,
+    });
+    agent.status = "blocked";
+    context.agents.push(agent);
+    rememberBackgroundTask(context, createAgentBackgroundTask(agent, context));
+    const delayed = deferred<ToolOutput>();
+    const started = deferred<void>();
+    const originalWrite = builtInTools.Write.call;
+    builtInTools.Write.call = (async () => {
+      started.resolve();
+      return delayed.promise;
+    }) as typeof originalWrite;
+
+    try {
+      const pending = executeApprovedAgentToolUse(
+        agent,
+        {
+          id: "approved-tool-owner",
+          name: "Write",
+          input: { path: "late-approved.txt", content: "late" },
+        },
+        "Write",
+        context,
+        agent.parentSessionId ?? "session-parent",
+      );
+      await started.promise;
+      expect(agent.status).toBe("running");
+      await cancelAgent(agent, context, new MemoryOutput());
+      delayed.resolve({ text: "late approved write result" });
+      const result = await pending;
+
+      expect(result.cancelled).toBe(true);
+      const transcript = (await context.store.resume(child.id)).transcript;
+      expect(transcript.some((event) => event.type === "tool_result")).toBe(false);
+      expect(context.evidence.some((item) => item.summary.includes("late approved"))).toBe(false);
+    } finally {
+      builtInTools.Write.call = originalWrite;
+    }
+  });
+
   it("runModelBackedAgent keeps default handoff separate from explicit full-context fork", async () => {
     const parentMessages: ModelMessage[] = [
       { role: "system", content: "PARENT_SYSTEM_SENTINEL stable runtime" },
@@ -765,6 +902,14 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
 
 function call(name: string, input: unknown): ModelToolCall {
   return { id: `tc-${name}-${Math.random().toString(16).slice(2)}`, name, input };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function gateway(

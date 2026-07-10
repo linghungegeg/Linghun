@@ -577,6 +577,7 @@ export async function recordVerificationEvidence(
   context: TuiContext,
   sessionId: string,
   report: VerificationReport,
+  options: { rememberInContext?: boolean } = {},
 ): Promise<void> {
   const supportsClaims = deriveVerificationSupportsClaims(report);
   const evidence = createEvidenceRecord(
@@ -585,7 +586,7 @@ export async function recordVerificationEvidence(
     report.logPath ?? "Verification Runner",
     supportsClaims,
   );
-  rememberEvidence(context, evidence);
+  if (options.rememberInContext !== false) rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,

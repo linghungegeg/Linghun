@@ -61,6 +61,7 @@ import type {
 import {
   createVerificationPlan,
   createVerificationUnavailableReport,
+  isCurrentVerificationReport,
   runVerificationPlan,
 } from "./verification-command-runtime.js";
 import type {
@@ -91,6 +92,7 @@ export type WorkflowCommandRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     report: VerificationReport,
+    options?: { rememberInContext?: boolean },
   ) => Promise<void>;
   captureFailureLearning: (
     context: TuiContext,
@@ -150,8 +152,9 @@ function recordVerificationEvidence(
   context: TuiContext,
   sessionId: string,
   report: VerificationReport,
+  options?: { rememberInContext?: boolean },
 ): Promise<void> {
-  return getWorkflowDeps().recordVerificationEvidence(context, sessionId, report);
+  return getWorkflowDeps().recordVerificationEvidence(context, sessionId, report, options);
 }
 
 function captureFailureLearning(
@@ -632,6 +635,7 @@ function recoverWorkflowRunState(state: DurableWorkflowRunState): WorkflowRunSta
   const status = state.status === "running" && hasStale ? "stale" : state.status;
   return {
     id: state.id,
+    ...(state.ownerSessionId ? { ownerSessionId: state.ownerSessionId } : {}),
     goal: state.goal,
     planId: state.planId,
     status,
@@ -655,6 +659,7 @@ function createWorkflowBackgroundProjection(
   const staleStep = run.steps.find((step) => step.status === "stale");
   return {
     ...task,
+    ...(run.ownerSessionId ? { ownerSessionId: run.ownerSessionId } : {}),
     status: run.status === "running" ? "running" : run.status === "stale" ? "stale" : task.status,
     currentStep: staleStep?.summary ?? runningStep?.title ?? task.currentStep,
     updatedAt: new Date().toISOString(),
@@ -689,6 +694,7 @@ export function createWorkflowInterruptBackgroundTask(
   return {
     id: run.id,
     kind: "job",
+    ...(run.ownerSessionId ? { ownerSessionId: run.ownerSessionId } : {}),
     title: `${titlePrefix}: ${truncateDisplay(run.goal, 50)}`,
     status: "running",
     currentStep: runningStep?.title ?? "workflow running",
@@ -1017,6 +1023,7 @@ async function runWorkflowPlanSteps(
   const workflowTask: BackgroundTaskState = {
     id: runId,
     kind: "job",
+    ownerSessionId: sessionId,
     title: `${taskTitlePrefix}: ${truncateDisplay(goal, 50)}`,
     status: "running",
     currentStep: isMultiAgent ? "agents starting" : "workflow starting",
@@ -1039,6 +1046,7 @@ async function runWorkflowPlanSteps(
   const engineeringSignal = snapshotEngineeringSignal(context);
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
+    ownerSessionId: sessionId,
     goal,
     planId: plan.id,
     status: "running",
@@ -1355,6 +1363,7 @@ export async function runRegistryWorkflow(
   const task: BackgroundTaskState = {
     id: runId,
     kind: "job",
+    ownerSessionId: sessionId,
     title: `Workflow: ${truncateDisplay(workflow.name || "workflow", 50)}`,
     status: "running",
     currentStep: "workflow starting",
@@ -1377,6 +1386,7 @@ export async function runRegistryWorkflow(
   const engineeringSignal = snapshotEngineeringSignal(context);
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
+    ownerSessionId: sessionId,
     goal: goal || workflow.description,
     planId: workflow.id,
     status: "running",
@@ -1569,12 +1579,11 @@ async function executeRegistryWorkflowStep(
       handledKnownAction = true;
       const role = step.role ?? "worker";
       const task = step.task ?? (goal || workflow.description);
-      const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand([role, task], context, output, {
+      const agent = await handleForkCommand([role, task], context, output, {
         ...(workflowRunId ? { workflowRunId } : {}),
+        ...(run?.ownerSessionId ? { ownerSessionId: run.ownerSessionId } : {}),
         ...(run?.engineeringSignal ? { engineeringSignal: run.engineeringSignal } : {}),
       });
-      const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
       if (!agent) {
         return {
           status: "blocked",
@@ -1586,26 +1595,41 @@ async function executeRegistryWorkflowStep(
               : "agent runtime 未启动；步骤正在等待 runtime/resource 可用",
             context.language,
           ),
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: [],
         };
       }
+      const agentEvidenceRefs = workflowAgentEvidenceRefs(context, agent.id, workflowRunId);
       if (agent.status === "failed") {
         return {
           status: "failed",
           summary: formatWorkflowStepSummary(step.id, "failed", agent.summary, context.language),
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: agentEvidenceRefs,
         };
       }
       if (agent.status === "blocked" || agent.status === "stale" || agent.status === "cancelled") {
         return {
           status: agent.status === "cancelled" ? "cancelled" : "blocked",
           summary: formatWorkflowStepSummary(step.id, "blocked", agent.summary, context.language),
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: agentEvidenceRefs,
         };
       }
+      return {
+        status: "completed",
+        summary: formatWorkflowStepSummary(
+          step.id,
+          "completed",
+          context.language === "en-US"
+            ? "registry action completed: agent"
+            : "registry 操作已完成：agent",
+          context.language,
+        ),
+        evidenceRefs: agentEvidenceRefs,
+      };
     } else if (step.action === "verification") {
       handledKnownAction = true;
-      const report = await runWorkflowVerificationStep(step.level ?? "focused", context, output);
+      const report = await runWorkflowVerificationStep(step.level ?? "focused", context, output, {
+        ownerSessionId: run?.ownerSessionId,
+      });
       const status = workflowStepStatusFromVerification(report.status);
       if (status !== "completed") {
         return {
@@ -1825,8 +1849,7 @@ async function executeWorkflowStep(
           evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
         };
       }
-      const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand(
+      const agent = await handleForkCommand(
         [
           req.role,
           req.task,
@@ -1836,16 +1859,20 @@ async function executeWorkflowStep(
         output,
         {
           workflowRunId,
+          ...(run?.ownerSessionId ? { ownerSessionId: run.ownerSessionId } : {}),
           ...(run?.engineeringSignal ? { engineeringSignal: run.engineeringSignal } : {}),
         },
       );
-      const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
       const agentTask = agent
         ? context.backgroundTasks.find((task) => task.id === agent.id)
         : undefined;
       if (agentTask && workflowRunId) {
         agentTask.workflowRunId = workflowRunId;
-        await appendBackgroundTaskEvent(context, await ensureSession(context), agentTask);
+        await appendBackgroundTaskEvent(
+          context,
+          agentTask.ownerSessionId ?? run?.ownerSessionId ?? (await ensureSession(context)),
+          agentTask,
+        );
       }
       if (!agent) {
         const summary = formatWorkflowStepSummary(
@@ -1860,7 +1887,7 @@ async function executeWorkflowStep(
         return {
           status: "blocked",
           summary,
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: [],
         };
       }
       if (!agentTask) {
@@ -1876,9 +1903,10 @@ async function executeWorkflowStep(
         return {
           status: "blocked",
           summary,
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: [],
         };
       }
+      const agentEvidenceRefs = workflowAgentEvidenceRefs(context, agent.id, workflowRunId);
       if (agent?.status === "failed") {
         const summary = formatWorkflowStepSummary(
           request.sliceId,
@@ -1890,7 +1918,21 @@ async function executeWorkflowStep(
         return {
           status: "failed",
           summary,
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: agentEvidenceRefs,
+        };
+      }
+      if (agent.status === "cancelled" || agent.status === "stale") {
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          agent.status,
+          agent.summary,
+          context.language,
+        );
+        await captureWorkflowFailureLearning(request, summary, context);
+        return {
+          status: agent.status,
+          summary,
+          evidenceRefs: agentEvidenceRefs,
         };
       }
       if (agent?.status === "blocked" || agent?.summary.includes("权限管道拒绝")) {
@@ -1904,9 +1946,19 @@ async function executeWorkflowStep(
         return {
           status: "blocked",
           summary,
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: agentEvidenceRefs,
         };
       }
+      return {
+        status: "completed",
+        summary: formatWorkflowStepSummary(
+          request.sliceId,
+          "completed",
+          context.language === "en-US" ? "completed via fork" : "已通过 fork 完成",
+          context.language,
+        ),
+        evidenceRefs: agentEvidenceRefs,
+      };
     } else if (req.mainChain === "verification") {
       const constraints = currentRequestUserActionConstraints(context);
       const verificationBlockedByUser =
@@ -1916,6 +1968,7 @@ async function executeWorkflowStep(
         verificationBlockedByUser ? "plan-only" : req.level,
         context,
         output,
+        { ownerSessionId: run?.ownerSessionId },
       );
       const status = workflowStepStatusFromVerification(report.status);
       if (status !== "completed") {
@@ -1972,14 +2025,20 @@ async function executeWorkflowStep(
           ],
           context,
           output,
-          { ignoreForegroundModelGuard: options.ignoreForegroundModelGuard === true },
+          {
+            ignoreForegroundModelGuard: options.ignoreForegroundModelGuard === true,
+            workflowRunId,
+          },
         );
       } else {
         await runNestedWorkflowJobCommand(
           [req.action, req.jobRef ?? ""].filter(Boolean),
           context,
           output,
-          { ignoreForegroundModelGuard: options.ignoreForegroundModelGuard === true },
+          {
+            ignoreForegroundModelGuard: options.ignoreForegroundModelGuard === true,
+            workflowRunId,
+          },
         );
       }
       const readonlyJobActions = new Set(["list", "logs"]);
@@ -2448,15 +2507,19 @@ export async function runWorkflowVerificationStep(
   level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint",
   context: TuiContext,
   output: Writable,
+  options: { ownerSessionId?: string } = {},
 ): Promise<VerificationReport> {
-  const sessionId = await ensureSession(context);
+  const sessionId = options.ownerSessionId ?? (await ensureSession(context));
+  const publishToCurrentSession = !context.sessionId || context.sessionId === sessionId;
   if (level === "plan-only") {
     const report = createVerificationUnavailableReport(
       "focused",
       "plan-only requested; commands were not executed.",
     );
-    context.lastVerification = report;
-    await recordVerificationEvidence(context, sessionId, report);
+    if (publishToCurrentSession) context.lastVerification = report;
+    await recordVerificationEvidence(context, sessionId, report, {
+      rememberInContext: publishToCurrentSession,
+    });
     return report;
   }
   const plan =
@@ -2478,8 +2541,10 @@ export async function runWorkflowVerificationStep(
       "real-smoke",
       "package.json smoke script is missing; synthetic smoke is not real-smoke.",
     );
-    context.lastVerification = report;
-    await recordVerificationEvidence(context, sessionId, report);
+    if (publishToCurrentSession) context.lastVerification = report;
+    await recordVerificationEvidence(context, sessionId, report, {
+      rememberInContext: publishToCurrentSession,
+    });
     return report;
   }
   const report = await runVerificationPlan(
@@ -2488,9 +2553,14 @@ export async function runWorkflowVerificationStep(
     sessionId,
     output,
     appendBackgroundTaskEvent,
+    { ownerSessionId: sessionId },
   );
-  context.lastVerification = report;
-  await recordVerificationEvidence(context, sessionId, report);
+  if (isCurrentVerificationReport(context, report)) {
+    if (publishToCurrentSession) context.lastVerification = report;
+    await recordVerificationEvidence(context, sessionId, report, {
+      rememberInContext: publishToCurrentSession,
+    });
+  }
   return report;
 }
 
@@ -2498,10 +2568,13 @@ async function runNestedWorkflowJobCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
-  options: { ignoreForegroundModelGuard?: boolean } = {},
+  options: { ignoreForegroundModelGuard?: boolean; workflowRunId?: string } = {},
 ): Promise<void> {
   const workflowTaskIndex = context.backgroundTasks.findIndex(
-    (task) => task.kind === "job" && task.id.startsWith("workflow-") && task.status === "running",
+    (task) =>
+      task.kind === "job" &&
+      task.id === options.workflowRunId &&
+      task.status === "running",
   );
   const activeAbortController =
     options.ignoreForegroundModelGuard === true ? context.activeAbortController : undefined;
@@ -2513,7 +2586,7 @@ async function runNestedWorkflowJobCommand(
       await handleJobCommand(args, context, output);
       return;
     } finally {
-      if (activeAbortController) {
+      if (activeAbortController && context.activeAbortController === undefined) {
         context.activeAbortController = activeAbortController;
       }
     }
@@ -2522,7 +2595,7 @@ async function runNestedWorkflowJobCommand(
   try {
     await handleJobCommand(args, context, output);
   } finally {
-    if (activeAbortController) {
+    if (activeAbortController && context.activeAbortController === undefined) {
       context.activeAbortController = activeAbortController;
     }
     if (workflowTask && !context.backgroundTasks.some((task) => task.id === workflowTask.id)) {
@@ -2655,6 +2728,19 @@ function workflowRuntimeKind(request: WorkflowBridgeRequestProposal): WorkflowSt
 function newWorkflowEvidenceRefs(before: string[], context: TuiContext): string[] {
   const seen = new Set(before);
   return context.evidence.map((item) => item.id).filter((id) => !seen.has(id));
+}
+
+function workflowAgentEvidenceRefs(
+  context: TuiContext,
+  agentId: string,
+  workflowRunId?: string,
+): string[] {
+  const notice = context.agentCompletions?.notices.find(
+    (item) =>
+      item.agentId === agentId &&
+      (!workflowRunId || item.workflowRunId === workflowRunId),
+  );
+  return notice?.evidenceRefs ?? [];
 }
 
 function mergeWorkflowEvidenceRefs(...groups: string[][]): string[] {

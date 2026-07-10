@@ -79,7 +79,12 @@ export function enqueueAgentCompletionNotice(
 export function collectPendingAgentCompletionNotices(context: TuiContext): AgentCompletionNotice[] {
   const state = ensureAgentCompletionState(context);
   const reported = new Set(state.reportedNoticeIds);
-  return state.notices.filter((notice) => !notice.reportedAt && !reported.has(notice.id));
+  return state.notices.filter(
+    (notice) =>
+      !notice.reportedAt &&
+      !reported.has(notice.id) &&
+      (!context.sessionId || notice.parentSessionId === context.sessionId),
+  );
 }
 
 export function markAgentCompletionNoticeReported(
@@ -100,7 +105,7 @@ export function formatAgentCompletionDigest(context: TuiContext): string | null 
   const pending = collectPendingAgentCompletionNotices(context);
   if (pending.length === 0) return null;
   const state = ensureAgentCompletionState(context);
-  const latestBatch = state.batchSummaries[0];
+  const latestBatch = findLatestPendingBatch(state.batchSummaries, pending);
   const isEn = context.language === "en-US";
   const counts = summarizeNotices(pending);
   const lines = [
@@ -136,7 +141,7 @@ export function formatAgentCompletionMainChainContext(context: TuiContext): stri
   const pending = collectPendingAgentCompletionNotices(context);
   if (pending.length === 0) return null;
   const state = ensureAgentCompletionState(context);
-  const latestBatch = state.batchSummaries[0];
+  const latestBatch = findLatestPendingBatch(state.batchSummaries, pending);
   const isEn = context.language === "en-US";
   const lines = [
     isEn
@@ -290,6 +295,14 @@ function getNoticeScopeKey(notice: AgentCompletionNotice): string {
       : notice.parentSessionId
         ? `session:${notice.parentSessionId}`
         : `agent:${notice.agentId}`;
+}
+
+function findLatestPendingBatch(
+  batches: AgentCompletionBatchSummary[],
+  pending: AgentCompletionNotice[],
+): AgentCompletionBatchSummary | undefined {
+  const pendingScopeKeys = new Set(pending.map(getNoticeScopeKey));
+  return batches.find((batch) => pendingScopeKeys.has(batch.scopeKey));
 }
 
 function formatAgentLabel(notice: AgentCompletionNotice): string {

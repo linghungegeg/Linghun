@@ -356,11 +356,12 @@ export type TuiContext = {
   visionObservations: VisionObservation[];
   imageResults: ImageGenerationResult[];
   lastVerification?: VerificationReport;
+  latestVerificationRunId?: string;
   activePlan?: PlanProposal;
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
   foregroundAbortPendingUntilMs?: number;
-  activeVerificationAbortController?: AbortController;
+  activeVerificationAbortControllers?: Map<string, AbortController>;
   pendingNaturalCommand?: PendingNaturalCommand;
   pendingLocalApproval?: PendingLocalApproval;
   pendingAutopilot?: PendingAutopilotRequest;

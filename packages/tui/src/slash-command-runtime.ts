@@ -975,6 +975,7 @@ import {
   formatVerificationLast,
   formatVerificationPlan,
   formatVerificationTaskSummary,
+  isCurrentVerificationReport,
   runVerificationCommand,
   runVerificationPlan,
 } from "./verification-command-runtime.js";
@@ -2231,8 +2232,10 @@ export async function handleVerifyCommand(
     output,
     appendBackgroundTaskEvent,
   );
-  context.lastVerification = report;
-  await recordVerificationEvidence(context, sessionId, report);
+  if (isCurrentVerificationReport(context, report)) {
+    context.lastVerification = report;
+    await recordVerificationEvidence(context, sessionId, report);
+  }
   writeLine(output, formatVerificationTaskSummary(report, context.language));
   writeStatus(output, context);
 }

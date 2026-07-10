@@ -8,7 +8,11 @@ import { recordVerificationEvidence } from "./evidence-runtime.js";
 import type { TuiContext } from "./index.js";
 import { createCacheState, createHookState } from "./index.js";
 import type { VerificationReport, VerificationStepKind } from "./tui-data-types.js";
-import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
+import {
+  createVerificationPlan,
+  isCurrentVerificationReport,
+  runVerificationPlan,
+} from "./verification-command-runtime.js";
 
 describe("verification-command-runtime", () => {
   afterEach(() => {
@@ -212,6 +216,145 @@ describe("verification-command-runtime", () => {
     expect(report.commands).toHaveLength(1);
     expect(report.unverified.join("\n")).toContain("meta orchestration degrade skipped 1");
   });
+
+  it("creates and runs verification in the owner worktree cwd", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-main-"));
+    const worktreePath = await mkdtemp(join(tmpdir(), "linghun-verify-worktree-"));
+    const packageJson = JSON.stringify({
+      scripts: {
+        test: "node -e \"console.log(require('fs').readFileSync('marker.txt','utf8'))\"",
+      },
+    });
+    await Promise.all([
+      writeFile(join(projectPath, "package.json"), packageJson, "utf8"),
+      writeFile(join(projectPath, "package-lock.json"), "", "utf8"),
+      writeFile(join(projectPath, "marker.txt"), "main-marker", "utf8"),
+      writeFile(join(worktreePath, "package.json"), packageJson, "utf8"),
+      writeFile(join(worktreePath, "package-lock.json"), "", "utf8"),
+      writeFile(join(worktreePath, "marker.txt"), "worktree-marker", "utf8"),
+    ]);
+    const context = await createRunnableVerificationContext(projectPath);
+    const plan = await createVerificationPlan(worktreePath, "default");
+
+    const report = await runVerificationPlan(
+      plan,
+      context,
+      "agent-transcript",
+      new MockWritable(),
+      async () => {},
+      {
+        cwd: worktreePath,
+        ownerAgentId: "agent-worktree",
+        ownerSessionId: "session-owner",
+      },
+    );
+
+    expect(report.status).toBe("pass");
+    expect(report.commands.map((command) => command.summary).join("\n")).toContain(
+      "worktree-marker",
+    );
+    expect(report.commands.map((command) => command.summary).join("\n")).not.toContain(
+      "main-marker",
+    );
+    expect(context.backgroundTasks[0]).toMatchObject({
+      ownerAgentId: "agent-worktree",
+      ownerSessionId: "session-owner",
+      result: "pass",
+    });
+  }, 30_000);
+
+  it("isolates concurrent verification controllers and prevents cancelled late PASS", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-concurrent-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const runA = runVerificationPlan(
+      [
+        {
+          kind: "test",
+          command: "node -e \"setTimeout(() => console.log('A done'), 300)\"",
+          reason: "concurrent A",
+        },
+      ],
+      context,
+      "session-a",
+      new MockWritable(),
+      async () => {},
+      { ownerAgentId: "agent-a", ownerSessionId: "session-a" },
+    );
+    await waitFor(() => context.activeVerificationAbortControllers?.size === 1);
+    const runB = runVerificationPlan(
+      [
+        {
+          kind: "test",
+          command: "node -e \"setTimeout(() => console.log('B done'), 500)\"",
+          reason: "concurrent B",
+        },
+      ],
+      context,
+      "session-b",
+      new MockWritable(),
+      async () => {},
+      { ownerAgentId: "agent-b", ownerSessionId: "session-b" },
+    );
+    await waitFor(() => context.activeVerificationAbortControllers?.size === 2);
+    const taskA = context.backgroundTasks.find((task) => task.ownerAgentId === "agent-a");
+    const taskB = context.backgroundTasks.find((task) => task.ownerAgentId === "agent-b");
+    const controllerB = taskB
+      ? context.activeVerificationAbortControllers?.get(taskB.id)
+      : undefined;
+    if (!taskA || !taskB || !controllerB) throw new Error("verification owners were not registered");
+
+    context.activeVerificationAbortControllers?.get(taskA.id)?.abort();
+    const reportA = await runA;
+    expect(reportA.status).toBe("cancelled");
+    expect(taskA.status).toBe("cancelled");
+    expect(context.activeVerificationAbortControllers?.get(taskB.id)).toBe(controllerB);
+    expect(controllerB.signal.aborted).toBe(false);
+
+    const reportB = await runB;
+    expect(reportB.status).toBe("pass");
+    expect(taskB.result).toBe("pass");
+    expect(context.activeVerificationAbortControllers?.size).toBe(0);
+  }, 30_000);
+
+  it("binds verifier cancellation to its owner signal without PASS evidence", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-owner-abort-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const ownerController = new AbortController();
+    const pending = runVerificationPlan(
+      [
+        {
+          kind: "test",
+          command: "node -e \"setTimeout(() => console.log('late pass'), 500)\"",
+          reason: "owner cancellation",
+        },
+      ],
+      context,
+      "agent-transcript",
+      new MockWritable(),
+      async () => {},
+      {
+        ownerAgentId: "agent-cancelled-verifier",
+        ownerSessionId: "session-owner",
+        ownerSignal: ownerController.signal,
+      },
+    );
+    await waitFor(() => context.activeVerificationAbortControllers?.size === 1);
+    ownerController.abort();
+    const report = await pending;
+    if (isCurrentVerificationReport(context, report)) {
+      context.lastVerification = report;
+      await recordVerificationEvidence(context, "session-owner", report);
+    }
+
+    expect(report.status).toBe("cancelled");
+    expect(context.lastVerification).toBeUndefined();
+    expect(context.evidence).toEqual([]);
+    expect(context.backgroundTasks[0]).toMatchObject({
+      ownerAgentId: "agent-cancelled-verifier",
+      status: "cancelled",
+      result: "cancelled",
+    });
+  }, 30_000);
 });
 
 class MockWritable extends Writable {
@@ -237,6 +380,7 @@ async function createVerificationRunContext(mode: "degrade" | "stop"): Promise<T
     language: "zh-CN",
     backgroundTasks: [],
     backgroundAbortControllers: new Map(),
+    evidence: [],
     cache: createCacheState(projectPath),
     hooks: await createHookState(defaultConfig, projectPath),
     store: {
@@ -258,6 +402,30 @@ async function createVerificationRunContext(mode: "degrade" | "stop"): Promise<T
       },
     },
   } as unknown as TuiContext;
+}
+
+async function createRunnableVerificationContext(projectPath: string): Promise<TuiContext> {
+  return {
+    projectPath,
+    config: defaultConfig,
+    language: "zh-CN",
+    backgroundTasks: [],
+    backgroundAbortControllers: new Map(),
+    evidence: [],
+    cache: createCacheState(projectPath),
+    hooks: await createHookState(defaultConfig, projectPath),
+    store: {
+      appendEvent: vi.fn(async () => {}),
+    },
+  } as unknown as TuiContext;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for verification state");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function makeReport(

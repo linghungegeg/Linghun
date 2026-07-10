@@ -67,6 +67,7 @@ import {
   __testBuildExplicitDetailsCommandPanel,
   __testCloseCommandPanelState,
   __testCreateShellBlockOutput,
+  __testCreateTuiRuntimeContext,
   __testCreateVerificationLevelForReadiness,
   __testFormatStartAgentDidNotStartMessage,
   __testGetCurrentWorkflowStepRequest,
@@ -143,9 +144,11 @@ import {
 import { createControlledMemoryInjection } from "./tui-memory-runtime.js";
 import {
   recoverDurableJobForContext,
+  handleForkCommand,
   resumeDurableJob,
   runDurableJobLiteTick,
 } from "./job-agent-command-runtime.js";
+import { runWorkflowVerificationStep } from "./workflow-command-runtime.js";
 import {
   getDurableJobStatePath,
   listDurableJobs as listDurableJobsFromRuntime,
@@ -428,7 +431,7 @@ function mockOpenAiDelayedTextFetch(finalText = "done", delayMs = 10): unknown[]
   return requests;
 }
 
-function mockOpenAiBarrierFetch(finalText = "done"): {
+function mockOpenAiBarrierFetch(finalText: string | string[] = "done"): {
   requests: unknown[];
   releaseOne: () => void;
   releaseAll: () => void;
@@ -439,10 +442,16 @@ function mockOpenAiBarrierFetch(finalText = "done"): {
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
       requests.push(JSON.parse(String(init.body)));
+      const requestIndex = requests.length - 1;
       await new Promise<void>((resolveBarrier) => {
         resolvers.push(resolveBarrier);
       });
-      const body = `data: ${JSON.stringify({ id: `chatcmpl-barrier-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      const responseText = Array.isArray(finalText)
+        ? (finalText[requestIndex] ?? finalText.at(-1) ?? "")
+        : finalText;
+      const body = responseText
+        ? `data: ${JSON.stringify({ id: `chatcmpl-barrier-${requests.length}`, choices: [{ delta: { content: responseText } }] })}\n\ndata: [DONE]\n\n`
+        : "data: [DONE]\n\n";
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }),
   );
@@ -8671,6 +8680,136 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
+  it("binds parallel workflow forks to their returned agents despite a manual fork insertion", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-fork-owner-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const output = new MemoryOutput();
+    const barrier = mockOpenAiBarrierFetch(["workflow agent A done", ""]);
+    const workflowRunId = "workflow-fork-owner-fixture";
+    const plan = normalizeWorkflowPlan({
+      id: "wf-fork-owner",
+      title: "Fork owner isolation",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: "full-access",
+      currentPhaseId: "phase-fork-owner",
+      phases: [
+        {
+          id: "phase-fork-owner",
+          title: "Fork owner phase",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "confirmed" },
+          slices: ["a", "b"].map((suffix) => ({
+            id: `slice-fork-${suffix}`,
+            title: `Fork ${suffix}`,
+            role: "worker" as const,
+            status: "queued" as const,
+            dependsOnSliceIds: [],
+            independent: true,
+            canRunInParallel: true,
+            targetRuntime: {
+              kind: "slash" as const,
+              slash: "/fork" as const,
+              role: "worker" as const,
+              mutating: false,
+            },
+            nextAction: `workflow owner ${suffix}`,
+          })),
+        },
+      ],
+      budget: { maxRunningAgents: 3 },
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid fork owner plan");
+
+    const workflowPromise = __testRunWorkflowStepsWithPlan(
+      "fork owner isolation",
+      plan.plan,
+      context,
+      output,
+      { runningCap: 3, __testRunId: workflowRunId },
+    );
+    await waitForTestCondition(() => barrier.requests.length === 2);
+    await handleSlashCommand("/fork worker manual owner --background", context, output);
+    const manualAgent = context.agents.find((agent) => agent.task === "manual owner");
+    if (!manualAgent) throw new Error("manual agent was not created");
+    await handleSlashCommand(`/agents cancel ${manualAgent.id}`, context, output);
+    await waitForTestMs(0);
+    barrier.releaseAll();
+    await workflowPromise;
+
+    const workflowAgents = context.agents.filter((agent) => agent.id !== manualAgent.id);
+    expect(new Set(context.agents.map((agent) => agent.id)).size).toBe(3);
+    expect(workflowAgents).toHaveLength(2);
+    expect(context.workflows.activeRun?.steps.map((step) => step.status).sort()).toEqual([
+      "blocked",
+      "completed",
+    ]);
+    for (const agent of workflowAgents) {
+      expect(context.backgroundTasks.find((task) => task.id === agent.id)?.workflowRunId).toBe(
+        workflowRunId,
+      );
+    }
+    expect(context.backgroundTasks.find((task) => task.id === manualAgent.id)?.workflowRunId).toBe(
+      undefined,
+    );
+  }, 30_000);
+
+  it("keeps delayed workflow fork and verification on the workflow owner session", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-session-owner-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const sessionA = await store.create({ model: "route-model" });
+    const sessionB = await store.create({ model: "route-model" });
+    const context = await createTestContext(project, store, sessionB, config);
+    context.modelGateway = createModelGateway(config);
+    const output = new MemoryOutput();
+    mockOpenAiTextFetch("workflow owner agent done");
+
+    const agent = await handleForkCommand(
+      ["worker", "workflow owner task"],
+      context,
+      output,
+      { workflowRunId: "workflow-owner-a", ownerSessionId: sessionA.id },
+    );
+    if (!agent) throw new Error("workflow owner agent was not created");
+    expect(agent.parentSessionId).toBe(sessionA.id);
+    expect(context.backgroundTasks.find((task) => task.id === agent.id)).toMatchObject({
+      ownerSessionId: sessionA.id,
+      workflowRunId: "workflow-owner-a",
+    });
+
+    context.lastVerification = undefined;
+    context.evidence = [];
+    await runWorkflowVerificationStep("plan-only", context, output, {
+      ownerSessionId: sessionA.id,
+    });
+    expect(context.lastVerification).toBeUndefined();
+    expect(context.evidence).toEqual([]);
+    const transcriptA = (await store.resume(sessionA.id)).transcript;
+    const transcriptB = (await store.resume(sessionB.id)).transcript;
+    expect(
+      transcriptA.some(
+        (event) =>
+          event.type === "agent_start" &&
+          (event.agent as { id?: string }).id === agent.id,
+      ),
+    ).toBe(true);
+    expect(transcriptA.some((event) => event.type === "evidence_record")).toBe(true);
+    expect(
+      transcriptB.some(
+        (event) =>
+          event.type === "agent_start" &&
+          (event.agent as { id?: string }).id === agent.id,
+      ),
+    ).toBe(false);
+    expect(transcriptB.some((event) => event.type === "evidence_record")).toBe(false);
+  }, 30_000);
+
   it("marks workflow blocked when one slice cannot produce a main-chain request", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-workflow-blocked-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -14860,18 +14999,24 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(3);
-    for (const request of requests) {
+    const modelRequests = requests.filter(
+      (request) =>
+        !JSON.stringify(request.body).includes(
+          "You are Linghun's memory extraction classifier.",
+        ),
+    );
+    expect(modelRequests).toHaveLength(3);
+    for (const request of modelRequests) {
       expect(request.url).toBe("https://relay.example.com/v1/messages");
       expect(request.url.endsWith("/chat/completions")).toBe(false);
     }
-    const childRequest = requests[1];
+    const childRequest = modelRequests[1];
     const childRequestText = JSON.stringify(childRequest?.body ?? {});
     expect(childRequestText).toContain("child agent running in an isolated sidechain transcript");
     expect(childRequestText).not.toContain("toolu_start_budget_1");
     expect(childRequestText).not.toContain('"type":"tool_result"');
 
-    const mainContinuation = requests[2];
+    const mainContinuation = modelRequests[2];
     const mainContinuationText = JSON.stringify(mainContinuation?.body ?? {});
     expect(mainContinuationText).not.toContain(
       "child agent running in an isolated sidechain transcript",
@@ -19723,6 +19868,43 @@ describe("Phase 06 TUI slash commands", () => {
     expect(lastBgUpdate?.task?.cancelState).toBe("confirmed_exited");
   });
 
+  it("writes background Bash completion only to its owner session", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-owner-session-"));
+    const { context, store } = await __testCreateTuiRuntimeContext(project);
+    const sessionA = await store.create({ model: context.model });
+    const sessionB = await store.create({ model: context.model });
+    context.sessionId = sessionB.id;
+    const task = createBackgroundTaskFixture("bash", { id: "background-owner-session" });
+    task.ownerSessionId = sessionA.id;
+    context.backgroundTasks = [task];
+    const toolsTaskId = "tools-background-owner-session";
+    context.backgroundBashTaskMap?.set(toolsTaskId, task.id);
+
+    context.tools.onBackgroundBashComplete?.({
+      taskId: toolsTaskId,
+      exitCode: 0,
+      outcome: "completed",
+      outputPath: join(project, "background-owner.log"),
+      command: "node owner-session.js",
+    });
+
+    let ownerEvidenceWritten = false;
+    for (let attempt = 0; attempt < 100 && !ownerEvidenceWritten; attempt += 1) {
+      ownerEvidenceWritten = (await store.resume(sessionA.id)).transcript.some(
+        (event) => event.type === "evidence_record" && event.summary.includes("Bash(background)"),
+      );
+      if (!ownerEvidenceWritten) await waitForTestMs(10);
+    }
+    expect(ownerEvidenceWritten).toBe(true);
+    const transcriptA = (await store.resume(sessionA.id)).transcript;
+    const transcriptB = (await store.resume(sessionB.id)).transcript;
+    expect(transcriptA.some((event) => event.type === "background_task_update")).toBe(true);
+    expect(transcriptA.some((event) => event.type === "evidence_record")).toBe(true);
+    expect(transcriptB.some((event) => event.type === "background_task_update")).toBe(false);
+    expect(transcriptB.some((event) => event.type === "evidence_record")).toBe(false);
+    expect(context.evidence.some((item) => item.summary.includes("Bash(background)"))).toBe(false);
+  });
+
   it("retained background Bash completion releases the TUI background slot", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -20801,16 +20983,15 @@ describe("Phase 06 TUI slash commands", () => {
 
     const running = handleSlashCommand("/verify", context, output);
     await waitForTestCondition(
-      () => Boolean(context.activeVerificationAbortController) && output.text.includes("验证步骤"),
+      () => Boolean(context.activeVerificationAbortControllers?.size) && output.text.includes("验证步骤"),
     );
     await handleSlashCommand("/interrupt", context, output);
     await running;
 
-    expect(context.lastVerification?.status).toBe("cancelled");
+    expect(context.lastVerification).toBeUndefined();
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
-    expect(context.evidence[0]?.supportsClaims).not.toContain("已验证");
-    expect(context.evidence[0]?.supportsClaims).toContain("verification:cancelled");
+    expect(context.evidence).toEqual([]);
     expect(output.text).toContain("CANCELLED");
     expect(output.text).toContain("未生成 PASS 证据");
   });
@@ -20829,6 +21010,7 @@ describe("Phase 06 TUI slash commands", () => {
     const runId = "workflow-interrupt-test";
     context.workflows.activeRun = {
       id: runId,
+      ownerSessionId: session.id,
       goal: "interrupt workflow",
       planId: "wf-interrupt",
       status: "running",
@@ -20904,6 +21086,7 @@ describe("Phase 06 TUI slash commands", () => {
     const startedAt = new Date().toISOString();
     context.workflows.activeRuns = ["workflow-interrupt-a", "workflow-interrupt-b"].map((id) => ({
       id,
+      ownerSessionId: session.id,
       goal: id,
       planId: "wf-interrupt-multi",
       status: "running" as const,
@@ -20950,6 +21133,7 @@ describe("Phase 06 TUI slash commands", () => {
     const runId = "workflow-interrupt-missing-background";
     context.workflows.activeRun = {
       id: runId,
+      ownerSessionId: session.id,
       goal: "interrupt workflow without background",
       planId: "wf-interrupt-missing-background",
       status: "running",
@@ -21022,7 +21206,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     const running = handleSlashCommand("/verify", context, output);
     await waitForTestCondition(
-      () => Boolean(context.activeVerificationAbortController) && output.text.includes("验证步骤"),
+      () => Boolean(context.activeVerificationAbortControllers?.size) && output.text.includes("验证步骤"),
     );
     const task = context.backgroundTasks[0];
     const old = new Date(Date.now() - 5_000).toISOString();
@@ -21034,11 +21218,10 @@ describe("Phase 06 TUI slash commands", () => {
 
     const verificationTask = context.backgroundTasks.find((item) => item.kind === "verification");
     expect(backgroundOutput.text).toContain("stale");
-    expect(context.lastVerification?.status).toBe("stale");
+    expect(context.lastVerification).toBeUndefined();
     expect(verificationTask?.status).toBe("stale");
     expect(verificationTask?.result).toBe("stale");
-    expect(context.evidence[0]?.supportsClaims).not.toContain("已验证");
-    expect(context.evidence[0]?.supportsClaims).toContain("verification:stale");
+    expect(context.evidence).toEqual([]);
     expect(output.text).toContain("STALE");
     expect(output.text).toContain("未生成 PASS 证据");
   });
@@ -27613,7 +27796,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     const transcript = (await store.resume(session.id)).transcript;
     const raw = JSON.stringify(transcript);
     expect(raw).toContain("compact_required");
-    expect(raw).toContain("blocked_runtime_stop");
+    expect(raw).toContain("blocked_runtime_hint");
   });
 
   it("Policy: historical background states do not emit blocked runtime hints", async () => {

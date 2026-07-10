@@ -231,8 +231,15 @@ export async function runVerificationPlan(
     sessionId: string,
     task: BackgroundTaskState,
   ) => Promise<void>,
+  options: {
+    cwd?: string;
+    ownerAgentId?: string;
+    ownerSessionId?: string;
+    ownerSignal?: AbortSignal;
+  } = {},
 ): Promise<VerificationReport> {
   const runId = randomUUID();
+  context.latestVerificationRunId = runId;
   const startedAt = new Date().toISOString();
   const orchestration = resolveMetaOrchestrationAction(context, "verification");
   await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
@@ -267,11 +274,20 @@ export async function runVerificationPlan(
   );
   await mkdir(logRoot, { recursive: true });
   const controller = new AbortController();
-  context.activeVerificationAbortController = controller;
+  context.activeVerificationAbortControllers ??= new Map();
+  context.activeVerificationAbortControllers.set(runId, controller);
+  const abortFromOwner = () => controller.abort();
+  if (options.ownerSignal?.aborted) {
+    controller.abort();
+  } else {
+    options.ownerSignal?.addEventListener("abort", abortFromOwner, { once: true });
+  }
   context.interrupt = { type: "running", taskId: runId, canCancel: true };
   const task: BackgroundTaskState = {
     id: runId,
     kind: "verification",
+    ownerSessionId: options.ownerSessionId ?? sessionId,
+    ...(options.ownerAgentId ? { ownerAgentId: options.ownerAgentId } : {}),
     title: "Verification Runner",
     status: "running",
     currentStep: "preparing verification",
@@ -323,7 +339,7 @@ export async function runVerificationPlan(
       const logPath = join(logRoot, `${runId}-${index + 1}-${step.kind}.log`);
       const result = await runVerificationCommand(
         step.command,
-        context.projectPath,
+        options.cwd ?? context.projectPath,
         controller.signal,
       );
       const durationMs = Date.now() - stepStarted;
@@ -335,9 +351,10 @@ export async function runVerificationPlan(
         result.exitCode,
         result.runnerError,
       );
+      const wasCancelled = controller.signal.aborted || task.status === "cancelled";
       const wasMarkedStale = task.status === "stale";
       const commandStatus: VerificationRuntimeStatus =
-        result.outcome === "cancelled"
+        wasCancelled || result.outcome === "cancelled"
           ? "cancelled"
           : result.outcome === "timeout"
             ? "timeout"
@@ -464,11 +481,25 @@ export async function runVerificationPlan(
     });
     return report;
   } finally {
-    if (context.activeVerificationAbortController === controller) {
-      context.activeVerificationAbortController = undefined;
+    options.ownerSignal?.removeEventListener("abort", abortFromOwner);
+    if (context.activeVerificationAbortControllers?.get(runId) === controller) {
+      context.activeVerificationAbortControllers.delete(runId);
     }
-    context.interrupt = { type: "idle" };
+    if (context.interrupt?.type === "running" && context.interrupt.taskId === runId) {
+      context.interrupt = { type: "idle" };
+    }
   }
+}
+
+export function isCurrentVerificationReport(
+  context: TuiContext,
+  report: VerificationReport,
+): boolean {
+  return (
+    context.latestVerificationRunId === report.id &&
+    report.status !== "cancelled" &&
+    report.status !== "stale"
+  );
 }
 
 export async function runVerificationCommand(

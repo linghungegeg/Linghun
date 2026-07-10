@@ -1555,6 +1555,25 @@ describe("mapRequestActivityToView — real context field mapping", () => {
 });
 
 describe("mapBottomPaneStatusToView — unified bottom status", () => {
+  it("counts pending agent completions only for the current session", () => {
+    const context = createContext({
+      sessionId: "session-b",
+      agentCompletions: {
+        notices: [
+          { id: "notice-a", parentSessionId: "session-a" },
+          { id: "notice-b", parentSessionId: "session-b" },
+        ],
+        batchSummaries: [],
+        lastNotificationAt: {},
+        reportedNoticeIds: [],
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const view = createShellViewModel(context, { width: 80 });
+
+    expect(view.visibleWorkState?.pendingCompletionCount).toBe(1);
+  });
+
   it("prefers foreground WorkRequestState over legacy activity mapping", () => {
     const ctx = createContext({
       requestActivityPhase: "tool_running",

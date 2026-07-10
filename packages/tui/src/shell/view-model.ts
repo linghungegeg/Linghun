@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { type Language, type PermissionMode, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
+import { collectPendingAgentCompletionNotices } from "../agent-completion-finalizer.js";
 import {
   computeLocalCacheDisplayState,
   type LocalCacheDisplayState,
@@ -1868,9 +1869,7 @@ function deriveVisibleWorkState(context: TuiContext): VisibleWorkState {
     (requestPhase !== undefined &&
       requestPhase !== "completed" &&
       requestPhase !== "request_completed");
-  const pendingCompletionCount = (context.agentCompletions?.notices ?? []).filter(
-    (n) => !n.reportedAt,
-  ).length;
+  const pendingCompletionCount = collectPendingAgentCompletionNotices(context).length;
   const scrollState = (context as { transcriptScrollState?: { stickToBottom?: boolean } })
     .transcriptScrollState;
   const scrollDetached = scrollState ? scrollState.stickToBottom === false : false;

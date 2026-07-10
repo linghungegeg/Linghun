@@ -183,6 +183,7 @@ export function createAgentBackgroundTask(
   return {
     id: agent.id,
     kind: "agent",
+    ...(agent.parentSessionId ? { ownerSessionId: agent.parentSessionId } : {}),
     title: `Agent ${label}`,
     status: backgroundStatus,
     currentStep,
@@ -384,6 +385,7 @@ export function createJobBackgroundTask(
   return {
     id: job.id,
     kind: "job",
+    ...(job.ownerSessionId ? { ownerSessionId: job.ownerSessionId } : {}),
     title: `Job: ${truncateDisplay(job.goal, 40)}`,
     status: mapDurableJobToBackgroundStatus(job.status),
     currentStep:

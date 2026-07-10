@@ -751,6 +751,7 @@ export async function executeApprovedModelToolUse(
       ? createBackgroundTask(toolName, toolCall.input, context)
       : undefined;
   if (task) {
+    task.ownerSessionId = sessionId;
     rememberBackgroundTask(context, task);
     await appendBackgroundTaskEvent(context, sessionId, task);
   }
@@ -1475,13 +1476,11 @@ export async function executeLinghunControlToolUse(
       const input = parseStartAgentToolInput(toolCall.input, context);
       if (!input.ok)
         return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
-      const before = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand(
+      const agent = await handleForkCommand(
         buildForkArgsFromStartAgentInput(input, context),
         context,
         createSilentOutput(),
       );
-      const agent = context.agents.find((item) => !before.has(item.id));
       const result = buildStartAgentToolResult(
         agent,
         formatStartAgentDidNotStartMessage(input, context),
@@ -3203,6 +3202,7 @@ export async function handleToolCommand(
     }
     const task = name === "Bash" ? createBackgroundTask(name, input, context) : undefined;
     if (task) {
+      task.ownerSessionId = sessionId;
       rememberBackgroundTask(context, task);
       await appendBackgroundTaskEvent(context, sessionId, task);
       writeLine(output, formatBackgroundTask(task, context.language));
@@ -3236,7 +3236,7 @@ export async function handleToolCommand(
       if (!bgStarted2) {
         clearBackgroundAbortController(context, task?.id ?? "");
       }
-      if (backgroundController) {
+      if (backgroundController && context.tools.abortSignal === backgroundController.signal) {
         context.tools.abortSignal = previousAbortSignal;
       }
     }
