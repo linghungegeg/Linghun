@@ -218,6 +218,7 @@ export type TranscriptEvent =
       summary: string;
       source: string;
       supportsClaims: string[];
+      toolUseId?: string;
       createdAt: string;
     }
   | {

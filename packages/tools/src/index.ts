@@ -52,6 +52,18 @@ export type ToolProgressEvent = {
   toolName: ToolName;
   stream: "stdout" | "stderr" | "system";
   text: string;
+  phase?:
+    | "connecting"
+    | "receiving"
+    | "processing"
+    | "starting"
+    | "initializing"
+    | "listing"
+    | "calling"
+    | "waiting";
+  transport?: string;
+  receivedBytes?: number;
+  itemCount?: number;
 };
 
 export type ToolChildProcessTrackOptions = {
@@ -3040,9 +3052,16 @@ async function diffTool(input: DiffInput, context: ToolContext): Promise<ToolOut
 // WebSearch tool
 // ---------------------------------------------------------------------------
 
-async function webSearchTool(input: WebSearchInput, _context: ToolContext): Promise<ToolOutput> {
+async function webSearchTool(input: WebSearchInput, context: ToolContext): Promise<ToolOutput> {
   const start = Date.now();
-  const result = await bingSearch(input);
+  const result = await bingSearch(input, context.abortSignal, (progress) => {
+    void context.onProgress?.({
+      toolName: "WebSearch",
+      stream: "system",
+      text: progress.phase,
+      ...progress,
+    });
+  });
 
   if (!result.ok) {
     return {
@@ -3053,7 +3072,11 @@ async function webSearchTool(input: WebSearchInput, _context: ToolContext): Prom
         searches: 1,
         count: 0,
         durationMs: Date.now() - start,
+        isError: true,
         error: result.error,
+        errorCode: result.errorCode,
+        aborted: result.aborted,
+        timedOut: result.timedOut,
       },
     };
   }
@@ -3071,9 +3094,16 @@ async function webSearchTool(input: WebSearchInput, _context: ToolContext): Prom
 // WebFetch tool
 // ---------------------------------------------------------------------------
 
-async function webFetchTool(input: WebFetchInput, _context: ToolContext): Promise<ToolOutput> {
+async function webFetchTool(input: WebFetchInput, context: ToolContext): Promise<ToolOutput> {
   const start = Date.now();
-  const result = await webFetch(input);
+  const result = await webFetch(input, context.abortSignal, (progress) => {
+    void context.onProgress?.({
+      toolName: "WebFetch",
+      stream: "system",
+      text: progress.phase,
+      ...progress,
+    });
+  });
   return formatFetchOutput(input.url, result, Date.now() - start);
 }
 

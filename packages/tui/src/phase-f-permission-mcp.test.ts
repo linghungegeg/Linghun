@@ -205,7 +205,146 @@ describe("Phase F MCP duplicate, schema, and SSE coverage", () => {
         15_000,
         controller.signal,
       ),
+    ).resolves.toMatchObject({ ok: false, errorCode: "MCP_SSE_ABORTED" });
+  });
+
+  it("finishes an MCP SSE call when the matching frame arrives before stream close", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const request = JSON.parse(String(init.body)) as { id: number; method: string };
+        if (request.method === "tools/list") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "demo" }] } }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                `: heartbeat\n\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { content: "ok" } })}\n\n`,
+              ),
+            );
+          },
+        });
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+
+    await expect(
+      runMcpSseToolCall(
+        { command: "", transport: "sse", url: "https://example.com/open-stream" },
+        "demo",
+        {},
+        1_000,
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { content: "ok" } });
+  });
+
+  it("does not let SSE noise or arbitrary ping renew the hard deadline", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const request = JSON.parse(String(init.body)) as { id: number; method: string };
+        if (request.method === "tools/list") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "demo" }] } }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        let interval: ReturnType<typeof setInterval> | undefined;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            interval = setInterval(() => {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: not-json\n\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: "ping", params: {} })}\n\n`,
+                ),
+              );
+            }, 10);
+            init.signal?.addEventListener("abort", () => {
+              if (interval) clearInterval(interval);
+              controller.error(new DOMException("aborted", "AbortError"));
+            });
+          },
+          cancel() {
+            if (interval) clearInterval(interval);
+          },
+        });
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+
+    await expect(
+      runMcpSseToolCall(
+        { command: "", transport: "sse", url: "https://example.com/noise-hard-cap" },
+        "demo",
+        {},
+        120,
+        undefined,
+        { idleTimeoutMs: 1_000 },
+      ),
     ).resolves.toMatchObject({ ok: false, errorCode: "ETIMEDOUT" });
+  });
+
+  it("lets valid SSE progress frames renew idle until a response before hard deadline", async () => {
+    const progress: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const request = JSON.parse(String(init.body)) as { id: number; method: string };
+        if (request.method === "tools/list") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "demo" }] } }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        let interval: ReturnType<typeof setInterval> | undefined;
+        let responseTimer: ReturnType<typeof setTimeout> | undefined;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            interval = setInterval(() => {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } })}\n\n`,
+                ),
+              );
+            }, 30);
+            responseTimer = setTimeout(() => {
+              if (interval) clearInterval(interval);
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { content: "ok" } })}\n\n`,
+                ),
+              );
+            }, 180);
+          },
+          cancel() {
+            if (interval) clearInterval(interval);
+            if (responseTimer) clearTimeout(responseTimer);
+          },
+        });
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+
+    await expect(
+      runMcpSseToolCall(
+        { command: "", transport: "sse", url: "https://example.com/valid-progress" },
+        "demo",
+        {},
+        500,
+        undefined,
+        {
+          idleTimeoutMs: 60,
+          onProgress: (event) => {
+            progress.push(event.phase);
+          },
+        },
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { content: "ok" } });
+    expect(progress).toContain("receiving");
   });
 
   it("fails closed for skill/plugin deferred entries without safe executors", async () => {

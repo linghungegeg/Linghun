@@ -11,19 +11,56 @@ export type WebFetchInput = {
 
 type WebFetchResult =
   | { ok: true; content: string; status: number; statusText: string; contentType: string | null; size: number }
-  | { ok: false; error: string; status?: number };
+  | {
+      ok: false;
+      error: string;
+      errorCode: "INVALID_URL" | "HTTP_ERROR" | "ABORTED" | "TIMEOUT" | "REQUEST_ERROR";
+      status?: number;
+      aborted: boolean;
+      timedOut: boolean;
+    };
 
-export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
+type WebFetchProgress = {
+  phase: "connecting" | "receiving" | "processing";
+  transport: "http" | "https";
+  receivedBytes?: number;
+};
+
+export async function webFetch(
+  input: WebFetchInput,
+  callerSignal?: AbortSignal,
+  onProgress?: (progress: WebFetchProgress) => void,
+): Promise<WebFetchResult> {
   // 1. Validate URL
   const urlError = validateUrl(input.url);
-  if (urlError) return { ok: false, error: urlError };
+  if (urlError) {
+    return {
+      ok: false,
+      error: urlError,
+      errorCode: "INVALID_URL",
+      aborted: false,
+      timedOut: false,
+    };
+  }
 
   const url = input.url.startsWith("http://") ? input.url : input.url;
+  const transport = url.startsWith("http://") ? "http" : "https";
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let abortCause: "caller" | "timeout" | undefined;
+  const abortFromCaller = () => {
+    abortCause ??= "caller";
+    controller.abort(callerSignal?.reason);
+  };
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timer = setTimeout(() => {
+    abortCause ??= "timeout";
+    controller.abort();
+  }, FETCH_TIMEOUT_MS);
 
   try {
+    onProgress?.({ phase: "connecting", transport });
     const response = await fetch(url, {
       method: "GET",
       headers: {
@@ -36,8 +73,6 @@ export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
       redirect: "follow",
     });
 
-    clearTimeout(timer);
-
     const contentType = response.headers.get("content-type") || null;
 
     // Read body with size limit
@@ -47,16 +82,21 @@ export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
       return {
         ok: false,
         error: "无法读取响应内容",
+        errorCode: "REQUEST_ERROR",
         status: response.status,
+        aborted: false,
+        timedOut: false,
       };
     }
 
     const decoder = new TextDecoder("utf-8", { fatal: false });
     let totalBytes = 0;
+    onProgress?.({ phase: "receiving", transport, receivedBytes: totalBytes });
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       totalBytes += value.length;
+      onProgress?.({ phase: "receiving", transport, receivedBytes: totalBytes });
       if (totalBytes > MAX_RESPONSE_SIZE) {
         reader.cancel();
         body += decoder.decode(value.slice(0, MAX_RESPONSE_SIZE - (totalBytes - value.length)), {
@@ -67,12 +107,16 @@ export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
       body += decoder.decode(value, { stream: true });
     }
     body += decoder.decode();
+    onProgress?.({ phase: "processing", transport, receivedBytes: totalBytes });
 
     if (!response.ok) {
       return {
         ok: false,
         error: `HTTP ${response.status} ${response.statusText}`,
+        errorCode: "HTTP_ERROR",
         status: response.status,
+        aborted: false,
+        timedOut: false,
       };
     }
 
@@ -96,13 +140,36 @@ export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
       contentType,
       size: totalBytes,
     };
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof DOMException && err.name === "AbortError") {
-      return { ok: false, error: "请求超时" };
+  } catch (error) {
+    if (abortCause === "caller") {
+      return {
+        ok: false,
+        error: "请求已中断",
+        errorCode: "ABORTED",
+        aborted: true,
+        timedOut: false,
+      };
     }
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `请求失败: ${message}` };
+    if (abortCause === "timeout") {
+      return {
+        ok: false,
+        error: "请求超时",
+        errorCode: "TIMEOUT",
+        aborted: false,
+        timedOut: true,
+      };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error: `请求失败: ${message}`,
+      errorCode: "REQUEST_ERROR",
+      aborted: false,
+      timedOut: false,
+    };
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
 }
 
@@ -225,7 +292,11 @@ export function formatFetchOutput(
         statusText: result.error,
         size: 0,
         durationMs,
+        isError: true,
         error: result.error,
+        errorCode: result.errorCode,
+        aborted: result.aborted,
+        timedOut: result.timedOut,
       },
     };
   }

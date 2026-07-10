@@ -191,9 +191,9 @@ async function makeSendMessageContext() {
   const session = await store.create({ model: "deepseek-chat" });
   const events: unknown[] = [];
   const appendEvent = store.appendEvent.bind(store);
-  store.appendEvent = async (sessionId, event) => {
-    events.push(event);
-    return appendEvent(sessionId, event);
+  store.appendEvent = async (sessionId, event, commitGuard) => {
+    await appendEvent(sessionId, event, commitGuard);
+    if (!commitGuard || commitGuard()) events.push(event);
   };
   const context = {
     store,
@@ -334,6 +334,100 @@ describe("model message prompt cache layout", () => {
     );
   }, 30_000);
 
+  it("records an empty provider stream as a structured resumable failure", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const blocks: Array<Record<string, unknown>> = [];
+    const output = createShellBlockOutputForTest(context, blocks as never);
+    const gateway = {
+      async *stream() {
+        yield {
+          type: "message_stop",
+          chunkCount: 0,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("继续当前请求", context, gateway, output);
+
+    expect(context.lastProviderFailure).toMatchObject({
+      code: "PROVIDER_EMPTY_RESPONSE",
+      outcome: "empty_response",
+      recoverability: "resumable",
+      requestTurnId: expect.any(String),
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "evidence_record",
+        supportsClaims: expect.arrayContaining([
+          "provider_failure",
+          "PROVIDER_EMPTY_RESPONSE",
+        ]),
+      }),
+    );
+    expect(blocks).toContainEqual(
+      expect.objectContaining({
+        messageKind: "tool_result_error",
+        failureDomain: "provider",
+        failureOutcome: "empty_response",
+        failureRequestTurnId: context.lastProviderFailure?.requestTurnId,
+      }),
+    );
+  }, 30_000);
+
+  it("drops an empty-stream failure when a newer request takes ownership during evidence append", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const blocks: Array<Record<string, unknown>> = [];
+    const output = createShellBlockOutputForTest(context, blocks as never);
+    const appendEvent = context.store.appendEvent.bind(context.store);
+    let superseded = false;
+    context.store.appendEvent = async (sessionId, event, commitGuard) => {
+      if (
+        !superseded &&
+        event.type === "evidence_record" &&
+        event.supportsClaims.includes("provider_failure")
+      ) {
+        superseded = true;
+        context.activeAbortController?.abort();
+        beginForegroundRequestTurn(context, "user-new");
+      }
+      await appendEvent(sessionId, event, commitGuard);
+    };
+    const gateway = {
+      async *stream() {
+        yield {
+          type: "message_stop",
+          chunkCount: 0,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("旧请求", context, gateway, output);
+
+    expect(superseded).toBe(true);
+    expect(context.lastProviderFailure).toBeUndefined();
+    expect(context.evidence.some((item) => item.supportsClaims.includes("provider_failure"))).toBe(
+      false,
+    );
+    expect(
+      events.some(
+        (event) =>
+          (event as { type?: string; supportsClaims?: string[] }).type === "evidence_record" &&
+          (event as { supportsClaims?: string[] }).supportsClaims?.includes("provider_failure"),
+      ),
+    ).toBe(false);
+    expect(blocks.some((block) => block.failureDomain === "provider")).toBe(false);
+  }, 30_000);
+
   it("keeps volatile system diagnostics after reusable transcript history", async () => {
     const context = {
       model: "test-model",
@@ -430,6 +524,73 @@ describe("model message prompt cache layout", () => {
     expect(serialized).toContain("new request after compact");
     expect(serialized).toContain("new answer after compact");
     expect(serialized).not.toContain("RAW_OLD_CONTEXT");
+  });
+
+  it("revalidates compacted memory constraints against the current accepted store", async () => {
+    const projection = {
+      boundaryId: "compact-memory-boundary",
+      summary: "Linghun compact summary\nuser constraints OLD_DELETED_MEMORY",
+      postCompactTargetChars: 160_000,
+      restoreContext: {
+        goal: "continue",
+        currentTask: "current task",
+        phaseStatus: "in_progress",
+        userConstraints: ["OLD_DELETED_MEMORY"],
+        keyFiles: [],
+        memoryStatus: "1 accepted memories",
+        verificationRequirement: "verify with evidence",
+      },
+    };
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      memory: {
+        accepted: [
+          {
+            id: "current-memory",
+            scope: "user",
+            status: "accepted",
+            summary: "CURRENT_MEMORY",
+            source: "test",
+            sourceRefs: [],
+            risk: "low",
+            inferred: false,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            {
+              type: "system_event",
+              level: "info",
+              message: `compact_projection:${JSON.stringify(projection)}`,
+            },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-compact-memory",
+      "stable system",
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(serialized).toContain("CURRENT_MEMORY");
+    expect(serialized).not.toContain("OLD_DELETED_MEMORY");
   });
 
   it("cuts model history at a deep compact packet boundary", async () => {

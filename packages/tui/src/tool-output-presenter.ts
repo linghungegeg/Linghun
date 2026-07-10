@@ -201,6 +201,9 @@ function formatPrimaryToolLead(
   language: Language,
 ): string {
   const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
+  if ((name === "WebSearch" || name === "WebFetch") && isToolOutputError(output)) {
+    return formatWebFailureLead(name, metadata, language);
+  }
   const count = readNumber(metadata, "count");
   const totalLines = readNumber(metadata, "totalLines") ?? readNumber(metadata, "contentLines");
   const visibleLines =
@@ -257,12 +260,32 @@ function formatPrimaryToolLead(
 
 function isToolOutputError(output: ToolOutput): boolean {
   const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
+  const explicitError =
+    metadata && typeof (metadata as Record<string, unknown>).isError === "boolean"
+      ? (metadata as Record<string, unknown>).isError
+      : undefined;
+  if (explicitError === true) return true;
   const exitCode = readNumber(metadata, "exitCode");
   if (exitCode !== undefined) return exitCode !== 0;
   const ok = metadata && typeof (metadata as Record<string, unknown>).ok === "boolean"
     ? (metadata as Record<string, unknown>).ok
     : undefined;
   return ok === false;
+}
+
+function formatWebFailureLead(
+  name: "WebSearch" | "WebFetch",
+  metadata: object | undefined,
+  language: Language,
+): string {
+  const data = metadata as Record<string, unknown> | undefined;
+  if (data?.aborted === true) {
+    return language === "en-US" ? `${name} cancelled` : `${name} 已取消`;
+  }
+  if (data?.timedOut === true) {
+    return language === "en-US" ? `${name} timed out` : `${name} 已超时`;
+  }
+  return language === "en-US" ? `${name} failed` : `${name} 失败`;
 }
 
 function lineCount(value: string): number {

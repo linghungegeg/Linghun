@@ -135,6 +135,7 @@ export type EvidenceRecord = {
   fullOutputPath?: string;
   outputPath?: string;
   logPath?: string;
+  toolUseId?: string;
   supportsClaims: string[];
   claimSeeds?: EvidenceClaimSeed[];
   createdAt: string;
@@ -329,6 +330,10 @@ export type CompactProjection = {
   preCompactChars: number;
   postCompactChars: number;
   postCompactTargetChars?: number;
+  retriggerGuard?: {
+    baselineChars: number;
+    tailGrowthThreshold: number;
+  };
   savingsRatio?: number;
   acceptance?: CompactAcceptanceSnapshot;
   progress?: CompactProgressSnapshot;
@@ -1045,6 +1050,18 @@ export type MemoryScope = "project" | "user" | "session";
 export type MemoryStatus = "candidate" | "accepted" | "rejected" | "disabled" | "retired";
 export type MemoryTaxonomy = "user" | "feedback" | "project" | "reference";
 
+export type MemoryOrigin = {
+  kind: "ai_sessions_import";
+  key: string;
+};
+
+export type MemoryTombstoneIndex = {
+  ids: Set<string>;
+  origins: Set<string>;
+  unreadableScopes: Set<MemoryScope>;
+  diagnostics: string[];
+};
+
 export type MemoryCandidate = {
   id: string;
   scope: MemoryScope;
@@ -1054,6 +1071,7 @@ export type MemoryCandidate = {
   summary: string;
   source: string;
   sourceRefs: string[];
+  origin?: MemoryOrigin;
   risk: "low" | "medium" | "high";
   inferred: boolean;
   createdAt: string;
@@ -1094,6 +1112,7 @@ export type MemoryState = {
   rejected: MemoryCandidate[];
   disabled: MemoryCandidate[];
   retired: MemoryCandidate[];
+  tombstones?: MemoryTombstoneIndex;
   learningMode: MemoryLearningMode;
   learningModeSource?: "default" | "persisted";
   lastLearningRun?: MemoryLearningRun;
@@ -1311,6 +1330,8 @@ export type PluginState = {
 export type ProviderFailureSummary = {
   code: string;
   kind?: string;
+  outcome?: string;
+  recoverability?: "resumable" | "action_required";
   provider: string;
   model: string;
   endpointProfile: string;
@@ -1320,6 +1341,8 @@ export type ProviderFailureSummary = {
   summary: string;
   evidenceId: string;
   createdAt: string;
+  requestTurnId?: string;
+  retry?: { attempt: number; max: number; exhausted: boolean };
 };
 
 export type ProviderFallbackAttemptSummary = {

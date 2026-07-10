@@ -44,7 +44,12 @@ export type RemoteDeliveryResult = {
 // Injectable so tests never touch the real network/process.
 export type RemoteFetch = (
   url: string,
-  init: { method: "POST"; headers: Record<string, string>; body: string },
+  init: {
+    method: "POST";
+    headers: Record<string, string>;
+    body: string;
+    signal?: AbortSignal;
+  },
 ) => Promise<{ status: number; text: () => Promise<string> }>;
 
 export type RemoteCliRunner = (
@@ -212,24 +217,21 @@ function parsePlatformErrCode(body: string): number | undefined {
 export async function deliverWebhook(
   request: RemoteWebhookRequest,
   fetchImpl: RemoteFetch,
+  signal?: AbortSignal,
 ): Promise<RemoteDeliveryResult> {
   try {
     const response = await fetchImpl(request.url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: request.body,
+      signal,
     });
+    const bodyText = await response.text();
     if (response.status === 401 || response.status === 403) {
       return { status: "failed", detail: `auth rejected (HTTP ${response.status})` };
     }
     if (response.status < 200 || response.status >= 300) {
       return { status: "failed", detail: `platform rejected (HTTP ${response.status})` };
-    }
-    let bodyText = "";
-    try {
-      bodyText = await response.text();
-    } catch {
-      bodyText = "";
     }
     const errcode = parsePlatformErrCode(bodyText);
     if (errcode !== undefined && errcode !== 0) {
@@ -239,7 +241,12 @@ export async function deliverWebhook(
   } catch {
     // Detail is intentionally generic — never echo the endpoint or error payload,
     // which may contain the secret-bearing URL.
-    return { status: "failed", detail: "network error reaching remote channel" };
+    return {
+      status: "failed",
+      detail: signal?.aborted
+        ? "remote delivery cancelled"
+        : "network error reaching remote channel",
+    };
   }
 }
 
@@ -271,12 +278,29 @@ export async function deliverOfficialCli(
 
 const defaultFetch: RemoteFetch = async (url, init) => {
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(init.signal?.reason);
+  if (init.signal?.aborted) abortFromCaller();
+  else init.signal?.addEventListener("abort", abortFromCaller, { once: true });
   const timer = setTimeout(() => controller.abort(), DEFAULT_WEBHOOK_TIMEOUT_MS);
+  const cleanup = () => {
+    clearTimeout(timer);
+    init.signal?.removeEventListener("abort", abortFromCaller);
+  };
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
-    return { status: response.status, text: () => response.text() };
-  } finally {
-    clearTimeout(timer);
+    return {
+      status: response.status,
+      text: async () => {
+        try {
+          return await response.text();
+        } finally {
+          cleanup();
+        }
+      },
+    };
+  } catch (error) {
+    cleanup();
+    throw error;
   }
 };
 

@@ -1639,7 +1639,7 @@ describe("mapBottomPaneStatusToView — unified bottom status", () => {
       },
     });
 
-    expect(status).toMatchObject({ kind: "failed", source: "provider" });
+    expect(status).toMatchObject({ kind: "completed_partial", source: "provider" });
     expect(status?.reason).toBe("HTTP 502");
   });
 
@@ -1752,12 +1752,14 @@ describe("mapBottomPaneStatusToView — unified bottom status", () => {
     expect(mapBottomPaneStatusToView(ctx)).toBeUndefined();
   });
 
-  it("maps provider failure to failed", () => {
+  it("maps recoverable provider failure to completed partial", () => {
     const ctx = createContext({
       language: "en-US",
       lastProviderFailure: {
         code: "HTTP_502",
         kind: "transit",
+        outcome: "transit",
+        recoverability: "resumable",
         provider: "openai",
         model: "gpt-5.5",
         endpointProfile: "default",
@@ -1767,8 +1769,29 @@ describe("mapBottomPaneStatusToView — unified bottom status", () => {
 
     const status = mapBottomPaneStatusToView(ctx);
 
-    expect(status).toMatchObject({ kind: "failed", source: "provider" });
+    expect(status).toMatchObject({ kind: "completed_partial", source: "provider" });
     expect(status?.reason).toBe("HTTP 502");
+  });
+
+  it("maps provider configuration failures to action required", () => {
+    const ctx = createContext({
+      language: "en-US",
+      lastProviderFailure: {
+        code: "PROVIDER_NON_SSE_STREAM",
+        kind: "compatibility",
+        outcome: "compatibility",
+        recoverability: "action_required",
+        provider: "openai",
+        model: "gpt-5.5",
+        endpointProfile: "responses",
+        summary: "endpoint did not return SSE",
+      },
+    } as unknown as Partial<TuiContext>);
+
+    expect(mapBottomPaneStatusToView(ctx)).toMatchObject({
+      kind: "action_required",
+      source: "provider",
+    });
   });
 
   it("does not let stale provider failure override active request status", () => {
@@ -8165,6 +8188,7 @@ describe("TaskSuggestionBar executable state", () => {
           summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           messageKind: "tool_result_error",
+          failureDomain: "provider",
         },
       ],
     });
@@ -8174,6 +8198,60 @@ describe("TaskSuggestionBar executable state", () => {
       false,
     );
     expect(view.bottomPaneStatus?.text).not.toBe("Provider 请求失败");
+  });
+
+  it("keeps only the active request owner provider failure", () => {
+    const view = createShellViewModel(createContext({
+      currentRequestTurnId: "turn-new",
+      lastProviderFailure: {
+        code: "PROVIDER_EMPTY_RESPONSE",
+        kind: "transit",
+        provider: "openai",
+        model: "gpt-5",
+        endpointProfile: "default",
+        summary: "latest empty response",
+        requestTurnId: "turn-new",
+      },
+    } as unknown as Partial<TuiContext>), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "provider-fail-old",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "old failure",
+          messageKind: "tool_result_error",
+          failureDomain: "provider",
+          failureRequestTurnId: "turn-old",
+        },
+        {
+          id: "provider-fail-new-first",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "first failure for latest request",
+          messageKind: "tool_result_error",
+          failureDomain: "provider",
+          failureRequestTurnId: "turn-new",
+        },
+        {
+          id: "provider-fail-new-latest",
+          kind: "error",
+          status: "fail",
+          title: "模型请求失败",
+          summary: "latest failure",
+          messageKind: "tool_result_error",
+          failureDomain: "provider",
+          failureRequestTurnId: "turn-new",
+        },
+      ],
+    });
+
+    expect(view.blocks.some((block) => block.id === "provider-fail-old")).toBe(false);
+    expect(view.blocks.some((block) => block.id === "provider-fail-new-first")).toBe(false);
+    expect(view.blocks.some((block) => block.id === "provider-fail-new-latest")).toBe(true);
   });
 
   it("hides stale provider request failure after the provider has recovered", () => {
@@ -8189,6 +8267,7 @@ describe("TaskSuggestionBar executable state", () => {
           summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           messageKind: "tool_result_error",
+          failureDomain: "provider",
         },
         {
           id: "assistant-ok",
@@ -8228,6 +8307,7 @@ describe("TaskSuggestionBar executable state", () => {
           summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           messageKind: "tool_result_error",
+          failureDomain: "provider",
         },
         {
           id: "tool-progress",
@@ -8269,6 +8349,7 @@ describe("TaskSuggestionBar executable state", () => {
           summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           messageKind: "tool_result_error",
+          failureDomain: "provider",
         },
       ],
     });
@@ -8301,6 +8382,7 @@ describe("TaskSuggestionBar executable state", () => {
           summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           messageKind: "tool_result_error",
+          failureDomain: "provider",
         },
       ],
     });
@@ -8402,6 +8484,7 @@ describe("TaskSuggestionBar executable state", () => {
           summary: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           fullText: "模型请求未完成。可运行 /model doctor 查看详情后重试。",
           messageKind: "tool_result_error",
+          failureDomain: "provider",
           retryAttempt: 2,
           retryMax: 2,
         },

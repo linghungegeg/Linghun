@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { defaultConfig } from "@linghun/config";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RemoteChannelState, RemoteEvent } from "./index.js";
 import {
   type RemoteCliRunner,
@@ -9,7 +9,13 @@ import {
   buildWebhookRequest,
   deliverOfficialCli,
   deliverWebhook,
+  defaultRemoteTransportDeps,
 } from "./remote-transport.js";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 function channel(
   type: RemoteChannelState["config"]["type"],
@@ -273,6 +279,73 @@ describe("D.14E remote transport — delivery distinguishes failure causes", () 
     expect(result.status).toBe("failed");
     expect(result.detail).not.toContain("secret-endpoint");
     expect(result.detail).not.toContain("token=abc");
+  });
+
+  it("caller abort after response headers cancels the webhook body read", async () => {
+    let bodyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      bodyStarted = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const signal = init.signal;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              bodyStarted();
+              signal?.addEventListener("abort", () => {
+                controller.error(signal.reason ?? new DOMException("aborted", "AbortError"));
+              });
+            },
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+    const caller = new AbortController();
+    const pending = deliverWebhook(
+      { url: "https://secret-endpoint/hook?token=abc", body: "{}" },
+      defaultRemoteTransportDeps().fetch,
+      caller.signal,
+    );
+    await started;
+    caller.abort();
+
+    await expect(pending).resolves.toEqual({
+      status: "failed",
+      detail: "remote delivery cancelled",
+    });
+  });
+
+  it("webhook timeout remains active while reading a stalled response body", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const signal = init.signal;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              signal?.addEventListener("abort", () => {
+                controller.error(signal.reason ?? new DOMException("timeout", "AbortError"));
+              });
+            },
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+    const pending = deliverWebhook(
+      { url: "https://secret-endpoint/hook?token=abc", body: "{}" },
+      defaultRemoteTransportDeps().fetch,
+    );
+    await vi.advanceTimersByTimeAsync(8_001);
+
+    const result = await pending;
+    expect(result).toEqual({ status: "failed", detail: "network error reaching remote channel" });
+    expect(JSON.stringify(result)).not.toContain("secret-endpoint");
+    expect(JSON.stringify(result)).not.toContain("token=abc");
   });
 
   it("official CLI success → sent; ENOENT → blocked; other error → failed", async () => {

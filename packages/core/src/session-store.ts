@@ -175,15 +175,21 @@ export class SessionStore {
     };
   }
 
-  async appendEvent(sessionId: string, event: TranscriptEvent): Promise<void> {
+  async appendEvent(
+    sessionId: string,
+    event: TranscriptEvent,
+    commitGuard?: () => boolean,
+  ): Promise<void> {
     assertValidSessionId(sessionId);
     const project = identifyProject(this.projectPath);
     await this.enqueueSessionWrite(project.projectId, sessionId, async () => {
+      if (commitGuard && !commitGuard()) return;
       const session = await this.readMetadata(project.projectId, sessionId);
       if (!session) {
         throw new Error(`未找到会话：${sessionId}`);
       }
 
+      if (commitGuard && !commitGuard()) return;
       await appendJsonl(session.transcriptPath, event);
       await this.appendRuntimeLedgerBestEffort(
         this.getSessionDir(project.projectId, sessionId),

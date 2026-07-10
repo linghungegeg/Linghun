@@ -1154,6 +1154,28 @@ describe("OpenAI stream parser", () => {
         hadUsage: true,
       },
     ]);
+    expect(events[3]).toMatchObject({
+      type: "error",
+      error: { code: "PROVIDER_RESPONSE_FAILED", recoverable: true },
+    });
+  });
+
+  it("maps response.incomplete to a structured recoverable failure", async () => {
+    const events = await collectOpenAiEvents(
+      [
+        `data: ${JSON.stringify({ type: "response.incomplete" })}\n\n`,
+        "data: [DONE]\n\n",
+      ],
+      "/v1/responses",
+    );
+
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: {
+        code: "PROVIDER_RESPONSE_INCOMPLETE",
+        recoverable: true,
+      },
+    });
   });
 
   it("converts Responses cache write usage fields for compatible providers", async () => {

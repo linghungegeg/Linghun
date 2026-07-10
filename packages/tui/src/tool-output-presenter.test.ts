@@ -221,6 +221,34 @@ describe("tool-output-presenter", () => {
       expect(structured.text).toContain("退出 2");
     });
 
+    it.each([
+      ["WebSearch", { aborted: true, timedOut: false }, "WebSearch 已取消"],
+      ["WebFetch", { aborted: false, timedOut: true }, "WebFetch 已超时"],
+      ["WebSearch", { aborted: false, timedOut: false }, "WebSearch 失败"],
+    ] as const)("%s 按结构化失败原因生成终态 lead", (name, failure, lead) => {
+      const structured = createStructuredToolOutput(
+        name,
+        { text: "request failed", data: { isError: true, ...failure } },
+        "zh-CN",
+      );
+
+      expect(structured.block.kind).toBe("tool_result_error");
+      expect(structured.block.status).toBe("error");
+      expect(structured.block.title).toBe(lead);
+      expect(structured.text).toContain(lead);
+    });
+
+    it("Web 成功输出保持原有 completed lead", () => {
+      const structured = createStructuredToolOutput(
+        "WebSearch",
+        { text: "result", data: { isError: false, searches: 1 } },
+        "en-US",
+      );
+
+      expect(structured.block.kind).toBe("tool_result_success");
+      expect(structured.block.title).toBe("1 search");
+    });
+
     it("Bash 成功时 formatToolOutput 含 lead '✓'", () => {
       const text = formatToolOutput("Bash", { text: "done", data: { exitCode: 0 } }, "zh-CN");
       expect(text).toContain("Bash");

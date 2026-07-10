@@ -415,6 +415,9 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
     if (kind === "gateway") {
       return "The upstream model service or gateway is temporarily unavailable, so this request did not complete. Retry later or run /model doctor for details.";
     }
+    if (kind === "response_failed") {
+      return "The upstream service explicitly ended this response without a usable answer. This request did not complete; input is ready, so retry or switch model. Run /model doctor if it repeats.";
+    }
     if (kind === "compatibility") {
       return "The endpoint returned a non-SSE stream. Check whether the endpoint/base URL supports streaming SSE and whether the endpoint profile matches this gateway. Run /model doctor for details.";
     }
@@ -455,6 +458,9 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
   }
   if (kind === "gateway") {
     return "上游模型服务或网关暂时异常，本次请求未完成。请稍后重试，或运行 /model doctor 查看详情。";
+  }
+  if (kind === "response_failed") {
+    return "上游服务已明确结束本次响应，但没有生成可用答案。本次请求未完成，输入已恢复；可重试或切换模型，若重复出现请运行 /model doctor。";
   }
   if (kind === "compatibility") {
     return "接口返回的不是 SSE 流。本次请求未完成；请检查 endpoint/baseUrl 是否支持 SSE，以及 endpointProfile 是否和网关匹配。可运行 /model doctor 查看详情。";
@@ -511,6 +517,7 @@ export function formatProviderFailureKindLabel(
     auth: { zh: "密钥或权限问题", en: "API key or permission" },
     not_found: { zh: "接口或模型不存在", en: "endpoint or model not found" },
     gateway: { zh: "服务端或网关异常", en: "server or gateway failure" },
+    response_failed: { zh: "上游响应未完成", en: "upstream response failed" },
     compatibility: { zh: "SSE/接口兼容问题", en: "SSE/endpoint compatibility" },
     stream_parse: { zh: "SSE 流格式异常", en: "malformed SSE stream" },
     tool_stream: { zh: "工具调用流不完整", en: "incomplete tool-call stream" },
@@ -557,6 +564,7 @@ export type ProviderFailureKind =
   | "auth"
   | "not_found"
   | "gateway"
+  | "response_failed"
   | "compatibility"
   | "stream_parse"
   | "tool_stream"
@@ -578,6 +586,9 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
   // a transport problem.
   if (code === "PROVIDER_NON_SSE_STREAM") {
     return "compatibility";
+  }
+  if (code === "PROVIDER_RESPONSE_FAILED" || code === "PROVIDER_RESPONSE_INCOMPLETE") {
+    return "response_failed";
   }
   if (code === "PROVIDER_MALFORMED_STREAM") {
     return "stream_parse";

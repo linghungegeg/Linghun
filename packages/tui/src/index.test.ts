@@ -5323,6 +5323,73 @@ describe("Phase 06 TUI slash commands", () => {
     expect([...(context.toolResultBudgetState?.replacements.values() ?? [])][0]?.record.artifact.preview).toBe("preview text");
   });
 
+  it("refreshes current memory state before resume and restores only the latest session-scoped record", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-resume-memory-state-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const target = await store.create({ model: "deepseek-v4-flash" });
+    const current = await store.create({ model: "deepseek-v4-flash" });
+    const createdAt = "2026-06-01T00:00:00.000Z";
+    const acceptedMemory = (id: string, scope: "project" | "user" | "session", summary: string) => ({
+      id,
+      scope,
+      status: "accepted" as const,
+      summary,
+      source: "test",
+      sourceRefs: ["test"],
+      risk: "low" as const,
+      inferred: false,
+      createdAt,
+    });
+
+    await store.appendEvent(target.id, {
+      type: "memory_accepted",
+      memory: acceptedMemory("disabled-current", "session", "must stay disabled"),
+      createdAt,
+    });
+    await store.appendEvent(target.id, {
+      type: "memory_accepted",
+      memory: acceptedMemory("latest-scope", "session", "stale session version"),
+      createdAt,
+    });
+    await store.appendEvent(target.id, {
+      type: "memory_accepted",
+      memory: acceptedMemory("latest-scope", "project", "latest persistent version"),
+      createdAt: "2026-06-01T00:00:01.000Z",
+    });
+    await store.appendEvent(target.id, {
+      type: "memory_accepted",
+      memory: acceptedMemory("target-session", "session", "target session value"),
+      createdAt: "2026-06-01T00:00:02.000Z",
+    });
+
+    const paths = resolveStoragePaths(defaultConfig, project);
+    await mkdir(paths.memoryUser, { recursive: true });
+    await writeFile(
+      join(paths.memoryUser, "disabled-current.json"),
+      JSON.stringify({
+        ...acceptedMemory("disabled-current", "user", "current disabled value"),
+        status: "disabled",
+      }),
+      "utf8",
+    );
+
+    const context = await createTestContext(project, store, current);
+    context.memory = await createMemoryState(defaultConfig, project);
+    context.memory.accepted.push(
+      acceptedMemory("old-current-session", "session", "must not cross sessions"),
+    );
+    const output = new MemoryOutput();
+
+    await handleSlashCommand(`/resume ${target.id}`, context, output);
+
+    expect(context.memory.accepted.map((item) => item.id)).toEqual(["target-session"]);
+    expect(context.memory.disabled.map((item) => item.id)).toContain("disabled-current");
+    expect(context.memory.accepted.map((item) => item.id)).not.toContain("disabled-current");
+    expect(context.memory.accepted.map((item) => item.id)).not.toContain("latest-scope");
+    expect(context.memory.accepted.map((item) => item.id)).not.toContain("old-current-session");
+    expect(context.memory.sessionDir).toContain(target.id);
+  });
+
   it("D.14B: auto-learning accepts stable taxonomy memory from user input when active", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -5419,6 +5486,8 @@ describe("Phase 06 TUI slash commands", () => {
         id: memoryId,
         taxonomy: "user",
         summary: "User preference: 压测报告格式：超长英文段落",
+        turnKind: "preference",
+        stability: "stable",
       },
       {
         veto: true,
@@ -5453,6 +5522,8 @@ describe("Phase 06 TUI slash commands", () => {
         id: memoryId,
         taxonomy: "user",
         summary: "User preference: 压测报告格式：英文表格",
+        turnKind: "preference",
+        stability: "stable",
       },
       {
         veto: false,
@@ -5464,6 +5535,107 @@ describe("Phase 06 TUI slash commands", () => {
     expect(result.acceptedUpdated).toBe(1);
     expect(context.memory.accepted).toHaveLength(1);
     expect(context.memory.accepted[0]?.summary).toContain("英文表格");
+  });
+
+  it("rejects structured query, audit, and temporary auto-learning proposals", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-memory-turn-kind-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.modelGateway = createJsonDecisionGateway([
+      {
+        action: "create",
+        taxonomy: "user",
+        summary: "User preference: audit fixture",
+        turnKind: "audit",
+        stability: "stable",
+      },
+      {
+        action: "create",
+        taxonomy: "user",
+        summary: "User preference: query fixture",
+        turnKind: "query",
+        stability: "stable",
+      },
+      {
+        action: "create",
+        taxonomy: "user",
+        summary: "User preference: temporary fixture",
+        turnKind: "temporary_task",
+        stability: "temporary",
+      },
+    ]) as unknown as typeof context.modelGateway;
+
+    await runAutoLearningOnTurnEnd(context, "审计当前 memory 是否误写用户偏好。");
+    await runAutoLearningOnTurnEnd(context, "查询当前 memory 中记录的用户偏好。");
+    await runAutoLearningOnTurnEnd(context, "执行一次基准压力检查并观察用户偏好回灌。");
+
+    expect(context.memory.accepted).toHaveLength(0);
+  });
+
+  it("fails closed without a semantic classifier for an owned turn", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-memory-classifier-unavailable-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const controller = new AbortController();
+    context.currentRequestTurnId = "request-owned";
+
+    const run = await runAutoLearningOnTurnEnd(context, "请记住：我偏好不应由 fallback 写入。", {
+      requestTurnId: "request-owned",
+      sessionId: session.id,
+      signal: controller.signal,
+    });
+
+    expect(run.skippedReason).toContain("semantic_classifier_unavailable");
+    expect(context.memory.accepted).toHaveLength(0);
+  });
+
+  it("drops a semantic auto-learning result that arrives after its owner is interrupted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-memory-owner-interrupt-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const controller = new AbortController();
+    context.currentRequestTurnId = "request-stale";
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    context.modelGateway = {
+      stream: async function* () {
+        await gate;
+        yield {
+          type: "assistant_text_delta" as const,
+          id: "late-memory-classifier",
+          text: JSON.stringify({
+            action: "create",
+            taxonomy: "user",
+            summary: "User preference: stale result",
+            turnKind: "preference",
+            stability: "stable",
+          }),
+        };
+      },
+    } as unknown as typeof context.modelGateway;
+
+    const pending = runAutoLearningOnTurnEnd(context, "请记住：我偏好 stale result。", {
+      requestTurnId: "request-stale",
+      sessionId: session.id,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    controller.abort();
+    context.currentRequestTurnId = "request-next";
+    release();
+    const run = await pending;
+
+    expect(run.skippedReason).toContain("stale_request_owner");
+    expect(context.memory.accepted).toHaveLength(0);
+    expect(context.evidence).toHaveLength(0);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "memory_accepted")).toBe(false);
+    expect(transcript.some((event) => event.type === "evidence_record")).toBe(false);
   });
 
   it("D.14B: prompt injection keeps project memory from being crowded out by user memory", async () => {
@@ -22172,16 +22344,19 @@ describe("Phase 06 TUI slash commands", () => {
       transcript.some(
         (event) =>
           event.type === "evidence_record" &&
-          event.supportsClaims.includes("provider_empty_response"),
+          event.supportsClaims.includes("provider_failure") &&
+          event.supportsClaims.includes("PROVIDER_EMPTY_RESPONSE"),
       ),
     ).toBe(true);
     expect(
       transcript.some(
         (event) =>
-          event.type === "system_event" && event.message.includes("provider_empty_response"),
+          event.type === "system_event" &&
+          event.message.includes("code PROVIDER_EMPTY_RESPONSE") &&
+          event.message.includes("outcome empty_response"),
       ),
     ).toBe(true);
-  });
+  }, 15_000);
 
   it("lets read-and-summarize requests reach the model loop", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));

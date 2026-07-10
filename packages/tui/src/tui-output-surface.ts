@@ -417,7 +417,7 @@ export class ShellBlockOutput extends Writable {
    * slash/tool catch / executeIndexIgnoreWritePlan ignore 写入失败 等。
    * 普通 writeLine / /mcp status / 普通 assistant 正文不要走这条路径。
    */
-  writeErrorLine(text: string, title?: string): void {
+  writeErrorLine(text: string, title?: string, metadata?: ErrorLineMetadata): void {
     const normalized = text.replace(/\r/g, "").trim();
     if (!normalized) return;
     const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
@@ -437,9 +437,12 @@ export class ShellBlockOutput extends Writable {
       fullText: normalized,
       nextAction: hasMore ? errorHint : undefined,
       messageKind: "tool_result_error",
-      retrySeconds: this.context.retryInfo?.delaySec,
-      retryAttempt: this.context.retryInfo?.attempt,
-      retryMax: this.context.retryInfo?.max,
+      retrySeconds: metadata?.retrySeconds ?? this.context.retryInfo?.delaySec,
+      retryAttempt: metadata?.retryAttempt ?? this.context.retryInfo?.attempt,
+      retryMax: metadata?.retryMax ?? this.context.retryInfo?.max,
+      failureDomain: metadata?.failureDomain,
+      failureOutcome: metadata?.failureOutcome,
+      failureRequestTurnId: metadata?.failureRequestTurnId,
     };
     const last = this.blocks.at(-1);
     if (
@@ -1344,10 +1347,26 @@ export function writeDiagnosticLine(output: Writable, text: string): void {
  * slash/tool catch / executeIndexIgnoreWritePlan ignore 写入失败。
  * 普通正文 / diagnostic / status 不要走这条路径。
  */
-export function writeErrorLine(output: Writable, text: string, title?: string): void {
-  const candidate = output as { writeErrorLine?: (text: string, title?: string) => void };
+export type ErrorLineMetadata = {
+  retrySeconds?: number;
+  retryAttempt?: number;
+  retryMax?: number;
+  failureDomain?: "provider" | "request" | "tool";
+  failureOutcome?: string;
+  failureRequestTurnId?: string;
+};
+
+export function writeErrorLine(
+  output: Writable,
+  text: string,
+  title?: string,
+  metadata?: ErrorLineMetadata,
+): void {
+  const candidate = output as {
+    writeErrorLine?: (text: string, title?: string, metadata?: ErrorLineMetadata) => void;
+  };
   if (typeof candidate.writeErrorLine === "function") {
-    candidate.writeErrorLine(text, title);
+    candidate.writeErrorLine(text, title, metadata);
     return;
   }
   writeLine(output, text);

@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { Writable } from "node:stream";
+import {
+  builtInTools,
+  createToolContext,
+  type ToolContext,
+  type ToolOutput,
+  type ToolProgressEvent,
+} from "@linghun/tools";
 
 import { createModelToolDefinitions } from "./model-loop-runtime.js";
 import {
@@ -10,12 +18,262 @@ import {
   __testFormatPreEnginePrimaryText,
   __testParseRunWorkflowToolInput,
   __testParseStartAgentToolInput,
+  executeApprovedModelToolUse,
   rememberSourcePackCandidatesFromToolData,
   rememberToolFiles,
 } from "./model-tool-runtime.js";
 import { formatToolOutput } from "./tool-output-presenter.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type { AgentRun, WorkflowRunState } from "./tui-data-types.js";
+
+class WebToolOutput extends Writable {
+  text = "";
+  errors: string[] = [];
+
+  override _write(
+    chunk: unknown,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.text += String(chunk);
+    callback();
+  }
+
+  writeErrorLine(text: string): void {
+    this.errors.push(text);
+  }
+}
+
+function createWebToolTestContext(events: unknown[]): TuiContext {
+  return {
+    tools: createToolContext(process.cwd()),
+    currentRequestTurnId: "turn-web",
+    store: {
+      appendEvent: async (_sessionId: string, event: unknown) => {
+        events.push(event);
+      },
+    },
+    language: "zh-CN",
+    evidence: [],
+    recentlyMentionedFiles: [],
+    backgroundTasks: [],
+    backgroundAbortControllers: new Map(),
+  } as unknown as TuiContext;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function emitWebProgress(
+  context: ToolContext,
+  event: ToolProgressEvent & {
+    phase: "connecting" | "receiving" | "processing";
+    transport: string;
+    receivedBytes?: number;
+    itemCount?: number;
+  },
+): void | Promise<void> | undefined {
+  return (context.onProgress as ((progress: typeof event) => void | Promise<void>) | undefined)?.(
+    event,
+  );
+}
+
+describe("model-tool-runtime Web terminal output", () => {
+  it("routes a current-owner structured Web failure through writeErrorLine", async () => {
+    const originalCall = builtInTools.WebSearch.call;
+    builtInTools.WebSearch.call = (async () => ({
+      text: "搜索超时",
+      data: { isError: true, aborted: false, timedOut: true },
+    })) as typeof originalCall;
+    const events: unknown[] = [];
+    const context = createWebToolTestContext(events);
+    const output = new WebToolOutput();
+    const controller = new AbortController();
+
+    try {
+      const result = await executeApprovedModelToolUse(
+        { id: "web-failed", name: "WebSearch", input: { query: "linghun" } },
+        "WebSearch",
+        context,
+        "session-web",
+        output,
+        undefined,
+        undefined,
+        { requestTurnId: "turn-web", signal: controller.signal },
+      );
+
+      expect(result.ok).toBe(false);
+      expect(output.errors).toHaveLength(1);
+      expect(output.errors[0]).toContain("WebSearch 已超时");
+      expect(context.lastToolFailure?.summary).toContain("WebSearch timed out");
+      expect(context.lastToolFailure?.summary).not.toContain("exited non-zero");
+    } finally {
+      builtInTools.WebSearch.call = originalCall;
+    }
+  });
+
+  it("keeps successful Web output on the normal output path", async () => {
+    const originalCall = builtInTools.WebSearch.call;
+    builtInTools.WebSearch.call = (async () => ({
+      text: "result",
+      data: { isError: false, searches: 1, count: 1 },
+    })) as typeof originalCall;
+    const context = createWebToolTestContext([]);
+    const output = new WebToolOutput();
+    const controller = new AbortController();
+
+    try {
+      const result = await executeApprovedModelToolUse(
+        { id: "web-success", name: "WebSearch", input: { query: "linghun" } },
+        "WebSearch",
+        context,
+        "session-web",
+        output,
+        undefined,
+        undefined,
+        { requestTurnId: "turn-web", signal: controller.signal },
+      );
+
+      expect(result.ok).toBe(true);
+      expect(output.errors).toEqual([]);
+      expect(output.text).toContain("执行 1 次搜索");
+    } finally {
+      builtInTools.WebSearch.call = originalCall;
+    }
+  });
+
+  it("isolates parallel Web progress by request owner and tool use id", async () => {
+    const originalCall = builtInTools.WebSearch.call;
+    const firstResult = deferred<ToolOutput>();
+    const secondResult = deferred<ToolOutput>();
+    const scopedContexts = new Map<string, ToolContext>();
+    builtInTools.WebSearch.call = (async (input: unknown, toolContext: ToolContext) => {
+      const query = (input as { query: string }).query;
+      scopedContexts.set(query, toolContext);
+      await emitWebProgress(toolContext, {
+        toolName: "WebSearch",
+        stream: "system",
+        text: "receiving",
+        phase: "receiving",
+        transport: "https",
+        receivedBytes: query === "first" ? 1_024 : 2_048,
+        itemCount: query === "first" ? 1 : 2,
+      });
+      return query === "first" ? firstResult.promise : secondResult.promise;
+    }) as typeof originalCall;
+    const events: unknown[] = [];
+    const context = createWebToolTestContext(events);
+    const originalProgress = vi.fn();
+    const shellRerender = vi.fn();
+    context.tools.onProgress = originalProgress;
+    context.shellRerender = shellRerender;
+    const controller = new AbortController();
+
+    try {
+      const firstPending = executeApprovedModelToolUse(
+        { id: "web-first", name: "WebSearch", input: { query: "first" } },
+        "WebSearch",
+        context,
+        "session-web",
+        new WebToolOutput(),
+        undefined,
+        undefined,
+        { requestTurnId: "turn-web", signal: controller.signal },
+      );
+      await vi.waitFor(() => expect(scopedContexts.has("first")).toBe(true));
+      const secondPending = executeApprovedModelToolUse(
+        { id: "web-second", name: "WebSearch", input: { query: "second" } },
+        "WebSearch",
+        context,
+        "session-web",
+        new WebToolOutput(),
+        undefined,
+        undefined,
+        { requestTurnId: "turn-web", signal: controller.signal },
+      );
+      await vi.waitFor(() => expect(scopedContexts.has("second")).toBe(true));
+
+      expect(scopedContexts.get("first")).not.toBe(scopedContexts.get("second"));
+      expect(context.tools.onProgress).toBe(originalProgress);
+      expect(context.requestActivityToolUseId).toBe("web-second");
+      expect((context as { requestActivityToolTarget?: string }).requestActivityToolTarget)
+        .toContain("2.0 KB");
+      const secondTarget = (context as { requestActivityToolTarget?: string })
+        .requestActivityToolTarget;
+      const rerenders = shellRerender.mock.calls.length;
+
+      await emitWebProgress(scopedContexts.get("first")!, {
+        toolName: "WebSearch",
+        stream: "system",
+        text: "processing",
+        phase: "processing",
+        transport: "https",
+        receivedBytes: 8_192,
+        itemCount: 8,
+      });
+      await emitWebProgress(scopedContexts.get("second")!, {
+        toolName: "WebSearch",
+        stream: "system",
+        text: "receiving",
+        phase: "receiving",
+        transport: "https",
+        receivedBytes: 4_096,
+        itemCount: 4,
+      });
+
+      expect((context as { requestActivityToolTarget?: string }).requestActivityToolTarget)
+        .toBe(secondTarget);
+      expect(shellRerender).toHaveBeenCalledTimes(rerenders);
+      expect(originalProgress).not.toHaveBeenCalled();
+
+      await emitWebProgress(scopedContexts.get("second")!, {
+        toolName: "WebSearch",
+        stream: "system",
+        text: "processing",
+        phase: "processing",
+        transport: "https",
+        receivedBytes: 4_096,
+        itemCount: 4,
+      });
+      const processingTarget = (context as { requestActivityToolTarget?: string })
+        .requestActivityToolTarget;
+      expect(processingTarget).toContain("processing");
+      expect(processingTarget).toContain("4.0 KB");
+      expect(shellRerender).toHaveBeenCalledTimes(rerenders + 1);
+
+      firstResult.resolve({ text: "first result", data: { searches: 1, count: 1 } });
+      await firstPending;
+      expect(context.requestActivityToolUseId).toBe("web-second");
+
+      const eventCount = events.length;
+      context.currentRequestTurnId = "turn-next";
+      await emitWebProgress(scopedContexts.get("second")!, {
+        toolName: "WebSearch",
+        stream: "system",
+        text: "processing",
+        phase: "processing",
+        transport: "https",
+        receivedBytes: 16_384,
+        itemCount: 16,
+      });
+      expect((context as { requestActivityToolTarget?: string }).requestActivityToolTarget)
+        .toBe(processingTarget);
+      expect(events).toHaveLength(eventCount);
+      expect(events.some((event) => (event as { type?: string }).type === "tool_call_delta"))
+        .toBe(false);
+
+      secondResult.resolve({ text: "late second result", data: { searches: 1, count: 1 } });
+      await secondPending;
+    } finally {
+      builtInTools.WebSearch.call = originalCall;
+    }
+  });
+});
 
 describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
   it("keeps automatic final-gate evidence primary text out of the main screen", () => {

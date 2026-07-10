@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { McpServerConfig } from "@linghun/config";
 import { createProcessGuard } from "./process-guard.js";
 import { sanitizeDiagnosticText } from "./startup-runtime.js";
+import type { McpRuntimeProgress } from "./mcp-sse-runtime.js";
 
 // D.13J Block 4 — mutating heuristic for generic MCP tools。我们不知道具体 server 的工具语义，
 // 只能依赖工具名前缀/关键字保守判定：write/delete/update/create/remove/index 等被视为 mutating。
@@ -66,10 +67,13 @@ type McpStdioRunnerOptions<T> = {
   server: McpServerConfig;
   cwd: string;
   timeoutMs: number;
+  idleTimeoutMs?: number;
   requestTimeoutMs?: (method: string) => number | undefined;
   label: string;
   timeoutSummary: string;
   captureStderr: boolean;
+  signal?: AbortSignal;
+  onProgress?: (progress: McpRuntimeProgress) => void;
   run: (sendRequest: McpStdioRequestSender) => Promise<T>;
 };
 
@@ -108,17 +112,32 @@ export async function createMcpStdioRunner<T>(
     }
 
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let hardTimer: ReturnType<typeof setTimeout> | undefined;
+    let abortFromCaller: (() => void) | undefined;
     const settle = (result: McpStdioRunnerResult<T>): void => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
+      if (hardTimer) clearTimeout(hardTimer);
+      if (abortFromCaller) options.signal?.removeEventListener("abort", abortFromCaller);
       try {
         guard.requestStop(false);
       } catch {
         // ignore
       }
       resolvePromise(result);
+    };
+    const armInactivityTimeout = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (settled) return;
+      idleTimer = setTimeout(() => {
+        settle({
+          ok: false,
+          summary: options.timeoutSummary,
+          errorCode: "ETIMEDOUT",
+        });
+      }, options.idleTimeoutMs ?? options.timeoutMs);
     };
 
     const stderrChunks: Buffer[] = [];
@@ -131,7 +150,20 @@ export async function createMcpStdioRunner<T>(
       return;
     }
 
-    timer = setTimeout(() => {
+    abortFromCaller = () => {
+      settle({
+        ok: false,
+        summary: "MCP stdio call aborted by caller",
+        errorCode: "MCP_STDIO_ABORTED",
+      });
+    };
+    if (options.signal?.aborted) {
+      abortFromCaller();
+      return;
+    }
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    armInactivityTimeout();
+    hardTimer = setTimeout(() => {
       settle({
         ok: false,
         summary: options.timeoutSummary,
@@ -142,6 +174,7 @@ export async function createMcpStdioRunner<T>(
     type Pending = {
       resolve: (value: unknown) => void;
       reject: (error: Error) => void;
+      heartbeat: () => void;
     };
     const pending = new Map<number, Pending>();
     let nextId = 1;
@@ -150,16 +183,10 @@ export async function createMcpStdioRunner<T>(
       return new Promise((resolveReq, rejectReq) => {
         const id = nextId++;
         let requestTimer: ReturnType<typeof setTimeout> | undefined;
-        const settleRequest = (settle: () => void): void => {
-          if (requestTimer) clearTimeout(requestTimer);
-          settle();
-        };
-        pending.set(id, {
-          resolve: (value) => settleRequest(() => resolveReq(value)),
-          reject: (error) => settleRequest(() => rejectReq(error)),
-        });
         const perRequestTimeoutMs = options.requestTimeoutMs?.(method);
-        if (perRequestTimeoutMs !== undefined && perRequestTimeoutMs > 0) {
+        const armRequestTimeout = (): void => {
+          if (requestTimer) clearTimeout(requestTimer);
+          if (perRequestTimeoutMs === undefined || perRequestTimeoutMs <= 0) return;
           requestTimer = setTimeout(() => {
             pending.delete(id);
             rejectReq(
@@ -169,10 +196,21 @@ export async function createMcpStdioRunner<T>(
               ),
             );
           }, perRequestTimeoutMs);
-        }
+        };
+        const settleRequest = (settle: () => void): void => {
+          if (requestTimer) clearTimeout(requestTimer);
+          settle();
+        };
+        pending.set(id, {
+          resolve: (value) => settleRequest(() => resolveReq(value)),
+          reject: (error) => settleRequest(() => rejectReq(error)),
+          heartbeat: armRequestTimeout,
+        });
+        armRequestTimeout();
         const message = JSON.stringify({ jsonrpc: "2.0", id, method, params: params2 });
         try {
           stdin.write(`${message}\n`);
+          options.onProgress?.({ phase: "waiting", transport: "stdio" });
         } catch (error) {
           if (requestTimer) clearTimeout(requestTimer);
           pending.delete(id);
@@ -182,6 +220,7 @@ export async function createMcpStdioRunner<T>(
     };
 
     stdout.setEncoding("utf8");
+    let receivedBytes = 0;
     stdout.on("data", (chunk: string) => {
       stdoutBuffer += chunk;
       let newlineIdx = stdoutBuffer.indexOf("\n");
@@ -201,10 +240,31 @@ export async function createMcpStdioRunner<T>(
             continue;
           }
           const obj = frame as {
+            jsonrpc?: unknown;
             id?: number;
+            method?: unknown;
+            params?: unknown;
             result?: unknown;
             error?: { message?: string; code?: number | string };
           };
+          const responseHandler = typeof obj.id === "number" ? pending.get(obj.id) : undefined;
+          const isProgress =
+            obj.jsonrpc === "2.0" &&
+            obj.method === "notifications/progress" &&
+            Boolean(obj.params);
+          if (obj.jsonrpc === "2.0" && (responseHandler || isProgress)) {
+            armInactivityTimeout();
+            receivedBytes += Buffer.byteLength(line, "utf8");
+            options.onProgress?.({
+              phase: "receiving",
+              transport: "stdio",
+              receivedBytes,
+            });
+            if (responseHandler) responseHandler.heartbeat();
+            if (isProgress) {
+              for (const handler of pending.values()) handler.heartbeat();
+            }
+          }
           if (typeof obj.id === "number") {
             const handler = pending.get(obj.id);
             if (handler) {
@@ -278,17 +338,27 @@ export async function runMcpStdioToolCall(
   params: Record<string, unknown>,
   cwd: string,
   timeoutMs: number = MCP_STDIO_TOOL_CALL_TIMEOUT_MS,
+  signal?: AbortSignal,
+  options: {
+    idleTimeoutMs?: number;
+    onProgress?: (progress: McpRuntimeProgress) => void;
+  } = {},
 ): Promise<McpStdioResult> {
+  options.onProgress?.({ phase: "starting", transport: "stdio" });
   const result = await createMcpStdioRunner({
     server,
     cwd,
     timeoutMs,
+    idleTimeoutMs: options.idleTimeoutMs,
     requestTimeoutMs: (method) =>
       method === "tools/call" ? timeoutMs : MCP_STDIO_CONNECTION_TIMEOUT_MS,
     label: `mcp-stdio:${server.command}`,
     timeoutSummary: `MCP stdio timeout after ${timeoutMs}ms (no result for tools/call ${toolName})`,
     captureStderr: true,
+    signal,
+    onProgress: options.onProgress,
     run: async (sendRequest) => {
+      options.onProgress?.({ phase: "initializing", transport: "stdio" });
       await sendRequest("initialize", {
         protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
         capabilities: {},
@@ -296,6 +366,7 @@ export async function runMcpStdioToolCall(
       });
       // D.13J tail fix（Block A）：tools/list 校验目标 tool 在 server 公布的列表内。
       // 防御 server 静默接受 tools/call 但工具名不存在 / 拼写错误 / server 已下线该工具。
+      options.onProgress?.({ phase: "listing", transport: "stdio" });
       const listResult = await sendRequest("tools/list", {});
       const toolNames = extractMcpToolNames(listResult);
       if (!toolNames.includes(toolName)) {
@@ -304,6 +375,7 @@ export async function runMcpStdioToolCall(
           "MCP_TOOL_NOT_FOUND",
         );
       }
+      options.onProgress?.({ phase: "calling", transport: "stdio" });
       return await sendRequest("tools/call", {
         name: toolName,
         arguments: params,

@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __testClassifyWindowsShellCommand,
   __testCreateBashOutcomeDiagnostics,
@@ -20,7 +20,13 @@ import {
   createToolContext,
   runTool,
   type ToolPermissionSpec,
+  type ToolProgressEvent,
 } from "./index.js";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("Phase 05 core tools", () => {
   it("Phase D createTool adds fail-closed defaults and CoreTool methods", () => {
@@ -103,6 +109,200 @@ describe("Phase 05 core tools", () => {
         blocked_domains: ["example.com"],
       }),
     ).toThrow("allowed_domains 和 blocked_domains 不能同时使用");
+  });
+
+  it("emits structured Web progress at observable transport boundaries", async () => {
+    const searchProgress: ToolProgressEvent[] = [];
+    const searchContext = createToolContext();
+    searchContext.onProgress = (event) => {
+      searchProgress.push(event);
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          '<li class="b_algo"><h2><a href="https://example.com">Example</a></h2><p>Result</p></li>',
+          { headers: { "content-type": "text/html", "content-length": "96" } },
+        )),
+    );
+
+    await runTool("WebSearch", { query: "linghun" }, searchContext);
+
+    expect(searchProgress.map((event) => event.phase)).toEqual([
+      "connecting",
+      "receiving",
+      "processing",
+    ]);
+    expect(searchProgress.at(-1)).toMatchObject({
+      toolName: "WebSearch",
+      transport: "https",
+      itemCount: 1,
+    });
+    expect(searchProgress.at(-1)?.receivedBytes).toBeGreaterThan(0);
+
+    const fetchProgress: ToolProgressEvent[] = [];
+    const fetchContext = createToolContext();
+    fetchContext.onProgress = (event) => {
+      fetchProgress.push(event);
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("plain body", { headers: { "content-type": "text/plain" } })),
+    );
+
+    await runTool("WebFetch", { url: "https://example.com/page" }, fetchContext);
+
+    expect(fetchProgress[0]).toMatchObject({
+      toolName: "WebFetch",
+      phase: "connecting",
+      transport: "https",
+    });
+    expect(fetchProgress.some((event) => event.phase === "receiving")).toBe(true);
+    expect(fetchProgress.at(-1)).toMatchObject({
+      toolName: "WebFetch",
+      phase: "processing",
+      receivedBytes: 10,
+    });
+  });
+
+  it("propagates caller abort into WebSearch and returns structured failure data", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        expect(init.signal?.aborted).toBe(true);
+        throw new DOMException("aborted", "AbortError");
+      }),
+    );
+    const context = createToolContext();
+    context.abortSignal = controller.signal;
+
+    const result = await runTool("WebSearch", { query: "linghun" }, context);
+
+    expect(result.output.data).toMatchObject({
+      isError: true,
+      errorCode: "ABORTED",
+      aborted: true,
+      timedOut: false,
+    });
+  });
+
+  it("keeps the WebSearch timeout active while reading the response body", async () => {
+    vi.useFakeTimers();
+    let readerStartedResolve: (() => void) | undefined;
+    const readerStarted = new Promise<void>((resolvePromise) => {
+      readerStartedResolve = resolvePromise;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const signal = init.signal as AbortSignal;
+        return {
+          ok: true,
+          status: 200,
+          text: () =>
+            new Promise<string>((_resolvePromise, rejectPromise) => {
+              readerStartedResolve?.();
+              signal.addEventListener(
+                "abort",
+                () => rejectPromise(new DOMException("aborted", "AbortError")),
+                { once: true },
+              );
+            }),
+        } as Response;
+      }),
+    );
+
+    const pending = runTool("WebSearch", { query: "linghun" }, createToolContext());
+    await readerStarted;
+    await vi.advanceTimersByTimeAsync(20_000);
+    const result = await pending;
+
+    expect(result.output.data).toMatchObject({
+      isError: true,
+      errorCode: "TIMEOUT",
+      aborted: false,
+      timedOut: true,
+    });
+  });
+
+  it("keeps the WebFetch timeout active while reading a slow body", async () => {
+    vi.useFakeTimers();
+    let readerStartedResolve: (() => void) | undefined;
+    const readerStarted = new Promise<void>((resolvePromise) => {
+      readerStartedResolve = resolvePromise;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const signal = init.signal as AbortSignal;
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          headers: new Headers({ "content-type": "text/plain" }),
+          body: {
+            getReader: () => ({
+              read: () =>
+                new Promise<never>((_resolvePromise, rejectPromise) => {
+                  readerStartedResolve?.();
+                  signal.addEventListener(
+                    "abort",
+                    () => rejectPromise(new DOMException("aborted", "AbortError")),
+                    { once: true },
+                  );
+                }),
+              cancel: vi.fn(),
+            }),
+          },
+        } as unknown as Response;
+      }),
+    );
+
+    const pending = runTool(
+      "WebFetch",
+      { url: "https://example.com/slow" },
+      createToolContext(),
+    );
+    await readerStarted;
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await pending;
+
+    expect(result.output.data).toMatchObject({
+      isError: true,
+      errorCode: "TIMEOUT",
+      aborted: false,
+      timedOut: true,
+    });
+  });
+
+  it("propagates caller abort into WebFetch structured failure data", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        expect(init.signal?.aborted).toBe(true);
+        throw new DOMException("aborted", "AbortError");
+      }),
+    );
+    const context = createToolContext();
+    context.abortSignal = controller.signal;
+
+    const result = await runTool(
+      "WebFetch",
+      { url: "https://example.com/abort" },
+      context,
+    );
+
+    expect(result.output.data).toMatchObject({
+      isError: true,
+      errorCode: "ABORTED",
+      aborted: true,
+      timedOut: false,
+    });
   });
 
   it("reads, searches, edits, tracks todo, runs bash, and summarizes diff", async () => {

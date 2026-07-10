@@ -8,12 +8,48 @@ import {
   deriveEvidenceClaimSeeds,
   isToolOutputFailure,
   recordToolEvidence,
+  recordToolResultBudgetEvidence,
   recordVerificationEvidence,
   stringifyToolResultContentForBudget,
 } from "./evidence-runtime.js";
 import { readRuntimeLedgerRecords } from "./runtime-storage.js";
 
 describe("evidence-runtime", () => {
+  it("links persisted large-result evidence to its tool use", async () => {
+    const events: unknown[] = [];
+    const context = {
+      evidence: [],
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    } as never;
+
+    await recordToolResultBudgetEvidence(context, "session-1", {
+      toolUseId: "tool-large",
+      originalChars: 20_000,
+      replacementChars: 200,
+      artifact: {
+        id: "artifact-large",
+        toolUseId: "tool-large",
+        path: "F:/tmp/tool-large.txt",
+        relativePath: ".linghun/tool-results/tool-large.txt",
+        bytes: 20_000,
+        chars: 20_000,
+        sha256: "a".repeat(64),
+        previewChars: 0,
+        preview: "",
+        hasMore: true,
+      },
+      reason: "single_result",
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "evidence_record", toolUseId: "tool-large" }),
+    );
+  });
+
   it("records read-only tool evidence with low-noise summaries", async () => {
     const events: unknown[] = [];
     const context = {
@@ -132,6 +168,40 @@ describe("evidence-runtime", () => {
         expect.objectContaining({ type: "evidence_record", claimSeeds: web?.claimSeeds }),
       ]),
     );
+  });
+
+  it("does not record successful web-source evidence for structured Web failures", async () => {
+    const events: unknown[] = [];
+    const context = {
+      evidence: [],
+      store: {
+        appendEvent: async (_sessionId: string, event: unknown) => {
+          events.push(event);
+        },
+      },
+    } as never;
+    const output = {
+      text: "WebSearch failed: request timed out",
+      data: {
+        isError: true,
+        error: "request timed out",
+        errorCode: "TIMEOUT",
+        aborted: false,
+        timedOut: true,
+      },
+    };
+
+    const evidence = await recordToolEvidence(
+      context,
+      "session-1",
+      "WebSearch",
+      output,
+      { query: "latest facts" },
+    );
+
+    expect(isToolOutputFailure("WebSearch", output)).toBe(true);
+    expect(evidence).toBeNull();
+    expect(events).toEqual([]);
   });
 
   it("records verification claim seeds only for passed verification evidence", async () => {
@@ -301,5 +371,20 @@ describe("isToolOutputFailure", () => {
   it("returns false for non-Bash tools", () => {
     const output = { text: "error", data: { exitCode: 127 } };
     expect(isToolOutputFailure("Read", output)).toBe(false);
+  });
+
+  it("uses structured Web failure data instead of output text", () => {
+    expect(
+      isToolOutputFailure("WebFetch", {
+        text: "request failed",
+        data: { isError: true, errorCode: "HTTP_ERROR" },
+      }),
+    ).toBe(true);
+    expect(
+      isToolOutputFailure("WebSearch", {
+        text: "No web search results found",
+        data: { isError: false, count: 0 },
+      }),
+    ).toBe(false);
   });
 });

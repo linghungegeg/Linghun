@@ -144,6 +144,10 @@ describe("provider failure classification", () => {
     expect(classifyProviderFailure({ code: "PROVIDER_MALFORMED_STREAM" })).toBe("stream_parse");
     expect(classifyProviderFailure({ code: "PROVIDER_PARTIAL_TOOL_CALL" })).toBe("tool_stream");
     expect(classifyProviderFailure({ code: "PROVIDER_STREAM_DECODE_ERROR" })).toBe("transit");
+    expect(classifyProviderFailure({ code: "PROVIDER_RESPONSE_FAILED" })).toBe("response_failed");
+    expect(classifyProviderFailure({ code: "PROVIDER_RESPONSE_INCOMPLETE" })).toBe(
+      "response_failed",
+    );
   });
 
   it("formats distinct primary messages for compatibility and tool stream failures", () => {

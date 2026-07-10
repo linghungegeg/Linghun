@@ -62,6 +62,7 @@ import {
   createMemoryState,
   createRemoteState,
 } from "./tui-state-runtime.js";
+import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 
 describe("Phase E MCP stdio runtime coverage", () => {
   it("covers tools/call ok, tool-not-found, timeout, and spawn error paths", async () => {
@@ -101,6 +102,82 @@ describe("Phase E MCP stdio runtime coverage", () => {
       200,
     );
     expect(spawnError.ok).toBe(false);
+  });
+
+  it("aborts a hanging MCP stdio call without waiting for the tool timeout", async () => {
+    const server = await createMcpServerScript(`
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const req = JSON.parse(line);
+        if (req.method === "initialize") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: {} }));
+        if (req.method === "tools/list") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { tools: [{ name: "demo_tool" }] } }));
+      });
+    `);
+    const controller = new AbortController();
+    const pending = runMcpStdioToolCall(
+      server,
+      "demo_tool",
+      {},
+      server.cwd,
+      30_000,
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 50);
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      errorCode: "MCP_STDIO_ABORTED",
+    });
+  });
+
+  it("treats MCP stdio progress frames as heartbeat during a long tool call", async () => {
+    const server = await createMcpServerScript(`
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const req = JSON.parse(line);
+        if (req.method === "initialize") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: {} }));
+        if (req.method === "tools/list") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { tools: [{ name: "demo_tool" }] } }));
+        if (req.method === "tools/call") {
+          const heartbeat = setInterval(() => console.log(JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: {} })), 50);
+          setTimeout(() => {
+            clearInterval(heartbeat);
+            console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { content: "ok" } }));
+          }, 450);
+        }
+      });
+    `);
+
+    await expect(
+      runMcpStdioToolCall(server, "demo_tool", {}, server.cwd, 5_000, undefined, {
+        idleTimeoutMs: 300,
+      }),
+    ).resolves.toMatchObject({ ok: true, summary: "tools/call demo_tool ok" });
+  });
+
+  it("does not let stdio noise or arbitrary ping renew the hard deadline", async () => {
+    const server = await createMcpServerScript(`
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const req = JSON.parse(line);
+        if (req.method === "initialize") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: {} }));
+        if (req.method === "tools/list") console.log(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { tools: [{ name: "demo_tool" }] } }));
+        if (req.method === "tools/call") {
+          setInterval(() => {
+            console.log("not-json-noise");
+            console.log(JSON.stringify({ jsonrpc: "2.0", method: "ping", params: {} }));
+          }, 10);
+        }
+      });
+    `);
+
+    await expect(
+      runMcpStdioToolCall(server, "demo_tool", {}, server.cwd, 120, undefined, {
+        idleTimeoutMs: 1_000,
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: "ETIMEDOUT" });
   });
 });
 
@@ -542,6 +619,133 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(largeFollowUp.blocked || context.cache.compactBoundaries.length > boundaryCount).toBe(
       true,
     );
+  });
+
+  it("restores the post-compact retrigger guard across resume", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 13_100);
+    const staleContext = "RESUME_RETRIGGER_OLD_CONTEXT".repeat(3_000);
+    const first = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: staleContext },
+        { role: "assistant", content: staleContext },
+        { role: "user", content: "compact before resume" },
+      ],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+
+    expect(first.blocked).toBe(false);
+    if (first.blocked) throw new Error("provider preflight unexpectedly blocked");
+    const projection = context.cache.compactProjection;
+    expect(projection?.retriggerGuard).toEqual({
+      baselineChars: estimateModelMessageChars(first.messages),
+      tailGrowthThreshold: expect.any(Number),
+    });
+
+    const resumed = await createTestContext();
+    setExecutorMaxInputTokens(resumed, 13_100);
+    hydrateResumeContext(resumed, [
+      {
+        type: "system_event",
+        id: "compact-resume-retrigger",
+        level: "info",
+        message: `compact_projection:${JSON.stringify(projection)}`,
+        createdAt: projection?.createdAt ?? new Date().toISOString(),
+      },
+    ]);
+    expect(resumed.cache.compactStrategy).toBeUndefined();
+    expect(resumed.cache.compactProjection?.retriggerGuard).toEqual(projection?.retriggerGuard);
+    const boundaryCount = resumed.cache.compactBoundaries.length;
+
+    const smallFollowUp = await prepareMessagesForProviderPreflight({
+      messages: [...first.messages, { role: "user", content: "small follow-up after resume" }],
+      context: resumed,
+      sessionId: resumed.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "reactive",
+      deps: compactDeps(),
+    });
+
+    expect(smallFollowUp.blocked).toBe(false);
+    expect(resumed.cache.compactBoundaries).toHaveLength(boundaryCount);
+
+    const largeFollowUp = await prepareMessagesForProviderPreflight({
+      messages: [...smallFollowUp.messages, { role: "user", content: "x".repeat(30_000) }],
+      context: resumed,
+      sessionId: resumed.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+
+    expect(largeFollowUp.blocked || resumed.cache.compactBoundaries.length > boundaryCount).toBe(
+      true,
+    );
+  });
+
+  it("restores raw tool_result fingerprints before aggregate budgeting", async () => {
+    const sessionId = "session-resume-raw-tool-results";
+    const oldResults = Array.from({ length: 4 }, (_, index) =>
+      `OLD_RAW_${index}:${String(index).repeat(48_700)}`,
+    );
+    const newResult = `NEW_RAW:${"n".repeat(10_000)}`;
+    const providerContent = (content: string) =>
+      JSON.stringify({ tool: "Read", isError: false, content });
+    const pair = (toolUseId: string, content: string): ModelMessage[] => [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: toolUseId, name: "Read", input: { path: `${toolUseId}.txt` } }],
+      },
+      { role: "tool", tool_call_id: toolUseId, content: providerContent(content) },
+    ];
+    const oldPairs = oldResults.flatMap((content, index) => pair(`call-old-${index}`, content));
+    const combined = [...oldPairs, ...pair("call-new", newResult)];
+    const uninterruptedContext = await createTestContext();
+    const uninterruptedState = { seenIds: new Set<string>(), replacements: new Map() };
+    for (let index = 0; index < oldResults.length; index += 1) {
+      await applyToolResultBudgetToMessages(pair(`call-old-${index}`, oldResults[index] ?? ""), {
+        projectPath: uninterruptedContext.projectPath,
+        sessionId,
+        state: uninterruptedState,
+      });
+    }
+    const uninterrupted = await applyToolResultBudgetToMessages(combined, {
+      projectPath: uninterruptedContext.projectPath,
+      sessionId,
+      state: uninterruptedState,
+    });
+
+    const resumedContext = await createTestContext();
+    resumedContext.sessionId = sessionId;
+    hydrateResumeContext(
+      resumedContext,
+      oldResults.map((content, index) => ({
+        type: "tool_result" as const,
+        toolUseId: `call-old-${index}`,
+        toolName: "Read" as const,
+        content,
+        isError: false,
+        createdAt: new Date().toISOString(),
+      })),
+    );
+    expect(resumedContext.toolResultBudgetState?.seenIds).toHaveLength(oldResults.length);
+    const resumed = await applyToolResultBudgetToMessages(combined, {
+      projectPath: resumedContext.projectPath,
+      sessionId,
+      state: resumedContext.toolResultBudgetState,
+    });
+
+    expect(resumed.messages).toEqual(uninterrupted.messages);
+    expect(resumed.records.map((record) => record.toolUseId)).toEqual(["call-new"]);
+    for (let index = 0; index < oldResults.length; index += 1) {
+      expect(resumed.messages[index * 2 + 1]?.content).toBe(providerContent(oldResults[index] ?? ""));
+    }
   });
 
   it("can roll back provider-visible replacement projection with a feature flag", async () => {

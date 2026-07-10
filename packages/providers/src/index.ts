@@ -3229,14 +3229,18 @@ function parseResponsesEvent(
   }
   if (parsed.type === "response.failed" || parsed.type === "response.incomplete") {
     state.streamComplete = true;
+    const outcome = parsed.type === "response.failed" ? "failed" : "incomplete";
     return [
       {
         type: "error",
         error: new LinghunError({
-          code: "PROVIDER_STREAM_ERROR",
+          code:
+            parsed.type === "response.failed"
+              ? "PROVIDER_RESPONSE_FAILED"
+              : "PROVIDER_RESPONSE_INCOMPLETE",
           message: `模型请求失败：Responses endpoint 返回 ${parsed.type}。`,
           suggestion:
-            "请运行 /model doctor 检查 endpoint profile、model、reasoning 和 provider 兼容性。",
+            `上游明确以 ${outcome} 结束本次响应。请重试；若重复出现，请运行 /model doctor 检查 endpoint profile、model、reasoning 和 provider 兼容性。`,
           recoverable: true,
         }),
       },

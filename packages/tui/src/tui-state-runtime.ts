@@ -29,6 +29,11 @@ import {
 import { builtInTools } from "@linghun/tools";
 import { createCacheFreshness } from "./cache-freshness.js";
 import { loadMemoryRulesFile, parseMemoryRuleFrontmatter } from "./memory-rules-runtime.js";
+import {
+  isMemoryTombstoned,
+  loadMemoryTombstoneIndex,
+  parseMemoryOrigin,
+} from "./memory-tombstone-runtime.js";
 import { createReplBridgeState } from "./remote-repl-bridge-runtime.js";
 import { MEMORY_LEARNING_STATE_FILE } from "./runtime-utils.js";
 import { formatError, truncateDisplay } from "./startup-runtime.js";
@@ -295,7 +300,18 @@ export async function createMemoryState(
 ): Promise<MemoryState> {
   const paths = resolveStoragePaths(config, projectPath);
   const projectRulesPath = join(projectPath, "LINGHUN.md");
-  const projectRules = await loadProjectRulesSummary(projectRulesPath);
+  const [projectRules, tombstones, candidates, accepted, rejected, disabled, retired] =
+    await Promise.all([
+      loadProjectRulesSummary(projectRulesPath),
+      loadMemoryTombstoneIndex(paths.memoryProject, paths.memoryUser),
+      loadMemoryByStatus(paths, "candidate"),
+      loadMemoryByStatus(paths, "accepted"),
+      loadMemoryByStatus(paths, "rejected"),
+      loadMemoryByStatus(paths, "disabled"),
+      loadMemoryByStatus(paths, "retired"),
+    ]);
+  const visible = (items: MemoryCandidate[]): MemoryCandidate[] =>
+    items.filter((item) => !isMemoryTombstoned(tombstones, item));
   return {
     projectRulesPath,
     projectRulesExists: projectRules.exists,
@@ -309,11 +325,12 @@ export async function createMemoryState(
     projectDir: paths.memoryProject,
     userDir: paths.memoryUser,
     sessionDir: paths.memorySession,
-    candidates: await loadMemoryByStatus(paths, "candidate"),
-    accepted: await loadMemoryByStatus(paths, "accepted"),
-    rejected: await loadMemoryByStatus(paths, "rejected"),
-    disabled: await loadMemoryByStatus(paths, "disabled"),
-    retired: await loadMemoryByStatus(paths, "retired"),
+    candidates: visible(candidates),
+    accepted: visible(accepted),
+    rejected: visible(rejected),
+    disabled: visible(disabled),
+    retired: visible(retired),
+    tombstones,
     ...((await loadMemoryLearningMode(paths)) ?? {
       learningMode: "active" as const,
       learningModeSource: "default" as const,
@@ -448,6 +465,7 @@ function parseMemoryCandidate(value: unknown): MemoryCandidate | null {
   const sourceRefs = Array.isArray(value.sourceRefs)
     ? value.sourceRefs.filter((item): item is string => typeof item === "string")
     : [value.source];
+  const origin = parseMemoryOrigin(value.origin);
   return {
     id: value.id,
     scope: value.scope,
@@ -459,6 +477,7 @@ function parseMemoryCandidate(value: unknown): MemoryCandidate | null {
     summary: truncateDisplay(value.summary.replace(/\s+/g, " "), 240),
     source: value.source,
     sourceRefs: sourceRefs.slice(0, 6),
+    ...(origin ? { origin } : {}),
     risk,
     inferred: value.inferred === true,
     createdAt: value.createdAt,

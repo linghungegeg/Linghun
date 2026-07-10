@@ -56,6 +56,28 @@ describe("SessionStore", () => {
     expect(resumed.diagnostics).toEqual([]);
   });
 
+  it("skips an owned event when its commit guard becomes stale", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+
+    await store.appendEvent(
+      session.id,
+      {
+        type: "tool_result",
+        toolUseId: "late-tool",
+        toolName: "Read",
+        content: "late",
+        createdAt: new Date(0).toISOString(),
+      },
+      () => false,
+    );
+
+    const resumed = await store.resume(session.id);
+    expect(resumed.transcript.some((event) => event.type === "tool_result")).toBe(false);
+  });
+
   it("indexes runtime transcript events into the session ledger", async () => {
     const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-project-"));

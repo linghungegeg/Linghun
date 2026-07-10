@@ -324,6 +324,8 @@ export function createShellViewModel(
     const activeStreamingAssistant = context.streamingAssistant;
     const activeStreamingAssistantId = activeStreamingAssistant?.id;
     const hasActiveProviderFailure = Boolean(context.lastProviderFailure);
+    const activeProviderFailureRequestTurnId =
+      context.currentRequestTurnId ?? context.lastProviderFailure?.requestTurnId;
     const activeRequestPhase = (context as { requestActivityPhase?: string }).requestActivityPhase;
     const hasActiveRequestActivity = isActiveRequestActivityPhase(activeRequestPhase);
     const hasActiveTaskActivity = isActiveTaskActivity(effectiveActivity);
@@ -331,6 +333,7 @@ export function createShellViewModel(
     const staleCompactBoundaryBlockIds = new Set<string>();
     const activeCompactBoundaryBlockIds = new Set<string>();
     let latestProviderFailureBlockId: string | undefined;
+    let latestProviderFailureRecovered = false;
     for (const block of allOutputBlocks) {
       if (block.messageKind === "compact_boundary") {
         activeCompactBoundaryBlockIds.add(block.id);
@@ -341,20 +344,29 @@ export function createShellViewModel(
         activeCompactBoundaryBlockIds.clear();
       }
       if (isProviderFailureOutputBlock(block, language)) {
+        if (latestProviderFailureBlockId) {
+          staleProviderFailureBlockIds.add(latestProviderFailureBlockId);
+        }
         latestProviderFailureBlockId = block.id;
+        latestProviderFailureRecovered = false;
         continue;
       }
       if (latestProviderFailureBlockId && isProviderRecoveryProgressBlock(block, language)) {
         staleProviderFailureBlockIds.add(latestProviderFailureBlockId);
         latestProviderFailureBlockId = undefined;
+        latestProviderFailureRecovered = true;
       }
     }
-    hasRecoveredAfterProviderFailure = staleProviderFailureBlockIds.size > 0;
+    hasRecoveredAfterProviderFailure = latestProviderFailureRecovered;
     const selectedBlocks = allOutputBlocks.filter((b, i) => {
       if (isEmptyAssistantStreamBlock(b)) return false;
       if (
         isProviderFailureOutputBlock(b, language) &&
-        (!hasActiveProviderFailure || hasActiveRequestActivity || staleProviderFailureBlockIds.has(b.id))
+        (!hasActiveProviderFailure ||
+          hasActiveRequestActivity ||
+          staleProviderFailureBlockIds.has(b.id) ||
+          (activeProviderFailureRequestTurnId !== undefined &&
+            b.failureRequestTurnId !== activeProviderFailureRequestTurnId))
       ) {
         return false;
       }
@@ -1689,13 +1701,24 @@ export function mapBottomPaneStatusToView(
     !input.suppressProviderFailure &&
     !isActiveRequestActivityPhase(phase)
   ) {
+    const actionRequired = providerFailure.recoverability === "action_required";
     const rateLimited = providerFailure.code === "PROVIDER_RATE_LIMITED";
     return {
-      kind: "failed",
+      kind: actionRequired ? "action_required" : "completed_partial",
       source: "provider",
-      text: isEn ? "Provider request failed" : "Provider 请求失败",
+      text: actionRequired
+        ? isEn
+          ? "Provider configuration needs attention"
+          : "Provider 配置需要处理"
+        : isEn
+          ? "Provider request did not complete · retry available"
+          : "Provider 请求未完成 · 可重试",
       reason: providerFailure.summary,
-      nextAction: rateLimited
+      nextAction: actionRequired
+        ? isEn
+          ? "Fix the provider/model configuration or use /model doctor, then retry."
+          : "修复 provider/model 配置或运行 /model doctor 后重试。"
+        : rateLimited
         ? isEn
           ? "Retry later or use /model doctor; other work can continue."
           : "稍后重试或运行 /model doctor；其他工作可继续。"
@@ -2316,12 +2339,8 @@ function isKnownSlashCommand(command: string): boolean {
 }
 
 function isProviderFailureOutputBlock(block: ProductBlockViewModel, language: Language): boolean {
-  if (block.messageKind !== "tool_result_error") return false;
-  const title = block.title.trim().toLowerCase();
-  if (language === "en-US") {
-    return title === "model request failed" || title === "provider request failed";
-  }
-  return title === "模型请求失败" || title === "provider 请求失败";
+  void language;
+  return block.messageKind === "tool_result_error" && block.failureDomain === "provider";
 }
 
 function isProviderRecoveryProgressBlock(block: ProductBlockViewModel, language: Language): boolean {

@@ -183,7 +183,7 @@ export async function handleRemoteCommand(
       [],
       5 * 60 * 1000,
     );
-    const result = await sendRemoteEventReal(context, event);
+    const result = await sendRemoteEventReal(context, event, undefined, context.tools.abortSignal);
     const ok = result.status === "sent";
     await appendRemoteSystemEvent(
       context,
@@ -1512,6 +1512,7 @@ export async function sendRemoteEventReal(
   context: TuiContext,
   event: RemoteEvent,
   depsOverride?: RemoteTransportDeps,
+  signal?: AbortSignal,
 ): Promise<RemoteEvent> {
   const transport = depsOverride ?? remoteTransportDeps ?? defaultRemoteTransportDeps();
   const channel = context.remote.channels.find((item) => item.id === event.channel);
@@ -1543,7 +1544,7 @@ export async function sendRemoteEventReal(
     if (!build.ok) {
       return finalize("failed", "missing redacted webhook endpoint configuration");
     }
-    const result = await deliverWebhook(build.request, transport.fetch);
+    const result = await deliverWebhook(build.request, transport.fetch, signal);
     return finalize(result.status === "sent" ? "sent" : "failed", result.detail);
   }
   const invocation = buildOfficialCliInvocation(channel, event);

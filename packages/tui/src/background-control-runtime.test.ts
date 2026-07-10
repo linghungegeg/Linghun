@@ -1,9 +1,15 @@
 import { Writable } from "node:stream";
 import { defaultConfig } from "@linghun/config";
+import type { TranscriptEvent } from "@linghun/core";
 import { builtInTools, createToolContext, type ToolOutput } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
 import { interruptAllActiveWork } from "./background-control-runtime.js";
-import { executeApprovedModelToolUse } from "./model-tool-runtime.js";
+import { appendDeferredToolResultEvent } from "./evidence-runtime.js";
+import { hydrateResumeContext } from "./handoff-session-runtime.js";
+import {
+  executeApprovedModelToolUse,
+  executeDeferredDispatchToolUse,
+} from "./model-tool-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 
 class MemoryOutput extends Writable {
@@ -118,6 +124,209 @@ describe("foreground delayed tool ownership", () => {
       await runDelayedReadIsolationIteration(iteration);
     }
   }, 30_000);
+
+  it("does not commit MCP evidence when interrupted during the evidence append", async () => {
+    const events: unknown[] = [];
+    const context = makeContext(events);
+    const evidenceAppendStarted = deferred<void>();
+    const releaseEvidenceAppend = deferred<void>();
+    context.store.appendEvent = async (
+      _sessionId: string,
+      event: unknown,
+      commitGuard?: () => boolean,
+    ) => {
+      if ((event as { type?: string }).type === "evidence_record") {
+        evidenceAppendStarted.resolve();
+        await releaseEvidenceAppend.promise;
+      }
+      if (commitGuard && !commitGuard()) return;
+      events.push(event);
+    };
+    const output = new MemoryOutput();
+    const controllerA = new AbortController();
+    const lateResponse = deferred<Response>();
+    const toolCallStarted = deferred<void>();
+    let toolCallRequestId = 0;
+    context.projectPath = process.cwd();
+    context.config = {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          remote: { command: "", transport: "sse", url: "https://example.com/mcp" },
+        },
+      },
+    };
+    context.mcp = {
+      enabled: true,
+      servers: [{ name: "remote", command: "", status: "configured" }],
+      tools: [
+        {
+          server: "remote",
+          name: "demo",
+          description: "demo",
+          discovery: "discovered",
+          trusted: true,
+          schemaLoaded: true,
+          runtimeVersion: "compatible",
+        },
+      ],
+    };
+    context.skills = {
+      enabled: false,
+      projectDir: process.cwd(),
+      userDir: process.cwd(),
+      skills: [],
+      disabledIds: [],
+      trustedIds: [],
+      evolutionCandidates: [],
+      rejectedEvolutionCandidates: [],
+    };
+    context.plugins = {
+      enabled: false,
+      projectDir: process.cwd(),
+      userDir: process.cwd(),
+      plugins: [],
+      disabledIds: [],
+      trustedIds: [],
+    };
+    context.index = { status: "unknown" } as TuiContext["index"];
+    context.discoveredDeferredToolNames = new Set(["mcp:remote:demo"]);
+    context.evidence = [];
+    context.tools.abortSignal = controllerA.signal;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { id: number; method: string };
+      if (request.method === "tools/list") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "demo" }] } }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      toolCallRequestId = request.id;
+      toolCallStarted.resolve();
+      return lateResponse.promise;
+    }) as typeof fetch;
+
+    try {
+      const pending = executeDeferredDispatchToolUse(
+        {
+          id: "mcp-late",
+          name: "ExecuteExtraTool",
+          input: { tool_name: "mcp:remote:demo", params: {} },
+        },
+        context,
+        "session-delayed-mcp",
+        output,
+        {
+          messages: [],
+          provider: "deepseek",
+          model: "deepseek-chat",
+          endpointProfile: "chat_completions",
+          reasoningSent: false,
+          requestTurnId: "turn-a",
+          abortSignal: controllerA.signal,
+        },
+      );
+      await Promise.race([
+        toolCallStarted.promise,
+        pending.then((result) => {
+          throw new Error(`MCP call finished before tools/call: ${JSON.stringify(result)}`);
+        }),
+      ]);
+
+      lateResponse.resolve(
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: toolCallRequestId,
+            error: { code: -32000, message: "late failure" },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+      await evidenceAppendStarted.promise;
+
+      controllerA.abort();
+      context.currentRequestTurnId = "turn-b";
+      context.requestActivityOwner = { kind: "foreground", requestTurnId: "turn-b" };
+      context.requestActivityPhase = "request_started";
+      context.requestActivityToolUseId = "turn-b-tool";
+      (context as { requestActivityToolTarget?: string }).requestActivityToolTarget = "new turn";
+      context.tools.abortSignal = new AbortController().signal;
+      releaseEvidenceAppend.resolve();
+
+      await expect(pending).resolves.toMatchObject({
+        ok: false,
+        text: "cancelled: stale deferred tool result discarded",
+      });
+      expect(context.currentRequestTurnId).toBe("turn-b");
+      expect(context.requestActivityOwner).toEqual({ kind: "foreground", requestTurnId: "turn-b" });
+      expect(context.requestActivityToolUseId).toBe("turn-b-tool");
+      expect((context as { requestActivityToolTarget?: string }).requestActivityToolTarget).toBe("new turn");
+      expect(context.evidence).toEqual([]);
+      expect(output.text).not.toContain("late failure");
+      expect(events.some((event) => (event as { type?: string }).type === "tool_result")).toBe(false);
+      expect(
+        events.find((event) => (event as { type?: string }).type === "evidence_record"),
+      ).toBeUndefined();
+
+      const resumed = makeContext([]);
+      resumed.memory = {
+        candidates: [],
+        accepted: [],
+        rejected: [],
+        disabled: [],
+        retired: [],
+      } as unknown as TuiContext["memory"];
+      resumed.cache = {
+        history: [],
+        compactBoundaries: [],
+      } as unknown as TuiContext["cache"];
+      resumed.checkpoints = [];
+      hydrateResumeContext(resumed, events as TranscriptEvent[]);
+      expect(resumed.evidence).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not commit a deferred tool_result when its queued owner becomes stale", async () => {
+    const events: unknown[] = [];
+    const context = makeContext(events);
+    const resultAppendStarted = deferred<void>();
+    const releaseResultAppend = deferred<void>();
+    let current = true;
+    context.store.appendEvent = async (
+      _sessionId: string,
+      event: unknown,
+      commitGuard?: () => boolean,
+    ) => {
+      if ((event as { type?: string }).type === "tool_result") {
+        resultAppendStarted.resolve();
+        await releaseResultAppend.promise;
+      }
+      if (commitGuard && !commitGuard()) return;
+      events.push(event);
+    };
+
+    const pending = appendDeferredToolResultEvent(
+      context,
+      "session-delayed-result",
+      "mcp-delayed-result",
+      "ExecuteExtraTool",
+      { text: "late MCP result" },
+      false,
+      undefined,
+      () => current,
+    );
+    await resultAppendStarted.promise;
+    current = false;
+    releaseResultAppend.resolve();
+    await pending;
+
+    expect(events.some((event) => (event as { type?: string }).type === "tool_result")).toBe(false);
+  });
 });
 
 describe("session-scoped background interrupt", () => {

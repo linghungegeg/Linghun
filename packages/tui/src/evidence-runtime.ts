@@ -175,10 +175,17 @@ export async function recordProviderFailureEvidence(
   sessionId: string,
   error: unknown,
   runtime: SelectedModelRuntime,
+  options?: {
+    requestTurnId?: string;
+    retry?: { attempt: number; max: number };
+    commitGuard?: () => boolean;
+  },
 ): Promise<EvidenceRecord> {
   const code = readProviderFailureString(error, "code") ?? "PROVIDER_ERROR";
   const message = error instanceof Error ? error.message : String(error);
   const failureKind = classifyProviderFailure(error);
+  const outcome = providerFailureOutcome(code, failureKind);
+  const recoverability = providerFailureRecoverability(code, failureKind);
   const transitFailure = failureKind === "transit";
   const endpointSummary = summarizeProviderEndpoint(error, message);
   const httpStatus =
@@ -187,11 +194,12 @@ export async function recordProviderFailureEvidence(
   const diagnosticParts = [
     `provider failure: kind ${failureKind}`,
     `code ${code}`,
+    `status ${httpStatus ?? "unknown"}`,
+    `content-type ${contentType}`,
     `provider ${runtime.provider}`,
     `model ${runtime.model}`,
     `endpointProfile ${runtime.endpointProfile}`,
-    `status ${httpStatus ?? "unknown"}`,
-    `content-type ${contentType}`,
+    `outcome ${outcome}`,
     `endpoint ${endpointSummary}`,
     `message ${sanitizeProviderFailureText(message)}`,
   ];
@@ -209,25 +217,14 @@ export async function recordProviderFailureEvidence(
       runtime.endpointProfile,
     ],
   );
-  rememberEvidence(context, evidence);
+  if (options?.commitGuard && !options.commitGuard()) return evidence;
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
-  });
-  await appendSystemEvent(context, sessionId, summary, "warning");
-  context.lastProviderFailure = {
-    code,
-    kind: failureKind,
-    provider: runtime.provider,
-    model: runtime.model,
-    endpointProfile: runtime.endpointProfile,
-    endpointSummary,
-    httpStatus,
-    contentType,
-    summary: evidence.summary,
-    evidenceId: evidence.id,
-    createdAt: evidence.createdAt,
-  };
+  }, options?.commitGuard);
+  if (options?.commitGuard && !options.commitGuard()) return evidence;
+  await appendSystemEvent(context, sessionId, summary, "warning", options?.commitGuard);
+  if (options?.commitGuard && !options.commitGuard()) return evidence;
   await captureFailureLearning(context, sessionId, {
     category: "provider_failure",
     failureSummary: `provider request failed kind=${failureKind} code=${code} endpoint=${endpointSummary} status=${httpStatus ?? "unknown"} content-type=${contentType} message=${sanitizeProviderFailureText(message)}`,
@@ -242,8 +239,59 @@ export async function recordProviderFailureEvidence(
     sourceRef: `evidence:${evidence.id}`,
     relatedTarget: code,
     severity: "high",
-  });
+  }, options?.commitGuard);
+  if (options?.commitGuard && !options.commitGuard()) return evidence;
+  rememberEvidence(context, evidence);
+  context.lastProviderFailure = {
+    code,
+    kind: failureKind,
+    outcome,
+    recoverability,
+    provider: runtime.provider,
+    model: runtime.model,
+    endpointProfile: runtime.endpointProfile,
+    endpointSummary,
+    httpStatus,
+    contentType,
+    summary: evidence.summary,
+    evidenceId: evidence.id,
+    createdAt: evidence.createdAt,
+    requestTurnId: options?.requestTurnId,
+    retry: options?.retry
+      ? { attempt: options.retry.attempt, max: options.retry.max, exhausted: true }
+      : undefined,
+  };
   return evidence;
+}
+
+function providerFailureOutcome(code: string, kind: string): string {
+  if (code === "PROVIDER_RESPONSE_FAILED") return "response_failed";
+  if (code === "PROVIDER_RESPONSE_INCOMPLETE") return "response_incomplete";
+  if (code === "PROVIDER_EMPTY_RESPONSE") return "empty_response";
+  if (code === "PROVIDER_RETRY_EXHAUSTED") return "retry_exhausted";
+  return kind;
+}
+
+function providerFailureRecoverability(
+  code: string,
+  kind: string,
+): "resumable" | "action_required" {
+  if (
+    code === "PROVIDER_RESPONSE_FAILED" ||
+    code === "PROVIDER_RESPONSE_INCOMPLETE" ||
+    code === "PROVIDER_EMPTY_RESPONSE" ||
+    code === "PROVIDER_RETRY_EXHAUSTED"
+  ) {
+    return "resumable";
+  }
+  return kind === "auth" ||
+    kind === "schema" ||
+    kind === "compatibility" ||
+    kind === "reasoning_unsupported" ||
+    kind === "not_found" ||
+    kind === "quota_or_balance_exhausted"
+    ? "action_required"
+    : "resumable";
 }
 
 function readProviderFailureString(error: unknown, key: string): string | undefined {
@@ -350,18 +398,34 @@ export async function recordToolFailureEvidence(
   sessionId: string,
   name: ToolName,
   summary: string,
+  commitGuard?: () => boolean,
+  toolUseId?: string,
 ): Promise<EvidenceRecord> {
-  const evidence = createEvidenceRecord(
-    "command_output",
-    `${name} failure: ${truncateDisplay(summary.replace(/\s+/g, " "), 140)}`,
-    `tool:${name}:failure`,
-    [name, "tool_failure"],
-  );
-  rememberEvidence(context, evidence);
+  const evidence = {
+    ...createEvidenceRecord(
+      "command_output",
+      `${name} failure: ${truncateDisplay(summary.replace(/\s+/g, " "), 140)}`,
+      `tool:${name}:failure`,
+      [name, "tool_failure"],
+    ),
+    ...(toolUseId ? { toolUseId } : {}),
+  };
+  if (!commitGuard) {
+    rememberEvidence(context, evidence);
+    await context.store.appendEvent(sessionId, {
+      type: "evidence_record",
+      ...evidence,
+    });
+    return evidence;
+  }
+  if (!commitGuard()) return evidence;
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
-  });
+  }, commitGuard);
+  if (commitGuard()) {
+    rememberEvidence(context, evidence);
+  }
   return evidence;
 }
 
@@ -369,7 +433,9 @@ export async function captureFailureLearning(
   context: TuiContext,
   sessionId: string,
   input: FailureLearningInput,
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   context.lastMetaSchedulerFailureLearningFulfilled = true;
   if (input.category === "tool_failure") {
     context.lastToolFailure = {
@@ -381,18 +447,22 @@ export async function captureFailureLearning(
   try {
     ({ record } = mergeFailureRecord(context.failureLearning, input));
     await writeFailureRecord(context.failureLearning, record);
+    if (commitGuard && !commitGuard()) return;
     await appendSystemEvent(
       context,
       sessionId,
       `failure_learning recorded category=${record.category} count=${record.count} severity=${record.severity}`,
       "info",
+      commitGuard,
     );
   } catch {
+    if (commitGuard && !commitGuard()) return;
     await appendSystemEvent(
       context,
       sessionId,
       `failure_learning degraded warning=write_failed category=${record?.category ?? input.category}`,
       "warning",
+      commitGuard,
     ).catch(() => undefined);
   }
 }
@@ -434,7 +504,12 @@ export async function recordToolEvidence(
   name: ToolName,
   output: ToolOutput,
   input?: unknown,
+  commitGuard?: () => boolean,
+  toolUseId?: string,
 ): Promise<EvidenceRecord | null> {
+  if ((name === "WebSearch" || name === "WebFetch") && isToolOutputFailure(name, output)) {
+    return null;
+  }
   const kind =
     name === "Read" || name === "ReadSnippets" || name === "SourcePack"
       ? "file_read"
@@ -461,19 +536,33 @@ export async function recordToolEvidence(
     ...(kind === "web_source" ? ["web_source", "external_current_fact"] : []),
     ...(readOnlyEvidence ? ["readonly_low_noise_evidence"] : []),
   ];
-  const evidence = createEvidenceRecord(
-    kind,
-    readOnlyEvidence
-      ? formatReadOnlyToolEvidenceSummary(name, output, input)
-      : `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
-    output.fullOutputPath ?? name,
-    supportsClaims,
-  );
-  rememberEvidence(context, evidence);
+  const evidence = {
+    ...createEvidenceRecord(
+      kind,
+      readOnlyEvidence
+        ? formatReadOnlyToolEvidenceSummary(name, output, input)
+        : `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
+      output.fullOutputPath ?? name,
+      supportsClaims,
+    ),
+    ...(toolUseId ? { toolUseId } : {}),
+  };
+  if (!commitGuard) {
+    rememberEvidence(context, evidence);
+    await context.store.appendEvent(sessionId, {
+      type: "evidence_record",
+      ...evidence,
+    });
+    return evidence;
+  }
+  if (!commitGuard()) return evidence;
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
-  });
+  }, commitGuard);
+  if (commitGuard()) {
+    rememberEvidence(context, evidence);
+  }
   return evidence;
 }
 
@@ -657,6 +746,7 @@ export async function recordToolResultBudgetEvidence(
   context: TuiContext,
   sessionId: string,
   record: ToolResultBudgetRecord,
+  commitGuard?: () => boolean,
 ): Promise<string> {
   const existing = context.evidence.find(
     (item) =>
@@ -666,19 +756,24 @@ export async function recordToolResultBudgetEvidence(
   );
   if (existing) return existing.id;
 
-  const evidence = createEvidenceRecord(
-    "command_output",
-    formatToolResultBudgetEvidenceSummary(record),
-    record.artifact.relativePath,
-    ["tool_result_budget", "artifact", `toolUseId:${record.toolUseId}`],
-  );
+  const evidence = {
+    ...createEvidenceRecord(
+      "command_output",
+      formatToolResultBudgetEvidenceSummary(record),
+      record.artifact.relativePath,
+      ["tool_result_budget", "artifact", `toolUseId:${record.toolUseId}`],
+    ),
+    toolUseId: record.toolUseId,
+  };
   evidence.fullOutputPath = record.artifact.path;
   evidence.outputPath = record.artifact.path;
-  rememberEvidence(context, evidence);
+  if (commitGuard && !commitGuard()) return evidence.id;
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
-  });
+  }, commitGuard);
+  if (commitGuard && !commitGuard()) return evidence.id;
+  rememberEvidence(context, evidence);
   await appendSystemEvent(context, sessionId, formatToolResultBudgetSystemEvent(record), "info");
   return evidence.id;
 }
@@ -700,14 +795,16 @@ export async function appendSystemEvent(
   sessionId: string,
   message: string,
   level: "info" | "warning",
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   await context.store.appendEvent(sessionId, {
     type: "system_event",
     id: randomUUID(),
     level,
     message,
     createdAt: new Date().toISOString(),
-  });
+  }, commitGuard);
 }
 
 export async function appendRouteDecisionEvent(
@@ -896,6 +993,10 @@ export function isToolOutputFailure(name: ToolName, output: ToolOutput): boolean
     const exitCode = data?.exitCode;
     return typeof exitCode === "number" && exitCode !== 0;
   }
+  if (name === "WebSearch" || name === "WebFetch") {
+    const data = output.data as { isError?: unknown } | undefined;
+    return data?.isError === true;
+  }
   return false;
 }
 
@@ -938,13 +1039,18 @@ export async function appendDeferredToolResultEvent(
   content: unknown,
   isError: boolean,
   evidenceId?: string,
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   const budgetedContent = await budgetToolResultTranscriptContent(
     context,
     sessionId,
     toolUseId,
     content,
+    content,
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) return;
   await context.store.appendEvent(sessionId, {
     type: "tool_result",
     toolUseId,
@@ -953,7 +1059,7 @@ export async function appendDeferredToolResultEvent(
     isError,
     evidenceId,
     createdAt: new Date().toISOString(),
-  });
+  }, commitGuard);
 }
 
 export async function appendToolResultEvent(
@@ -964,6 +1070,7 @@ export async function appendToolResultEvent(
   content: unknown,
   isError: boolean,
   evidenceId?: string,
+  commitGuard?: () => boolean,
 ): Promise<unknown> {
   rememberRecentDiagnostics(context, toolName, content, toolUseId, evidenceId);
   rememberToolEvidenceData(context, evidenceId, content);
@@ -975,7 +1082,9 @@ export async function appendToolResultEvent(
     toolUseId,
     modelHistoryContent,
     content,
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) return budgetedContent;
   await context.store.appendEvent(sessionId, {
     type: "tool_result",
     toolUseId,
@@ -984,7 +1093,7 @@ export async function appendToolResultEvent(
     isError,
     evidenceId,
     createdAt: new Date().toISOString(),
-  });
+  }, commitGuard);
   return budgetedContent;
 }
 
@@ -1155,7 +1264,9 @@ export async function budgetToolResultTranscriptContent(
   toolUseId: string,
   content: unknown,
   artifactContent: unknown = content,
+  commitGuard?: () => boolean,
 ): Promise<unknown> {
+  if (commitGuard && !commitGuard()) return content;
   const contentText = stringifyToolResultContentForBudget(content);
   const artifactTextForBudget = stringifyToolResultContentForBudget(artifactContent);
   if (!artifactTextForBudget || artifactTextForBudget.startsWith("<persisted-tool-result>")) {
@@ -1185,7 +1296,7 @@ export async function budgetToolResultTranscriptContent(
     },
   );
   for (const record of budgeted.records) {
-    await recordToolResultBudgetEvidence(context, sessionId, record);
+    await recordToolResultBudgetEvidence(context, sessionId, record, commitGuard);
   }
   const replacement = budgeted.messages[0];
   if (contentFits && hasCompactModelHistoryData(content)) return content;

@@ -6,6 +6,7 @@ import { summarizeArchitectureCard } from "./architecture-runtime.js";
 import { isDeepCompactPacket } from "./deep-compact-runtime.js";
 import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
+import { isMemoryTombstoned, parseMemoryOrigin } from "./memory-tombstone-runtime.js";
 import { recordHandoffInRuntimeLedger } from "./runtime-storage.js";
 import type {
   CompactProjection,
@@ -16,6 +17,7 @@ import type {
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
 import { isRecord } from "./tui-state-runtime.js";
+import { createToolResultBudgetFingerprint } from "./tool-result-budget.js";
 
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
 const HANDOFF_KEY_FILE_LIMIT = 12;
@@ -38,10 +40,19 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   if (latestVerification?.type === "verification_end") {
     context.lastVerification = latestVerification.report as VerificationReport;
   }
+  const completedEvidenceIds = new Set(
+    transcript
+      .filter(
+        (event): event is Extract<TranscriptEvent, { type: "tool_result" }> =>
+          event.type === "tool_result" && typeof event.evidenceId === "string",
+      )
+      .map((event) => event.evidenceId as string),
+  );
   const evidence = transcript
     .filter(
       (event): event is Extract<TranscriptEvent, { type: "evidence_record" }> =>
-        event.type === "evidence_record",
+        event.type === "evidence_record" &&
+        (!event.toolUseId || completedEvidenceIds.has(event.id)),
     )
     .slice(-10)
     .map((event) => ({
@@ -49,6 +60,7 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
       kind: event.kind,
       summary: event.summary,
       source: event.source,
+      ...(event.toolUseId ? { toolUseId: event.toolUseId } : {}),
       supportsClaims: event.supportsClaims,
       createdAt: event.createdAt,
     }));
@@ -101,8 +113,20 @@ function restoreToolResultBudgetLedger(context: TuiContext, transcript: Transcri
   const sessionId = context.sessionId;
   if (!sessionId) return;
   for (const event of transcript) {
-    if (event.type !== "tool_result" || typeof event.content !== "string") continue;
-    if (!event.content.startsWith("<persisted-tool-result>")) continue;
+    if (event.type !== "tool_result") continue;
+    context.toolResultBudgetState ??= { seenIds: new Set(), replacements: new Map() };
+    if (typeof event.content !== "string" || !event.content.startsWith("<persisted-tool-result>")) {
+      const providerContent = JSON.stringify({
+        tool: event.toolName,
+        isError: event.isError ?? false,
+        evidenceId: event.evidenceId,
+        content: event.content,
+      });
+      context.toolResultBudgetState.seenIds.add(
+        createToolResultBudgetFingerprint(sessionId, event.toolUseId, providerContent),
+      );
+      continue;
+    }
     const metadata = parsePersistedToolResultSummary(event.content);
     if (!metadata) continue;
     const record = {
@@ -125,12 +149,19 @@ function restoreToolResultBudgetLedger(context: TuiContext, transcript: Transcri
       },
     };
     const replacement = { summary: event.content, record };
-    context.toolResultBudgetState ??= { seenIds: new Set(), replacements: new Map() };
+    const fingerprint = [
+      sessionId,
+      event.toolUseId,
+      metadata.originalChars,
+      metadata.originalBytes,
+      metadata.sha256,
+    ].join("\0");
+    context.toolResultBudgetState.seenIds.add(fingerprint);
     context.toolResultBudgetState.replacements.set(
-      [sessionId, event.toolUseId, metadata.originalChars, metadata.originalBytes, metadata.sha256].join("\0"),
+      fingerprint,
       {
         ...replacement,
-        fingerprint: [sessionId, event.toolUseId, metadata.originalChars, metadata.originalBytes, metadata.sha256].join("\0"),
+        fingerprint,
       },
     );
     context.toolResultBudgetState.contentReplacements ??= new Map();
@@ -270,10 +301,23 @@ function isCheckpointFile(value: unknown): value is {
 
 function restoreSessionAcceptedMemory(context: TuiContext, transcript: TranscriptEvent[]): void {
   const finalActions = collectMemoryFinalActions(transcript);
-  const known = new Set(context.memory.accepted.map((item) => item.id));
+  const known = new Set(
+    [
+      ...context.memory.candidates,
+      ...context.memory.accepted,
+      ...context.memory.rejected,
+      ...context.memory.disabled,
+      ...context.memory.retired,
+    ].map((item) => item.id),
+  );
+  const processed = new Set<string>();
   const restored: MemoryCandidate[] = [];
-  for (const event of transcript) {
-    if (event.type !== "memory_accepted") continue;
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const event = transcript[index];
+    if (!event || event.type !== "memory_accepted") continue;
+    const id = readMemoryId(event.memory);
+    if (!id || processed.has(id)) continue;
+    processed.add(id);
     const memory = parseResumeAcceptedMemory(event.memory);
     if (!memory) continue;
     if (memory.scope !== "session") continue;
@@ -284,7 +328,7 @@ function restoreSessionAcceptedMemory(context: TuiContext, transcript: Transcrip
     known.add(memory.id);
   }
   if (restored.length > 0) {
-    context.memory.accepted = [...restored.reverse(), ...context.memory.accepted];
+    context.memory.accepted = [...restored, ...context.memory.accepted];
   }
 }
 
@@ -305,6 +349,7 @@ function restorePendingMemoryCandidates(context: TuiContext, transcript: Transcr
     if (event.type !== "memory_candidate") continue;
     const candidate = parseResumeMemoryCandidate(event.candidate);
     if (!candidate) continue;
+    if (isMemoryTombstoned(context.memory.tombstones, candidate)) continue;
     if (processed.has(candidate.id) || known.has(candidate.id)) continue;
     restored.push(candidate);
     known.add(candidate.id);
@@ -380,6 +425,7 @@ function parseResumeMemoryCandidate(value: unknown): MemoryCandidate | undefined
   const sourceRefs = Array.isArray(value.sourceRefs)
     ? value.sourceRefs.filter((item): item is string => typeof item === "string")
     : [value.source];
+  const origin = parseMemoryOrigin(value.origin);
   return {
     id: value.id,
     scope: value.scope,
@@ -387,6 +433,7 @@ function parseResumeMemoryCandidate(value: unknown): MemoryCandidate | undefined
     summary: value.summary,
     source: value.source,
     sourceRefs: sourceRefs.slice(0, 6),
+    ...(origin ? { origin } : {}),
     risk: value.risk === "medium" || value.risk === "high" ? value.risk : "low",
     inferred: value.inferred === true,
     createdAt: value.createdAt,
@@ -456,6 +503,10 @@ function isCompactProjection(value: unknown): value is CompactProjection {
     typeof value.postCompactChars === "number" &&
     (value.postCompactTargetChars === undefined ||
       typeof value.postCompactTargetChars === "number") &&
+    (value.retriggerGuard === undefined ||
+      (isRecord(value.retriggerGuard) &&
+        typeof value.retriggerGuard.baselineChars === "number" &&
+        typeof value.retriggerGuard.tailGrowthThreshold === "number")) &&
     (value.savingsRatio === undefined || typeof value.savingsRatio === "number") &&
     (value.acceptance === undefined || isCompactAcceptanceSnapshot(value.acceptance)) &&
     (value.progress === undefined || isCompactProgressSnapshot(value.progress)) &&

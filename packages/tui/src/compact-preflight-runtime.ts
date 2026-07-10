@@ -122,9 +122,13 @@ export async function prepareMessagesForProviderPreflight(input: {
     },
   ];
   const previousStrategy = input.context.cache.compactStrategy;
-  const hasRetriggerGuard = previousStrategy?.steps.some(
+  const persistedRetriggerGuard = input.context.cache.compactProjection?.retriggerGuard;
+  const previousStrategyHasRetriggerGuard = previousStrategy?.steps.some(
     (step) => step.reason === "post_compact_will_retrigger_next_turn",
   );
+  const retriggerBaselineChars = previousStrategyHasRetriggerGuard && previousStrategy
+    ? previousStrategy.finalChars
+    : persistedRetriggerGuard?.baselineChars;
   const hasCompactProjection = budgeted.some(
     (message) =>
       typeof message.content === "string" &&
@@ -134,13 +138,16 @@ export async function prepareMessagesForProviderPreflight(input: {
     COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
     Math.floor(Math.max(0, contextMaxChars - triggerChars) / 2),
   );
+  const activeRetriggerTailGrowthThreshold =
+    persistedRetriggerGuard?.tailGrowthThreshold ?? retriggerTailGrowthThreshold;
+  const reactiveProviderFailureActive =
+    input.trigger === "reactive" && input.context.lastProviderFailure !== undefined;
   if (
-    input.trigger !== "reactive" &&
-    previousStrategy &&
-    hasRetriggerGuard &&
+    !reactiveProviderFailureActive &&
+    retriggerBaselineChars !== undefined &&
     hasCompactProjection &&
     budgetedChars <= contextMaxChars &&
-    budgetedChars - previousStrategy.finalChars < retriggerTailGrowthThreshold
+    budgetedChars - retriggerBaselineChars < activeRetriggerTailGrowthThreshold
   ) {
     return { blocked: false, messages: budgeted };
   }
@@ -404,6 +411,10 @@ export async function prepareMessagesForProviderPreflight(input: {
     }
     const willRetriggerNextTurn = providerMessageChars >= triggerChars;
     if (willRetriggerNextTurn) {
+      projection.retriggerGuard = {
+        baselineChars: providerMessageChars,
+        tailGrowthThreshold: retriggerTailGrowthThreshold,
+      };
       strategySteps.push({
         layer: "full_summary",
         status: "failed",

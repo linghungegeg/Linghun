@@ -226,14 +226,26 @@ function collectToolResultCandidates(
 }
 
 function getCandidateStateKey(candidate: Candidate, sessionId: string): string {
-  candidate.stateKey ??= [
+  candidate.stateKey ??= createToolResultBudgetFingerprint(
     sessionId,
     candidate.toolUseId,
-    candidate.chars,
-    candidate.bytes,
-    getCandidateContentHash(candidate),
-  ].join("\0");
+    candidate.content,
+  );
   return candidate.stateKey;
+}
+
+export function createToolResultBudgetFingerprint(
+  sessionId: string,
+  toolUseId: string,
+  content: string,
+): string {
+  return [
+    sessionId,
+    toolUseId,
+    content.length,
+    Buffer.byteLength(content, "utf8"),
+    createHash("sha256").update(content).digest("hex"),
+  ].join("\0");
 }
 
 function getCandidateContentKey(candidate: Candidate, sessionId: string): string {

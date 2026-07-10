@@ -8,6 +8,7 @@ import {
   type ToolName,
   type ToolOutput,
   type ToolProgressEvent,
+  type ToolContext,
   type SourcePackCandidate,
   builtInTools,
   runTool,
@@ -78,6 +79,7 @@ import {
   refreshIndexStatus,
   runIndexRepository,
 } from "./mcp-index-runtime.js";
+import type { McpRuntimeProgress } from "./mcp-sse-runtime.js";
 import {
   AGENT_CONTROL_TOOL_NAME,
   COMMAND_PROPOSAL_TOOL_NAME,
@@ -208,6 +210,13 @@ import {
   runWorkflowSteps,
   runWorkflowVerificationStep,
 } from "./workflow-command-runtime.js";
+
+type StructuredToolProgressEvent = ToolProgressEvent & {
+  phase?: "connecting" | "receiving" | "processing";
+  transport?: string;
+  receivedBytes?: number;
+  itemCount?: number;
+};
 
 /**
  * Extract a short target summary from tool input for ActivityIndicator display.
@@ -376,7 +385,7 @@ export async function executeModelToolUse(
     toolCall.name === EXECUTE_EXTRA_TOOL_NAME ||
     toolCall.name === COMMAND_PROPOSAL_TOOL_NAME
   ) {
-    return executeDeferredDispatchToolUse(toolCall, context, sessionId, output);
+    return executeDeferredDispatchToolUse(toolCall, context, sessionId, output, continuation);
   }
   if (isPreEngineToolName(toolCall.name)) {
     return executePreEngineToolUse(toolCall, context, sessionId, output);
@@ -766,6 +775,7 @@ export async function executeApprovedModelToolUse(
   startRequestActivity(output, context, "tool_running", {
     toolName,
     toolTarget: extractToolTarget(toolName, toolCall.input),
+    toolUseId: toolCall.id,
     ...(requestOwner ? { requestTurnId: requestOwner.requestTurnId } : {}),
   });
   await context.store.appendEvent(sessionId, {
@@ -782,17 +792,23 @@ export async function executeApprovedModelToolUse(
   if (backgroundController) {
     context.tools.abortSignal = backgroundController.signal;
   }
+  const clearToolRequestActivity = (): void => {
+    if (context.requestActivityToolUseId === toolCall.id) {
+      clearRequestActivity(context, activityOwner);
+    }
+  };
   const cleanupFinishedTool = (): void => {
     clearBackgroundAbortController(context, task?.id ?? "");
     if (backgroundController && context.tools.abortSignal === backgroundController.signal) {
       context.tools.abortSignal = previousAbortSignal;
     }
-    clearRequestActivity(context, activityOwner);
+    clearToolRequestActivity();
   };
   const dropStaleToolResult = async (
     kind: "result" | "error",
   ): Promise<{ ok: false; tool: string; text: string }> => {
     cleanupFinishedTool();
+    context.evidence = context.evidence.filter((item) => item.toolUseId !== toolCall.id);
     await appendSystemEvent(
       context,
       sessionId,
@@ -816,14 +832,18 @@ export async function executeApprovedModelToolUse(
   // R1: tool start banner suppressed by default (noise reduction).
   // Verbose/brief mode (R7) will re-enable when needed.
   try {
-    const result = await runTool(toolName, toolCall.input, context.tools);
+    const result = await runTool(toolName, toolCall.input, progress.toolContext);
     progress.restore();
     await Promise.all(progress.pending);
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
-    clearRequestActivity(context, activityOwner);
-    await context.store.appendEvent(sessionId, createToolEndEvent(toolCall.id, result.output));
+    clearToolRequestActivity();
+    await context.store.appendEvent(
+      sessionId,
+      createToolEndEvent(toolCall.id, result.output),
+      () => !requestIsStale(),
+    );
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
@@ -831,13 +851,26 @@ export async function executeApprovedModelToolUse(
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
-    const evidence = await recordToolEvidence(
-      context,
-      sessionId,
-      toolName,
-      result.output,
-      toolCall.input,
-    );
+    const isError = isToolOutputFailure(toolName, result.output);
+    const evidence =
+      isError && (toolName === "WebSearch" || toolName === "WebFetch")
+        ? await recordToolFailureEvidence(
+            context,
+            sessionId,
+            toolName,
+            result.output.text,
+            () => !requestIsStale(),
+            toolCall.id,
+          )
+        : await recordToolEvidence(
+            context,
+            sessionId,
+            toolName,
+            result.output,
+            toolCall.input,
+            () => !requestIsStale(),
+            toolCall.id,
+          );
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
@@ -852,7 +885,6 @@ export async function executeApprovedModelToolUse(
       reportWriteGuard.evidenceRead = true;
     }
     rememberToolFiles(context, toolName, toolCall.input, result.output);
-    const isError = isToolOutputFailure(toolName, result.output);
     if (task) {
       const bgData = result.output.data as { backgroundTaskId?: string; outputPath?: string } | undefined;
       if (bgData?.backgroundTaskId) {
@@ -875,18 +907,30 @@ export async function executeApprovedModelToolUse(
       result.output,
       isError,
       evidence?.id,
+      () => !requestIsStale(),
     );
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
-    if (isError) {
-      // D.14B — Bash/command 退出码非 0（非异常）也是真实失败。
+    const webFailureData =
+      isError && (toolName === "WebSearch" || toolName === "WebFetch")
+        ? (result.output.data as { aborted?: unknown; timedOut?: unknown } | undefined)
+        : undefined;
+    if (isError && webFailureData?.aborted !== true) {
+      const isWebFailure = webFailureData !== undefined;
       await captureFailureLearning(context, sessionId, {
         category: "tool_failure",
-        failureSummary: `${toolName} exited non-zero: ${result.output.text}`,
-        rootCauseGuess: `${toolName} command returned a non-zero exit code`,
-        avoidNextTime:
-          "Inspect the command output and exit code; fix the underlying cause before claiming the command passed",
+        failureSummary: isWebFailure
+          ? `${toolName} ${webFailureData.timedOut === true ? "timed out" : "failed"}: ${result.output.text}`
+          : `${toolName} exited non-zero: ${result.output.text}`,
+        rootCauseGuess: isWebFailure
+          ? webFailureData.timedOut === true
+            ? `${toolName} exceeded its request timeout`
+            : `${toolName} returned a structured failure result`
+          : `${toolName} command returned a non-zero exit code`,
+        avoidNextTime: isWebFailure
+          ? "Inspect the structured Web failure details and retry or adjust the request without claiming success"
+          : "Inspect the command output and exit code; fix the underlying cause before claiming the command passed",
         sourceRef: evidence?.id ? `evidence:${evidence.id}` : `tool:${toolName}`,
         relatedTarget: toolName,
         severity: "medium",
@@ -912,7 +956,9 @@ export async function executeApprovedModelToolUse(
       evidence?.id,
       reportWriteGuard,
     );
-    if (toolName === "Bash") {
+    if (isError && (toolName === "WebSearch" || toolName === "WebFetch")) {
+      writeErrorLine(output, userFacingToolOutput);
+    } else if (toolName === "Bash") {
       writeLocalCommandOutputLine(output, userFacingToolOutput);
     } else {
       writeLine(output, userFacingToolOutput);
@@ -936,11 +982,27 @@ export async function executeApprovedModelToolUse(
     if (requestIsStale()) {
       return dropStaleToolResult("error");
     }
-    const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      toolName,
+      text,
+      () => !requestIsStale(),
+      toolCall.id,
+    );
     if (requestIsStale()) {
       return dropStaleToolResult("error");
     }
-    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      toolName,
+      text,
+      true,
+      evidence.id,
+      () => !requestIsStale(),
+    );
     await captureFailureLearning(context, sessionId, {
       category: "tool_failure",
       failureSummary: text,
@@ -979,6 +1041,7 @@ export async function executeDeferredDispatchToolUse(
   context: TuiContext,
   sessionId: string,
   output: Writable,
+  continuation?: PendingModelContinuation,
 ): Promise<{
   ok: boolean;
   tool: string;
@@ -987,7 +1050,55 @@ export async function executeDeferredDispatchToolUse(
   evidenceId?: string;
 }> {
   const dispatchName = toolCall.name;
-  startRequestActivity(output, context, "tool_running", { toolName: dispatchName, toolTarget: extractToolTarget(dispatchName, toolCall.input) });
+  const requestTurnId = continuation?.requestTurnId;
+  const requestSignal = continuation?.abortSignal ?? context.tools.abortSignal;
+  const activityOwner = requestTurnId
+    ? { kind: "foreground" as const, requestTurnId }
+    : undefined;
+  const requestIsStale = () =>
+    requestSignal?.aborted === true ||
+    Boolean(requestTurnId && context.currentRequestTurnId !== requestTurnId);
+  const dropStaleResult = () => {
+    context.evidence = context.evidence.filter((item) => item.toolUseId !== toolCall.id);
+    return {
+      ok: false,
+      tool: dispatchName,
+      text: "cancelled: stale deferred tool result discarded",
+    };
+  };
+  const initialToolTarget = extractToolTarget(dispatchName, toolCall.input);
+  startRequestActivity(output, context, "tool_running", {
+    toolName: dispatchName,
+    toolTarget: initialToolTarget,
+    toolUseId: toolCall.id,
+    ...(requestTurnId ? { requestTurnId } : {}),
+  });
+  const clearDeferredActivity = (): void => {
+    if (context.requestActivityToolUseId === toolCall.id) {
+      clearRequestActivity(context, activityOwner);
+    }
+  };
+  let lastMcpProgressAt = Number.NEGATIVE_INFINITY;
+  let lastMcpProgressPhase: McpRuntimeProgress["phase"] | undefined;
+  const updateMcpProgress = (progress: McpRuntimeProgress): void => {
+    if (requestIsStale() || context.requestActivityToolUseId !== toolCall.id) return;
+    const now = Date.now();
+    if (progress.phase === lastMcpProgressPhase && now - lastMcpProgressAt < 1_000) return;
+    lastMcpProgressAt = now;
+    lastMcpProgressPhase = progress.phase;
+    const details = [
+      initialToolTarget,
+      progress.phase,
+      progress.transport,
+      progress.receivedBytes !== undefined
+        ? formatWebProgressBytes(progress.receivedBytes)
+        : undefined,
+      progress.itemCount !== undefined ? `${progress.itemCount} items` : undefined,
+    ].filter((value): value is string => Boolean(value));
+    (context as { requestActivityToolTarget?: string }).requestActivityToolTarget =
+      details.join(" · ");
+    context.shellRerender?.();
+  };
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
     id: toolCall.id,
@@ -995,6 +1106,7 @@ export async function executeDeferredDispatchToolUse(
     input: toolCall.input,
     createdAt: new Date().toISOString(),
   });
+  if (requestIsStale()) return dropStaleResult();
   try {
     const input = (
       toolCall.input && typeof toolCall.input === "object" && !Array.isArray(toolCall.input)
@@ -1020,7 +1132,7 @@ export async function executeDeferredDispatchToolUse(
           true,
           evidence.id,
         );
-        clearRequestActivity(context);
+        clearRequestActivity(context, activityOwner);
         return { ok: false, tool: dispatchName, text, evidenceId: evidence.id };
       }
       const result = executeSearchExtraTools(queryRaw, context);
@@ -1037,7 +1149,7 @@ export async function executeDeferredDispatchToolUse(
         false,
         evidence?.id,
       );
-      clearRequestActivity(context);
+      clearRequestActivity(context, activityOwner);
       // D.13V-C — 主屏只显示降噪后的产品文案；raw text 已经写入 tool_result store，
       // doctor / details / Ctrl+O 仍可看到。
       writeLine(
@@ -1074,7 +1186,7 @@ export async function executeDeferredDispatchToolUse(
           text,
           true,
         );
-        clearRequestActivity(context);
+        clearRequestActivity(context, activityOwner);
         return { ok: false, tool: dispatchName, text };
       }
       const structuredTool = executableCommandProposalTool(command);
@@ -1091,7 +1203,7 @@ export async function executeDeferredDispatchToolUse(
           text,
           true,
         );
-        clearRequestActivity(context);
+        clearRequestActivity(context, activityOwner);
         return { ok: false, tool: dispatchName, text };
       }
       const text =
@@ -1106,7 +1218,7 @@ export async function executeDeferredDispatchToolUse(
         { command, reason },
         false,
       );
-      clearRequestActivity(context);
+      clearRequestActivity(context, activityOwner);
       writeLine(output, text);
       return { ok: true, tool: dispatchName, text, data: { command, reason } };
     }
@@ -1144,14 +1256,20 @@ export async function executeDeferredDispatchToolUse(
     const result = await executeExtraTool(
       { tool_name: input.tool_name, params: input.params },
       context,
+      { signal: requestSignal, onProgress: updateMcpProgress },
     );
+    if (requestIsStale()) return dropStaleResult();
     if (!result.ok) {
+      if (requestIsStale()) return dropStaleResult();
       const evidence = await recordToolFailureEvidence(
         context,
         sessionId,
         "Read",
         `${dispatchName}: ${result.text}`,
+        () => !requestIsStale(),
+        toolCall.id,
       );
+      if (requestIsStale()) return dropStaleResult();
       await appendDeferredToolResultEvent(
         context,
         sessionId,
@@ -1160,8 +1278,10 @@ export async function executeDeferredDispatchToolUse(
         result.text,
         true,
         evidence.id,
+        () => !requestIsStale(),
       );
-      clearRequestActivity(context);
+      if (requestIsStale()) return dropStaleResult();
+      clearDeferredActivity();
       // D.13V-C — 失败也要降噪：主屏不暴露 ExecuteExtraTool / dispatcher 等内部词。
       writeLine(
         output,
@@ -1173,10 +1293,12 @@ export async function executeDeferredDispatchToolUse(
       return { ok: false, tool: dispatchName, text: result.text, evidenceId: evidence.id };
     }
     rememberSourcePackCandidatesFromToolData(context, input.tool_name, result.data);
+    if (requestIsStale()) return dropStaleResult();
     const evidence = await recordToolEvidence(context, sessionId, "Read", {
       text: result.text,
       data: result.data,
-    } as ToolOutput);
+    } as ToolOutput, undefined, () => !requestIsStale(), toolCall.id);
+    if (requestIsStale()) return dropStaleResult();
     await appendDeferredToolResultEvent(
       context,
       sessionId,
@@ -1185,8 +1307,10 @@ export async function executeDeferredDispatchToolUse(
       { text: result.text, data: result.data },
       false,
       evidence?.id,
+      () => !requestIsStale(),
     );
-    clearRequestActivity(context);
+    if (requestIsStale()) return dropStaleResult();
+    clearDeferredActivity();
     writeLine(
       output,
       sanitizeDeferredToolPrimaryText(result.text, context.language, {
@@ -1202,14 +1326,19 @@ export async function executeDeferredDispatchToolUse(
       evidenceId: evidence?.id,
     };
   } catch (error) {
-    clearRequestActivity(context);
+    if (requestIsStale()) return dropStaleResult();
+    clearDeferredActivity();
     const text = formatError(error, context.language);
+    if (requestIsStale()) return dropStaleResult();
     const evidence = await recordToolFailureEvidence(
       context,
       sessionId,
       "Read",
       `${dispatchName}: ${text}`,
+      () => !requestIsStale(),
+      toolCall.id,
     );
+    if (requestIsStale()) return dropStaleResult();
     await appendDeferredToolResultEvent(
       context,
       sessionId,
@@ -1218,7 +1347,9 @@ export async function executeDeferredDispatchToolUse(
       text,
       true,
       evidence.id,
+      () => !requestIsStale(),
     );
+    if (requestIsStale()) return dropStaleResult();
     return { ok: false, tool: dispatchName, text, evidenceId: evidence.id };
   }
 }
@@ -3228,7 +3359,7 @@ export async function handleToolCommand(
     let result: Awaited<ReturnType<typeof runTool>>;
     let bgStarted2 = false;
     try {
-      result = await runTool(name, input, context.tools);
+      result = await runTool(name, input, progress.toolContext);
       bgStarted2 = !!(result.output.data as { backgroundTaskId?: string } | undefined)?.backgroundTaskId;
     } finally {
       progress.restore();
@@ -3476,16 +3607,42 @@ function installToolProgressHandler(
   output: Writable,
   task?: BackgroundTaskState,
   requestOwner?: { requestTurnId: string; signal: AbortSignal },
-): { pending: Promise<void>[]; restore: () => void } {
+): { toolContext: ToolContext; pending: Promise<void>[]; restore: () => void } {
   const previous = context.tools.onProgress;
   const pending: Promise<void>[] = [];
   let visibleProgressLines = 0;
   let progressSuppressed = false;
-  const handler = (event: ToolProgressEvent) => {
+  let lastWebActivityAt = Number.NEGATIVE_INFINITY;
+  let lastWebActivityPhase: StructuredToolProgressEvent["phase"];
+  const initialToolTarget = (context as { requestActivityToolTarget?: string })
+    .requestActivityToolTarget;
+  const handler = (event: StructuredToolProgressEvent) => {
     if (
       requestOwner &&
       (requestOwner.signal.aborted || context.currentRequestTurnId !== requestOwner.requestTurnId)
     ) {
+      return;
+    }
+    if (event.toolName === "WebSearch" || event.toolName === "WebFetch") {
+      if (!event.phase || context.requestActivityToolUseId !== callId) {
+        return;
+      }
+      const now = Date.now();
+      if (event.phase === lastWebActivityPhase && now - lastWebActivityAt < 1_000) {
+        return;
+      }
+      lastWebActivityAt = now;
+      lastWebActivityPhase = event.phase;
+      const progress = [
+        initialToolTarget,
+        event.phase,
+        event.transport,
+        event.receivedBytes !== undefined ? formatWebProgressBytes(event.receivedBytes) : undefined,
+        event.itemCount !== undefined ? `${event.itemCount} items` : undefined,
+      ].filter((value): value is string => Boolean(value));
+      (context as { requestActivityToolTarget?: string }).requestActivityToolTarget =
+        progress.join(" · ");
+      context.shellRerender?.();
       return;
     }
     if (event.toolName !== "Bash") {
@@ -3541,13 +3698,19 @@ function installToolProgressHandler(
       progressSuppressed = true;
     }
   };
-  context.tools.onProgress = handler;
-  return {
-    pending,
-    restore: () => {
-      if (context.tools.onProgress === handler) {
-        context.tools.onProgress = previous;
-      }
+  const toolContext = new Proxy(context.tools, {
+    get(target, property, receiver) {
+      return property === "onProgress" ? handler : Reflect.get(target, property, receiver);
     },
+  });
+  return {
+    toolContext,
+    pending,
+    restore: () => undefined,
   };
+}
+
+function formatWebProgressBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  return `${(bytes / 1_024).toFixed(1)} KB`;
 }

@@ -22,6 +22,12 @@ import {
   writeAutoMemoryFiles,
   type MemoryExtractionDecision,
 } from "./memory-extraction-runtime.js";
+import {
+  appendMemoryTombstone,
+  createAiSessionsImportOrigin,
+  isMemoryTombstoned,
+  rememberMemoryTombstone,
+} from "./memory-tombstone-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
 import type { MemoryCandidate, MemoryLearningRun, MemoryTaxonomy } from "./tui-data-types.js";
 import {
@@ -44,7 +50,7 @@ import {
 } from "./tui-memory-runtime.js";
 import { writeErrorLine } from "./tui-output-surface.js";
 import { getSelectedModelRuntime } from "./tui-model-runtime.js";
-import { pathExists, summarizeProjectRules } from "./tui-state-runtime.js";
+import { createMemoryState, pathExists, summarizeProjectRules } from "./tui-state-runtime.js";
 
 export type MemoryCommandRuntimeDeps = {
   appendSystemEvent: (
@@ -76,6 +82,12 @@ export type MemoryMutation =
   | { action: "rollback"; memory: MemoryCandidate }
   | { action: "delete"; memory: MemoryCandidate }
   | { action: "init" };
+
+export type MemoryLearningTurnOwner = {
+  requestTurnId: string;
+  sessionId: string;
+  signal: AbortSignal;
+};
 
 let runtimeDeps: MemoryCommandRuntimeDeps | undefined;
 
@@ -376,6 +388,7 @@ export async function resumeSessionWithHandoff(
 ): Promise<void> {
   try {
     const resumed = await context.store.resume(sessionId);
+    context.memory = await createMemoryState(context.config, context.projectPath);
     context.sessionId = resumed.session.id;
     context.sessionStoreVerifiedId = resumed.session.id;
     bindSessionRuntimeStorage(context, resumed.session.id);
@@ -498,6 +511,8 @@ export async function executeMemoryMutation(
     return;
   }
   if (mutation.action === "delete") {
+    const sessionId = await deps().ensureSession(context);
+    await persistMemoryDeletionTombstone(context, mutation.memory, sessionId);
     await removeMemoryRecord(mutation.memory, context);
     removeMemoryFromState(context.memory, mutation.memory.id);
     if (mutation.memory.taxonomy && mutation.memory.scope !== "session") {
@@ -507,7 +522,6 @@ export async function executeMemoryMutation(
         context.memory.disabled.filter((item) => item.scope === mutation.memory.scope),
       );
     }
-    const sessionId = await deps().ensureSession(context);
     await appendMemoryLifecycleEvent(context, sessionId, "deleted", mutation.memory);
     await deps().recordMemoryMutationEvidence(context, sessionId, "deleted", mutation.memory);
     deps().refreshCacheFreshness(context);
@@ -586,6 +600,7 @@ async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryL
 export async function runAutoLearningOnTurnEnd(
   context: TuiContext,
   userInput: string,
+  owner?: MemoryLearningTurnOwner,
 ): Promise<MemoryLearningRun> {
   if (context.memory.learningMode !== "active") {
     return {
@@ -596,6 +611,9 @@ export async function runAutoLearningOnTurnEnd(
       createdAt: new Date().toISOString(),
     };
   }
+  if (!isMemoryLearningOwnerCurrent(context, owner)) {
+    return createSkippedMemoryLearningRun("stale_request_owner");
+  }
 
   const deterministicDecision = decideMemoryExtraction({
     recentMessages: [userInput],
@@ -603,11 +621,25 @@ export async function runAutoLearningOnTurnEnd(
     disabled: context.memory.disabled,
     candidates: context.memory.candidates,
   });
+  const semanticDecision = await decideMemoryExtractionWithSemanticClassifier(
+    context,
+    userInput,
+    owner,
+  );
+  if (!isMemoryLearningOwnerCurrent(context, owner)) {
+    return createSkippedMemoryLearningRun("stale_request_owner");
+  }
   const decision =
-    (await decideMemoryExtractionWithSemanticClassifier(context, userInput)) ??
-    deterministicDecision;
+    semanticDecision ??
+    (owner &&
+    (deterministicDecision.action === "create" || deterministicDecision.action === "update")
+      ? { action: "no-op" as const, reason: "semantic_classifier_unavailable" }
+      : deterministicDecision);
 
   if (decision.action === "create" || decision.action === "update") {
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner");
+    }
     const existing = context.memory.accepted.find((item) => item.id === decision.id);
     const applied = await applyMemoryExtractionDecision({
       decision,
@@ -617,12 +649,18 @@ export async function runAutoLearningOnTurnEnd(
     if (!applied.memory) {
       throw new Error("memory extraction returned no accepted memory");
     }
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner");
+    }
     await writeMemoryRecord(applied.memory, context);
     context.memory.accepted = [
       applied.memory,
       ...context.memory.accepted.filter((item) => item.id !== applied.memory?.id),
     ];
-    const sessionId = await deps().ensureSession(context);
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner");
+    }
+    const sessionId = owner?.sessionId ?? (await deps().ensureSession(context));
     await context.store.appendEvent(sessionId, {
       type: "memory_accepted",
       memory: applied.memory,
@@ -655,6 +693,9 @@ export async function runAutoLearningOnTurnEnd(
   }
 
   if (decision.action === "delete") {
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner");
+    }
     const existing = context.memory.accepted.find((item) => item.id === decision.id);
     if (!existing) {
       return {
@@ -665,6 +706,17 @@ export async function runAutoLearningOnTurnEnd(
         createdAt: new Date().toISOString(),
       };
     }
+    const sessionId = owner?.sessionId ?? (await deps().ensureSession(context));
+    const deletionCommitted = await persistMemoryDeletionTombstone(
+      context,
+      existing,
+      sessionId,
+      owner?.requestTurnId,
+      owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined,
+    );
+    if (!deletionCommitted) {
+      return createSkippedMemoryLearningRun("stale_request_owner");
+    }
     await removeMemoryRecord(existing, context);
     removeMemoryFromState(context.memory, existing.id);
     if (existing.taxonomy && existing.scope !== "session") {
@@ -674,7 +726,9 @@ export async function runAutoLearningOnTurnEnd(
         context.memory.disabled.filter((item) => item.scope === existing.scope),
       );
     }
-    const sessionId = await deps().ensureSession(context);
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner");
+    }
     await appendMemoryLifecycleEvent(context, sessionId, "auto_deleted", existing);
     await deps().recordMemoryMutationEvidence(context, sessionId, "auto_deleted", existing);
     const run: MemoryLearningRun = {
@@ -710,6 +764,7 @@ export async function runAutoLearningOnTurnEnd(
 async function decideMemoryExtractionWithSemanticClassifier(
   context: TuiContext,
   userInput: string,
+  owner?: MemoryLearningTurnOwner,
 ): Promise<MemoryExtractionDecision | undefined> {
   if (!context.modelGateway) return undefined;
   if (userInput.trim().length < 8 || userInput.length > 2400) return undefined;
@@ -719,11 +774,13 @@ async function decideMemoryExtractionWithSemanticClassifier(
     "You are Linghun's memory extraction classifier. Return exactly one compact JSON object and no prose.",
     prompt,
     500,
+    owner,
   );
   if (!text) return undefined;
   const decision = parseSemanticMemoryDecision(text, context, userInput);
   if (!decision || decision.action === "no-op") return decision;
-  const vetoed = await shouldVetoMemoryWriteForCurrentTurn(context, userInput, decision);
+  if (!isMemoryLearningOwnerCurrent(context, owner)) return undefined;
+  const vetoed = await shouldVetoMemoryWriteForCurrentTurn(context, userInput, decision, owner);
   if (vetoed === true) {
     return { action: "no-op", reason: "semantic_current_turn_memory_control" };
   }
@@ -735,10 +792,17 @@ async function streamSemanticMemoryJson(
   system: string,
   prompt: string,
   maxOutputTokens: number,
+  owner?: MemoryLearningTurnOwner,
 ): Promise<string | undefined> {
   if (!context.modelGateway) return undefined;
   const runtime = getSelectedModelRuntime(context);
   const controller = new AbortController();
+  const abortForOwner = (): void => controller.abort(owner?.signal.reason);
+  if (owner?.signal.aborted) {
+    abortForOwner();
+  } else {
+    owner?.signal.addEventListener("abort", abortForOwner, { once: true });
+  }
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
     let text = "";
@@ -750,8 +814,8 @@ async function streamSemanticMemoryJson(
         maxOutputTokens,
         toolChoice: "none",
         requestContext: "agent",
-        requestContextId: context.runtimeContextId,
-        sessionId: context.sessionId,
+        requestContextId: owner?.requestTurnId ?? context.runtimeContextId,
+        sessionId: owner?.sessionId ?? context.sessionId,
         messages: [
           {
             role: "system",
@@ -762,14 +826,16 @@ async function streamSemanticMemoryJson(
       },
       controller.signal,
     )) {
+      if (controller.signal.aborted) return undefined;
       if (event.type === "assistant_text_delta") text += event.text;
       if (event.type === "error") return undefined;
     }
-    return text;
+    return controller.signal.aborted ? undefined : text;
   } catch {
     return undefined;
   } finally {
     clearTimeout(timeout);
+    owner?.signal.removeEventListener("abort", abortForOwner);
   }
 }
 
@@ -798,6 +864,7 @@ function buildSemanticMemoryClassifierPrompt(context: TuiContext, userInput: str
       "If the user asks to forget/remove/delete a remembered fact, return delete and reference the existing accepted id.",
       "If the user asks to change/update an existing preference/fact, return update and reference the existing accepted id. Do not create when no existing target matches.",
       "Prefer no-op over guessing. For update/delete, id must come from accepted.",
+      "For create/update, classify the turn semantically and require a stable long-lived fact. Queries, audits, and temporary tasks are not stable memory.",
     ],
     outputSchema: {
       action: "no-op | create | update | delete",
@@ -805,6 +872,9 @@ function buildSemanticMemoryClassifierPrompt(context: TuiContext, userInput: str
       id: "existing id for update/delete, omit for create/no-op",
       taxonomy: "user | feedback | project | reference",
       summary: "required for create/update; concise stable memory summary",
+      turnKind:
+        "preference | feedback | project_fact | reference | memory_control | query | audit | temporary_task | other",
+      stability: "stable | temporary | unknown",
     },
     accepted,
     disabled,
@@ -816,6 +886,7 @@ async function shouldVetoMemoryWriteForCurrentTurn(
   context: TuiContext,
   userInput: string,
   decision: Exclude<MemoryExtractionDecision, { action: "no-op" }>,
+  owner?: MemoryLearningTurnOwner,
 ): Promise<boolean | undefined> {
   const prompt = JSON.stringify({
     task:
@@ -843,6 +914,7 @@ async function shouldVetoMemoryWriteForCurrentTurn(
     "You are Linghun's memory-control veto classifier. Return exactly one compact JSON object and no prose.",
     prompt,
     200,
+    owner,
   );
   const parsed = text ? parseJsonObject(text) : undefined;
   return typeof parsed?.veto === "boolean" ? parsed.veto : undefined;
@@ -862,6 +934,13 @@ function parseSemanticMemoryDecision(
   if (action !== "create" && action !== "update" && action !== "delete") return undefined;
   const taxonomy = readMemoryTaxonomy(parsed.taxonomy);
   if (!taxonomy) return undefined;
+  if (action === "create" || action === "update") {
+    const turnKind = readSemanticMemoryTurnKind(parsed.turnKind);
+    const stability = readString(parsed.stability);
+    if (!isLearnableSemanticMemoryTurn(turnKind) || stability !== "stable") {
+      return { action: "no-op", reason: "semantic_turn_not_stable_memory" };
+    }
+  }
   const inputBlocked = findUnsavableReason(userInput);
   if (inputBlocked) {
     return { action: "no-op", reason: "semantic_unsaveable_input", blockedBy: inputBlocked };
@@ -948,6 +1027,41 @@ function readMemoryTaxonomy(value: unknown): MemoryCandidate["taxonomy"] | undef
     : undefined;
 }
 
+function readSemanticMemoryTurnKind(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function isLearnableSemanticMemoryTurn(value: string | undefined): boolean {
+  return (
+    value === "preference" ||
+    value === "feedback" ||
+    value === "project_fact" ||
+    value === "reference"
+  );
+}
+
+function isMemoryLearningOwnerCurrent(
+  context: TuiContext,
+  owner: MemoryLearningTurnOwner | undefined,
+): boolean {
+  return (
+    !owner ||
+    (!owner.signal.aborted &&
+      context.currentRequestTurnId === owner.requestTurnId &&
+      context.sessionId === owner.sessionId)
+  );
+}
+
+function createSkippedMemoryLearningRun(reason: string): MemoryLearningRun {
+  return {
+    trigger: "manual",
+    candidatesCreated: 0,
+    modelCalled: false,
+    skippedReason: `memory_extraction:${reason}`,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 function hasSemanticSummaryMatch(
   memories: MemoryCandidate[],
   taxonomy: MemoryTaxonomy,
@@ -989,6 +1103,17 @@ export async function importAiSessions(
 ): Promise<void> {
   const source = args[0] ?? "auto";
   const query = args.slice(1).join(" ").trim() || basename(context.projectPath);
+  const origin = createAiSessionsImportOrigin(source, query);
+  if (
+    isMemoryTombstoned(context.memory.tombstones, {
+      id: "pending-import",
+      scope: "project",
+      origin,
+    })
+  ) {
+    writeLine(output, "该外部会话来源已删除，不会从同一结构化来源自动重建候选记忆。");
+    return;
+  }
   const summary = `AI sessions import requested: source=${source}, query=${query}. 当前 Linghun 最小入口只记录摘要和证据引用，不读取或保存敏感聊天原文；如 MCP bridge 不可用，请先配置 ai-sessions。`;
   const sessionId = await deps().ensureSession(context);
   await context.store.appendEvent(sessionId, {
@@ -997,15 +1122,37 @@ export async function importAiSessions(
     summary,
     createdAt: new Date().toISOString(),
   });
-  const candidate = createMemoryCandidate(
-    "project",
-    `外部会话导入线索：${source} / ${query}`,
-    "AI sessions import summary",
-    [`ai-sessions:${source}:${query}`],
-  );
+  const candidate = {
+    ...createMemoryCandidate(
+      "project",
+      `外部会话导入线索：${source} / ${query}`,
+      "AI sessions import summary",
+      [`ai-sessions:${source}:${query}`],
+    ),
+    origin,
+  };
   context.memory.candidates.unshift(candidate);
   await writeMemoryRecord(candidate, context);
   deps().refreshCacheFreshness(context);
   writeLine(output, summary);
   writeLine(output, `已创建候选记忆等待确认：${candidate.id}`);
+}
+
+async function persistMemoryDeletionTombstone(
+  context: TuiContext,
+  memory: MemoryCandidate,
+  sessionId: string,
+  requestTurnId = context.currentRequestTurnId,
+  commitGuard?: () => boolean,
+): Promise<boolean> {
+  const tombstone = await appendMemoryTombstone({
+    directory: getMemoryDirectory(memory.scope, context),
+    memory,
+    sessionId,
+    ...(requestTurnId ? { requestTurnId } : {}),
+    ...(commitGuard ? { commitGuard } : {}),
+  });
+  if (memory.scope !== "session" && !tombstone) return false;
+  rememberMemoryTombstone(context.memory.tombstones, tombstone);
+  return true;
 }

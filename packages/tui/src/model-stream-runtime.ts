@@ -81,7 +81,10 @@ import { runArchitectureAndCompletenessFinalGate } from "./final-answer-gate.js"
 import { createGitRunner, readGitStatus } from "./git-runtime.js";
 import { computeWorktreeContext } from "./git-operation-runtime.js";
 import { summarizeWorktreeContextForPrompt } from "./git-tool-runtime.js";
-import { runAutoLearningOnTurnEnd } from "./memory-command-runtime.js";
+import {
+  runAutoLearningOnTurnEnd,
+  type MemoryLearningTurnOwner,
+} from "./memory-command-runtime.js";
 import {
   handleProviderRetryForMetaOrchestration,
   recordMetaOrchestrationRuntimeEvent,
@@ -933,6 +936,27 @@ function showProviderSwitchActivity(context: TuiContext): void {
   context.requestActivityToolName = undefined;
   context.retryInfo = undefined;
   context.shellRerender?.();
+}
+
+function writeProviderTerminalError(
+  output: Writable,
+  error: unknown,
+  context: TuiContext,
+  requestTurnId?: string,
+): void {
+  const failure = context.lastProviderFailure;
+  writeErrorLine(
+    output,
+    formatProviderFailurePrimary(error, context.language),
+    formatProviderFailureTitle(context.language),
+    {
+      failureDomain: "provider",
+      failureOutcome: failure?.outcome ?? failure?.kind ?? "provider_failure",
+      failureRequestTurnId: requestTurnId,
+      retryAttempt: failure?.retry?.attempt,
+      retryMax: failure?.retry?.max,
+    },
+  );
 }
 
 export function evaluateAggregatedFinalAnswerGate(
@@ -2215,6 +2239,7 @@ export function clearRequestActivity(
   context.retryInfo = undefined;
   context.requestActivityPhase = undefined;
   context.requestActivityToolName = undefined;
+  context.requestActivityToolUseId = undefined;
   context.requestActivityToolLines = undefined;
   context.requestActivityToolBytes = undefined;
   context.requestActivityOwner = undefined;
@@ -2314,6 +2339,7 @@ export function startRequestActivity(
     reportPath?: string;
     toolName?: string;
     toolTarget?: string;
+    toolUseId?: string;
     ownerKind?: RequestActivityOwner["kind"];
     requestTurnId?: string;
   } = {},
@@ -2326,6 +2352,7 @@ export function startRequestActivity(
   context.requestActivityOwner = owner;
   context.requestActivityPhase = phase;
   context.requestActivityToolName = values.toolName;
+  context.requestActivityToolUseId = values.toolUseId;
   (context as { requestActivityToolTarget?: string }).requestActivityToolTarget = values.toolTarget;
   context.requestActivityToolLines = 0;
   context.requestActivityToolBytes = 0;
@@ -2918,9 +2945,15 @@ export async function sendMessage(
           continue;
         }
         if (event.type === "error") {
+          const retryInfo = context.retryInfo;
           clearRequestActivity(context, { kind: "foreground", requestTurnId });
           markContextUsageStale(context, "disconnected_mid_stream");
-          await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
+          await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime, {
+            requestTurnId,
+            retry: retryInfo,
+            commitGuard: requestOwnerIsCurrent,
+          });
+          if (await stopStaleRequest()) return;
           if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
             reactiveCompactRetried = true;
             const reactivePreflight = await prepareMessagesForProviderPreflight({
@@ -3014,11 +3047,7 @@ export async function sendMessage(
             userMessageId: userMessageEvent.id,
           });
           if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
-            writeErrorLine(
-              output,
-              formatProviderFailurePrimary(event.error, context.language),
-              formatProviderFailureTitle(context.language),
-            );
+            writeProviderTerminalError(output, event.error, context, requestTurnId);
           }
           return;
         }
@@ -3092,12 +3121,11 @@ export async function sendMessage(
           roundHadUsage,
           roundFinishReason,
           roundHadThinking,
+          requestTurnId,
+          requestOwnerIsCurrent,
         );
-        if (result.isError) {
-          writeErrorLine(output, result.message);
-        } else {
-          writeLine(output, result.message);
-        }
+        if (await stopStaleRequest()) return;
+        writeProviderEmptyResponseResult(output, result, context, requestTurnId);
         return;
       }
 
@@ -3626,7 +3654,11 @@ export async function sendMessage(
       createdAt: new Date().toISOString(),
     });
     if (await stopStaleRequest()) return;
-    await commitAutoLearningAfterSuccessfulTurn(context, text);
+    await commitAutoLearningAfterSuccessfulTurn(context, text, {
+      requestTurnId,
+      sessionId,
+      signal: controller.signal,
+    });
     if (await stopStaleRequest()) return;
     const reportedAt = new Date().toISOString();
     for (const noticeId of agentCompletionNoticeIdsForTurn) {
@@ -3929,9 +3961,10 @@ function enqueueAutoMemoryHint(_context: TuiContext, _created: number, _updated:
 async function commitAutoLearningAfterSuccessfulTurn(
   context: TuiContext,
   userText: string,
+  owner: MemoryLearningTurnOwner,
 ): Promise<void> {
   if (context.memory.learningMode !== "active") return;
-  const run = await runAutoLearningOnTurnEnd(context, userText);
+  const run = await runAutoLearningOnTurnEnd(context, userText, owner);
   if (run.candidatesCreated > 0) {
     enqueueMemoryCandidateHint(context, run.candidatesCreated);
   }
@@ -4182,7 +4215,10 @@ function isModelHistoryCompactBoundary(event: TranscriptEvent): boolean {
   );
 }
 
-function modelHistoryCompactSummary(event: TranscriptEvent | undefined): ModelMessage | undefined {
+function modelHistoryCompactSummary(
+  event: TranscriptEvent | undefined,
+  context: TuiContext,
+): ModelMessage | undefined {
   if (event?.type === "deep_compact_packet" && isDeepCompactPacket(event.packet)) {
     const content = formatDeepCompactPromptSummary(event.packet);
     return content ? { role: "user", content } : undefined;
@@ -4193,19 +4229,93 @@ function modelHistoryCompactSummary(event: TranscriptEvent | undefined): ModelMe
   try {
     const projection = JSON.parse(event.message.slice(COMPACT_PROJECTION_EVENT_PREFIX.length)) as {
       summary?: unknown;
-      restoreContext?: unknown;
+      postCompactTargetChars?: unknown;
+      restoreContext?: {
+        goal?: unknown;
+        currentTask?: unknown;
+        phaseStatus?: unknown;
+        userConstraints?: unknown;
+        keyFiles?: unknown;
+        memoryStatus?: unknown;
+        verificationRequirement?: unknown;
+        [key: string]: unknown;
+      };
     };
     if (typeof projection.summary !== "string") return undefined;
-    const restoreMetadata = projection.restoreContext
-      ? `\n[Context restore metadata]\n${JSON.stringify(projection.restoreContext)}`
+    const restored = revalidateCompactProjectionMemory(
+      { ...projection, summary: projection.summary },
+      context,
+    );
+    const restoreMetadata = restored.restoreContext
+      ? `\n[Context restore metadata]\n${JSON.stringify(restored.restoreContext)}`
       : "";
     return {
       role: "user",
-      content: `Context compact projection\n${projection.summary}${restoreMetadata}`,
+      content: `Context compact projection\n${restored.summary}${restoreMetadata}`,
     };
   } catch {
     return undefined;
   }
+}
+
+function revalidateCompactProjectionMemory(
+  projection: {
+    summary: string;
+    postCompactTargetChars?: unknown;
+    restoreContext?: {
+      goal?: unknown;
+      currentTask?: unknown;
+      phaseStatus?: unknown;
+      userConstraints?: unknown;
+      keyFiles?: unknown;
+      memoryStatus?: unknown;
+      verificationRequirement?: unknown;
+      [key: string]: unknown;
+    };
+  },
+  context: TuiContext,
+): { summary: string; restoreContext?: Record<string, unknown> } {
+  const restore = projection.restoreContext;
+  if (
+    !restore ||
+    !Array.isArray(restore.userConstraints) ||
+    typeof restore.goal !== "string" ||
+    typeof restore.currentTask !== "string" ||
+    typeof restore.phaseStatus !== "string" ||
+    !Array.isArray(restore.keyFiles) ||
+    typeof restore.verificationRequirement !== "string"
+  ) {
+    return { summary: projection.summary, ...(restore ? { restoreContext: restore } : {}) };
+  }
+  const userConstraints = context.memory.accepted
+    .filter((item) => item.scope === "user" || item.taxonomy === "user")
+    .slice(0, 4)
+    .map((item) => item.summary.replace(/\s+/gu, " ").trim().slice(0, 160));
+  const restoreContext = {
+    ...restore,
+    userConstraints,
+    memoryStatus: `${context.memory.accepted.length} accepted memories`,
+  };
+  const targetTokens =
+    typeof projection.postCompactTargetChars === "number"
+      ? Math.ceil(projection.postCompactTargetChars / 4)
+      : "unknown";
+  return {
+    summary: [
+      "Linghun compact summary",
+      "scope provider-visible recent context projection",
+      "role compacted recent provider context",
+      `user goal ${restore.goal}`,
+      `current task ${restore.currentTask}`,
+      `phase status ${restore.phaseStatus}`,
+      `user constraints ${userConstraints.join("; ") || "none recorded"}`,
+      `key files ${restore.keyFiles.filter((item): item is string => typeof item === "string").join(", ") || "none"}`,
+      `target budget tokens ${targetTokens}`,
+      "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
+      `verification requirement ${restore.verificationRequirement}`,
+    ].join("\n"),
+    restoreContext,
+  };
 }
 
 export async function buildModelMessagesWithRecentContext(
@@ -4235,7 +4345,7 @@ export async function buildModelMessagesWithRecentContext(
       compactBoundaryIndex = index;
       break;
     }
-    const compactSummary = modelHistoryCompactSummary(recent[compactBoundaryIndex]);
+    const compactSummary = modelHistoryCompactSummary(recent[compactBoundaryIndex], context);
     const activeRecent = compactBoundaryIndex >= 0 ? recent.slice(compactBoundaryIndex + 1) : recent;
     const lastRecent = activeRecent.at(-1);
     const withoutCurrent =
@@ -4603,9 +4713,15 @@ async function streamFinalModelAnswerWithoutTools(
       continue;
     }
     if (event.type === "error") {
+      const retryInfo = context.retryInfo;
       clearRequestActivity(context, activityOwner);
       const currentRuntime = runtimeFromContinuation(continuation);
-      await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
+      await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime, {
+        requestTurnId,
+        retry: retryInfo,
+        commitGuard: () => !requestIsStale(),
+      });
+      if (requestIsStale()) return "";
       // withProviderRetry already recorded the failure and exhausted same-provider
       // retries. Only fallback to a different model remains.
       const fallback = fallbackAttempted
@@ -4653,11 +4769,7 @@ async function streamFinalModelAnswerWithoutTools(
           ))
         );
       }
-      writeErrorLine(
-        output,
-        formatProviderFailurePrimary(event.error, context.language),
-        formatProviderFailureTitle(context.language),
-      );
+      writeProviderTerminalError(output, event.error, context, requestTurnId);
       return assistantText;
     }
   }
@@ -4688,12 +4800,11 @@ async function streamFinalModelAnswerWithoutTools(
         hadUsage,
         finishReason,
         hadThinking,
+        requestTurnId,
+        () => !requestIsStale(),
       );
-      if (result.isError) {
-        writeErrorLine(output, result.message);
-      } else {
-        writeLine(output, result.message);
-      }
+      if (requestIsStale()) return "";
+      writeProviderEmptyResponseResult(output, result, context, requestTurnId);
     }
   }
   if (assistantText) {
@@ -5101,6 +5212,10 @@ export async function continueModelAfterToolResults(
           }
           return;
         }
+        if (!isCurrentForegroundRequestTurn(context, requestTurnId)) {
+          await stopStaleContinuation();
+          return;
+        }
         recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
           await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
@@ -5164,11 +5279,17 @@ export async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "error") {
+          const retryInfo = context.retryInfo;
           clearRequestActivity(context);
           pendingContinuationToolUses.length = 0;
           const currentRuntime = runtimeFromContinuation(continuation);
           markContextUsageStale(context, "disconnected_mid_stream");
-          await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
+          await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime, {
+            requestTurnId,
+            retry: retryInfo,
+            commitGuard: requestOwnerIsCurrent,
+          });
+          if (await stopStaleContinuation()) return;
           if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
             reactiveCompactRetried = true;
             const reactivePreflight = await prepareMessagesForProviderPreflight({
@@ -5255,11 +5376,7 @@ export async function continueModelAfterToolResults(
             reason: "provider_disconnect",
           });
           if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
-            writeErrorLine(
-              output,
-              formatProviderFailurePrimary(event.error, context.language),
-              formatProviderFailureTitle(context.language),
-            );
+            writeProviderTerminalError(output, event.error, context, requestTurnId);
           }
           return;
         }
@@ -5340,12 +5457,11 @@ export async function continueModelAfterToolResults(
             roundHadUsage,
             roundFinishReason,
             roundHadThinking,
+            requestTurnId,
+            requestOwnerIsCurrent,
           );
-          if (result.isError) {
-            writeErrorLine(output, result.message);
-          } else {
-            writeLine(output, result.message);
-          }
+          if (await stopStaleContinuation()) return;
+          writeProviderEmptyResponseResult(output, result, context, requestTurnId);
           break;
         }
         const reportWriteGuard = continuation.reportWriteGuard;
@@ -5748,12 +5864,15 @@ async function recordProviderEmptyResponse(
   hadUsage: boolean,
   finishReason: string | undefined,
   hadThinking: boolean,
+  requestTurnId?: string,
+  commitGuard?: () => boolean,
 ): Promise<{ message: string; isError: boolean }> {
-  const provider = getRuntimeStatusProvider(context);
+  const runtime = getSelectedModelRuntime(context);
+  const provider = runtime.provider;
   if (!hadUsage) {
     markContextUsageStale(context, "missing_usage");
   }
-  const model = context.model;
+  const model = runtime.model;
   const metadata = [
     `provider ${provider}`,
     `model=${model}`,
@@ -5771,24 +5890,56 @@ async function recordProviderEmptyResponse(
       `provider:${provider}:model:${model}`,
       ["provider_reasoning_only", "reasoning_stream_observed", provider, model],
     );
+    if (commitGuard && !commitGuard()) {
+      return { message: formatProviderThinkingOnlyResponsePrimary(context.language), isError: false };
+    }
+    await context.store.appendEvent(
+      sessionId,
+      { type: "evidence_record", ...evidence },
+      commitGuard,
+    );
+    if (commitGuard && !commitGuard()) {
+      return { message: formatProviderThinkingOnlyResponsePrimary(context.language), isError: false };
+    }
     rememberEvidence(context, evidence);
-    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
-    await appendSystemEvent(context, sessionId, `provider_reasoning_only: ${metadata}`, "info");
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `provider_reasoning_only: ${metadata}`,
+      "info",
+      commitGuard,
+    );
+    if (commitGuard && !commitGuard()) {
+      context.evidence = context.evidence.filter((item) => item.id !== evidence.id);
+    }
     return { message: formatProviderThinkingOnlyResponsePrimary(context.language), isError: false };
   }
-  const evidence = createEvidenceRecord(
-    "command_output",
-    `provider_empty_response: ${metadata}`,
-    `provider:${provider}:model:${model}`,
-    ["provider_empty_response", "model_empty_response", provider, model],
-  );
-  rememberEvidence(context, evidence);
-  await context.store.appendEvent(sessionId, {
-    type: "evidence_record",
-    ...evidence,
+  const error = Object.assign(new Error(`provider_empty_response: ${metadata}`), {
+    code: "PROVIDER_EMPTY_RESPONSE",
   });
-  await appendSystemEvent(context, sessionId, `provider_empty_response: ${metadata}`, "warning");
+  await recordProviderFailureEvidence(context, sessionId, error, runtime, {
+    requestTurnId,
+    commitGuard,
+  });
   return { message: formatProviderEmptyResponsePrimary(context.language), isError: true };
+}
+
+function writeProviderEmptyResponseResult(
+  output: Writable,
+  result: { message: string; isError: boolean },
+  context: TuiContext,
+  requestTurnId?: string,
+): void {
+  if (!result.isError) {
+    writeLine(output, result.message);
+    return;
+  }
+  const failure = context.lastProviderFailure;
+  writeErrorLine(output, result.message, formatProviderFailureTitle(context.language), {
+    failureDomain: "provider",
+    failureOutcome: failure?.outcome ?? failure?.kind ?? "empty_response",
+    failureRequestTurnId: requestTurnId,
+  });
 }
 
 function currentModelSupportsTools(

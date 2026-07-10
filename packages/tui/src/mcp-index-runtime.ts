@@ -54,7 +54,7 @@ import {
   runMcpStdioToolCall,
   runMcpStdioToolList,
 } from "./mcp-stdio-runtime.js";
-import { runMcpSseToolCall } from "./mcp-sse-runtime.js";
+import { runMcpSseToolCall, type McpRuntimeProgress } from "./mcp-sse-runtime.js";
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import { formatMcpTools } from "./remote-mcp-presenter.js";
 import {
@@ -1792,6 +1792,10 @@ function recommendDeferredToolCall(
 export async function executeExtraTool(
   args: { tool_name: unknown; params?: unknown },
   context: TuiContext,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (progress: McpRuntimeProgress) => void;
+  } = {},
 ): Promise<ExecuteExtraToolResult> {
   if (typeof args.tool_name !== "string" || args.tool_name.trim() === "") {
     return {
@@ -1947,13 +1951,17 @@ export async function executeExtraTool(
           parsed.tool,
           params,
           undefined,
-          context.tools.abortSignal,
+          options.signal ?? context.tools.abortSignal,
+          { onProgress: options.onProgress },
         )
       : await runMcpStdioToolCall(
           serverConfig as McpServerConfig,
           parsed.tool,
           params,
           context.projectPath,
+          undefined,
+          options.signal ?? context.tools.abortSignal,
+          { onProgress: options.onProgress },
         );
     if (!result.ok) {
       return {

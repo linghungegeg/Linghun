@@ -129,6 +129,9 @@ export type ProductBlockViewModel = {
   retrySeconds?: number;
   retryAttempt?: number;
   retryMax?: number;
+  failureDomain?: "provider" | "request" | "tool";
+  failureOutcome?: string;
+  failureRequestTurnId?: string;
 };
 
 export type CtrlOExpandView = {

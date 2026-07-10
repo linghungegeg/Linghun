@@ -415,6 +415,7 @@ export type TuiContext = {
   };
   requestActivityPhase?: RequestActivityPhase;
   requestActivityToolName?: string;
+  requestActivityToolUseId?: string;
   requestActivityToolLines?: number;
   requestActivityToolBytes?: number;
   unseenMessageCount?: number;

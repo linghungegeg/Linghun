@@ -19,23 +19,60 @@ export type SearchResult = {
 
 type BingScrapeResult =
   | { ok: true; results: SearchResult[] }
-  | { ok: false; error: string; status?: number };
+  | {
+      ok: false;
+      error: string;
+      errorCode: "INVALID_INPUT" | "HTTP_ERROR" | "ABORTED" | "TIMEOUT" | "REQUEST_ERROR";
+      status?: number;
+      aborted: boolean;
+      timedOut: boolean;
+    };
+
+type WebSearchProgress = {
+  phase: "connecting" | "receiving" | "processing";
+  transport: "https";
+  receivedBytes?: number;
+  itemCount?: number;
+};
 
 /**
  * Scrape Bing (cn.bing.com) HTML search results.
  * Zero API key, zero cost, accessible from mainland China.
  */
-export async function bingSearch(input: WebSearchInput): Promise<BingScrapeResult> {
+export async function bingSearch(
+  input: WebSearchInput,
+  callerSignal?: AbortSignal,
+  onProgress?: (progress: WebSearchProgress) => void,
+): Promise<BingScrapeResult> {
   const query = input.query.trim();
-  if (!query) return { ok: false, error: "搜索词不能为空" };
+  if (!query) {
+    return {
+      ok: false,
+      error: "搜索词不能为空",
+      errorCode: "INVALID_INPUT",
+      aborted: false,
+      timedOut: false,
+    };
+  }
 
   const count = Math.min(input.num_results ?? MAX_RESULTS_DEFAULT, 20);
   const searchUrl = `${BING_URL}?q=${encodeURIComponent(query)}&count=${count}&setlang=zh-cn`;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  let abortCause: "caller" | "timeout" | undefined;
+  const abortFromCaller = () => {
+    abortCause ??= "caller";
+    controller.abort(callerSignal?.reason);
+  };
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timer = setTimeout(() => {
+    abortCause ??= "timeout";
+    controller.abort();
+  }, TIMEOUT_MS);
 
   try {
+    onProgress?.({ phase: "connecting", transport: "https" });
     const response = await fetch(searchUrl, {
       method: "GET",
       headers: {
@@ -47,26 +84,62 @@ export async function bingSearch(input: WebSearchInput): Promise<BingScrapeResul
       signal: controller.signal,
     });
 
-    clearTimeout(timer);
-
     if (!response.ok) {
       return {
         ok: false,
         error: `Bing 返回 HTTP ${response.status}`,
+        errorCode: "HTTP_ERROR",
         status: response.status,
+        aborted: false,
+        timedOut: false,
       };
     }
 
+    const contentLength = Number(response.headers?.get("content-length"));
+    onProgress?.({
+      phase: "receiving",
+      transport: "https",
+      ...(Number.isFinite(contentLength) ? { receivedBytes: contentLength } : {}),
+    });
     const html = await response.text();
     const results = parseBingHtml(html, count);
+    onProgress?.({
+      phase: "processing",
+      transport: "https",
+      receivedBytes: new TextEncoder().encode(html).byteLength,
+      itemCount: results.length,
+    });
     return { ok: true, results };
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof DOMException && err.name === "AbortError") {
-      return { ok: false, error: "搜索超时" };
+  } catch (error) {
+    if (abortCause === "caller") {
+      return {
+        ok: false,
+        error: "搜索已中断",
+        errorCode: "ABORTED",
+        aborted: true,
+        timedOut: false,
+      };
     }
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `搜索请求失败: ${message}` };
+    if (abortCause === "timeout") {
+      return {
+        ok: false,
+        error: "搜索超时",
+        errorCode: "TIMEOUT",
+        aborted: false,
+        timedOut: true,
+      };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error: `搜索请求失败: ${message}`,
+      errorCode: "REQUEST_ERROR",
+      aborted: false,
+      timedOut: false,
+    };
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
 }
 
