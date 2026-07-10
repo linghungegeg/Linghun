@@ -120,6 +120,8 @@ describe("context usage ledger", () => {
       confirmedUsedTokens: 125,
       staleReason: undefined,
       lastConfirmedTurn: 7,
+      model: "gpt-5.5",
+      provider: "unknown",
     });
     expect(context.cache.contextUsage?.contextWindowTokens).toBeGreaterThan(125);
     expect(context.cache.contextUsage?.compactTriggerTokens).toBeGreaterThan(0);
@@ -184,5 +186,50 @@ describe("context usage ledger", () => {
       confirmedUsedTokens: 230,
       staleReason: "disconnected_mid_stream",
     });
+  });
+
+  it("does not reuse an old model trigger after the runtime route changes", () => {
+    const context = makeContext();
+    context.cache.contextUsage = {
+      estimatedChars: 920,
+      maxChars: 1_024,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      source: "provider_usage",
+      confirmedUsedTokens: 230,
+      contextWindowTokens: 256,
+      compactTriggerTokens: 1,
+      model: "old-model",
+      provider: "old-provider",
+    };
+
+    expect(shouldForceCompactFromConfirmedUsage(context)).toBe(false);
+
+    expect(context.cache.contextUsage).toMatchObject({
+      model: "old-model",
+      provider: "old-provider",
+      compactTriggerTokens: 1,
+    });
+  });
+
+  it("recalculates the trigger only after the runtime snapshot is marked stale", () => {
+    const context = makeContext();
+    recordConfirmedContextUsage(context, {
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+    });
+    const currentTrigger = context.cache.contextUsage?.compactTriggerTokens ?? 0;
+    context.cache.contextUsage = {
+      ...context.cache.contextUsage!,
+      confirmedUsedTokens: currentTrigger,
+      compactTriggerTokens: currentTrigger + 1,
+      model: "gpt-5.5",
+      provider: "unknown",
+    };
+
+    expect(shouldForceCompactFromConfirmedUsage(context)).toBe(false);
+
+    context.cache.contextUsage.staleReason = "runtime_changed";
+    expect(shouldForceCompactFromConfirmedUsage(context)).toBe(true);
   });
 });

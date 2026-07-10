@@ -224,6 +224,7 @@ type AggregatedFinalAnswerGateResult =
       claimVerdict?: FinalAnswerClaimVerdict;
       extendedVerdict?: FinalAnswerExtendedVerdict;
       engineeringVerdict?: { unsupportedKinds: string[]; message: string };
+      runtimeVerdict?: { unsupportedKinds: string[]; message: string };
       unsupportedKinds: string[];
     };
 
@@ -944,10 +945,13 @@ export function evaluateAggregatedFinalAnswerGate(
     ? runArchitectureAndCompletenessFinalGate(context, assistantText)
     : { status: "passed" as const };
   const engineeringVerdict = evaluateEngineeringFinalBoundary(context, assistantText);
+  const blockedWorkflowClaim =
+    context.lastMetaSchedulerDecision?.shouldStopForBlockedRuntime === true &&
+    claimVerdict.matchedClaims.some((claim) => claim.kind === "workflow_status_claim");
   const needsClaim = claimVerdict.status === "needs_disclaimer";
   const needsExtended = extended.status === "needs_disclaimer";
   const needsEngineering = engineeringVerdict.status === "needs_disclaimer";
-  if (!needsClaim && !needsExtended && !needsEngineering) {
+  if (!needsClaim && !needsExtended && !needsEngineering && !blockedWorkflowClaim) {
     return { status: "passed" };
   }
   return {
@@ -955,10 +959,19 @@ export function evaluateAggregatedFinalAnswerGate(
     ...(needsClaim ? { claimVerdict } : {}),
     ...(needsExtended ? { extendedVerdict: extended.verdict } : {}),
     ...(needsEngineering ? { engineeringVerdict } : {}),
+    ...(blockedWorkflowClaim
+      ? {
+          runtimeVerdict: {
+            unsupportedKinds: ["workflow_status_claim"],
+            message: "blocked workflow status cannot be declared complete",
+          },
+        }
+      : {}),
     unsupportedKinds: [
       ...(needsClaim ? claimVerdict.unsupportedKinds : []),
       ...(needsExtended ? extended.verdict.unsupportedKinds : []),
       ...(needsEngineering ? engineeringVerdict.unsupportedKinds : []),
+      ...(blockedWorkflowClaim ? ["workflow_status_claim"] : []),
     ],
   };
 }
@@ -1336,6 +1349,8 @@ async function runFinalGateEvidenceAction(input: {
     reasoningSent: boolean;
   };
   reportWriteGuard?: PendingModelContinuation["reportWriteGuard"];
+  requestTurnId?: string;
+  abortSignal?: AbortSignal;
 }): Promise<FinalGateEvidenceActionResult> {
   const toolCall = await createFinalGateEvidenceToolCall(input.actionPlan, input.context);
   if (!toolCall) {
@@ -1355,6 +1370,8 @@ async function runFinalGateEvidenceAction(input: {
     endpointProfile: input.runtime.endpointProfile,
     reasoningLevel: input.runtime.reasoningLevel,
     reasoningSent: input.runtime.reasoningSent,
+    ...(input.requestTurnId ? { requestTurnId: input.requestTurnId } : {}),
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
     ...(input.reportWriteGuard ? { reportWriteGuard: input.reportWriteGuard } : {}),
   };
   await appendSystemEvent(
@@ -2169,7 +2186,7 @@ export function clearRequestActivity(
   context: TuiContext,
   owner?: RequestActivityOwner,
 ): void {
-  if (owner && context.requestActivityOwner && !sameRequestActivityOwner(context.requestActivityOwner, owner)) {
+  if (owner && !sameRequestActivityOwner(context.requestActivityOwner, owner)) {
     return;
   }
   const timer = context.requestActivity?.slowTimer;
@@ -2223,10 +2240,21 @@ export function beginForegroundRequestTurn(
   context: TuiContext,
   userMessageId?: string,
 ): string {
+  const previousRequestTurnId = context.currentRequestTurnId;
+  if (previousRequestTurnId) {
+    clearRequestActivity(context, {
+      kind: "foreground",
+      requestTurnId: previousRequestTurnId,
+    });
+  }
   const requestTurnId = randomUUID();
   context.runtimeContextId = requestTurnId;
   context.currentRequestTurnId = requestTurnId;
   context.currentRequestUserMessageId = userMessageId;
+  if (context.currentUserActionConstraintsRequestTurnId !== requestTurnId) {
+    context.currentUserActionConstraints = undefined;
+    context.currentUserActionConstraintsRequestTurnId = undefined;
+  }
   return requestTurnId;
 }
 
@@ -2237,6 +2265,10 @@ function isCurrentForegroundRequestTurn(context: TuiContext, requestTurnId: stri
 function clearForegroundRequestState(context: TuiContext, requestTurnId: string): void {
   if (!isCurrentForegroundRequestTurn(context, requestTurnId)) return;
   clearRequestActivity(context, { kind: "foreground", requestTurnId });
+  if (context.currentUserActionConstraintsRequestTurnId === requestTurnId) {
+    context.currentUserActionConstraints = undefined;
+    context.currentUserActionConstraintsRequestTurnId = undefined;
+  }
   context.activeAbortController = undefined;
   context.foregroundAbortPendingUntilMs = undefined;
   context.tools.abortSignal = undefined;
@@ -2424,7 +2456,47 @@ export async function sendMessage(
     createdAt: string;
   };
   const requestTurnId = beginForegroundRequestTurn(context, userMessageEvent.id);
+  const assistantEventId = randomUUID();
+  let assistantStreamBlockId = `assistant-stream-${assistantEventId}-0`;
+  let assistantStreamStarted = false;
+  let assistantText = "";
+  let committedIntermediateAssistantText = "";
+  let finalAnswerEvidenceActionRetries = 0;
+  let finalAnswerClaimAlignmentRewrites = 0;
+  let modelLoopCompleted = false;
+  const controller = new AbortController();
+  let staleRequestRecorded = false;
+  const requestOwnerIsCurrent = (): boolean =>
+    !controller.signal.aborted && isCurrentForegroundRequestTurn(context, requestTurnId);
+  const recordStaleRequest = async (): Promise<void> => {
+    if (staleRequestRecorded) return;
+    staleRequestRecorded = true;
+    if (controller.signal.aborted && isCurrentForegroundRequestTurn(context, requestTurnId)) {
+      await recordInterruptedForegroundTurn(context, sessionId, {
+        requestTurnId,
+        reason: "model_abort",
+        userMessageId: userMessageEvent.id,
+      });
+      return;
+    }
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `stale_foreground_request_dropped: requestTurnId=${requestTurnId}`,
+      "warning",
+    );
+  };
+  const stopStaleRequest = async (): Promise<boolean> => {
+    if (requestOwnerIsCurrent()) return false;
+    await recordStaleRequest();
+    return true;
+  };
+  context.activeAbortController = controller;
+  context.tools.abortSignal = controller.signal;
+  context.interrupt = { type: "running", taskId: "model-stream", canCancel: true };
+  try {
   await context.store.appendEvent(sessionId, userMessageEvent);
+  if (await stopStaleRequest()) return;
   let selectedRuntime = getSelectedModelRuntime(context);
   // Remember the original provider+model for correct breaker clear after fallback.
   const originalProvider = selectedRuntime.provider;
@@ -2439,22 +2511,13 @@ export async function sendMessage(
     `model request: selected role ${selectedRuntime.role}; provider ${selectedRuntime.provider}; model ${selectedRuntime.model}; endpoint profile ${selectedRuntime.endpointProfile}; reasoning level ${selectedRuntime.reasoningLevel ?? "none"}; reasoning sent ${selectedRuntime.reasoningSent ? "yes" : "no"}; tools ${selectedTools ? "yes" : "no"}`,
     "info",
   );
-  const assistantEventId = randomUUID();
+  if (await stopStaleRequest()) return;
   // 当 output 是 ShellBlockOutput（Ink task shell）时，每轮 request 用一个稳定的
   // streaming block id，让 assistant_text_delta 累计写入同一条 keep:true block，
   // 避免被 _write 的 ephemeral splice 淘汰为最后一片 chunk。plain TUI / 测试
   // MemoryOutput 上没有 beginAssistantStream，writeAssistantDelta 会回退到 write。
-  let assistantStreamBlockId = `assistant-stream-${assistantEventId}-0`;
   beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
-  let assistantText = "";
-  let committedIntermediateAssistantText = "";
-  let finalAnswerEvidenceActionRetries = 0;
-  let finalAnswerClaimAlignmentRewrites = 0;
-  let modelLoopCompleted = false;
-  const controller = new AbortController();
-  context.activeAbortController = controller;
-  context.tools.abortSignal = controller.signal;
-  context.interrupt = { type: "running", taskId: "model-stream", canCancel: true };
+  assistantStreamStarted = true;
   const perfEvents: string[] = [];
   startRequestActivity(
     output,
@@ -2462,6 +2525,7 @@ export async function sendMessage(
     reportWriteGuard ? "request_started_report" : "request_started",
     {
       reportPath: reportWriteGuard?.requestedPath,
+      requestTurnId,
     },
   );
   const runtimeStatus = buildRuntimeStatusForModel({
@@ -2603,23 +2667,6 @@ export async function sendMessage(
     context.userStateCooldownUntilMs = Date.now() + 300_000;
     context.userStateDismissedUntilMs = Date.now() + 300_000;
   }
-  if (metaSchedulerDecision.shouldStopForBlockedRuntime) {
-    writeLine(
-      output,
-      context.language === "en-US"
-        ? "Blocked workflows/agents detected. Resolve them first, then retry."
-        : "检测到阻塞的 workflow/agent，请先处理后再继续。",
-    );
-    writeStatus(output, context);
-    await appendSystemEvent(
-      context,
-      sessionId,
-      "meta_scheduler:blocked_runtime_stop",
-      "warning",
-    );
-    clearForegroundRequestState(context, requestTurnId);
-    return;
-  }
   const gitStatusSummary = await buildGitStatusSummary(context.projectPath);
   const _tDirective0 = Date.now();
   const _msDirective = formatMetaSchedulerDirective(metaSchedulerDecision);
@@ -2662,9 +2709,9 @@ export async function sendMessage(
       content: createReportTaskGuard(reportWriteGuard, context.language),
     });
   }
-  const previousUserActionConstraints = context.currentUserActionConstraints;
+  if (await stopStaleRequest()) return;
   context.currentUserActionConstraints = parseUserActionConstraints(text);
-  try {
+  context.currentUserActionConstraintsRequestTurnId = requestTurnId;
     let evidenceRounds = 0;
     let consecutiveTodoOnlyRounds = 0;
     let noProgressRounds = 0;
@@ -2681,6 +2728,7 @@ export async function sendMessage(
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
     modelRoundLoop: for (let round = 0; ; round += 1) {
+      if (await stopStaleRequest()) return;
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
@@ -2713,9 +2761,9 @@ export async function sendMessage(
         trigger: "request",
         deps: compactPreflightDeps,
       });
+      if (await stopStaleRequest()) return;
       metaSchedulerDecision.internalEvents.push(`perf:preflight_ms=${Date.now() - _tPreflight0}`);
       if (preflight.blocked) {
-        clearForegroundRequestState(context, requestTurnId);
         writeLine(output, preflight.message);
         writeStatus(output, context);
         return;
@@ -2733,7 +2781,6 @@ export async function sendMessage(
           `context_still_too_large_after_compaction: model=${selectedRuntime.model} inputTooLarge=${text.length > contextMaxChars ? "yes" : "no"}`,
           "warning",
         );
-        clearForegroundRequestState(context, requestTurnId);
         writeLine(output, warning);
         writeStatus(output, context);
         return;
@@ -2799,14 +2846,9 @@ export async function sendMessage(
           },
         },
       )) {
-        if (controller.signal.aborted) {
-          await recordInterruptedForegroundTurn(context, sessionId, {
-            requestTurnId,
-            reason: "model_abort",
-            userMessageId: userMessageEvent.id,
-          });
+        if (!requestOwnerIsCurrent()) {
+          await recordStaleRequest();
           if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
-            clearForegroundRequestState(context, requestTurnId);
             cancelAssistantStream(output);
             writeLine(output, t(context, "toolInterrupted"));
           }
@@ -2815,7 +2857,8 @@ export async function sendMessage(
         recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
           await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
-          clearRequestActivity(context);
+          if (await stopStaleRequest()) return;
+          clearRequestActivity(context, { kind: "foreground", requestTurnId });
           const visibleText = textSanitizer.push(event.text);
           assistantText += visibleText;
           roundAssistantText += visibleText;
@@ -2844,7 +2887,7 @@ export async function sendMessage(
           );
           pendingAssistantPreviewText = result.text;
           if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
-          clearRequestActivity(context);
+          clearRequestActivity(context, { kind: "foreground", requestTurnId });
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
           continue;
         }
@@ -2875,7 +2918,7 @@ export async function sendMessage(
           continue;
         }
         if (event.type === "error") {
-          clearRequestActivity(context);
+          clearRequestActivity(context, { kind: "foreground", requestTurnId });
           markContextUsageStale(context, "disconnected_mid_stream");
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
           if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
@@ -2980,6 +3023,7 @@ export async function sendMessage(
           return;
         }
       }
+      if (await stopStaleRequest()) return;
       const finalVisibleText = textSanitizer.flush();
       assistantText += finalVisibleText;
       roundAssistantText += finalVisibleText;
@@ -3040,7 +3084,7 @@ export async function sendMessage(
           discardAssistantBlock(output, assistantStreamBlockId);
           continue;
         }
-        clearRequestActivity(context);
+        clearRequestActivity(context, { kind: "foreground", requestTurnId });
         const result = await recordProviderEmptyResponse(
           context,
           sessionId,
@@ -3132,6 +3176,7 @@ export async function sendMessage(
         // D.13U — Final Answer Claim Gate 和 Extended Gate 聚合检查
         if (assistantText) {
           await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
+          if (await stopStaleRequest()) return;
           const gateResult = evaluateAggregatedFinalAnswerGate(
             context,
             assistantText,
@@ -3145,6 +3190,7 @@ export async function sendMessage(
               `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
               "warning",
             );
+            if (await stopStaleRequest()) return;
             if (
               shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
               finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
@@ -3156,6 +3202,7 @@ export async function sendMessage(
                 `final_answer_claim_alignment_rewrite attempt=${finalAnswerClaimAlignmentRewrites}`,
                 "warning",
               );
+              if (await stopStaleRequest()) return;
               discardAssistantBlock(output, assistantStreamBlockId);
               assistantText = "";
               roundAssistantText = "";
@@ -3182,8 +3229,10 @@ export async function sendMessage(
                 ? "warning"
                 : "info",
             );
+            if (await stopStaleRequest()) return;
             if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              if (await stopStaleRequest()) return;
               assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
@@ -3202,8 +3251,11 @@ export async function sendMessage(
               sessionId,
               messages: messagesForProvider,
               runtime: selectedRuntime,
+              requestTurnId,
+              abortSignal: controller.signal,
               ...(reportWriteGuard ? { reportWriteGuard } : {}),
             });
+            if (await stopStaleRequest()) return;
             if (actionResult.status === "permission_pending") {
               return;
             }
@@ -3213,6 +3265,7 @@ export async function sendMessage(
               continue;
             }
             await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+            if (await stopStaleRequest()) return;
             assistantText = buildEvidenceBackedFinalBoundaryAnswer(
               gateResult,
               context.language,
@@ -3230,6 +3283,7 @@ export async function sendMessage(
         }
         break;
       }
+      if (await stopStaleRequest()) return;
       if (roundAssistantText) {
         replaceAssistantBlockContent(output, assistantStreamBlockId, roundAssistantText);
         endAssistantStream(output);
@@ -3259,12 +3313,15 @@ export async function sendMessage(
             endpointProfile: selectedRuntime.endpointProfile,
             reasoningLevel: selectedRuntime.reasoningLevel,
             reasoningSent: selectedRuntime.reasoningSent,
+            requestTurnId,
+            abortSignal: controller.signal,
             ...(reportWriteGuard ? { reportWriteGuard } : {}),
           },
           failFastContext: "this batch",
           collectFailureFingerprints: true,
         },
       );
+      if (await stopStaleRequest()) return;
       if (toolBatchResult.pendingApproval) {
         return;
       }
@@ -3346,16 +3403,8 @@ export async function sendMessage(
       }
     }
     modelLoopCompleted = true;
-  } finally {
-    if (!modelLoopCompleted || !assistantText) {
-      endAssistantStream(output);
-    }
-    if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
-      context.currentUserActionConstraints = previousUserActionConstraints;
-    }
-    clearForegroundRequestState(context, requestTurnId);
-  }
 
+  if (await stopStaleRequest()) return;
   // Successful response — clear the circuit breaker for both the current and original provider+model.
   clearProviderBreaker(context.providerBreaker, selectedRuntime.provider, selectedRuntime.model);
   if (selectedRuntime.provider !== originalProvider || selectedRuntime.model !== originalModel) {
@@ -3363,15 +3412,19 @@ export async function sendMessage(
   }
   if (assistantText) {
     await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
+    if (await stopStaleRequest()) return;
   }
 
   if (reportWriteGuard && !reportWriteGuard.completed) {
+    if (await stopStaleRequest()) return;
     const message = await recordReportIncompleteEvidence(context, sessionId, reportWriteGuard);
+    if (await stopStaleRequest()) return;
     writeLine(output, message);
   }
 
   if (assistantText) {
-    startRequestActivity(output, context, "verifying_final_answer");
+    if (await stopStaleRequest()) return;
+    startRequestActivity(output, context, "verifying_final_answer", { requestTurnId });
     // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
     // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
     {
@@ -3388,6 +3441,7 @@ export async function sendMessage(
               `final_answer_claim_alignment_rewrite final_safety=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
               "warning",
             );
+            if (await stopStaleRequest()) return;
             messagesForProvider.push({
               role: "assistant",
               content: truncateRoundAssistantForProvider(assistantText, context),
@@ -3405,6 +3459,8 @@ export async function sendMessage(
                 endpointProfile: selectedRuntime.endpointProfile,
                 reasoningLevel: selectedRuntime.reasoningLevel,
                 reasoningSent: selectedRuntime.reasoningSent,
+                requestTurnId,
+                abortSignal: controller.signal,
                 ...(reportWriteGuard ? { reportWriteGuard } : {}),
               },
               context,
@@ -3417,6 +3473,7 @@ export async function sendMessage(
               finalAnswerClaimAlignmentRewrites,
               finalAnswerEvidenceActionRetries,
             );
+            if (await stopStaleRequest()) return;
             if (context.pendingLocalApproval) return;
             retriedClaimAlignment = true;
           }
@@ -3439,6 +3496,7 @@ export async function sendMessage(
               ? "warning"
               : "info",
           );
+          if (await stopStaleRequest()) return;
           if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
             replaceAssistantBlockContent(output, assistantStreamBlockId, "");
             const actionResult = await runFinalGateEvidenceAction({
@@ -3448,8 +3506,11 @@ export async function sendMessage(
               sessionId,
               messages: messagesForProvider,
               runtime: selectedRuntime,
+              requestTurnId,
+              abortSignal: controller.signal,
               ...(reportWriteGuard ? { reportWriteGuard } : {}),
             });
+            if (await stopStaleRequest()) return;
             if (actionResult.status === "permission_pending") {
               return;
             }
@@ -3475,6 +3536,7 @@ export async function sendMessage(
                 finalAnswerClaimAlignmentRewrites,
                 finalAnswerEvidenceActionRetries,
               );
+              if (await stopStaleRequest()) return;
               if (context.pendingLocalApproval) return;
             } else {
               await appendSystemEvent(
@@ -3483,7 +3545,9 @@ export async function sendMessage(
                 `final_answer_gap_action_${actionResult.status} final_safety=yes reason=${actionResult.reason}`,
                 "warning",
               );
+              if (await stopStaleRequest()) return;
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              if (await stopStaleRequest()) return;
               assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
@@ -3491,7 +3555,9 @@ export async function sendMessage(
               );
             }
           } else {
+            if (await stopStaleRequest()) return;
             await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+            if (await stopStaleRequest()) return;
             assistantText = buildEvidenceBackedFinalBoundaryAnswer(
               gateResult,
               context.language,
@@ -3508,12 +3574,14 @@ export async function sendMessage(
       }
       const coherentAssistantText = enforceSuccessfulToolCoherence(assistantText, context);
       if (coherentAssistantText !== assistantText) {
+        if (await stopStaleRequest()) return;
         await appendSystemEvent(
           context,
           sessionId,
           "final_answer_coherence_guard: replaced contradictory pre-tool failure/success text with evidence-backed final answer",
           "warning",
         );
+        if (await stopStaleRequest()) return;
         assistantText = coherentAssistantText;
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
@@ -3537,6 +3605,7 @@ export async function sendMessage(
         summary: `assistant_chars=${assistantText.length}; sanitized=${sanitized !== beforeSanitize ? "yes" : "no"}`,
         level: sanitized !== beforeSanitize ? "warning" : "info",
       });
+      if (await stopStaleRequest()) return;
     }
     const visibleAssistantBlockText =
       committedIntermediateAssistantText && assistantText.startsWith(committedIntermediateAssistantText)
@@ -3545,8 +3614,9 @@ export async function sendMessage(
     if (visibleAssistantBlockText) {
       replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
     }
+    if (await stopStaleRequest()) return;
     endAssistantStream(output);
-    clearRequestActivity(context);
+    clearRequestActivity(context, { kind: "foreground", requestTurnId });
     writeFinalAssistantText(output, assistantText);
     output.write("\n");
     await context.store.appendEvent(sessionId, {
@@ -3555,7 +3625,9 @@ export async function sendMessage(
       text: assistantText,
       createdAt: new Date().toISOString(),
     });
+    if (await stopStaleRequest()) return;
     await commitAutoLearningAfterSuccessfulTurn(context, text);
+    if (await stopStaleRequest()) return;
     const reportedAt = new Date().toISOString();
     for (const noticeId of agentCompletionNoticeIdsForTurn) {
       markAgentCompletionNoticeReported(context, noticeId, reportedAt);
@@ -3583,6 +3655,20 @@ export async function sendMessage(
   }
   writeLightHints(output, context);
   writeStatus(output, context);
+  } finally {
+    try {
+      if (!requestOwnerIsCurrent()) {
+        await recordStaleRequest();
+      }
+    } finally {
+      if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+        if (assistantStreamStarted && (!modelLoopCompleted || !assistantText)) {
+          endAssistantStream(output);
+        }
+        clearForegroundRequestState(context, requestTurnId);
+      }
+    }
+  }
 }
 
 export async function __testSendMessage(
@@ -4357,6 +4443,15 @@ async function streamFinalModelAnswerWithoutTools(
   claimAlignmentRewriteCount = 0,
   evidenceActionRetryCount = 0,
 ): Promise<string> {
+  const requestTurnId = continuation.requestTurnId;
+  const requestIsStale = (): boolean =>
+    signal.aborted ||
+    continuation.abortSignal?.aborted === true ||
+    Boolean(requestTurnId && context.currentRequestTurnId !== requestTurnId);
+  const activityOwner = requestTurnId
+    ? { kind: "foreground" as const, requestTurnId }
+    : undefined;
+  if (requestIsStale()) return "";
   let assistantText = "";
   let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
   // 与 sendMessage 一致的 assistant streaming block：避免最后一轮 assistant 文本
@@ -4390,13 +4485,16 @@ async function streamFinalModelAnswerWithoutTools(
     trigger: "final",
     deps: compactPreflightDeps,
   });
+  if (requestIsStale()) return "";
   if (preflight.blocked) {
     writeLine(output, preflight.message);
     return "";
   }
   checkAndWriteProviderCooldown(context, runtime, output);
   continuation.messages = preflight.messages;
-  startRequestActivity(output, context, "checking_final_evidence");
+  startRequestActivity(output, context, "checking_final_evidence", {
+    ...(requestTurnId ? { requestTurnId } : {}),
+  });
   const promptCacheFields = await buildPromptCacheRequestFields(context);
   const providerRequest: ModelRequest = applyPromptCacheKey(
     applyCacheWritePolicyToRequest(
@@ -4405,7 +4503,7 @@ async function streamFinalModelAnswerWithoutTools(
         model: continuation.model,
         endpointProfile: continuation.endpointProfile,
         requestContext: "foreground",
-        requestContextId: context.runtimeContextId,
+        requestContextId: requestTurnId ?? context.runtimeContextId,
         sessionId,
         ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
         toolChoice: "none",
@@ -4439,16 +4537,19 @@ async function streamFinalModelAnswerWithoutTools(
       },
     },
   )) {
-    if (signal.aborted) {
-      clearRequestActivity(context);
-      cancelAssistantStream(output);
-      writeLine(output, t(context, "toolInterrupted"));
+    if (requestIsStale()) {
+      clearRequestActivity(context, activityOwner);
+      if (!requestTurnId || context.currentRequestTurnId === requestTurnId) {
+        cancelAssistantStream(output);
+        writeLine(output, t(context, "toolInterrupted"));
+      }
       return assistantText;
     }
     recordRequestFirstDelta(context, event.type);
     if (event.type === "assistant_text_delta") {
       await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
-      clearRequestActivity(context);
+      if (requestIsStale()) return "";
+      clearRequestActivity(context, activityOwner);
       const visibleText = textSanitizer.push(event.text);
       assistantText += visibleText;
       pendingAssistantPreviewText += visibleText;
@@ -4502,7 +4603,7 @@ async function streamFinalModelAnswerWithoutTools(
       continue;
     }
     if (event.type === "error") {
-      clearRequestActivity(context);
+      clearRequestActivity(context, activityOwner);
       const currentRuntime = runtimeFromContinuation(continuation);
       await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
       // withProviderRetry already recorded the failure and exhausted same-provider
@@ -4560,6 +4661,7 @@ async function streamFinalModelAnswerWithoutTools(
       return assistantText;
     }
   }
+  if (requestIsStale()) return "";
   const finalVisibleText = textSanitizer.flush();
   assistantText += finalVisibleText;
   pendingAssistantPreviewText += finalVisibleText;
@@ -4575,7 +4677,7 @@ async function streamFinalModelAnswerWithoutTools(
     );
   }
   if (!assistantText) {
-    clearRequestActivity(context);
+    clearRequestActivity(context, activityOwner);
     if (ignoredRawToolProtocolText) {
       writeLine(output, formatRawToolProtocolRetryFailure(context.language));
     } else {
@@ -4600,7 +4702,10 @@ async function streamFinalModelAnswerWithoutTools(
       clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
     }
     await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
-    startRequestActivity(output, context, "checking_final_evidence");
+    if (requestIsStale()) return "";
+    startRequestActivity(output, context, "checking_final_evidence", {
+      ...(requestTurnId ? { requestTurnId } : {}),
+    });
     const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
     if (gateResult.status === "needs_disclaimer") {
       if (
@@ -4615,7 +4720,9 @@ async function streamFinalModelAnswerWithoutTools(
           role: "user",
           content: createFinalGateClaimAlignmentRewritePrompt(context.language),
         });
-        startRequestActivity(output, context, "rewriting_final_answer");
+        startRequestActivity(output, context, "rewriting_final_answer", {
+          ...(requestTurnId ? { requestTurnId } : {}),
+        });
         replaceAssistantBlockContent(output, assistantStreamBlockId, "");
         return streamFinalModelAnswerWithoutTools(
           continuation,
@@ -4647,8 +4754,11 @@ async function streamFinalModelAnswerWithoutTools(
           ? "warning"
           : "info",
       );
+      if (requestIsStale()) return "";
       if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
-        startRequestActivity(output, context, "collecting_final_evidence");
+        startRequestActivity(output, context, "collecting_final_evidence", {
+          ...(requestTurnId ? { requestTurnId } : {}),
+        });
         replaceAssistantBlockContent(output, assistantStreamBlockId, "");
         const actionResult = await runFinalGateEvidenceAction({
           actionPlan,
@@ -4657,14 +4767,19 @@ async function streamFinalModelAnswerWithoutTools(
           sessionId,
           messages: continuation.messages,
           runtime,
+          requestTurnId,
+          abortSignal: continuation.abortSignal ?? signal,
           ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
         });
+        if (requestIsStale()) return "";
         if (actionResult.status === "permission_pending") {
           return "";
         }
         if (shouldContinueAfterFinalGateEvidenceAction(actionResult, evidenceActionRetryCount)) {
           continuation.messages = actionResult.messages;
-          startRequestActivity(output, context, "rewriting_final_answer");
+          startRequestActivity(output, context, "rewriting_final_answer", {
+            ...(requestTurnId ? { requestTurnId } : {}),
+          });
           return streamFinalModelAnswerWithoutTools(
             continuation,
             context,
@@ -4686,6 +4801,7 @@ async function streamFinalModelAnswerWithoutTools(
         );
       }
       await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+      if (requestIsStale()) return "";
       assistantText = buildEvidenceBackedFinalBoundaryAnswer(
         gateResult,
         context.language,
@@ -4704,8 +4820,9 @@ async function streamFinalModelAnswerWithoutTools(
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
+    if (requestIsStale()) return "";
     endAssistantStream(output);
-    clearRequestActivity(context);
+    clearRequestActivity(context, activityOwner);
     writeFinalAssistantText(output, assistantText);
   }
   return assistantText;
@@ -4821,8 +4938,11 @@ export async function continueModelAfterToolResults(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
+  const sessionId = await ensureSession(context);
   const requestTurnId = beginForegroundRequestTurn(context);
   const controller = new AbortController();
+  continuation.requestTurnId = requestTurnId;
+  continuation.abortSignal = controller.signal;
   const originalContProvider = continuation.provider;
   const originalContModel = continuation.model;
   context.activeAbortController = controller;
@@ -4838,7 +4958,22 @@ export async function continueModelAfterToolResults(
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
   let assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-0`;
   beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
-  const sessionId = await ensureSession(context);
+  let staleContinuationRecorded = false;
+  const requestOwnerIsCurrent = (): boolean =>
+    !controller.signal.aborted && isCurrentForegroundRequestTurn(context, requestTurnId);
+  const stopStaleContinuation = async (): Promise<boolean> => {
+    if (requestOwnerIsCurrent()) return false;
+    if (!staleContinuationRecorded) {
+      staleContinuationRecorded = true;
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `stale_foreground_continuation_dropped: requestTurnId=${requestTurnId}`,
+        "warning",
+      );
+    }
+    return true;
+  };
   const agentCompletionNoticeIdsForTurn = injectAgentCompletionMainChainContext(
     continuation.messages,
     context,
@@ -5411,13 +5546,15 @@ export async function continueModelAfterToolResults(
       }
     }
     continuationLoopCompleted = true;
+    if (await stopStaleContinuation()) return;
     if (assistantText) {
       clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
       if (continuation.provider !== originalContProvider || continuation.model !== originalContModel) {
         clearProviderBreaker(context.providerBreaker, originalContProvider, originalContModel);
       }
       await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
-      startRequestActivity(output, context, "verifying_final_answer");
+      if (await stopStaleContinuation()) return;
+      startRequestActivity(output, context, "verifying_final_answer", { requestTurnId });
       // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
       // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
       {
@@ -5434,6 +5571,7 @@ export async function continueModelAfterToolResults(
                 `final_answer_claim_alignment_rewrite continuation_final_safety=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
                 "warning",
               );
+              if (await stopStaleContinuation()) return;
               continuation.messages.push({
                 role: "assistant",
                 content: truncateRoundAssistantForProvider(assistantText, context),
@@ -5455,6 +5593,7 @@ export async function continueModelAfterToolResults(
                 finalAnswerClaimAlignmentRewrites,
                 finalAnswerEvidenceActionRetries,
               );
+              if (await stopStaleContinuation()) return;
               if (context.pendingLocalApproval) return;
               retriedClaimAlignment = true;
             }
@@ -5473,10 +5612,11 @@ export async function continueModelAfterToolResults(
               context,
               sessionId,
               `final_answer_gap_planner continuation_final_safety=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
-              actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
-                ? "warning"
-                : "info",
-            );
+                actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+                  ? "warning"
+                  : "info",
+              );
+              if (await stopStaleContinuation()) return;
             if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
               replaceAssistantBlockContent(output, assistantStreamBlockId, "");
               const actionResult = await runFinalGateEvidenceAction({
@@ -5486,8 +5626,11 @@ export async function continueModelAfterToolResults(
                 sessionId,
                 messages: continuation.messages,
                 runtime: runtimeFromContinuation(continuation),
+                requestTurnId,
+                abortSignal: controller.signal,
                 ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
               });
+              if (await stopStaleContinuation()) return;
               if (actionResult.status === "permission_pending") {
                 return;
               }
@@ -5506,6 +5649,7 @@ export async function continueModelAfterToolResults(
                   finalAnswerClaimAlignmentRewrites,
                   finalAnswerEvidenceActionRetries,
                 );
+                if (await stopStaleContinuation()) return;
                 if (context.pendingLocalApproval) return;
               } else {
                 await appendSystemEvent(
@@ -5514,7 +5658,9 @@ export async function continueModelAfterToolResults(
                   `final_answer_gap_action_${actionResult.status} continuation_final_safety=yes reason=${actionResult.reason}`,
                   "warning",
                 );
+                if (await stopStaleContinuation()) return;
                 await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+                if (await stopStaleContinuation()) return;
                 assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                   gateResult,
                   context.language,
@@ -5523,6 +5669,7 @@ export async function continueModelAfterToolResults(
               }
             } else {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              if (await stopStaleContinuation()) return;
               assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
@@ -5545,6 +5692,7 @@ export async function continueModelAfterToolResults(
             "final_answer_coherence_guard: replaced contradictory pre-tool failure/success text with evidence-backed final answer",
             "warning",
           );
+          if (await stopStaleContinuation()) return;
           assistantText = coherentAssistantText;
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
@@ -5566,8 +5714,9 @@ export async function continueModelAfterToolResults(
       if (visibleAssistantBlockText) {
         replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
       }
+      if (await stopStaleContinuation()) return;
       endAssistantStream(output);
-      clearRequestActivity(context);
+      clearRequestActivity(context, { kind: "foreground", requestTurnId });
       writeFinalAssistantText(output, assistantText);
       output.write("\n");
       await context.store.appendEvent(sessionId, {
@@ -5576,16 +5725,19 @@ export async function continueModelAfterToolResults(
         text: assistantText,
         createdAt: new Date().toISOString(),
       });
+      if (await stopStaleContinuation()) return;
       const reportedAt = new Date().toISOString();
       for (const noticeId of agentCompletionNoticeIdsForTurn) {
         markAgentCompletionNoticeReported(context, noticeId, reportedAt);
       }
     }
   } finally {
-    if (!continuationLoopCompleted || !assistantText) {
-      endAssistantStream(output);
+    if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+      if (!continuationLoopCompleted || !assistantText) {
+        endAssistantStream(output);
+      }
+      clearForegroundRequestState(context, requestTurnId);
     }
-    clearForegroundRequestState(context, requestTurnId);
   }
 }
 

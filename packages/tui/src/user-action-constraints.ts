@@ -9,6 +9,17 @@ export type UserActionConstraints = {
   forbidAllTools: boolean;
 };
 
+export function currentRequestUserActionConstraints(input: {
+  currentRequestTurnId?: string;
+  currentUserActionConstraintsRequestTurnId?: string;
+  currentUserActionConstraints?: UserActionConstraints;
+}): UserActionConstraints | undefined {
+  return input.currentRequestTurnId &&
+    input.currentUserActionConstraintsRequestTurnId === input.currentRequestTurnId
+    ? input.currentUserActionConstraints
+    : undefined;
+}
+
 const EMPTY_CONSTRAINTS: UserActionConstraints = {
   readonlyOnly: false,
   forbidWrite: false,

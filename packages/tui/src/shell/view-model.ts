@@ -1,9 +1,15 @@
 import { basename } from "node:path";
-import type { CacheTurnStats } from "@linghun/core";
 import { type Language, type PermissionMode, TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
-import type { CacheRequestObservation } from "../cache-policy-runtime.js";
-import { calculateContextPercentages, formatContextProgressBar } from "../context-window-runtime.js";
+import {
+  computeLocalCacheDisplayState,
+  type LocalCacheDisplayState,
+} from "../cache-policy-runtime.js";
+import {
+  calculateContextPercentages,
+  formatContextProgressBar,
+  getNativeContextWindowForModel,
+} from "../context-window-runtime.js";
 import type { BackgroundTaskState, TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
 import {
@@ -458,6 +464,7 @@ export function createShellViewModel(
   // dim/warning 语义；setup-needed 时 model 显示 dim "--"，避免兜底 deepseek-chat
   // 流到主屏。
   const cyclePermHint = language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）";
+  const currentContextWindowTokens = getNativeContextWindowForModel(context.model);
   const taskFooter: TaskFooterView | undefined = buildTaskFooterView({
     language,
     width,
@@ -471,7 +478,7 @@ export function createShellViewModel(
     reasoningLevel: options.reasoningLevel,
     reasoningSent: options.reasoningSent,
     estimatedCostCny: sumFiniteNumbers((context.roleUsage ?? []).map((usage) => usage.estimatedCny)),
-    contextUsage: selectFooterContextUsage(context),
+    contextUsage: selectFooterContextUsage(context, currentContextWindowTokens),
     isRemoteMode: context.remote?.enabled ?? false,
   });
 
@@ -2418,13 +2425,16 @@ type FooterContextUsageInput = ReturnType<typeof calculateContextPercentages> & 
   savingsRatio?: number;
 };
 
-function selectFooterContextUsage(context: TuiContext): FooterContextUsageInput | undefined {
+function selectFooterContextUsage(
+  context: TuiContext,
+  currentContextWindowTokens: number,
+): FooterContextUsageInput | undefined {
   const usage = context.cache.contextUsage;
   if (usage?.source === "provider_usage") {
     return {
       ...calculateContextPercentages(
-        Math.ceil(usage.estimatedChars / 4),
-        Math.ceil(usage.maxChars / 4),
+        usage.confirmedUsedTokens ?? Math.ceil(usage.estimatedChars / 4),
+        currentContextWindowTokens,
       ),
       savingsRatio: usage.savingsRatio,
     };
@@ -2432,14 +2442,10 @@ function selectFooterContextUsage(context: TuiContext): FooterContextUsageInput 
 
   const pressure = context.cache.compactPressure;
   if (pressure) {
-    const maxChars =
-      usage?.updatedAt === pressure.updatedAt && Number.isFinite(usage.maxChars)
-        ? usage.maxChars
-        : pressure.maxChars;
     return {
       ...calculateContextPercentages(
         Math.ceil(pressure.estimatedChars / 4),
-        Math.ceil(maxChars / 4),
+        currentContextWindowTokens,
       ),
       ...(usage?.updatedAt === pressure.updatedAt ? { savingsRatio: usage.savingsRatio } : {}),
     };
@@ -2447,7 +2453,10 @@ function selectFooterContextUsage(context: TuiContext): FooterContextUsageInput 
 
   if (!usage) return undefined;
   return {
-    ...calculateContextPercentages(Math.ceil(usage.estimatedChars / 4), Math.ceil(usage.maxChars / 4)),
+    ...calculateContextPercentages(
+      usage.confirmedUsedTokens ?? Math.ceil(usage.estimatedChars / 4),
+      currentContextWindowTokens,
+    ),
     savingsRatio: usage.savingsRatio,
   };
 }
@@ -2469,75 +2478,21 @@ type TaskFooterInput = {
   isRemoteMode: boolean;
 };
 
-type FooterCacheStatus = {
-  hitRate: number | null;
-  fallback: "none" | "local_stable" | "sampling";
-};
-
-export function computeRecentCacheHitRate(
-  history: Pick<CacheTurnStats, "hitRate" | "inputTokens" | "cacheReadTokens" | "cacheWriteTokens">[],
-  windowSize = 20,
-): number | null {
-  const recent = history.slice(-Math.max(1, windowSize));
-  if (recent.length === 0) return null;
-  const totals = recent.reduce(
-    (acc, item) => {
-      const inputTokens = Number.isFinite(item.inputTokens) ? Math.max(0, item.inputTokens) : 0;
-      const cacheReadTokens = Number.isFinite(item.cacheReadTokens)
-        ? Math.max(0, item.cacheReadTokens)
-        : 0;
-      const cacheWriteTokens = Number.isFinite(item.cacheWriteTokens)
-        ? Math.max(0, item.cacheWriteTokens)
-        : 0;
-      acc.cacheReadTokens += cacheReadTokens;
-      acc.cacheEligibleTokens += inputTokens + cacheReadTokens + cacheWriteTokens;
-      return acc;
-    },
-    { cacheReadTokens: 0, cacheEligibleTokens: 0 },
-  );
-
-  if (totals.cacheEligibleTokens > 0) {
-    return totals.cacheReadTokens / totals.cacheEligibleTokens;
-  }
-
-  const validHitRates = recent
-    .map((item) => item.hitRate)
-    .filter((value): value is number => Number.isFinite(value));
-  if (validHitRates.length === 0) return null;
-  return validHitRates.reduce((sum, value) => sum + value, 0) / validHitRates.length;
-}
+type FooterCacheStatus = LocalCacheDisplayState;
 
 function computeFooterCacheStatus(
   cache: TuiContext["cache"] | undefined,
 ): FooterCacheStatus {
-  const hitRate = computeRecentCacheHitRate(cache?.history ?? []);
-  if (hitRate !== null) return { hitRate, fallback: "none" };
-
   const observation =
     cache?.lastMainChainRequestObservation ??
     cache?.lastRequestObservationByKind?.main ??
     cache?.lastRequestObservationByKind?.continuation ??
     cache?.lastRequestObservationByKind?.final ??
     cache?.lastRequestObservation;
-  if (!observation?.promptCacheEnabled) return { hitRate: null, fallback: "none" };
-  return {
-    hitRate: null,
-    fallback: isLocallyStableCacheObservation(observation) ? "local_stable" : "sampling",
-  };
-}
-
-function isLocallyStableCacheObservation(observation: CacheRequestObservation): boolean {
-  if (observation.hasCacheBreakNonce) return false;
-  const changed = new Set(observation.fingerprint.changedKeys ?? []);
-  const stableKeys: Array<keyof CacheRequestObservation["fingerprint"]> = [
-    "systemPrefixHash",
-    "stableToolSchemaHash",
-    "modelHash",
-    "reasoningHash",
-    "cacheConfigHash",
-    "promptCacheKeyHash",
-  ];
-  return stableKeys.every((key) => !changed.has(key));
+  return computeLocalCacheDisplayState({
+    history: cache?.history ?? [],
+    ...(observation?.promptCacheEnabled ? { observation } : {}),
+  });
 }
 
 function buildTaskFooterView(input: TaskFooterInput): TaskFooterView {
@@ -2614,21 +2569,19 @@ function formatFooterCache(language: Language, status: FooterCacheStatus): strin
   const label = language === "en-US" ? "Cache" : "缓存";
   const hitRate = status.hitRate;
   if (hitRate === null || hitRate === undefined) {
-    if (status.fallback === "local_stable") {
-      return language === "en-US" ? `${label} local` : `${label} 本地稳定`;
-    }
-    if (status.fallback === "sampling") {
-      return language === "en-US" ? `${label} sampling` : `${label} 采样中`;
-    }
-    return `${label}?`;
+    return language === "en-US" ? `${label} sampling` : `${label} 采样中`;
   }
-  return `${label} ${formatCachePercent(hitRate)}`;
+  const freshness =
+    status.freshness === "changed"
+      ? language === "en-US" ? "changed" : "变化"
+      : language === "en-US" ? "stable" : "稳定";
+  return `${label} ${formatCachePercent(hitRate)} · ${freshness}`;
 }
 
 function formatFooterCacheTone(status: FooterCacheStatus): "default" | "warning" | "dim" {
   const hitRate = status.hitRate;
   if (hitRate === null || hitRate === undefined) {
-    return status.fallback === "none" ? "dim" : "default";
+    return "dim";
   }
   return "default";
 }

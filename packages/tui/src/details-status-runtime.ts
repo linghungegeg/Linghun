@@ -3,8 +3,12 @@ import { basename } from "node:path";
 import { Writable } from "node:stream";
 import type { TranscriptEvent } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
+import { computeLocalCacheDisplayState } from "./cache-policy-runtime.js";
 import { buildExplicitDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
-import { calculateContextPercentages } from "./context-window-runtime.js";
+import {
+  calculateContextPercentages,
+  getNativeContextWindowForModel,
+} from "./context-window-runtime.js";
 import { formatBackgroundDetails, formatBackgroundOutputDetails } from "./job-runner-presenter.js";
 import { formatLogArtifactSlice, readLogArtifactSlice } from "./log-artifact.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
@@ -315,12 +319,7 @@ export function buildStatusPanel(context: TuiContext): CommandPanelView {
   const mode = formatPermissionModeLabel(context.permissionMode, context.language);
 
   // ── Summary (always visible) ──────────────────────────────────────────────
-  const contextUsage = context.cache.compactPressure
-    ? calculateContextPercentages(
-        Math.ceil(context.cache.compactPressure.estimatedChars / 4),
-        Math.ceil(context.cache.compactPressure.maxChars / 4),
-      )
-    : undefined;
+  const contextUsage = selectStatusContextUsage(context);
   const ctxLabel = contextUsage
     ? `${(contextUsage.ratio * 100).toFixed(0)}%`
     : "?";
@@ -463,18 +462,20 @@ export function buildStatusPanel(context: TuiContext): CommandPanelView {
 
 export function writeStatus(output: Writable, context: TuiContext): void {
   const background = context.backgroundTasks.filter(isRuntimeActiveBackgroundTask).length;
-  const latestHitRate = context.cache.history.at(-1)?.hitRate ?? null;
+  const cacheObservation =
+    context.cache.lastMainChainRequestObservation ??
+    context.cache.lastRequestObservationByKind?.main ??
+    context.cache.lastRequestObservation;
+  const cacheStatus = computeLocalCacheDisplayState({
+    history: context.cache.history,
+    ...(cacheObservation?.promptCacheEnabled ? { observation: cacheObservation } : {}),
+  });
   const gate = context.pendingLocalApproval
     ? "waiting approval"
     : context.pendingNaturalCommand || context.pendingAutopilot
       ? "waiting confirmation"
       : "none";
-  const contextUsage = context.cache.compactPressure
-    ? calculateContextPercentages(
-        Math.ceil(context.cache.compactPressure.estimatedChars / 4),
-        Math.ceil(context.cache.compactPressure.maxChars / 4),
-      )
-    : undefined;
+  const contextUsage = selectStatusContextUsage(context);
   writeLine(
     output,
     formatRuntimeStatusLine(
@@ -486,13 +487,38 @@ export function writeStatus(output: Writable, context: TuiContext): void {
         reasoningStatus: getSelectedModelRuntime(context).reasoningStatus,
         mode: context.permissionMode,
         background,
-        cacheHitRate: latestHitRate,
+        cacheHitRate: cacheStatus.hitRate,
+        cacheFreshness: cacheStatus.freshness,
         indexStatus: context.index.status,
         gate,
         contextUsage,
       },
       context.language,
     ),
+  );
+}
+
+function selectStatusContextUsage(
+  context: TuiContext,
+): ReturnType<typeof calculateContextPercentages> | undefined {
+  const maxTokens = getNativeContextWindowForModel(context.model);
+  const usage = context.cache.contextUsage;
+  if (usage?.source === "provider_usage") {
+    return calculateContextPercentages(
+      usage.confirmedUsedTokens ?? Math.ceil(usage.estimatedChars / 4),
+      maxTokens,
+    );
+  }
+  if (context.cache.compactPressure) {
+    return calculateContextPercentages(
+      Math.ceil(context.cache.compactPressure.estimatedChars / 4),
+      maxTokens,
+    );
+  }
+  if (!usage) return undefined;
+  return calculateContextPercentages(
+    usage.confirmedUsedTokens ?? Math.ceil(usage.estimatedChars / 4),
+    maxTokens,
   );
 }
 

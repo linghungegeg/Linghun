@@ -260,6 +260,8 @@ export type PendingModelContinuation = {
   reasoningLevel?: string;
   reasoningSent: boolean;
   reportWriteGuard?: ReportWriteGuard;
+  requestTurnId?: string;
+  abortSignal?: AbortSignal;
 };
 
 export function runtimeFromContinuation(
@@ -401,6 +403,7 @@ export type TuiContext = {
   lastToolFailure?: { toolName: string; summary: string };
   /** Current user turn constraints that must be honored by the tool permission layer. */
   currentUserActionConstraints?: UserActionConstraints;
+  currentUserActionConstraintsRequestTurnId?: string;
   providerBreaker: ProviderCircuitBreakerState;
   solutionCompleteness: SolutionCompletenessStatus;
   currentArchitectureCard?: ArchitectureCard;

@@ -39,6 +39,7 @@ import {
   recordCompactBoundary,
 } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
+import { getNativeContextWindowForModel } from "./context-window-runtime.js";
 import {
   createDeepCompactProgress,
   maybeRunDeepCompactBeforeProvider,
@@ -113,7 +114,7 @@ const USAGE_STALE_MIN_CONFIRMED_TOKENS = 1;
 
 function getContextWindowTokens(context: TuiContext): number {
   const runtime = getSelectedModelRuntime(context);
-  return Math.max(1, Math.ceil(getProviderContextWindowChars(context, runtime) / LINGHUN_BYTES_PER_TOKEN));
+  return getNativeContextWindowForModel(runtime.model);
 }
 
 function getCompactTriggerTokens(context: TuiContext): number {
@@ -129,7 +130,8 @@ function getProviderConfirmedContextTokens(usage: ModelUsage, provider: string):
 }
 
 export function recordConfirmedContextUsage(context: TuiContext, usage: ModelUsage): void {
-  const provider = getRuntimeStatusProvider(context);
+  const runtime = getSelectedModelRuntime(context);
+  const provider = runtime.provider;
   const confirmedUsedTokens = getProviderConfirmedContextTokens(usage, provider);
   const contextWindowTokens = getContextWindowTokens(context);
   const compactTriggerTokens = getCompactTriggerTokens(context);
@@ -151,6 +153,8 @@ export function recordConfirmedContextUsage(context: TuiContext, usage: ModelUsa
     usageRatio: Number((confirmedUsedTokens / Math.max(1, contextWindowTokens)).toFixed(3)),
     staleReason: undefined,
     lastConfirmedTurn: context.cache.nextTurn,
+    model: runtime.model,
+    provider,
   };
 }
 
@@ -172,7 +176,15 @@ export function markContextUsageStale(
 export function shouldForceCompactFromConfirmedUsage(context: TuiContext): boolean {
   const usage = context.cache.contextUsage;
   if (!usage?.confirmedUsedTokens) return false;
-  const triggerTokens = usage.compactTriggerTokens ?? getCompactTriggerTokens(context);
+  const runtime = getSelectedModelRuntime(context);
+  const runtimeChanged = Boolean(
+    usage.staleReason === "runtime_changed" ||
+      (usage.model &&
+        (usage.model !== runtime.model || usage.provider !== runtime.provider)),
+  );
+  const triggerTokens = runtimeChanged
+    ? getCompactTriggerTokens(context)
+    : usage.compactTriggerTokens ?? getCompactTriggerTokens(context);
   return usage.confirmedUsedTokens >= triggerTokens;
 }
 

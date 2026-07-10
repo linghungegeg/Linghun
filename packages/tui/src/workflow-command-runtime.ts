@@ -44,6 +44,7 @@ import {
 import type { TuiContext } from "./tui-context-runtime.js";
 import { WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT } from "./tui-context-runtime.js";
 import {
+  currentRequestUserActionConstraints,
   forbidsVerificationEvidence,
   hasReadOnlyUserConstraint,
 } from "./user-action-constraints.js";
@@ -1907,7 +1908,7 @@ async function executeWorkflowStep(
         };
       }
     } else if (req.mainChain === "verification") {
-      const constraints = context.currentUserActionConstraints;
+      const constraints = currentRequestUserActionConstraints(context);
       const verificationBlockedByUser =
         constraints !== undefined &&
         (hasReadOnlyUserConstraint(constraints) || forbidsVerificationEvidence(constraints));

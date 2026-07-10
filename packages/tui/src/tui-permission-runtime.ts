@@ -40,7 +40,10 @@ import {
   isPlanAllowedTool,
 } from "./permission-continuation-runtime.js";
 import { type PolicyVerdict, classifyToolRequest } from "./permission-policy-engine.js";
-import type { UserActionConstraints } from "./user-action-constraints.js";
+import {
+  currentRequestUserActionConstraints,
+  type UserActionConstraints,
+} from "./user-action-constraints.js";
 
 export type PermissionCheck = {
   request: {
@@ -242,7 +245,7 @@ export async function decidePermission(
   const constraintDenyReason = currentUserConstraintDenyReason(
     name,
     verdict,
-    context.currentUserActionConstraints,
+    currentRequestUserActionConstraints(context),
     context.language,
   );
   if (constraintDenyReason) {

@@ -859,7 +859,7 @@ describe("Meta scheduler runtime", () => {
     expect(decision.indexStrategy).toBe(expected);
   });
 
-  it("stops PASS when agent or workflow runtime is blocked", () => {
+  it("keeps blocked workflow as a scoped no-PASS runtime hint", () => {
     const workflow: NonNullable<WorkflowState["activeRun"]> = {
       id: "wf-1",
       goal: "ship",
@@ -875,10 +875,11 @@ describe("Meta scheduler runtime", () => {
     });
 
     expect(decision.shouldStopForBlockedRuntime).toBe(true);
-    expect(decision.internalEvents).toContain("meta_scheduler:blocked_runtime_stop");
+    expect(decision.internalEvents).toContain("meta_scheduler:blocked_runtime_hint");
+    expect(decision.directives.join("\n")).toContain("must not be continued");
   });
 
-  it("plans a single stop inspect-runtime step and consumers prefer stop over run", () => {
+  it("allows ordinary provider work while stopping blocked workflow dispatch", () => {
     const workflow: NonNullable<WorkflowState["activeRun"]> = {
       id: "wf-1",
       goal: "ship",
@@ -897,11 +898,19 @@ describe("Meta scheduler runtime", () => {
       (step) => step.id === "inspect-runtime",
     );
     expect(inspectSteps).toHaveLength(1);
-    expect(inspectSteps[0]).toMatchObject({ id: "inspect-runtime", mode: "stop" });
+    expect(inspectSteps[0]).toMatchObject({ id: "inspect-runtime", mode: "run" });
     expect(
       resolveMetaOrchestrationAction({ lastMetaSchedulerDecision: decision }, "inspect-runtime")
         .shouldStop,
-    ).toBe(true);
+    ).toBe(false);
+    expect(decision.orchestrationPlan.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "provider-request", mode: "run" }),
+        expect.objectContaining({ id: "tool-execution", mode: "run" }),
+        expect.objectContaining({ id: "workflow-dispatch", mode: "stop" }),
+      ]),
+    );
+    expect(decision.orchestrationPlan.primaryAction).not.toBe("stop_blocked");
 
     const duplicateLegacyDecision = {
       ...decision,
@@ -917,6 +926,30 @@ describe("Meta scheduler runtime", () => {
       getMetaOrchestrationStep({ lastMetaSchedulerDecision: duplicateLegacyDecision }, "inspect-runtime")
         ?.mode,
     ).toBe("stop");
+  });
+
+  it("stops workflow-classified continuation when its active workflow is blocked", () => {
+    const workflow: NonNullable<WorkflowState["activeRun"]> = {
+      id: "wf-1",
+      goal: "ship",
+      planId: "plan-1",
+      status: "blocked",
+      steps: [],
+      startedAt: new Date(0).toISOString(),
+      result: "blocked",
+    };
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "run the workflow to continue the task",
+      workflow,
+    });
+
+    expect(decision.policyDecision.executionPlan.preferWorkflow).toBe(true);
+    expect(decision.orchestrationPlan.primaryAction).toBe("stop_blocked");
+    expect(
+      resolveMetaOrchestrationAction({ lastMetaSchedulerDecision: decision }, "workflow-dispatch")
+        .shouldStop,
+    ).toBe(true);
   });
 
   it("applies provider retry stop through the shared meta orchestration helper", async () => {

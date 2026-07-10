@@ -11,7 +11,10 @@ import {
   saveProviderEnvSetup,
 } from "@linghun/config";
 import { showCommandPanel } from "./command-panel-runtime.js";
-import { getContextWindowForModel } from "./context-window-runtime.js";
+import {
+  getContextWindowForModel,
+  markContextUsageRuntimeChanged,
+} from "./context-window-runtime.js";
 import {
   snapshotDeferredToolsSummary,
   snapshotDiscoveredDeferredToolsSummary,
@@ -106,6 +109,7 @@ export async function handleModelCommand(
     // Set executor role and update defaultModel
     context.config = await saveModelRoute("executor", model, context.projectPath);
     context.model = resolved.model;
+    markContextUsageRuntimeChanged(context.cache);
     const route = getRoleRoute(context.config, "executor");
     writeLine(
       output,
@@ -263,6 +267,7 @@ export async function handleModelSetupInput(
         context.pendingModelSetup = undefined;
         context.config = await loadConfig(context.projectPath);
         context.model = resolveInitialModel(context.config);
+        markContextUsageRuntimeChanged(context.cache);
         writeLine(output, formatModelSetupSaved(savedPath, context.language));
         return;
       }
@@ -341,6 +346,7 @@ export async function handleModelRouteCommand(
     const route = getRoleRoute(context.config, role);
     if (role === "executor") {
       context.model = route.primaryModel || context.model;
+      markContextUsageRuntimeChanged(context.cache);
     }
     writeLine(
       output,

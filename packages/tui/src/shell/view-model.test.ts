@@ -11,6 +11,9 @@ import {
 } from "../index.js";
 import { createStructuredToolOutput, formatToolOutput } from "../tool-output-presenter.js";
 import {
+  computeRecentCacheHitRate,
+} from "../cache-policy-runtime.js";
+import {
   commitTerminalFirstUserBlock,
   createTerminalFirstAssistantSink,
   writeAssistantDelta,
@@ -44,7 +47,6 @@ import {
 import {
   createOutputBlock,
   createShellViewModel,
-  computeRecentCacheHitRate,
   getComposerPlaceholder,
   mapBottomPaneStatusToView,
   mapPendingApprovalToPermission,
@@ -529,9 +531,9 @@ describe("shell view model", () => {
       bordered: true,
     });
     expect(view.taskFooter?.model).toMatch(/^Model\s+\S/u);
-    expect(view.taskFooter?.cache).toBe("Cache 84%");
-    expect(view.taskFooter?.contextUsage?.wide).toContain("ctx [");
-    expect(view.taskFooter?.contextUsage?.ratio).toBe(0.12);
+    expect(view.taskFooter?.cache).toBe("Cache 84% · stable");
+    expect(view.taskFooter?.contextUsage?.wide).toBe("ctx 2% (3k/200k)");
+    expect(view.taskFooter?.contextUsage?.ratio).toBe(0.015);
     expect(rendered).toContain("长中文段落用于验证窄终端换行");
     expect(rendered).toContain("English markdown keeps bold text");
     expect(rendered).toContain("+ ts");
@@ -4570,12 +4572,12 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       { width: 120, viewMode: "task" },
     );
 
-    expect(view.taskFooter?.cache).toBe("缓存 84%");
+    expect(view.taskFooter?.cache).toBe("缓存 84% · 稳定");
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 50% (50k/100k) ↓38%",
-      narrow: "上下文 50% (50k/100k) ↓38%",
-      minimal: "上下文 50% ↓38%",
-      ratio: 0.5,
+      wide: "上下文 25% (50k/200k) ↓38%",
+      narrow: "上下文 25% (50k/200k) ↓38%",
+      minimal: "上下文 25% ↓38%",
+      ratio: 0.25,
     });
   });
 
@@ -4604,10 +4606,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 50% (50k/100k)",
-      narrow: "上下文 50% (50k/100k)",
-      minimal: "上下文 50%",
-      ratio: 0.5,
+      wide: "上下文 25% (50k/200k)",
+      narrow: "上下文 25% (50k/200k)",
+      minimal: "上下文 25%",
+      ratio: 0.25,
     });
   });
 
@@ -4643,7 +4645,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     });
   });
 
-  it("task footer keeps provider-confirmed long context usage over compact pressure", () => {
+  it("task footer rebases provider-confirmed usage onto the current model window", () => {
     const view = createShellViewModel(
       createContext({
         cache: {
@@ -4672,10 +4674,61 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 80% (200k/250k)",
-      narrow: "上下文 80% (200k/250k)",
-      minimal: "上下文 80%",
-      ratio: 0.8,
+      wide: "上下文 100% (200k/200k)",
+      narrow: "上下文 100% (200k/200k)",
+      minimal: "上下文 100%",
+      ratio: 1,
+    });
+  });
+
+  it("task footer uses the current model total window instead of the route input budget", () => {
+    const view = createShellViewModel(
+      createContext({
+        model: "custom-model[1m]",
+        config: {
+          workspaceTrust: {
+            recorded: true,
+            level: "trusted",
+          },
+          modelRoutes: {
+            routes: [
+              {
+                role: "executor",
+                provider: "openai-compatible",
+                primaryModel: "custom-model[1m]",
+                fallbackModels: [],
+                requiredCapabilities: ["text"],
+                allowTools: true,
+                allowWrite: true,
+                allowBash: true,
+                requireApprovalBeforeRun: true,
+                maxInputTokens: 200_000,
+              },
+            ],
+          },
+        },
+        cache: {
+          history: [{ hitRate: 0.84 }],
+          contextUsage: {
+            estimatedChars: 332_000,
+            maxChars: 512_000,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            source: "provider_usage",
+            confirmedUsedTokens: 83_000,
+            contextWindowTokens: 128_000,
+            compactTriggerTokens: 115_000,
+            staleReason: "runtime_changed",
+          },
+        },
+      } as unknown as Partial<TuiContext>),
+      { width: 120, viewMode: "task" },
+    );
+
+    expect(view.taskFooter?.contextUsage).toMatchObject({
+      wide: "上下文 8% (83k/1m)",
+      narrow: "上下文 8% (83k/1m)",
+      minimal: "上下文 8%",
+      ratio: 0.083,
     });
   });
 
@@ -7603,7 +7656,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       viewMode: "task",
     });
 
-    expect(view.taskFooter?.cache).toBe("缓存 76%");
+    expect(view.taskFooter?.cache).toBe("缓存 76% · 稳定");
     expect(view.taskFooter?.cacheTone).toBe("default");
   });
 
@@ -7619,11 +7672,11 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       viewMode: "task",
     });
 
-    expect(view.taskFooter?.cache).toBe("Cache 53%");
+    expect(view.taskFooter?.cache).toBe("Cache 53% · stable");
     expect(view.taskFooter?.cacheTone).toBe("default");
   });
 
-  it("task footer falls back to local stable cache state when provider usage is unavailable", () => {
+  it("task footer keeps sampling instead of claiming local stability without trusted usage", () => {
     const ctx = createContext(({
       cache: {
         history: [],
@@ -7640,8 +7693,8 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       viewMode: "task",
     });
 
-    expect(view.taskFooter?.cache).toBe("缓存 本地稳定");
-    expect(view.taskFooter?.cacheTone).toBe("default");
+    expect(view.taskFooter?.cache).toBe("缓存 采样中");
+    expect(view.taskFooter?.cacheTone).toBe("dim");
   });
 
   it("task footer shows cache sampling when local stable cache shape changed without usage", () => {
@@ -7663,7 +7716,67 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     });
 
     expect(view.taskFooter?.cache).toBe("Cache sampling");
-    expect(view.taskFooter?.cacheTone).toBe("default");
+    expect(view.taskFooter?.cacheTone).toBe("dim");
+  });
+
+  it("task footer keeps the last trusted local ratio when the newest usage lacks cache metrics", () => {
+    const ctx = createContext(({
+      cache: {
+        history: [
+          { hitRate: 0.8, inputTokens: 20, cacheReadTokens: 80, cacheWriteTokens: 0, source: "api_usage", freshness: { changedKeys: [] } },
+          { hitRate: 0, inputTokens: 1_000, cacheReadTokens: 0, cacheWriteTokens: 0, source: "estimated", freshness: { changedKeys: [] } },
+        ],
+        lastMainChainRequestObservation: {
+          promptCacheEnabled: true,
+          hasCacheBreakNonce: false,
+          fingerprint: { changedKeys: ["requestHash", "latestMessageHash"] },
+        },
+      },
+    } as unknown) as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, { width: 120, viewMode: "task" });
+
+    expect(view.taskFooter?.cache).toBe("缓存 80% · 稳定");
+  });
+
+  it("task footer updates when the local 20-turn window rolls forward", () => {
+    const ctx = createContext();
+    (ctx as unknown as { cache: { history: Array<Record<string, unknown>> } }).cache.history =
+      Array.from({ length: 20 }, () => ({
+        hitRate: 1,
+        inputTokens: 0,
+        cacheReadTokens: 100,
+        cacheWriteTokens: 0,
+        source: "api_usage",
+        freshness: { changedKeys: [] },
+      }));
+    const before = createShellViewModel(ctx, { width: 120, viewMode: "task" });
+    (ctx as unknown as { cache: { history: Array<Record<string, unknown>> } }).cache.history.push(
+      { hitRate: 0, inputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, source: "api_usage", freshness: { changedKeys: [] } },
+    );
+    const after = createShellViewModel(ctx, { width: 120, viewMode: "task" });
+
+    expect(before.taskFooter?.cache).toBe("缓存 100% · 稳定");
+    expect(after.taskFooter?.cache).toBe("缓存 95% · 稳定");
+  });
+
+  it("task footer keeps the trusted ratio and marks stable cache-key changes", () => {
+    const ctx = createContext(({
+      cache: {
+        history: [
+          { hitRate: 0.8, inputTokens: 20, cacheReadTokens: 80, cacheWriteTokens: 0, source: "api_usage", freshness: { changedKeys: [] } },
+        ],
+        lastMainChainRequestObservation: {
+          promptCacheEnabled: true,
+          hasCacheBreakNonce: false,
+          fingerprint: { changedKeys: ["systemPrefixHash"] },
+        },
+      },
+    } as unknown) as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, { width: 120, viewMode: "task" });
+
+    expect(view.taskFooter?.cache).toBe("缓存 80% · 变化");
   });
 
   it("recent cache aggregate only uses the latest 20 records", () => {

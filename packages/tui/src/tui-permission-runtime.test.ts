@@ -95,6 +95,8 @@ describe("tui permission runtime — CCB-aligned modes", () => {
   it("full-access still honors current user no-write constraints", async () => {
     const { context, sessionId } = await createTestContext();
     context.permissionMode = "full-access";
+    context.currentRequestTurnId = "turn-readonly";
+    context.currentUserActionConstraintsRequestTurnId = "turn-readonly";
     context.currentUserActionConstraints = parseUserActionConstraints("不要写文件，只检查现状");
     await writeFile(join(context.projectPath, "README.md"), "# demo\n", "utf8");
 
@@ -112,6 +114,19 @@ describe("tui permission runtime — CCB-aligned modes", () => {
     expect(write.decision).toBe("deny");
     expect(edit.decision).toBe("deny");
     expect(mutatingBash.decision).toBe("deny");
+    expect(context.pendingLocalApproval).toBeUndefined();
+  });
+
+  it("ignores constraints owned by an interrupted foreground request", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.permissionMode = "full-access";
+    context.currentRequestTurnId = "turn-b";
+    context.currentUserActionConstraintsRequestTurnId = "turn-a";
+    context.currentUserActionConstraints = parseUserActionConstraints("只读，不要写文件或执行命令");
+
+    const write = await decidePermission("Write", { path: "report.md", content: "x" }, context, sessionId);
+
+    expect(write.decision).toBe("allow");
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 

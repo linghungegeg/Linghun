@@ -1,6 +1,7 @@
 import type { RoleModelRoute } from "@linghun/config";
 import { findKnownModel } from "@linghun/providers";
 import { readPositiveIntEnv } from "@linghun/shared";
+import type { ContextUsageSnapshot } from "./tui-data-types.js";
 
 export type ContextPercentage = {
   usedTokens: number;
@@ -12,6 +13,17 @@ export type ContextPercentage = {
 
 const DEFAULT_CONTEXT_WINDOW_TOKENS = readPositiveIntEnv("LINGHUN_CONTEXT_WINDOW_TOKENS", 200_000);
 const CONTEXT_1M_TOKENS = 1_000_000;
+
+export function markContextUsageRuntimeChanged(cache: {
+  contextUsage?: ContextUsageSnapshot;
+} | undefined): void {
+  if (!cache?.contextUsage) return;
+  cache.contextUsage = {
+    ...cache.contextUsage,
+    updatedAt: new Date().toISOString(),
+    staleReason: "runtime_changed",
+  };
+}
 
 /** Model name ends with `[1m]` (case-insensitive) → explicit 1M opt-in. */
 function has1mSuffix(model: string | undefined): boolean {

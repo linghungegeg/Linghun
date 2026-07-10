@@ -4,6 +4,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
+import { SessionStore } from "@linghun/core";
 import type { ModelGateway } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import {
@@ -11,6 +12,7 @@ import {
   __testBuildModelMessagesWithRecentContext,
   __testScheduleApiTokenCountDiagnostics,
   __testRunFinalGateEvidenceAction,
+  __testSendMessage,
   __testStreamFinalModelAnswerWithoutTools,
   buildAggregatedDowngradedFinalAnswer,
   buildEvidenceBackedFinalBoundaryAnswer,
@@ -35,9 +37,19 @@ import {
   shouldRetryHighReasoningToolsEmptyResponse,
   updateToolFailureRecoveryState,
 } from "./model-stream-runtime.js";
+import { createFailureLearningState } from "./failure-learning-runtime.js";
+import { createIndexState } from "./index-runtime.js";
+import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
+import type { TuiContext } from "./tui-context-runtime.js";
 import { createShellBlockOutputForTest } from "./tui-output-surface.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
+import {
+  createCacheState,
+  createMcpState,
+  createMemoryState,
+  createRemoteState,
+} from "./tui-state-runtime.js";
 
 function withClaims(text: string, claims: Array<{ kind: string; phrase: string }>): string {
   return `${text}\nLinghunFinalAnswerClaims: ${JSON.stringify({ claims })}`;
@@ -173,6 +185,57 @@ function makeNaturalInputContext(language: "zh-CN" | "en-US" = "zh-CN") {
   };
 }
 
+async function makeSendMessageContext() {
+  const projectPath = await mkdtemp(join(tmpdir(), "linghun-model-owner-"));
+  const store = new SessionStore({ projectPath, sessionRootDir: join(projectPath, ".sessions") });
+  const session = await store.create({ model: "deepseek-chat" });
+  const events: unknown[] = [];
+  const appendEvent = store.appendEvent.bind(store);
+  store.appendEvent = async (sessionId, event) => {
+    events.push(event);
+    return appendEvent(sessionId, event);
+  };
+  const context = {
+    store,
+    sessionId: session.id,
+    model: "deepseek-chat",
+    permissionMode: "default",
+    projectPath,
+    tools: createToolContext(projectPath),
+    permissions: { rules: [], recentDenied: [] },
+    language: "zh-CN",
+    config: defaultConfig,
+    backgroundTasks: [],
+    backgroundAbortControllers: new Map(),
+    providerBreaker: createProviderCircuitBreakerState(),
+    checkpoints: [],
+    evidence: [],
+    cache: createCacheState(projectPath, "deepseek-chat", [], defaultConfig),
+    mcp: createMcpState(defaultConfig),
+    index: createIndexState(defaultConfig),
+    memory: await createMemoryState(defaultConfig, projectPath),
+    failureLearning: createFailureLearningState(projectPath, defaultConfig),
+    skills: { enabled: false, skills: [], errors: [] },
+    workflows: { templates: [], activeRun: undefined, history: [] },
+    agentRegistry: { agents: [], errors: [] },
+    workflowRegistry: { workflows: [], errors: [] },
+    hooks: { enabled: false, hooks: [], errors: [] },
+    plugins: { enabled: false, plugins: [], errors: [] },
+    remote: createRemoteState(defaultConfig),
+    agents: [],
+    roleUsage: [],
+    routeDecisions: [],
+    roleHandoffs: [],
+    visionObservations: [],
+    imageResults: [],
+    interrupt: { type: "idle" },
+    recentlyMentionedFiles: [],
+    solutionCompleteness: createSolutionCompletenessStatus(),
+    discoveredDeferredToolNames: new Set<string>(),
+  } as unknown as TuiContext;
+  return { context, events };
+}
+
 describe("model message prompt cache layout", () => {
   it("tracks foreground turn ids and records interrupted turns once", async () => {
     const appended: unknown[] = [];
@@ -186,6 +249,12 @@ describe("model message prompt cache layout", () => {
     };
 
     const firstTurnId = beginForegroundRequestTurn(context as never, "user-1");
+    Object.assign(context, {
+      currentUserActionConstraints: { readonlyOnly: true, forbidWrite: true },
+      currentUserActionConstraintsRequestTurnId: firstTurnId,
+      requestActivityOwner: { kind: "foreground", requestTurnId: firstTurnId },
+      requestActivityPhase: "request_started",
+    });
     const secondTurnId = beginForegroundRequestTurn(context as never, "user-2");
 
     expect(firstTurnId).not.toBe(secondTurnId);
@@ -194,6 +263,13 @@ describe("model message prompt cache layout", () => {
     expect((context as { currentRequestUserMessageId?: string }).currentRequestUserMessageId).toBe(
       "user-2",
     );
+    expect((context as { currentUserActionConstraints?: unknown }).currentUserActionConstraints).toBeUndefined();
+    expect(
+      (context as { currentUserActionConstraintsRequestTurnId?: string })
+        .currentUserActionConstraintsRequestTurnId,
+    ).toBeUndefined();
+    expect((context as { requestActivityOwner?: unknown }).requestActivityOwner).toBeUndefined();
+    expect((context as { requestActivityPhase?: unknown }).requestActivityPhase).toBeUndefined();
 
     await recordInterruptedForegroundTurn(context as never, "session-turn", {
       requestTurnId: secondTurnId,
@@ -218,6 +294,45 @@ describe("model message prompt cache layout", () => {
       userMessageId: "user-2",
     });
   });
+
+  it("lets a natural request reach the provider while an unrelated workflow is blocked", async () => {
+    const { context, events } = await makeSendMessageContext();
+    context.workflows.activeRun = {
+      id: "wf-blocked",
+      goal: "old workflow",
+      planId: "plan-blocked",
+      status: "blocked",
+      steps: [],
+      startedAt: new Date(0).toISOString(),
+      result: "blocked",
+    };
+    const stream = vi.fn(async function* () {
+      yield { type: "assistant_text_delta", text: "可以继续回答这个普通问题。" } as const;
+      yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+    });
+    const gateway = {
+      stream,
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("解释当前代码路径", context, gateway, new MemoryOutput());
+
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(
+      events.some((event) => JSON.stringify(event).includes("meta_scheduler:blocked_runtime_hint")),
+    ).toBe(true);
+    expect(
+      events.some((event) => JSON.stringify(event).includes("meta_scheduler:blocked_runtime_stop")),
+    ).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "assistant_text_delta",
+        text: "可以继续回答这个普通问题。",
+      }),
+    );
+  }, 30_000);
 
   it("keeps volatile system diagnostics after reusable transcript history", async () => {
     const context = {
@@ -908,6 +1023,50 @@ describe("high reasoning tool empty response retry", () => {
 });
 
 describe("final answer gate aggregation", () => {
+  it("downgrades a structured completion claim for an actively blocked workflow", () => {
+    const context = {
+      ...makeGateContext(),
+      evidence: [
+        makeEvidence({
+          source: "workflow-execution",
+          summary: "Workflow completed before becoming blocked",
+          supportsClaims: ["workflow_execution", "action_executed", "workflow_terminal_status"],
+        }),
+      ],
+      lastMetaSchedulerDecision: {
+        shouldStopForBlockedRuntime: true,
+        policyDecision: { engineeringSignal: undefined },
+      },
+    };
+
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("Workflow 已完成。", [
+        { kind: "workflow_status_claim", phrase: "Workflow 已完成" },
+      ]),
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    expect(result.runtimeVerdict?.unsupportedKinds).toContain("workflow_status_claim");
+    expect(result.unsupportedKinds).toContain("workflow_status_claim");
+  });
+
+  it("does not downgrade unrelated explanatory text for a blocked workflow", () => {
+    const result = evaluateAggregatedFinalAnswerGate(
+      {
+        ...makeGateContext(),
+        lastMetaSchedulerDecision: {
+          shouldStopForBlockedRuntime: true,
+          policyDecision: { engineeringSignal: undefined },
+        },
+      } as never,
+      "当前可以继续解释其他问题。",
+    );
+
+    expect(result.status).toBe("passed");
+  });
+
   it("aggregates claim gate and extended gate issues in one verdict", () => {
     const result = evaluateAggregatedFinalAnswerGate(
       makeGateContext() as never,
@@ -1166,6 +1325,84 @@ describe("final answer gate aggregation", () => {
     expect(serializedBlocks).toContain("验证通过");
     expect(serializedBlocks).not.toContain(rawDraft);
     expect((context as { lastFullOutput?: string }).lastFullOutput ?? "").not.toContain(rawDraft);
+  });
+
+  it("drops a delayed claim rewrite after a newer foreground request takes ownership", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-stale-final-rewrite-"));
+    const { context, events } = makeDispatcherContext(projectPath);
+    Object.assign(context, {
+      config: defaultConfig,
+      providerBreaker: createProviderCircuitBreakerState(),
+      evidence: [
+        makeEvidence({
+          kind: "test_result",
+          summary: "focused verification passed",
+          supportsClaims: ["verification_passed"],
+        }),
+      ],
+      cache: { history: [], deepCompact: undefined },
+    });
+    const blocks: Array<{ id: string; fullText?: string; summary?: string }> = [];
+    const output = createShellBlockOutputForTest(context, blocks as never);
+    const controller = new AbortController();
+    const turnA = beginForegroundRequestTurn(context, "user-a");
+    let releaseRewrite: (() => void) | undefined;
+    let markRewriteStarted: (() => void) | undefined;
+    const rewriteStarted = new Promise<void>((resolve) => {
+      markRewriteStarted = resolve;
+    });
+    const rewriteRelease = new Promise<void>((resolve) => {
+      releaseRewrite = resolve;
+    });
+    let streamCalls = 0;
+    const rawDraft = withClaims("已完成。", [{ kind: "completion_claim", phrase: "已完成" }]);
+    const gateway = {
+      async *stream() {
+        streamCalls += 1;
+        if (streamCalls === 1) {
+          yield { type: "assistant_text_delta", text: rawDraft } as const;
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+          return;
+        }
+        markRewriteStarted?.();
+        await rewriteRelease;
+        yield { type: "assistant_text_delta", text: "迟到的 A 轮改写" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    const pending = __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "请给最终结论" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        requestTurnId: turnA,
+        abortSignal: controller.signal,
+      },
+      context,
+      gateway,
+      "session-stale-final-rewrite",
+      output,
+      controller.signal,
+    );
+
+    await rewriteStarted;
+    controller.abort();
+    const turnB = beginForegroundRequestTurn(context, "user-b");
+    const ownerState = context as unknown as TuiContext;
+    ownerState.requestActivityOwner = { kind: "foreground", requestTurnId: turnB };
+    ownerState.requestActivityPhase = "request_started";
+    releaseRewrite?.();
+
+    await expect(pending).resolves.toBe("");
+    expect(ownerState.requestActivityOwner).toEqual({ kind: "foreground", requestTurnId: turnB });
+    expect(ownerState.requestActivityPhase).toBe("request_started");
+    expect(JSON.stringify(blocks)).not.toContain("迟到的 A 轮改写");
+    expect(events.some(({ event }) => (event as { type?: string }).type === "assistant_message")).toBe(false);
   });
 
   it("clears active provider failure as soon as a later stream recovers", async () => {

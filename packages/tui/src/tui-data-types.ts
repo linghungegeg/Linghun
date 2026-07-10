@@ -410,8 +410,10 @@ export type ContextUsageSnapshot = {
   contextWindowTokens?: number;
   compactTriggerTokens?: number;
   usageRatio?: number;
-  staleReason?: "disconnected_mid_stream" | "missing_usage";
+  staleReason?: "disconnected_mid_stream" | "missing_usage" | "runtime_changed";
   lastConfirmedTurn?: number;
+  model?: string;
+  provider?: string;
 };
 
 export type CompactFailureState = {

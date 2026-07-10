@@ -624,9 +624,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   }
   if (blockedRuntime) {
     directives.push(
-      "Blocked/stale agent or workflow state is a hard stop for PASS; require real recovery, cancellation, or explicit degradation.",
+      "A blocked or stale workflow may be inspected or explained, but must not be continued, mutated, or declared complete until recovery, cancellation, or explicit degradation.",
     );
-    internalEvents.push("meta_scheduler:blocked_runtime_stop");
+    internalEvents.push("meta_scheduler:blocked_runtime_hint");
   }
   const finalIntent = evaluateExecutionIntent({
     taskKind,
@@ -801,14 +801,14 @@ function createOrchestrationPlan(input: {
   steps.push({
     id: "inspect-runtime",
     executor: "meta-scheduler",
-    mode: input.shouldStopForBlockedRuntime ? "stop" : "run",
+    mode: "run",
     reason: input.shouldStopForBlockedRuntime
-      ? "Blocked or stale runtime must be recovered or degraded before claiming PASS."
+      ? "Inspect the blocked workflow while preserving its scoped continuation and completion guard."
       : "Collect runtime, permission, verification, provider, context, and background signals before dispatch.",
   });
 
   if (input.shouldStopForBlockedRuntime) {
-    hardStops.push("blocked_runtime");
+    hardStops.push("blocked_workflow_dispatch");
   }
 
   if (input.shouldCompactBeforeProvider) {
@@ -876,6 +876,15 @@ function createOrchestrationPlan(input: {
     reason: "Every provider-visible request should be evaluated against cooldown, fallback, and retry guard state.",
   });
 
+  if (input.shouldStopForBlockedRuntime) {
+    steps.push({
+      id: "workflow-dispatch",
+      executor: "workflow-runtime",
+      mode: "stop",
+      reason: "The active workflow is blocked or stale and cannot continue or mutate until explicitly recovered.",
+    });
+  }
+
   if (policy.executionPlan.preferAgent) {
     steps.push({
       id: "agent-dispatch",
@@ -884,12 +893,14 @@ function createOrchestrationPlan(input: {
       reason: "Agent-classified task should delegate through the managed agent runtime.",
     });
   } else if (policy.executionPlan.preferWorkflow) {
-    steps.push({
-      id: "workflow-dispatch",
-      executor: "workflow-runtime",
-      mode: "run",
-      reason: "Workflow-classified task should dispatch through the workflow runtime.",
-    });
+    if (!input.shouldStopForBlockedRuntime) {
+      steps.push({
+        id: "workflow-dispatch",
+        executor: "workflow-runtime",
+        mode: "run",
+        reason: "Workflow-classified task should dispatch through the workflow runtime.",
+      });
+    }
   } else if (policy.capabilitySignal.active && policy.taskKind === "capability") {
     steps.push({
       id: "capability-dispatch",
@@ -950,7 +961,12 @@ function selectPrimaryOrchestrationAction(
   steps: OrchestrationStep[],
   policy: PolicyDecision,
 ): OrchestrationPlan["primaryAction"] {
-  if (steps.some((step) => step.id === "inspect-runtime" && step.mode === "stop")) return "stop_blocked";
+  if (
+    policy.executionPlan.preferWorkflow &&
+    steps.some((step) => step.id === "workflow-dispatch" && step.mode === "stop")
+  ) {
+    return "stop_blocked";
+  }
   if (steps.some((step) => step.id === "provider-retry" && step.mode === "stop")) return "stop_blocked";
   if (steps.some((step) => step.id === "permission-gate" && step.mode === "stop")) return "ask_permission";
   if (steps.some((step) => step.id === "compact-context")) return "compact";

@@ -131,6 +131,18 @@ describe("/model set command", () => {
   });
 
   it("sets executor route to deepseek-chat and persists it", async () => {
+    (context as unknown as { cache: Record<string, unknown> }).cache = {
+      contextUsage: {
+        estimatedChars: 400_000,
+        maxChars: 800_000,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        source: "provider_usage",
+        confirmedUsedTokens: 100_000,
+        contextWindowTokens: 200_000,
+        compactTriggerTokens: 180_000,
+      },
+    };
+
     await handleModelCommand(["route", "set", "executor", "deepseek-chat"], context, output);
 
     expect(output.lines).toContain("已设置 executor role：provider deepseek model deepseek-chat");
@@ -140,6 +152,7 @@ describe("/model set command", () => {
     const executorRoute = reloaded.modelRoutes.routes.find((r) => r.role === "executor");
     expect(executorRoute?.primaryModel).toBe("deepseek-chat");
     expect(executorRoute?.provider).toBe("deepseek");
+    expect(context.cache.contextUsage?.staleReason).toBe("runtime_changed");
   });
 
   it("rejects invalid executor route model without persisting", async () => {
@@ -183,6 +196,33 @@ describe("/model set command", () => {
     expect(context.config).not.toBe(configBefore);
     const executorRoute = context.config.modelRoutes.routes.find((r) => r.role === "executor");
     expect(executorRoute?.primaryModel).toBe("gpt-4");
+  });
+
+  it("marks the previous context window and compact trigger stale after model set", async () => {
+    (context as unknown as { cache: Record<string, unknown> }).cache = {
+      contextUsage: {
+        estimatedChars: 400_000,
+        maxChars: 800_000,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        source: "provider_usage",
+        confirmedUsedTokens: 100_000,
+        contextWindowTokens: 200_000,
+        compactTriggerTokens: 180_000,
+        usageRatio: 0.5,
+        model: "deepseek-chat",
+        provider: "deepseek",
+      },
+    };
+
+    await handleModelCommand(["set", "deepseek-reasoner"], context, output);
+
+    expect(context.cache.contextUsage).toMatchObject({
+      model: "deepseek-chat",
+      provider: "deepseek",
+      contextWindowTokens: 200_000,
+      compactTriggerTokens: 180_000,
+      staleReason: "runtime_changed",
+    });
   });
 
   it("shows context window and alias hints in the default model panel", async () => {

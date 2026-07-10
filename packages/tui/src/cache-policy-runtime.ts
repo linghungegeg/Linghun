@@ -1,3 +1,4 @@
+import type { CacheTurnStats } from "@linghun/core";
 import type { EndpointProfile, ModelRequest, ModelUsage } from "@linghun/providers";
 import { stableHash } from "./cache-freshness.js";
 import type { CompactProjection, PostCompactCacheWarmupState } from "./tui-data-types.js";
@@ -95,6 +96,99 @@ export type CacheUsageObservation = {
   endpoint?: string;
   source: "api_usage" | "estimated";
 };
+
+export type LocalCacheDisplayState = {
+  hitRate: number | null;
+  freshness: "stable" | "changed" | "sampling";
+  sampleSize: number;
+};
+
+type CacheHitRateSample = Pick<
+  CacheTurnStats,
+  "hitRate" | "inputTokens" | "cacheReadTokens" | "cacheWriteTokens"
+> &
+  Partial<Pick<CacheTurnStats, "source" | "freshness">>;
+
+export function computeRecentCacheHitRate(
+  history: CacheHitRateSample[],
+  windowSize = 20,
+): number | null {
+  const recent = history.slice(-Math.max(1, windowSize));
+  const trusted = recent.filter((item) => item.source !== "estimated");
+  if (trusted.length === 0) return null;
+  const totals = trusted.reduce(
+    (acc, item) => {
+      const inputTokens = Number.isFinite(item.inputTokens) ? Math.max(0, item.inputTokens) : 0;
+      const cacheReadTokens = Number.isFinite(item.cacheReadTokens)
+        ? Math.max(0, item.cacheReadTokens)
+        : 0;
+      const cacheWriteTokens = Number.isFinite(item.cacheWriteTokens)
+        ? Math.max(0, item.cacheWriteTokens)
+        : 0;
+      acc.cacheReadTokens += cacheReadTokens;
+      acc.cacheEligibleTokens += inputTokens + cacheReadTokens + cacheWriteTokens;
+      return acc;
+    },
+    { cacheReadTokens: 0, cacheEligibleTokens: 0 },
+  );
+  if (totals.cacheEligibleTokens > 0) {
+    return totals.cacheReadTokens / totals.cacheEligibleTokens;
+  }
+  const validHitRates = trusted
+    .map((item) => item.hitRate)
+    .filter((value): value is number => Number.isFinite(value));
+  if (validHitRates.length === 0) return null;
+  return validHitRates.reduce((sum, value) => sum + value, 0) / validHitRates.length;
+}
+
+export function computeLocalCacheDisplayState(input: {
+  history: CacheHitRateSample[];
+  observation?: CacheRequestObservation;
+}): LocalCacheDisplayState {
+  const recent = input.history.slice(-20);
+  const trustedRecent = recent.filter((item) => item.source !== "estimated");
+  const historyHitRate = computeRecentCacheHitRate(recent);
+  const observationUsage = input.observation?.usage;
+  const observationHitRate =
+    observationUsage?.source === "api_usage"
+      ? computeUsageHitRate(observationUsage)
+      : null;
+  const hitRate = historyHitRate ?? observationHitRate;
+  if (hitRate === null) {
+    return { hitRate: null, freshness: "sampling", sampleSize: 0 };
+  }
+  const freshness = input.observation
+    ? isLocallyStableCacheObservation(input.observation)
+      ? "stable"
+      : "changed"
+    : (trustedRecent.at(-1)?.freshness?.changedKeys.length ?? 0) > 0
+      ? "changed"
+      : "stable";
+  return {
+    hitRate,
+    freshness,
+    sampleSize: trustedRecent.length > 0 ? trustedRecent.length : 1,
+  };
+}
+
+function computeUsageHitRate(usage: CacheUsageObservation): number | null {
+  const denominator = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  return denominator > 0 ? usage.cacheReadTokens / denominator : null;
+}
+
+function isLocallyStableCacheObservation(observation: CacheRequestObservation): boolean {
+  if (observation.hasCacheBreakNonce) return false;
+  const changed = new Set(observation.fingerprint.changedKeys ?? []);
+  const stableKeys: Array<keyof CacheRequestObservation["fingerprint"]> = [
+    "systemPrefixHash",
+    "stableToolSchemaHash",
+    "modelHash",
+    "reasoningHash",
+    "cacheConfigHash",
+    "promptCacheKeyHash",
+  ];
+  return stableKeys.every((key) => !changed.has(key));
+}
 
 export function resolveCachePolicy(kind: CacheRequestKind): CachePolicyDecision {
   if (kind === "agent-child" || kind === "side-question" || kind === "deep-compact") {

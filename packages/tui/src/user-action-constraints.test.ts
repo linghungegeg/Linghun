@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  currentRequestUserActionConstraints,
   forbidsVerificationEvidence,
   hasReadOnlyUserConstraint,
   parseUserActionConstraints,
@@ -40,5 +41,26 @@ describe("user-action-constraints", () => {
 
     expect(constraints.forbidAllTools).toBe(false);
     expect(constraints.forbidShell).toBe(false);
+  });
+
+  it("keeps readonly constraints scoped to their request owner across interrupted turns", () => {
+    const readonly = parseUserActionConstraints("只读检查，不要执行命令、测试或 build");
+    const state = {
+      currentRequestTurnId: "turn-a",
+      currentUserActionConstraintsRequestTurnId: "turn-a",
+      currentUserActionConstraints: readonly,
+    };
+
+    expect(currentRequestUserActionConstraints(state)).toBe(readonly);
+
+    state.currentRequestTurnId = "turn-b";
+    expect(currentRequestUserActionConstraints(state)).toBeUndefined();
+
+    state.currentUserActionConstraintsRequestTurnId = "turn-b";
+    state.currentUserActionConstraints = parseUserActionConstraints("请直接完成");
+    expect(currentRequestUserActionConstraints(state)).toBe(state.currentUserActionConstraints);
+
+    state.currentRequestTurnId = "turn-c";
+    expect(currentRequestUserActionConstraints(state)).toBeUndefined();
   });
 });

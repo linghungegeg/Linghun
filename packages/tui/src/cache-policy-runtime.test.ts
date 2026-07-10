@@ -7,6 +7,8 @@ import {
   type CacheRequestKind,
   type CacheRequestObservationState,
   createPostCompactCacheWarmup,
+  computeLocalCacheDisplayState,
+  computeRecentCacheHitRate,
   normalizeCacheUsageObservation,
   observeCacheSafeRequest,
   observeCacheUsage,
@@ -15,6 +17,30 @@ import {
   rememberCacheSafePrefix,
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
+
+describe("local cache footer observations", () => {
+  it("ignores estimated usage and keeps the latest trusted 20-turn ratio", () => {
+    const history = [
+      { hitRate: 0.8, inputTokens: 20, cacheReadTokens: 80, cacheWriteTokens: 0, source: "api_usage" as const },
+      { hitRate: 0, inputTokens: 1_000, cacheReadTokens: 0, cacheWriteTokens: 0, source: "estimated" as const },
+    ];
+
+    expect(computeRecentCacheHitRate(history)).toBe(0.8);
+  });
+
+  it("uses trusted usage observation when local history has not recorded the turn yet", () => {
+    const observation = observeCacheUsage({
+      observation: observeCacheSafeRequest({ kind: "main", provider: "test", request: makeRequest() }),
+      usage: makeUsage({ inputTokens: 20, cacheReadTokens: 80, cacheWriteTokens: 0 }),
+    });
+
+    expect(computeLocalCacheDisplayState({ history: [], observation })).toMatchObject({
+      hitRate: 0.8,
+      freshness: "stable",
+      sampleSize: 1,
+    });
+  });
+});
 
 function makeRequest(overrides: Partial<ModelRequest> = {}): ModelRequest {
   return {

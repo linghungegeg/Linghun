@@ -578,6 +578,9 @@ export async function executeModelToolUse(
     output,
     permission.preflight,
     continuation?.reportWriteGuard,
+    continuation?.requestTurnId && continuation.abortSignal
+      ? { requestTurnId: continuation.requestTurnId, signal: continuation.abortSignal }
+      : undefined,
   );
 }
 
@@ -715,6 +718,7 @@ export async function executeApprovedModelToolUse(
   output: Writable,
   preflight?: string,
   reportWriteGuard?: ReportWriteGuard,
+  requestOwner?: { requestTurnId: string; signal: AbortSignal },
 ): Promise<{
   ok: boolean;
   tool: string;
@@ -750,7 +754,19 @@ export async function executeApprovedModelToolUse(
     rememberBackgroundTask(context, task);
     await appendBackgroundTaskEvent(context, sessionId, task);
   }
-  startRequestActivity(output, context, "tool_running", { toolName, toolTarget: extractToolTarget(toolName, toolCall.input) });
+  const activityOwner = requestOwner
+    ? { kind: "foreground" as const, requestTurnId: requestOwner.requestTurnId }
+    : undefined;
+  const requestIsStale = (): boolean =>
+    Boolean(
+      requestOwner &&
+        (requestOwner.signal.aborted || context.currentRequestTurnId !== requestOwner.requestTurnId),
+    );
+  startRequestActivity(output, context, "tool_running", {
+    toolName,
+    toolTarget: extractToolTarget(toolName, toolCall.input),
+    ...(requestOwner ? { requestTurnId: requestOwner.requestTurnId } : {}),
+  });
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
     id: toolCall.id,
@@ -765,16 +781,55 @@ export async function executeApprovedModelToolUse(
   if (backgroundController) {
     context.tools.abortSignal = backgroundController.signal;
   }
-  const progress = installToolProgressHandler(context, sessionId, toolCall.id, output, task);
+  const cleanupFinishedTool = (): void => {
+    clearBackgroundAbortController(context, task?.id ?? "");
+    if (backgroundController && context.tools.abortSignal === backgroundController.signal) {
+      context.tools.abortSignal = previousAbortSignal;
+    }
+    clearRequestActivity(context, activityOwner);
+  };
+  const dropStaleToolResult = async (
+    kind: "result" | "error",
+  ): Promise<{ ok: false; tool: string; text: string }> => {
+    cleanupFinishedTool();
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `stale_tool_${kind}_dropped: tool=${toolName}; toolUseId=${toolCall.id}; requestTurnId=${requestOwner?.requestTurnId ?? "none"}`,
+      "warning",
+    );
+    return {
+      ok: false,
+      tool: toolName,
+      text: `cancelled: stale foreground tool ${kind} discarded`,
+    };
+  };
+  const progress = installToolProgressHandler(
+    context,
+    sessionId,
+    toolCall.id,
+    output,
+    task,
+    requestOwner,
+  );
   // R1: tool start banner suppressed by default (noise reduction).
   // Verbose/brief mode (R7) will re-enable when needed.
   try {
     const result = await runTool(toolName, toolCall.input, context.tools);
     progress.restore();
     await Promise.all(progress.pending);
-    clearRequestActivity(context);
+    if (requestIsStale()) {
+      return dropStaleToolResult("result");
+    }
+    clearRequestActivity(context, activityOwner);
     await context.store.appendEvent(sessionId, createToolEndEvent(toolCall.id, result.output));
+    if (requestIsStale()) {
+      return dropStaleToolResult("result");
+    }
     await appendDerivedToolEvents(context, sessionId, toolName, result.output);
+    if (requestIsStale()) {
+      return dropStaleToolResult("result");
+    }
     const evidence = await recordToolEvidence(
       context,
       sessionId,
@@ -782,6 +837,9 @@ export async function executeApprovedModelToolUse(
       result.output,
       toolCall.input,
     );
+    if (requestIsStale()) {
+      return dropStaleToolResult("result");
+    }
     if (
       reportWriteGuard &&
       (toolName === "Read" ||
@@ -805,6 +863,9 @@ export async function executeApprovedModelToolUse(
       }
       await appendBackgroundTaskEvent(context, sessionId, task);
     }
+    if (requestIsStale()) {
+      return dropStaleToolResult("result");
+    }
     const modelContent = await appendToolResultEvent(
       context,
       sessionId,
@@ -814,6 +875,9 @@ export async function executeApprovedModelToolUse(
       isError,
       evidence?.id,
     );
+    if (requestIsStale()) {
+      return dropStaleToolResult("result");
+    }
     if (isError) {
       // D.14B — Bash/command 退出码非 0（非异常）也是真实失败。
       await captureFailureLearning(context, sessionId, {
@@ -837,7 +901,7 @@ export async function executeApprovedModelToolUse(
     if (!bgStarted) {
       clearBackgroundAbortController(context, task?.id ?? "");
     }
-    if (backgroundController) {
+    if (backgroundController && context.tools.abortSignal === backgroundController.signal) {
       context.tools.abortSignal = previousAbortSignal;
     }
     const userFacingToolOutput = formatModelToolOutput(
@@ -863,13 +927,18 @@ export async function executeApprovedModelToolUse(
   } catch (error) {
     progress.restore();
     await Promise.all(progress.pending);
-    clearBackgroundAbortController(context, task?.id ?? "");
-    if (backgroundController) {
-      context.tools.abortSignal = previousAbortSignal;
+    cleanupFinishedTool();
+    if (requestIsStale()) {
+      return dropStaleToolResult("error");
     }
-    clearRequestActivity(context);
     const text = formatError(error, context.language);
+    if (requestIsStale()) {
+      return dropStaleToolResult("error");
+    }
     const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
+    if (requestIsStale()) {
+      return dropStaleToolResult("error");
+    }
     await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
     await captureFailureLearning(context, sessionId, {
       category: "tool_failure",
@@ -3380,7 +3449,14 @@ async function appendProgressEventSafely(
   context: TuiContext,
   sessionId: string,
   event: Parameters<TuiContext["store"]["appendEvent"]>[1],
+  requestOwner?: { requestTurnId: string; signal: AbortSignal },
 ): Promise<void> {
+  if (
+    requestOwner &&
+    (requestOwner.signal.aborted || context.currentRequestTurnId !== requestOwner.requestTurnId)
+  ) {
+    return;
+  }
   try {
     await context.store.appendEvent(sessionId, event);
   } catch (error) {
@@ -3399,12 +3475,19 @@ function installToolProgressHandler(
   callId: string,
   output: Writable,
   task?: BackgroundTaskState,
+  requestOwner?: { requestTurnId: string; signal: AbortSignal },
 ): { pending: Promise<void>[]; restore: () => void } {
   const previous = context.tools.onProgress;
   const pending: Promise<void>[] = [];
   let visibleProgressLines = 0;
   let progressSuppressed = false;
-  context.tools.onProgress = (event: ToolProgressEvent) => {
+  const handler = (event: ToolProgressEvent) => {
+    if (
+      requestOwner &&
+      (requestOwner.signal.aborted || context.currentRequestTurnId !== requestOwner.requestTurnId)
+    ) {
+      return;
+    }
     if (event.toolName !== "Bash") {
       void previous?.(event);
       return;
@@ -3422,7 +3505,7 @@ function installToolProgressHandler(
           type: "background_task_update",
           task,
           createdAt: new Date().toISOString(),
-        }),
+        }, requestOwner),
       );
     }
     pending.push(
@@ -3431,7 +3514,7 @@ function installToolProgressHandler(
         id: callId,
         message: truncateDisplay(message.replace(/\s+/g, " "), 500),
         createdAt: new Date().toISOString(),
-      }),
+      }, requestOwner),
     );
     const lines = displayText.split(/\r?\n/u).filter(Boolean);
     context.requestActivityToolLines = (context.requestActivityToolLines ?? 0) + lines.length;
@@ -3458,10 +3541,13 @@ function installToolProgressHandler(
       progressSuppressed = true;
     }
   };
+  context.tools.onProgress = handler;
   return {
     pending,
     restore: () => {
-      context.tools.onProgress = previous;
+      if (context.tools.onProgress === handler) {
+        context.tools.onProgress = previous;
+      }
     },
   };
 }
