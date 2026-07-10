@@ -10,7 +10,7 @@ import {
   type ModelRequest,
   type ModelToolCall,
   type ModelToolDefinition,
-  resolveEffectiveEndpointProfile,
+  resolveProviderRuntimeContract,
 } from "@linghun/providers";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import type { ToolName, ToolOutput, ToolRunResult } from "@linghun/tools";
@@ -2851,30 +2851,21 @@ function shouldAttemptAgentRuntimeFallback(kind: ProviderFailureKind): boolean {
   );
 }
 
-function resolveAgentRuntimeForModel(
+export function resolveAgentRuntimeForModel(
   context: TuiContext,
   baseRuntime: AgentProviderRuntime,
   model: string,
 ): AgentProviderRuntime {
   const providerConfig = context.config.providers[baseRuntime.provider];
-  const rawEndpointProfile = providerConfig?.endpointProfile ?? baseRuntime.endpointProfile;
-  const endpointProfile = resolveEffectiveEndpointProfile({
-    requestEndpointProfile: undefined,
-    configEndpointProfile: rawEndpointProfile,
-    configBaseUrl: providerConfig?.baseUrl,
-    configModel: providerConfig?.model,
-    requestModel: model,
-  }).endpointProfile;
-  const compatibilityProfile =
-    providerConfig?.compatibilityProfile ??
-    (providerConfig?.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
+  const contract = providerConfig
+    ? resolveProviderRuntimeContract(
+        { ...providerConfig, id: baseRuntime.provider },
+        { messages: [], model },
+      )
+    : undefined;
+  const endpointProfile = contract?.endpointProfile ?? baseRuntime.endpointProfile;
   const reasoningLevel = providerConfig?.reasoningLevel ?? baseRuntime.reasoningLevel;
-  const reasoningSent = Boolean(
-    reasoningLevel &&
-      (endpointProfile === "responses" ||
-        compatibilityProfile === "permissive_openai_compatible" ||
-        endpointProfile === "anthropic_messages"),
-  );
+  const reasoningSent = Boolean(reasoningLevel && contract?.sendReasoning);
   return {
     provider: baseRuntime.provider,
     model,
@@ -2884,7 +2875,7 @@ function resolveAgentRuntimeForModel(
   };
 }
 
-function createAgentRuntimeForFallbackModel(
+export function createAgentRuntimeForFallbackModel(
   context: TuiContext,
   baseRuntime: AgentProviderRuntime,
   fallbackModel: string,
@@ -2893,24 +2884,13 @@ function createAgentRuntimeForFallbackModel(
   const provider = inferProviderForRouteModel(fallbackModel, context.config);
   const providerConfig = context.config.providers[provider];
   if (!providerConfig) return undefined;
-  const rawEndpointProfile = providerConfig.endpointProfile ?? "chat_completions";
-  const endpointProfile = resolveEffectiveEndpointProfile({
-    requestEndpointProfile: undefined,
-    configEndpointProfile: rawEndpointProfile,
-    configBaseUrl: providerConfig.baseUrl,
-    configModel: providerConfig.model,
-    requestModel: fallbackModel,
-  }).endpointProfile;
-  const compatibilityProfile =
-    providerConfig.compatibilityProfile ??
-    (providerConfig.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
-  const reasoningLevel = providerConfig.reasoningLevel;
-  const reasoningSent = Boolean(
-    reasoningLevel &&
-      (endpointProfile === "responses" ||
-        compatibilityProfile === "permissive_openai_compatible" ||
-        endpointProfile === "anthropic_messages"),
+  const contract = resolveProviderRuntimeContract(
+    { ...providerConfig, id: provider },
+    { messages: [], model: fallbackModel },
   );
+  const endpointProfile = contract.endpointProfile;
+  const reasoningLevel = providerConfig.reasoningLevel;
+  const reasoningSent = Boolean(reasoningLevel && contract.sendReasoning);
   return {
     provider,
     model: fallbackModel,

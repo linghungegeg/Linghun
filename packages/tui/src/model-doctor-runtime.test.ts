@@ -140,7 +140,7 @@ describe("model-doctor-runtime", () => {
     });
   });
 
-  it("detects provider.env API key source for both OpenAI-compatible and DeepSeek", async () => {
+  it("detects provider.env API key source for all built-in providers", async () => {
     const home = await mkdtemp(join(tmpdir(), "linghun-doctor-home-"));
     try {
       vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
@@ -150,6 +150,8 @@ describe("model-doctor-runtime", () => {
         [
           "LINGHUN_OPENAI_API_KEY=sk-openai-secret",
           "LINGHUN_DEEPSEEK_API_KEY=sk-deepseek-secret",
+          "LINGHUN_GEMINI_API_KEY=sk-gemini-secret",
+          "LINGHUN_GROK_API_KEY=sk-grok-secret",
         ].join("\n"),
         "utf8",
       );
@@ -158,6 +160,8 @@ describe("model-doctor-runtime", () => {
 
       expect(providers.has("openai-compatible")).toBe(true);
       expect(providers.has("deepseek")).toBe(true);
+      expect(providers.has("gemini")).toBe(true);
+      expect(providers.has("grok")).toBe(true);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -623,6 +627,21 @@ describe("model-doctor-runtime", () => {
     });
     it("defaults to openai-compatible for unknown models", () => {
       expect(inferProviderForRouteModel("llama-3-70b", baseConfig)).toBe("openai-compatible");
+    });
+    it("fails closed when multiple providers expose the same model", () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          gemini: {
+            type: "gemini",
+            baseUrl: "https://api.example.com/v1",
+            apiKey: "sk-gemini-key",
+            model: "gpt-4o",
+          },
+        },
+      };
+      expect(inferProviderForRouteModel("gpt-4o", config)).toBe("unknown");
     });
   });
 

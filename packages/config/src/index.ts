@@ -331,7 +331,10 @@ export type ProviderEnvWarning = {
   reason: string;
 };
 
+export type ProviderSetupType = "openai-compatible" | "gemini" | "grok";
+
 export type ProviderEnvSetup = {
+  providerType?: ProviderSetupType;
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -375,16 +378,35 @@ export function resolveModelSelection(
   if (!inputModel) {
     throw new Error("模型名不能为空。");
   }
-  const normalized = normalizeDeepSeekModelName(inputModel);
-  for (const [providerId, provider] of Object.entries(providers)) {
-    if (provider.model === normalized) {
-      return {
-        inputModel,
-        model: normalized,
-        provider: providerId,
-        legacyAlias: normalized !== inputModel,
-      };
+  const separator = inputModel.indexOf(":");
+  if (separator > 0 && providers[inputModel.slice(0, separator)]) {
+    const qualifiedProvider = inputModel.slice(0, separator);
+    const qualifiedModel = inputModel.slice(separator + 1);
+    const normalized = normalizeDeepSeekModelName(qualifiedModel);
+    if (!normalized || providers[qualifiedProvider].model !== normalized) {
+      throw new Error(`provider ${qualifiedProvider} 未配置模型：${qualifiedModel}。`);
     }
+    return {
+      inputModel,
+      model: normalized,
+      provider: qualifiedProvider,
+      legacyAlias: normalized !== qualifiedModel,
+    };
+  }
+  const normalized = normalizeDeepSeekModelName(inputModel);
+  const matches = Object.entries(providers).filter(([, provider]) => provider.model === normalized);
+  if (matches.length > 1) {
+    throw new Error(
+      `模型 ${normalized} 同时存在于多个 provider：${matches.map(([providerId]) => providerId).join("、")}。请使用 provider:model 明确选择。`,
+    );
+  }
+  if (matches.length === 1) {
+    return {
+      inputModel,
+      model: normalized,
+      provider: matches[0][0],
+      legacyAlias: normalized !== inputModel,
+    };
   }
   if (isDeepSeekApiModel(normalized) && providers.deepseek) {
     return {
@@ -475,6 +497,12 @@ const providerEnvKeys = new Set([
   "LINGHUN_DEEPSEEK_API_KEY",
   "LINGHUN_DEEPSEEK_MODEL",
   "LINGHUN_DEEPSEEK_ENDPOINT_PROFILE",
+  "LINGHUN_GEMINI_BASE_URL",
+  "LINGHUN_GEMINI_API_KEY",
+  "LINGHUN_GEMINI_MODEL",
+  "LINGHUN_GROK_BASE_URL",
+  "LINGHUN_GROK_API_KEY",
+  "LINGHUN_GROK_MODEL",
   "LINGHUN_INFERENCE_LEVEL",
   "LINGHUN_AUX_MODEL",
 ]);
@@ -501,6 +529,16 @@ LINGHUN_OPENAI_INCLUDE_USAGE=false
 # LINGHUN_DEEPSEEK_MODEL=deepseek-chat
 # Optional: use anthropic_messages for DeepSeek Anthropic-compatible search.
 # LINGHUN_DEEPSEEK_ENDPOINT_PROFILE=anthropic_messages
+
+# Optional Gemini native provider (chat-completions SSE + native web search).
+# LINGHUN_GEMINI_BASE_URL=https://api.example.com/v1
+# LINGHUN_GEMINI_API_KEY=
+# LINGHUN_GEMINI_MODEL=gemini-3.5-flash
+
+# Optional Grok native provider (Responses SSE + native web search).
+# LINGHUN_GROK_BASE_URL=https://api.example.com/v1
+# LINGHUN_GROK_API_KEY=
+# LINGHUN_GROK_MODEL=grok-4.20-reasoning
 
 # Supported reasoning levels: Low, Medium, High.
 LINGHUN_INFERENCE_LEVEL=High
@@ -1067,18 +1105,34 @@ function normalizeReasoningLevel(value: string): "Low" | "Medium" | "High" {
 }
 
 function formatProviderEnv(setup: ProviderEnvSetup): string {
-  return [
+  const providerType = setup.providerType ?? "openai-compatible";
+  const prefix =
+    providerType === "gemini"
+      ? "LINGHUN_GEMINI"
+      : providerType === "grok"
+        ? "LINGHUN_GROK"
+        : "LINGHUN_OPENAI";
+  const lines = [
     "# Linghun private provider config. Do not commit this file.",
     "# Shell env variables with the same names have higher priority.",
-    `LINGHUN_OPENAI_BASE_URL=${setup.baseUrl}`,
-    `LINGHUN_OPENAI_API_KEY=${setup.apiKey}`,
-    `LINGHUN_OPENAI_MODEL=${setup.model}`,
-    `LINGHUN_OPENAI_ENDPOINT_PROFILE=${setup.endpointProfile ?? "chat_completions"}`,
-    `LINGHUN_OPENAI_INCLUDE_USAGE=${setup.includeUsage === true ? "true" : "false"}`,
-    `LINGHUN_INFERENCE_LEVEL=${setup.reasoningLevel ?? "Medium"}`,
+    `${prefix}_BASE_URL=${setup.baseUrl}`,
+    `${prefix}_API_KEY=${setup.apiKey}`,
+    `${prefix}_MODEL=${setup.model}`,
+  ];
+  if (providerType === "openai-compatible") {
+    lines.push(
+      `LINGHUN_OPENAI_ENDPOINT_PROFILE=${setup.endpointProfile ?? "chat_completions"}`,
+      `LINGHUN_OPENAI_INCLUDE_USAGE=${setup.includeUsage === true ? "true" : "false"}`,
+    );
+  }
+  if (providerType !== "grok") {
+    lines.push(`LINGHUN_INFERENCE_LEVEL=${setup.reasoningLevel ?? "Medium"}`);
+  }
+  lines.push(
     `LINGHUN_AUX_MODEL=${setup.auxModel ?? ""}`,
     "",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 function parseProviderEnv(raw: string, path: string): Record<string, string> {
@@ -1125,6 +1179,16 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
       process.env.LINGHUN_DEEPSEEK_API_KEY &&
       process.env.LINGHUN_DEEPSEEK_MODEL,
   );
+  const hasCompleteShellGeminiProvider = Boolean(
+    process.env.LINGHUN_GEMINI_BASE_URL &&
+      process.env.LINGHUN_GEMINI_API_KEY &&
+      process.env.LINGHUN_GEMINI_MODEL,
+  );
+  const hasCompleteShellGrokProvider = Boolean(
+    process.env.LINGHUN_GROK_BASE_URL &&
+      process.env.LINGHUN_GROK_API_KEY &&
+      process.env.LINGHUN_GROK_MODEL,
+  );
   const hasMainProviderValue = Boolean(
     hasCompleteShellOpenAiProvider ||
       values.LINGHUN_OPENAI_BASE_URL ||
@@ -1139,7 +1203,24 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
       values.LINGHUN_DEEPSEEK_ENDPOINT_PROFILE ||
       process.env.LINGHUN_DEEPSEEK_ENDPOINT_PROFILE,
   );
-  if (!hasMainProviderValue && !hasDeepSeekProviderValue) {
+  const hasGeminiProviderValue = Boolean(
+    hasCompleteShellGeminiProvider ||
+      values.LINGHUN_GEMINI_BASE_URL ||
+      values.LINGHUN_GEMINI_API_KEY ||
+      values.LINGHUN_GEMINI_MODEL,
+  );
+  const hasGrokProviderValue = Boolean(
+    hasCompleteShellGrokProvider ||
+      values.LINGHUN_GROK_BASE_URL ||
+      values.LINGHUN_GROK_API_KEY ||
+      values.LINGHUN_GROK_MODEL,
+  );
+  if (
+    !hasMainProviderValue &&
+    !hasDeepSeekProviderValue &&
+    !hasGeminiProviderValue &&
+    !hasGrokProviderValue
+  ) {
     return {};
   }
   const providerConfig: Record<string, ProviderConfig> = {};
@@ -1193,17 +1274,60 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
       ...deepSeekProvider,
     };
   }
+  if (hasGeminiProviderValue) {
+    const baseUrl = process.env.LINGHUN_GEMINI_BASE_URL ?? values.LINGHUN_GEMINI_BASE_URL ?? "";
+    const apiKey = process.env.LINGHUN_GEMINI_API_KEY ?? values.LINGHUN_GEMINI_API_KEY ?? "";
+    const model = process.env.LINGHUN_GEMINI_MODEL ?? values.LINGHUN_GEMINI_MODEL ?? "";
+    const reasoningLevel = normalizeReasoningLevel(
+      process.env.LINGHUN_INFERENCE_LEVEL ?? values.LINGHUN_INFERENCE_LEVEL ?? "Medium",
+    );
+    validateProviderEnvSetup({
+      providerType: "gemini",
+      baseUrl,
+      apiKey,
+      model,
+      reasoningLevel,
+    });
+    providerConfig.gemini = {
+      type: "gemini",
+      baseUrl,
+      apiKey,
+      model,
+      endpointProfile: "chat_completions",
+      compatibilityProfile: "gemini",
+      reasoningLevel,
+    };
+  }
+  if (hasGrokProviderValue) {
+    const baseUrl = process.env.LINGHUN_GROK_BASE_URL ?? values.LINGHUN_GROK_BASE_URL ?? "";
+    const apiKey = process.env.LINGHUN_GROK_API_KEY ?? values.LINGHUN_GROK_API_KEY ?? "";
+    const model = process.env.LINGHUN_GROK_MODEL ?? values.LINGHUN_GROK_MODEL ?? "";
+    validateProviderEnvSetup({ providerType: "grok", baseUrl, apiKey, model });
+    providerConfig.grok = {
+      type: "grok",
+      baseUrl,
+      apiKey,
+      model,
+      endpointProfile: "responses",
+      compatibilityProfile: "grok",
+    };
+  }
   const routeProvider = hasCompleteShellOpenAiProvider
     ? "openai-compatible"
     : hasCompleteShellDeepSeekProvider
       ? "deepseek"
-      : hasMainProviderValue
-        ? "openai-compatible"
-        : "deepseek";
-  const model =
-    routeProvider === "openai-compatible"
-      ? (process.env.LINGHUN_OPENAI_MODEL ?? openAiProvider.model)
-      : (process.env.LINGHUN_DEEPSEEK_MODEL ?? deepSeekProvider.model);
+      : hasCompleteShellGeminiProvider
+        ? "gemini"
+        : hasCompleteShellGrokProvider
+          ? "grok"
+          : hasMainProviderValue
+            ? "openai-compatible"
+            : hasDeepSeekProviderValue
+              ? "deepseek"
+              : hasGeminiProviderValue
+                ? "gemini"
+                : "grok";
+  const model = providerConfig[routeProvider]?.model;
   return {
     ...(model ? { defaultModel: model } : {}),
     providers: providerConfig,

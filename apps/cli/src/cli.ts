@@ -347,6 +347,8 @@ async function readProviderEnvApiKeyProviders(
     return new Set([
       ...(values.LINGHUN_OPENAI_API_KEY ? ["openai-compatible"] : []),
       ...(values.LINGHUN_DEEPSEEK_API_KEY ? ["deepseek"] : []),
+      ...(values.LINGHUN_GEMINI_API_KEY ? ["gemini"] : []),
+      ...(values.LINGHUN_GROK_API_KEY ? ["grok"] : []),
     ]);
   } catch {
     return new Set();

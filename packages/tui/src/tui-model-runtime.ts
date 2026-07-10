@@ -240,15 +240,16 @@ export function resolveProviderForModel(config: LinghunConfig, model: string): s
     return executor.provider;
   }
   if (config.defaultModel === model || config.defaultModel === normalized) {
-    for (const [providerId, provider] of Object.entries(config.providers)) {
-      if (provider.model === model || provider.model === normalized) return providerId;
-    }
+    const defaultMatches = Object.entries(config.providers).filter(
+      ([, provider]) => provider.model === model || provider.model === normalized,
+    );
+    if (defaultMatches.length === 1) return defaultMatches[0][0];
+    if (defaultMatches.length > 1) return "unknown";
   }
-  for (const [providerId, provider] of Object.entries(config.providers)) {
-    if (provider.model === model || provider.model === normalized) {
-      return providerId;
-    }
-  }
+  const matches = Object.entries(config.providers).filter(
+    ([, provider]) => provider.model === model || provider.model === normalized,
+  );
+  if (matches.length === 1) return matches[0][0];
   return "unknown";
 }
 

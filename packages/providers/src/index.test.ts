@@ -3,6 +3,7 @@ import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared
 import { describe, expect, it, vi } from "vitest";
 import {
   DeepSeekProvider,
+  GeminiProvider,
   GrokProvider,
   type LinghunEvent,
   ModelGateway,
@@ -25,7 +26,7 @@ const EXPECTED_REQUEST_USER_AGENT = `${LINGHUN_NAME}/${LINGHUN_VERSION} (@linghu
 
 describe("Gemini and Grok native gateways", () => {
   it("uses Gemini chat hosted search with custom tools and reasoning", () => {
-    const provider = new OpenAiCompatibleProvider({
+    const provider = new GeminiProvider({
       id: "gemini",
       type: "gemini",
       baseUrl: "https://gateway.example.com/v1",
@@ -44,13 +45,19 @@ describe("Gemini and Grok native gateways", () => {
     });
     const request = provider.createChatRequest({
       messages: [{ role: "user", content: "Search the web." }],
-      tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+      tools: [
+        { name: "WebSearch", description: "Local search", inputSchema: { type: "object" } },
+        { name: "Read", description: "Read", inputSchema: { type: "object" } },
+      ],
     });
 
     expect(contract.profile).toBe("gemini_chat_completions");
     expect(contract.sendReasoning).toBe(true);
     expect(request.reasoning).toEqual({ effort: "medium" });
     expect(request.tools?.at(-1)).toEqual({ type: "web_search_preview" });
+    expect(request.tools).not.toContainEqual(
+      expect.objectContaining({ function: expect.objectContaining({ name: "WebSearch" }) }),
+    );
   });
 
   it("uses Grok Responses search without sending rejected reasoning fields", () => {
@@ -71,13 +78,71 @@ describe("Gemini and Grok native gateways", () => {
     });
     const request = provider.createResponsesRequest({
       messages: [{ role: "user", content: "Search the web." }],
-      tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+      tools: [
+        { name: "WebSearch", description: "Local search", inputSchema: { type: "object" } },
+        { name: "Read", description: "Read", inputSchema: { type: "object" } },
+      ],
     });
 
     expect(contract.profile).toBe("grok_responses");
     expect(contract.sendReasoning).toBe(false);
     expect(request).not.toHaveProperty("reasoning");
     expect(request.tools?.at(-1)).toEqual({ type: "web_search", external_web_access: true });
+    expect(request.tools).not.toContainEqual(expect.objectContaining({ name: "WebSearch" }));
+  });
+
+  it.each([
+    {
+      name: "Gemini",
+      provider: new GeminiProvider({
+        id: "gemini",
+        type: "gemini",
+        baseUrl: "https://gateway.example.com/v1",
+        apiKey: "test-key",
+        model: "gemini-3.5-flash",
+      }),
+      expectedUrl: "https://gateway.example.com/v1/chat/completions",
+      sse: 'data: {"id":"gemini-1","choices":[{"delta":{"content":"gemini"}}]}\n\ndata: [DONE]\n\n',
+      expectedEvent: { type: "assistant_text_delta", id: "gemini-1", text: "gemini" },
+    },
+    {
+      name: "Grok",
+      provider: new GrokProvider({
+        id: "grok",
+        type: "grok",
+        baseUrl: "https://gateway.example.com/v1",
+        apiKey: "test-key",
+        model: "grok-4.20-reasoning",
+      }),
+      expectedUrl: "https://gateway.example.com/v1/responses",
+      sse: 'data: {"id":"grok-1","type":"response.output_text.delta","delta":"grok"}\n\ndata: [DONE]\n\n',
+      expectedEvent: { type: "assistant_text_delta", id: "grok-1", text: "grok" },
+    },
+  ])("streams $name through the shared OpenAI SSE parser branch", async (testCase) => {
+    const fetchMock = vi.fn(async (_url: string) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(testCase.sse));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const events: LinghunEvent[] = [];
+
+    for await (const event of testCase.provider.stream({
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      events.push(event);
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(testCase.expectedUrl);
+    expect(events).toContainEqual(testCase.expectedEvent);
   });
 });
 

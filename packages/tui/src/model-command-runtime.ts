@@ -36,6 +36,7 @@ import {
   formatModelSetupSummary,
   getModelSetupPromptMessage,
   getNextModelSetupStep,
+  normalizeModelSetupProviderType,
   normalizeModelSetupReasoningLevel,
   parseModelSetupPrefill,
 } from "./model-setup-runtime.js";
@@ -70,7 +71,12 @@ export async function handleModelCommand(
     return;
   }
   if (action === "setup") {
-    await startModelSetup(context, output);
+    if (args[1] && !/^(openai-compatible|openai|gemini|grok)$/iu.test(args[1])) {
+      writeLine(output, "错误：provider 可选 openai-compatible / gemini / grok。");
+      return;
+    }
+    const providerType = args[1] ? normalizeModelSetupProviderType(args[1]) : undefined;
+    await startModelSetup(context, output, providerType ? { providerType } : {});
     return;
   }
   if (action === "doctor") {
@@ -181,7 +187,7 @@ export async function startModelSetup(
 ): Promise<void> {
   const existed = await providerEnvExists();
   const providerEnvPath = existed ? getProviderEnvPath() : await ensureProviderEnvTemplate();
-  const values: Partial<ProviderEnvSetup> = { reasoningLevel: "Medium", ...prefill };
+  const values: Partial<ProviderEnvSetup> = { ...prefill };
   context.pendingModelSetup = {
     step: getNextModelSetupStep(values),
     providerEnvPath,
@@ -229,6 +235,16 @@ export async function handleModelSetupInput(
       return;
     }
 
+    if (setup.step === "provider") {
+      if (!/^(openai-compatible|openai|gemini|grok)$/iu.test(value)) {
+        throw new Error("provider 可选 openai-compatible / gemini / grok。");
+      }
+      applyModelSetupValues(setup, { providerType: normalizeModelSetupProviderType(value) });
+      setup.step = getNextModelSetupStep(setup.values);
+      writeLine(output, getModelSetupPromptMessage(setup, context.language));
+      return;
+    }
+
     if (setup.step === "baseUrl") {
       applyModelSetupValues(setup, { baseUrl: value });
       setup.step = "apiKey";
@@ -243,7 +259,11 @@ export async function handleModelSetupInput(
     }
     if (setup.step === "model") {
       applyModelSetupValues(setup, { model: value });
-      setup.step = "reasoning";
+      setup.step = getNextModelSetupStep(setup.values);
+      if (setup.step === "confirm") {
+        writeLine(output, formatModelSetupSummary(setup, context.language));
+        return;
+      }
       writeLine(output, getModelSetupPromptMessage(setup, context.language));
       return;
     }

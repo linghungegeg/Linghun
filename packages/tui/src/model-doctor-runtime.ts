@@ -145,6 +145,8 @@ export async function readProviderEnvApiKeyProviders(): Promise<Set<string>> {
     return new Set([
       ...(values.LINGHUN_OPENAI_API_KEY ? ["openai-compatible"] : []),
       ...(values.LINGHUN_DEEPSEEK_API_KEY ? ["deepseek"] : []),
+      ...(values.LINGHUN_GEMINI_API_KEY ? ["gemini"] : []),
+      ...(values.LINGHUN_GROK_API_KEY ? ["grok"] : []),
     ]);
   } catch {
     return new Set();
@@ -773,10 +775,10 @@ export function routeSupportsCapability(
 
 export function inferProviderForRouteModel(model: string, config: LinghunConfig): string {
   const normalized = normalizeDeepSeekModelName(model);
-  for (const [providerId, provider] of Object.entries(config.providers)) {
-    if (provider.model === model || provider.model === normalized) {
-      return providerId;
-    }
-  }
+  const matches = Object.entries(config.providers).filter(
+    ([, provider]) => provider.model === model || provider.model === normalized,
+  );
+  if (matches.length === 1) return matches[0][0];
+  if (matches.length > 1) return "unknown";
   return "openai-compatible";
 }
