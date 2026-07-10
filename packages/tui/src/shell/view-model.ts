@@ -198,6 +198,7 @@ export type ShellViewModelOptions = {
   composerOverlayRows?: number;
   /** Current Composer draft, used to restore input across renderer remounts. */
   composerDraftText?: string;
+  queuedInputs?: import("./models/queued-input-state.js").QueuedInputItem[];
   /**
    * D.13E Step 2 — ConfigPanel state (panel_list / panel_detail / undefined).
    * View-model maps this to ShellViewModel.configPanel via mapConfigPanelState.
@@ -571,6 +572,22 @@ export function createShellViewModel(
     workRequestState,
     suppressProviderFailure: hasProviderFailureOutputBlock || hasRecoveredAfterProviderFailure,
   });
+  const composerBusy = computeComposerBusy({
+    submitted: options.submitted,
+    activity: visibleActivity,
+    context,
+  });
+  const lastHandoff = context.memory?.lastHandoff;
+  const sessionFork =
+    context.sessionId &&
+    lastHandoff?.sessionId === context.sessionId &&
+    lastHandoff.parentSessionId
+      ? {
+          currentSessionId: context.sessionId,
+          parentSessionId: lastHandoff.parentSessionId,
+          goal: lastHandoff.goal,
+        }
+      : undefined;
 
   return {
     language,
@@ -604,27 +621,25 @@ export function createShellViewModel(
     },
     composer: {
       placeholder: composerPlaceholder,
-      taskPlaceholder: text.taskPlaceholder,
+      taskPlaceholder: composerBusy
+        ? language === "en-US"
+          ? "Type a follow-up, then press Tab to queue"
+          : "输入后续消息，按 Tab 排队"
+        : text.taskPlaceholder,
       submittedHint: text.submittedHint,
       draftText: options.composerDraftText,
       masking: context.pendingModelSetup?.step === "apiKey",
       setupActive,
       setupStep: composerSetupStepLabel,
-      busy: computeComposerBusy({
-        submitted: options.submitted,
-        activity: visibleActivity,
-        context,
-      }),
-      busyHint: computeComposerBusy({
-        submitted: options.submitted,
-        activity: visibleActivity,
-        context,
-      })
+      busy: composerBusy,
+      busyHint: composerBusy
         ? language === "en-US"
-          ? "Still working on the previous request. Press Ctrl+C to interrupt, then send again."
-          : "正在处理上一条，按 Ctrl+C 可中断，稍后再发。"
+          ? "Still working. Enter keeps the draft; Tab queues it; Ctrl+C interrupts."
+          : "正在处理上一条；Enter 保留草稿，Tab 排队，Ctrl+C 中断。"
         : undefined,
     },
+    queuedInputs: options.queuedInputs,
+    sessionFork,
     blocks: fullFittedBlocks,
     staticHistoryBlocks,
     staticHistoryReplayGeneration: (context as { transcriptStaticReplayGeneration?: number })

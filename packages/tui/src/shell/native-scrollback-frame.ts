@@ -32,6 +32,8 @@ export function nativeScrollbackTaskFrameHasContent(view: ShellViewModel): boole
       hasActiveTaskList(view) ||
       estimateAgentProgressRows(view.agentProgressTree) > 0 ||
       estimateWorkflowProgressRows(view.workflowProgressView) > 0 ||
+      (view.queuedInputs?.length ?? 0) > 0 ||
+      view.sessionFork ||
       (view.taskSuggestions?.length ?? 0) > 0 ||
       view.blocks.length > 0,
   );
@@ -71,7 +73,8 @@ export function nativeScrollbackTaskFrameHeight(view: ShellViewModel): number {
   if (
     view.streamingAssistantText ||
     estimateAgentProgressRows(view.agentProgressTree) > 0 ||
-    estimateWorkflowProgressRows(view.workflowProgressView) > 0
+    estimateWorkflowProgressRows(view.workflowProgressView) > 0 ||
+    (view.queuedInputs?.length ?? 0) > 0
   ) {
     return Math.max(1, Math.min(maxNonFullscreenHeight, LIVE_PREVIEW_FRAME_ROWS));
   }

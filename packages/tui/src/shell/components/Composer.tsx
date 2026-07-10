@@ -16,6 +16,7 @@ import {
   normalizeTerminalInput,
   sanitizeTerminalText,
 } from "../models/terminal-input-runtime.js";
+import { MAX_QUEUED_INPUTS } from "../models/queued-input-state.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { resolveTerminalInteractionModes } from "../terminal-interaction-runtime.js";
 import { charWidth, computeWrappedInputState, fitText } from "../text-utils.js";
@@ -1269,7 +1270,17 @@ export function Composer({
         return;
       }
 
-      // Tab — 接受 slash 候选 head（保留 args）。
+      const latestQueuedInput = view.queuedInputs?.at(-1);
+      if (key.upArrow && key.meta && latestQueuedInput) {
+        resetBuffer(latestQueuedInput.text);
+        emitInput({ type: "queued-input-edit-latest", id: latestQueuedInput.id });
+        showHintNotice(
+          view.language === "en-US" ? "Restored the latest queued input." : "已取回最后一条排队输入。",
+        );
+        return;
+      }
+
+      // Tab — slash/ghost completion wins; otherwise queue while busy or submit while idle.
       if (key.tab && !key.shift) {
         if (slashVisible && slashSelection >= 0) {
           const picked = slashCandidates[slashSelectionClamped];
@@ -1290,6 +1301,27 @@ export function Composer({
           resetBuffer(`${text}${ghost} `);
           return;
         }
+        const submitText = text.trim();
+        if (!submitText) return;
+        if (view.composer.busy) {
+          if ((view.queuedInputs?.length ?? 0) >= MAX_QUEUED_INPUTS) {
+            showHintNotice(
+              view.language === "en-US"
+                ? `Queue is full (${MAX_QUEUED_INPUTS}). Edit or wait for an item to run.`
+                : `排队已满（${MAX_QUEUED_INPUTS} 条），请取回编辑或等待执行。`,
+            );
+            return;
+          }
+          historyRef.current = historyAdd(historyRef.current, text);
+          resetBuffer();
+          clearHintNotice();
+          emitInput({ type: "queue-submit", text: submitText });
+          return;
+        }
+        historyRef.current = historyAdd(historyRef.current, text);
+        resetBuffer();
+        clearHintNotice();
+        emitInput({ type: "submit", text: submitText });
         return;
       }
 

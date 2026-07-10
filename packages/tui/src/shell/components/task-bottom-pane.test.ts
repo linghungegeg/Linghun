@@ -202,6 +202,19 @@ describe("TaskBottomPane budget allocation", () => {
     expect(allocation.showAgentProgress).toBe(false);
   });
 
+  it("keeps queued follow-ups ahead of optional progress rows", () => {
+    const allocation = allocateBottomPaneBudget(14, {
+      queuedInputRows: 3,
+      workflowProgressRows: 4,
+      agentProgressRows: 3,
+      sessionForkRows: 1,
+    });
+
+    expect(allocation.queuedInputRows).toBeGreaterThan(0);
+    expect(allocation.showWorkflowProgress).toBe(false);
+    expect(allocation.showAgentProgress).toBe(false);
+  });
+
   it("does not break the transcript reserve at the compact boundary", () => {
     const allocation = allocateBottomPaneBudget(6, {
       workingRows: 1,

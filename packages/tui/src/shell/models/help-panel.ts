@@ -61,6 +61,7 @@ const ADVANCED_ENTRIES_ZH: HelpPanelEntry[] = [
   { slash: "/batch", description: "启动隔离 worktree batch 智能体" },
   { slash: "/skills", description: "管理技能与启用状态" },
   { slash: "/workflows", description: "查看 workflow 状态与触发入口" },
+  { slash: "/fork", description: "无参数复制当前会话；带 agent 角色时启动子智能体" },
   { slash: "/handoff", description: "导出会话 handoff packet" },
   { slash: "/branch", description: "基于 handoff 创建会话分支（不是 git 分支）" },
   { slash: "/git", description: "查看 git 状态、稳定点建议、worktree 摘要（只读）" },
@@ -76,6 +77,7 @@ const ADVANCED_ENTRIES_EN: HelpPanelEntry[] = [
   { slash: "/batch", description: "Run isolated worktree batch agents" },
   { slash: "/skills", description: "Manage skills and their enabled state" },
   { slash: "/workflows", description: "Inspect workflow status and trigger entries" },
+  { slash: "/fork", description: "Fork the current session, or start an agent when a role is provided" },
   { slash: "/handoff", description: "Export the session handoff packet" },
   { slash: "/branch", description: "Create a session branch from handoff (not a git branch)" },
   {

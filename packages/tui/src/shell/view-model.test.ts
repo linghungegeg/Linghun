@@ -207,6 +207,31 @@ describe("shell view model", () => {
     expect(modelView.composer.masking).toBe(false);
   });
 
+  it("projects only the current session fork from its handoff", () => {
+    const memory = {
+      lastHandoff: {
+        sessionId: "fork-current",
+        parentSessionId: "fork-parent",
+        goal: "compare layouts",
+      },
+    } as unknown as TuiContext["memory"];
+    const forkView = createShellViewModel(
+      createContext({ sessionId: "fork-current", memory }),
+      { width: 80 },
+    );
+    const unrelatedView = createShellViewModel(
+      createContext({ sessionId: "other-session", memory }),
+      { width: 80 },
+    );
+
+    expect(forkView.sessionFork).toEqual({
+      currentSessionId: "fork-current",
+      parentSessionId: "fork-parent",
+      goal: "compare layouts",
+    });
+    expect(unrelatedView.sessionFork).toBeUndefined();
+  });
+
   it("keeps project route problems separate from user provider setup", () => {
     const view = createShellViewModel(createContext(), {
       projectRouteProblem: "missing-provider executor route",
@@ -1167,7 +1192,7 @@ describe("task-only view mode", () => {
     // Vision text NOT shown in task mode
     expect(output.text).not.toContain("技术普惠会越来越成熟");
     // Composer still present, with the task-mode placeholder
-    expect(output.text).toContain("继续输入…");
+    expect(output.text).toContain("输入后续消息，按 Tab 排队");
   });
 
   it("task mode Ink render shows permission with border", async () => {
@@ -4511,7 +4536,7 @@ describe("D.13D Final Closure — interaction shell", () => {
     expect(output.text).not.toContain("费用");
     expect(output.text).not.toContain("项目：");
     // task placeholder used
-    expect(output.text).toContain("继续输入…");
+    expect(output.text).toContain("输入后续消息，按 Tab 排队");
   });
 
   it("Task Ink render still hides home brand wordmark", async () => {
@@ -8085,7 +8110,8 @@ describe("D.13Q-UX Real Smoke Fix v2 — D. busy guard 不吞草稿", () => {
       submitted: true,
     });
     expect(view.composer.busy).toBe(true);
-    expect(view.composer.busyHint ?? "").toContain("正在处理");
+    expect(view.composer.busyHint).toContain("Tab 排队");
+    expect(view.composer.taskPlaceholder).toContain("按 Tab 排队");
   });
 
   it("activeAbortController 存在时 busy=true，即使 submitted=false", () => {

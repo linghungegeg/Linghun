@@ -529,6 +529,9 @@ import {
   createUserTextBlock,
 } from "./shell/models/command-transcript-presenter.js";
 import {
+  QueuedInputQueue,
+} from "./shell/models/queued-input-state.js";
+import {
   createTranscriptSource,
   transcriptSourceRawTextForBlock,
   transcriptSourceKindForBlock,
@@ -2621,6 +2624,8 @@ async function runInkShell(
   let commandSequence = 0;
   let composerOverlayRows = 0;
   let composerDraftText = "";
+  const queuedInputQueue = new QueuedInputQueue();
+  let shellExitRequested = false;
   let resolveExit: (code: number) => void = () => undefined;
   const exitPromise = new Promise<number>((resolve) => {
     resolveExit = resolve;
@@ -2691,6 +2696,7 @@ async function runInkShell(
         reasoningSent: runtime.reasoningSent,
         composerOverlayRows,
         composerDraftText,
+        queuedInputs: queuedInputQueue.items,
         // D.13Q-UX Task Surface — controller 持有的 configPanelState 必须显式
         // 喂给 view-model；旧实现遗漏这一行，导致 /config submit 后 ConfigPanel
         // 永远不会出现在 ShellViewModel.configPanel 上。
@@ -2758,6 +2764,30 @@ async function runInkShell(
       }
       if (event.type === "composer-draft-change") {
         composerDraftText = event.text;
+        return;
+      }
+      if (event.type === "queue-submit") {
+        const queued = queuedInputQueue.enqueue(event.text);
+        if (queued.full) {
+          pushTransientNotification(
+            context,
+            context.language === "en-US"
+              ? "Follow-up queue is full. Wait for an item to run or edit the latest one."
+              : "后续输入队列已满，请等待执行或取回最后一条编辑。",
+            "warning",
+          );
+        } else if (queued.item) {
+          composerDraftText = "";
+        }
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "queued-input-edit-latest") {
+        const latest = queuedInputQueue.takeLatest(event.id);
+        if (latest) composerDraftText = latest.text;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
         return;
       }
       if (event.type === "interrupt") {
@@ -3692,6 +3722,7 @@ async function runInkShell(
         submittedPendingStartedAt = undefined;
         shell?.rerender();
         if (result === "exit") {
+          shellExitRequested = true;
           shell?.unmount();
           resolveExit(0);
           return;
@@ -3759,14 +3790,29 @@ async function runInkShell(
         shell?.rerender();
       }
       if (result === "exit") {
+        shellExitRequested = true;
         shell?.unmount();
         resolveExit(0);
         return;
       }
       await shell?.waitUntilRenderFlush();
       runMemoryEviction(context, blocks);
+      await drainQueuedInputs();
     },
   };
+
+  async function drainQueuedInputs(): Promise<void> {
+    if (shellExitRequested || queuedInputQueue.items.length === 0) return;
+    await queuedInputQueue.drain(
+      () => shellExitRequested || controller.getViewModel().composer.busy === true,
+      async (item) => {
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        await controller.onInput({ type: "submit", text: item.text });
+      },
+      () => shell?.rerender(),
+    );
+  }
 
   try {
     shell = renderInkShell(controller, {
@@ -3801,6 +3847,16 @@ async function runInkShell(
         !hasWorkflows &&
         !hasBgTasks
       ) {
+        void drainQueuedInputs().catch((error: unknown) => {
+          pushTransientNotification(
+            context,
+            context.language === "en-US"
+              ? `Queued follow-up failed: ${formatError(error, context.language)}`
+              : `排队后续输入执行失败：${formatError(error, context.language)}`,
+            "error",
+          );
+          requestShellFrame();
+        });
         return;
       }
       requestShellFrame();
@@ -4010,7 +4066,12 @@ export async function handleSlashCommand(
     return "handled";
   }
   if (command === "/fork") {
-    await handleForkCommand(rest, context, output);
+    const target = rest[0]?.toLowerCase();
+    if (rest.length === 0 || target === "session" || target === "chat") {
+      await handleBranchCommand(rest.length === 0 ? [] : rest.slice(1), context, output);
+    } else {
+      await handleForkCommand(rest, context, output);
+    }
     return "handled";
   }
   if (command === "/rewind") {

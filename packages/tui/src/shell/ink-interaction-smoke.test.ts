@@ -2509,6 +2509,79 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("queues a busy follow-up with Tab and submits with Tab when idle", async () => {
+    const busyView: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      composer: { ...baseTaskView().composer, busy: true },
+      queuedInputs: [],
+    };
+    const busy = await renderWithEvents(() => busyView);
+    for (const value of [..."follow up", "\t"]) await writeInput(busy.input, busy.shell, value);
+
+    expect(busy.events).toContainEqual({ type: "queue-submit", text: "follow up" });
+    expect(busy.events).not.toContainEqual({ type: "submit", text: "follow up" });
+    busy.shell.unmount();
+
+    const idleView = { ...busyView, composer: { ...busyView.composer, busy: false } };
+    const idle = await renderWithEvents(() => idleView);
+    for (const value of [..."send now", "\t"]) await writeInput(idle.input, idle.shell, value);
+
+    expect(idle.events).toContainEqual({ type: "submit", text: "send now" });
+    idle.shell.unmount();
+  });
+
+  it("keeps slash completion ahead of busy Tab queueing", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      composer: { ...baseTaskView().composer, busy: true },
+      queuedInputs: [],
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+    for (const value of [..."/he", "\t"]) await writeInput(input, shell, value);
+
+    expect(events.some((event) => event.type === "queue-submit")).toBe(false);
+    expect(
+      events.some(
+        (event) => event.type === "composer-draft-change" && event.text.startsWith("/help"),
+      ),
+    ).toBe(true);
+    shell.unmount();
+  });
+
+  it("shows queued follow-ups and restores the latest one with Alt+Up", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      composer: { ...baseTaskView().composer, busy: true },
+      queuedInputs: [
+        { id: "queued-input-1", text: "first follow-up" },
+        { id: "queued-input-2", text: "latest follow-up" },
+      ],
+      sessionFork: {
+        currentSessionId: "current-session-1234",
+        parentSessionId: "parent-session-5678",
+      },
+    };
+    const { input, output, events, shell } = await renderWithEvents(() => view);
+    const visible = finalScreenLinesFrom(output, view.height).join("\n");
+
+    expect(visible).toContain("后续输入排队 2 条");
+    expect(visible).toContain("first follow-up");
+    expect(visible).toContain("会话 Fork current-");
+    expect(visible).toContain("父会话 parent-s");
+
+    await writeInput(input, shell, "\x1b[1;3A");
+    expect(events).toContainEqual({ type: "queued-input-edit-latest", id: "queued-input-2" });
+    expect(
+      events.some(
+        (event) => event.type === "composer-draft-change" && event.text === "latest follow-up",
+      ),
+    ).toBe(true);
+    shell.unmount();
+  });
+
   it("keeps empty composer number input as text instead of globally selecting suggestions", async () => {
     const view: ShellViewModel = {
       ...baseTaskView(),

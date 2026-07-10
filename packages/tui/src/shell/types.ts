@@ -1,6 +1,7 @@
 import type { Readable, Writable } from "node:stream";
 import type { Language } from "@linghun/shared";
 import type { Keybinding } from "../keybinding-runtime.js";
+import type { QueuedInputItem } from "./models/queued-input-state.js";
 
 export type ShellRuntimeMode = "ink" | "plain";
 
@@ -570,6 +571,12 @@ export type ShellViewModel = {
   permission?: TaskPermissionView;
   status: StatusTrayViewModel;
   composer: ComposerViewModel;
+  queuedInputs?: QueuedInputItem[];
+  sessionFork?: {
+    currentSessionId: string;
+    parentSessionId: string;
+    goal?: string;
+  };
   blocks: ProductBlockViewModel[];
   /** Append-only finalized history for normal-screen Static output. */
   staticHistoryBlocks?: ProductBlockViewModel[];
@@ -721,6 +728,8 @@ export type VisibleWorkState = {
  */
 export type ShellInputEvent =
   | { type: "submit"; text: string }
+  | { type: "queue-submit"; text: string }
+  | { type: "queued-input-edit-latest"; id: string }
   | { type: "empty-submit" }
   | { type: "escape" }
   | { type: "interrupt" }

@@ -4822,6 +4822,26 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Resume context package");
   });
 
+  it("uses bare /fork for a session fork while preserving role-based agent forks", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const parent = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, parent);
+
+    await handleSlashCommand("/fork", context, output);
+
+    const forkId = context.sessionId;
+    const resumed = await store.resume(forkId ?? "missing");
+    const branch = resumed.transcript.find((event) => event.type === "branch_created");
+    expect(forkId).not.toBe(parent.id);
+    expect(branch).toMatchObject({
+      type: "branch_created",
+      branch: { parentSessionId: parent.id, sourceSession: parent.id },
+    });
+    expect(output.text).toContain("已创建会话分支");
+  });
+
   it("handles Phase 11 memory, resume, branch, and cache freshness", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

@@ -42,6 +42,8 @@ export type BottomPaneSlotEstimates = {
   taskListRows?: number;
   agentProgressRows?: number;
   workflowProgressRows?: number;
+  queuedInputRows?: number;
+  sessionForkRows?: number;
 };
 
 export type BottomPaneBudgetAllocation = {
@@ -57,6 +59,8 @@ export type BottomPaneBudgetAllocation = {
   showTaskList: boolean;
   showAgentProgress: boolean;
   showWorkflowProgress: boolean;
+  queuedInputRows: number;
+  showSessionFork: boolean;
 };
 
 export function allocateBottomPaneBudget(
@@ -75,6 +79,7 @@ export function allocateBottomPaneBudget(
         ? COMPACT_FOOTER_ROWS
         : 0;
   let workingRows = (slotEstimates.workingRows ?? 0) > 0 ? WORKING_ROWS : 0;
+  let queuedInputRows = Math.max(0, Math.floor(slotEstimates.queuedInputRows ?? 0));
   const slashCap =
     mode === "full" ? FULL_SLASH_ROWS : mode === "compact" ? COMPACT_SLASH_ROWS : 0;
   let slashMaxRows = Math.min(Math.max(0, slotEstimates.slashRows ?? 0), slashCap);
@@ -84,7 +89,7 @@ export function allocateBottomPaneBudget(
     composerMaxVisibleLines +
     slashMaxRows +
     (mode === "full" ? COMPOSER_TOP_PADDING_ROWS : 0);
-  const requiredRows = () => composerRows() + footerRows + workingRows;
+  const requiredRows = () => composerRows() + footerRows + workingRows + queuedInputRows;
 
   if (requiredRows() > maxRows && slashMaxRows > 0 && composerMaxVisibleLines > 1) {
     composerMaxVisibleLines = COMPACT_COMPOSER_VISIBLE_LINES;
@@ -98,6 +103,8 @@ export function allocateBottomPaneBudget(
   }
   if (requiredRows() > maxRows && footerRows > 0) footerRows = 0;
   if (requiredRows() > maxRows && workingRows > 0) workingRows = 0;
+  while (requiredRows() > maxRows && queuedInputRows > 1) queuedInputRows -= 1;
+  if (requiredRows() > maxRows && queuedInputRows > 0) queuedInputRows = 0;
 
   let remainingRows = Math.max(0, maxRows - requiredRows());
   const take = (rows: number | undefined): boolean => {
@@ -113,6 +120,7 @@ export function allocateBottomPaneBudget(
   const showTaskList = take(slotEstimates.taskListRows);
   const showRuntimeSummary = take(slotEstimates.runtimeSummaryRows);
   const showNotifications = take(slotEstimates.notificationRows);
+  const showSessionFork = take(slotEstimates.sessionForkRows);
 
   return {
     mode,
@@ -127,6 +135,8 @@ export function allocateBottomPaneBudget(
     showTaskList,
     showAgentProgress,
     showWorkflowProgress,
+    queuedInputRows,
+    showSessionFork,
   };
 }
 
@@ -159,6 +169,9 @@ export function TaskBottomPane({
     taskListRows: estimateTaskListRows(view.taskListView, statusActive),
     agentProgressRows: estimateAgentProgressRows(view.agentProgressTree),
     workflowProgressRows: estimateWorkflowProgressRows(view.workflowProgressView),
+    queuedInputRows:
+      (view.queuedInputs?.length ?? 0) > 0 ? Math.min(4, (view.queuedInputs?.length ?? 0) + 1) : 0,
+    sessionForkRows: view.sessionFork ? 1 : 0,
   };
   const allocation = allocateBottomPaneBudget(frameHeight, {
     ...slotEstimates,
@@ -246,6 +259,20 @@ export function TaskBottomPane({
         />
       ) : null}
 
+      {allocation.showSessionFork && view.sessionFork ? (
+        <SessionForkLine fork={view.sessionFork} width={contentWidth} language={view.language} theme={theme} />
+      ) : null}
+
+      {allocation.queuedInputRows > 0 && (view.queuedInputs?.length ?? 0) > 0 ? (
+        <QueuedInputPreview
+          items={view.queuedInputs ?? []}
+          rows={allocation.queuedInputRows}
+          width={contentWidth}
+          language={view.language}
+          theme={theme}
+        />
+      ) : null}
+
       <Box flexDirection="column" width={cw} paddingTop={allocation.mode === "full" ? 1 : 0}>
         <Composer
           view={view}
@@ -271,6 +298,68 @@ export function TaskBottomPane({
           <CompactStatusFooter footer={view.taskFooter} width={view.width} />
         )
       ) : null}
+    </Box>
+  );
+}
+
+function QueuedInputPreview({
+  items,
+  rows,
+  width,
+  language,
+  theme,
+}: {
+  items: NonNullable<ShellViewModel["queuedInputs"]>;
+  rows: number;
+  width: number;
+  language: ShellViewModel["language"];
+  theme: ShellTheme;
+}): React.ReactNode {
+  const visible = items.slice(0, Math.max(0, rows - 1));
+  const hidden = Math.max(0, items.length - visible.length);
+  const title =
+    language === "en-US"
+      ? `Queued follow-ups ${items.length} · Alt+↑ edit latest`
+      : `后续输入排队 ${items.length} 条 · Alt+↑ 编辑末条`;
+  return (
+    <Box flexDirection="column" width={width} paddingX={2}>
+      <Text color={theme.muted} dimColor>
+        {fitText(`• ${title}`, width)}
+      </Text>
+      {visible.map((item, index) => (
+        <Text key={item.id} color={theme.muted} dimColor>
+          {fitText(
+            `  ${index === visible.length - 1 ? "└" : "├"} ${item.text}${hidden > 0 && index === visible.length - 1 ? ` · +${hidden}` : ""}`,
+            width,
+          )}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+function SessionForkLine({
+  fork,
+  width,
+  language,
+  theme,
+}: {
+  fork: NonNullable<ShellViewModel["sessionFork"]>;
+  width: number;
+  language: ShellViewModel["language"];
+  theme: ShellTheme;
+}): React.ReactNode {
+  const current = fork.currentSessionId.slice(0, 8);
+  const parent = fork.parentSessionId.slice(0, 8);
+  const text =
+    language === "en-US"
+      ? `Fork ${current} ← parent ${parent} · /sessions to switch`
+      : `会话 Fork ${current} ← 父会话 ${parent} · /sessions 切换`;
+  return (
+    <Box width={width} paddingX={2}>
+      <Text color={theme.muted} dimColor>
+        {fitText(text, width)}
+      </Text>
     </Box>
   );
 }
