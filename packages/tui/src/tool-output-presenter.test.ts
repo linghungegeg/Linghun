@@ -428,7 +428,7 @@ describe("tool-output-presenter", () => {
       expect(layered.preview).toContain("- 范围:\n  1. src/alpha.ts:10-20");
       expect(layered.preview).toContain("\n  2. src/beta.ts:30-40");
       expect(layered.preview).toContain("\n  3. src/gamma.ts:50-60");
-      expect(layered.preview).toContain("另 1 项在详情中");
+      expect(layered.preview).toContain("另有 1 项在详情中");
       expect(layered.preview).not.toContain("src/delta.ts:70-80");
       expect(layered.preview).not.toContain("PRIVATE_SNIPPET_BODY");
       expect(layered.details).toBe("snippet output");
@@ -508,6 +508,159 @@ describe("tool-output-presenter", () => {
       expect(sourcePack.details).toBe("source pack output");
       expect(edit.preview).toContain("- 路径:\n  1. src/a.ts\n  2. src/b.ts");
       expect(edit.preview).not.toContain("src/a.ts; src/b.ts");
+    });
+
+    it("Diff 真实 changedFiles 按行编号，超出路径只进详情", () => {
+      const details = [
+        "# Full diff evidence",
+        "",
+        "| File | Status |",
+        "| --- | --- |",
+        "| src/a.ts | changed |",
+        "",
+        "```diff",
+        "+const changed = true;",
+        "```",
+      ].join("\n");
+      const structured = createStructuredToolOutput(
+        "Diff",
+        {
+          text: "本轮工具改动 4 个文件，+8 -3。\n- src/a.ts\n- src/b.ts\n- src/c.ts\n- src/d.ts",
+          details,
+          fullOutputPath: ".linghun/session/tool-results/diff.txt",
+          evidenceId: "ev-diff",
+          data: {
+            changedFiles: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"],
+            addedLines: 8,
+            removedLines: 3,
+          },
+        },
+        "zh-CN",
+      );
+
+      expect(structured.text).toContain("Diff 摘要：4 个文件，+8 -3。");
+      expect(structured.layered.preview).toContain(
+        "- 路径:\n  1. src/a.ts\n  2. src/b.ts\n  3. src/c.ts",
+      );
+      expect(structured.layered.preview).toContain("另有 1 项在详情中");
+      expect(structured.layered.preview).not.toContain("src/d.ts");
+      expect(structured.layered.details).toBe(details);
+      expect(structured.block.detailsPath).toBe(".linghun/session/tool-results/diff.txt");
+      expect(structured.block.evidenceId).toBe("ev-diff");
+    });
+
+    it("Grep count 大于 preview 时按总数折叠，并去掉重复匹配计数", () => {
+      const previewText = [
+        "找到 10 处匹配。",
+        "src/a.ts:1: alpha",
+        "src/b.ts:2: beta",
+      ].join("\n");
+      const outputText = [
+        "找到 10 处匹配。",
+        ...Array.from({ length: 10 }, (_, index) => `src/${index}.ts:${index + 1}: match`),
+      ].join("\n");
+      const structured = createStructuredToolOutput(
+        "Grep",
+        { text: outputText, preview: previewText, data: { count: 10 } },
+        "zh-CN",
+      );
+
+      expect(structured.text.match(/找到 (?:\*\*)?10(?:\*\*)? 处匹配。/gu)).toHaveLength(1);
+      expect(structured.layered.preview).toContain("1. src/a.ts:1: alpha");
+      expect(structured.layered.preview).toContain("2. src/b.ts:2: beta");
+      expect(structured.layered.preview).toContain("另有 8 项在详情中");
+      expect(structured.layered.preview).not.toContain("1. 找到 10 处匹配");
+      expect(structured.layered.details).toBe(outputText);
+      expect(structured.layered.truncated).toBe(true);
+    });
+
+    it("Grep count 大于现有正文但无完整载体时不虚构详情数量", () => {
+      const structured = createStructuredToolOutput(
+        "Grep",
+        {
+          text: "src/a.ts:1: alpha\nsrc/b.ts:2: beta",
+          data: { count: 10 },
+        },
+        "zh-CN",
+      );
+
+      expect(structured.text).toContain("找到 **10** 处匹配。");
+      expect(structured.layered.preview).toContain("1. src/a.ts:1: alpha");
+      expect(structured.layered.preview).not.toContain("另有 8 项");
+      expect(structured.layered.details).toBeUndefined();
+      expect(structured.layered.truncated).toBe(false);
+    });
+
+    it("Grep/Glob count=0 不制造伪结果列表", () => {
+      const grep = createStructuredToolOutput(
+        "Grep",
+        { text: "未找到匹配内容。", data: { count: 0 } },
+        "zh-CN",
+      );
+      const glob = createStructuredToolOutput(
+        "Glob",
+        { text: "未找到匹配文件。", data: { count: 0 } },
+        "zh-CN",
+      );
+
+      expect(grep.text).toBe("找到 **0** 处匹配。");
+      expect(glob.text).toBe("找到 **0** 个文件。");
+      expect(grep.layered.preview).toBe("");
+      expect(glob.layered.preview).toBe("");
+      expect(grep.layered.truncated).toBe(false);
+      expect(glob.layered.truncated).toBe(false);
+    });
+
+    it("10K Diff 与 50K Grep 压力下主视图有界，详情和引用完整", () => {
+      const changedFiles = Array.from({ length: 10_000 }, (_, index) => `src/file-${index}.ts`);
+      const diffDetails = [
+        "| Kind | Value |",
+        "| --- | --- |",
+        "| files | 10000 |",
+        "",
+        "```diff",
+        "+full patch retained",
+        "```",
+        changedFiles.join("\n"),
+      ].join("\n");
+      const diff = createStructuredToolOutput(
+        "Diff",
+        {
+          text: "diff complete",
+          details: diffDetails,
+          fullOutputPath: ".linghun/session/tool-results/diff-10k.txt",
+          evidenceId: "ev-diff-10k",
+          data: { changedFiles, addedLines: 10_000, removedLines: 0 },
+        },
+        "en-US",
+      );
+      const grepText = Array.from(
+        { length: 50_000 },
+        (_, index) => `src/file-${index}.ts:${index + 1}: match`,
+      ).join("\n");
+      const grep = createStructuredToolOutput(
+        "Grep",
+        {
+          text: grepText,
+          fullOutputPath: ".linghun/session/tool-results/grep-50k.txt",
+          evidenceId: "ev-grep-50k",
+          data: { count: 50_000 },
+        },
+        "en-US",
+      );
+
+      expect(diff.text.length).toBeLessThan(1_000);
+      expect(diff.text).toContain("1. src/file-0.ts");
+      expect(diff.text).not.toContain("src/file-9999.ts");
+      expect(diff.layered.details).toBe(diffDetails);
+      expect(diff.block.detailsPath).toBe(".linghun/session/tool-results/diff-10k.txt");
+      expect(diff.block.evidenceId).toBe("ev-diff-10k");
+      expect(grep.text.length).toBeLessThan(1_000);
+      expect(grep.text).toContain("1. src/file-0.ts:1: match");
+      expect(grep.text).not.toContain("src/file-49999.ts");
+      expect(grep.layered.details).toBe(grepText);
+      expect(grep.block.detailsPath).toBe(".linghun/session/tool-results/grep-50k.txt");
+      expect(grep.block.evidenceId).toBe("ev-grep-50k");
     });
 
     it("evidenceId 透传到 layered.evidenceId（保留诊断信息）", () => {

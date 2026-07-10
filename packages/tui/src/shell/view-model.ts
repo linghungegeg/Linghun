@@ -292,9 +292,17 @@ export function createShellViewModel(
     // terminal history would keep piling into the fixed-height frame and
     // compress after a few turns. transcriptSource stays canonical for the
     // non-native staticHistory replay path and Ctrl+O expansion.
-    const allOutputBlocks = shouldUseNativeScrollbackTaskFrame()
-      ? (options.outputBlocks ?? [])
-      : (sourceOutputBlocks ?? options.outputBlocks ?? []);
+    const nativeScrollback = shouldUseNativeScrollbackTaskFrame();
+    const expandedSourceBlock =
+      nativeScrollback && ctrlOExpandState?.active && ctrlOExpandState.blockId
+        ? sourceOutputBlocks?.find((block) => block.id === ctrlOExpandState.blockId)
+        : undefined;
+    const liveOutputBlocks = options.outputBlocks ?? [];
+    const allOutputBlocks = nativeScrollback
+      ? expandedSourceBlock && !liveOutputBlocks.some((block) => block.id === expandedSourceBlock.id)
+        ? [...liveOutputBlocks, expandedSourceBlock]
+        : liveOutputBlocks
+      : (sourceOutputBlocks ?? liveOutputBlocks);
     // D.13Q-UX Real Smoke Fix v3 — transcript 必须严格按 append 时间顺序排列。
     // 旧实现 [...failBlocks, ...keepBlocks, ...ephemeralBlocks] 会按类型重排，
     // 让失败块插队到旧消息上方、ephemeral 推到 keep 后面，破坏 user → assistant
@@ -1185,7 +1193,7 @@ function stripEmbeddedFoldHint(text: string): { text: string; stripped: boolean 
 }
 
 function hasPresenterHiddenSummary(text: string): boolean {
-  if (/^\s*\.\.\.\s*(?:另有 \d+ 项在详情中。|\d+ more item\(s\) in details\.)/mu.test(text)) {
+  if (/^\s*\.\.\.\s*(?:另(?:有)? \d+ 项在详情中。|\d+ more item\(s\) in details\.)/mu.test(text)) {
     return true;
   }
   const firstLine = text.split(/\r?\n/u).find((line) => line.trim().length > 0) ?? "";
@@ -1298,7 +1306,7 @@ function isToolCallLike(text: string): boolean {
 }
 
 function isToolResultLike(text: string): boolean {
-  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit)\(|Bash\s+(?:✓|✗)|找到\s+\*\*?\d+\*\*?\s+(?:处匹配|个文件)|读取\s+\*\*?\d+\*\*?\s+行|(?:Found|Read)\s+\*\*?\d+\*\*?|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|Todo[:：]|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
+  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|ReadSnippets|SourcePack|Grep|Glob|Write|Edit|MultiEdit)\(|Bash\s+(?:✓|✗)|找到\s+\*\*?\d+\*\*?\s+(?:处匹配|个文件)|读取\s+\*\*?\d+\*\*?\s+行|(?:Found|Read|ReadSnippets|SourcePack)\s+\*\*?\d+\*\*?|(?:Bash|Read|ReadSnippets|SourcePack|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|Todo[:：]|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
     text.trim(),
   );
 }
@@ -2696,7 +2704,7 @@ function fitLine(value: string, width: number): string {
   return truncateMiddle(value.replace(/\s+/gu, " ").trim(), width);
 }
 
-function redactSensitiveText(value: string): string {
+export function redactSensitiveText(value: string): string {
   return value
     .replace(/sk-[A-Za-z0-9_-]{8,}/gu, "[masked-key]")
     .replace(/(api[_-]?key\s*[=:]\s*)\S+/giu, "$1[masked-key]")

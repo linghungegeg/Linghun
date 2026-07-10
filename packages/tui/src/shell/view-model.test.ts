@@ -15,8 +15,10 @@ import {
 } from "../cache-policy-runtime.js";
 import {
   commitTerminalFirstUserBlock,
+  createShellBlockOutputForTest,
   createTerminalFirstAssistantSink,
   writeAssistantDelta,
+  writeStructuredToolOutput,
 } from "../tui-output-surface.js";
 import {
   bufferInsert,
@@ -6957,6 +6959,221 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     // tool_result_success rows carry the ⎿ continuation prefix.
     expect(history).toContain("⎿");
     expect(history).toContain("  ⎿  tool body\x1B[K\r\n\x1B[K");
+  });
+
+  it("structured tool output keeps preview on the main surface and details in Ctrl+O", () => {
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
+    const details = [
+      "# Evidence",
+      "",
+      "| Path | Range |",
+      "| --- | --- |",
+      "| src/a.ts | 1-4 |",
+      "",
+      "```ts",
+      "const DETAIL_SENTINEL = true;",
+      "```",
+    ].join("\n");
+    const structured = createStructuredToolOutput(
+      "ReadSnippets",
+      {
+        text: details,
+        details,
+        fullOutputPath: ".linghun/session/tool-results/read-snippets.txt",
+        evidenceId: "ev-read-snippets",
+        data: {
+          count: 2,
+          ranges: [
+            { path: "src/a.ts", start: 1, end: 4 },
+            { path: "src/b.ts", start: 8, end: 12 },
+          ],
+        },
+      },
+      "zh-CN",
+    );
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = createShellBlockOutputForTest(ctx, blocks);
+
+    output.writeStructuredToolOutput(structured);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.summary).toContain("- 范围:\n  1. src/a.ts:1-4\n  2. src/b.ts:8-12");
+    expect(blocks[0]?.summary).not.toContain("DETAIL_SENTINEL");
+    expect(blocks[0]?.fullText).toContain(details);
+    expect(blocks[0]?.displayBlock?.detailsPath).toBe(
+      ".linghun/session/tool-results/read-snippets.txt",
+    );
+    expect(blocks[0]?.displayBlock?.evidenceId).toBe("ev-read-snippets");
+    expect(ctx.lastFullOutput).toContain(details);
+
+    const collapsed = renderPlainShell(
+      createShellViewModel(ctx, { outputBlocks: blocks, width: 100, viewMode: "task" }),
+    );
+    expect(collapsed).not.toContain("DETAIL_SENTINEL");
+    ctx.ctrlOExpandState = { active: true, blockId: blocks[0]?.id };
+    const expanded = renderPlainShell(
+      createShellViewModel(ctx, { outputBlocks: blocks, width: 100, viewMode: "task" }),
+    );
+    expect(expanded).toContain("Path");
+    expect(expanded).toContain("Range");
+    expect(expanded).toContain("const DETAIL_SENTINEL = true;");
+  });
+
+  it("native scrollback commits only structured preview and reprojects canonical details", () => {
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const { output: ttyOutput, read } = makeTtyCapture();
+    const sink = createTerminalFirstAssistantSink(ttyOutput, {
+      columns: 100,
+      noColor: true,
+      viewportGeometry: terminalHistoryGeometry,
+      rows: 30,
+    });
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = createShellBlockOutputForTest(ctx, blocks, () => {}, sink);
+    const structured = createStructuredToolOutput(
+      "SourcePack",
+      {
+        text: "CANONICAL_DETAIL_SENTINEL",
+        details: "## Full source evidence\n\nCANONICAL_DETAIL_SENTINEL",
+        fullOutputPath: ".linghun/session/tool-results/source-pack.txt",
+        evidenceId: "ev-source-pack",
+        data: { snippets: [{ path: "src/source.ts", start: 4, end: 9 }] },
+      },
+      "en-US",
+    );
+
+    output.writeStructuredToolOutput(structured);
+
+    expect(blocks).toHaveLength(0);
+    expect(ctx.transcriptSource?.cells).toHaveLength(1);
+    expect(read()).toContain("1. src/source.ts:4-9");
+    expect(read()).not.toContain("CANONICAL_DETAIL_SENTINEL");
+    const blockId = ctx.transcriptSource?.cells[0]?.block.id;
+    ctx.ctrlOExpandState = { active: true, blockId };
+    const expanded = createShellViewModel(ctx, {
+      outputBlocks: blocks,
+      transcriptSource: ctx.transcriptSource,
+      width: 100,
+      viewMode: "task",
+    });
+    expect(expanded.blocks.some((block) => block.summary.includes("CANONICAL_DETAIL_SENTINEL"))).toBe(
+      true,
+    );
+  });
+
+  it("structured tool output keeps the legacy Writable fallback byte-for-byte", () => {
+    let captured = "";
+    const output = new Writable({
+      write(chunk, _encoding, callback) {
+        captured += chunk.toString();
+        callback();
+      },
+    });
+    const structured = createStructuredToolOutput(
+      "Glob",
+      { text: "src/a.ts\nsrc/b.ts", data: { count: 2 } },
+      "en-US",
+    );
+
+    writeStructuredToolOutput(output, structured, "report primary override");
+
+    expect(captured).toBe("report primary override\n");
+  });
+
+  it("structured details normalize terminal wrappers and redact visible secrets", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = createShellBlockOutputForTest(ctx, blocks);
+    const structured = createStructuredToolOutput(
+      "Glob",
+      {
+        text: "src/a.ts",
+        details: JSON.stringify({ text: "\u001b[31mBearer secret-token-12345\u001b[0m" }),
+        data: { count: 1 },
+      },
+      "en-US",
+    );
+
+    output.writeStructuredToolOutput(structured);
+
+    expect(blocks[0]?.fullText).toBe("Bearer [masked-key]");
+    expect(blocks[0]?.fullText).not.toContain("\u001b");
+    expect(blocks[0]?.fullText).not.toContain("secret-token-12345");
+  });
+
+  it("path-only structured details remain reachable through Ctrl+O", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = createShellBlockOutputForTest(ctx, blocks);
+    const structured = createStructuredToolOutput(
+      "Glob",
+      {
+        text: "src/a.ts",
+        fullOutputPath: ".linghun/session/tool-results/glob.txt",
+        evidenceId: "ev-glob-path-only",
+        data: { count: 1 },
+      },
+      "en-US",
+    );
+
+    output.writeStructuredToolOutput(structured);
+
+    expect(blocks[0]?.ctrlOCollapsed).toBe(true);
+    expect(blocks[0]?.fullText).toContain("完整输出：.linghun/session/tool-results/glob.txt");
+    expect(blocks[0]?.fullText).toContain("证据：ev-glob-path-only");
+  });
+
+  it("structured 1MB details stay artifact-bounded without losing references", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "linghun-structured-output-memory-"));
+    try {
+      vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+      const { output: ttyOutput } = makeTtyCapture();
+      const sink = createTerminalFirstAssistantSink(ttyOutput, {
+        columns: 100,
+        noColor: true,
+        viewportGeometry: terminalHistoryGeometry,
+        rows: 30,
+      });
+      const ctx = { ...makeFakeContext(), projectPath: tempDir, sessionId: "structured-large" };
+      const blocks: ProductBlockViewModel[] = [];
+      const output = createShellBlockOutputForTest(ctx, blocks, () => {}, sink);
+      const details = `${"detail-row\n".repeat(100_000)}DETAIL_TAIL_SENTINEL`;
+      const structured = createStructuredToolOutput(
+        "Bash",
+        {
+          text: details,
+          preview: "command completed",
+          details,
+          fullOutputPath: ".linghun/session/tool-results/large.log",
+          evidenceId: "ev-large-details",
+          data: { exitCode: 0, lines: 100_000 },
+        },
+        "zh-CN",
+      );
+
+      output.writeStructuredToolOutput(structured);
+      expect(blocks).toHaveLength(0);
+      expect(ctx.transcriptSource?.cells[0]?.block.fullText?.length).toBeLessThan(12_000);
+      expect(ctx.transcriptSource?.cells[0]?.block.fullText).not.toContain("DETAIL_TAIL_SENTINEL");
+      expect(ctx.transcriptSource?.cells[0]?.block.fullText).toContain(
+        "完整输出：.linghun/session/tool-results/large.log",
+      );
+      expect(ctx.transcriptSource?.cells[0]?.block.fullText).toContain("证据：ev-large-details");
+      await output.compactOutputMemory();
+
+      expect(ctx.lastFullOutput?.length).toBeLessThan(12_000);
+      expect(ctx.transcriptSource?.cells[0]?.block.fullText?.length).toBeLessThan(12_000);
+      expect(ctx.transcriptSource?.cells[0]?.block.displayBlock?.detailsPath).toBe(
+        ".linghun/session/tool-results/large.log",
+      );
+      expect(ctx.transcriptSource?.cells[0]?.block.displayBlock?.evidenceId).toBe(
+        "ev-large-details",
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("commit tick drains queued stable lines smoothly and catches up when queue is old", () => {

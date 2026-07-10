@@ -30,8 +30,10 @@ import {
 } from "./shell/terminal-history-inserter.js";
 import { displayWidth, wrapText } from "./shell/text-utils.js";
 import type { ProductBlockViewModel, TranscriptViewportGeometryView } from "./shell/types.js";
-import { createOutputBlock } from "./shell/view-model.js";
+import { normalizeVisibleToolText } from "./shell/visible-output-normalizer.js";
+import { createOutputBlock, redactSensitiveText } from "./shell/view-model.js";
 import { stripAnsi, writeLine } from "./startup-runtime.js";
+import type { StructuredToolOutput } from "./tool-output-presenter.js";
 
 const MAX_OUTPUT_BLOCKS = 80;
 const PRESERVE_RECENT_EPHEMERAL_BLOCKS = 12;
@@ -167,6 +169,44 @@ export class ShellBlockOutput extends Writable {
       this.onWrite();
     }
     callback();
+  }
+
+  writeStructuredToolOutput(structured: StructuredToolOutput, primaryText = structured.text): void {
+    const normalizedPrimary = primaryText.replace(/\r/g, "").trim();
+    if (!normalizedPrimary) return;
+    const base = createOutputBlock(normalizedPrimary, this.context.language);
+    const details = createVisibleStructuredDetails(structured, this.context.language);
+    const hasVisibleDetails = Boolean(details && details !== base.fullText);
+    const isError = structured.block.kind === "tool_result_error";
+    const detailsHint =
+      this.context.language === "en-US"
+        ? `${TOGGLE_DETAILS_KEYBIND} for details`
+        : `${TOGGLE_DETAILS_KEYBIND} 查看完整内容`;
+    const block: ProductBlockViewModel = {
+      ...base,
+      kind: isError ? "error" : "details",
+      status: isError ? "fail" : "info",
+      title: "",
+      fullText: details || base.fullText,
+      nextAction: hasVisibleDetails ? detailsHint : base.nextAction,
+      ctrlOCollapsed: hasVisibleDetails || base.ctrlOCollapsed,
+      messageKind: structured.block.kind,
+      displayBlock: {
+        ...structured.block,
+        summary: base.summary,
+        body: base.fullText,
+      },
+    };
+    this.appendTranscriptSourceBlock(block);
+    this.blocks.push(block);
+    this.commitTerminalFirstStableBlock(block);
+    if (!this.context.suppressLastFullOutputCapture) {
+      this.context.lastFullOutput = block.fullText;
+    }
+    this.compactOutputMemory().catch((error) => {
+      void this.appendCompactOutputMemoryWarning(error);
+    });
+    this.onWrite();
   }
 
   /**
@@ -723,6 +763,38 @@ export class ShellBlockOutput extends Writable {
 
 }
 
+function createVisibleStructuredDetails(
+  structured: StructuredToolOutput,
+  language: "zh-CN" | "en-US",
+): string | undefined {
+  const normalized = structured.layered.details
+    ? redactSensitiveText(normalizeVisibleToolText(structured.layered.details).replace(/\r/g, "").trim())
+    : undefined;
+  const references = [
+    structured.layered.fullOutputPath
+      ? language === "en-US"
+        ? `Full output: ${structured.layered.fullOutputPath}`
+        : `完整输出：${structured.layered.fullOutputPath}`
+      : undefined,
+    structured.layered.evidenceId
+      ? language === "en-US"
+        ? `Evidence: ${structured.layered.evidenceId}`
+        : `证据：${structured.layered.evidenceId}`
+      : undefined,
+  ].filter((line): line is string => Boolean(line));
+  if (!normalized) return references.length > 0 ? references.join("\n") : undefined;
+  if (normalized.length <= MAX_BLOCK_FULL_TEXT_CHARS) {
+    return references.length > 0 ? [normalized, ...references].join("\n") : normalized;
+  }
+  const notice =
+    language === "en-US"
+      ? "... inline details bounded; use the retained full output or evidence."
+      : "... 内联详情已收敛；请查看保留的完整输出或证据。";
+  return [normalized.slice(0, LAST_FULL_OUTPUT_PREVIEW_CHARS).trimEnd(), notice, ...references]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function projectMainScreenAfterCompact(
   context: TuiContext,
   blocks: ProductBlockViewModel[],
@@ -1078,7 +1150,9 @@ function renderTerminalFirstStableBlock(
 function terminalFirstStableBlockText(block: ProductBlockViewModel): string {
   const source = block.kind === "command" && !block.messageKind
     ? block.title
-    : (block.fullText ?? block.summary);
+    : block.ctrlOCollapsed
+      ? block.summary
+      : (block.fullText ?? block.summary);
   return source.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 }
 
@@ -1381,6 +1455,24 @@ export function writeLocalCommandOutputLine(output: Writable, text: string): voi
   writeLine(output, text);
 }
 
+export function writeStructuredToolOutput(
+  output: Writable,
+  structured: StructuredToolOutput,
+  primaryText = structured.text,
+): void {
+  const candidate = output as {
+    writeStructuredToolOutput?: (
+      structured: StructuredToolOutput,
+      primaryText?: string,
+    ) => void;
+  };
+  if (typeof candidate.writeStructuredToolOutput === "function") {
+    candidate.writeStructuredToolOutput(structured, primaryText);
+    return;
+  }
+  writeLine(output, primaryText);
+}
+
 /**
  * 测试入口：构造一个 ShellBlockOutput 并暴露 begin/append/end + D.13V
  * discard/replace 操作，便于单测验证 streaming block / lastFullOutput 行为。
@@ -1398,6 +1490,7 @@ export function createShellBlockOutputForTest(
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
   writeLocalCommandOutputLine(text: string): void;
+  writeStructuredToolOutput(structured: StructuredToolOutput, primaryText?: string): void;
   compactOutputMemory(options?: { projectMainScreen?: boolean }): Promise<{ beforeCount: number; afterCount: number }>;
 } {
   return new ShellBlockOutput(context, blocks, onWrite, terminalFirstAssistantSink);

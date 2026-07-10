@@ -2858,7 +2858,12 @@ async function runInkShell(
           await shell?.waitUntilRenderFlush();
           return;
         }
-        const expandableBlock = findLatestCtrlOExpandableBlock(blocks);
+        const canonicalBlocks = context.transcriptSource?.cells.map((cell) => cell.block) ?? [];
+        const canonicalIds = new Set(canonicalBlocks.map((block) => block.id));
+        const expandableBlock = findLatestCtrlOExpandableBlock([
+          ...canonicalBlocks,
+          ...blocks.filter((block) => !canonicalIds.has(block.id)),
+        ]);
         if (expandableBlock) {
           const isSameBlockExpanded =
             context.ctrlOExpandState?.active &&

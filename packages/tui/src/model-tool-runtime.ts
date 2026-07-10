@@ -156,7 +156,7 @@ import {
   uniqueStrings,
   writeLine,
 } from "./startup-runtime.js";
-import { formatToolOutput } from "./tool-output-presenter.js";
+import { createStructuredToolOutput } from "./tool-output-presenter.js";
 import {
   findDurableJob,
   isAgentType,
@@ -193,7 +193,10 @@ import type {
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
 import { getSelectedModelRuntime } from "./tui-model-runtime.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
-import { writeErrorLine, writeLocalCommandOutputLine } from "./tui-output-surface.js";
+import {
+  writeErrorLine,
+  writeStructuredToolOutput,
+} from "./tui-output-surface.js";
 import { decidePermission, toPermissionPromptView } from "./tui-permission-runtime.js";
 import {
   createVerificationPlan,
@@ -949,19 +952,47 @@ export async function executeApprovedModelToolUse(
     if (backgroundController && context.tools.abortSignal === backgroundController.signal) {
       context.tools.abortSignal = previousAbortSignal;
     }
-    const userFacingToolOutput = formatModelToolOutput(
-      toolName,
-      result.output,
-      context.language,
-      evidence?.id,
-      reportWriteGuard,
-    );
-    if (isError && (toolName === "WebSearch" || toolName === "WebFetch")) {
-      writeErrorLine(output, userFacingToolOutput);
-    } else if (toolName === "Bash") {
-      writeLocalCommandOutputLine(output, userFacingToolOutput);
+    if (toolName === "WebSearch" || toolName === "WebFetch") {
+      const userFacingToolOutput = formatModelToolOutput(
+        toolName,
+        result.output,
+        context.language,
+        evidence?.id,
+        reportWriteGuard,
+      );
+      if (isError) {
+        writeErrorLine(output, userFacingToolOutput);
+      } else {
+        writeLine(output, userFacingToolOutput);
+      }
     } else {
-      writeLine(output, userFacingToolOutput);
+      const structuredToolOutput = createStructuredToolOutput(
+        toolName,
+        result.output,
+        context.language,
+        evidence?.id,
+      );
+      const reportPrimaryOverride =
+        reportWriteGuard &&
+        (toolName === "Write" ||
+          toolName === "Read" ||
+          toolName === "ReadSnippets" ||
+          toolName === "SourcePack" ||
+          toolName === "Glob" ||
+          toolName === "Grep");
+      writeStructuredToolOutput(
+        output,
+        structuredToolOutput,
+        reportPrimaryOverride
+          ? formatModelToolOutput(
+              toolName,
+              result.output,
+              context.language,
+              evidence?.id,
+              reportWriteGuard,
+            )
+          : structuredToolOutput.text,
+      );
     }
     return {
       ok: !isError,
@@ -3406,7 +3437,10 @@ export async function handleToolCommand(
         severity: "medium",
       });
     }
-    writeLine(output, formatToolOutput(name, result.output, context.language, evidence?.id));
+    writeStructuredToolOutput(
+      output,
+      createStructuredToolOutput(name, result.output, context.language, evidence?.id),
+    );
     writeStatus(output, context);
   } catch (error) {
     writeErrorLine(output, formatError(error, context.language));

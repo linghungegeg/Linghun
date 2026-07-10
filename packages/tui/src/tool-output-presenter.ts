@@ -220,6 +220,14 @@ function formatPrimaryToolLead(
     }
     return filePart ? `${name}(${filePart}) ${patchPart}` : `${name} ${patchPart}`;
   }
+  if (name === "Diff") {
+    const changedFiles = readStringList(metadata, "changedFiles");
+    const addedLines = readNumber(metadata, "addedLines") ?? 0;
+    const removedLines = readNumber(metadata, "removedLines") ?? 0;
+    return language === "en-US"
+      ? `Diff summary: ${changedFiles.length} changed file(s), +${addedLines} -${removedLines}.`
+      : `Diff 摘要：${changedFiles.length} 个文件，+${addedLines} -${removedLines}。`;
+  }
   if (language === "en-US") {
     if (name === "Grep") return `Found **${count ?? 0}** matches.`;
     if (name === "Glob") return `Found **${count ?? visibleLines}** files.`;
@@ -874,6 +882,7 @@ function isSummaryFirstTool(name: ToolName): boolean {
     name === "Glob" ||
     name === "Grep" ||
     name === "Bash" ||
+    name === "Diff" ||
     name === "Write" ||
     name === "Edit" ||
     name === "MultiEdit"
@@ -983,6 +992,7 @@ function formatStructuredPreviewItems(
       readRangeTargets(metadata, "ranges"),
       language,
       true,
+      count,
     );
   }
   if (name === "SourcePack") {
@@ -991,9 +1001,14 @@ function formatStructuredPreviewItems(
       readRangeTargets(metadata, "snippets"),
       language,
       true,
+      count,
     );
   }
   if (name === "Grep" || name === "Glob") {
+    const resultLines = (count === 0 ? [] : lines)
+      .filter((line) => line.trim().length > 0)
+      .filter((line) => !isRedundantSearchCountSummary(name, line, count, language));
+    const completeResultCount = hasCompleteResultCarrier(output) ? count : undefined;
     return formatNumberedPreviewList(
       name === "Glob"
         ? language === "en-US"
@@ -1002,8 +1017,21 @@ function formatStructuredPreviewItems(
         : language === "en-US"
           ? "Results"
           : "结果",
-      count === 0 ? [] : lines.filter((line) => line.trim().length > 0),
+      resultLines,
       language,
+      false,
+      completeResultCount,
+    );
+  }
+  if (name === "Diff") {
+    const changedFiles = readStringList(metadata, "changedFiles");
+    const paths = changedFiles.length > 0 ? changedFiles : output?.changedFiles ?? [];
+    return formatNumberedPreviewList(
+      language === "en-US" ? "Paths" : "路径",
+      paths,
+      language,
+      false,
+      paths.length,
     );
   }
   if (isEditingTool(name)) {
@@ -1036,19 +1064,43 @@ function formatNumberedPreviewList(
   items: string[],
   language: Language,
   hidesItemContent = false,
+  totalCount?: number,
 ): { text: string; truncated: boolean } | undefined {
-  if (items.length === 0) return undefined;
+  const itemCount = Math.max(items.length, totalCount ?? 0);
+  if (itemCount === 0) return undefined;
   const visibleItems = items.slice(0, STRUCTURED_PREVIEW_ITEM_LIMIT);
-  const hiddenCount = items.length - visibleItems.length;
+  const hiddenCount = itemCount - visibleItems.length;
   const lines = [`- ${label}:`, ...visibleItems.map((item, index) => `  ${index + 1}. ${item}`)];
   if (hiddenCount > 0) {
     lines.push(
       language === "en-US"
         ? `  ... ${hiddenCount} more item(s) in details.`
-        : `  ... 另 ${hiddenCount} 项在详情中。`,
+        : `  ... 另有 ${hiddenCount} 项在详情中。`,
     );
   }
   return { text: lines.join("\n"), truncated: hidesItemContent || hiddenCount > 0 };
+}
+
+function hasCompleteResultCarrier(output: ToolOutput | undefined): boolean {
+  if (!output) return false;
+  if (output.details || output.fullOutputPath) return true;
+  return typeof output.preview === "string" && output.preview !== output.text;
+}
+
+function isRedundantSearchCountSummary(
+  name: "Grep" | "Glob",
+  line: string,
+  count: number | undefined,
+  language: Language,
+): boolean {
+  if (count === undefined) return false;
+  const normalized = line.replace(/\*\*/gu, "").trim();
+  if (language === "en-US") {
+    const noun = name === "Grep" ? "matches" : "files";
+    return normalized === `Found ${count} ${noun}.`;
+  }
+  const noun = name === "Grep" ? "处匹配" : "个文件";
+  return normalized === `找到 ${count} ${noun}。`;
 }
 
 function formatToolLineStat(
