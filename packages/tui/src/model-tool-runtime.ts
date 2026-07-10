@@ -201,6 +201,8 @@ import { decidePermission, toPermissionPromptView } from "./tui-permission-runti
 import {
   createVerificationPlan,
   formatVerificationPlan,
+  getRequestScopedVerificationChangedFiles,
+  resolveVerificationScopeCwd,
   runVerificationPlan,
 } from "./verification-command-runtime.js";
 import {
@@ -855,6 +857,22 @@ export async function executeApprovedModelToolUse(
       return dropStaleToolResult("result");
     }
     const isError = isToolOutputFailure(toolName, result.output);
+    const evidenceInput =
+      toolName === "Bash" && requestOwner
+        ? {
+            ...(isRecord(toolCall.input) ? toolCall.input : {}),
+            verificationScope: {
+              ownerKey: `request:${sessionId}:${requestOwner.requestTurnId}`,
+              cwd: await resolveVerificationScopeCwd(
+                context.projectPath,
+                getRequestScopedVerificationChangedFiles(context),
+              ),
+              changedFiles: getRequestScopedVerificationChangedFiles(context),
+              ownerSessionId: sessionId,
+              requestTurnId: requestOwner.requestTurnId,
+            },
+          }
+        : toolCall.input;
     const evidence =
       isError && (toolName === "WebSearch" || toolName === "WebFetch")
         ? await recordToolFailureEvidence(
@@ -870,7 +888,7 @@ export async function executeApprovedModelToolUse(
             sessionId,
             toolName,
             result.output,
-            toolCall.input,
+            evidenceInput,
             () => !requestIsStale(),
             toolCall.id,
           );
@@ -887,7 +905,9 @@ export async function executeApprovedModelToolUse(
     ) {
       reportWriteGuard.evidenceRead = true;
     }
-    rememberToolFiles(context, toolName, toolCall.input, result.output);
+    rememberToolFiles(context, toolName, toolCall.input, result.output, {
+      requestTurnId: requestOwner?.requestTurnId,
+    });
     if (task) {
       const bgData = result.output.data as { backgroundTaskId?: string; outputPath?: string } | undefined;
       if (bgData?.backgroundTaskId) {
@@ -1624,7 +1644,27 @@ export async function executeLinghunControlToolUse(
   evidenceId?: string;
   pendingApproval?: boolean;
 }> {
-  startRequestActivity(output, context, "tool_running", { toolName: toolCall.name, toolTarget: extractToolTarget(toolCall.name, toolCall.input) });
+  const requestTurnId = continuation?.requestTurnId;
+  const requestSignal = continuation?.abortSignal ?? context.tools.abortSignal;
+  const verificationRunsInBackground = toolCall.name === RUN_VERIFICATION_TOOL_NAME;
+  const requestActivityOwner = verificationRunsInBackground
+    ? { kind: "background" as const }
+    : requestTurnId
+      ? { kind: "foreground" as const, requestTurnId }
+      : undefined;
+  const requestIsStale = () =>
+    requestSignal?.aborted === true ||
+    Boolean(requestTurnId && context.currentRequestTurnId !== requestTurnId);
+  startRequestActivity(output, context, "tool_running", {
+    toolName: toolCall.name,
+    toolTarget: extractToolTarget(toolCall.name, toolCall.input),
+    toolUseId: toolCall.id,
+    ...(verificationRunsInBackground
+      ? { ownerKind: "background" as const }
+      : requestTurnId
+        ? { requestTurnId }
+        : {}),
+  });
   const previousCommandPanelState = context.commandPanelState;
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
@@ -1869,29 +1909,51 @@ export async function executeLinghunControlToolUse(
       const input = parseVerificationToolInput(toolCall.input);
       if (!input.ok)
         return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
-      await runWorkflowVerificationStep(input.level, context, createSilentOutput());
-      const report = context.lastVerification;
-      const ok = report?.status === "pass";
-      const text = report
-        ? `Verification ${report.status.toUpperCase()}: ${report.summary}`
-        : "Verification runner did not produce a report.";
-      await appendPolicyToolFeedback(
+      const report = await runWorkflowVerificationStep(
+        input.level,
         context,
-        sessionId,
-        `verification result: level ${input.level}; status ${report?.status ?? "partial"}; report ${report?.id ?? "none"}`,
-        ok ? "info" : "warning",
+        createSilentOutput(),
+        {
+          ownerSessionId: sessionId,
+          ownerSignal: requestSignal,
+          requestTurnId,
+          publishResult: false,
+        },
       );
-      return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
-        status: report?.status ?? "partial",
-        reportId: report?.id,
+      if (requestIsStale()) {
+        return {
+          ok: false,
+          tool: toolCall.name,
+          text: "cancelled: stale RunVerification result discarded",
+          data: { status: report.status, reportId: report.id, level: input.level },
+        };
+      }
+      const ok = report.status === "pass";
+      const text = report
+        ? `Verification ${report.status.toUpperCase()}: ${report.summary} Scope: ${report.scope?.cwd ?? context.projectPath}.`
+        : "Verification runner did not produce a report.";
+      const finished = await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
+        status: report.status,
+        reportId: report.id,
         level: input.level,
+        scope: report.scope,
         commands:
-          report?.commands.map((command) => ({
+          report.commands.map((command) => ({
             kind: command.kind,
             status: command.status,
             synthetic: command.synthetic === true,
-          })) ?? [],
-      });
+          })),
+      }, () => !requestIsStale());
+      if (!requestIsStale()) context.lastVerification = report;
+      if (!requestIsStale()) {
+        await appendPolicyToolFeedback(
+          context,
+          sessionId,
+          `verification result: level ${input.level}; status ${report.status}; report ${report.id}`,
+          ok ? "info" : "warning",
+        );
+      }
+      return finished;
     }
     if (toolCall.name === WRITE_REPORT_TOOL_NAME) {
       return executeWriteReportToolUse(toolCall, context, sessionId, output, continuation);
@@ -1904,8 +1966,12 @@ export async function executeLinghunControlToolUse(
       `Unknown Linghun control tool: ${toolCall.name}`,
     );
   } finally {
-    context.commandPanelState = previousCommandPanelState;
-    clearRequestActivity(context);
+    if (toolCall.name !== RUN_VERIFICATION_TOOL_NAME || !requestIsStale()) {
+      context.commandPanelState = previousCommandPanelState;
+    }
+    if (context.requestActivityToolUseId === toolCall.id) {
+      clearRequestActivity(context, requestActivityOwner);
+    }
   }
 }
 
@@ -2508,7 +2574,11 @@ async function finishControlToolResult(
   text: string,
   isError: boolean,
   data?: unknown,
+  commitGuard?: () => boolean,
 ) {
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale control tool result discarded" };
+  }
   const spec = controlToolEvidenceSpec(toolCall.name, isError, data);
   const evidence = createEvidenceRecord(
     "command_output",
@@ -2516,8 +2586,14 @@ async function finishControlToolResult(
     spec.source,
     spec.supportsClaims,
   );
-  rememberEvidence(context, evidence);
-  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  evidence.toolUseId = toolCall.id;
+  if (toolCall.name === RUN_VERIFICATION_TOOL_NAME && isRecord(data) && isRecord(data.scope)) {
+    evidence.data = { verificationScope: data.scope };
+  }
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence }, commitGuard);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale control tool result discarded" };
+  }
   await appendDeferredToolResultEvent(
     context,
     sessionId,
@@ -2526,7 +2602,12 @@ async function finishControlToolResult(
     { text, data },
     isError,
     evidence?.id,
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale control tool result discarded" };
+  }
+  rememberEvidence(context, evidence);
   if (!shouldSuppressControlToolPrimaryText(toolCall)) {
     writeLine(output, formatControlToolPrimaryText(toolCall.name, text, isError, data, context));
   }
@@ -3017,8 +3098,12 @@ export function rememberToolFiles(
   name: ToolName,
   input: unknown,
   output: ToolOutput,
+  owner: { requestTurnId?: string; workflowRunId?: string } = {},
 ): void {
   const paths: string[] = [];
+  const belongsToCurrentRequest =
+    !owner.workflowRunId &&
+    (!owner.requestTurnId || owner.requestTurnId === context.currentRequestTurnId);
   if (typeof input === "object" && input !== null && "path" in input) {
     const path = (input as { path?: unknown }).path;
     if (typeof path === "string") {
@@ -3030,6 +3115,12 @@ export function rememberToolFiles(
   }
   if (Array.isArray(output.changedFiles)) {
     paths.push(...output.changedFiles);
+    if (belongsToCurrentRequest) {
+      context.currentRequestChangedFiles = uniqueStrings([
+        ...(context.currentRequestChangedFiles ?? []),
+        ...output.changedFiles,
+      ]);
+    }
   }
   if (name === "SourcePack" || name === "ReadSnippets") {
     paths.push(...extractPathsFromToolData(output.data));
@@ -3041,6 +3132,12 @@ export function rememberToolFiles(
     ...paths.filter(Boolean),
     ...context.recentlyMentionedFiles,
   ]).slice(0, 10);
+  if (belongsToCurrentRequest) {
+    context.currentRequestMentionedFiles = uniqueStrings([
+      ...(context.currentRequestMentionedFiles ?? []),
+      ...paths.filter(Boolean),
+    ]).slice(0, 20);
+  }
 }
 
 export function rememberSourcePackCandidatesFromToolData(
@@ -3282,7 +3379,8 @@ export async function handleToolCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
-): Promise<void> {
+  owner: { requestTurnId?: string; workflowRunId?: string } = {},
+): Promise<ToolOutput | undefined> {
   try {
     const input = parseToolInput(name, args);
     const sessionId = await ensureSession(context);
@@ -3415,7 +3513,7 @@ export async function handleToolCommand(
     await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));
     await appendDerivedToolEvents(context, sessionId, name, result.output);
     const evidence = await recordToolEvidence(context, sessionId, name, result.output, input);
-    rememberToolFiles(context, name, input, result.output);
+    rememberToolFiles(context, name, input, result.output, owner);
     await appendToolResultEvent(
       context,
       sessionId,
@@ -3442,8 +3540,10 @@ export async function handleToolCommand(
       createStructuredToolOutput(name, result.output, context.language, evidence?.id),
     );
     writeStatus(output, context);
+    return result.output;
   } catch (error) {
     writeErrorLine(output, formatError(error, context.language));
+    return undefined;
   }
 }
 

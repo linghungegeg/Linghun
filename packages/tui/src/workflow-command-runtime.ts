@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants, accessSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
 import type { CacheFreshness } from "@linghun/core";
@@ -11,7 +11,7 @@ import {
   formatDiagnosticError,
   isNodeErrorWithCode,
 } from "@linghun/shared";
-import type { ToolName } from "@linghun/tools";
+import type { ToolName, ToolOutput } from "@linghun/tools";
 import type {
   RegistryAgentDefinition,
   RegistryWorkflowDefinition,
@@ -54,6 +54,7 @@ import type {
   EngineeringSignalSnapshot,
   EvidenceRecord,
   VerificationReport,
+  VerificationScope,
   WorkflowRunState,
   WorkflowState,
   WorkflowStepState,
@@ -61,7 +62,9 @@ import type {
 import {
   createVerificationPlan,
   createVerificationUnavailableReport,
+  getRequestScopedVerificationChangedFiles,
   isCurrentVerificationReport,
+  resolveVerificationScopeCwd,
   runVerificationPlan,
 } from "./verification-command-runtime.js";
 import type {
@@ -92,7 +95,7 @@ export type WorkflowCommandRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     report: VerificationReport,
-    options?: { rememberInContext?: boolean },
+    options?: { rememberInContext?: boolean; commitGuard?: () => boolean },
   ) => Promise<void>;
   captureFailureLearning: (
     context: TuiContext,
@@ -110,7 +113,8 @@ export type WorkflowCommandRuntimeDeps = {
     args: string[],
     context: TuiContext,
     output: Writable,
-  ) => Promise<void>;
+    owner?: { requestTurnId?: string; workflowRunId?: string },
+  ) => Promise<ToolOutput | undefined>;
   createSilentOutput: () => Writable;
 };
 
@@ -152,7 +156,7 @@ function recordVerificationEvidence(
   context: TuiContext,
   sessionId: string,
   report: VerificationReport,
-  options?: { rememberInContext?: boolean },
+  options?: { rememberInContext?: boolean; commitGuard?: () => boolean },
 ): Promise<void> {
   return getWorkflowDeps().recordVerificationEvidence(context, sessionId, report, options);
 }
@@ -202,9 +206,32 @@ async function handleToolCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
-): Promise<void> {
-  await getWorkflowDeps().handleToolCommand(toolName, args, context, output);
+  owner?: { requestTurnId?: string; workflowRunId?: string },
+): Promise<ToolOutput | undefined> {
+  return getWorkflowDeps().handleToolCommand(toolName, args, context, output, owner);
 }
+
+function rememberWorkflowChangedFiles(
+  run: WorkflowRunState | undefined,
+  changedFiles: string[] | undefined,
+): void {
+  if (!run || !changedFiles?.length) return;
+  run.changedFiles = Array.from(
+    new Set([...(run.changedFiles ?? []), ...changedFiles.map((file) => file.replaceAll("\\", "/"))]),
+  );
+}
+
+function isResumableVerifierAgent(agent: {
+  type: string;
+  status: string;
+  lastTerminalStatus?: string;
+}): boolean {
+  return (
+    agent.type === "verifier" && agent.status === "idle" && agent.lastTerminalStatus !== "completed"
+  );
+}
+
+export const __testIsResumableVerifierAgent = isResumableVerifierAgent;
 
 function createSilentOutput(): Writable {
   return getWorkflowDeps().createSilentOutput();
@@ -633,9 +660,21 @@ function recoverWorkflowRunState(state: DurableWorkflowRunState): WorkflowRunSta
   );
   const hasStale = recoveredSteps.some((step) => step.status === "stale");
   const status = state.status === "running" && hasStale ? "stale" : state.status;
+  const projectPath = resolve(state.projectPath);
+  const storedCwd = typeof state.cwd === "string" ? resolve(state.cwd) : projectPath;
+  const cwd = storedCwd.toLowerCase() === projectPath.toLowerCase() ? storedCwd : projectPath;
+  const changedFiles = Array.isArray(state.changedFiles)
+    ? state.changedFiles.filter((item): item is string => {
+        if (typeof item !== "string") return false;
+        const relativePath = relative(cwd, resolve(cwd, item));
+        return !relativePath.startsWith("..") && !isAbsolute(relativePath);
+      })
+    : [];
   return {
     id: state.id,
     ...(state.ownerSessionId ? { ownerSessionId: state.ownerSessionId } : {}),
+    cwd,
+    changedFiles: [...changedFiles],
     goal: state.goal,
     planId: state.planId,
     status,
@@ -1047,6 +1086,8 @@ async function runWorkflowPlanSteps(
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
     ownerSessionId: sessionId,
+    cwd: context.projectPath,
+    changedFiles: getRequestScopedVerificationChangedFiles(context),
     goal,
     planId: plan.id,
     status: "running",
@@ -1387,6 +1428,8 @@ export async function runRegistryWorkflow(
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
     ownerSessionId: sessionId,
+    cwd: context.projectPath,
+    changedFiles: getRequestScopedVerificationChangedFiles(context),
     goal: goal || workflow.description,
     planId: workflow.id,
     status: "running",
@@ -1598,6 +1641,9 @@ async function executeRegistryWorkflowStep(
           evidenceRefs: [],
         };
       }
+      if (resolve(agent.cwd ?? context.projectPath) === resolve(run?.cwd ?? context.projectPath)) {
+        rememberWorkflowChangedFiles(run, agent.changedFiles);
+      }
       const agentEvidenceRefs = workflowAgentEvidenceRefs(context, agent.id, workflowRunId);
       if (agent.status === "failed") {
         return {
@@ -1606,13 +1652,25 @@ async function executeRegistryWorkflowStep(
           evidenceRefs: agentEvidenceRefs,
         };
       }
-      if (agent.status === "blocked" || agent.status === "stale" || agent.status === "cancelled") {
+    if (agent.status === "blocked" || agent.status === "stale" || agent.status === "cancelled") {
         return {
           status: agent.status === "cancelled" ? "cancelled" : "blocked",
           summary: formatWorkflowStepSummary(step.id, "blocked", agent.summary, context.language),
-          evidenceRefs: agentEvidenceRefs,
-        };
-      }
+        evidenceRefs: agentEvidenceRefs,
+      };
+    }
+    if (isResumableVerifierAgent(agent)) {
+      return {
+        status: "partial",
+        summary: formatWorkflowStepSummary(
+          step.id,
+          "partial",
+          agent.summary,
+          context.language,
+        ),
+        evidenceRefs: agentEvidenceRefs,
+      };
+    }
       return {
         status: "completed",
         summary: formatWorkflowStepSummary(
@@ -1629,6 +1687,12 @@ async function executeRegistryWorkflowStep(
       handledKnownAction = true;
       const report = await runWorkflowVerificationStep(step.level ?? "focused", context, output, {
         ownerSessionId: run?.ownerSessionId,
+        workflowRunId: run?.id,
+        cwd: run?.cwd,
+        changedFiles: run?.changedFiles,
+        ownerSignal: run?.id
+          ? context.backgroundAbortControllers?.get(run.id)?.signal
+          : undefined,
       });
       const status = workflowStepStatusFromVerification(report.status);
       if (status !== "completed") {
@@ -1657,7 +1721,10 @@ async function executeRegistryWorkflowStep(
           summary: `workflow step ${step.id} blocked: missing command`,
           evidenceRefs: [],
         };
-      await handleToolCommand("Bash", [step.command], context, output);
+      const toolOutput = await handleToolCommand("Bash", [step.command], context, output, {
+        workflowRunId,
+      });
+      rememberWorkflowChangedFiles(run, toolOutput?.changedFiles);
     } else if (step.action === "write") {
       handledKnownAction = true;
       if (!step.path || !step.content) {
@@ -1674,7 +1741,10 @@ async function executeRegistryWorkflowStep(
           evidenceRefs: [],
         };
       }
-      await handleToolCommand("Write", [step.path, step.content], context, output);
+      const toolOutput = await handleToolCommand("Write", [step.path, step.content], context, output, {
+        workflowRunId,
+      });
+      rememberWorkflowChangedFiles(run, toolOutput?.changedFiles);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1756,6 +1826,7 @@ function workflowStepStatusFromVerification(
 ): WorkflowStepTerminalStatus {
   if (status === "pass") return "completed";
   if (status === "partial") return "partial";
+  if (status === "timeout") return "partial";
   if (status === "cancelled") return "cancelled";
   if (status === "stale") return "stale";
   return "failed";
@@ -1890,6 +1961,9 @@ async function executeWorkflowStep(
           evidenceRefs: [],
         };
       }
+      if (resolve(agent.cwd ?? context.projectPath) === resolve(run?.cwd ?? context.projectPath)) {
+        rememberWorkflowChangedFiles(run, agent.changedFiles);
+      }
       if (!agentTask) {
         const summary = formatWorkflowStepSummary(
           request.sliceId,
@@ -1949,6 +2023,18 @@ async function executeWorkflowStep(
           evidenceRefs: agentEvidenceRefs,
         };
       }
+      if (isResumableVerifierAgent(agent)) {
+        return {
+          status: "partial",
+          summary: formatWorkflowStepSummary(
+            request.sliceId,
+            "partial",
+            agent.summary,
+            context.language,
+          ),
+          evidenceRefs: agentEvidenceRefs,
+        };
+      }
       return {
         status: "completed",
         summary: formatWorkflowStepSummary(
@@ -1968,7 +2054,15 @@ async function executeWorkflowStep(
         verificationBlockedByUser ? "plan-only" : req.level,
         context,
         output,
-        { ownerSessionId: run?.ownerSessionId },
+        {
+          ownerSessionId: run?.ownerSessionId,
+          workflowRunId: run?.id,
+          cwd: run?.cwd,
+          changedFiles: run?.changedFiles,
+          ownerSignal: run?.id
+            ? context.backgroundAbortControllers?.get(run.id)?.signal
+            : undefined,
+        },
       );
       const status = workflowStepStatusFromVerification(report.status);
       if (status !== "completed") {
@@ -2463,14 +2557,22 @@ function selectRunnableWorkflowBatch(
       return [{ step, request }];
     }
     const mutating = request.safety.mutating;
+    const verification = request.request.mainChain === "verification";
     if (mutating && batch.filter((item) => item.request.safety.mutating).length >= cap) {
       continue;
     }
-    if (batch.length > 0 && (mutating || !step.independent || step.canRunInParallel !== true)) {
+    if (
+      batch.length > 0 &&
+      (verification ||
+        batch.some((item) => item.request.request?.mainChain === "verification") ||
+        mutating ||
+        !step.independent ||
+        step.canRunInParallel !== true)
+    ) {
       break;
     }
     batch.push({ step, request });
-    if (mutating || !step.independent || step.canRunInParallel !== true) {
+    if (verification || mutating || !step.independent || step.canRunInParallel !== true) {
       break;
     }
   }
@@ -2507,59 +2609,145 @@ export async function runWorkflowVerificationStep(
   level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint",
   context: TuiContext,
   output: Writable,
-  options: { ownerSessionId?: string } = {},
+  options: {
+    ownerSessionId?: string;
+    ownerSignal?: AbortSignal;
+    requestTurnId?: string;
+    publishResult?: boolean;
+    workflowRunId?: string;
+    cwd?: string;
+    changedFiles?: string[];
+  } = {},
 ): Promise<VerificationReport> {
   const sessionId = options.ownerSessionId ?? (await ensureSession(context));
-  const publishToCurrentSession = !context.sessionId || context.sessionId === sessionId;
+  let workflowController = options.workflowRunId
+    ? context.backgroundAbortControllers?.get(options.workflowRunId)
+    : undefined;
+  let effectiveOwnerSignal = options.ownerSignal ?? workflowController?.signal;
+  const changedFiles = options.changedFiles ?? getRequestScopedVerificationChangedFiles(context);
+  const verificationCwd = await resolveVerificationScopeCwd(
+    options.cwd ?? context.projectPath,
+    changedFiles,
+  );
+  const verificationScope: VerificationScope = {
+    ownerKey: options.requestTurnId
+      ? `request:${sessionId}:${options.requestTurnId}`
+      : options.workflowRunId
+        ? `workflow:${sessionId}:${options.workflowRunId}`
+        : `session:${sessionId}`,
+    cwd: verificationCwd,
+    changedFiles: [...changedFiles],
+    ownerSessionId: sessionId,
+    ...(options.workflowRunId ? { workflowRunId: options.workflowRunId } : {}),
+    ...(options.requestTurnId ? { requestTurnId: options.requestTurnId } : {}),
+    level,
+  };
+  const workflowOwnerStillActive = (): boolean => {
+    if (!options.workflowRunId) return true;
+    const run = getWorkflowRun(context, options.workflowRunId);
+    return run?.status === "running";
+  };
+  const ownerStillValid = (): boolean =>
+    effectiveOwnerSignal?.aborted !== true &&
+    (!options.requestTurnId || context.currentRequestTurnId === options.requestTurnId) &&
+    workflowOwnerStillActive();
+  const canPublishToCurrentSession = (): boolean =>
+    ownerStillValid() && (!context.sessionId || context.sessionId === sessionId);
   if (level === "plan-only") {
     const report = createVerificationUnavailableReport(
       "focused",
       "plan-only requested; commands were not executed.",
     );
-    if (publishToCurrentSession) context.lastVerification = report;
-    await recordVerificationEvidence(context, sessionId, report, {
-      rememberInContext: publishToCurrentSession,
-    });
+    report.scope = verificationScope;
+    if (options.publishResult !== false && ownerStillValid()) {
+      await recordVerificationEvidence(context, sessionId, report, {
+        rememberInContext: canPublishToCurrentSession(),
+        commitGuard: ownerStillValid,
+      });
+      if (canPublishToCurrentSession()) context.lastVerification = report;
+    }
     return report;
   }
   const plan =
     level === "smoke" || level === "focused" || level === "real-smoke"
-      ? await createVerificationPlan(context.projectPath, "smoke")
-      : (await createVerificationPlan(context.projectPath, "default")).filter(
+      ? await createVerificationPlan(verificationCwd, "smoke")
+      : (await createVerificationPlan(verificationCwd, "default")).filter(
           (step) => step.kind === level,
         );
   const effectivePlan =
     level === "focused"
-      ? await createVerificationPlan(context.projectPath, "focused")
+      ? await createVerificationPlan(verificationCwd, "focused")
       : level === "real-smoke"
-        ? await createVerificationPlan(context.projectPath, "real-smoke")
+        ? await createVerificationPlan(verificationCwd, "real-smoke")
         : plan.length > 0
           ? plan
-          : await createVerificationPlan(context.projectPath, "smoke");
+          : await createVerificationPlan(verificationCwd, "smoke");
   if (level === "real-smoke" && effectivePlan.length === 0) {
     const report = createVerificationUnavailableReport(
       "real-smoke",
       "package.json smoke script is missing; synthetic smoke is not real-smoke.",
     );
-    if (publishToCurrentSession) context.lastVerification = report;
-    await recordVerificationEvidence(context, sessionId, report, {
-      rememberInContext: publishToCurrentSession,
-    });
+    report.scope = verificationScope;
+    if (options.publishResult !== false && ownerStillValid()) {
+      await recordVerificationEvidence(context, sessionId, report, {
+        rememberInContext: canPublishToCurrentSession(),
+        commitGuard: ownerStillValid,
+      });
+      if (canPublishToCurrentSession()) context.lastVerification = report;
+    }
     return report;
   }
-  const report = await runVerificationPlan(
-    effectivePlan,
-    context,
-    sessionId,
-    output,
-    appendBackgroundTaskEvent,
-    { ownerSessionId: sessionId },
-  );
-  if (isCurrentVerificationReport(context, report)) {
-    if (publishToCurrentSession) context.lastVerification = report;
+  if (options.workflowRunId && !options.ownerSignal && !workflowController) {
+    context.backgroundAbortControllers ??= new Map();
+    workflowController = new AbortController();
+    context.backgroundAbortControllers.set(options.workflowRunId, workflowController);
+    effectiveOwnerSignal = workflowController.signal;
+  }
+  if (!ownerStillValid()) workflowController?.abort();
+  let report: VerificationReport;
+  try {
+    report = await runVerificationPlan(
+      effectivePlan,
+      context,
+      sessionId,
+      output,
+      appendBackgroundTaskEvent,
+      {
+        cwd: verificationCwd,
+        ownerSessionId: sessionId,
+        ownerSignal: effectiveOwnerSignal,
+        workflowRunId: options.workflowRunId,
+        requestTurnId: options.requestTurnId,
+        changedFiles,
+        level,
+        commitGuard: ownerStillValid,
+      },
+    );
+  } finally {
+    if (
+      workflowController &&
+      options.workflowRunId &&
+      context.backgroundAbortControllers?.get(options.workflowRunId) === workflowController &&
+      !context.backgroundTasks.some(
+        (task) =>
+          task.kind === "verification" &&
+          task.workflowRunId === options.workflowRunId &&
+          context.activeVerificationAbortControllers?.has(task.id) === true,
+      )
+    ) {
+      context.backgroundAbortControllers.delete(options.workflowRunId);
+    }
+  }
+  if (
+    options.publishResult !== false &&
+    isCurrentVerificationReport(context, report) &&
+    ownerStillValid()
+  ) {
     await recordVerificationEvidence(context, sessionId, report, {
-      rememberInContext: publishToCurrentSession,
+      rememberInContext: canPublishToCurrentSession(),
+      commitGuard: ownerStillValid,
     });
+    if (canPublishToCurrentSession()) context.lastVerification = report;
   }
   return report;
 }

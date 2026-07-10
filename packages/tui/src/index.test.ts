@@ -8733,6 +8733,41 @@ describe("Phase 06 TUI slash commands", () => {
     ).toEqual([]);
   });
 
+  it("keeps verification slices serial within one workflow owner", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-verification-serial-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    const base = createVerificationWorkflowPlan("smoke");
+    const sourceSlice = base.phases[0]?.slices[0];
+    if (!sourceSlice) throw new Error("verification slice fixture missing");
+    base.phases[0].slices = ["left", "right"].map((suffix) => ({
+      ...sourceSlice,
+      id: `slice-verify-${suffix}`,
+      title: `Verify ${suffix}`,
+      independent: true,
+      canRunInParallel: true,
+    }));
+    base.budget = { maxRunningAgents: 2 };
+    const plan = normalizeWorkflowPlan(base);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid serial verification plan");
+
+    await __testRunWorkflowStepsWithPlan("serial verification owner", plan.plan, context, output, {
+      runningCap: 2,
+    });
+
+    expect(context.workflows.activeRun?.steps.map((step) => step.batchId)).toEqual([
+      "batch-1",
+      "batch-2",
+    ]);
+    expect(context.workflows.activeRun?.steps.map((step) => step.status)).toEqual([
+      "completed",
+      "completed",
+    ]);
+  }, 30_000);
+
   it("keeps dependent workflow slices serial even when running cap allows more", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-workflow-serial-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -9480,6 +9515,9 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
       id?: string;
+      cwd?: string;
+      changedFiles?: string[];
+      status?: string;
       result?: string;
       steps?: { status?: string; evidenceRefs?: string[] }[];
       backgroundTask?: { id?: string; result?: string };
@@ -9488,6 +9526,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.result).toBe("blocked");
     expect(persisted.steps?.some((step) => step.status === "blocked")).toBe(true);
     expect(persisted.backgroundTask?.result).toBe("partial");
+    persisted.cwd = project;
+    persisted.changedFiles = ["workflow-restart.txt"];
+    persisted.status = "running";
+    if (persisted.steps?.[0]) persisted.steps[0].status = "running";
+    await writeFile(statePath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 
     const freshSession = await store.create({ model: "deepseek-v4-flash" });
     const freshContext = await createTestContext(project, store, freshSession, config);
@@ -9499,6 +9542,19 @@ describe("Phase 06 TUI slash commands", () => {
       expect.objectContaining({ id: runId, result: "partial" }),
     );
     expect(freshContext.workflows.activeRun?.id).toBe(runId);
+    expect(freshContext.workflows.activeRun).toMatchObject({
+      status: "stale",
+      cwd: project,
+      changedFiles: ["workflow-restart.txt"],
+    });
+    const recovered = JSON.parse(await readFile(statePath, "utf8")) as {
+      cwd?: string;
+      changedFiles?: string[];
+    };
+    expect(recovered).toMatchObject({
+      cwd: project,
+      changedFiles: ["workflow-restart.txt"],
+    });
     expect(freshOutput.text).toContain(`Workflow ${runId}`);
     expect(freshOutput.text).not.toContain("result=pass");
   });
@@ -9680,6 +9736,82 @@ describe("Phase 06 TUI slash commands", () => {
       transcript.some((event) => event.type === "workflow_end" && event.status === "failed"),
     ).toBe(true);
     expect(output.text).not.toContain("PASS：");
+  });
+
+  it("keeps verifier partial lifecycle resumable for workflow mapping", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-verifier-partial-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.lastMetaSchedulerDecision = {
+      orchestrationPlan: {
+        primaryAction: "verify",
+        steps: [
+          {
+            id: "verification",
+            executor: "verification-runtime",
+            mode: "stop",
+            reason: "test partial verifier",
+          },
+        ],
+        hardStops: ["test_partial_verifier"],
+        degradationPath: [],
+      },
+    } as unknown as TuiContext["lastMetaSchedulerDecision"];
+    const now = new Date().toISOString();
+    const agent: AgentRun = {
+      id: "workflow-verifier-partial",
+      type: "verifier",
+      role: "verifier",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: "verify workflow without hard blocking",
+      model: session.model,
+      permissionMode: "full-access",
+      status: "running",
+      transcriptPath: join(project, "workflow-verifier-partial.jsonl"),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      cwd: project,
+      summary: "verifier running",
+      contextSummary: "workflow verifier partial fixture",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt: now,
+      updatedAt: now,
+    };
+    const background = createBackgroundTaskFixture("agent", {
+      id: agent.id,
+      workflowRunId: "workflow-partial-owner",
+    });
+    context.agents = [agent];
+    context.backgroundTasks = [background];
+    const { completeAgent } = await import("./job-agent-command-runtime.js");
+    const { __testIsResumableVerifierAgent } = await import("./workflow-command-runtime.js");
+
+    await completeAgent(agent, background, context, new MemoryOutput());
+
+    expect(agent.status).toBe("idle");
+    expect(agent.lastTerminalStatus).toBeUndefined();
+    expect(background).toMatchObject({ status: "completed", result: "partial" });
+    expect(__testIsResumableVerifierAgent(agent)).toBe(true);
+    expect(context.evidence.flatMap((item) => item.supportsClaims)).not.toContain(
+      "verification_passed",
+    );
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "agent_end" &&
+          event.agentId === agent.id &&
+          event.status === "cancelled",
+      ),
+    ).toBe(true);
   });
 
   it("source: workflow verification maps partial/cancelled/timeout/stale to conservative non-completed states", async () => {
@@ -31451,6 +31583,43 @@ describe("Phase 7.5-B AW1: registry workflow write step behavioral tests", () =>
     expect(combinedOutput).not.toContain("write registry step requires existing Write tool input");
     // The workflow started message should appear.
     expect(combinedOutput).toContain("workflow");
+  });
+
+  it("records workflow writes in workflow scope without polluting the foreground request", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-aw1-workflow-scope-"));
+    await mkdir(join(project, ".linghun", "workflows"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "workflows", "write-scope-test.json"),
+      JSON.stringify({
+        id: "write-scope-test",
+        name: "Write Scope Test",
+        description: "Record workflow-owned changed files.",
+        steps: [
+          { id: "step-write", action: "write", path: "generated.txt", content: "generated" },
+        ],
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+    context.currentRequestChangedFiles = ["foreground-only.ts"];
+    const { loadWorkflowRegistry, registryWorkflowToTemplate } = await import(
+      "./agent-workflow-registry.js"
+    );
+    const registry = await loadWorkflowRegistry(project);
+    context.workflowRegistry = { workflows: registry.items, errors: registry.errors };
+    context.workflows.templates = [
+      ...context.workflows.templates,
+      ...registry.items.map(registryWorkflowToTemplate),
+    ];
+
+    await handleSlashCommand("/workflows run write-scope-test", context, new MemoryOutput());
+
+    expect(await readFile(join(project, "generated.txt"), "utf8")).toBe("generated");
+    expect(context.workflows.activeRun?.changedFiles).toContain("generated.txt");
+    expect(context.currentRequestChangedFiles).toEqual(["foreground-only.ts"]);
   });
 });
 

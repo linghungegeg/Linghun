@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
 import type { Language } from "@linghun/shared";
@@ -22,6 +22,7 @@ import type {
   VerificationRuntimeStatus,
   VerificationStep,
   VerificationStepKind,
+  VerificationScope,
 } from "./tui-data-types.js";
 import { isRecord } from "./tui-state-runtime.js";
 
@@ -221,6 +222,61 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+export async function resolveVerificationScopeCwd(
+  projectPath: string,
+  changedFiles: string[],
+): Promise<string> {
+  const projectRoot = resolve(projectPath);
+  if (changedFiles.length === 0) return projectRoot;
+  const packageRoots = new Set<string>();
+  for (const changedFile of changedFiles) {
+    const filePath = resolve(isAbsolute(changedFile) ? changedFile : join(projectRoot, changedFile));
+    const projectRelativePath = relative(projectRoot, filePath);
+    if (projectRelativePath.startsWith("..") || isAbsolute(projectRelativePath)) return projectRoot;
+    let candidate = dirname(filePath);
+    while (true) {
+      if (await fileExists(join(candidate, "package.json"))) {
+        packageRoots.add(candidate);
+        break;
+      }
+      if (candidate === projectRoot) {
+        packageRoots.add(projectRoot);
+        break;
+      }
+      const parent = dirname(candidate);
+      if (parent === candidate || relative(projectRoot, parent).startsWith("..")) {
+        packageRoots.add(projectRoot);
+        break;
+      }
+      candidate = parent;
+    }
+    if (packageRoots.size > 1) return projectRoot;
+  }
+  return packageRoots.values().next().value ?? projectRoot;
+}
+
+export function getRequestScopedVerificationChangedFiles(context: TuiContext): string[] {
+  if (context.currentRequestChangedFiles?.length) return [...context.currentRequestChangedFiles];
+  if (context.currentRequestMentionedFiles?.length) return [...context.currentRequestMentionedFiles];
+  if (context.currentRequestTurnId) return [];
+  const lastChangedFile = context.tools.changedFiles.at(-1);
+  return lastChangedFile ? [lastChangedFile] : [];
+}
+
+function createVerificationOwnerKey(
+  sessionId: string,
+  options: {
+    ownerAgentId?: string;
+    workflowRunId?: string;
+    requestTurnId?: string;
+  },
+): string {
+  if (options.requestTurnId) return `request:${sessionId}:${options.requestTurnId}`;
+  if (options.ownerAgentId) return `agent:${sessionId}:${options.ownerAgentId}`;
+  if (options.workflowRunId) return `workflow:${sessionId}:${options.workflowRunId}`;
+  return `session:${sessionId}`;
+}
+
 export async function runVerificationPlan(
   plan: VerificationStep[],
   context: TuiContext,
@@ -236,10 +292,32 @@ export async function runVerificationPlan(
     ownerAgentId?: string;
     ownerSessionId?: string;
     ownerSignal?: AbortSignal;
+    workflowRunId?: string;
+    requestTurnId?: string;
+    changedFiles?: string[];
+    level?: string;
+    heartbeatIntervalMs?: number;
+    staleAfterMs?: number;
+    commitGuard?: () => boolean;
   } = {},
 ): Promise<VerificationReport> {
   const runId = randomUUID();
+  const ownerSessionId = options.ownerSessionId ?? sessionId;
+  const cwd = resolve(options.cwd ?? context.projectPath);
+  const ownerKey = createVerificationOwnerKey(ownerSessionId, options);
+  const scope: VerificationScope = {
+    ownerKey,
+    cwd,
+    changedFiles: [...(options.changedFiles ?? [])],
+    ownerSessionId,
+    ...(options.ownerAgentId ? { ownerAgentId: options.ownerAgentId } : {}),
+    ...(options.workflowRunId ? { workflowRunId: options.workflowRunId } : {}),
+    ...(options.requestTurnId ? { requestTurnId: options.requestTurnId } : {}),
+    ...(options.level ? { level: options.level } : {}),
+  };
   context.latestVerificationRunId = runId;
+  context.latestVerificationRunIds ??= new Map();
+  context.latestVerificationRunIds.set(ownerKey, runId);
   const startedAt = new Date().toISOString();
   const orchestration = resolveMetaOrchestrationAction(context, "verification");
   await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
@@ -256,6 +334,7 @@ export async function runVerificationPlan(
       mode: orchestration.shouldAsk ? "ask" : "stop",
       reason: orchestration.reason,
     });
+    report.scope = scope;
     await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
       stepId: "verification",
       executor: "verification-runtime",
@@ -282,20 +361,21 @@ export async function runVerificationPlan(
   } else {
     options.ownerSignal?.addEventListener("abort", abortFromOwner, { once: true });
   }
-  context.interrupt = { type: "running", taskId: runId, canCancel: true };
   const task: BackgroundTaskState = {
     id: runId,
     kind: "verification",
-    ownerSessionId: options.ownerSessionId ?? sessionId,
+    ownerSessionId,
     ...(options.ownerAgentId ? { ownerAgentId: options.ownerAgentId } : {}),
+    ...(options.requestTurnId ? { requestTurnId: options.requestTurnId } : {}),
+    ...(options.workflowRunId ? { workflowRunId: options.workflowRunId } : {}),
     title: "Verification Runner",
     status: "running",
     currentStep: "preparing verification",
     progress: { completed: 0, total: effectivePlan.length, label: "verify" },
     startedAt,
     updatedAt: startedAt,
-    heartbeatIntervalMs: 30_000,
-    staleAfterMs: 120_000,
+    heartbeatIntervalMs: options.heartbeatIntervalMs ?? 30_000,
+    staleAfterMs: options.staleAfterMs ?? 120_000,
     logPath: logRoot,
     hasOutput: false,
     userVisibleSummary: `验证已启动：${effectivePlan.length} 个步骤。可用 /background 查看详情。`,
@@ -337,10 +417,13 @@ export async function runVerificationPlan(
       writeLine(output, `验证步骤：${task.currentStep} · ${step.command}`);
 
       const logPath = join(logRoot, `${runId}-${index + 1}-${step.kind}.log`);
-      const result = await runVerificationCommand(
-        step.command,
-        options.cwd ?? context.projectPath,
-        controller.signal,
+      const heartbeat = setInterval(() => {
+        if (task.status !== "running" || controller.signal.aborted) return;
+        task.updatedAt = new Date().toISOString();
+        void appendBackgroundTaskEvent(context, sessionId, task).catch(() => undefined);
+      }, task.heartbeatIntervalMs);
+      const result = await runVerificationCommand(step.command, cwd, controller.signal).finally(
+        () => clearInterval(heartbeat),
       );
       const durationMs = Date.now() - stepStarted;
       const runnerErrorLine = result.runnerError ? `runner error ${result.runnerError}\n` : "";
@@ -453,6 +536,7 @@ export async function runVerificationPlan(
           : hasRunnerError
             ? "查看 runner error 日志，记录 Node 版本，并建议用 Node 22 LTS 复核。"
             : "先查看失败命令与日志，修复后复跑 /verify。",
+      scope,
     };
     task.status =
       status === "fail"
@@ -467,26 +551,47 @@ export async function runVerificationPlan(
     task.nextAction = report.nextAction;
     task.userVisibleSummary = report.summary;
     await appendBackgroundTaskEvent(context, sessionId, task);
+    const passCommitStillValid = (): boolean =>
+      !controller.signal.aborted &&
+      task.status !== "cancelled" &&
+      task.status !== "stale" &&
+      options.commitGuard?.() !== false &&
+      context.latestVerificationRunIds?.get(ownerKey) === runId;
     await context.store.appendEvent(sessionId, {
       type: "verification_end",
       report,
       createdAt: endedAt,
-    });
+    }, report.status === "pass" ? passCommitStillValid : undefined);
+    if (report.status === "pass" && !passCommitStillValid()) {
+      report.status = controller.signal.aborted ? "cancelled" : "stale";
+      report.summary = controller.signal.aborted
+        ? "CANCELLED：验证在提交 PASS 前已取消，未生成 PASS 证据。"
+        : "STALE：验证在提交 PASS 前失去 owner，未生成 PASS 证据。";
+      report.unverified.push(`${report.status}: owner changed before PASS commit.`);
+      report.risk.push("Verification PASS was discarded before commit.");
+      task.status = report.status;
+      task.result = report.status;
+      task.currentStep = `verification ${report.status}`;
+      task.userVisibleSummary = report.summary;
+      await appendBackgroundTaskEvent(context, sessionId, task);
+      await context.store.appendEvent(sessionId, {
+        type: "verification_end",
+        report,
+        createdAt: new Date().toISOString(),
+      });
+    }
     await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
       stepId: "verification",
       executor: "verification-runtime",
-      status: status === "pass" ? "completed" : status === "fail" ? "failed" : "degraded",
-      summary: `${status}; run=${runId}; commands=${results.length}; unverified=${unverified.length}`,
-      level: status === "pass" ? "info" : "warning",
+      status: report.status === "pass" ? "completed" : report.status === "fail" ? "failed" : "degraded",
+      summary: `${report.status}; run=${runId}; commands=${results.length}; unverified=${unverified.length}`,
+      level: report.status === "pass" ? "info" : "warning",
     });
     return report;
   } finally {
     options.ownerSignal?.removeEventListener("abort", abortFromOwner);
     if (context.activeVerificationAbortControllers?.get(runId) === controller) {
       context.activeVerificationAbortControllers.delete(runId);
-    }
-    if (context.interrupt?.type === "running" && context.interrupt.taskId === runId) {
-      context.interrupt = { type: "idle" };
     }
   }
 }
@@ -495,8 +600,11 @@ export function isCurrentVerificationReport(
   context: TuiContext,
   report: VerificationReport,
 ): boolean {
+  const currentRunId = report.scope
+    ? context.latestVerificationRunIds?.get(report.scope.ownerKey)
+    : context.latestVerificationRunId;
   return (
-    context.latestVerificationRunId === report.id &&
+    currentRunId === report.id &&
     report.status !== "cancelled" &&
     report.status !== "stale"
   );
@@ -513,6 +621,14 @@ export async function runVerificationCommand(
   outcome: "completed" | "timeout" | "cancelled";
   runnerError?: string;
 }> {
+  if (signal?.aborted) {
+    return {
+      exitCode: 1,
+      output: "",
+      outcome: "cancelled",
+      runnerError: "runner cancelled before spawn",
+    };
+  }
   return new Promise((resolveCommand) => {
     const detached = process.platform !== "win32";
     const child = spawn(command, { cwd, shell: true, detached, windowsHide: true });

@@ -48,7 +48,14 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
     .reverse()
     .find((event) => event.type === "verification_end");
   if (latestVerification?.type === "verification_end") {
-    context.lastVerification = latestVerification.report as VerificationReport;
+    const report = latestVerification.report as VerificationReport;
+    context.lastVerification =
+      report.status === "cancelled" ||
+        report.status === "stale" ||
+        report.scope?.ownerAgentId ||
+        report.scope?.workflowRunId
+        ? undefined
+        : report;
   }
   const completedEvidenceIds = new Set(
     transcript

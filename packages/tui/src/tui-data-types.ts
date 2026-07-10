@@ -51,6 +51,7 @@ export type BackgroundTaskState = {
   kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp" | "index";
   ownerSessionId?: string;
   ownerAgentId?: string;
+  requestTurnId?: string;
   title: string;
   status: BackgroundTaskStatus;
   currentStep?: string;
@@ -173,6 +174,17 @@ export type VerificationCommandResult = VerificationStep & {
   runnerError?: string;
 };
 
+export type VerificationScope = {
+  ownerKey: string;
+  cwd: string;
+  changedFiles: string[];
+  ownerSessionId: string;
+  ownerAgentId?: string;
+  workflowRunId?: string;
+  requestTurnId?: string;
+  level?: string;
+};
+
 export type VerificationReport = {
   id: string;
   status: Exclude<VerificationRuntimeStatus, "skipped">;
@@ -185,6 +197,7 @@ export type VerificationReport = {
   endedAt: string;
   durationMs: number;
   nextAction: string;
+  scope?: VerificationScope;
 };
 
 export type CacheHistoryConfig = {
@@ -698,6 +711,7 @@ export type AgentRun = {
   transcriptSessionId: string;
   mailbox: AgentMailboxMessage[];
   cwd?: string;
+  changedFiles?: string[];
   isolation?: "worktree";
   cancelTokenId?: string;
   heartbeatAt?: string;
@@ -1249,6 +1263,8 @@ export type WorkflowTemplate = {
 export type WorkflowRunState = {
   id: string;
   ownerSessionId?: string;
+  cwd?: string;
+  changedFiles?: string[];
   goal: string;
   planId: string;
   status: "running" | "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale";

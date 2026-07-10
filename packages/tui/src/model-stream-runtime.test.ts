@@ -10,6 +10,7 @@ import { createToolContext } from "@linghun/tools";
 import {
   __testApplyPromptCacheKey,
   __testBuildModelMessagesWithRecentContext,
+  __testCurrentVerificationReportForRequest,
   __testScheduleApiTokenCountDiagnostics,
   __testRunFinalGateEvidenceAction,
   __testSendMessage,
@@ -1410,7 +1411,8 @@ describe("final answer gate aggregation", () => {
       ...makeGateContext(),
       evidence: [
         makeEvidence({
-          kind: "test_result",
+          kind: "command_output",
+          source: "Bash",
           summary: "focused verification passed",
           supportsClaims: ["verification_passed"],
         }),
@@ -1561,6 +1563,16 @@ describe("final answer gate aggregation", () => {
     const output = createShellBlockOutputForTest(context, blocks as never);
     const controller = new AbortController();
     const turnA = beginForegroundRequestTurn(context, "user-a");
+    const ownerSessionId = (context as unknown as TuiContext).sessionId ?? "session-stale-final-rewrite";
+    (context as unknown as TuiContext).evidence[0].data = {
+      verificationScope: {
+        ownerKey: `request:${ownerSessionId}:${turnA}`,
+        cwd: projectPath,
+        changedFiles: [],
+        ownerSessionId,
+        requestTurnId: turnA,
+      },
+    };
     let releaseRewrite: (() => void) | undefined;
     let markRewriteStarted: (() => void) | undefined;
     const rewriteStarted = new Promise<void>((resolve) => {
@@ -1618,7 +1630,7 @@ describe("final answer gate aggregation", () => {
     expect(ownerState.requestActivityPhase).toBe("request_started");
     expect(JSON.stringify(blocks)).not.toContain("迟到的 A 轮改写");
     expect(events.some(({ event }) => (event as { type?: string }).type === "assistant_message")).toBe(false);
-  });
+  }, 15_000);
 
   it("clears active provider failure as soon as a later stream recovers", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-provider-recovered-"));
@@ -2172,6 +2184,160 @@ describe("final answer gate aggregation", () => {
         3,
       ),
     ).toBe(false);
+    expect(
+      shouldContinueAfterFinalGateEvidenceAction(
+        {
+          status: "attempt_recorded",
+          messages: [],
+          result: { ok: false, tool: "RunVerification", text: "TIMEOUT" },
+          reason: "verification_not_proven",
+        },
+        0,
+      ),
+    ).toBe(false);
+  });
+
+  it("downgrades immediately while background verification is resumable", () => {
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["verification_claim"],
+      },
+      context: {
+        ...makeGateContext(),
+        permissionMode: "full-access",
+        language: "zh-CN",
+        currentRequestTurnId: "request-stale-verification",
+        sessionId: "session-stale-verification",
+        backgroundTasks: [
+          {
+            id: "verification-stale",
+            kind: "verification",
+            ownerSessionId: "session-stale-verification",
+            requestTurnId: "request-stale-verification",
+            title: "Verification Runner",
+            status: "stale",
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            heartbeatIntervalMs: 30_000,
+            staleAfterMs: 120_000,
+            hasOutput: false,
+            userVisibleSummary: "stale/resumable",
+          },
+        ],
+      } as never,
+      userText: "继续输出当前结论",
+    });
+
+    expect(plan).toMatchObject({
+      action: "downgrade_only",
+      reason: "verification_background_resumable",
+    });
+    expect(plan.evidenceAction).toBeUndefined();
+  });
+
+  it("only accepts verification evidence owned by the current request scope", () => {
+    const context = {
+      ...makeGateContext(),
+      currentRequestTurnId: "request-b",
+      currentRequestChangedFiles: ["packages/tui/src/a.ts"],
+      sessionId: "session-scope",
+      tools: { changedFiles: ["packages/tui/src/a.ts"] },
+      evidence: [
+        makeEvidence({
+          kind: "test_result",
+          supportsClaims: ["verification_passed", "typecheck_passed"],
+          data: {
+            verificationScope: {
+              ownerKey: "request:session-scope:request-a",
+              cwd: "C:/repo/packages/tui",
+              changedFiles: ["packages/tui/src/a.ts"],
+              ownerSessionId: "session-scope",
+              requestTurnId: "request-a",
+            },
+          },
+        }),
+      ],
+    } as unknown as TuiContext;
+    const claim = withClaims("类型检查已通过。", [
+      { kind: "verification_claim", phrase: "类型检查已通过" },
+    ]);
+
+    expect(evaluateAggregatedFinalAnswerGate(context, claim, false).status).toBe(
+      "needs_disclaimer",
+    );
+    const scope = (context.evidence[0]?.data as { verificationScope: { requestTurnId: string } })
+      .verificationScope;
+    scope.requestTurnId = "request-b";
+    expect(evaluateAggregatedFinalAnswerGate(context, claim, false).status).toBe("passed");
+    context.currentRequestChangedFiles?.push("packages/tui/src/b.ts");
+    expect(evaluateAggregatedFinalAnswerGate(context, claim, false).status).toBe(
+      "needs_disclaimer",
+    );
+  });
+
+  it("does not let an older terminal verification suppress current scoped verification", () => {
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["verification_claim"],
+      },
+      context: {
+        ...makeGateContext(),
+        permissionMode: "full-access",
+        language: "zh-CN",
+        currentRequestTurnId: "request-new",
+        sessionId: "session-old-timeout",
+        backgroundTasks: [
+          {
+            id: "verification-old-timeout",
+            kind: "verification",
+            ownerSessionId: "session-old-timeout",
+            requestTurnId: "request-old",
+            title: "Verification Runner",
+            status: "timeout",
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            heartbeatIntervalMs: 30_000,
+            staleAfterMs: 120_000,
+            hasOutput: false,
+            userVisibleSummary: "old timeout",
+          },
+        ],
+      } as never,
+      userText: "验证当前改动",
+    });
+
+    expect(plan.action).toBe("verification_request");
+  });
+
+  it("ignores an older request timeout for the next follow-up", () => {
+    const context = {
+      currentRequestTurnId: "request-new",
+      sessionId: "session-timeout",
+      tools: { changedFiles: ["packages/tui/src/a.ts"] },
+      lastVerification: {
+        id: "verification-old-timeout",
+        status: "timeout",
+        summary: "TIMEOUT",
+        commands: [],
+        unverified: ["timeout"],
+        risk: [],
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        durationMs: 1,
+        nextAction: "resume",
+        scope: {
+          ownerKey: "request:session-timeout:request-old",
+          cwd: "C:/repo/packages/tui",
+          changedFiles: ["packages/tui/src/a.ts"],
+          ownerSessionId: "session-timeout",
+          requestTurnId: "request-old",
+        },
+      },
+    } as unknown as TuiContext;
+
+    expect(__testCurrentVerificationReportForRequest(context)).toBeUndefined();
   });
 
   it("plans artifact gaps with a direct Read when the draft names a file", () => {

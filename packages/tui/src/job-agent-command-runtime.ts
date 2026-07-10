@@ -160,9 +160,13 @@ import {
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
 type AgentWorkResult = {
-  status: "completed" | "failed" | "blocked";
+  status: "completed" | "failed" | "blocked" | "idle";
   summary: string;
   evidenceRefs: string[];
+};
+
+type AgentEvidenceResult = Omit<AgentWorkResult, "status"> & {
+  status: Exclude<AgentWorkResult["status"], "idle">;
 };
 
 type AgentWakeMode = "start" | "mailbox" | "permission_approved" | "resume";
@@ -297,7 +301,7 @@ export type JobAgentCommandRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     report: VerificationReport,
-    options?: { rememberInContext?: boolean },
+    options?: { rememberInContext?: boolean; commitGuard?: () => boolean },
   ) => Promise<void>;
   createAgentGatewayContinuation: (
     context: TuiContext,
@@ -307,7 +311,7 @@ export type JobAgentCommandRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     agent: AgentRun,
-    result: AgentWorkResult,
+    result: AgentEvidenceResult,
   ) => Promise<string | undefined>;
   recordAgentMailboxEvidence: (
     context: TuiContext,
@@ -2602,8 +2606,8 @@ export async function completeAgent(
   const now = new Date().toISOString();
   agent.status = result.status;
   agent.summary = result.summary;
-  if (result.status === "completed") {
-    agent.lastTerminalStatus = "completed";
+  if (result.status === "completed" || result.status === "idle") {
+    agent.lastTerminalStatus = result.status === "completed" ? "completed" : undefined;
     setAgentIdle(agent, result.summary, now);
   } else {
     agent.lastTerminalStatus = result.status === "failed" ? "failed" : "blocked";
@@ -2644,16 +2648,21 @@ export async function completeAgent(
   await context.store.appendEvent(parentSessionId, {
     type: "agent_end",
     agentId: agent.id,
-    status: result.status,
+    status: result.status === "idle" ? "cancelled" : result.status,
     summary: result.summary,
     createdAt: now,
   });
-  const agentEvidenceId = await deps().recordAgentExecutionEvidence(
-    context,
-    parentSessionId,
-    agent,
-    result,
-  );
+  const evidenceResult: AgentEvidenceResult | undefined =
+    result.status === "idle"
+      ? undefined
+      : {
+          status: result.status,
+          summary: result.summary,
+          evidenceRefs: result.evidenceRefs,
+        };
+  const agentEvidenceId = evidenceResult
+    ? await deps().recordAgentExecutionEvidence(context, parentSessionId, agent, evidenceResult)
+    : undefined;
   if (agentEvidenceId) {
     result.evidenceRefs = Array.from(new Set([...result.evidenceRefs, agentEvidenceId]));
   }
@@ -2661,7 +2670,7 @@ export async function completeAgent(
     context,
     agent,
     task,
-    result.status,
+    result.status === "idle" ? "stale" : result.status,
     result.summary,
     result.evidenceRefs,
     parentSessionId,
@@ -2749,6 +2758,12 @@ export async function runAgentWork(
   if (agent.type === "verifier") {
     const verificationCwd = agent.cwd ?? context.projectPath;
     const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
+    const ownerSignal = context.backgroundAbortControllers?.get(agent.id)?.signal;
+    const workflowRunId = context.backgroundTasks.find((task) => task.id === agent.id)?.workflowRunId;
+    const verifierStillValid = (): boolean =>
+      ownerSignal?.aborted !== true &&
+      agent.status !== "cancelled" &&
+      agent.status !== "stale";
     const plan = await createVerificationPlan(verificationCwd, "smoke");
     const report = await runVerificationPlan(
       plan,
@@ -2760,7 +2775,11 @@ export async function runAgentWork(
         cwd: verificationCwd,
         ownerAgentId: agent.id,
         ownerSessionId: parentSessionId,
-        ownerSignal: context.backgroundAbortControllers?.get(agent.id)?.signal,
+        ownerSignal,
+        workflowRunId,
+        changedFiles: [],
+        level: "smoke",
+        commitGuard: verifierStillValid,
       },
     );
     const cancelled =
@@ -2768,13 +2787,14 @@ export async function runAgentWork(
       agent.status === "stale" ||
       report.status === "cancelled" ||
       report.status === "stale";
-    if (!cancelled && isCurrentVerificationReport(context, report)) {
+    if (!cancelled && isCurrentVerificationReport(context, report) && verifierStillValid()) {
       const publishToCurrentSession =
         !context.sessionId || context.sessionId === parentSessionId;
-      if (publishToCurrentSession) context.lastVerification = report;
       await deps().recordVerificationEvidence(context, parentSessionId, report, {
         rememberInContext: publishToCurrentSession,
+        commitGuard: verifierStillValid,
       });
+      if (publishToCurrentSession && verifierStillValid()) context.lastVerification = report;
     }
     const hasRealVerificationPass = report.commands.some(
       (command) => command.status === "pass" && command.synthetic !== true,
@@ -2791,7 +2811,7 @@ export async function runAgentWork(
           ? "completed"
           : !cancelled && report.status === "fail"
             ? "failed"
-            : "blocked",
+            : "idle",
       summary,
       evidenceRefs: [],
     };
@@ -2801,7 +2821,14 @@ export async function runAgentWork(
   await recordMetaOrchestrationRuntimeEvent(context, agent.parentSessionId ?? context.sessionId, {
     stepId: "agent-dispatch",
     executor: "agent-runtime",
-    status: result.status === "completed" ? "completed" : result.status === "failed" ? "failed" : "blocked",
+    status:
+      result.status === "completed"
+        ? "completed"
+        : result.status === "failed"
+          ? "failed"
+          : result.status === "idle"
+            ? "degraded"
+            : "blocked",
     summary: `agent=${agent.id}; status=${result.status}; ${result.summary}`,
     level: result.status === "completed" ? "info" : "warning",
   });
@@ -4915,6 +4942,11 @@ async function runAgentToolInCwd(
   scoped.readSnapshots = context.tools.readSnapshots;
   scoped.patchSummaries = context.tools.patchSummaries;
   const result = await runTool(toolName, input, scoped);
+  if (result.output.changedFiles?.length) {
+    agent.changedFiles = Array.from(
+      new Set([...(agent.changedFiles ?? []), ...result.output.changedFiles]),
+    );
+  }
   if (cwd !== context.projectPath) {
     context.tools.changedFiles.push(
       ...scoped.changedFiles.map((file) => relative(context.projectPath, resolve(cwd, file))),

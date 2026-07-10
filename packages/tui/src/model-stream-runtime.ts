@@ -178,7 +178,11 @@ import {
   forbidsVerificationEvidence,
   parseUserActionConstraints,
 } from "./user-action-constraints.js";
-import { createVerificationPlan } from "./verification-command-runtime.js";
+import {
+  createVerificationPlan,
+  getRequestScopedVerificationChangedFiles,
+  resolveVerificationScopeCwd,
+} from "./verification-command-runtime.js";
 import type { PendingModelContinuation, TuiContext } from "./tui-context-runtime.js";
 import { updateTurnContinuity } from "./turn-continuity-runtime.js";
 import {
@@ -964,7 +968,10 @@ export function evaluateAggregatedFinalAnswerGate(
   assistantText: string,
   runExtendedGate = true,
 ): AggregatedFinalAnswerGateResult {
-  const claimVerdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
+  const claimVerdict = evaluateFinalAnswerClaims(
+    assistantText,
+    evidenceForCurrentVerificationScope(context),
+  );
   const extended = runExtendedGate
     ? runArchitectureAndCompletenessFinalGate(context, assistantText)
     : { status: "passed" as const };
@@ -998,6 +1005,76 @@ export function evaluateAggregatedFinalAnswerGate(
       ...(blockedWorkflowClaim ? ["workflow_status_claim"] : []),
     ],
   };
+}
+
+function evidenceForCurrentVerificationScope(context: TuiContext): TuiContext["evidence"] {
+  if (!context.currentRequestTurnId) return context.evidence;
+  return context.evidence.filter(
+    (record) => !isVerificationEvidenceRecord(record) || verificationEvidenceMatchesContext(record, context),
+  );
+}
+
+function isVerificationEvidenceRecord(record: TuiContext["evidence"][number]): boolean {
+  return record.kind === "test_result" || record.supportsClaims.some((claim) =>
+    claim === "verification_passed" ||
+    claim === "verification_attempted" ||
+    claim === "test_passed" ||
+    claim === "typecheck_passed" ||
+    claim === "build_passed" ||
+    claim === "lint_passed" ||
+    claim === "smoke_passed"
+  );
+}
+
+function verificationEvidenceMatchesContext(
+  record: TuiContext["evidence"][number],
+  context: TuiContext,
+): boolean {
+  const scope = readEvidenceDataRecord(record, "verificationScope");
+  if (!scope) return false;
+  if (typeof scope.ownerAgentId === "string" || typeof scope.workflowRunId === "string") {
+    return false;
+  }
+  if (typeof scope.requestTurnId === "string") {
+    if (scope.requestTurnId !== context.currentRequestTurnId) return false;
+  }
+  if (typeof scope.ownerSessionId === "string" && context.sessionId) {
+    if (scope.ownerSessionId !== context.sessionId) return false;
+  }
+  return sameVerificationChangedFiles(
+    scope.changedFiles,
+    getRequestScopedVerificationChangedFiles(context),
+  );
+}
+
+function sameVerificationChangedFiles(left: unknown, right: string[]): boolean {
+  if (!Array.isArray(left) || left.some((item) => typeof item !== "string")) return false;
+  const normalizedLeft = [...left].sort();
+  const normalizedRight = [...right].sort();
+  return normalizedLeft.length === normalizedRight.length &&
+    normalizedLeft.every((item, index) => item === normalizedRight[index]);
+}
+
+function currentVerificationReportForRequest(context: TuiContext) {
+  const report = context.lastVerification;
+  if (!report || !context.currentRequestTurnId) return report;
+  const scope = report.scope;
+  if (!scope) return undefined;
+  if (scope.ownerAgentId || scope.workflowRunId) return undefined;
+  if (scope.requestTurnId) {
+    if (scope.requestTurnId !== context.currentRequestTurnId) return undefined;
+  }
+  if (context.sessionId && scope.ownerSessionId !== context.sessionId) return undefined;
+  return sameVerificationChangedFiles(
+    scope.changedFiles,
+    getRequestScopedVerificationChangedFiles(context),
+  )
+    ? report
+    : undefined;
+}
+
+export function __testCurrentVerificationReportForRequest(context: TuiContext) {
+  return currentVerificationReportForRequest(context);
 }
 
 function evaluateEngineeringFinalBoundary(
@@ -1074,7 +1151,7 @@ function hasArtifactEvidence(context: TuiContext): boolean {
 }
 
 function hasFullVerificationEvidence(context: TuiContext): boolean {
-  return context.evidence.some((item) =>
+  return evidenceForCurrentVerificationScope(context).some((item) =>
     /full(?: test)? suite|all tests|entire suite|test_passed|verification_passed|全部测试|所有测试/iu.test(
       [item.summary, item.source, ...item.supportsClaims].join(" "),
     ),
@@ -1130,13 +1207,16 @@ export function shouldContinueAfterFinalGateEvidenceAction(
   evidenceActionRetryCount: number,
 ): result is Extract<FinalGateEvidenceActionResult, { status: "evidence_recorded" | "attempt_recorded" }> {
   if (result.status === "evidence_recorded") return true;
+  if (result.status === "attempt_recorded" && result.reason === "verification_not_proven") {
+    return false;
+  }
   return result.status === "attempt_recorded" && evidenceActionRetryCount < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES;
 }
 
 export function planFinalGateEvidenceGapAction(input: {
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
   context: Pick<TuiContext, "permissionMode" | "evidence" | "language"> &
-    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision">>;
+    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision" | "backgroundTasks" | "currentRequestTurnId" | "sessionId">>;
   userText?: string;
   assistantText?: string;
   retryBudgetRemaining?: boolean;
@@ -1152,6 +1232,28 @@ export function planFinalGateEvidenceGapAction(input: {
         action: "blocked_explanation",
         reason: "user_forbid_commands",
         directive: formatEvidenceGapBlocker("user_forbid_commands", language),
+      };
+    }
+    const resumableVerification = context.backgroundTasks?.find(
+      (task) =>
+        task.kind === "verification" &&
+        !task.ownerAgentId &&
+        !task.workflowRunId &&
+        (!task.ownerSessionId || !context.sessionId || task.ownerSessionId === context.sessionId) &&
+        (task.requestTurnId
+          ? task.requestTurnId === context.currentRequestTurnId
+          : task.status === "running") &&
+        (task.status === "running" ||
+          task.status === "failed" ||
+          task.status === "cancelled" ||
+          task.status === "timeout" ||
+          task.status === "stale"),
+    );
+    if (resumableVerification) {
+      return {
+        action: "downgrade_only",
+        reason: "verification_background_resumable",
+        directive: createFinalGateEvidenceTaskDirective(result, language),
       };
     }
   }
@@ -1494,14 +1596,36 @@ async function selectMinimalBashVerificationCommand(
   context: TuiContext,
   preferredKind?: FinalGateVerificationLevel,
 ): Promise<string | undefined> {
-  const plan = await createVerificationPlan(context.projectPath, "focused");
+  const changedFiles = getRequestScopedVerificationChangedFiles(context);
+  const cwd = await resolveVerificationScopeCwd(context.projectPath, changedFiles);
+  const plan = await createVerificationPlan(
+    cwd,
+    preferredKind === "build" || preferredKind === "smoke" ? "default" : "focused",
+  );
   const step =
     (preferredKind
       ? plan.find((item) => item.kind === preferredKind && item.synthetic !== true)
       : undefined) ??
     plan.find((item) => item.kind === "typecheck" && item.synthetic !== true) ??
     plan.find((item) => item.synthetic !== true);
-  return step?.command;
+  return step ? formatVerificationCommandForDirectory(step.command, cwd) : undefined;
+}
+
+function formatVerificationCommandForDirectory(command: string, cwd: string): string {
+  const quotedCwd = `"${cwd.replaceAll('"', '\\"')}"`;
+  if (command.startsWith("corepack pnpm ")) {
+    return `corepack pnpm --dir ${quotedCwd} ${command.slice("corepack pnpm ".length)}`;
+  }
+  if (command.startsWith("npm run ")) {
+    return `npm --prefix ${quotedCwd} run ${command.slice("npm run ".length)}`;
+  }
+  if (command.startsWith("corepack yarn ")) {
+    return `corepack yarn --cwd ${quotedCwd} ${command.slice("corepack yarn ".length)}`;
+  }
+  if (command.startsWith("bun run ")) {
+    return `bun --cwd ${quotedCwd} run ${command.slice("bun run ".length)}`;
+  }
+  return command;
 }
 
 function readFinalGateVerificationLevel(value: unknown): FinalGateVerificationLevel | undefined {
@@ -1560,9 +1684,21 @@ function formatEvidenceBoundaryScope(evidence: TuiContext["evidence"], language:
     .filter(Boolean);
   const uniqueCategories = Array.from(new Set(categories));
   const label = uniqueCategories.join(language === "en-US" ? ", " : "、");
+  const verificationCwds = Array.from(
+    new Set(
+      evidence
+        .map((record) => readEvidenceDataRecord(record, "verificationScope")?.cwd)
+        .filter((cwd): cwd is string => typeof cwd === "string"),
+    ),
+  );
+  const scopeSuffix = verificationCwds.length > 0
+    ? language === "en-US"
+      ? `; verification scope ${verificationCwds.join(", ")}`
+      : `；验证范围 ${verificationCwds.join("、")}`
+    : "";
   return language === "en-US"
-    ? `${summary.total} recorded item(s), covering ${label || "runtime evidence"}`
-    : `已有 ${summary.total} 条记录，覆盖${label || "运行证据"}`;
+    ? `${summary.total} recorded item(s), covering ${label || "runtime evidence"}${scopeSuffix}`
+    : `已有 ${summary.total} 条记录，覆盖${label || "运行证据"}${scopeSuffix}`;
 }
 
 function formatEvidenceBoundaryCategory(kind: string, language: Language): string {
@@ -1594,7 +1730,7 @@ function formatEvidenceBoundaryCategory(kind: string, language: Language): strin
 
 export function shouldRewriteFinalGateClaimAlignment(
   result: AggregatedFinalAnswerGateResult,
-  context: Pick<TuiContext, "evidence">,
+  context: Pick<TuiContext, "evidence"> & Partial<TuiContext>,
 ): boolean {
   if (result.status !== "needs_disclaimer") return false;
   if (!result.claimVerdict) return false;
@@ -1602,7 +1738,11 @@ export function shouldRewriteFinalGateClaimAlignment(
   if (result.claimVerdict.unsupportedKinds.some((kind) => kind !== "completion_claim")) {
     return false;
   }
-  return hasFreshVerificationEvidenceForFinalClaimAlignment(context.evidence);
+  return hasFreshVerificationEvidenceForFinalClaimAlignment(
+    context.currentRequestTurnId
+      ? evidenceForCurrentVerificationScope(context as TuiContext)
+      : context.evidence,
+  );
 }
 
 function hasFreshVerificationEvidenceForFinalClaimAlignment(evidence: TuiContext["evidence"]): boolean {
@@ -2275,6 +2415,8 @@ export function beginForegroundRequestTurn(
   const requestTurnId = randomUUID();
   context.runtimeContextId = requestTurnId;
   context.currentRequestTurnId = requestTurnId;
+  context.currentRequestChangedFiles = [];
+  context.currentRequestMentionedFiles = [];
   context.currentRequestUserMessageId = userMessageId;
   if (context.currentUserActionConstraintsRequestTurnId !== requestTurnId) {
     context.currentUserActionConstraints = undefined;
@@ -3796,6 +3938,7 @@ function createMetaSchedulerInput(
   userText: string,
   providerCooldownBlocked: boolean,
 ): MetaSchedulerInput {
+  const currentVerification = currentVerificationReportForRequest(context);
   return {
     language: context.language,
     userText,
@@ -3827,7 +3970,7 @@ function createMetaSchedulerInput(
     usageSampleCount: context.cache.history.length,
     roleBudgetStop: context.roleUsage.some((item) => item.budgetStop),
     toolResultBudgetPersistedCount: context.toolResultBudgetState?.replacements.size ?? 0,
-    lastVerificationStatus: context.lastVerification?.status,
+    lastVerificationStatus: currentVerification?.status,
     pendingApproval: Boolean(context.pendingLocalApproval),
     activeAgentCount: context.backgroundTasks.filter(
       (task) => task.kind === "agent" && task.status === "running",

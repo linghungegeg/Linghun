@@ -548,6 +548,18 @@ export async function recordToolEvidence(
     ),
     ...(toolUseId ? { toolUseId } : {}),
   };
+  const inputRecord = input && typeof input === "object" && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : undefined;
+  const verificationScope = inputRecord?.verificationScope;
+  if (
+    name === "Bash" &&
+    verificationScope &&
+    typeof verificationScope === "object" &&
+    !Array.isArray(verificationScope)
+  ) {
+    evidence.data = { verificationScope };
+  }
   if (!commitGuard) {
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, {
@@ -667,21 +679,25 @@ export async function recordVerificationEvidence(
   context: TuiContext,
   sessionId: string,
   report: VerificationReport,
-  options: { rememberInContext?: boolean } = {},
+  options: { rememberInContext?: boolean; commitGuard?: () => boolean } = {},
 ): Promise<void> {
+  if (options.commitGuard && !options.commitGuard()) return;
   const supportsClaims = deriveVerificationSupportsClaims(report);
   const evidence = createEvidenceRecord(
     "test_result",
-    `${formatVerificationEvidenceStatusSummary(report)} 日志：${report.logPath ?? "无日志"}`,
+    `${formatVerificationEvidenceStatusSummary(report)} 范围：${report.scope?.cwd ?? "未记录"}；日志：${report.logPath ?? "无日志"}`,
     report.logPath ?? "Verification Runner",
     supportsClaims,
   );
-  if (options.rememberInContext !== false) rememberEvidence(context, evidence);
+  if (report.scope) evidence.data = { verificationScope: report.scope };
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
-  });
+  }, options.commitGuard);
+  if (options.commitGuard && !options.commitGuard()) return;
+  if (options.rememberInContext !== false) rememberEvidence(context, evidence);
   if (report.status === "fail" || report.status === "partial" || report.status === "timeout") {
+    if (options.commitGuard && !options.commitGuard()) return;
     const failedCommand = report.commands.find(
       (c) => c.status === "fail" || c.status === "timeout",
     );

@@ -317,6 +317,8 @@ export type TuiContext = {
   sessionId?: string;
   runtimeContextId?: string;
   currentRequestTurnId?: string;
+  currentRequestChangedFiles?: string[];
+  currentRequestMentionedFiles?: string[];
   currentRequestUserMessageId?: string;
   lastInterruptedTurn?: {
     requestTurnId: string;
@@ -357,6 +359,7 @@ export type TuiContext = {
   imageResults: ImageGenerationResult[];
   lastVerification?: VerificationReport;
   latestVerificationRunId?: string;
+  latestVerificationRunIds?: Map<string, string>;
   activePlan?: PlanProposal;
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
