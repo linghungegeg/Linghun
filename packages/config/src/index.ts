@@ -22,10 +22,13 @@ export type EndpointProfile = "chat_completions" | "responses" | "anthropic_mess
 export type ProviderCompatibilityProfile =
   | "deepseek"
   | "strict_openai_compatible"
-  | "permissive_openai_compatible";
+  | "permissive_openai_compatible"
+  | "anthropic_messages"
+  | "gemini"
+  | "grok";
 
 export type ProviderConfig = {
-  type: "openai-compatible" | "deepseek";
+  type: "openai-compatible" | "deepseek" | "gemini" | "grok";
   baseUrl?: string;
   apiKey?: string;
   model: string;
@@ -610,6 +613,23 @@ export const defaultConfig: LinghunConfig = {
       compatibilityProfile: "strict_openai_compatible",
       reasoningLevel: defaultReasoningLevel,
       includeUsage: parseEnvBoolean(process.env.LINGHUN_OPENAI_INCLUDE_USAGE),
+    },
+    gemini: {
+      type: "gemini",
+      baseUrl: process.env.LINGHUN_GEMINI_BASE_URL,
+      apiKey: process.env.LINGHUN_GEMINI_API_KEY,
+      model: process.env.LINGHUN_GEMINI_MODEL ?? "gemini-3.5-flash",
+      endpointProfile: "chat_completions",
+      compatibilityProfile: "gemini",
+      reasoningLevel: defaultReasoningLevel,
+    },
+    grok: {
+      type: "grok",
+      baseUrl: process.env.LINGHUN_GROK_BASE_URL,
+      apiKey: process.env.LINGHUN_GROK_API_KEY,
+      model: process.env.LINGHUN_GROK_MODEL ?? "grok-4.20-reasoning",
+      endpointProfile: "responses",
+      compatibilityProfile: "grok",
     },
   },
   modelRoutes: defaultModelRoutes,
@@ -1670,7 +1690,12 @@ function validateProviders(providers: Record<string, ProviderConfig>): void {
   assertRecord(providers, "settings.providers");
   for (const [providerId, provider] of Object.entries(providers)) {
     assertRecord(provider, `settings.providers.${providerId}`);
-    if (provider.type !== "deepseek" && provider.type !== "openai-compatible") {
+    if (
+      provider.type !== "deepseek" &&
+      provider.type !== "openai-compatible" &&
+      provider.type !== "gemini" &&
+      provider.type !== "grok"
+    ) {
       throw new Error(`settings.providers.${providerId}.type is invalid`);
     }
     assertNonEmptyString(provider.model, `settings.providers.${providerId}.model`);
@@ -1693,7 +1718,10 @@ function validateProviders(providers: Record<string, ProviderConfig>): void {
       provider.compatibilityProfile !== undefined &&
       provider.compatibilityProfile !== "deepseek" &&
       provider.compatibilityProfile !== "strict_openai_compatible" &&
-      provider.compatibilityProfile !== "permissive_openai_compatible"
+      provider.compatibilityProfile !== "permissive_openai_compatible" &&
+      provider.compatibilityProfile !== "anthropic_messages" &&
+      provider.compatibilityProfile !== "gemini" &&
+      provider.compatibilityProfile !== "grok"
     ) {
       throw new Error(`settings.providers.${providerId}.compatibilityProfile is invalid`);
     }

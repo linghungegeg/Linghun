@@ -98,7 +98,10 @@ export function maskSecret(secret: string): string {
 }
 
 function getProviderEnvKeyName(providerType: string): string {
-  return providerType === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
+  if (providerType === "deepseek") return "LINGHUN_DEEPSEEK_API_KEY";
+  if (providerType === "gemini") return "LINGHUN_GEMINI_API_KEY";
+  if (providerType === "grok") return "LINGHUN_GROK_API_KEY";
+  return "LINGHUN_OPENAI_API_KEY";
 }
 
 export function getProviderKeySource(
@@ -392,10 +395,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     // 避免再开一段；既不破坏现有 doctor grep 用例（仍含 effective/sent 关键字），
     // 也让普通用户能直接看懂主行。
     const reasoningSentLocal = Boolean(
-      reasoningLevel &&
-        (endpointProfile === "responses" ||
-          endpointProfile === "anthropic_messages" ||
-          compatibilityProfile === "permissive_openai_compatible"),
+      reasoningLevel && contract.sendReasoning,
     );
     const reasoningPlain = !reasoningLevel
       ? context.language === "en-US"
@@ -409,11 +409,14 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
           ? `Reasoning ${reasoningLevel} not sent (gateway or model rejects it)`
           : `推理 ${reasoningLevel} 不会发送（当前网关或模型不接受）`;
     const reasoningTechnical = reasoningLevel
-      ? endpointProfile === "responses"
+      ? !contract.sendReasoning
+        ? `ignored/unsupported/未生效 compatibility profile ${compatibilityProfile}`
+        : endpointProfile === "responses"
         ? `effective/sent reasoning.effort=${reasoningLevel}`
         : endpointProfile === "anthropic_messages"
           ? `effective/sent thinking.budget_tokens=${reasoningLevel === "Low" ? "1024" : reasoningLevel === "Medium" ? "4096" : reasoningLevel === "High" ? "8192" : reasoningLevel}`
-          : compatibilityProfile === "permissive_openai_compatible"
+          : compatibilityProfile === "permissive_openai_compatible" ||
+              compatibilityProfile === "gemini"
             ? `effective/sent reasoning.effort=${reasoningLevel}`
             : `ignored/unsupported/未生效 compatibility profile ${compatibilityProfile}`
       : "not configured/未生效";

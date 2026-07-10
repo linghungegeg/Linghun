@@ -40,9 +40,12 @@ import {
 import {
   DeepSeekProvider,
   type EndpointProfile,
+  GeminiProvider,
+  GrokProvider,
   ModelGateway,
   OpenAiCompatibleProvider,
   resolveEffectiveEndpointProfile,
+  resolveProviderRuntimeContract,
 } from "@linghun/providers";
 import { normalizeDeepSeekModelName } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
@@ -125,6 +128,9 @@ export function hasSelectedProviderConfigProblem(context: TuiContext): boolean {
   const runtime = getSelectedModelRuntime(context);
   const provider = context.config.providers[runtime.provider];
   if (!provider) return true;
+  if (provider.type === "gemini" || provider.type === "grok") {
+    return !provider.baseUrl || !provider.apiKey || !provider.model;
+  }
   if (provider.type !== "openai-compatible") return !provider.apiKey || !provider.model;
   return hasOpenAiCompatibleProviderSetupProblem(provider);
 }
@@ -190,9 +196,6 @@ export function getSelectedModelRuntime(
     configModel: providerConfig?.model,
     requestModel: model,
   }).endpointProfile;
-  const compatibilityProfile =
-    providerConfig?.compatibilityProfile ??
-    (providerConfig?.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
   const reasoningLevel = providerConfig?.reasoningLevel;
   // D.13K：reasoningSent 现支持三种生效路径——
   //   1. responses profile（OpenAI Responses API 原生 reasoning.effort）；
@@ -200,9 +203,11 @@ export function getSelectedModelRuntime(
   //   3. anthropic_messages profile（Anthropic extended thinking，由 provider builder 注入 thinking 字段）。
   const reasoningSent = Boolean(
     reasoningLevel &&
-      (endpointProfile === "responses" ||
-        compatibilityProfile === "permissive_openai_compatible" ||
-        endpointProfile === "anthropic_messages"),
+      providerConfig &&
+      resolveProviderRuntimeContract(
+        { ...providerConfig, id: provider },
+        { messages: [], model },
+      ).sendReasoning,
   );
   return {
     role,
@@ -259,6 +264,12 @@ export function createModelGateway(config: LinghunConfig): ModelGateway {
     Object.entries(config.providers).map(([id, provider]) => {
       if (provider.type === "deepseek") {
         return new DeepSeekProvider({ ...provider, id, displayName: "DeepSeek" });
+      }
+      if (provider.type === "gemini") {
+        return new GeminiProvider({ ...provider, id, displayName: "Gemini" });
+      }
+      if (provider.type === "grok") {
+        return new GrokProvider({ ...provider, id, displayName: "Grok" });
       }
       return new OpenAiCompatibleProvider({ ...provider, id, displayName: "OpenAI compatible" });
     }),

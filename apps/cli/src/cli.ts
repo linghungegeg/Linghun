@@ -205,7 +205,7 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
     );
     const problems: string[] = [];
     const warnings: string[] = [];
-    const envPrefix = target.providerId === "deepseek" ? "LINGHUN_DEEPSEEK" : "LINGHUN_OPENAI";
+    const envPrefix = getProviderEnvPrefix(target.providerId);
     if (!target.provider.baseUrl) {
       problems.push(`- 缺少 base_url：请设置 ${envPrefix}_BASE_URL 或配置 provider.baseUrl。`);
     }
@@ -282,7 +282,7 @@ function formatModelInfo(
 }
 
 type DoctorProviderConfig = {
-  type: "openai-compatible" | "deepseek";
+  type: "openai-compatible" | "deepseek" | "gemini" | "grok";
   baseUrl?: string;
   apiKey?: string;
   model: string;
@@ -360,13 +360,20 @@ function getProviderKeySource(
   providerEnvApiKeyProviders: Set<string>,
 ): string {
   if (!hasApiKey) return "missing";
-  const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
+  const envName = `${getProviderEnvPrefix(providerId)}_API_KEY`;
   if (process.env[envName]) return "shell-env";
   if (providerEnvApiKeyProviders.has(providerId)) {
     return process.env.LINGHUN_CONFIG_DIR ? "config-dir-provider-env" : "user-provider-env";
   }
   if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings-legacy";
   return "missing";
+}
+
+function getProviderEnvPrefix(providerId: string): string {
+  if (providerId === "deepseek") return "LINGHUN_DEEPSEEK";
+  if (providerId === "gemini") return "LINGHUN_GEMINI";
+  if (providerId === "grok") return "LINGHUN_GROK";
+  return "LINGHUN_OPENAI";
 }
 
 function maskSecret(secret: string): string {

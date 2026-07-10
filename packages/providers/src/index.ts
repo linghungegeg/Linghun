@@ -81,18 +81,22 @@ export type ProviderCompatibilityProfile =
   | "deepseek"
   | "strict_openai_compatible"
   | "permissive_openai_compatible"
-  | "anthropic_messages";
+  | "anthropic_messages"
+  | "gemini"
+  | "grok";
 export type ProviderRuntimeProfile =
   | "deepseek_chat_completions"
   | "deepseek_anthropic_messages"
   | "strict_openai_compatible_chat_completions"
   | "permissive_openai_compatible_chat_completions"
   | "openai_responses"
-  | "anthropic_messages";
+  | "anthropic_messages"
+  | "gemini_chat_completions"
+  | "grok_responses";
 
 export type ProviderConfig = {
   id: string;
-  type: "openai-compatible" | "deepseek";
+  type: "openai-compatible" | "deepseek" | "gemini" | "grok";
   displayName?: string;
   baseUrl?: string;
   apiKey?: string;
@@ -215,7 +219,7 @@ export type OpenAiChatRequest = {
   messages: OpenAiChatMessage[];
   stream: true;
   max_tokens?: number;
-  tools?: OpenAiToolDefinition[];
+  tools?: Array<OpenAiToolDefinition | OpenAiChatWebSearchToolDefinition>;
   tool_choice?: "auto" | "none";
   parallel_tool_calls?: boolean;
   reasoning?: { effort: string };
@@ -252,6 +256,10 @@ type OpenAiToolDefinition = {
     description: string;
     parameters: unknown;
   };
+};
+
+type OpenAiChatWebSearchToolDefinition = {
+  type: "web_search_preview";
 };
 
 type OpenAiResponsesFunctionToolDefinition = {
@@ -1048,6 +1056,40 @@ export function resolveProviderRuntimeContract(
   request: ModelRequest = { messages: [] },
 ): ProviderRuntimeContract {
   const supportsTools = config.supportsTools !== false;
+  if (config.type === "gemini") {
+    return {
+      profile: "gemini_chat_completions",
+      endpointProfile: "chat_completions",
+      endpoint: "/chat/completions",
+      compatibilityProfile: "gemini",
+      supportsTools,
+      sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
+      includeUsage: true,
+      toolSchemaShape: supportsTools ? "openai_chat_tools" : "tools_disabled",
+      toolResultShape: supportsTools ? "chat_tool_message" : "tools_disabled",
+      retryStatuses: [...PROVIDER_RETRY_STATUSES],
+      maxAttempts: PROVIDER_MAX_ATTEMPTS,
+      requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+      streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+    };
+  }
+  if (config.type === "grok") {
+    return {
+      profile: "grok_responses",
+      endpointProfile: "responses",
+      endpoint: "/responses",
+      compatibilityProfile: "grok",
+      supportsTools,
+      sendReasoning: false,
+      includeUsage: true,
+      toolSchemaShape: supportsTools ? "openai_responses_tools" : "tools_disabled",
+      toolResultShape: supportsTools ? "responses_function_call_output" : "tools_disabled",
+      retryStatuses: [...PROVIDER_RETRY_STATUSES],
+      maxAttempts: PROVIDER_MAX_ATTEMPTS,
+      requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+      streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+    };
+  }
   if (config.type === "deepseek") {
     const endpointProfile =
       request.endpointProfile === "anthropic_messages" ||
@@ -2223,16 +2265,19 @@ function createOptionalMaxTokens<K extends "max_tokens" | "max_output_tokens">(
 function createOpenAiChatTools(
   request: ModelRequest,
   contract: ProviderRuntimeContract,
-): OpenAiToolDefinition[] | undefined {
+): Array<OpenAiToolDefinition | OpenAiChatWebSearchToolDefinition> | undefined {
   assertToolCapability(request, contract);
   // D.13F：tools 数组按 name 字典序稳定排序，避免上层迭代顺序波动破坏 OpenAI 隐式
   // prompt cache 的前缀 hash。chat profile 不传 prompt_cache_key；Responses profile
   // 可由 TUI 注入稳定 promptCacheKey。
   const tools = request.tools;
   if (!tools) return undefined;
-  return [...tools]
+  const customTools = [...tools]
     .sort(compareToolCacheIdentity)
     .map((tool) => getCachedOpenAiChatToolBase(tool));
+  return contract.compatibilityProfile === "gemini" && request.toolChoice !== "none"
+    ? [...customTools, { type: "web_search_preview" }]
+    : customTools;
 }
 
 function createOpenAiResponsesTools(
@@ -3484,6 +3529,10 @@ function readCacheWriteTokens(usage: {
   }
   return null;
 }
+
+export class GeminiProvider extends OpenAiCompatibleProvider {}
+
+export class GrokProvider extends OpenAiCompatibleProvider {}
 
 export class DeepSeekProvider extends OpenAiCompatibleProvider {
   constructor(config: Omit<ProviderConfig, "type" | "id"> & Partial<Pick<ProviderConfig, "id">>) {

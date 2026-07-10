@@ -3,6 +3,7 @@ import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared
 import { describe, expect, it, vi } from "vitest";
 import {
   DeepSeekProvider,
+  GrokProvider,
   type LinghunEvent,
   ModelGateway,
   type ModelRequest,
@@ -21,6 +22,64 @@ import {
 } from "./index.js";
 
 const EXPECTED_REQUEST_USER_AGENT = `${LINGHUN_NAME}/${LINGHUN_VERSION} (@linghun/${LINGHUN_CLI_NAME})`;
+
+describe("Gemini and Grok native gateways", () => {
+  it("uses Gemini chat hosted search with custom tools and reasoning", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "gemini",
+      type: "gemini",
+      baseUrl: "https://gateway.example.com/v1",
+      apiKey: "test-key",
+      model: "gemini-3.5-flash",
+      endpointProfile: "chat_completions",
+      reasoningLevel: "Medium",
+    });
+
+    const contract = resolveProviderRuntimeContract({
+      id: "gemini",
+      type: "gemini",
+      model: "gemini-3.5-flash",
+      endpointProfile: "chat_completions",
+      reasoningLevel: "Medium",
+    });
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "Search the web." }],
+      tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+    });
+
+    expect(contract.profile).toBe("gemini_chat_completions");
+    expect(contract.sendReasoning).toBe(true);
+    expect(request.reasoning).toEqual({ effort: "medium" });
+    expect(request.tools?.at(-1)).toEqual({ type: "web_search_preview" });
+  });
+
+  it("uses Grok Responses search without sending rejected reasoning fields", () => {
+    const provider = new GrokProvider({
+      id: "grok",
+      type: "grok",
+      baseUrl: "https://gateway.example.com/v1",
+      apiKey: "test-key",
+      model: "grok-4.20-reasoning",
+      reasoningLevel: "High",
+    });
+
+    const contract = resolveProviderRuntimeContract({
+      id: "grok",
+      type: "grok",
+      model: "grok-4.20-reasoning",
+      reasoningLevel: "High",
+    });
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "Search the web." }],
+      tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+    });
+
+    expect(contract.profile).toBe("grok_responses");
+    expect(contract.sendReasoning).toBe(false);
+    expect(request).not.toHaveProperty("reasoning");
+    expect(request.tools?.at(-1)).toEqual({ type: "web_search", external_web_access: true });
+  });
+});
 
 describe("DeepSeek model capabilities", () => {
   it("records real DeepSeek API model names", () => {
@@ -3413,7 +3472,9 @@ describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
         { name: "Mike", description: "m", inputSchema: { type: "object" } },
       ],
     });
-    const names = request.tools?.map((tool) => tool.function.name);
+    const names = request.tools?.flatMap((tool) =>
+      tool.type === "function" ? [tool.function.name] : [],
+    );
     expect(names).toEqual(["Alpha", "Mike", "Zeta"]);
   });
 
