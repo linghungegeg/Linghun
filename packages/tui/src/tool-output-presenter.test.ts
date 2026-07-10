@@ -397,10 +397,13 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
 
-      expect(layered.preview).toContain("范围: src/alpha.ts:10-20; src/beta.ts:30-40; src/gamma.ts:50-60");
-      expect(layered.preview).toContain("另 1 个");
+      expect(layered.preview).toContain("- 范围:\n  1. src/alpha.ts:10-20");
+      expect(layered.preview).toContain("\n  2. src/beta.ts:30-40");
+      expect(layered.preview).toContain("\n  3. src/gamma.ts:50-60");
+      expect(layered.preview).toContain("另 1 项在详情中");
       expect(layered.preview).not.toContain("src/delta.ts:70-80");
       expect(layered.preview).not.toContain("PRIVATE_SNIPPET_BODY");
+      expect(layered.details).toBe("snippet output");
     });
 
     it("ReadSnippets English preview labels visible ranges", () => {
@@ -416,7 +419,67 @@ describe("tool-output-presenter", () => {
         "en-US",
       );
 
-      expect(layered.preview).toContain("Ranges: src/alpha.ts:10-20");
+      expect(layered.preview).toContain("- Ranges:\n  1. src/alpha.ts:10-20");
+      expect(layered.truncated).toBe(true);
+      expect(layered.details).toBe("snippet output");
+    });
+
+    it("Grep/Glob 多结果按结构分行编号，匹配数量只显示一次", () => {
+      const grep = createStructuredToolOutput(
+        "Grep",
+        {
+          text: "src/a.ts:1: alpha\nsrc/b.ts:2: beta\nsrc/c.ts:3: gamma",
+          data: { count: 3 },
+        },
+        "zh-CN",
+      );
+      const glob = createLayeredToolOutput(
+        "Glob",
+        { text: "src/a.ts\nsrc/b.ts\nsrc/c.ts", data: { count: 3 } },
+        "zh-CN",
+      );
+
+      expect(grep.text.match(/找到 \*\*3\*\* 处匹配。/gu)).toHaveLength(1);
+      expect(grep.text).not.toContain("3 条结果");
+      expect(grep.layered.preview).toContain("- 结果:\n  1. src/a.ts:1: alpha");
+      expect(grep.layered.preview).toContain("\n  2. src/b.ts:2: beta");
+      expect(glob.preview).toContain("- 路径:\n  1. src/a.ts");
+      expect(glob.preview).toContain("\n  2. src/b.ts");
+      expect(glob.preview).not.toContain("src/a.ts; src/b.ts");
+    });
+
+    it("SourcePack 多范围和编辑工具多路径按行编号", () => {
+      const sourcePack = createLayeredToolOutput(
+        "SourcePack",
+        {
+          text: "source pack output",
+          data: {
+            count: 2,
+            snippets: [
+              { path: "src/a.ts", start: 4, end: 8 },
+              { path: "src/b.ts", start: 12, end: 16 },
+            ],
+          },
+        },
+        "zh-CN",
+      );
+      const edit = createLayeredToolOutput(
+        "MultiEdit",
+        {
+          text: "edited",
+          data: {
+            addedLines: 2,
+            removedLines: 1,
+            changedFiles: ["src/a.ts", "src/b.ts"],
+          },
+        },
+        "zh-CN",
+      );
+
+      expect(sourcePack.preview).toContain("- 结果:\n  1. src/a.ts:4-8\n  2. src/b.ts:12-16");
+      expect(sourcePack.details).toBe("source pack output");
+      expect(edit.preview).toContain("- 路径:\n  1. src/a.ts\n  2. src/b.ts");
+      expect(edit.preview).not.toContain("src/a.ts; src/b.ts");
     });
 
     it("evidenceId 透传到 layered.evidenceId（保留诊断信息）", () => {
@@ -482,8 +545,43 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
       expect(layered.preview).toContain("补丁 +3 -1");
-      expect(layered.preview).toContain("改动文件 1");
+      expect(layered.preview).toContain("- 路径:\n  1. a.ts");
       expect(layered.preview).not.toContain("changedFiles 1");
+    });
+
+    it("大响应预算文案不进入主视图，details/fullOutputPath/evidence 保持完整", () => {
+      const details = [
+        "# Full output",
+        "",
+        "| Name | Value |",
+        "| --- | --- |",
+        "| result | kept |",
+        "",
+        "```ts",
+        "const preserved = true;",
+        "```",
+      ].join("\n");
+      const output = {
+        text: `${"long output line\n".repeat(700)}tail`,
+        details,
+        fullOutputPath: ".linghun/session/tool-results/large.txt",
+        evidenceId: "ev-large-output",
+        data: { exitCode: 0 },
+      };
+
+      const structured = createStructuredToolOutput("Bash", output, "zh-CN");
+
+      expect(structured.text).not.toContain("大响应");
+      expect(structured.text).not.toContain("tokens");
+      expect(structured.block.body).not.toContain("大响应");
+      expect(structured.layered.details).toBe(details);
+      expect(structured.layered.details).toContain("| result | kept |");
+      expect(structured.layered.details).toContain("```ts");
+      expect(structured.layered.fullOutputPath).toBe(output.fullOutputPath);
+      expect(structured.layered.evidenceId).toBe(output.evidenceId);
+      expect(structured.block.detailsPath).toBe(output.fullOutputPath);
+      expect(structured.block.evidenceId).toBe(output.evidenceId);
+      expect(structured.block.collapsible).toBe(true);
     });
 
     it("Edit preview and details prefer structured patch hunks", () => {

@@ -9989,6 +9989,37 @@ describe("D.14D explicit details summary-first panel", () => {
     }
   });
 
+  it("P1 可见层：大响应预算不进主视图，编号结果换行保持", () => {
+    const large = createStructuredToolOutput(
+      "Bash",
+      {
+        text: "large output\n".repeat(1_000),
+        details: "full bash details\n```ts\nconst kept = true;\n```",
+        fullOutputPath: ".linghun/session/tool-results/bash-large.txt",
+        evidenceId: "ev-bash-large",
+        data: { exitCode: 0 },
+      },
+      "zh-CN",
+    );
+    const grep = createStructuredToolOutput(
+      "Grep",
+      {
+        text: "src/a.ts:1: alpha\nsrc/b.ts:2: beta",
+        data: { count: 2 },
+      },
+      "zh-CN",
+    );
+    const block = createOutputBlock(large.text, "zh-CN", "p1-large-bash");
+    const grepBlock = createOutputBlock(grep.text, "zh-CN", "p1-grep-results");
+
+    expect(block.fullText).not.toContain("大响应");
+    expect(block.fullText).not.toContain("tokens");
+    expect(grepBlock.fullText).toContain("- 结果:\n  1. src/a.ts:1: alpha\n  2. src/b.ts:2: beta");
+    expect(large.layered.details).toContain("const kept = true;");
+    expect(large.layered.fullOutputPath).toBe(".linghun/session/tool-results/bash-large.txt");
+    expect(large.layered.evidenceId).toBe("ev-bash-large");
+  });
+
   it("Phase 1: 失败工具 presenter 输出经旧字符串入口仍是醒目的错误块", () => {
     const presenterBody = formatToolOutput(
       "Bash",

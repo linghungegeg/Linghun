@@ -40,7 +40,7 @@ export type StructuredToolOutput = {
 const TODO_OUTPUT_ITEM_LIMIT = 8;
 const BASH_TAIL_LINE_LIMIT = 3;
 const PRIMARY_PREVIEW_LINE_CAP = 5;
-const READ_SNIPPET_TARGET_LIMIT = 3;
+const STRUCTURED_PREVIEW_ITEM_LIMIT = 3;
 const DIAGNOSTICS_SUMMARY_LIMIT = 3;
 const DIAGNOSTICS_EVIDENCE_LIMIT = 120;
 const RAW_TOOL_USE_PATTERNS = [
@@ -95,9 +95,10 @@ export function createLayeredToolOutput(
 ): LayeredToolOutput {
   const preview = createToolOutputPreview(name, output.preview ?? output.text, language, output);
   const truncated = Boolean(preview.truncated || output.truncated);
-  const details = isEditingTool(name)
+  const explicitDetails = isEditingTool(name)
     ? (createStructuredPatchDetails(output) ?? output.details)
     : output.details;
+  const details = explicitDetails ?? (truncated ? output.text : undefined);
   return {
     layer: "primary",
     toolName: name,
@@ -122,16 +123,6 @@ export function createStructuredToolOutput(
   const layered = createLayeredToolOutput(name, output, language, evidenceId);
   const lead = formatPrimaryToolLead(name, output, layered, language);
   const bodyLines: string[] = [];
-  // Phase 18: large response token warning (>10K characters).
-  const textLen = output.text?.length ?? 0;
-  if (textLen > 10_000) {
-    const approxTokens = Math.round(textLen / 4);
-    bodyLines.push(
-      language === "en-US"
-        ? `⚠ Large response · ~${approxTokens} tokens`
-        : `⚠ 大响应 · ~${approxTokens} tokens`,
-    );
-  }
   if (layered.preview) {
     bodyLines.push(layered.preview);
   }
@@ -880,22 +871,27 @@ function createSummaryFirstPreview(
   const windowLines = readNumber(metadata, "windowLines");
   const totalLines = readNumber(metadata, "totalLines");
   const contentLines = readNumber(metadata, "contentLines");
-  const exitCode = readNumber(metadata, "exitCode");
-  const stats = [
-    formatToolLineStat(name, {
-      language,
-      visibleLines: dataLines ?? lines.length,
-      windowLines,
-      totalLines,
-      contentLines,
-      truncated: Boolean(output?.truncated),
-    }),
-  ];
-  const readSnippetTargets =
-    name === "ReadSnippets" ? formatReadSnippetTargets(metadata, language) : undefined;
-  if (count !== undefined) {
-    stats.push(language === "en-US" ? `${count} match(es)` : `${count} 条结果`);
+  const stats: string[] = [];
+  if (name === "Read" || name === "Bash") {
+    stats.push(
+      formatToolLineStat(name, {
+        language,
+        visibleLines: dataLines ?? lines.length,
+        windowLines,
+        totalLines,
+        contentLines,
+        truncated: Boolean(output?.truncated),
+      }),
+    );
   }
+  const structuredItems = formatStructuredPreviewItems(
+    name,
+    metadata,
+    lines,
+    count,
+    output,
+    language,
+  );
   // 退出码已移至 end summary，只在失败时显示，避免重复
   if (name === "Bash" && looksLikeMojibake(previewText)) {
     stats.push(language === "en-US" ? "possible encoding issue" : "疑似编码问题");
@@ -903,26 +899,17 @@ function createSummaryFirstPreview(
   if (isEditingTool(name)) {
     const addedLines = readNumber(metadata, "addedLines") ?? 0;
     const removedLines = readNumber(metadata, "removedLines") ?? 0;
-    const changedFiles = readStringList(metadata, "changedFiles");
-    const readGuard = readStringValue(metadata, "readGuard");
-    const diffFence = createCompactDiffFence(output);
     stats.push(
       language === "en-US"
         ? `patch +${addedLines} -${removedLines}`
         : `补丁 +${addedLines} -${removedLines}`,
     );
-    if (!diffFence && changedFiles.length > 0) {
-      stats.push(
-        language === "en-US"
-          ? `changed ${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"}`
-          : `改动文件 ${changedFiles.length}`,
-      );
-    }
-    // readGuard status is shown in footer; omit from per-tool summary to reduce noise.
   }
+  const statsLine = stats.length > 0 ? `- ${stats.join("; ")}` : undefined;
   // Run 3 C — Ctrl+O 提示必须和真实可展开内容绑定。
   // 只有当原始输出确实有被隐藏的重要内容时才显示折叠提示。
   const hasHiddenContent =
+    Boolean(structuredItems?.truncated) ||
     Boolean(output?.truncated) ||
     Boolean(output?.details) ||
     Boolean(output?.fullOutputPath) ||
@@ -933,7 +920,7 @@ function createSummaryFirstPreview(
       name === "Bash" && !looksLikeMojibake(previewText) ? formatBashTail(lines, language) : [];
     const diffFence = isEditingTool(name) ? createCompactDiffFence(output) : "";
     return {
-      text: [`- ${stats.join("; ")}`, readSnippetTargets, ...tail, diffFence]
+      text: [statsLine, structuredItems?.text, ...tail, diffFence]
         .filter(Boolean)
         .join("\n"),
       truncated: true,
@@ -946,27 +933,72 @@ function createSummaryFirstPreview(
       if (nonEmpty.length > PRIMARY_PREVIEW_LINE_CAP) {
         const tail = formatBashTail(lines, language);
         return {
-          text: [`- ${stats.join("; ")}`, ...tail].filter(Boolean).join("\n"),
+          text: [statsLine, ...tail].filter(Boolean).join("\n"),
           truncated: true,
         };
       }
-      return { text: [`- ${stats.join("; ")}`, previewText].join("\n"), truncated: false };
+      return { text: [statsLine, previewText].filter(Boolean).join("\n"), truncated: false };
     }
   }
   return {
-    text: [`- ${stats.join("; ")}`, readSnippetTargets].filter(Boolean).join("\n"),
-    truncated: false,
+    text: [statsLine, structuredItems?.text].filter(Boolean).join("\n"),
+    truncated: Boolean(structuredItems?.truncated),
   };
 }
 
-function formatReadSnippetTargets(
+function formatStructuredPreviewItems(
+  name: ToolName,
   metadata: object | undefined,
+  lines: string[],
+  count: number | undefined,
+  output: ToolOutput | undefined,
   language: Language,
-): string | undefined {
-  if (!metadata) return undefined;
-  const ranges = (metadata as { ranges?: unknown }).ranges;
-  if (!Array.isArray(ranges)) return undefined;
-  const targets = ranges.flatMap((value): string[] => {
+): { text: string; truncated: boolean } | undefined {
+  if (name === "ReadSnippets") {
+    return formatNumberedPreviewList(
+      language === "en-US" ? "Ranges" : "范围",
+      readRangeTargets(metadata, "ranges"),
+      language,
+      true,
+    );
+  }
+  if (name === "SourcePack") {
+    return formatNumberedPreviewList(
+      language === "en-US" ? "Results" : "结果",
+      readRangeTargets(metadata, "snippets"),
+      language,
+      true,
+    );
+  }
+  if (name === "Grep" || name === "Glob") {
+    return formatNumberedPreviewList(
+      name === "Glob"
+        ? language === "en-US"
+          ? "Paths"
+          : "路径"
+        : language === "en-US"
+          ? "Results"
+          : "结果",
+      count === 0 ? [] : lines.filter((line) => line.trim().length > 0),
+      language,
+    );
+  }
+  if (isEditingTool(name)) {
+    const changedFiles = readStringList(metadata, "changedFiles");
+    return formatNumberedPreviewList(
+      language === "en-US" ? "Paths" : "路径",
+      changedFiles.length > 0 ? changedFiles : output?.changedFiles ?? [],
+      language,
+    );
+  }
+  return undefined;
+}
+
+function readRangeTargets(metadata: object | undefined, key: "ranges" | "snippets"): string[] {
+  if (!metadata) return [];
+  const ranges = (metadata as Record<string, unknown>)[key];
+  if (!Array.isArray(ranges)) return [];
+  return ranges.flatMap((value): string[] => {
     if (!value || typeof value !== "object") return [];
     const path = readStringValue(value, "path");
     const start = readNumber(value, "start");
@@ -974,17 +1006,26 @@ function formatReadSnippetTargets(
     if (!path || start === undefined || end === undefined) return [];
     return [`${path}:${start}-${end}`];
   });
-  if (targets.length === 0) return undefined;
-  const visibleTargets = targets.slice(0, READ_SNIPPET_TARGET_LIMIT).join("; ");
-  const hiddenCount = targets.length - READ_SNIPPET_TARGET_LIMIT;
-  const suffix =
-    hiddenCount > 0
-      ? language === "en-US"
-        ? `; +${hiddenCount} more`
-        : `；另 ${hiddenCount} 个`
-      : "";
-  const label = language === "en-US" ? "Ranges" : "范围";
-  return `- ${label}: ${visibleTargets}${suffix}`;
+}
+
+function formatNumberedPreviewList(
+  label: string,
+  items: string[],
+  language: Language,
+  hidesItemContent = false,
+): { text: string; truncated: boolean } | undefined {
+  if (items.length === 0) return undefined;
+  const visibleItems = items.slice(0, STRUCTURED_PREVIEW_ITEM_LIMIT);
+  const hiddenCount = items.length - visibleItems.length;
+  const lines = [`- ${label}:`, ...visibleItems.map((item, index) => `  ${index + 1}. ${item}`)];
+  if (hiddenCount > 0) {
+    lines.push(
+      language === "en-US"
+        ? `  ... ${hiddenCount} more item(s) in details.`
+        : `  ... 另 ${hiddenCount} 项在详情中。`,
+    );
+  }
+  return { text: lines.join("\n"), truncated: hidesItemContent || hiddenCount > 0 };
 }
 
 function formatToolLineStat(

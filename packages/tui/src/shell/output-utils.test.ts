@@ -42,4 +42,20 @@ describe("output-utils", () => {
       '{\n  "ok": true,\n  "value": 1\n}',
     );
   });
+
+  it("preserves Markdown tables and fenced code", () => {
+    const markdown = [
+      "Summary",
+      "",
+      "| Name | Value |",
+      "| --- | --- |",
+      "| result | kept |",
+      "",
+      "```ts",
+      "const kept = true;",
+      "```",
+    ].join("\n");
+
+    expect(tryJsonFormatContent(markdown)).toBe(markdown);
+  });
 });
