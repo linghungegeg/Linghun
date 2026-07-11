@@ -29,6 +29,7 @@ import {
   handleInterruptCommand,
 } from "./background-control-runtime.js";
 import { formatCompactStatus } from "./cache-command-runtime.js";
+import { rememberCacheSafePrefix } from "./cache-policy-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
 import { createDeepCompactPacket, formatDeepCompactPromptSummary } from "./deep-compact-runtime.js";
 import { createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
@@ -142,6 +143,7 @@ import {
   wecomBridgeAdapter,
   writeLightHintsForTest,
 } from "./index.js";
+import { cancelAgentByRef } from "./job-agent-command-runtime.js";
 import { createControlledMemoryInjection } from "./tui-memory-runtime.js";
 import { configureRemoteTransport } from "./remote-command-runtime.js";
 import {
@@ -16165,6 +16167,47 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("endpointProfile");
   });
 
+  it("keeps the agent cache prefix runtime-only instead of persisting it twice", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-cache-prefix-runtime-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    rememberCacheSafePrefix(context.cache, {
+      messages: [{ role: "system", content: "AGENT_CACHE_PREFIX_RUNTIME_ONLY" }],
+      model: "child-primary-model",
+      endpointProfile: "chat_completions",
+    });
+    mockOpenAiStartAgentChildFallbackFetch({
+      primaryResponse: new Response(
+        `data: ${JSON.stringify({ id: "chatcmpl-child", choices: [{ delta: { content: "child final" } }] })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+
+    await handleSlashCommand("/fork worker inspect cache ownership", context, new MemoryOutput());
+
+    const agent = context.agents[0];
+    expect(agent?.cacheSafePrefixSnapshot?.messages[0]?.content).toBe(
+      "AGENT_CACHE_PREFIX_RUNTIME_ONLY",
+    );
+    expect(Object.getOwnPropertyDescriptor(agent, "cacheSafePrefixSnapshot")?.enumerable).toBe(
+      false,
+    );
+    const persistedAgent = await readFile(
+      join(resolveStoragePaths(config, project).agentRuns, `${agent?.id}.json`),
+      "utf8",
+    );
+    expect(persistedAgent).not.toContain("cacheSafePrefixSnapshot");
+    expect(persistedAgent).not.toContain("AGENT_CACHE_PREFIX_RUNTIME_ONLY");
+    const parentTranscript = (await store.resume(session.id)).transcript;
+    const agentStart = parentTranscript.find((event) => event.type === "agent_start");
+    expect(JSON.stringify(agentStart)).not.toContain("cacheSafePrefixSnapshot");
+    expect(JSON.stringify(agentStart)).not.toContain("AGENT_CACHE_PREFIX_RUNTIME_ONLY");
+  });
+
   it("StartAgent child rate limit uses fallback model and succeeds", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-fallback-ok-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -16172,7 +16215,26 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "child-primary-model" });
     const config = createStartAgentChildFallbackConfig();
     const context = await createTestContext(project, store, session, config);
-    context.modelGateway = createModelGateway(config);
+    const modelGateway = createModelGateway(config);
+    const agentRequestContextIds: string[] = [];
+    context.modelGateway = new Proxy(modelGateway, {
+      get(target, property, receiver) {
+        if (property !== "stream") return Reflect.get(target, property, receiver);
+        return async function* (...args: unknown[]) {
+          const request = args.find(
+            (value): value is { requestContext?: string; requestContextId?: string } =>
+              Boolean(value && typeof value === "object" && "requestContext" in value),
+          );
+          if (request?.requestContext === "agent" && request.requestContextId) {
+            agentRequestContextIds.push(request.requestContextId);
+          }
+          const stream = target.stream.bind(target) as (
+            ...streamArgs: unknown[]
+          ) => AsyncIterable<unknown>;
+          yield* stream(...args);
+        };
+      },
+    }) as ModelGateway;
     const output = new MemoryOutput();
     const requests = mockOpenAiStartAgentChildFallbackFetch({
       primaryResponse: new Response("Too many requests: rate limit reached", {
@@ -16206,9 +16268,35 @@ describe("Phase 06 TUI slash commands", () => {
         ),
         "utf8",
       ),
-    ) as { provider?: string; model?: string };
+    ) as {
+      provider?: string;
+      model?: string;
+      lastProviderFallbackAttempt?: {
+        status?: string;
+        toModel?: string;
+        requestContextId?: string;
+      };
+    };
     expect(persistedAgent.provider).toBe("openai-compatible");
     expect(persistedAgent.model).toBe("child-fallback-model");
+    expect(context.lastProviderFallbackAttempt).toBeUndefined();
+    expect(context.agents[0]?.lastProviderFallbackAttempt).toMatchObject({
+      status: "succeeded",
+      toModel: "child-fallback-model",
+      requestContextId: expect.any(String),
+    });
+    expect(new Set(agentRequestContextIds).size).toBeGreaterThan(1);
+    expect(context.agents[0]?.lastProviderFallbackAttempt?.requestContextId).toBe(
+      agentRequestContextIds.at(-1),
+    );
+    expect(context.agents[0]?.lastProviderFallbackAttempt?.requestContextId).not.toBe(
+      agentRequestContextIds[0],
+    );
+    expect(persistedAgent.lastProviderFallbackAttempt).toMatchObject({
+      status: "succeeded",
+      toModel: "child-fallback-model",
+      requestContextId: expect.any(String),
+    });
 
     const showOutput = new MemoryOutput();
     await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, showOutput);
@@ -16241,6 +16329,67 @@ describe("Phase 06 TUI slash commands", () => {
     expect(fallbackMessages[0]).toContain("to openai-compatible/child-fallback-model");
     expect(fallbackMessages[0]).toContain("reason rate_limit");
     expect(fallbackMessages[0]).toContain("code PROVIDER_RATE_LIMITED");
+  });
+
+  it("drops delayed fallback success metadata when the agent owner is cancelled", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-fallback-owner-cancel-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiStartAgentChildFallbackFetch({
+      primaryResponse: new Response("Too many requests: rate limit reached", {
+        status: 429,
+        headers: { "retry-after": "0" },
+      }),
+      childFallbackFinalText: "late fallback result",
+    });
+    let releaseSuccessAppend!: () => void;
+    let markSuccessAppendStarted!: () => void;
+    const successAppendStarted = new Promise<void>((resolve) => {
+      markSuccessAppendStarted = resolve;
+    });
+    const successAppendGate = new Promise<void>((resolve) => {
+      releaseSuccessAppend = resolve;
+    });
+    const originalAppendEvent = store.appendEvent.bind(store);
+    vi.spyOn(store, "appendEvent").mockImplementation(async (sessionId, event, commitGuard) => {
+      if (
+        event.type === "system_event" &&
+        event.message.includes("provider fallback attempt") &&
+        event.message.includes("status succeeded")
+      ) {
+        markSuccessAppendStarted();
+        await successAppendGate;
+      }
+      return originalAppendEvent(sessionId, event, commitGuard);
+    });
+
+    const running = handleSlashCommand(
+      "/fork worker cancel during fallback metadata",
+      context,
+      new MemoryOutput(),
+    );
+    await successAppendStarted;
+    const agent = context.agents[0];
+    if (!agent) throw new Error("missing agent");
+    await cancelAgentByRef(agent.id, context, new MemoryOutput());
+    releaseSuccessAppend();
+    await running;
+
+    expect(agent.status).toBe("cancelled");
+    expect(agent.model).toBe("child-primary-model");
+    expect(agent.lastProviderFallbackAttempt?.status).not.toBe("succeeded");
+    expect(
+      context.routeDecisions.some(
+        (decision) =>
+          decision.selectedModel === "child-fallback-model" && decision.fallbackUsed === true,
+      ),
+    ).toBe(false);
+    const childTranscript = JSON.stringify((await store.resume(agent.transcriptSessionId)).transcript);
+    expect(childTranscript).not.toContain("status succeeded");
   });
 
   it("StartAgent child fallback target cooldown blocks before fallback request", async () => {
@@ -16279,6 +16428,41 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("child-fallback-model");
     expect(output.text).toContain("/model doctor");
     expect(output.text).not.toContain("worker completed");
+  });
+
+  it("StartAgent primary cooldown enters the existing healthy fallback chain", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-primary-cooldown-fallback-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    for (let index = 0; index < 5; index += 1) {
+      recordProviderFailure(
+        context.providerBreaker,
+        "openai-compatible",
+        "child-primary-model",
+        "PROVIDER_RATE_LIMITED",
+        "sidechain",
+      );
+    }
+    const output = new MemoryOutput();
+    const requests = mockOpenAiStartAgentChildFallbackFetch({
+      primaryResponse: new Response("primary must not be requested", { status: 500 }),
+      childFallbackFinalText: "healthy fallback final",
+    });
+
+    await handleSlashCommand("/fork worker continue through fallback", context, output);
+
+    const childRequests = requests.filter((request) =>
+      JSON.stringify(request).includes("child agent running in an isolated sidechain transcript"),
+    ) as Array<{ model?: string }>;
+    expect(childRequests.map((request) => request.model)).not.toContain("child-primary-model");
+    expect(childRequests.map((request) => request.model)).toContain("child-fallback-model");
+    expect(context.agents[0]?.status).toBe("idle");
+    expect(context.agents[0]?.lastProviderFallbackAttempt).toMatchObject({ status: "succeeded" });
+    expect(output.text).toContain("healthy fallback final");
   });
 
   it("StartAgent child prompt inherits engineering profile strategy hint", async () => {

@@ -174,6 +174,60 @@ describe("evidence-runtime", () => {
     });
   });
 
+  it("uses an explicit sidechain owner for remembered and persisted tool evidence", async () => {
+    const events: Array<{ type?: string; ownerScope?: unknown }> = [];
+    const context = {
+      projectPath: "F:/repo",
+      sessionId: "foreground-session",
+      currentRequestTurnId: "foreground-request-b",
+      evidence: [],
+      store: {
+        appendEvent: async (_sessionId: string, event: { type?: string; ownerScope?: unknown }) => {
+          events.push(structuredClone(event));
+        },
+      },
+    } as unknown as TuiContext;
+    const ownerScope = {
+      ownerSessionId: "agent-parent-session",
+      requestTurnId: "agent-invocation-a",
+      ownerAgentId: "agent-a",
+      workflowRunId: "workflow-a",
+      cwd: "F:/repo/worktrees/agent-a",
+    };
+
+    await recordToolEvidence(
+      context,
+      "agent-parent-session",
+      "Write",
+      { text: "written" },
+      { path: "result.txt", content: "done" },
+      undefined,
+      "tool-agent-a",
+      ownerScope,
+    );
+    await recordToolFailureEvidence(
+      context,
+      "agent-parent-session",
+      "Bash",
+      "failed",
+      undefined,
+      "tool-agent-failure-a",
+      ownerScope,
+    );
+
+    expect(context.evidence).toHaveLength(2);
+    expect(context.evidence.every((item) =>
+      item.ownerScope?.ownerAgentId === "agent-a" &&
+      item.ownerScope?.requestTurnId === "agent-invocation-a" &&
+      item.ownerScope?.cwd === "F:/repo/worktrees/agent-a"
+    )).toBe(true);
+    expect(events).toHaveLength(2);
+    expect(events.every((event) =>
+      (event.ownerScope as { ownerAgentId?: string; requestTurnId?: string }).ownerAgentId === "agent-a" &&
+      (event.ownerScope as { ownerAgentId?: string; requestTurnId?: string }).requestTurnId === "agent-invocation-a"
+    )).toBe(true);
+  });
+
   it("restores legacy budget artifact evidence by structured claim and tool use", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-legacy-budget-evidence-"));
     const relativePath = ".linghun/session/tool-results/session-1/call-legacy.txt";

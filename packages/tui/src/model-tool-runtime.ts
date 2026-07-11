@@ -191,6 +191,10 @@ import type {
   WorkflowRunState,
   WorkflowTemplate,
 } from "./tui-data-types.js";
+import {
+  currentRequestUserActionConstraints,
+  type UserActionConstraints,
+} from "./user-action-constraints.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
 import { getSelectedModelRuntime } from "./tui-model-runtime.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
@@ -1772,6 +1776,21 @@ export async function executeLinghunControlToolUse(
   const requestIsStale = () =>
     requestSignal?.aborted === true ||
     Boolean(requestTurnId && context.currentRequestTurnId !== requestTurnId);
+  const commitGuard = () => !requestIsStale();
+  const staleControlResult = () => ({
+    ok: false as const,
+    tool: toolCall.name,
+    text: "cancelled: stale control tool request discarded",
+  });
+  if (requestIsStale()) return staleControlResult();
+  const invocationPermissionMode = context.permissionMode;
+  const invocationUserActionConstraints = currentRequestUserActionConstraints(context)
+    ? { ...currentRequestUserActionConstraints(context)! }
+    : undefined;
+  const finishFailure = (text: string) =>
+    finishControlToolFailure(toolCall, context, sessionId, output, text, commitGuard);
+  const finishResult = (text: string, isError: boolean, data?: unknown) =>
+    finishControlToolResult(toolCall, context, sessionId, output, text, isError, data, commitGuard);
   startRequestActivity(output, context, "tool_running", {
     toolName: toolCall.name,
     toolTarget: extractToolTarget(toolCall.name, toolCall.input),
@@ -1783,23 +1802,36 @@ export async function executeLinghunControlToolUse(
         : {}),
   });
   const previousCommandPanelState = context.commandPanelState;
-  await context.store.appendEvent(sessionId, {
-    type: "tool_call_start",
-    id: toolCall.id,
-    name: toolCall.name,
-    input: toolCall.input,
-    createdAt: new Date().toISOString(),
-  });
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "tool_call_start",
+      id: toolCall.id,
+      name: toolCall.name,
+      input: toolCall.input,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (requestIsStale()) return staleControlResult();
   try {
     if (toolCall.name === START_AGENT_TOOL_NAME) {
       const input = parseStartAgentToolInput(toolCall.input, context);
-      if (!input.ok)
-        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok) return await finishFailure(input.text);
+      if (requestIsStale()) return staleControlResult();
       const agent = await handleForkCommand(
         buildForkArgsFromStartAgentInput(input, context),
         context,
         createSilentOutput(),
+        {
+          ownerSessionId: sessionId,
+          permissionMode: invocationPermissionMode,
+          invokingRequestTurnId: requestTurnId,
+          userActionConstraints: invocationUserActionConstraints,
+          commitGuard,
+        },
       );
+      if (requestIsStale()) return staleControlResult();
       const result = buildStartAgentToolResult(
         agent,
         formatStartAgentDidNotStartMessage(input, context),
@@ -1811,27 +1843,15 @@ export async function executeLinghunControlToolUse(
           if (notice.agentId === agent.id) markAgentCompletionNoticeReported(context, notice.id, reportedAt);
         }
       }
-      return await finishControlToolResult(
-        toolCall,
-        context,
-        sessionId,
-        output,
-        result.text,
-        !result.ok,
-        result.data,
-      );
+      return await finishResult(result.text, !result.ok, result.data);
     }
     if (toolCall.name === AGENT_CONTROL_TOOL_NAME) {
       const input = parseAgentControlToolInput(toolCall.input, context);
-      if (!input.ok)
-        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok) return await finishFailure(input.text);
+      if (requestIsStale()) return staleControlResult();
       if (input.action === "list") {
         const cancellable = listCancellableAgents(context);
-        return await finishControlToolResult(
-          toolCall,
-          context,
-          sessionId,
-          output,
+        return await finishResult(
           `Agent list inspected: ${context.agents.length} agent(s); cancellable ${cancellable.length}: ${cancellable.map((agent) => `${agent.id}:${agent.status}`).join(", ") || "none"}.`,
           false,
           {
@@ -1857,12 +1877,9 @@ export async function executeLinghunControlToolUse(
         );
       }
       if (input.action === "cancel_all" || input.action === "stop_all") {
-        const agents = await cancelAllAgents(context, createSilentOutput());
-        return await finishControlToolResult(
-          toolCall,
-          context,
-          sessionId,
-          output,
+        const agents = await cancelAllAgents(context, createSilentOutput(), commitGuard);
+        if (requestIsStale()) return staleControlResult();
+        return await finishResult(
           agents.length > 0
             ? `AgentControl ${input.action}: cancelled ${agents.length} agent(s).`
             : `AgentControl ${input.action}: no cancellable agents.`,
@@ -1872,11 +1889,7 @@ export async function executeLinghunControlToolUse(
       }
       if (input.action === "show") {
         const agent = findAgent(context, input.agentRef);
-        return await finishControlToolResult(
-          toolCall,
-          context,
-          sessionId,
-          output,
+        return await finishResult(
           agent
             ? `Agent ${agent.status}: ${agent.summary}`
             : `Agent not found: ${input.agentRef ?? "latest"}`,
@@ -1884,12 +1897,9 @@ export async function executeLinghunControlToolUse(
           formatAgentRunToolResultData(agent),
         );
       }
-      const agent = await cancelAgentByRef(input.agentRef, context, output);
-      return await finishControlToolResult(
-        toolCall,
-        context,
-        sessionId,
-        output,
+      const agent = await cancelAgentByRef(input.agentRef, context, output, commitGuard);
+      if (requestIsStale()) return staleControlResult();
+      return await finishResult(
         agent
           ? `Agent cancelled: ${agent.summary}`
           : `Agent not found: ${input.agentRef ?? "latest"}`,
@@ -1899,14 +1909,11 @@ export async function executeLinghunControlToolUse(
     }
     if (toolCall.name === SEND_MESSAGE_TOOL_NAME) {
       const input = parseSendMessageToolInput(toolCall.input);
-      if (!input.ok)
-        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
-      const result = await sendAgentMessage(context, { ...input, from: "model" });
-      return await finishControlToolResult(
-        toolCall,
-        context,
-        sessionId,
-        output,
+      if (!input.ok) return await finishFailure(input.text);
+      if (requestIsStale()) return staleControlResult();
+      const result = await sendAgentMessage(context, { ...input, from: "model" }, commitGuard);
+      if (requestIsStale()) return staleControlResult();
+      return await finishResult(
         result.text,
         !result.ok,
         {
@@ -1916,8 +1923,15 @@ export async function executeLinghunControlToolUse(
     }
     if (toolCall.name === RUN_WORKFLOW_TOOL_NAME) {
       const input = parseRunWorkflowToolInput(toolCall.input);
-      if (!input.ok)
-        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok) return await finishFailure(input.text);
+      if (requestIsStale()) return staleControlResult();
+      const workflowOptions = {
+        ownerSessionId: sessionId,
+        permissionMode: invocationPermissionMode,
+        invokingRequestTurnId: requestTurnId,
+        userActionConstraints: invocationUserActionConstraints,
+        commitGuard,
+      };
       if (input.workflowId) {
         const registry = findRegistryWorkflow(context, input.workflowId);
         const registryAgent = findRegistryAgentWorkflow(context, input.workflowId);
@@ -1927,13 +1941,7 @@ export async function executeLinghunControlToolUse(
             ? context.workflows.activeRun
             : undefined);
         if (!registry && !registryAgent && !existingRun) {
-          return await finishControlToolFailure(
-            toolCall,
-            context,
-            sessionId,
-            output,
-            `Unknown workflowId: ${input.workflowId}`,
-          );
+          return await finishFailure(`Unknown workflowId: ${input.workflowId}`);
         }
         if (existingRun && !registry && !registryAgent) {
           const currentStep = selectWorkflowCurrentStepForToolResult(existingRun);
@@ -1946,7 +1954,7 @@ export async function executeLinghunControlToolUse(
             existingRun.multiAgent,
             existingRun.result,
           );
-          return await finishControlToolResult(toolCall, context, sessionId, output, text, false, {
+          return await finishResult(text, false, {
             ...buildWorkflowToolResultData(existingRun, input, context.language),
           });
         }
@@ -1958,6 +1966,7 @@ export async function executeLinghunControlToolUse(
             input.runInBackground,
             context,
             createSilentOutput(),
+            workflowOptions,
           );
         } else if (registryAgent) {
           await runRegistryAgentWorkflow(
@@ -1966,14 +1975,17 @@ export async function executeLinghunControlToolUse(
             input.runInBackground,
             context,
             createSilentOutput(),
+            workflowOptions,
           );
         }
       } else {
         await runWorkflowSteps(input.goal ?? "", context, createSilentOutput(), {
           ...input,
           ignoreForegroundModelGuard: true,
+          ...workflowOptions,
         });
       }
+      if (requestIsStale()) return staleControlResult();
       const run = context.workflows.activeRun;
       const ok =
         run?.status === "completed" || (input.runInBackground && run?.status === "running");
@@ -1989,11 +2001,7 @@ export async function executeLinghunControlToolUse(
             run.result,
           )
         : "Workflow runtime did not start.";
-      return await finishControlToolResult(
-        toolCall,
-        context,
-        sessionId,
-        output,
+      return await finishResult(
         text,
         !ok,
         buildWorkflowToolResultData(run, input, context.language),
@@ -2001,8 +2009,7 @@ export async function executeLinghunControlToolUse(
     }
     if (toolCall.name === INDEX_OPERATION_TOOL_NAME) {
       const input = parseIndexOperationToolInput(toolCall.input);
-      if (!input.ok)
-        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok) return await finishFailure(input.text);
       const mappedName =
         input.action === "inspect"
           ? INDEX_STATUS_INSPECT
@@ -2024,8 +2031,7 @@ export async function executeLinghunControlToolUse(
     }
     if (toolCall.name === RUN_VERIFICATION_TOOL_NAME) {
       const input = parseVerificationToolInput(toolCall.input);
-      if (!input.ok)
-        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok) return await finishFailure(input.text);
       const report = await runWorkflowVerificationStep(
         input.level,
         context,
@@ -2062,7 +2068,7 @@ export async function executeLinghunControlToolUse(
       const text = report
         ? `Verification ${report.status.toUpperCase()}: ${report.summary} Scope: ${report.scope?.cwd ?? context.projectPath}.`
         : "Verification runner did not produce a report.";
-      const finished = await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
+      const finished = await finishResult(text, !ok, {
         status: report.status,
         reportId: report.id,
         level: input.level,
@@ -2073,7 +2079,7 @@ export async function executeLinghunControlToolUse(
             status: command.status,
             synthetic: command.synthetic === true,
           })),
-      }, () => !requestIsStale());
+      });
       if (!requestIsStale()) context.lastVerification = report;
       if (!requestIsStale()) {
         await appendPolicyToolFeedback(
@@ -2088,15 +2094,9 @@ export async function executeLinghunControlToolUse(
     if (toolCall.name === WRITE_REPORT_TOOL_NAME) {
       return executeWriteReportToolUse(toolCall, context, sessionId, output, continuation);
     }
-    return await finishControlToolFailure(
-      toolCall,
-      context,
-      sessionId,
-      output,
-      `Unknown Linghun control tool: ${toolCall.name}`,
-    );
+    return await finishFailure(`Unknown Linghun control tool: ${toolCall.name}`);
   } finally {
-    if (toolCall.name !== RUN_VERIFICATION_TOOL_NAME || !requestIsStale()) {
+    if (commitGuard()) {
       context.commandPanelState = previousCommandPanelState;
     }
     if (context.requestActivityToolUseId === toolCall.id) {
@@ -2588,8 +2588,9 @@ async function finishControlToolFailure(
   sessionId: string,
   output: Writable,
   text: string,
+  commitGuard?: () => boolean,
 ) {
-  return finishControlToolResult(toolCall, context, sessionId, output, text, true);
+  return finishControlToolResult(toolCall, context, sessionId, output, text, true, undefined, commitGuard);
 }
 
 function controlToolEvidenceSpec(
@@ -3503,24 +3504,63 @@ export async function handleToolCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
-  owner: { requestTurnId?: string; workflowRunId?: string } = {},
+  owner: {
+    ownerSessionId?: string;
+    requestTurnId?: string;
+    workflowRunId?: string;
+    permissionMode?: TuiContext["permissionMode"];
+    userActionConstraints?: UserActionConstraints;
+    ownerSignal?: AbortSignal;
+    cwd?: string;
+  } = {},
 ): Promise<ToolOutput | undefined> {
+  const workflowRun = owner.workflowRunId
+    ? context.workflows.activeRuns?.find((run) => run.id === owner.workflowRunId) ??
+      (context.workflows.activeRun?.id === owner.workflowRunId
+        ? context.workflows.activeRun
+        : undefined)
+    : undefined;
+  const ownerSignal = owner.ownerSignal ?? (owner.workflowRunId
+    ? context.backgroundAbortControllers?.get(owner.workflowRunId)?.signal
+    : undefined);
+  const ownerIsCurrent = () =>
+    ownerSignal?.aborted !== true &&
+    (!owner.workflowRunId || workflowRun?.status === "running");
+  const commitGuard = owner.workflowRunId || ownerSignal ? ownerIsCurrent : undefined;
+  if (!ownerIsCurrent()) return undefined;
   try {
     const input = parseToolInput(name, args);
-    const sessionId = await ensureSession(context);
-    const permission = await decidePermission(name, input, context, sessionId);
-    await context.store.appendEvent(sessionId, {
-      type: "permission_request",
-      request: permission.request,
-      createdAt: new Date().toISOString(),
+    const sessionId = owner.ownerSessionId ?? (await ensureSession(context));
+    if (!ownerIsCurrent()) return undefined;
+    const permission = await decidePermission(name, input, context, sessionId, {
+      ...(owner.permissionMode ? { permissionMode: owner.permissionMode } : {}),
+      ...(Object.prototype.hasOwnProperty.call(owner, "userActionConstraints")
+        ? { userActionConstraints: owner.userActionConstraints }
+        : {}),
     });
-    await context.store.appendEvent(sessionId, {
-      type: "permission_result",
-      requestId: permission.request.id,
-      decision: permission.decision,
-      reason: permission.reason,
-      createdAt: new Date().toISOString(),
-    });
+    if (!ownerIsCurrent()) return undefined;
+    await context.store.appendEvent(
+      sessionId,
+      {
+        type: "permission_request",
+        request: permission.request,
+        createdAt: new Date().toISOString(),
+      },
+      commitGuard,
+    );
+    if (!ownerIsCurrent()) return undefined;
+    await context.store.appendEvent(
+      sessionId,
+      {
+        type: "permission_result",
+        requestId: permission.request.id,
+        decision: permission.decision,
+        reason: permission.reason,
+        createdAt: new Date().toISOString(),
+      },
+      commitGuard,
+    );
+    if (!ownerIsCurrent()) return undefined;
     if (permission.autoAllowPolicy) {
       // Same audit event as the model-dispatched path. Mirrors the
       // emit in executeModelToolUse so transcripts have a single, uniform
@@ -3532,7 +3572,9 @@ export async function handleToolCommand(
         sessionId,
         formatPermissionAutoAllowEvent(name, verdict),
         "info",
+        commitGuard,
       );
+      if (!ownerIsCurrent()) return undefined;
     }
 
     if (permission.decision !== "allow") {
@@ -3541,29 +3583,40 @@ export async function handleToolCommand(
         sessionId,
         name,
         `permission ${permission.decision}: ${permission.reason}; ${permission.request.summary}`,
+        commitGuard,
+        undefined,
+        {
+          ownerSessionId: sessionId,
+          requestTurnId: owner.requestTurnId,
+          workflowRunId: owner.workflowRunId,
+          cwd: owner.cwd ?? context.projectPath,
+        },
       );
+      if (!ownerIsCurrent()) return undefined;
       writeLine(output, formatPermissionDenied(permission.reason, permission.request.summary));
       writeStatus(output, context);
       return;
     }
 
+    const effectivePermissionMode = owner.permissionMode ?? context.permissionMode;
     const boundaryPreflight =
-      context.permissionMode === "full-access" || context.permissionMode === "auto-review"
-        ? { decision: "allow" as const, reason: `${context.permissionMode} skips TUI boundary confirmation` }
+      effectivePermissionMode === "full-access" || effectivePermissionMode === "auto-review"
+        ? { decision: "allow" as const, reason: `${effectivePermissionMode} skips TUI boundary confirmation` }
         : await runBoundaryEditPreflight(
             { id: "slash-command-preflight", name, input },
             name,
             context,
           );
+    if (!ownerIsCurrent()) return undefined;
     if (boundaryPreflight.decision === "confirm") {
       writeLine(output, formatBoundaryEditPreflightPrompt(boundaryPreflight, context.language));
-      context.pendingLocalApproval = undefined;
+      if (!owner.workflowRunId) context.pendingLocalApproval = undefined;
       writeStatus(output, context);
       return;
     }
 
     const shouldKeepAutoReviewWorkspaceEditQuiet =
-      context.permissionMode === "auto-review" &&
+      effectivePermissionMode === "auto-review" &&
       permission.request.files.length > 0 &&
       (name === "Write" || name === "Edit" || name === "MultiEdit");
 
@@ -3581,6 +3634,7 @@ export async function handleToolCommand(
     }
 
     const checkpoint = await maybeCreateCheckpoint(name, input, context, sessionId);
+    if (!ownerIsCurrent()) return undefined;
     if (checkpoint && !shouldKeepAutoReviewWorkspaceEditQuiet) {
       writeLine(output, `${t(context, "checkpointCreated")}：${checkpoint.id}`);
     }
@@ -3595,13 +3649,18 @@ export async function handleToolCommand(
     }
 
     const callId = randomUUID();
-    await context.store.appendEvent(sessionId, {
-      type: "tool_call_start",
-      id: callId,
-      name,
-      input,
-      createdAt: new Date().toISOString(),
-    });
+    await context.store.appendEvent(
+      sessionId,
+      {
+        type: "tool_call_start",
+        id: callId,
+        name,
+        input,
+        createdAt: new Date().toISOString(),
+      },
+      commitGuard,
+    );
+    if (!ownerIsCurrent()) return undefined;
     const backgroundController = task
       ? registerBackgroundAbortController(context, task.id)
       : undefined;
@@ -3614,7 +3673,16 @@ export async function handleToolCommand(
     let result: Awaited<ReturnType<typeof runTool>>;
     let bgStarted2 = false;
     try {
-      result = await runTool(name, input, progress.toolContext);
+      const executionSignal = ownerSignal && backgroundController
+        ? AbortSignal.any([ownerSignal, backgroundController.signal])
+        : ownerSignal ?? backgroundController?.signal;
+      result = await runTool(
+        name,
+        input,
+        executionSignal
+          ? { ...progress.toolContext, abortSignal: executionSignal }
+          : progress.toolContext,
+      );
       bgStarted2 = !!(result.output.data as { backgroundTaskId?: string } | undefined)?.backgroundTaskId;
     } finally {
       progress.restore();
@@ -3626,6 +3694,7 @@ export async function handleToolCommand(
         context.tools.abortSignal = previousAbortSignal;
       }
     }
+    if (!ownerIsCurrent()) return undefined;
     if (task) {
       const bgData = result.output.data as { backgroundTaskId?: string; outputPath?: string } | undefined;
       if (bgData?.backgroundTaskId) {
@@ -3636,11 +3705,29 @@ export async function handleToolCommand(
       } else {
         finishBackgroundTaskFromToolOutput(task, result.output, context);
       }
-      await appendBackgroundTaskEvent(context, sessionId, task);
+      await appendBackgroundTaskEvent(context, sessionId, task, commitGuard);
     }
-    await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));
-    await appendDerivedToolEvents(context, sessionId, name, result.output);
-    const evidence = await recordToolEvidence(context, sessionId, name, result.output, input);
+    if (!ownerIsCurrent()) return undefined;
+    await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output), commitGuard);
+    if (!ownerIsCurrent()) return undefined;
+    await appendDerivedToolEvents(context, sessionId, name, result.output, commitGuard);
+    if (!ownerIsCurrent()) return undefined;
+    const evidence = await recordToolEvidence(
+      context,
+      sessionId,
+      name,
+      result.output,
+      input,
+      commitGuard,
+      callId,
+      {
+        ownerSessionId: sessionId,
+        requestTurnId: owner.requestTurnId,
+        workflowRunId: owner.workflowRunId,
+        cwd: owner.cwd ?? context.projectPath,
+      },
+    );
+    if (!ownerIsCurrent()) return undefined;
     rememberToolFiles(context, name, input, result.output, owner);
     await appendToolResultEvent(
       context,
@@ -3650,7 +3737,9 @@ export async function handleToolCommand(
       result.output,
       isToolOutputFailure(name, result.output),
       evidence?.id,
+      commitGuard,
     );
+    if (!ownerIsCurrent()) return undefined;
     if (isToolOutputFailure(name, result.output)) {
       await captureFailureLearning(context, sessionId, {
         category: "tool_failure",
@@ -3661,7 +3750,7 @@ export async function handleToolCommand(
         sourceRef: evidence?.id ? `evidence:${evidence.id}` : `tool:${name}`,
         relatedTarget: name,
         severity: "medium",
-      });
+      }, commitGuard);
     }
     writeStructuredToolOutput(
       output,

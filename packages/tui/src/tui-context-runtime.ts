@@ -20,6 +20,7 @@ import type {
 import type { BoundaryEditPreflightResult } from "./architecture-boundary.js";
 import type { ArchitectureCard } from "./architecture-runtime.js";
 import type { IndexState } from "./index-runtime.js";
+import type { FeishuLongConnectionHandle } from "./feishu-long-connection-runtime.js";
 import type { Keybinding } from "./keybinding-runtime.js";
 import type { MemoryMutation } from "./memory-command-runtime.js";
 import type { DeepCompactRunResult } from "./deep-compact-runtime.js";
@@ -355,6 +356,7 @@ export type TuiContext = {
   hooks: HookState;
   plugins: PluginState;
   remote: RemoteState;
+  feishuLongConnectionHandle?: FeishuLongConnectionHandle;
   agents: AgentRun[];
   agentCompletions?: AgentCompletionState;
   roleUsage: RoleUsage[];

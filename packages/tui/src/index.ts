@@ -395,6 +395,7 @@ import {
 } from "./provider-circuit-breaker.js";
 import {
   configureRemoteCommandRuntime,
+  clearRemoteCommandRuntime,
   consumeRemoteInboundMessage,
   createRemoteEvent,
   handleRemoteCommand,
@@ -1673,6 +1674,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     return 1;
   } finally {
     options.signal?.removeEventListener("abort", interruptHandler);
+    try {
+      await clearRemoteCommandRuntime(context);
+    } catch (error) {
+      writeLine(errorOutput, `警告：Remote runtime cleanup failed: ${formatError(error, context.language)}`);
+    }
     clearAppConnectorRuntime(context);
   }
 }
@@ -2105,6 +2111,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   } finally {
     options.signal?.removeEventListener("abort", interruptHandler);
     await finishHeadlessRuntime(context);
+    try {
+      await clearRemoteCommandRuntime(context);
+    } catch (error) {
+      writeLine(errorOutput, `警告：Remote runtime cleanup failed: ${formatError(error, context.language)}`);
+    }
     clearAppConnectorRuntime(context);
   }
 }

@@ -42,6 +42,7 @@ export const MCP_TRANSPORT_LIMITS: Readonly<McpTransportLimits> = Object.freeze(
 const MCP_SSE_CONNECTION_TIMEOUT_MS = 15_000;
 const MCP_SSE_TOOL_CALL_TIMEOUT_MS = 100_000_000;
 const MCP_SSE_TOOL_LIST_CACHE_TTL_MS = 5_000;
+const MCP_SSE_TOOL_LIST_CACHE_MAX_ENTRIES = 20;
 let nextJsonRpcId = 1;
 const toolListCache = new Map<string, { expiresAt: number; toolNames: string[] }>();
 
@@ -95,7 +96,12 @@ async function getMcpSseToolNames(
 ): Promise<{ ok: true; toolNames: string[] } | { ok: false; summary: string; errorCode?: string }> {
   const cached = toolListCache.get(url);
   const now = Date.now();
+  for (const [cachedUrl, entry] of toolListCache) {
+    if (entry.expiresAt <= now) toolListCache.delete(cachedUrl);
+  }
   if (cached && cached.expiresAt > now) {
+    toolListCache.delete(url);
+    toolListCache.set(url, cached);
     return { ok: true, toolNames: [...cached.toolNames] };
   }
   const list = await mcpSseRequest(url, "tools/list", {}, timeoutMs, signal, onProgress, timeoutMs);
@@ -103,10 +109,16 @@ async function getMcpSseToolNames(
     return { ok: false, summary: list.summary, errorCode: list.errorCode };
   }
   const toolNames = extractMcpToolNames(list.data);
+  toolListCache.delete(url);
   toolListCache.set(url, {
-    expiresAt: now + MCP_SSE_TOOL_LIST_CACHE_TTL_MS,
+    expiresAt: Date.now() + MCP_SSE_TOOL_LIST_CACHE_TTL_MS,
     toolNames,
   });
+  while (toolListCache.size > MCP_SSE_TOOL_LIST_CACHE_MAX_ENTRIES) {
+    const oldestUrl = toolListCache.keys().next().value;
+    if (typeof oldestUrl !== "string") break;
+    toolListCache.delete(oldestUrl);
+  }
   return { ok: true, toolNames };
 }
 

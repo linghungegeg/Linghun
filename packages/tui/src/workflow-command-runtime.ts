@@ -46,6 +46,7 @@ import { WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT } from "./tui-context-runtime.j
 import {
   currentRequestUserActionConstraints,
   forbidsVerificationEvidence,
+  type UserActionConstraints,
 } from "./user-action-constraints.js";
 import type {
   BackgroundTaskState,
@@ -76,6 +77,16 @@ import {
 } from "./workflow-agent-runtime-bridge.js";
 import type { NormalizedWorkflowPlan } from "./workflow-plan-schema.js";
 import type { WorkflowPlannerEntryResult } from "./workflow-planner-entry.js";
+
+type WorkflowToolOwner = {
+  ownerSessionId?: string;
+  requestTurnId?: string;
+  workflowRunId?: string;
+  permissionMode?: TuiContext["permissionMode"];
+  userActionConstraints?: UserActionConstraints;
+  ownerSignal?: AbortSignal;
+  cwd?: string;
+};
 
 export type WorkflowCommandRuntimeDeps = {
   ensureSession: (context: TuiContext) => Promise<string>;
@@ -112,7 +123,7 @@ export type WorkflowCommandRuntimeDeps = {
     args: string[],
     context: TuiContext,
     output: Writable,
-    owner?: { requestTurnId?: string; workflowRunId?: string },
+    owner?: WorkflowToolOwner,
   ) => Promise<ToolOutput | undefined>;
   createSilentOutput: () => Writable;
 };
@@ -205,7 +216,7 @@ async function handleToolCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
-  owner?: { requestTurnId?: string; workflowRunId?: string },
+  owner?: WorkflowToolOwner,
 ): Promise<ToolOutput | undefined> {
   return getWorkflowDeps().handleToolCommand(toolName, args, context, output, owner);
 }
@@ -901,18 +912,20 @@ export async function runWorkflowSteps(
   output: Writable,
   options: RunWorkflowExecutionOptions = {},
 ): Promise<void> {
+  if (options.commitGuard && !options.commitGuard()) return;
   await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
     stepId: "workflow-dispatch",
     executor: "workflow-runtime",
     status: "consumed",
     summary: `goal=${truncateDisplay(goal.replace(/\s+/g, " "), 160)}; agents=${options.agents ?? "auto"}`,
   });
+  if (options.commitGuard && !options.commitGuard()) return;
   const { generateWorkflowPlanPreview, formatWorkflowPlanPreview } = await import(
     "./workflow-planner-entry.js"
   );
   const preview = generateWorkflowPlanPreview({
     goal,
-    permissionMode: context.permissionMode,
+    permissionMode: options.permissionMode ?? context.permissionMode,
     language: context.language,
     agents: options.agents,
     multiAgent: options.multiAgent,
@@ -920,6 +933,7 @@ export async function runWorkflowSteps(
     teamName: options.teamName,
     ...buildWorkflowPlannerContextInput(context),
   });
+  if (options.commitGuard && !options.commitGuard()) return;
   if (!preview.ok) {
     writeLine(output, `工作流计划生成失败：${preview.reason}`);
     await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
@@ -982,6 +996,7 @@ export async function runWorkflowSteps(
     return;
   }
   await runWorkflowPlanSteps(goal, preview.plan, context, output, options);
+  if (options.commitGuard && !options.commitGuard()) return;
   await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
     stepId: "workflow-dispatch",
     executor: "workflow-runtime",
@@ -999,6 +1014,11 @@ type RunWorkflowExecutionOptions = {
   __testRunId?: string;
   confirmedPhaseStopPoints?: string[];
   ignoreForegroundModelGuard?: boolean;
+  ownerSessionId?: string;
+  permissionMode?: TuiContext["permissionMode"];
+  invokingRequestTurnId?: string;
+  userActionConstraints?: NonNullable<ReturnType<typeof currentRequestUserActionConstraints>>;
+  commitGuard?: () => boolean;
 };
 
 type WorkflowBatchItem = {
@@ -1043,6 +1063,7 @@ async function runWorkflowPlanSteps(
     new Set([...(options.confirmedPhaseStopPoints ?? []), phase.id]),
   );
   const sessionId = await ensureSession(context);
+  if (options.commitGuard && !options.commitGuard()) return;
   const runId = options.__testRunId ?? `workflow-${randomUUID().slice(0, 8)}`;
   const startedAt = new Date().toISOString();
   const executableSlices = plan.phases.flatMap((item) => item.slices);
@@ -1082,18 +1103,21 @@ async function runWorkflowPlanSteps(
     nextAction: "等待 step_result；失败时查看 /failures 和 transcript。",
   };
   const engineeringSignal = snapshotEngineeringSignal(context);
+  if (options.commitGuard && !options.commitGuard()) return;
+  const invokingRequestTurnId = "invokingRequestTurnId" in options
+    ? options.invokingRequestTurnId
+    : context.currentRequestTurnId;
+  const userActionConstraints = "userActionConstraints" in options
+    ? options.userActionConstraints
+    : currentRequestUserActionConstraints(context);
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
-    ownerSessionId: sessionId,
+    ownerSessionId: options.ownerSessionId ?? sessionId,
     cwd: context.projectPath,
     changedFiles: getRequestScopedVerificationChangedFiles(context),
-    permissionMode: plan.permissionMode,
-    ...(context.currentRequestTurnId
-      ? { invokingRequestTurnId: context.currentRequestTurnId }
-      : {}),
-    ...(currentRequestUserActionConstraints(context)
-      ? { userActionConstraints: { ...currentRequestUserActionConstraints(context)! } }
-      : {}),
+    permissionMode: options.permissionMode ?? plan.permissionMode,
+    ...(invokingRequestTurnId ? { invokingRequestTurnId } : {}),
+    ...(userActionConstraints ? { userActionConstraints: { ...userActionConstraints } } : {}),
     goal,
     planId: plan.id,
     status: "running",
@@ -1337,12 +1361,24 @@ export async function runRegistryAgentWorkflow(
   runInBackground: boolean,
   context: TuiContext,
   output: Writable,
+  options: RunWorkflowExecutionOptions = {},
 ): Promise<void> {
   const task = goal || agent.description;
   await handleForkCommand(
     [agent.id, task, ...(runInBackground ? ["--background"] : [])],
     context,
     output,
+    {
+      ...(options.ownerSessionId ? { ownerSessionId: options.ownerSessionId } : {}),
+      ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
+      ...("invokingRequestTurnId" in options
+        ? { invokingRequestTurnId: options.invokingRequestTurnId }
+        : {}),
+      ...("userActionConstraints" in options
+        ? { userActionConstraints: options.userActionConstraints }
+        : {}),
+      ...(options.commitGuard ? { commitGuard: options.commitGuard } : {}),
+    },
   );
 }
 
@@ -1352,8 +1388,11 @@ export async function runRegistryWorkflow(
   runInBackground: boolean,
   context: TuiContext,
   output: Writable,
+  options: RunWorkflowExecutionOptions = {},
 ): Promise<void> {
+  if (options.commitGuard && !options.commitGuard()) return;
   const sessionId = await ensureSession(context);
+  if (options.commitGuard && !options.commitGuard()) return;
   const orchestrationAction = resolveMetaOrchestrationAction(context, "workflow-dispatch");
   const policy = resolveWorkflowDispatchRuntimePolicy(orchestrationAction);
   if (policy.action === "block") {
@@ -1431,18 +1470,21 @@ export async function runRegistryWorkflow(
     nextAction: "查看 /workflows registry、/background 或 /details background。",
   };
   const engineeringSignal = snapshotEngineeringSignal(context);
+  if (options.commitGuard && !options.commitGuard()) return;
+  const invokingRequestTurnId = "invokingRequestTurnId" in options
+    ? options.invokingRequestTurnId
+    : context.currentRequestTurnId;
+  const userActionConstraints = "userActionConstraints" in options
+    ? options.userActionConstraints
+    : currentRequestUserActionConstraints(context);
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
-    ownerSessionId: sessionId,
+    ownerSessionId: options.ownerSessionId ?? sessionId,
     cwd: context.projectPath,
     changedFiles: getRequestScopedVerificationChangedFiles(context),
-    permissionMode: context.permissionMode,
-    ...(context.currentRequestTurnId
-      ? { invokingRequestTurnId: context.currentRequestTurnId }
-      : {}),
-    ...(currentRequestUserActionConstraints(context)
-      ? { userActionConstraints: { ...currentRequestUserActionConstraints(context)! } }
-      : {}),
+    permissionMode: options.permissionMode ?? context.permissionMode,
+    ...(invokingRequestTurnId ? { invokingRequestTurnId } : {}),
+    ...(userActionConstraints ? { userActionConstraints: { ...userActionConstraints } } : {}),
     goal: goal || workflow.description,
     planId: workflow.id,
     status: "running",
@@ -1604,7 +1646,7 @@ async function executeRegistryWorkflowStep(
     const isRegistryMutating =
       step.action === "write" || step.action === "bash" || step.action === "agent";
     if (isRegistryMutating) {
-      if (context.permissionMode === "plan") {
+      if ((run?.permissionMode ?? context.permissionMode) === "plan") {
         return {
           status: "blocked",
           summary: formatWorkflowStepSummary(
@@ -1740,8 +1782,31 @@ async function executeRegistryWorkflowStep(
           evidenceRefs: [],
         };
       const toolOutput = await handleToolCommand("Bash", [step.command], context, output, {
+        ownerSessionId: run?.ownerSessionId,
+        requestTurnId: run?.invokingRequestTurnId,
         workflowRunId,
+        permissionMode: run?.permissionMode,
+        userActionConstraints: run?.userActionConstraints,
+        ownerSignal: run?.id
+          ? context.backgroundAbortControllers?.get(run.id)?.signal
+          : undefined,
+        cwd: run?.cwd,
       });
+      if (!toolOutput) {
+        const cancelled = run?.status === "cancelled" || run?.status === "stale";
+        return {
+          status: cancelled ? "cancelled" : "blocked",
+          summary: formatWorkflowStepSummary(
+            step.id,
+            cancelled ? "cancelled" : "blocked",
+            cancelled
+              ? "workflow owner cancelled before Bash result commit"
+              : "Bash did not pass the workflow invocation permission boundary",
+            context.language,
+          ),
+          evidenceRefs: [],
+        };
+      }
       rememberWorkflowChangedFiles(run, toolOutput?.changedFiles);
     } else if (step.action === "write") {
       handledKnownAction = true;
@@ -1760,8 +1825,31 @@ async function executeRegistryWorkflowStep(
         };
       }
       const toolOutput = await handleToolCommand("Write", [step.path, step.content], context, output, {
+        ownerSessionId: run?.ownerSessionId,
+        requestTurnId: run?.invokingRequestTurnId,
         workflowRunId,
+        permissionMode: run?.permissionMode,
+        userActionConstraints: run?.userActionConstraints,
+        ownerSignal: run?.id
+          ? context.backgroundAbortControllers?.get(run.id)?.signal
+          : undefined,
+        cwd: run?.cwd,
       });
+      if (!toolOutput) {
+        const cancelled = run?.status === "cancelled" || run?.status === "stale";
+        return {
+          status: cancelled ? "cancelled" : "blocked",
+          summary: formatWorkflowStepSummary(
+            step.id,
+            cancelled ? "cancelled" : "blocked",
+            cancelled
+              ? "workflow owner cancelled before Write result commit"
+              : "Write did not pass the workflow invocation permission boundary",
+            context.language,
+          ),
+          evidenceRefs: [],
+        };
+      }
       rememberWorkflowChangedFiles(run, toolOutput?.changedFiles);
     }
   } catch (error) {
@@ -1806,8 +1894,9 @@ export async function __testExecuteRegistryWorkflowStep(
   goal: string,
   context: TuiContext,
   output: Writable,
+  workflowRunId?: string,
 ): ReturnType<typeof executeRegistryWorkflowStep> {
-  return executeRegistryWorkflowStep(workflow, step, goal, context, output);
+  return executeRegistryWorkflowStep(workflow, step, goal, context, output, workflowRunId);
 }
 
 function formatWorkflowStepSummary(

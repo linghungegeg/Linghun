@@ -714,6 +714,7 @@ export type AgentRun = {
   forkedFrom?: string;
   task: string;
   contextMode?: "handoff" | "full_fork";
+  cacheSafePrefixSnapshot?: CacheSafePrefixSnapshot;
   engineeringSignal?: EngineeringSignalSnapshot;
   model: string;
   registryAgentId?: string;
@@ -753,6 +754,7 @@ export type AgentRun = {
     cacheWriteTokens: number;
     estimatedCny: number;
   };
+  lastProviderFallbackAttempt?: ProviderFallbackAttemptSummary;
   startedAt: string;
   updatedAt: string;
 };
@@ -1402,6 +1404,7 @@ export type ProviderFailureSummary = {
 };
 
 export type ProviderFallbackAttemptSummary = {
+  requestContextId?: string;
   fromProvider: string;
   fromModel: string;
   toProvider: string;

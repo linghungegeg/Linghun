@@ -814,59 +814,147 @@ export class OpenAiCompatibleProvider implements Provider {
   ): AsyncGenerator<LinghunEvent> {
     this.assertReady();
     const requestController = new AbortController();
+    const forwardAbort = () => requestController.abort(signal?.reason);
     if (signal?.aborted) {
-      requestController.abort(signal.reason);
+      forwardAbort();
     } else {
-      signal?.addEventListener("abort", () => requestController.abort(signal.reason), {
-        once: true,
-      });
+      signal?.addEventListener("abort", forwardAbort, { once: true });
     }
-    const requestSignal = requestController.signal;
-    const contract = resolveProviderRuntimeContract(this.config, request);
-    const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
-      this.config.baseUrl,
-      contract.endpointProfile,
-    );
-    const url = joinBaseUrlAndEndpoint(baseUrlDiagnostic.normalizedBaseUrl, contract.endpoint);
-    if (contract.endpointProfile === "anthropic_messages") {
-      const body = this.createAnthropicMessagesRequest(request);
-      // D.13H：Anthropic Context Editing / cache_edits 收口。仅在
-      //   contextEditingEnabled === true
-      //   AND endpointProfile === "anthropic_messages"
-      //   AND anthropicBetaHeaders.filter(Boolean).length > 0
-      // 三者同时成立时，才把 anthropic-beta: <headers.join(",")> 附加进 headers；
-      // 永不发空的 anthropic-beta header（即使长度 1 但全空字符串也按 0 处理）。
-      // 即使 sendable=true，请求 body 仍然由 createAnthropicMessagesProfileRequest
-      // 硬禁止 cache_edits / cache_reference 字段（hard-disabled）。
-      const contextEditing = resolveAnthropicContextEditingDiagnostic(this.config, contract);
-      const headers: Record<string, string> = {
-        "content-type": "application/json",
-        ...LINGHUN_REQUEST_IDENTITY_HEADERS,
-        // Anthropic Messages 鉴权头：x-api-key + anthropic-version。
-        // 部分中转网关沿用 OpenAI 风格 Authorization: Bearer，因此并发发送两套头，
-        // Anthropic 官方接口忽略 Authorization，OpenAI 风格中转忽略 x-api-key/version。
-        "x-api-key": this.config.apiKey ?? "",
-        "anthropic-version": "2023-06-01",
-        authorization: `Bearer ${this.config.apiKey ?? ""}`,
-        accept: "text/event-stream",
-      };
-      if (contextEditing.sendable) {
-        const filteredBetaHeaders = (this.config.anthropicBetaHeaders ?? []).filter(
-          (header) => typeof header === "string" && header.length > 0,
-        );
-        if (filteredBetaHeaders.length > 0) {
-          headers["anthropic-beta"] = filteredBetaHeaders.join(",");
+    try {
+      const requestSignal = requestController.signal;
+      const contract = resolveProviderRuntimeContract(this.config, request);
+      const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
+        this.config.baseUrl,
+        contract.endpointProfile,
+      );
+      const url = joinBaseUrlAndEndpoint(baseUrlDiagnostic.normalizedBaseUrl, contract.endpoint);
+      if (contract.endpointProfile === "anthropic_messages") {
+        const body = this.createAnthropicMessagesRequest(request);
+        // D.13H：Anthropic Context Editing / cache_edits 收口。仅在
+        //   contextEditingEnabled === true
+        //   AND endpointProfile === "anthropic_messages"
+        //   AND anthropicBetaHeaders.filter(Boolean).length > 0
+        // 三者同时成立时，才把 anthropic-beta: <headers.join(",")> 附加进 headers；
+        // 永不发空的 anthropic-beta header（即使长度 1 但全空字符串也按 0 处理）。
+        // 即使 sendable=true，请求 body 仍然由 createAnthropicMessagesProfileRequest
+        // 硬禁止 cache_edits / cache_reference 字段（hard-disabled）。
+        const contextEditing = resolveAnthropicContextEditingDiagnostic(this.config, contract);
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+          ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+          // Anthropic Messages 鉴权头：x-api-key + anthropic-version。
+          // 部分中转网关沿用 OpenAI 风格 Authorization: Bearer，因此并发发送两套头，
+          // Anthropic 官方接口忽略 Authorization，OpenAI 风格中转忽略 x-api-key/version。
+          "x-api-key": this.config.apiKey ?? "",
+          "anthropic-version": "2023-06-01",
+          authorization: `Bearer ${this.config.apiKey ?? ""}`,
+          accept: "text/event-stream",
+        };
+        if (contextEditing.sendable) {
+          const filteredBetaHeaders = (this.config.anthropicBetaHeaders ?? []).filter(
+            (header) => typeof header === "string" && header.length > 0,
+          );
+          if (filteredBetaHeaders.length > 0) {
+            headers["anthropic-beta"] = filteredBetaHeaders.join(",");
+          }
         }
-      }
-      const response = await fetchWithProviderRetry(
-        url,
-        {
+        const response = await fetchWithProviderRetry(url, {
           method: "POST",
           headers,
           body: JSON.stringify(body),
           signal: requestSignal,
+        });
+
+        if (!response.ok) {
+          const responseText = await safeReadResponseText(response);
+          const fallback = await tryNonStreamingFallback({
+            providerConfig: this.config,
+            request,
+            contract,
+            baseUrl: baseUrlDiagnostic.normalizedBaseUrl,
+            status: response.status,
+            responseText,
+            requestSignal,
+          });
+          if (fallback) {
+            control?.onAttemptReset?.({
+              reason: "stream_http_error",
+              replacement: "non_streaming_fallback",
+            });
+            yield* fallback;
+            return;
+          }
+          if (response.status === 401 || response.status === 403) {
+            throw createApiKeyError(response.status, undefined, {
+              endpointProfile: contract.endpointProfile,
+              endpoint: contract.endpoint,
+              responseText,
+            });
+          }
+          throw createHttpStatusError(response.status, responseText, this.config.type, {
+            endpointProfile: contract.endpointProfile,
+            endpoint: contract.endpoint,
+          });
+        }
+
+        if (!response.body) {
+          throw new LinghunError({
+            code: "PROVIDER_STREAM_EMPTY",
+            message: "模型请求失败：响应中没有可读取的流。",
+            suggestion: `请确认 base_url 支持 ${contract.profile} 的 ${contract.endpoint} 流式接口。`,
+            recoverable: true,
+          });
+        }
+
+        await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
+
+        let yieldedToolUse = false;
+        for await (const event of parseAnthropicMessagesStream(
+          withStreamIdleTimeout(
+            response.body,
+            PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+            requestSignal,
+            requestController,
+          ),
+          contract.endpoint,
+        )) {
+          if (event.type === "tool_use") yieldedToolUse = true;
+          if (!yieldedToolUse && isProviderIncompleteStreamErrorEvent(event)) {
+            const fallback = await tryNonStreamingFallback({
+              providerConfig: this.config,
+              request,
+              contract,
+              baseUrl: baseUrlDiagnostic.normalizedBaseUrl,
+              requestSignal,
+            });
+            if (fallback) {
+              control?.onAttemptReset?.({
+                reason: "stream_incomplete",
+                replacement: "non_streaming_fallback",
+              });
+              yield* fallback;
+              return;
+            }
+          }
+          yield event;
+        }
+        return;
+      }
+
+      const body =
+        contract.endpointProfile === "responses"
+          ? this.createResponsesRequest(request)
+          : this.createChatRequest(request);
+      const response = await fetchWithProviderRetry(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+          authorization: `Bearer ${this.config.apiKey}`,
         },
-      );
+        body: JSON.stringify(body),
+        signal: requestSignal,
+      });
 
       if (!response.ok) {
         const responseText = await safeReadResponseText(response);
@@ -912,14 +1000,14 @@ export class OpenAiCompatibleProvider implements Provider {
       await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
       let yieldedToolUse = false;
-      for await (const event of parseAnthropicMessagesStream(
+      for await (const event of parseOpenAiStream(
         withStreamIdleTimeout(
           response.body,
           PROVIDER_STREAM_IDLE_TIMEOUT_MS,
           requestSignal,
           requestController,
         ),
-        contract.endpoint,
+        contract.endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
       )) {
         if (event.type === "tool_use") yieldedToolUse = true;
         if (!yieldedToolUse && isProviderIncompleteStreamErrorEvent(event)) {
@@ -941,99 +1029,8 @@ export class OpenAiCompatibleProvider implements Provider {
         }
         yield event;
       }
-      return;
-    }
-
-    const body =
-      contract.endpointProfile === "responses"
-        ? this.createResponsesRequest(request)
-        : this.createChatRequest(request);
-    const response = await fetchWithProviderRetry(
-      url,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...LINGHUN_REQUEST_IDENTITY_HEADERS,
-          authorization: `Bearer ${this.config.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: requestSignal,
-      },
-    );
-
-    if (!response.ok) {
-      const responseText = await safeReadResponseText(response);
-      const fallback = await tryNonStreamingFallback({
-        providerConfig: this.config,
-        request,
-        contract,
-        baseUrl: baseUrlDiagnostic.normalizedBaseUrl,
-        status: response.status,
-        responseText,
-        requestSignal,
-      });
-      if (fallback) {
-        control?.onAttemptReset?.({
-          reason: "stream_http_error",
-          replacement: "non_streaming_fallback",
-        });
-        yield* fallback;
-        return;
-      }
-      if (response.status === 401 || response.status === 403) {
-        throw createApiKeyError(response.status, undefined, {
-          endpointProfile: contract.endpointProfile,
-          endpoint: contract.endpoint,
-          responseText,
-        });
-      }
-      throw createHttpStatusError(response.status, responseText, this.config.type, {
-        endpointProfile: contract.endpointProfile,
-        endpoint: contract.endpoint,
-      });
-    }
-
-    if (!response.body) {
-      throw new LinghunError({
-        code: "PROVIDER_STREAM_EMPTY",
-        message: "模型请求失败：响应中没有可读取的流。",
-        suggestion: `请确认 base_url 支持 ${contract.profile} 的 ${contract.endpoint} 流式接口。`,
-        recoverable: true,
-      });
-    }
-
-    await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
-
-    let yieldedToolUse = false;
-    for await (const event of parseOpenAiStream(
-      withStreamIdleTimeout(
-        response.body,
-        PROVIDER_STREAM_IDLE_TIMEOUT_MS,
-        requestSignal,
-        requestController,
-      ),
-      contract.endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
-    )) {
-      if (event.type === "tool_use") yieldedToolUse = true;
-      if (!yieldedToolUse && isProviderIncompleteStreamErrorEvent(event)) {
-        const fallback = await tryNonStreamingFallback({
-          providerConfig: this.config,
-          request,
-          contract,
-          baseUrl: baseUrlDiagnostic.normalizedBaseUrl,
-          requestSignal,
-        });
-        if (fallback) {
-          control?.onAttemptReset?.({
-            reason: "stream_incomplete",
-            replacement: "non_streaming_fallback",
-          });
-          yield* fallback;
-          return;
-        }
-      }
-      yield event;
+    } finally {
+      signal?.removeEventListener("abort", forwardAbort);
     }
   }
 
@@ -1541,14 +1538,20 @@ async function tryNonStreamingFallback(input: {
   if (!text) {
     return undefined;
   }
+  const usage = extractNonStreamingUsage(
+    parsed,
+    input.contract.endpointProfile,
+    input.contract.endpoint,
+  );
   return [
     { type: "assistant_text_delta", id: "non-streaming-fallback", text },
+    ...(usage ? [{ type: "usage" as const, usage }] : []),
     {
       type: "message_stop",
       id: "non-streaming-fallback",
       finishReason: "non_streaming_fallback",
       chunkCount: 1,
-      hadUsage: false,
+      hadUsage: Boolean(usage),
     },
   ];
 }
@@ -1674,21 +1677,22 @@ function withStreamIdleTimeout(
           requestController?.abort(error);
           reject(error);
         }, timeoutMs);
-        signal.addEventListener(
-          "abort",
-          () => {
-            if (timer) clearTimeout(timer);
-          },
-          { once: true },
-        );
       });
-      const result = await Promise.race([reader.read(), timeout]);
-      if (timer) clearTimeout(timer);
-      if (result.done) {
-        controller.close();
-        return;
+      const clearIdleTimeout = () => {
+        if (timer) clearTimeout(timer);
+      };
+      signal.addEventListener("abort", clearIdleTimeout, { once: true });
+      try {
+        const result = await Promise.race([reader.read(), timeout]);
+        if (result.done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(result.value);
+      } finally {
+        clearIdleTimeout();
+        signal.removeEventListener("abort", clearIdleTimeout);
       }
-      controller.enqueue(result.value);
     },
     cancel(reason) {
       return reader.cancel(reason);
@@ -2958,27 +2962,10 @@ function parseAnthropicMessagesEventBlock(
     state.hadUsage = true;
     const merged: AnthropicUsage = { ...(state.rawUsage ?? {}), ...usage };
     state.rawUsage = merged;
-    const inputTokens = merged.input_tokens ?? state.inputTokens ?? 0;
-    const outputTokens = merged.output_tokens ?? 0;
-    const cacheReadTokens = merged.cache_read_input_tokens ?? state.cacheReadTokens;
-    const cacheWriteTokens = normalizeAnthropicCacheWriteTokens(merged) ?? state.cacheWriteTokens;
-    // D.13F：cache_creation 拆分到 ephemeral_5m / ephemeral_1h，既合并为 write 总量，也透出拆分字段。
-    const ephemeral5m = merged.cache_creation?.ephemeral_5m_input_tokens;
-    const ephemeral1h = merged.cache_creation?.ephemeral_1h_input_tokens;
     return [
       {
         type: "usage",
-        usage: {
-          inputTokens,
-          outputTokens,
-          totalTokens: inputTokens + outputTokens,
-          cacheReadTokens,
-          cacheWriteTokens,
-          cacheCreationEphemeral5mTokens: ephemeral5m,
-          cacheCreationEphemeral1hTokens: ephemeral1h,
-          rawUsage: merged,
-          endpoint,
-        },
+        usage: normalizeProviderUsage(merged, "anthropic_messages", endpoint),
       },
     ];
   }
@@ -3051,6 +3038,67 @@ type ResponsesUsage = {
   cache_creation_input_tokens?: number;
   cache_creation_tokens?: number;
 };
+
+function normalizeProviderUsage(
+  usage: OpenAiStreamUsage | ResponsesUsage | AnthropicUsage,
+  endpointProfile: EndpointProfile,
+  endpoint: string,
+): ModelUsage {
+  if (endpointProfile === "anthropic_messages") {
+    const anthropicUsage = usage as AnthropicUsage;
+    const inputTokens = anthropicUsage.input_tokens ?? 0;
+    const outputTokens = anthropicUsage.output_tokens ?? 0;
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens: inputTokens + outputTokens,
+      cacheReadTokens: anthropicUsage.cache_read_input_tokens,
+      cacheWriteTokens: normalizeAnthropicCacheWriteTokens(anthropicUsage),
+      cacheCreationEphemeral5mTokens: anthropicUsage.cache_creation?.ephemeral_5m_input_tokens,
+      cacheCreationEphemeral1hTokens: anthropicUsage.cache_creation?.ephemeral_1h_input_tokens,
+      rawUsage: usage,
+      endpoint,
+    };
+  }
+  if (endpointProfile === "responses") {
+    const responsesUsage = usage as ResponsesUsage;
+    return {
+      inputTokens: responsesUsage.input_tokens ?? 0,
+      outputTokens: responsesUsage.output_tokens ?? 0,
+      totalTokens: responsesUsage.total_tokens ?? 0,
+      cacheReadTokens: responsesUsage.input_tokens_details?.cached_tokens,
+      cacheWriteTokens: readCacheWriteTokens(responsesUsage) ?? undefined,
+      rawUsage: usage,
+      endpoint,
+    };
+  }
+  const chatUsage = usage as OpenAiStreamUsage;
+  return {
+    inputTokens: chatUsage.prompt_tokens ?? 0,
+    outputTokens: chatUsage.completion_tokens ?? 0,
+    totalTokens: chatUsage.total_tokens ?? 0,
+    cacheReadTokens:
+      chatUsage.prompt_tokens_details?.cached_tokens ?? chatUsage.cache_read_input_tokens,
+    cacheWriteTokens: readCacheWriteTokens(chatUsage) ?? undefined,
+    rawUsage: usage,
+    endpoint,
+  };
+}
+
+function extractNonStreamingUsage(
+  parsed: unknown,
+  endpointProfile: EndpointProfile,
+  endpoint: string,
+): ModelUsage | undefined {
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const usage = (parsed as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") return undefined;
+  return normalizeProviderUsage(
+    usage as OpenAiStreamUsage | ResponsesUsage | AnthropicUsage,
+    endpointProfile,
+    endpoint,
+  );
+}
 
 function parseOpenAiStreamLine(
   line: string,
@@ -3162,19 +3210,9 @@ function parseOpenAiStreamLine(
   }
   if (parsed.usage) {
     state.hadUsage = true;
-    const cacheWriteTokens = readCacheWriteTokens(parsed.usage) ?? undefined;
     events.push({
       type: "usage",
-      usage: {
-        inputTokens: parsed.usage.prompt_tokens ?? 0,
-        outputTokens: parsed.usage.completion_tokens ?? 0,
-        totalTokens: parsed.usage.total_tokens ?? 0,
-        cacheReadTokens:
-          parsed.usage.prompt_tokens_details?.cached_tokens ?? parsed.usage.cache_read_input_tokens,
-        cacheWriteTokens,
-        rawUsage: parsed.usage,
-        endpoint,
-      },
+      usage: normalizeProviderUsage(parsed.usage, "chat_completions", endpoint),
     });
   }
   return events;
@@ -3337,15 +3375,7 @@ function parseResponsesEvent(
       state.hadUsage = true;
       events.push({
         type: "usage",
-        usage: {
-          inputTokens: usage.input_tokens ?? 0,
-          outputTokens: usage.output_tokens ?? 0,
-          totalTokens: usage.total_tokens ?? 0,
-          cacheReadTokens: usage.input_tokens_details?.cached_tokens,
-          cacheWriteTokens: readCacheWriteTokens(usage) ?? undefined,
-          rawUsage: usage,
-          endpoint,
-        },
+        usage: normalizeProviderUsage(usage, "responses", endpoint),
       });
     }
     return events;

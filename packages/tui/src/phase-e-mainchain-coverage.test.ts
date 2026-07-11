@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -8,6 +8,7 @@ import type { ModelGateway, ModelMessage, ModelRequest, ModelToolCall } from "@l
 import { builtInTools, createToolContext, type ToolOutput } from "@linghun/tools";
 import { describe, expect, it, vi } from "vitest";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
+import { evidenceMatchesRequestOwner } from "./evidence-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
 import { rememberCacheSafePrefix } from "./cache-policy-runtime.js";
@@ -45,7 +46,11 @@ import { routeNaturalIntent } from "./natural-command-bridge.js";
 import { executePermissionApprove } from "./permission-approval-runtime.js";
 import { classifyToolRequest } from "./permission-policy-engine.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
-import { configureSlashCommandRuntime, handleSlashCommand } from "./slash-command-runtime.js";
+import {
+  configureSlashCommandRuntime,
+  handleSlashCommand,
+  recordAgentToolEvidence,
+} from "./slash-command-runtime.js";
 import type { PendingLocalApproval, TuiContext } from "./tui-context-runtime.js";
 import type {
   AgentRun,
@@ -327,6 +332,137 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
     );
     expect(index.tool).toBe(INDEX_STATUS_INSPECT);
   }, 60_000);
+
+  it("drops stale control tools before they mutate agents, mailboxes, or workflows", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const agent = createAgentRun(context, { id: "agent-stale-control", status: "running" });
+    context.agents.push(agent);
+    context.currentRequestTurnId = "request-b";
+    const continuation = {
+      messages: [],
+      provider: "deepseek",
+      model: "deepseek-chat",
+      endpointProfile: "chat_completions" as const,
+      reasoningSent: false,
+      requestTurnId: "request-a",
+      abortSignal: new AbortController().signal,
+    };
+
+    const results = await Promise.all([
+      executeLinghunControlToolUse(
+        call(START_AGENT_TOOL_NAME, { role: "planner", task: "late start" }),
+        context,
+        sessionId,
+        new MemoryOutput(),
+        continuation,
+      ),
+      executeLinghunControlToolUse(
+        call(SEND_MESSAGE_TOOL_NAME, { agentRef: agent.id, message: "late mail" }),
+        context,
+        sessionId,
+        new MemoryOutput(),
+        continuation,
+      ),
+      executeLinghunControlToolUse(
+        call(AGENT_CONTROL_TOOL_NAME, { action: "cancel", agentRef: agent.id }),
+        context,
+        sessionId,
+        new MemoryOutput(),
+        continuation,
+      ),
+      executeLinghunControlToolUse(
+        call(RUN_WORKFLOW_TOOL_NAME, { goal: "late workflow" }),
+        context,
+        sessionId,
+        new MemoryOutput(),
+        continuation,
+      ),
+    ]);
+
+    expect(results.every((result) => result.ok === false && result.text.includes("stale"))).toBe(true);
+    expect(context.agents).toEqual([agent]);
+    expect(agent.status).toBe("running");
+    expect(agent.mailbox).toEqual([]);
+    expect(context.workflows.activeRun).toBeUndefined();
+    expect(context.evidence).toEqual([]);
+  });
+
+  it("drops an in-flight StartAgent after its request owner changes", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    context.currentRequestTurnId = "request-a";
+    let releaseCreate!: () => void;
+    let markCreateStarted!: () => void;
+    const createStarted = new Promise<void>((resolve) => { markCreateStarted = resolve; });
+    const createRelease = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    const originalCreate = context.store.create.bind(context.store);
+    const deleteSpy = vi.spyOn(context.store, "delete");
+    vi.spyOn(context.store, "create").mockImplementationOnce(async (...args) => {
+      markCreateStarted();
+      await createRelease;
+      return originalCreate(...args);
+    });
+
+    const pending = executeLinghunControlToolUse(
+      call(START_AGENT_TOOL_NAME, { role: "planner", task: "race start" }),
+      context,
+      sessionId,
+      new MemoryOutput(),
+      {
+        messages: [],
+        provider: "deepseek",
+        model: "deepseek-chat",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        requestTurnId: "request-a",
+        abortSignal: new AbortController().signal,
+      },
+    );
+    await createStarted;
+    context.currentRequestTurnId = "request-b";
+    releaseCreate();
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("stale");
+    expect(context.agents).toEqual([]);
+    expect(context.evidence).toEqual([]);
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+  }, 60_000);
+
+  it("records agent tool evidence under the invocation owner instead of the foreground", async () => {
+    const context = await createTestContext();
+    context.currentRequestTurnId = "request-b";
+    const agent = createAgentRun(context, {
+      id: "agent-owner-a",
+      invokingRequestTurnId: "request-a",
+      cwd: join(context.projectPath, ".worktrees", "agent-owner-a"),
+    });
+    rememberBackgroundTask(context, {
+      ...createBackgroundTask(agent.id, "agent", "running"),
+      workflowRunId: "workflow-a",
+    });
+
+    const evidenceId = await recordAgentToolEvidence(
+      context,
+      context.sessionId ?? "session",
+      agent,
+      "Write",
+      { text: "written" },
+      { path: "result.txt", content: "done" },
+    );
+    const evidence = context.evidence.find((item) => item.id === evidenceId);
+
+    expect(evidence?.ownerScope).toMatchObject({
+      ownerSessionId: context.sessionId,
+      requestTurnId: "request-a",
+      ownerAgentId: agent.id,
+      workflowRunId: "workflow-a",
+      cwd: agent.cwd,
+    });
+    expect(evidence && evidenceMatchesRequestOwner(evidence, context)).toBe(false);
+  });
 
   it("records passed RunVerification claims for final-answer evidence", async () => {
     const context = await createTestContext();
@@ -962,6 +1098,63 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(fullForkContents.at(-1)).toContain("<linghun-full-context-fork>");
   });
 
+  it("keeps an agent on its invocation cache prefix after the foreground changes", async () => {
+    const requests: ModelRequest[] = [];
+    const context = await createTestContext(undefined, (request) => {
+      requests.push(structuredClone(request));
+    });
+    rememberCacheSafePrefix(context.cache, {
+      messages: [{ role: "system", content: "AGENT_A_PREFIX" }],
+      model: "deepseek-chat",
+      endpointProfile: "chat_completions",
+      tools: createModelToolDefinitionsForTools([builtInTools.Read, builtInTools.Todo]),
+      toolChoice: "auto",
+    });
+    const agent = createAgentRun(context, { id: "agent-cache-a" });
+    rememberCacheSafePrefix(context.cache, {
+      messages: [{ role: "system", content: "FOREGROUND_B_PREFIX" }],
+      model: "deepseek-chat",
+      endpointProfile: "chat_completions",
+      tools: createModelToolDefinitionsForTools([builtInTools.Read, builtInTools.Todo]),
+      toolChoice: "auto",
+    });
+
+    await runModelBackedAgent(agent, context, new MemoryOutput());
+
+    const payload = JSON.stringify(requests[0]);
+    expect(payload).toContain("AGENT_A_PREFIX");
+    expect(payload).not.toContain("FOREGROUND_B_PREFIX");
+  });
+
+  it("rotates the agent requestContextId when same-provider retry resets the attempt", async () => {
+    const requestContextIds: string[] = [];
+    const context = await createTestContext(
+      [
+        [
+          { type: "assistant_text_delta", text: "OLD_PARTIAL" },
+          { type: "error", error: { code: "PROVIDER_NETWORK_ERROR", message: "retry" } },
+        ],
+        [
+          { type: "assistant_text_delta", text: "NEW_COMPLETE" },
+          { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+        ],
+      ],
+      (request) => {
+        if (request.requestContextId) requestContextIds.push(request.requestContextId);
+      },
+    );
+
+    const result = await runModelBackedAgent(
+      createAgentRun(context, { id: "agent-request-context" }),
+      context,
+      new MemoryOutput(),
+    );
+
+    expect(result.status, result.summary).toBe("completed");
+    expect(requestContextIds).toHaveLength(2);
+    expect(new Set(requestContextIds).size).toBe(2);
+  });
+
   it("runModelBackedAgent does not recursively inherit a full-context fork prefix", async () => {
     const requests: ModelRequest[] = [];
     const context = await createTestContext(undefined, (request) => {
@@ -1157,6 +1350,149 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(context.lastVerification?.summary).not.toContain("plan-only requested");
   }, 60_000);
 
+  it("keeps registry Write on the workflow permission and evidence owner", async () => {
+    const context = await createTestContext();
+    context.permissionMode = "full-access";
+    context.currentRequestTurnId = "foreground-b";
+    const workflow = {
+      id: "registry-owner",
+      name: "Registry owner",
+      description: "",
+      path: "registry.yml",
+      steps: [],
+    };
+    context.workflows.activeRun = {
+      id: "workflow-owner-a",
+      ownerSessionId: context.sessionId,
+      cwd: context.projectPath,
+      goal: "readonly workflow",
+      planId: workflow.id,
+      status: "running",
+      result: "partial",
+      phaseGateConfirmed: true,
+      confirmedPhaseStopPoints: [workflow.id],
+      permissionMode: "full-access",
+      invokingRequestTurnId: "request-a",
+      userActionConstraints: parseUserActionConstraints("只读，不要修改文件"),
+      steps: [],
+      startedAt: new Date().toISOString(),
+    };
+
+    const result = await __testExecuteRegistryWorkflowStep(
+      workflow,
+      { id: "write-owned", action: "write", path: "owned.txt", content: "x" },
+      "goal",
+      context,
+      new MemoryOutput(),
+      "workflow-owner-a",
+    );
+
+    expect(result.status).toBe("blocked");
+    await expect(readFile(join(context.projectPath, "owned.txt"), "utf8")).rejects.toThrow();
+    const evidence = context.evidence.find((item) => item.summary.includes("Write failure"));
+    expect(evidence?.ownerScope).toMatchObject({
+      ownerSessionId: context.sessionId,
+      requestTurnId: "request-a",
+      workflowRunId: "workflow-owner-a",
+      cwd: context.projectPath,
+    });
+    expect(evidence && evidenceMatchesRequestOwner(evidence, context)).toBe(false);
+  });
+
+  it("keeps registry Bash on the workflow permission and evidence owner", async () => {
+    const context = await createTestContext();
+    context.permissionMode = "full-access";
+    context.currentRequestTurnId = "foreground-b";
+    const workflow = {
+      id: "registry-bash-owner",
+      name: "Registry Bash owner",
+      description: "",
+      path: "registry.yml",
+      steps: [],
+    };
+    context.workflows.activeRun = {
+      id: "workflow-bash-owner-a",
+      ownerSessionId: context.sessionId,
+      cwd: context.projectPath,
+      goal: "readonly workflow",
+      planId: workflow.id,
+      status: "running",
+      result: "partial",
+      phaseGateConfirmed: true,
+      confirmedPhaseStopPoints: [workflow.id],
+      permissionMode: "full-access",
+      invokingRequestTurnId: "request-a",
+      userActionConstraints: parseUserActionConstraints("不要执行命令"),
+      steps: [],
+      startedAt: new Date().toISOString(),
+    };
+
+    const result = await __testExecuteRegistryWorkflowStep(
+      workflow,
+      { id: "bash-owned", action: "bash", command: "node -e \"process.exit(0)\"" },
+      "goal",
+      context,
+      new MemoryOutput(),
+      "workflow-bash-owner-a",
+    );
+
+    expect(result.status).toBe("blocked");
+    const evidence = context.evidence.find((item) => item.summary.includes("Bash failure"));
+    expect(evidence?.ownerScope).toMatchObject({
+      requestTurnId: "request-a",
+      workflowRunId: "workflow-bash-owner-a",
+      cwd: context.projectPath,
+    });
+    expect(evidence && evidenceMatchesRequestOwner(evidence, context)).toBe(false);
+  });
+
+  it("does not let foreground plan mode downgrade a full-access registry Write", async () => {
+    const context = await createTestContext();
+    context.permissionMode = "plan";
+    context.currentRequestTurnId = "foreground-b";
+    context.currentUserActionConstraintsRequestTurnId = "foreground-b";
+    context.currentUserActionConstraints = parseUserActionConstraints("只读，不要修改文件");
+    const workflow = {
+      id: "registry-full-access",
+      name: "Registry full access",
+      description: "",
+      path: "registry.yml",
+      steps: [],
+    };
+    context.workflows.activeRun = {
+      id: "workflow-full-access-a",
+      ownerSessionId: context.sessionId,
+      cwd: context.projectPath,
+      goal: "write workflow",
+      planId: workflow.id,
+      status: "running",
+      result: "partial",
+      phaseGateConfirmed: true,
+      confirmedPhaseStopPoints: [workflow.id],
+      permissionMode: "full-access",
+      invokingRequestTurnId: "request-a",
+      steps: [],
+      startedAt: new Date().toISOString(),
+    };
+
+    const result = await __testExecuteRegistryWorkflowStep(
+      workflow,
+      { id: "write-full", action: "write", path: "full.txt", content: "ok" },
+      "goal",
+      context,
+      new MemoryOutput(),
+      "workflow-full-access-a",
+    );
+
+    expect(result.status).toBe("completed");
+    await expect(readFile(join(context.projectPath, "full.txt"), "utf8")).resolves.toBe("ok");
+    const evidence = context.evidence.find((item) => item.ownerScope?.workflowRunId === "workflow-full-access-a");
+    expect(evidence?.ownerScope).toMatchObject({
+      requestTurnId: "request-a",
+      workflowRunId: "workflow-full-access-a",
+    });
+  });
+
   it("propagates workflow invocation ownership into forked agents", async () => {
     const context = await createTestContext();
     context.permissionMode = "plan";
@@ -1198,6 +1534,91 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(agent?.invokingRequestTurnId).toBe("foreground-old");
     expect(agent?.userActionConstraints).toBeUndefined();
   }, 60_000);
+
+  it("cancelling an agent terminalizes only its pending tool approval", async () => {
+    const context = await createTestContext();
+    const agent = createAgentRun(context, { id: "agent-pending-cancel", status: "running" });
+    context.agents.push(agent);
+    const controller = registerBackgroundAbortController(context, agent.id);
+    context.agentToolContexts = new Map([[agent.id, createToolContext(context.projectPath)]]);
+    const pendingToolCall = call("Write", { path: "cancelled.txt", content: "no" });
+    context.pendingLocalApproval = {
+      kind: "agent_tool_use",
+      agentId: agent.id,
+      agentTranscriptSessionId: agent.transcriptSessionId,
+      toolCall: pendingToolCall,
+      toolName: "Write",
+      sessionId: context.sessionId ?? "session",
+    };
+
+    await cancelAgent(agent, context, new MemoryOutput());
+
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(agent.status).toBe("cancelled");
+    expect(controller.signal.aborted).toBe(true);
+    expect(context.agentToolContexts.has(agent.id)).toBe(false);
+    const transcript = await context.store.readRecentTranscriptEvents(
+      agent.transcriptSessionId,
+      { limit: 20 },
+    );
+    expect(transcript.events.some((event) =>
+      event.type === "tool_result" &&
+      event.toolUseId === pendingToolCall.id &&
+      event.isError === true
+    )).toBe(true);
+    await expect(readFile(join(context.projectPath, "cancelled.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("cancelling one agent preserves another agent pending approval", async () => {
+    const context = await createTestContext();
+    const agentA = createAgentRun(context, { id: "agent-cancel-a", status: "running" });
+    const agentB = createAgentRun(context, { id: "agent-approve-b", status: "running" });
+    context.agents.push(agentA, agentB);
+    const approval: PendingLocalApproval = {
+      kind: "agent_tool_use",
+      agentId: agentB.id,
+      agentTranscriptSessionId: agentB.transcriptSessionId,
+      toolCall: call("Write", { path: "b.txt", content: "b" }),
+      toolName: "Write",
+      sessionId: context.sessionId ?? "session",
+    };
+    context.pendingLocalApproval = approval;
+
+    await cancelAgent(agentA, context, new MemoryOutput());
+
+    expect(context.pendingLocalApproval).toBe(approval);
+    expect(agentA.status).toBe("cancelled");
+    expect(agentB.status).toBe("running");
+  });
+
+  it("still aborts and terminalizes an agent when pending approval recording fails", async () => {
+    const context = await createTestContext();
+    const agent = createAgentRun(context, { id: "agent-approval-error", status: "running" });
+    context.agents.push(agent);
+    const controller = registerBackgroundAbortController(context, agent.id);
+    context.pendingLocalApproval = {
+      kind: "agent_tool_use",
+      agentId: agent.id,
+      agentTranscriptSessionId: agent.transcriptSessionId,
+      toolCall: call("Write", { path: "never.txt", content: "no" }),
+      toolName: "Write",
+      sessionId: context.sessionId ?? "session",
+    };
+    const originalAppend = context.store.appendEvent.bind(context.store);
+    vi.spyOn(context.store, "appendEvent").mockImplementation(async (sessionId, event, commitGuard) => {
+      if (event.type === "system_event" && event.message.startsWith("agent_permission_denied:")) {
+        throw new Error("approval transcript unavailable");
+      }
+      return originalAppend(sessionId, event, commitGuard);
+    });
+
+    await expect(cancelAgent(agent, context, new MemoryOutput())).resolves.toBeUndefined();
+
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(controller.signal.aborted).toBe(true);
+    expect(agent.status).toBe("cancelled");
+    expect(agent.summary).toContain("终结记录降级");
+  });
 
   it("covers executePermissionApprove across all pending approval kinds", async () => {
     const base = await createTestContext();
@@ -1486,7 +1907,12 @@ function gatewayByTurn(
       if (request) onRequest?.(request);
       const events = turns[index] ?? [];
       index += 1;
-      for (const event of events) yield event;
+      for (const event of events) {
+        if (event.type === "error") {
+          throw Object.assign(new Error(event.error.message), event.error);
+        }
+        yield event;
+      }
     },
     async countMessagesTokensWithAPI() {
       return { source: "unavailable", reason: "test" };
@@ -1592,7 +2018,7 @@ function createBackgroundTask(
 
 function createAgentRun(context: TuiContext, overrides: Partial<AgentRun> = {}): AgentRun {
   const id = overrides.id ?? "agent-test";
-  return {
+  const agent: AgentRun = {
     id,
     type: "planner",
     role: "planner",
@@ -1621,6 +2047,15 @@ function createAgentRun(context: TuiContext, overrides: Partial<AgentRun> = {}):
     updatedAt: new Date().toISOString(),
     ...overrides,
   };
+  const cacheSafePrefixSnapshot =
+    overrides.cacheSafePrefixSnapshot ?? context.cache.lastCacheSafePrefix;
+  if (cacheSafePrefixSnapshot) {
+    Object.defineProperty(agent, "cacheSafePrefixSnapshot", {
+      value: cacheSafePrefixSnapshot,
+      enumerable: false,
+    });
+  }
+  return agent;
 }
 
 function memoryCandidate(id: string): MemoryCandidate {

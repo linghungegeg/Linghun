@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { defaultConfig } from "@linghun/config";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { TuiContext } from "./index.js";
 import {
   configureMemoryCommandRuntime,
@@ -13,6 +13,7 @@ import {
 } from "./memory-command-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import { createCacheState } from "./tui-state-runtime.js";
 import type { MemoryCandidate } from "./tui-data-types.js";
 
@@ -259,6 +260,12 @@ describe("memory-command-runtime", () => {
             stability: "stable",
           }),
         };
+        yield {
+          type: "message_stop" as const,
+          id: "memory-delete-audit-stop",
+          chunkCount: 1,
+          hadUsage: false,
+        };
       },
     } as unknown as TuiContext["modelGateway"];
     configureMemoryDeps();
@@ -309,6 +316,12 @@ describe("memory-command-runtime", () => {
                 })
               : JSON.stringify({ veto: false, reason: "direct_memory_control" }),
         };
+        yield {
+          type: "message_stop" as const,
+          id: `memory-delete-control-stop-${classifierCalls}`,
+          chunkCount: 1,
+          hadUsage: false,
+        };
       },
     } as unknown as TuiContext["modelGateway"];
     const systemEvents: string[] = [];
@@ -325,6 +338,67 @@ describe("memory-command-runtime", () => {
     expect(context.memory.accepted).toEqual([]);
     expect(systemEvents).toContainEqual(expect.stringContaining("action=deleted"));
     expect(evidenceEvents).toEqual(["auto_deleted"]);
+  });
+
+  it("retries the semantic classifier through the shared provider lifecycle", async () => {
+    vi.useFakeTimers();
+    try {
+      const directory = await mkdtemp(join(tmpdir(), "linghun-memory-classifier-retry-"));
+      const context = makeContext(directory, makeMemory());
+      context.memory.learningMode = "active";
+      context.sessionId = "session-memory-test";
+      context.config = defaultConfig;
+      context.model = defaultConfig.defaultModel;
+      let attempts = 0;
+      context.modelGateway = {
+        stream: async function* () {
+          attempts += 1;
+          if (attempts === 1) {
+            yield {
+              type: "assistant_text_delta" as const,
+              id: "stale-memory-attempt",
+              text: "STALE_PARTIAL",
+            };
+            yield {
+              type: "error" as const,
+              error: Object.assign(new Error("retry"), {
+                code: "PROVIDER_NETWORK_ERROR",
+                recoverable: true,
+              }),
+            };
+            return;
+          }
+          yield {
+            type: "assistant_text_delta" as const,
+            id: "fresh-memory-attempt",
+            text: JSON.stringify({ action: "no-op", reason: "temporary_task" }),
+          };
+          yield {
+            type: "message_stop" as const,
+            id: "fresh-memory-stop",
+            chunkCount: 1,
+            hadUsage: false,
+          };
+        },
+      } as unknown as TuiContext["modelGateway"];
+      configureMemoryDeps();
+
+      const pending = runAutoLearningOnTurnEnd(context, "请临时检查这个文件，不要长期记忆。", {
+        requestTurnId: "turn-memory-test",
+        sessionId: "session-memory-test",
+        signal: new AbortController().signal,
+      });
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(700);
+      const result = await pending;
+
+      expect(attempts).toBe(2);
+      expect(result.skippedReason).toBe("memory_extraction:temporary_task");
+      expect(context.memory.accepted).toHaveLength(1);
+      expect(context.providerBreaker.entries.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -359,6 +433,7 @@ function makeContext(directory: string, memory: MemoryCandidate): TuiContext {
   return {
     projectPath: directory,
     currentRequestTurnId: "turn-memory-test",
+    providerBreaker: createProviderCircuitBreakerState(),
     memory: {
       projectDir: directory,
       userDir: directory,

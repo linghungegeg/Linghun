@@ -197,6 +197,19 @@ describe("tui permission runtime — CCB-aligned modes", () => {
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 
+  it("full-access does not hard-block writes requested after inspection", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.permissionMode = "full-access";
+    context.currentRequestTurnId = "turn-inspect-then-fix";
+    context.currentUserActionConstraintsRequestTurnId = "turn-inspect-then-fix";
+    context.currentUserActionConstraints = parseUserActionConstraints("先看代码，然后修复并写入文件");
+
+    const write = await decidePermission("Write", { path: "report.md", content: "fixed" }, context, sessionId);
+
+    expect(write.decision).toBe("allow");
+    expect(context.pendingLocalApproval).toBeUndefined();
+  });
+
   it("ignores constraints owned by an interrupted foreground request", async () => {
     const { context, sessionId } = await createTestContext();
     context.permissionMode = "full-access";

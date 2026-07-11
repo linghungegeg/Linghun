@@ -1,7 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { buildBtwMessages, classifyBtwIntent, extractBtwResult } from "./btw-runtime.js";
+import {
+  buildBtwMessages,
+  classifyBtwIntent,
+  extractBtwResult,
+  runBtwSideQuestion,
+} from "./btw-runtime.js";
 
 describe("D.14D btw-runtime", () => {
+  it("discards partial visible state when the provider resets its attempt", async () => {
+    const gateway = {
+      async *stream(
+        _provider: string,
+        _request: unknown,
+        _signal: AbortSignal,
+        control?: { onAttemptReset?: () => void },
+      ) {
+        yield { type: "assistant_text_delta", id: "old", text: "OLD_PARTIAL" };
+        yield { type: "assistant_thinking_delta", id: "old", text: "old thinking" };
+        control?.onAttemptReset?.();
+        yield { type: "assistant_text_delta", id: "new", text: "NEW_COMPLETE" };
+        yield { type: "message_stop", id: "new", chunkCount: 1, hadUsage: false };
+      },
+    };
+
+    const result = await runBtwSideQuestion(
+      "question",
+      gateway as never,
+      {
+        provider: "test-provider",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+      "en-US",
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({ status: "answered", answer: "NEW_COMPLETE" });
+  });
+
   describe("buildBtwMessages", () => {
     it("builds an isolated system+user pair without injecting runtime/internal tokens", () => {
       const messages = buildBtwMessages("解释这段逻辑", "zh-CN");

@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Writable } from "node:stream";
 import type { TranscriptEvent } from "@linghun/core";
+import type { ModelRequest } from "@linghun/providers";
 import { TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import {
@@ -26,6 +27,7 @@ import {
   isMemoryTombstoned,
 } from "./memory-tombstone-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
+import { withProviderRetry } from "./provider-circuit-breaker.js";
 import type {
   MemoryCandidate,
   MemoryLearningRun,
@@ -869,25 +871,34 @@ async function streamSemanticMemoryJson(
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
     let text = "";
-    for await (const event of context.modelGateway.stream(
+    const request: ModelRequest = {
+      model: runtime.model,
+      endpointProfile: runtime.endpointProfile,
+      maxOutputTokens,
+      toolChoice: "none",
+      requestContext: "agent",
+      requestContextId: owner?.requestTurnId ?? context.runtimeContextId,
+      sessionId: owner?.sessionId ?? context.sessionId,
+      messages: [
+        {
+          role: "system",
+          content: system,
+        },
+        { role: "user", content: prompt },
+      ],
+    };
+    for await (const event of withProviderRetry(
+      context.modelGateway,
+      context.providerBreaker,
       runtime.provider,
-      {
-        model: runtime.model,
-        endpointProfile: runtime.endpointProfile,
-        maxOutputTokens,
-        toolChoice: "none",
-        requestContext: "agent",
-        requestContextId: owner?.requestTurnId ?? context.runtimeContextId,
-        sessionId: owner?.sessionId ?? context.sessionId,
-        messages: [
-          {
-            role: "system",
-            content: system,
-          },
-          { role: "user", content: prompt },
-        ],
-      },
+      request,
       controller.signal,
+      {
+        cooldownScope: "sidechain",
+        onAttemptReset: () => {
+          text = "";
+        },
+      },
     )) {
       if (controller.signal.aborted) return undefined;
       if (event.type === "assistant_text_delta") text += event.text;

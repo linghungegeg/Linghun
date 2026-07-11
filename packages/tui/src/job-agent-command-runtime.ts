@@ -38,7 +38,7 @@ import type {
 import { createSilentOutput } from "./details-status-runtime.js";
 import { appendSystemEvent, appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
-import { createManagedWorktree } from "./git-operation-runtime.js";
+import { createManagedWorktree, executeManagedWorktreeRemove } from "./git-operation-runtime.js";
 import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
 import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
 import { formatEngineeringProfileStrategyHint } from "./headless-bench-runtime.js";
@@ -1484,6 +1484,12 @@ async function startDurableJobAgentRun(
     startedAt: now,
     updatedAt: now,
   };
+  if (context.cache.lastCacheSafePrefix) {
+    Object.defineProperty(agent, "cacheSafePrefixSnapshot", {
+      value: context.cache.lastCacheSafePrefix,
+      enumerable: false,
+    });
+  }
   assignment.runId = agent.id;
   assignment.owner = agent.transcriptSessionId;
   assignment.startedAt = now;
@@ -2403,8 +2409,10 @@ export async function handleForkCommand(
     permissionMode?: PermissionMode;
     invokingRequestTurnId?: string;
     userActionConstraints?: UserActionConstraints;
+    commitGuard?: () => boolean;
   } = {},
 ): Promise<AgentRun | undefined> {
+  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
   const options = parseForkCommandArgs(args);
   const registryAgent = resolveForkRegistryAgent(context, options.rawType);
   const type = registryAgent ? mapRegistryAgentType(registryAgent) : options.type;
@@ -2435,6 +2443,7 @@ export async function handleForkCommand(
     runtimeOptions.ownerSessionId ??
     activeWorkflowRun?.ownerSessionId ??
     (await deps().ensureSession(context));
+  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
   const orchestrationAction = resolveMetaOrchestrationAction(context, "agent-dispatch");
   const policy = resolveAgentDispatchRuntimePolicy(orchestrationAction, {
     kind: "fork-agent",
@@ -2461,7 +2470,15 @@ export async function handleForkCommand(
     });
   }
   const packet = await loadOrCreateHandoffPacket(context, parentSessionId);
+  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
   const cwdResult = await resolveAgentCwd(context, options);
+  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) {
+    if (cwdResult.ok && cwdResult.createdWorktree) {
+      const cleanup = await executeManagedWorktreeRemove(context.projectPath, cwdResult.cwd, true);
+      if (cleanup.kind === "failed") throw new Error(cleanup.reason);
+    }
+    return;
+  }
   if (!cwdResult.ok) {
     writeLine(output, cwdResult.text);
     return;
@@ -2470,35 +2487,28 @@ export async function handleForkCommand(
   const effectiveTask = registryAgent ? `${registryAgent.prompt}\n\nTask: ${task}` : task;
   const resolved = resolveRoleRoute(context, role, `/fork ${effectiveType}`);
   await deps().appendRouteDecisionEvent(context, parentSessionId, resolved.decision);
+  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
   if (!resolved.usable) {
     writeLine(output, formatRoutePauseMessage(role, resolved.decision));
     return;
   }
   const route = resolved.route;
   const effectiveModel = registryAgent?.model ?? route.primaryModel ?? context.model;
-  const cooldown = checkProviderCooldown(
-    context.providerBreaker,
-    route.provider ?? "unconfigured",
-    effectiveModel,
-    "sidechain",
-  );
-  if (cooldown.blocked) {
-    const message = formatCooldownMessage(
-      route.provider ?? "unconfigured",
-      effectiveModel,
-      cooldown.remainingMs,
-      context.language,
-      cooldown.reasonCode,
-    );
-    writeLine(output, message);
-    return;
-  }
   const registryAllowedTools = normalizeRegistryAllowedTools(registryAgent?.allowedTools);
   const registryMaxTurns = normalizeRegistryAgentMaxTurns(registryAgent?.maxTurns);
+  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
   const child = await context.store.create({
     model: effectiveModel,
     summary: `agent:${effectiveType}:${truncateDisplay(task, 60)}`,
   });
+  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) {
+    await context.store.delete(child.id);
+    if (cwdResult.ok && cwdResult.createdWorktree) {
+      const cleanup = await executeManagedWorktreeRemove(context.projectPath, cwdResult.cwd, true);
+      if (cleanup.kind === "failed") throw new Error(cleanup.reason);
+    }
+    return;
+  }
   const now = new Date().toISOString();
   const agent: AgentRun = {
     id: `agent-${randomUUID().slice(0, 8)}`,
@@ -2549,6 +2559,13 @@ export async function handleForkCommand(
     startedAt: now,
     updatedAt: now,
   };
+  if (context.cache.lastCacheSafePrefix) {
+    Object.defineProperty(agent, "cacheSafePrefixSnapshot", {
+      value: context.cache.lastCacheSafePrefix,
+      enumerable: false,
+    });
+  }
+  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
   context.agents.unshift(agent);
   const background = createAgentBackgroundTask(agent, context);
   if (workflowTaskId) background.workflowRunId = workflowTaskId;
@@ -2986,12 +3003,15 @@ function resolveAgentRuntimeFallback(
 async function recordAgentProviderFallbackAttempt(
   context: TuiContext,
   sessionId: string,
+  agent: AgentRun,
   input: {
     from: AgentProviderRuntime;
     to: AgentProviderRuntime;
     kind: ProviderFailureKind;
     code: string;
     status: "attempted" | "succeeded" | "failed";
+    requestContextId: string;
+    commitGuard: () => boolean;
   },
 ): Promise<string> {
   const summary = formatProviderFallbackAttemptSummary(
@@ -3004,7 +3024,8 @@ async function recordAgentProviderFallbackAttempt(
     },
     context.language,
   );
-  context.lastProviderFallbackAttempt = {
+  const attempt = {
+    requestContextId: input.requestContextId,
     fromProvider: input.from.provider,
     fromModel: input.from.model,
     toProvider: input.to.provider,
@@ -3021,7 +3042,8 @@ async function recordAgentProviderFallbackAttempt(
     level: input.status === "succeeded" ? "info" : "warning",
     message: `provider fallback attempt: from ${input.from.provider}/${input.from.model}; to ${input.to.provider}/${input.to.model}; reason ${input.kind}; code ${input.code}; status ${input.status}`,
     createdAt: new Date().toISOString(),
-  });
+  }, input.commitGuard);
+  if (input.commitGuard()) agent.lastProviderFallbackAttempt = attempt;
   return summary;
 }
 
@@ -3123,7 +3145,7 @@ export async function runModelBackedAgent(
       toolCalls = [];
       assistantText = "";
       pendingAttemptUsage = undefined;
-      const agentAttemptId = `${agent.id}:${round}:${agentAttemptGeneration}:${randomUUID()}`;
+      let agentAttemptId = `${agent.id}:${round}:${agentAttemptGeneration}:${randomUUID()}`;
       const preflight = await deps().prepareProviderPreflight(
         context,
         agent.transcriptSessionId,
@@ -3190,6 +3212,8 @@ export async function runModelBackedAgent(
           onAttemptReset: () => {
             if (isAgentExecutionCancelled(agent, signal)) return;
             agentAttemptGeneration += 1;
+            agentAttemptId = `${agent.id}:${round}:${agentAttemptGeneration}:${randomUUID()}`;
+            providerRequest.requestContextId = agentAttemptId;
             toolCalls = [];
             assistantText = "";
             pendingAttemptUsage = undefined;
@@ -3288,15 +3312,21 @@ export async function runModelBackedAgent(
             }
             attemptedFallbackModels.add(fallback.runtime.model);
             const fromRuntime = { ...currentRuntime };
+            const fallbackAttemptOwner = agentAttemptId;
             const summary = await recordAgentProviderFallbackAttempt(
               context,
               agent.transcriptSessionId,
+              agent,
               {
                 from: fromRuntime,
                 to: fallback.runtime,
                 kind: fallback.kind,
                 code: fallback.code,
                 status: "attempted",
+                requestContextId: fallbackAttemptOwner,
+                commitGuard: () =>
+                  !isAgentExecutionCancelled(agent, signal) &&
+                  agentAttemptId === fallbackAttemptOwner,
               },
             );
             if (isAgentExecutionCancelled(agent, signal)) {
@@ -3325,9 +3355,14 @@ export async function runModelBackedAgent(
             activeFallback.to.provider === currentRuntime.provider &&
             activeFallback.to.model === currentRuntime.model
           ) {
-            await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, {
+            const fallbackFailureOwner = agentAttemptId;
+            await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, agent, {
               ...activeFallback,
               status: "failed",
+              requestContextId: fallbackFailureOwner,
+              commitGuard: () =>
+                !isAgentExecutionCancelled(agent, signal) &&
+                agentAttemptId === fallbackFailureOwner,
             });
           }
           const kindLabel = formatProviderFailureKindLabel(kind, context.language);
@@ -3374,18 +3409,14 @@ export async function runModelBackedAgent(
               evidenceRefs: [],
             };
           }
-          syncAgentRuntimeFallbackMetadata(context, agent, activeFallback.from, activeFallback.to);
-          await persistAgentRun(context, agent);
-          if (isAgentExecutionCancelled(agent, signal)) {
-            return {
-              status: "blocked",
-              summary: `${agent.type} cancelled：late fallback persistence was discarded.`,
-              evidenceRefs: [],
-            };
-          }
-          await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, {
+          const fallbackSuccessOwner = agentAttemptId;
+          await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, agent, {
             ...activeFallback,
             status: "succeeded",
+            requestContextId: fallbackSuccessOwner,
+            commitGuard: () =>
+              !isAgentExecutionCancelled(agent, signal) &&
+              agentAttemptId === fallbackSuccessOwner,
           });
           if (isAgentExecutionCancelled(agent, signal)) {
             return {
@@ -3394,6 +3425,8 @@ export async function runModelBackedAgent(
               evidenceRefs: [],
             };
           }
+          syncAgentRuntimeFallbackMetadata(context, agent, activeFallback.from, activeFallback.to);
+          await persistAgentRun(context, agent);
           activeFallback = undefined;
         }
       }
@@ -4004,9 +4037,13 @@ function applyAgentCacheSafePrefix(
   agent: AgentRun,
   request: ModelRequest,
 ): ModelRequest {
-  if (agent.contextMode === "full_fork" && !parentPrefixHasFullContextForkMarker(context)) {
+  const cacheState = { lastCacheSafePrefix: agent.cacheSafePrefixSnapshot };
+  if (
+    agent.contextMode === "full_fork" &&
+    !cacheSafePrefixHasFullContextForkMarker(agent.cacheSafePrefixSnapshot)
+  ) {
     const fullFork = applyLastCacheSafePrefix({
-      state: context.cache,
+      state: cacheState,
       request: {
         ...request,
         messages: [
@@ -4021,16 +4058,18 @@ function applyAgentCacheSafePrefix(
     if (fullFork.status === "applied") return fullFork.request;
   }
   return applyLastCacheSafePrefix({
-    state: context.cache,
+    state: cacheState,
     request,
     inheritSystemPrefix: true,
     inheritTools: true,
   }).request;
 }
 
-function parentPrefixHasFullContextForkMarker(context: TuiContext): boolean {
+function cacheSafePrefixHasFullContextForkMarker(
+  snapshot: AgentRun["cacheSafePrefixSnapshot"],
+): boolean {
   return Boolean(
-    context.cache.lastCacheSafePrefix?.messages.some(
+    snapshot?.messages.some(
       (message) =>
         typeof message.content === "string" &&
         message.content.includes(FULL_CONTEXT_FORK_MARKER),
@@ -4199,10 +4238,41 @@ export async function cancelAgent(
     writeLine(output, `agent ${agent.id} 当前状态为 ${agent.status}，无需取消。`);
     return;
   }
+  const controller = context.backgroundAbortControllers?.get(agent.id);
+  controller?.abort();
   const now = new Date().toISOString();
   agent.status = "cancelled";
   agent.lastTerminalStatus = "blocked";
   agent.summary = `agent ${agent.id} 已取消；主会话可继续。`;
+  setAgentActivity(agent, "cancelled", agent.summary);
+  agent.updatedAt = now;
+  const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
+  const pendingApproval = context.pendingLocalApproval;
+  let pendingApprovalCleanupError: string | undefined;
+  if (
+    pendingApproval?.kind === "agent_tool_use" &&
+    pendingApproval.agentId === agent.id
+  ) {
+    context.pendingLocalApproval = undefined;
+    controller?.abort();
+    try {
+      await denyAgentToolUse(
+        agent,
+        pendingApproval.toolCall,
+        pendingApproval.toolName,
+        context,
+        pendingApproval.sessionId,
+        "agent cancelled while tool approval was pending",
+      );
+    } catch (error) {
+      pendingApprovalCleanupError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  agent.status = "cancelled";
+  agent.lastTerminalStatus = "blocked";
+  agent.summary = pendingApprovalCleanupError
+    ? `agent ${agent.id} 已取消；pending approval 终结记录降级：${truncateDisplay(pendingApprovalCleanupError, 120)}`
+    : `agent ${agent.id} 已取消；主会话可继续。`;
   setAgentActivity(agent, "cancelled", agent.summary);
   if (agent.activeTask) {
     agent.activeTask.status = "cancelled";
@@ -4218,7 +4288,6 @@ export async function cancelAgent(
     background.cancelRequestedAt ??= now;
     background.confirmedExitedAt = now;
   }
-  const controller = context.backgroundAbortControllers?.get(agent.id);
   controller?.abort();
   clearAgentAbortController(context, agent.id, controller);
   for (const verificationTask of context.backgroundTasks.filter(
@@ -4231,7 +4300,6 @@ export async function cancelAgent(
       controllers.delete(verificationTask.id);
     }
   }
-  const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
   await context.store.appendEvent(parentSessionId, {
     type: "agent_end",
     agentId: agent.id,
@@ -4261,7 +4329,9 @@ export async function cancelAgentByRef(
   ref: string | undefined,
   context: TuiContext,
   output: Writable,
+  commitGuard?: () => boolean,
 ): Promise<AgentRun | undefined> {
+  if (commitGuard && !commitGuard()) return undefined;
   const agent = findAgent(context, ref);
   if (!agent) {
     writeLine(output, "未找到 agent。");
@@ -4271,11 +4341,17 @@ export async function cancelAgentByRef(
     writeLine(output, `agent ${agent.id} 当前状态为 ${agent.status}，无需取消。`);
     return undefined;
   }
+  if (commitGuard && !commitGuard()) return undefined;
   await cancelAgent(agent, context, output);
   return agent;
 }
 
-export async function cancelAllAgents(context: TuiContext, output: Writable): Promise<AgentRun[]> {
+export async function cancelAllAgents(
+  context: TuiContext,
+  output: Writable,
+  commitGuard?: () => boolean,
+): Promise<AgentRun[]> {
+  if (commitGuard && !commitGuard()) return [];
   const agents = listCancellableAgents(context);
   if (agents.length === 0) {
     writeLine(
@@ -4287,6 +4363,7 @@ export async function cancelAllAgents(context: TuiContext, output: Writable): Pr
     return [];
   }
   for (const agent of agents) {
+    if (commitGuard && !commitGuard()) return [];
     await cancelAgent(agent, context, createSilentOutput());
   }
   writeLine(
@@ -4581,7 +4658,11 @@ export async function sendAgentMessage(
     taskId?: string;
     from?: AgentMailboxMessage["from"];
   },
+  commitGuard?: () => boolean,
 ): Promise<{ ok: boolean; text: string; delivered: string[] }> {
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, text: "cancelled: stale SendMessage request discarded", delivered: [] };
+  }
   const text = input.message.trim();
   if (!text) {
     return { ok: false, text: "SendMessage requires target and non-empty message.", delivered: [] };
@@ -4604,8 +4685,14 @@ export async function sendAgentMessage(
   if (capError) return { ok: false, text: capError, delivered: [] };
   const now = new Date().toISOString();
   const parentSessionId = await deps().ensureSession(context);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, text: "cancelled: stale SendMessage request discarded", delivered: [] };
+  }
   const wakeTargets: Array<{ agent: AgentRun; background: BackgroundTaskState }> = [];
   for (const agent of targets) {
+    if (commitGuard && !commitGuard()) {
+      return { ok: false, text: "cancelled: stale SendMessage request discarded", delivered: [] };
+    }
     agent.mailbox = normalizeAgentMailbox(agent);
     trimAgentMailboxHistory(agent);
     const message: AgentMailboxMessage = {
@@ -5037,7 +5124,13 @@ async function resolveAgentCwd(
   context: TuiContext,
   options: ForkCommandOptions,
 ): Promise<
-  | { ok: true; cwd: string; isolation?: "worktree"; evidenceText?: string }
+  | {
+      ok: true;
+      cwd: string;
+      isolation?: "worktree";
+      evidenceText?: string;
+      createdWorktree?: boolean;
+    }
   | { ok: false; text: string }
 > {
   if (options.cwd && options.isolation === "worktree") {
@@ -5054,6 +5147,7 @@ async function resolveAgentCwd(
       ok: true,
       cwd: outcome.path,
       isolation: "worktree",
+      createdWorktree: outcome.kind === "created",
       evidenceText: `managed_worktree ${outcome.kind}: ${summary.text}`,
     };
   }

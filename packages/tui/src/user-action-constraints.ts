@@ -56,7 +56,7 @@ export function parseUserActionConstraints(text: string | undefined): UserAction
   const readonlyOnly =
     anyClauseMatches(
       clauses,
-      /(?:只读|只(?:看|检查|分析|审计|定位)|先(?:看|检查|分析|审计|定位)|read[-\s]?only|audit\s+only|diagnose\s+only)/iu,
+      /(?:只读|只(?:看|检查|分析|审计|定位)|read[-\s]?only|audit\s+only|diagnose\s+only)/iu,
     );
 
   const forbidWrite =

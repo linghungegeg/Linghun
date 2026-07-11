@@ -480,13 +480,14 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
       resolve();
       return;
     }
-    const timer = setTimeout(resolve, ms);
-    if (signal) {
-      signal.addEventListener("abort", () => {
-        clearTimeout(timer);
-        resolve();
-      }, { once: true });
-    }
+    let timer: NodeJS.Timeout | undefined;
+    const finish = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
   });
 }
 

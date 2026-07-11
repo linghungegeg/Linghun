@@ -61,6 +61,7 @@ describe("Phase F permission contract and Windows safety coverage", () => {
 
 describe("Phase F MCP duplicate, schema, and SSE coverage", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -179,6 +180,75 @@ describe("Phase F MCP duplicate, schema, and SSE coverage", () => {
     await expect(runMcpSseToolCall(server, "demo", {})).resolves.toMatchObject({ ok: true });
     await expect(runMcpSseToolCall(server, "demo", {})).resolves.toMatchObject({ ok: true });
     expect(listCalls).toBe(1);
+  });
+
+  it("starts the SSE tool-list TTL after a slow successful response", async () => {
+    let now = 1_000;
+    let listCalls = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as { id: number; method: string };
+        if (body.method === "tools/list") {
+          listCalls += 1;
+          now = 7_000;
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [{ name: "demo" }] } }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }), {
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    const server = {
+      command: "",
+      transport: "sse" as const,
+      url: "https://example.com/slow-cache-ttl",
+    };
+
+    await runMcpSseToolCall(server, "demo", {});
+    now = 8_000;
+    await runMcpSseToolCall(server, "demo", {});
+
+    expect(listCalls).toBe(1);
+  });
+
+  it("bounds the SSE tool-list cache to the 20 most recent endpoints", async () => {
+    const listCalls = new Map<string, number>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as { id: number; method: string };
+        if (body.method === "tools/list") {
+          listCalls.set(url, (listCalls.get(url) ?? 0) + 1);
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [{ name: "demo" }] } }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }), {
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    const urls = Array.from(
+      { length: 21 },
+      (_, index) => `https://example.com/bounded-cache-${index}`,
+    );
+    for (const url of urls) {
+      await runMcpSseToolCall({ command: "", transport: "sse", url }, "demo", {});
+    }
+    await runMcpSseToolCall(
+      { command: "", transport: "sse", url: urls[0] },
+      "demo",
+      {},
+    );
+
+    expect(listCalls.get(urls[0])).toBe(2);
+    expect(listCalls.get(urls.at(-1) ?? "")).toBe(1);
   });
 
   it("passes caller abort signals into MCP SSE requests", async () => {

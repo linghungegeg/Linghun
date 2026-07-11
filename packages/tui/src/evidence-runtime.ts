@@ -453,6 +453,7 @@ export async function recordToolFailureEvidence(
   summary: string,
   commitGuard?: () => boolean,
   toolUseId?: string,
+  ownerScope?: Partial<NonNullable<EvidenceRecord["ownerScope"]>>,
 ): Promise<EvidenceRecord> {
   const evidence: EvidenceRecord = {
     ...createEvidenceRecord(
@@ -463,7 +464,7 @@ export async function recordToolFailureEvidence(
     ),
     ...(toolUseId ? { toolUseId } : {}),
   };
-  scopeEvidenceToContext(context, evidence);
+  scopeEvidenceToContext(context, evidence, ownerScope);
   if (!commitGuard) {
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, {
@@ -560,6 +561,7 @@ export async function recordToolEvidence(
   input?: unknown,
   commitGuard?: () => boolean,
   toolUseId?: string,
+  ownerScope?: Partial<NonNullable<EvidenceRecord["ownerScope"]>>,
 ): Promise<EvidenceRecord | null> {
   if ((name === "WebSearch" || name === "WebFetch") && isToolOutputFailure(name, output)) {
     return null;
@@ -613,6 +615,7 @@ export async function recordToolEvidence(
     ...(context.currentRequestTurnId ? { requestTurnId: context.currentRequestTurnId } : {}),
     cwd: context.projectPath,
     ...(targetValues.length > 0 ? { targets: Array.from(new Set(targetValues)) } : {}),
+    ...ownerScope,
   };
   if (
     name === "Bash" &&

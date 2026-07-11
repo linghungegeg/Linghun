@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LinghunError } from "@linghun/core";
 import { ModelGateway, type LinghunEvent, type ModelInfo, type Provider } from "@linghun/providers";
@@ -672,6 +673,69 @@ describe("provider-circuit-breaker", () => {
       } finally {
         randomSpy.mockRestore();
       }
+    });
+
+    it("removes retry wait abort listeners after normal completion", async () => {
+      const model: ModelInfo = {
+        id: "gpt-4o",
+        displayName: "GPT-4o",
+        providerId: "openai",
+        contextWindow: 128_000,
+        maxOutputTokens: 4_096,
+        supportsTools: true,
+        supportsVision: false,
+        supportsThinking: false,
+        supportsPromptCache: false,
+      };
+      let attempts = 0;
+      const provider: Provider = {
+        id: "openai",
+        displayName: "OpenAI",
+        supports: { streaming: true, usage: true },
+        async listModels() {
+          return [model];
+        },
+        async *stream() {
+          attempts += 1;
+          if (attempts === 1) {
+            yield {
+              type: "error",
+              error: new LinghunError({
+                code: "PROVIDER_NETWORK_ERROR",
+                message: "retry",
+                recoverable: true,
+              }),
+            } satisfies LinghunEvent;
+            return;
+          }
+          yield {
+            type: "message_stop",
+            id: "retry-stop",
+            chunkCount: 1,
+            hadUsage: false,
+          } satisfies LinghunEvent;
+        },
+      };
+      const signal = new AbortController().signal;
+      const run = (async () => {
+        for await (const _event of withProviderRetry(
+          new ModelGateway([provider]),
+          state,
+          "openai",
+          { messages: [], model: "gpt-4o" },
+          signal,
+          { maxRetries: 1, baseDelayMs: 10, maxDelayMs: 10 },
+        )) {
+        }
+      })();
+
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(20);
+      await run;
+
+      expect(attempts).toBe(2);
+      expect(getEventListeners(signal, "abort")).toHaveLength(0);
+      expect(state.entries.size).toBe(0);
     });
 
     it("keeps 100 concurrent runtimes isolated across 1,000 attempt replacements", async () => {

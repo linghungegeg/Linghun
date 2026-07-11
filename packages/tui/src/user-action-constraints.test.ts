@@ -16,13 +16,39 @@ describe("user-action-constraints", () => {
     expect(forbidsVerificationEvidence(constraints)).toBe(true);
   });
 
-  it("treats readonly positioning as write constraint without banning read tools", () => {
+  it("keeps explicit no-write wording hard without promoting sequencing to readonly", () => {
     const constraints = parseUserActionConstraints("先定位，不要改文件");
 
-    expect(constraints.readonlyOnly).toBe(true);
+    expect(constraints.readonlyOnly).toBe(false);
     expect(constraints.forbidWrite).toBe(true);
     expect(constraints.forbidShell).toBe(false);
     expect(constraints.forbidAllTools).toBe(false);
+    expect(hasReadOnlyUserConstraint(constraints)).toBe(true);
+  });
+
+  it.each([
+    "先看代码然后修复问题",
+    "先检查清楚，再修改文件",
+    "先分析根因；然后编辑实现",
+    "inspect first, then fix the implementation",
+  ])("does not turn ordered implementation intent into a hard deny: %s", (text) => {
+    const constraints = parseUserActionConstraints(text);
+
+    expect(constraints.readonlyOnly).toBe(false);
+    expect(constraints.forbidWrite).toBe(false);
+    expect(hasReadOnlyUserConstraint(constraints)).toBe(false);
+  });
+
+  it.each([
+    "只读审计，不要修改文件",
+    "先检查清楚，但不要写入或编辑文件",
+    "audit only; do not edit files",
+    "diagnose only, do not modify files",
+  ])("keeps explicit readonly intent as a hard request constraint: %s", (text) => {
+    const constraints = parseUserActionConstraints(text);
+
+    expect(constraints.readonlyOnly || constraints.forbidWrite).toBe(true);
+    expect(constraints.forbidWrite).toBe(true);
     expect(hasReadOnlyUserConstraint(constraints)).toBe(true);
   });
 

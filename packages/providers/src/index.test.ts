@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { LinghunError } from "@linghun/core";
 import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
 import { describe, expect, it, vi } from "vitest";
@@ -707,6 +708,161 @@ describe("OpenAI compatible provider", () => {
       id: "non-streaming-fallback",
       text: "fallback ok",
     });
+    expect(events.at(-1)).toMatchObject({ type: "message_stop", hadUsage: false });
+  });
+
+  it.each([
+    {
+      endpointProfile: "chat_completions" as const,
+      body: {
+        choices: [{ message: { content: "chat fallback" } }],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 4,
+          total_tokens: 14,
+          prompt_tokens_details: { cached_tokens: 6, cache_creation_tokens: 2 },
+        },
+      },
+      expected: {
+        inputTokens: 10,
+        outputTokens: 4,
+        totalTokens: 14,
+        cacheReadTokens: 6,
+        cacheWriteTokens: 2,
+      },
+    },
+    {
+      endpointProfile: "responses" as const,
+      body: {
+        output_text: "responses fallback",
+        usage: {
+          input_tokens: 12,
+          output_tokens: 5,
+          total_tokens: 17,
+          input_tokens_details: { cached_tokens: 7, cache_creation_tokens: 3 },
+        },
+      },
+      expected: {
+        inputTokens: 12,
+        outputTokens: 5,
+        totalTokens: 17,
+        cacheReadTokens: 7,
+        cacheWriteTokens: 3,
+      },
+    },
+    {
+      endpointProfile: "anthropic_messages" as const,
+      body: {
+        content: [{ type: "text", text: "anthropic fallback" }],
+        usage: {
+          input_tokens: 13,
+          output_tokens: 6,
+          cache_read_input_tokens: 8,
+          cache_creation_input_tokens: 4,
+        },
+      },
+      expected: {
+        inputTokens: 13,
+        outputTokens: 6,
+        totalTokens: 19,
+        cacheReadTokens: 8,
+        cacheWriteTokens: 4,
+      },
+    },
+  ])(
+    "preserves $endpointProfile usage through non-streaming fallback",
+    async ({ endpointProfile, body, expected }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+          .mockResolvedValueOnce(
+            new Response(JSON.stringify(body), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+          ),
+      );
+      const provider = new OpenAiCompatibleProvider({
+        id: "openai-compatible",
+        type: "openai-compatible",
+        baseUrl: "https://example.com/v1/",
+        apiKey: "test-key",
+        model: "test-model",
+        endpointProfile,
+      });
+      const events: LinghunEvent[] = [];
+
+      for await (const event of provider.stream({ messages: [{ role: "user", content: "hi" }] })) {
+        events.push(event);
+      }
+
+      expect(events.map((event) => event.type)).toEqual([
+        "assistant_text_delta",
+        "usage",
+        "message_stop",
+      ]);
+      expect(events.find((event) => event.type === "usage")).toMatchObject({
+        type: "usage",
+        usage: expected,
+      });
+      expect(events.at(-1)).toMatchObject({ type: "message_stop", hadUsage: true });
+    },
+  );
+
+  it("removes caller and per-chunk abort listeners after a completed stream", async () => {
+    const encoder = new TextEncoder();
+    const frames = [
+      ...Array.from(
+        { length: 1_000 },
+        (_, index) =>
+          `data: {"id":"chatcmpl-listener-${index}","choices":[{"delta":{"content":"ok"}}]}\n\n`,
+      ),
+      'data: {"id":"chatcmpl-listener","choices":[{"finish_reason":"stop","delta":{}}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    let capturedRequestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        capturedRequestSignal = init.signal as AbortSignal;
+        let index = 0;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              const frame = frames[index];
+              index += 1;
+              if (frame === undefined) {
+                controller.close();
+                return;
+              }
+              controller.enqueue(encoder.encode(frame));
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "test-model",
+      endpointProfile: "chat_completions",
+    });
+    const caller = new AbortController();
+
+    for await (const _event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      caller.signal,
+    )) {
+    }
+
+    expect(getEventListeners(caller.signal, "abort")).toHaveLength(0);
+    expect(capturedRequestSignal).toBeDefined();
+    expect(getEventListeners(capturedRequestSignal!, "abort")).toHaveLength(0);
   });
 
   it("keeps concurrent fallback attempt resets scoped to their provider request", async () => {

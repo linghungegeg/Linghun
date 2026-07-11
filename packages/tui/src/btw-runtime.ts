@@ -130,6 +130,11 @@ export async function runBtwSideQuestion(
   let text = "";
   let hadThinking = false;
   let providerError: string | undefined;
+  const resetAttempt = () => {
+    text = "";
+    hadThinking = false;
+    providerError = undefined;
+  };
   try {
     let providerRequest: ModelRequest = {
       messages,
@@ -160,12 +165,13 @@ export async function runBtwSideQuestion(
           runtime.provider,
           providerRequest,
           signal,
-          { cooldownScope: "sidechain" },
+          { cooldownScope: "sidechain", onAttemptReset: resetAttempt },
         )
       : gateway.stream(
           runtime.provider,
           providerRequest,
           signal,
+          { onAttemptReset: resetAttempt },
         );
     for await (const event of stream) {
       if (signal.aborted) {

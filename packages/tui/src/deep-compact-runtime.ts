@@ -307,7 +307,12 @@ export async function runDeepCompact(input: {
       input.runtime.provider,
       providerRequest,
       signal,
-      { cooldownScope: "sidechain" },
+      {
+        cooldownScope: "sidechain",
+        onAttemptReset: () => {
+          summary = "";
+        },
+      },
     )) {
       if (!ownerIsCurrent()) {
         return failMessage(input.context, "Deep compact cancelled by user interrupt.");

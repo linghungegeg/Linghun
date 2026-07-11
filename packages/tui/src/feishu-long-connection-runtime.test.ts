@@ -19,8 +19,11 @@ import {
 } from "./index.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
-import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
-import { handleRemoteCommand } from "./remote-command-runtime.js";
+import {
+  clearRemoteCommandRuntime,
+  configureRemoteCommandRuntime,
+  handleRemoteCommand,
+} from "./remote-command-runtime.js";
 import {
   createCacheState,
   createHookState,
@@ -298,6 +301,180 @@ describe("Feishu real inbound adapter", () => {
     await handleRemoteCommand(["bot", "stop", "feishu"], context, output as never);
     expect(closeCalls).toEqual(["closed"]);
     expect(output.text).toContain("Remote Bot feishu stopped");
+  });
+
+  it("keeps 100 same-project Feishu handles isolated by runtime owner", async () => {
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_ID", "test-app-id");
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
+    const { context: baseContext } = await createRemoteTestContext();
+    const contexts = Array.from({ length: 100 }, () => ({
+      ...baseContext,
+      remote: createRemoteState(baseContext.config),
+      evidence: [],
+    })) as TuiContext[];
+    let starts = 0;
+    let closes = 0;
+    configureRemoteCommandRuntime({
+      appendSystemEvent: async () => undefined,
+      ensureSession: async (context) => context.sessionId ?? "test-session",
+      handleRemoteInboundMessage: async (message) => ({
+        kind: message.kind,
+        status: "accepted",
+        summary: "routed",
+        evidenceCreated: false,
+      }),
+      startFeishuLongConnection: async () => {
+        starts += 1;
+        return { close: async () => void (closes += 1) };
+      },
+    });
+
+    try {
+      await Promise.all(
+        contexts.map((context) =>
+          handleRemoteCommand(["bot", "start", "feishu"], context, new MemoryOutput() as never),
+        ),
+      );
+
+      expect(starts).toBe(100);
+      expect(contexts.every((context) => context.feishuLongConnectionHandle)).toBe(true);
+      await clearRemoteCommandRuntime(contexts[0]!);
+      expect(contexts[0]?.feishuLongConnectionHandle).toBeUndefined();
+      expect(contexts.slice(1).every((context) => context.feishuLongConnectionHandle)).toBe(true);
+      expect(closes).toBe(1);
+    } finally {
+      await Promise.all(contexts.map((context) => clearRemoteCommandRuntime(context)));
+    }
+
+    expect(closes).toBe(100);
+  }, 30_000);
+
+  it("keeps status and doctor projected from each runtime owner", async () => {
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_ID", "test-app-id");
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
+    const { context: runningContext } = await createRemoteTestContext();
+    const stoppedContext = {
+      ...runningContext,
+      remote: createRemoteState(runningContext.config),
+      feishuLongConnectionHandle: undefined,
+    } as TuiContext;
+    runningContext.feishuLongConnectionHandle = { close: async () => undefined };
+    const runningStatus = new MemoryOutput();
+    const stoppedStatus = new MemoryOutput();
+    const runningDoctor = new MemoryOutput();
+    const stoppedDoctor = new MemoryOutput();
+
+    await handleRemoteCommand(["status"], runningContext, runningStatus as never);
+    await handleRemoteCommand(["status"], stoppedContext, stoppedStatus as never);
+    await handleRemoteCommand(["doctor"], runningContext, runningDoctor as never);
+    await handleRemoteCommand(["doctor"], stoppedContext, stoppedDoctor as never);
+
+    expect(runningStatus.text).toContain("feishu bot owner: running");
+    expect(stoppedStatus.text).toContain("feishu bot owner: bound/ready");
+    expect(runningDoctor.text).toContain("bot owner: running");
+    expect(stoppedDoctor.text).toContain("bot owner: bound/ready");
+  });
+
+  it("keeps a started handle authoritative when audit persistence fails", async () => {
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_ID", "test-app-id");
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
+    const { context, output } = await createRemoteTestContext();
+    const close = vi.fn(async () => undefined);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    configureRemoteCommandRuntime({
+      appendSystemEvent: async () => {
+        throw new Error("audit unavailable");
+      },
+      ensureSession: async () => context.sessionId ?? "test-session",
+      startFeishuLongConnection: async () => ({ close }),
+    });
+
+    await handleRemoteCommand(["bot", "start", "feishu"], context, output as never);
+
+    expect(output.text).toContain("Feishu Bot started");
+    expect(context.feishuLongConnectionHandle).toBeDefined();
+    expect(close).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("remote_bridge_start_audit_failed channel=feishu"),
+    );
+    await clearRemoteCommandRuntime(context);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates concurrent starts through the same runtime handle owner", async () => {
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_ID", "test-app-id");
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
+    const { context } = await createRemoteTestContext();
+    let releaseStart!: () => void;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const close = vi.fn(async () => undefined);
+    const start = vi.fn(async () => {
+      await startGate;
+      return { close };
+    });
+    configureRemoteCommandRuntime({
+      appendSystemEvent: async () => undefined,
+      ensureSession: async () => context.sessionId ?? "test-session",
+      startFeishuLongConnection: start,
+    });
+    const firstOutput = new MemoryOutput();
+    const secondOutput = new MemoryOutput();
+
+    const first = handleRemoteCommand(["bot", "start", "feishu"], context, firstOutput as never);
+    const second = handleRemoteCommand(["bot", "start", "feishu"], context, secondOutput as never);
+    releaseStart();
+    await Promise.all([first, second]);
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(firstOutput.text).toContain("Feishu Bot started");
+    expect(secondOutput.text).toContain("already running");
+    await clearRemoteCommandRuntime(context);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restore a rejected pending start after runtime cleanup", async () => {
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_ID", "test-app-id");
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
+    const { context } = await createRemoteTestContext();
+    let rejectStart!: (error: Error) => void;
+    const startGate = new Promise<never>((_resolve, reject) => {
+      rejectStart = reject;
+    });
+    const start = vi.fn(async () => startGate);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    configureRemoteCommandRuntime({
+      appendSystemEvent: async () => undefined,
+      ensureSession: async () => context.sessionId ?? "test-session",
+      startFeishuLongConnection: start,
+    });
+
+    const starting = handleRemoteCommand(
+      ["bot", "start", "feishu"],
+      context,
+      new MemoryOutput() as never,
+    );
+    const clearing = clearRemoteCommandRuntime(context);
+    rejectStart(new Error("connection rejected"));
+
+    await expect(Promise.all([starting, clearing])).resolves.toBeDefined();
+    expect(context.feishuLongConnectionHandle).toBeUndefined();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining("remote_bridge_start_audit_failed"));
+
+    configureRemoteCommandRuntime({
+      appendSystemEvent: async () => undefined,
+      ensureSession: async () => context.sessionId ?? "test-session",
+      startFeishuLongConnection: async () => ({ close: async () => undefined }),
+    });
+    await handleRemoteCommand(
+      ["bot", "start", "feishu"],
+      context,
+      new MemoryOutput() as never,
+    );
+    expect(context.feishuLongConnectionHandle).toBeDefined();
+    await clearRemoteCommandRuntime(context);
   });
 
   it("doctor treats Feishu long connection as ready-to-start without callback verification refs", async () => {

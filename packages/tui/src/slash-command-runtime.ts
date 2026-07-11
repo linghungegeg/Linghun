@@ -2619,7 +2619,23 @@ export async function recordAgentToolEvidence(
   output: ToolOutput,
   input: unknown,
 ): Promise<string | undefined> {
-  const evidence = await recordToolEvidence(context, sessionId, toolName, output, input);
+  const workflowRunId = context.backgroundTasks.find((task) => task.id === agent.id)?.workflowRunId;
+  const evidence = await recordToolEvidence(
+    context,
+    sessionId,
+    toolName,
+    output,
+    input,
+    undefined,
+    undefined,
+    {
+      ownerSessionId: sessionId,
+      requestTurnId: agent.invokingRequestTurnId,
+      ownerAgentId: agent.id,
+      workflowRunId,
+      cwd: agent.cwd ?? context.projectPath,
+    },
+  );
   await appendSystemEvent(
     context,
     sessionId,
@@ -2641,6 +2657,15 @@ export async function recordAgentToolFailureEvidence(
     sessionId,
     toolName,
     `agent ${agent.id}: ${summary}`,
+    undefined,
+    undefined,
+    {
+      ownerSessionId: sessionId,
+      requestTurnId: agent.invokingRequestTurnId,
+      ownerAgentId: agent.id,
+      workflowRunId: context.backgroundTasks.find((task) => task.id === agent.id)?.workflowRunId,
+      cwd: agent.cwd ?? context.projectPath,
+    },
   );
   await appendSystemEvent(
     context,

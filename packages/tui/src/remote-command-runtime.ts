@@ -72,7 +72,6 @@ let runtimeDeps: RemoteCommandRuntimeDeps | undefined;
 // D.14E — 可注入的真实发送 transport deps；未配置时回退到真实网络/进程实现。
 // 测试通过 sendRemoteEventReal 的 depsOverride 注入 stub，永不触网/触进程。
 let remoteTransportDeps: RemoteTransportDeps | undefined;
-const feishuLongConnectionHandles = new Map<string, FeishuLongConnectionHandle>();
 
 export function configureRemoteCommandRuntime(deps: RemoteCommandRuntimeDeps): void {
   runtimeDeps = deps;
@@ -129,7 +128,12 @@ export async function handleRemoteCommand(
       tone: "neutral",
       summary,
       actions: ["/remote doctor"],
-      detailsText: formatRemoteStatus(context.remote),
+      detailsText: [
+        formatRemoteStatus(context.remote),
+        ...context.remote.channels
+          .filter((channel) => channel.id === "feishu")
+          .map((channel) => `- ${channel.id} bot owner: ${getRemoteBotUserStatus(context, channel)}`),
+      ].join("\n"),
     });
     return;
   }
@@ -354,7 +358,7 @@ async function handleRemoteBotCommand(
   }
   if (action === "stop") {
     const channelArg = normalizeRemoteChannelId(args[1] ?? "");
-    const stopped = await stopRemoteBotChannel(channelArg);
+    const stopped = await stopRemoteBotChannel(channelArg, context);
     showCommandPanel(context, output, {
       title: `/remote bot stop ${channelArg || "<channel>"}`,
       tone: "neutral",
@@ -938,46 +942,47 @@ async function startRemoteFeishuBridge(
       ].join("\n"),
     };
   }
-  if (feishuLongConnectionHandles.has(channel.id)) {
+  if (context.feishuLongConnectionHandle) {
     return {
       status: "already_running",
       summary: "Feishu bridge already running.",
       detail: "Long connection handle is active in this process; secrets are not printed.",
     };
   }
+  const start = deps().startFeishuLongConnection ?? startFeishuLongConnection;
+  const startPromise = start({
+    appId,
+    appSecret,
+    onMessage: async (message) => {
+      const inbound = deps().handleRemoteInboundMessage;
+      if (!inbound) return;
+      await inbound(message, context, undefined, output);
+    },
+  });
+  const pendingHandle: FeishuLongConnectionHandle = {
+    close: async () => {
+      const handle = await startPromise.catch(() => undefined);
+      if (!handle) return;
+      await handle.close();
+    },
+  };
+  context.feishuLongConnectionHandle = pendingHandle;
+  let handle: FeishuLongConnectionHandle;
   try {
-    const start = deps().startFeishuLongConnection ?? startFeishuLongConnection;
-    const handle = await start({
-      appId,
-      appSecret,
-      onMessage: async (message) => {
-        const inbound = deps().handleRemoteInboundMessage;
-        if (!inbound) return;
-        await inbound(message, context, undefined, output);
-      },
-    });
-    feishuLongConnectionHandles.set(channel.id, handle);
-    await appendRemoteSystemEvent(
-      context,
-      `remote_bridge_start channel=${channel.id} status=started`,
-      "info",
-    );
-    return {
-      status: "started",
-      summary: "Feishu bridge started: waiting for mobile messages.",
-      detail: [
-        "Long connection started with official SDK; secrets are not printed.",
-        botReadiness ? formatFeishuBotStartReadiness(botReadiness) : undefined,
-      ]
-        .filter((item): item is string => Boolean(item))
-        .join("\n"),
-    };
+    handle = await startPromise;
   } catch {
-    await appendRemoteSystemEvent(
-      context,
-      `remote bridge start: channel ${channel.id}; status failed`,
-      "warning",
-    );
+    if (context.feishuLongConnectionHandle === pendingHandle) {
+      context.feishuLongConnectionHandle = undefined;
+    }
+    try {
+      await appendRemoteSystemEvent(
+        context,
+        `remote bridge start: channel ${channel.id}; status failed`,
+        "warning",
+      );
+    } catch {
+      process.stderr.write(`[linghun] remote_bridge_start_audit_failed channel=${channel.id}\n`);
+    }
     return {
       status: "failed",
       summary: "Feishu bridge start failed: platform connection rejected or unavailable.",
@@ -987,6 +992,42 @@ async function startRemoteFeishuBridge(
       ].join("\n"),
     };
   }
+  if (context.feishuLongConnectionHandle !== pendingHandle) {
+    return {
+      status: "failed",
+      summary: "Feishu bridge start was superseded before the connection became active.",
+      detail: "The owner changed while start was pending; the completed handle was closed by that owner.",
+    };
+  }
+  context.feishuLongConnectionHandle = handle;
+  try {
+    await appendRemoteSystemEvent(
+      context,
+      `remote_bridge_start channel=${channel.id} status=started`,
+      "info",
+      undefined,
+      () => context.feishuLongConnectionHandle === handle,
+    );
+  } catch {
+    process.stderr.write(`[linghun] remote_bridge_start_audit_failed channel=${channel.id}\n`);
+  }
+  if (context.feishuLongConnectionHandle !== handle) {
+    return {
+      status: "failed",
+      summary: "Feishu bridge start was superseded before completion.",
+      detail: "The connection owner changed while start audit was pending; no stale started state was reported.",
+    };
+  }
+  return {
+    status: "started",
+    summary: "Feishu bridge started: waiting for mobile messages.",
+    detail: [
+      "Long connection started with official SDK; secrets are not printed.",
+      botReadiness ? formatFeishuBotStartReadiness(botReadiness) : undefined,
+    ]
+      .filter((item): item is string => Boolean(item))
+      .join("\n"),
+  };
 }
 
 type FeishuBotStartReadiness = {
@@ -1051,12 +1092,22 @@ function formatFeishuBotStartReadiness(readiness: FeishuBotStartReadiness): stri
   return lines.join("\n");
 }
 
-async function stopRemoteBotChannel(channelId: string): Promise<boolean> {
-  const handle = feishuLongConnectionHandles.get(channelId);
+async function stopRemoteBotChannel(channelId: string, context: TuiContext): Promise<boolean> {
+  if (channelId !== "feishu") return false;
+  const handle = context.feishuLongConnectionHandle;
   if (!handle) return false;
-  await handle.close();
-  feishuLongConnectionHandles.delete(channelId);
+  context.feishuLongConnectionHandle = undefined;
+  try {
+    await handle.close();
+  } catch (error) {
+    context.feishuLongConnectionHandle = handle;
+    throw error;
+  }
   return true;
+}
+
+export async function clearRemoteCommandRuntime(context: TuiContext): Promise<boolean> {
+  return stopRemoteBotChannel("feishu", context);
 }
 
 function resolveEnvRef(ref: string | undefined): string | undefined {
@@ -1087,6 +1138,7 @@ export function formatRemoteDoctor(context: TuiContext): string {
     const grade = getRemoteCapabilityGrade(channel);
     const bridge = getRemoteBridgeDoctor(context.remote, channel.id);
     lines.push(`- ${channel.id}: ${channel.runtimeStatus}`);
+    lines.push(`  bot owner: ${getRemoteBotUserStatus(context, channel)}`);
     lines.push(`  binding: ${channel.bindingStatus}`);
     lines.push(`  transport: ${channel.config.transport}; status ${channel.transportStatus}`);
     lines.push(`  capability: ${grade.grade} — ${grade.reason}`);
@@ -1108,7 +1160,7 @@ function formatRemoteBotDoctorSummary(context: TuiContext, channelArg: string | 
   }
   if (channels.length === 0) return "Remote Bot doctor: choose feishu, dingtalk, or wechat.";
   return channels
-    .map((channel) => `${formatBotChannelName(channel.id)}: ${getRemoteBotUserStatus(channel)}`)
+    .map((channel) => `${formatBotChannelName(channel.id)}: ${getRemoteBotUserStatus(context, channel)}`)
     .join("；");
 }
 
@@ -1123,7 +1175,7 @@ function formatRemoteBotDoctorDetails(context: TuiContext, channelArg: string | 
     "Remote Bot doctor（普通视图只显示 Bot 状态；底层 bridge 诊断请用 /remote bridge doctor）",
   ];
   for (const channel of channels) {
-    const status = getRemoteBotUserStatus(channel);
+    const status = getRemoteBotUserStatus(context, channel);
     lines.push(`- ${formatBotChannelName(channel.id)}: ${status}`);
     lines.push(`  setup: /remote bot setup ${channel.id}`);
     lines.push(`  start: /remote bot start ${channel.id}`);
@@ -1157,7 +1209,7 @@ function formatRemoteBotSetupSummary(context: TuiContext, channelArg: string | u
   if (normalized === "wechat") return "Personal WeChat Bot setup: experimental opt-in only.";
   const channel = findRemoteChannel(context, normalized);
   if (!channel) return "Remote Bot setup: choose feishu, dingtalk, or wechat.";
-  return `${formatBotChannelName(channel.id)} setup: ${getRemoteBotUserStatus(channel)}.`;
+  return `${formatBotChannelName(channel.id)} setup: ${getRemoteBotUserStatus(context, channel)}.`;
 }
 
 function formatRemoteBotSetupDetails(context: TuiContext, channelArg: string | undefined): string {
@@ -1167,12 +1219,12 @@ function formatRemoteBotSetupDetails(context: TuiContext, channelArg: string | u
   if (!channel) {
     return "Remote Bot setup：请选择 feishu、dingtalk 或 wechat。示例：/remote bot setup feishu";
   }
-  if (channel.id === "feishu") return formatFeishuBotSetupDetails(channel);
-  if (channel.id === "dingtalk") return formatDingTalkBotSetupDetails(channel);
+  if (channel.id === "feishu") return formatFeishuBotSetupDetails(context, channel);
+  if (channel.id === "dingtalk") return formatDingTalkBotSetupDetails(context, channel);
   return "Enterprise WeChat is future/not implemented in this Bot productization stage.";
 }
 
-function formatFeishuBotSetupDetails(channel: RemoteChannelState): string {
+function formatFeishuBotSetupDetails(context: TuiContext, channel: RemoteChannelState): string {
   return [
     "Feishu Bot setup",
     "- Prepare a Feishu/Lark app with Bot enabled.",
@@ -1181,12 +1233,12 @@ function formatFeishuBotSetupDetails(channel: RemoteChannelState): string {
     "- Webhook notification is optional and not required for mobile control.",
     "- Start: /remote bot start feishu.",
     "- Pair from the Bot chat: /remote bot pair feishu, then send /bind CODE.",
-    `- Current Bot status: ${getRemoteBotUserStatus(channel)}.`,
+    `- Current Bot status: ${getRemoteBotUserStatus(context, channel)}.`,
     "- Secret values are never printed or stored in reports.",
   ].join("\n");
 }
 
-function formatDingTalkBotSetupDetails(channel: RemoteChannelState): string {
+function formatDingTalkBotSetupDetails(context: TuiContext, channel: RemoteChannelState): string {
   return [
     "DingTalk Bot setup",
     "- Official Stream path uses the dingtalk-stream SDK and Client ID / Client Secret.",
@@ -1195,7 +1247,7 @@ function formatDingTalkBotSetupDetails(channel: RemoteChannelState): string {
     "- Card callback topic: /v1.0/card/instances/callback; advanced cards must set callbackType=STREAM.",
     "- Configure env refs as LINGHUN_REMOTE_DINGTALK_CLIENT_ID and LINGHUN_REMOTE_DINGTALK_CLIENT_SECRET.",
     "- Current build has offline adapter normalization only; real DingTalk Stream start is NOT RUN without SDK wiring and credentials.",
-    `- Current Bot status: ${getRemoteBotUserStatus(channel)}.`,
+    `- Current Bot status: ${getRemoteBotUserStatus(context, channel)}.`,
     "- sessionWebhook and Client Secret are treated as secrets and never persisted in summaries.",
   ].join("\n");
 }
@@ -1249,7 +1301,7 @@ function selectBotChannels(
   );
 }
 
-function getRemoteBotUserStatus(channel: RemoteChannelState): string {
+function getRemoteBotUserStatus(context: TuiContext, channel: RemoteChannelState): string {
   const report = getRemoteBridgeDoctor(
     {
       enabled: true,
@@ -1264,7 +1316,7 @@ function getRemoteBotUserStatus(channel: RemoteChannelState): string {
   );
   if (channel.id === "feishu") {
     const readiness = getFeishuBotStartReadiness(channel);
-    if (feishuLongConnectionHandles.has(channel.id)) return "running";
+    if (context.feishuLongConnectionHandle) return "running";
     if (readiness.readiness === "needs-app-id") return "needs app id";
     if (readiness.readiness === "needs-app-secret") return "needs app secret";
     if (readiness.readiness === "needs-env") return "needs app env";

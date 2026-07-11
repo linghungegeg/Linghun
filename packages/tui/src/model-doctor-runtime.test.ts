@@ -1077,23 +1077,23 @@ describe("model-doctor-runtime", () => {
       }
     });
 
-    it("event log truncates to 200 lines (BREAK_CACHE_EVENTS_MAX_LINES)", async () => {
+    it("event log preserves 1,000 concurrent append-only events", async () => {
       const dir = await makeProject();
-      const max = breakCacheTestHooks.eventsMaxLines;
-      expect(max).toBe(200);
-      const oldLines = Array.from({ length: max + 24 }, (_, i) =>
-        JSON.stringify({ action: `bulk_${i}`, createdAt: "2026-01-01T00:00:00.000Z" }),
+      await Promise.all(
+        Array.from({ length: 1_000 }, (_, index) =>
+          breakCacheTestHooks.appendEvent(dir, `concurrent_${index}`),
+        ),
       );
       const eventsLogPath = breakCacheTestHooks.paths(dir).eventsLog;
-      mkdirSync(join(dir, ".linghun"), { recursive: true });
-      await writeFile(eventsLogPath, `${oldLines.join("\n")}\n`, "utf8");
-      await breakCacheTestHooks.appendEvent(dir, `bulk_${max + 24}`);
       const raw = await readFile(eventsLogPath, "utf8");
       const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
-      expect(lines.length).toBeLessThanOrEqual(max);
-      // 应保留最近的事件（bulk_<max+24>），裁掉早期的（bulk_0）
-      expect(raw).toContain(`bulk_${max + 24}`);
-      expect(raw).not.toContain('"action":"bulk_0"');
+      expect(lines).toHaveLength(1_000);
+      const actions = new Set(
+        lines.map((line) => (JSON.parse(line) as { action: string }).action),
+      );
+      expect(actions.size).toBe(1_000);
+      expect(actions.has("concurrent_0")).toBe(true);
+      expect(actions.has("concurrent_999")).toBe(true);
     });
 
     it("readRecentEvents returns only the requested tail length", async () => {

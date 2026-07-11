@@ -83,6 +83,36 @@ function createOwnedCompactHarness() {
 }
 
 describe("deep compact prompt insertion", () => {
+  it("discards partial summary text when the provider resets its attempt", async () => {
+    const { context, deps } = createOwnedCompactHarness();
+    const gateway = {
+      async *stream(
+        _provider: string,
+        _request: unknown,
+        _signal: AbortSignal,
+        control?: { onAttemptReset?: () => void },
+      ) {
+        yield { type: "assistant_text_delta", id: "old", text: "OLD_PARTIAL" };
+        control?.onAttemptReset?.();
+        yield { type: "assistant_text_delta", id: "new", text: "NEW_COMPLETE" };
+        yield { type: "message_stop", id: "new", chunkCount: 1, hadUsage: false };
+      },
+    };
+
+    const result = await maybeRunDeepCompactBeforeProvider({
+      context,
+      sessionId: "session-attempt-reset",
+      runtime: { model: "test-model", provider: "test-provider" } as never,
+      trigger: "manual",
+      gateway: gateway as never,
+      signal: new AbortController().signal,
+      deps,
+    });
+
+    expect(result).toMatchObject({ ok: true, packet: { summary: "NEW_COMPLETE" } });
+    expect(context.cache.deepCompact?.summary).toBe("NEW_COMPLETE");
+  });
+
   it("reuses the transcript tail reader after an accepted deep compact packet", async () => {
     const packet = makePacket();
     let resumeCalls = 0;
