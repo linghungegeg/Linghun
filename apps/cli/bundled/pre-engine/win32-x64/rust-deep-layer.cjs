@@ -7,6 +7,7 @@ const { pathToFileURL, fileURLToPath } = require("url");
 const { spawn, spawnSync } = require("child_process");
 
 const REQUEST_TIMEOUT_MS = 120000;
+const FLYCHECK_TIMEOUT_MS = Number(process.env.LINGHUN_RUST_FLYCHECK_TIMEOUT_MS || REQUEST_TIMEOUT_MS);
 
 function normalize(value) {
   return value.replace(/\\/g, "/");
@@ -21,6 +22,10 @@ function relativeTo(root, file) {
 }
 
 function findRustAnalyzer() {
+  if (process.env.LINGHUN_RUST_ANALYZER) {
+    const configured = path.resolve(process.env.LINGHUN_RUST_ANALYZER);
+    return fs.existsSync(configured) ? configured : null;
+  }
   const locator = process.platform === "win32" ? "where.exe" : "which";
   const result = spawnSync(locator, ["rust-analyzer"], {
     encoding: "utf8",
@@ -97,12 +102,22 @@ class RustAnalyzerSession {
     this.diagnostics = new Map();
     this.buildCount = 0;
     this.snapshot = 0;
+    this.flycheckGeneration = 0;
+    this.flycheckCompletedGeneration = 0;
+    this.flycheckTokens = new Map();
+    this.flycheckWaiters = new Set();
+    this.flycheckIdleWaiters = new Set();
+    this.diagnosticRefreshGeneration = 0;
+    this.diagnosticRefreshWaiters = new Set();
+    this.serverHealth = "ok";
+    this.serverStatusMessage = null;
     this.configStamp = this.readConfigStamp();
   }
 
   readConfigStamp() {
     const files = [
       "Cargo.toml",
+      "Cargo.lock",
       "rust-project.json",
       path.join(".cargo", "config.toml"),
       path.join(".cargo", "config"),
@@ -139,16 +154,22 @@ class RustAnalyzerSession {
       rootUri,
       workspaceFolders: [{ uri: rootUri, name: path.basename(this.root) }],
       capabilities: {
-        workspace: { symbol: { dynamicRegistration: false } },
+        window: { workDoneProgress: true },
+        experimental: { serverStatusNotification: true },
+        workspace: {
+          symbol: { dynamicRegistration: false },
+          diagnostics: { refreshSupport: true },
+        },
         textDocument: {
           definition: { dynamicRegistration: false },
           references: { dynamicRegistration: false },
           callHierarchy: { dynamicRegistration: false },
+          diagnostic: { dynamicRegistration: false, relatedDocumentSupport: false },
           publishDiagnostics: { relatedInformation: true },
         },
       },
       initializationOptions: {
-        checkOnSave: true,
+        checkOnSave: false,
         diagnostics: { enable: true },
         cargo: { buildScripts: { enable: false } },
         procMacro: { enable: false },
@@ -157,6 +178,7 @@ class RustAnalyzerSession {
     this.notify("initialized", {});
     this.buildCount += 1;
     await this.warmWorkspace();
+    this.configStamp = this.readConfigStamp();
   }
 
   stop() {
@@ -165,6 +187,7 @@ class RustAnalyzerSession {
     this.buffer = Buffer.alloc(0);
     this.documents.clear();
     this.diagnostics.clear();
+    this.rejectFlycheckWaiters("rust-analyzer stopped");
   }
 
   rejectPending(message) {
@@ -173,6 +196,34 @@ class RustAnalyzerSession {
       reject(new Error(message));
     }
     this.pending.clear();
+    this.rejectFlycheckWaiters(message);
+  }
+
+  rejectFlycheckWaiters(message) {
+    for (const waiter of this.flycheckWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.flycheckWaiters.clear();
+    for (const waiter of this.flycheckIdleWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.flycheckIdleWaiters.clear();
+    for (const waiter of this.diagnosticRefreshWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.diagnosticRefreshWaiters.clear();
+  }
+
+  resolveFlycheckWaiters() {
+    for (const waiter of [...this.flycheckWaiters]) {
+      if (this.flycheckCompletedGeneration <= waiter.afterGeneration) continue;
+      clearTimeout(waiter.timer);
+      this.flycheckWaiters.delete(waiter);
+      waiter.resolve(this.flycheckCompletedGeneration);
+    }
   }
 
   onData(chunk) {
@@ -182,13 +233,26 @@ class RustAnalyzerSession {
       if (headerEnd < 0) return;
       const header = this.buffer.slice(0, headerEnd).toString("ascii");
       const lengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
-      if (!lengthMatch) throw new Error("invalid rust-analyzer LSP response header");
+      if (!lengthMatch) {
+        this.buffer = Buffer.alloc(0);
+        if (this.child && !this.child.killed) this.child.kill();
+        this.child = null;
+        this.rejectPending("invalid rust-analyzer LSP response header");
+        return;
+      }
       const length = Number(lengthMatch[1]);
       const bodyStart = headerEnd + 4;
       if (this.buffer.length < bodyStart + length) return;
       const body = this.buffer.slice(bodyStart, bodyStart + length).toString("utf8");
       this.buffer = this.buffer.slice(bodyStart + length);
-      this.onMessage(JSON.parse(body));
+      try {
+        this.onMessage(JSON.parse(body));
+      } catch (error) {
+        if (this.child && !this.child.killed) this.child.kill();
+        this.child = null;
+        this.rejectPending(`invalid rust-analyzer LSP response: ${error.message}`);
+        return;
+      }
     }
   }
 
@@ -217,12 +281,53 @@ class RustAnalyzerSession {
       this.diagnostics.set(uri, diagnostics);
       return;
     }
+    if (message.method === "$/progress" && message.params) {
+      const token = String(message.params.token || "");
+      const kind = message.params.value && message.params.value.kind;
+      if (!token.startsWith("rust-analyzer/flycheck/")) return;
+      if (kind === "begin") {
+        if (this.flycheckTokens.has(token)) {
+          this.rejectFlycheckWaiters(`rust-analyzer flycheck protocol error: duplicate begin for ${token}`);
+          return;
+        }
+        this.flycheckGeneration += 1;
+        this.flycheckTokens.set(token, this.flycheckGeneration);
+      } else if (kind === "end") {
+        const generation = this.flycheckTokens.get(token);
+        if (generation != null) {
+          this.flycheckCompletedGeneration = Math.max(this.flycheckCompletedGeneration, generation);
+          this.flycheckTokens.delete(token);
+          this.resolveFlycheckWaiters();
+          if (this.flycheckTokens.size === 0) {
+            for (const waiter of this.flycheckIdleWaiters) {
+              clearTimeout(waiter.timer);
+              waiter.resolve();
+            }
+            this.flycheckIdleWaiters.clear();
+          }
+        }
+      }
+      return;
+    }
+    if (message.method === "experimental/serverStatus" && message.params) {
+      this.serverHealth = message.params.health || "ok";
+      this.serverStatusMessage = message.params.message || null;
+      return;
+    }
     if (message.id != null && message.method) {
       let result = null;
       if (message.method === "workspace/configuration") {
         result = (message.params && message.params.items || []).map(() => null);
       } else if (message.method === "window/workDoneProgress/create") {
         result = null;
+      } else if (message.method === "workspace/diagnostic/refresh") {
+        this.diagnosticRefreshGeneration += 1;
+        for (const waiter of [...this.diagnosticRefreshWaiters]) {
+          if (this.diagnosticRefreshGeneration <= waiter.afterGeneration) continue;
+          clearTimeout(waiter.timer);
+          this.diagnosticRefreshWaiters.delete(waiter);
+          waiter.resolve(this.diagnosticRefreshGeneration);
+        }
       }
       this.send({ jsonrpc: "2.0", id: message.id, result });
     }
@@ -314,13 +419,14 @@ class RustAnalyzerSession {
     const stamp = `${stat.mtimeMs}:${stat.size}`;
     const uri = pathToFileURL(absolute).href;
     const previous = this.documents.get(uri);
+    let synchronized = false;
     if (!previous) {
       this.diagnostics.delete(normalizeUri(uri));
       this.notify("textDocument/didOpen", {
         textDocument: { uri, languageId: "rust", version: 1, text },
       });
       this.documents.set(uri, { text, stamp, version: 1 });
-      this.snapshot += 1;
+      synchronized = true;
     } else if (previous.stamp !== stamp || previous.text !== text) {
       this.diagnostics.delete(normalizeUri(uri));
       const version = previous.version + 1;
@@ -330,21 +436,58 @@ class RustAnalyzerSession {
       });
       this.documents.set(uri, { text, stamp, version });
       this.snapshot += 1;
+      synchronized = true;
     }
-    return { absolute, uri, text };
+    return { absolute, uri, text, synchronized };
   }
 
-  async pullSettledDiagnostics(uri, settleMs = 2500) {
-    const deadline = Date.now() + settleMs;
-    let diagnostics = [];
-    while (Date.now() < deadline) {
-      const report = await this.semanticRequest("textDocument/diagnostic", {
-        textDocument: { uri },
-      });
-      if (report && Array.isArray(report.items)) diagnostics = report.items;
-      await new Promise(resolve => setTimeout(resolve, 250));
+  waitForFlycheckAfter(afterGeneration, timeout = REQUEST_TIMEOUT_MS) {
+    if (this.flycheckCompletedGeneration > afterGeneration) {
+      return Promise.resolve(this.flycheckCompletedGeneration);
     }
-    return this.diagnostics.get(normalizeUri(uri)) || diagnostics;
+    return new Promise((resolve, reject) => {
+      const waiter = { afterGeneration, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.flycheckWaiters.delete(waiter);
+        reject(new Error("rust-analyzer flycheck completion timed out"));
+      }, timeout);
+      this.flycheckWaiters.add(waiter);
+    });
+  }
+
+  waitForFlycheckIdle(timeout = REQUEST_TIMEOUT_MS) {
+    if (this.flycheckTokens.size === 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.flycheckIdleWaiters.delete(waiter);
+        reject(new Error("rust-analyzer flycheck did not become idle"));
+      }, timeout);
+      this.flycheckIdleWaiters.add(waiter);
+    });
+  }
+
+  waitForDiagnosticRefreshAfter(afterGeneration, timeout = REQUEST_TIMEOUT_MS) {
+    if (this.diagnosticRefreshGeneration > afterGeneration) {
+      return Promise.resolve(this.diagnosticRefreshGeneration);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { afterGeneration, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.diagnosticRefreshWaiters.delete(waiter);
+        reject(new Error("rust-analyzer diagnostic refresh timed out"));
+      }, timeout);
+      this.diagnosticRefreshWaiters.add(waiter);
+    });
+  }
+
+  async pullDiagnostics(uri) {
+    const report = await this.semanticRequest("textDocument/diagnostic", {
+      textDocument: { uri },
+    });
+    const pulled = report && Array.isArray(report.items) ? report.items : [];
+    if (pulled.length > 0) return pulled;
+    return this.diagnostics.get(normalizeUri(uri)) || pulled;
   }
 
   async definitions(uri, position) {
@@ -356,7 +499,7 @@ class RustAnalyzerSession {
     return Array.isArray(result) ? result : [result];
   }
 
-  async resolveTargets(symbol, positions) {
+  async resolveTargets(symbol, positions, allowWorkspaceSymbol) {
     const locations = [];
     const origins = [];
     for (const token of positions.filter(position => position.symbol === symbol)) {
@@ -366,6 +509,13 @@ class RustAnalyzerSession {
       const definitions = await this.definitions(document.uri, position);
       if (definitions.length > 0) origins.push({ uri: document.uri, position, symbol });
       locations.push(...definitions);
+    }
+    if (allowWorkspaceSymbol && positions.filter(position => position.symbol === symbol).length === 0) {
+      const workspaceSymbols = await this.semanticRequest("workspace/symbol", { query: symbol });
+      for (const item of workspaceSymbols || []) {
+        if (item.name !== symbol || !item.location) continue;
+        locations.push(item.location);
+      }
     }
     const targets = [];
     const seen = new Set();
@@ -425,16 +575,35 @@ class RustAnalyzerSession {
     return { dependencies, metadata };
   }
 
-  async analyze(files, symbols, symbolPositions, importTokens) {
+  async analyze(files, symbols, symbolPositions, importTokens, allowWorkspaceSymbol) {
     const rebuilt = await this.ensureCurrent();
     const normalizedFiles = [...new Set(files.map(file => normalize(file)))];
-    for (const file of normalizedFiles) await this.openFile(file);
+    let openedFiles = 0;
+    for (const file of normalizedFiles) {
+      if (await this.openFile(file)) openedFiles += 1;
+    }
+    if (normalizedFiles.length > 0 && openedFiles === 0) {
+      return {
+        status: "partially_verified",
+        reason: "Rust semantic evidence incomplete: rust_documents",
+        relations: Object.fromEntries(symbols.map(symbol => [symbol, {
+          targets: [], names_by_file: {}, related_files: [], references: [], callers: [], callees: [],
+          unresolved_module_specifiers: [], unresolved_relative_specifiers: [], external_module_specifiers: [],
+          blocked_module_specifiers: [], dynamic_import_files: [], graph_cycle: false, graph_truncated: false,
+        }])),
+        module_dependencies: {},
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: { coverage: [], missing: ["rust_documents"] },
+      };
+    }
     const { dependencies, metadata } = await this.dependencies(normalizedFiles, importTokens);
     const relations = {};
     let missingAnchor = false;
     let ambiguousTarget = false;
     for (const symbol of symbols) {
-      const { targets, origins } = await this.resolveTargets(symbol, symbolPositions);
+      const { targets, origins } = await this.resolveTargets(symbol, symbolPositions, allowWorkspaceSymbol);
       if (targets.length === 0) missingAnchor = true;
       if (targets.length > 1) ambiguousTarget = true;
       const namesByFile = {};
@@ -445,11 +614,10 @@ class RustAnalyzerSession {
       const referenceKeys = new Set();
       const callerKeys = new Set();
       const calleeKeys = new Set();
-      const anchors = [
-        ...targets.map(target => ({ uri: target.uri, position: target.position })),
-        ...origins,
-      ];
-      for (const origin of origins) {
+      const anchors = targets.length === 1
+        ? [...targets.map(target => ({ uri: target.uri, position: target.position })), ...origins]
+        : [];
+      for (const origin of targets.length === 1 ? origins : []) {
         const location = semanticLocation(this.root, {
           uri: origin.uri,
           range: {
@@ -532,7 +700,7 @@ class RustAnalyzerSession {
           }
         }
       }
-      for (const target of targets) relatedFiles.add(target.file);
+      if (targets.length === 1) relatedFiles.add(targets[0].file);
       const unresolved = [...relatedFiles]
         .flatMap(file => metadata[file] ? metadata[file].unresolved : []);
       relations[symbol] = {
@@ -604,29 +772,80 @@ class RustAnalyzerSession {
       const document = await this.openFile(file);
       if (document) documents.push(document);
     }
+    if (documents.length === 0) {
+      return {
+        status: "partially_verified",
+        reason: "rust-analyzer verify has no readable Rust documents",
+        issues: [],
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: {
+          coverage: [],
+          missing: ["rust_documents"],
+        },
+      };
+    }
     const issues = [];
     const issueKeys = new Set();
+    let observedDiagnosticCount = 0;
     for (const document of documents) {
-      this.diagnostics.delete(normalizeUri(document.uri));
-      this.notify("textDocument/didSave", { textDocument: { uri: document.uri } });
+      const tracked = this.documents.get(document.uri);
+      const version = tracked.version + 1;
+      this.notify("textDocument/didChange", {
+        textDocument: { uri: document.uri, version },
+        contentChanges: [{ text: document.text }],
+      });
+      this.documents.set(document.uri, { ...tracked, version });
+    }
+    try {
+      await this.waitForFlycheckIdle(FLYCHECK_TIMEOUT_MS);
+      this.notify("textDocument/didSave", {
+        textDocument: { uri: documents[0].uri },
+        text: documents[0].text,
+      });
+      for (const document of documents) this.diagnostics.delete(normalizeUri(document.uri));
+      this.notify("rust-analyzer/clearFlycheck", null);
+      const flycheckGeneration = this.flycheckGeneration;
+      const diagnosticRefreshGeneration = this.diagnosticRefreshGeneration;
+      this.notify("rust-analyzer/runFlycheck", {
+        textDocument: { uri: documents[0].uri },
+      });
+      await this.waitForFlycheckAfter(flycheckGeneration, FLYCHECK_TIMEOUT_MS);
+      await this.waitForDiagnosticRefreshAfter(diagnosticRefreshGeneration, FLYCHECK_TIMEOUT_MS);
+      this.configStamp = this.readConfigStamp();
+    } catch (error) {
+      return {
+        status: "partially_verified",
+        reason: error.message,
+        issues: [],
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: {
+          coverage: ["syntax", "types", "imports", "modules", "crate_resolution"],
+          missing: ["rust_analyzer_flycheck_completion"],
+        },
+      };
+    }
+    if (this.serverHealth !== "ok") {
+      return {
+        status: "partially_verified",
+        reason: this.serverStatusMessage || `rust-analyzer server health: ${this.serverHealth}`,
+        issues: [],
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: {
+          coverage: ["syntax", "types", "imports", "modules", "crate_resolution"],
+          missing: ["rust_analyzer_server_health"],
+        },
+      };
     }
     for (const document of documents) {
-      const diagnostics = await this.pullSettledDiagnostics(document.uri);
-      if (diagnostics == null) {
-        return {
-          status: "partially_verified",
-          reason: `rust-analyzer diagnostics timed out for ${relativeTo(this.root, document.absolute)}`,
-          issues: [],
-          program_build_count: this.buildCount,
-          program_rebuilt: rebuilt,
-          snapshot_id: String(this.snapshot),
-          verification: {
-            coverage: ["syntax", "types", "imports", "modules", "crate_resolution"],
-            missing: ["rust_analyzer_diagnostics"],
-          },
-        };
-      }
+      const diagnostics = await this.pullDiagnostics(document.uri);
       for (const diagnostic of diagnostics) {
+        observedDiagnosticCount += 1;
         if (diagnostic.severity !== 1) continue;
         const key = `${relativeTo(this.root, document.absolute)}:${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.code || diagnostic.message}`;
         if (issueKeys.has(key)) continue;
@@ -650,6 +869,7 @@ class RustAnalyzerSession {
       verification: {
         coverage: ["syntax", "types", "imports", "modules", "crate_resolution"],
         missing: [],
+        diagnostic_count: observedDiagnosticCount,
       },
     };
   }
@@ -684,6 +904,7 @@ async function handle(request) {
       request.symbols || [],
       request.symbol_positions || [],
       request.import_tokens || [],
+      request.allow_workspace_symbol === true,
     );
   }
   if (request.op === "discover") return session.discover(request.terms || []);

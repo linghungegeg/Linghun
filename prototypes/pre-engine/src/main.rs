@@ -19,7 +19,7 @@ mod ts_deep_layer;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::index::Index;
 
@@ -344,7 +344,7 @@ fn ambiguous_definition_symbols(idx: &Index, target_symbols: &[String]) -> Vec<S
     let targets: HashSet<&str> = target_symbols.iter().map(String::as_str).collect();
     let mut counts: HashMap<String, usize> = HashMap::new();
     for entry in idx.files().filter(|entry| {
-        !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python)
+        !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python | language::Lang::Rust)
     }) {
         for definition in
             symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang)
@@ -471,7 +471,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     )
                 };
                 let rust_structure_files = if requested_paths.is_empty() {
-                    rust_files
+                    Vec::new()
                 } else {
                     requested_paths.iter().filter(|path| {
                         idx.files().any(|entry| {
@@ -481,16 +481,18 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                         })
                     }).cloned().collect()
                 };
-                let rust_anchor_files = if requested_paths.is_empty() { &rust_structure_files } else { &requested_paths };
                 let (rust_symbol_positions, rust_import_tokens) = rust_lsp_inputs(
-                    idx, &root_str, rust_anchor_files, &[symbol.to_string()],
+                    idx, &root_str, &rust_structure_files, &[symbol.to_string()],
                 );
-                let rust_structure = if rust_structure_files.is_empty() {
+                let rust_structure = if rust_files.is_empty()
+                    || (!requested_paths.is_empty() && rust_structure_files.is_empty())
+                {
                     rust_deep_layer::disabled_structure(&[symbol.to_string()])
                 } else {
                     rust_deep_layer::run_structure(
                         rust_layer, &idx.root, &rust_structure_files, &[symbol.to_string()],
                         &rust_symbol_positions, &rust_import_tokens,
+                        requested_paths.is_empty(),
                     )
                 };
                 let ts_relations = if structure_files.is_empty() {
@@ -1034,6 +1036,7 @@ fn handle_pre_impact(
                         idx.files()
                             .find(|entry| make_relative(&entry.path.to_string_lossy(), &root_str) == *path)
                             .map(|entry| entry.lang)
+                            .or_else(|| language::Lang::from_path(Path::new(path)))
                     });
                     match seed_language {
                         Some(language::Lang::TypeScript | language::Lang::Tsx) => {
@@ -1153,13 +1156,11 @@ fn handle_pre_impact(
         )
     };
     let rust_symbols_requested: Vec<String> = rust_seed_symbols.iter().cloned().collect();
-    let rust_change_files: Vec<String> = change_paths.iter().filter(|path| {
-        idx.files().any(|entry| {
-            entry.lang == language::Lang::Rust
-                && make_relative(&entry.path.to_string_lossy(), &root_str)
-                    .eq_ignore_ascii_case(&make_relative(path, &root_str))
-        })
-    }).cloned().collect();
+    let rust_change_files: Vec<String> = change_paths
+        .iter()
+        .filter(|path| language::Lang::from_path(Path::new(path)) == Some(language::Lang::Rust))
+        .cloned()
+        .collect();
     let (rust_symbol_positions, rust_import_tokens) =
         rust_lsp_inputs(idx, &root_str, &rust_change_files, &rust_symbols_requested);
     let rust_structure = if rust_change_files.is_empty() {
@@ -1168,6 +1169,7 @@ fn handle_pre_impact(
         rust_deep_layer::run_structure(
             rust_layer, &idx.root, &rust_change_files, &rust_symbols_requested,
             &rust_symbol_positions, &rust_import_tokens,
+            false,
         )
     };
     let ts_relations = structure.relations.clone();
@@ -1983,26 +1985,69 @@ fn handle_pre_plan(
             relations.graph_truncated = true;
         }
     }
-    let rust_structure_files: Vec<String> = if target_files.is_empty() {
-        idx.files().filter(|entry| entry.lang == language::Lang::Rust)
-            .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str)).collect()
+    let has_rust_files = idx.files().any(|entry| entry.lang == language::Lang::Rust);
+    let mut rust_structure_files: Vec<String> = if target_files.is_empty() {
+        Vec::new()
     } else {
         target_files.iter().filter(|file| {
             idx.files().any(|entry| entry.lang == language::Lang::Rust
                 && make_relative(&entry.path.to_string_lossy(), &root_str) == **file)
         }).cloned().collect()
     };
-    let rust_anchor_files = if target_files.is_empty() { &rust_structure_files } else { &target_files };
-    let (rust_symbol_positions, _) = rust_lsp_inputs(idx, &root_str, rust_anchor_files, &target_symbols);
+    let (rust_symbol_positions, _) = rust_lsp_inputs(idx, &root_str, &rust_structure_files, &target_symbols);
     let (_, rust_import_tokens) = rust_lsp_inputs(idx, &root_str, &rust_structure_files, &[]);
-    let rust_structure = if rust_structure_files.is_empty() {
+    let mut rust_structure = if !has_rust_files
+        || (!target_files.is_empty() && rust_structure_files.is_empty())
+    {
         rust_deep_layer::disabled_structure(&target_symbols)
     } else {
         rust_deep_layer::run_structure(
             rust_layer, &idx.root, &rust_structure_files, &target_symbols,
             &rust_symbol_positions, &rust_import_tokens,
+            target_files.is_empty(),
         )
     };
+    for _ in 0..15 {
+        let mut expanded: HashSet<String> = rust_structure_files.iter().cloned().collect();
+        expanded.extend(rust_structure.module_dependencies.values().flatten().cloned());
+        expanded.extend(
+            rust_structure
+                .relations
+                .values()
+                .flat_map(|relations| relations.related_files.iter().cloned()),
+        );
+        if expanded.len() == rust_structure_files.len() {
+            break;
+        }
+        rust_structure_files = expanded.into_iter().collect();
+        rust_structure_files.sort();
+        idx.refresh_paths(&rust_structure_files);
+        let (expanded_symbol_positions, expanded_import_tokens) =
+            rust_lsp_inputs(idx, &root_str, &rust_structure_files, &target_symbols);
+        rust_structure = rust_deep_layer::run_structure(
+            rust_layer,
+            &idx.root,
+            &rust_structure_files,
+            &target_symbols,
+            &expanded_symbol_positions,
+            &expanded_import_tokens,
+            false,
+        );
+    }
+    let mut final_rust_closure: HashSet<String> = rust_structure_files.iter().cloned().collect();
+    final_rust_closure.extend(rust_structure.module_dependencies.values().flatten().cloned());
+    final_rust_closure.extend(
+        rust_structure
+            .relations
+            .values()
+            .flat_map(|relations| relations.related_files.iter().cloned()),
+    );
+    let rust_graph_truncated = final_rust_closure.len() > rust_structure_files.len();
+    if rust_graph_truncated {
+        for relations in rust_structure.relations.values_mut() {
+            relations.graph_truncated = true;
+        }
+    }
     let ts_relations = structure.relations.clone();
     let py_relations = py_structure.relations.clone();
     let rust_relations = rust_structure.relations.clone();
@@ -2119,7 +2164,8 @@ fn handle_pre_plan(
         .values()
         .chain(py_relations.values())
         .chain(rust_relations.values())
-        .any(|relations| relations.graph_truncated);
+        .any(|relations| relations.graph_truncated)
+        || rust_graph_truncated;
     let unresolved_external_modules = ts_relations.values().chain(py_relations.values()).chain(rust_relations.values()).any(|relations| {
         relations.targets.is_empty() && !relations.external_module_specifiers.is_empty()
     });

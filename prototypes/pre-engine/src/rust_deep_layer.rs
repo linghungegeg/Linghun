@@ -42,7 +42,7 @@ fn response_status(response: &Value) -> &'static str {
         Some("verified") => "verified",
         Some("partially_verified") => "partially_verified",
         Some("tool_missing") => "tool_missing",
-        _ => "fallback_used",
+        _ => "partially_verified",
     }
 }
 
@@ -170,6 +170,7 @@ impl RustDeepLayer {
         symbols: &[String],
         symbol_positions: &[Value],
         import_tokens: &[Value],
+        allow_workspace_symbol: bool,
     ) -> Result<StructureResult, String> {
         let root = self.root.to_string_lossy().replace('\\', "/");
         let (response, elapsed_ms) = self.request(json!({
@@ -179,6 +180,7 @@ impl RustDeepLayer {
             "symbols": symbols,
             "symbol_positions": symbol_positions,
             "import_tokens": import_tokens,
+            "allow_workspace_symbol": allow_workspace_symbol,
         }))?;
         Ok(StructureResult {
             relations: serde_json::from_value(
@@ -275,13 +277,13 @@ fn ensure_layer<'a>(
 pub fn run(deep: &mut Option<RustDeepLayer>, root: &Path, files: &[String]) -> RustDeepLayerResult {
     let layer = match ensure_layer(deep, root) {
         Ok(layer) => layer,
-        Err(reason) => return unavailable_result("tool_missing", reason),
+        Err(reason) => return unavailable_result("partially_verified", reason),
     };
     match layer.query_verify(files) {
         Ok(result) => result,
         Err(reason) => {
             *deep = None;
-            unavailable_result("fallback_used", reason)
+            unavailable_result("partially_verified", reason)
         }
     }
 }
@@ -293,16 +295,17 @@ pub fn run_structure(
     symbols: &[String],
     symbol_positions: &[Value],
     import_tokens: &[Value],
+    allow_workspace_symbol: bool,
 ) -> StructureResult {
     let layer = match ensure_layer(deep, root) {
         Ok(layer) => layer,
-        Err(reason) => return unavailable_structure(symbols, "tool_missing", reason),
+        Err(reason) => return unavailable_structure(symbols, "partially_verified", reason),
     };
-    match layer.query_structure(files, symbols, symbol_positions, import_tokens) {
+    match layer.query_structure(files, symbols, symbol_positions, import_tokens, allow_workspace_symbol) {
         Ok(result) => result,
         Err(reason) => {
             *deep = None;
-            unavailable_structure(symbols, "fallback_used", reason)
+            unavailable_structure(symbols, "partially_verified", reason)
         }
     }
 }
@@ -317,7 +320,7 @@ pub fn run_discovery(
         Err(reason) => {
             return RustDiscoveryResult {
                 candidates: vec![],
-                status: "tool_missing",
+                status: "partially_verified",
                 reason: Some(reason),
                 program_build_count: 0,
                 program_rebuilt: false,
@@ -332,7 +335,7 @@ pub fn run_discovery(
             *deep = None;
             RustDiscoveryResult {
                 candidates: vec![],
-                status: "fallback_used",
+                status: "partially_verified",
                 reason: Some(reason),
                 program_build_count: 0,
                 program_rebuilt: false,
@@ -377,5 +380,18 @@ fn unavailable_structure(
         program_rebuilt: false,
         snapshot_id: "0".to_string(),
         elapsed_ms: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_failures_never_map_to_fallback_or_tool_missing() {
+        for status in ["error", "protocol_error", "fallback_used", "unknown"] {
+            assert_eq!(response_status(&json!({ "status": status })), "partially_verified");
+        }
+        assert_eq!(response_status(&json!({ "status": "tool_missing" })), "tool_missing");
     }
 }
