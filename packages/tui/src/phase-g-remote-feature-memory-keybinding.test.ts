@@ -45,7 +45,8 @@ class MemoryOutput extends Writable {
   }
 }
 
-function createPhaseGTuiContext(): TuiContext {
+async function createPhaseGTuiContext(): Promise<TuiContext> {
+  const projectPath = await mkdtemp(join(tmpdir(), "linghun-phase-g-context-"));
   return {
     config: defaultConfig,
     language: "zh-CN",
@@ -56,7 +57,8 @@ function createPhaseGTuiContext(): TuiContext {
       resume: async () => ({ transcript: [] }),
       create: async () => ({ id: "session-phase-g" }),
     },
-    projectPath: "F:\\Linghun",
+    projectPath,
+    memory: await createMemoryState(defaultConfig, projectPath),
     remote: createRemoteState(defaultConfig),
   } as unknown as TuiContext;
 }
@@ -155,7 +157,7 @@ describe("Phase G remote REPL bridge, dedupe, and JWT refresh", () => {
   });
 
   it("routes local REPL bridge messages through the existing remote inbound handler", async () => {
-    const context = createPhaseGTuiContext();
+    const context = await createPhaseGTuiContext();
     const output = new MemoryOutput();
     configureRemoteCommandRuntime({
       appendSystemEvent: async () => undefined,

@@ -313,6 +313,53 @@ describe("SessionStore", () => {
     expect(recent.diagnostics).toEqual([]);
   });
 
+  it("stops reverse transcript reads at the latest matching boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+    const oldBoundary = {
+      type: "system_event",
+      level: "info",
+      message: "compact_projection:{\"summary\":\"OLD\"}",
+    } as const;
+    const latestBoundary = {
+      type: "system_event",
+      level: "info",
+      message: "compact_projection:{\"summary\":\"LATEST\"}",
+    } as const;
+    await writeFile(
+      session.transcriptPath,
+      [
+        "{broken-old-prefix",
+        JSON.stringify(oldBoundary),
+        JSON.stringify({ type: "user_message", text: "old active" }),
+        JSON.stringify(latestBoundary),
+        JSON.stringify({ type: "assistant_text_delta", text: "x".repeat(70_000) }),
+        JSON.stringify({ type: "user_message", text: "current" }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const recent = await store.readRecentTranscriptEvents(session.id, {
+      limit: Number.MAX_SAFE_INTEGER,
+      predicate: (event) =>
+        event.type === "user_message" ||
+        event.type === "assistant_text_delta" ||
+        (event.type === "system_event" && event.message.startsWith("compact_projection:")),
+      stopPredicate: (event) =>
+        event.type === "system_event" && event.message.startsWith("compact_projection:"),
+    });
+
+    expect(recent.events).toEqual([
+      latestBoundary,
+      { type: "assistant_text_delta", text: "x".repeat(70_000) },
+      { type: "user_message", text: "current" },
+    ]);
+    expect(recent.diagnostics).toEqual([]);
+  });
+
   it("reports diagnostics for malformed lines while tail-reading recent transcript events", async () => {
     const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-project-"));

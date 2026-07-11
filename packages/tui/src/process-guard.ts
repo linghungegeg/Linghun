@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 
@@ -41,6 +42,7 @@ type TrackedProcess = {
   retainAfterExit: boolean;
   childExited: boolean;
   workspaceSweep: boolean;
+  ownerId?: string;
   stopState?: "graceful" | "force";
 };
 
@@ -53,7 +55,11 @@ export type ProcessGuardDeps = {
 export class ProcessGuardRegistry {
   private readonly tracked = new Map<number, TrackedProcess>();
 
-  track(child: ProcessGuardTrackedChild, options: ProcessGuardTrackOptions = {}): boolean {
+  track(
+    child: ProcessGuardTrackedChild,
+    options: ProcessGuardTrackOptions = {},
+    ownerId?: string,
+  ): boolean {
     const pid = child.pid;
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
       return false;
@@ -73,13 +79,14 @@ export class ProcessGuardRegistry {
       retainAfterExit: options.retainAfterExit === true,
       childExited: false,
       workspaceSweep: options.workspaceSweep === true,
+      ownerId,
     });
     const cleanup = () => {
       const entry = this.tracked.get(pid);
-      if (!entry) return;
+      if (!entry || entry.child !== child || entry.ownerId !== ownerId) return;
       entry.childExited = true;
       if (!entry.retainAfterExit) {
-        this.untrack(pid);
+        this.untrack(pid, ownerId);
       }
     };
     child.once("exit", cleanup);
@@ -87,24 +94,30 @@ export class ProcessGuardRegistry {
     return true;
   }
 
-  untrack(pid: number | undefined): void {
+  untrack(pid: number | undefined, ownerId?: string): void {
     if (!pid) {
       return;
     }
+    if (ownerId !== undefined && this.tracked.get(pid)?.ownerId !== ownerId) return;
     this.tracked.delete(pid);
   }
 
-  snapshot(): ReadonlyArray<{ pid: number; detached: boolean; label?: string }> {
-    return Array.from(this.tracked.values()).map((entry) => ({
-      pid: entry.pid,
-      detached: entry.detached,
-      label: entry.label,
-    }));
+  snapshot(ownerId?: string): ReadonlyArray<{ pid: number; detached: boolean; label?: string }> {
+    return Array.from(this.tracked.values())
+      .filter((entry) => ownerId === undefined || entry.ownerId === ownerId)
+      .map((entry) => ({
+        pid: entry.pid,
+        detached: entry.detached,
+        label: entry.label,
+      }));
   }
 
-  activeSnapshot(): ReturnType<ProcessGuardRegistry["snapshot"]> {
+  activeSnapshot(ownerId?: string): ReturnType<ProcessGuardRegistry["snapshot"]> {
     return Array.from(this.tracked.values())
-      .filter((entry) => !entry.retainAfterExit)
+      .filter(
+        (entry) =>
+          !entry.retainAfterExit && (ownerId === undefined || entry.ownerId === ownerId),
+      )
       .map((entry) => ({
         pid: entry.pid,
         detached: entry.detached,
@@ -117,7 +130,7 @@ export class ProcessGuardRegistry {
     force: boolean,
     deps: Required<ProcessGuardDeps>,
     allowAsyncWindowsTreeKill: boolean,
-    onlyPids?: ReadonlySet<number>,
+    ownerId?: string,
   ): ProcessGuardStopResult {
     const result: ProcessGuardStopResult = {
       kind,
@@ -126,9 +139,9 @@ export class ProcessGuardRegistry {
       skipped: 0,
       failures: [],
     };
-    const removePids: number[] = [];
+    const removeEntries: Array<{ pid: number; ownerId?: string }> = [];
     for (const entry of this.tracked.values()) {
-      if (onlyPids && !onlyPids.has(entry.pid)) {
+      if (ownerId !== undefined && entry.ownerId !== ownerId) {
         continue;
       }
       if (kind === "exit-cleanup" && entry.retainAfterExit) {
@@ -136,11 +149,11 @@ export class ProcessGuardRegistry {
         continue;
       }
       if (stopEntry(entry, force, deps, allowAsyncWindowsTreeKill, result)) {
-        removePids.push(entry.pid);
+        removeEntries.push({ pid: entry.pid, ownerId: entry.ownerId });
       }
     }
-    for (const pid of removePids) {
-      this.untrack(pid);
+    for (const entry of removeEntries) {
+      this.untrack(entry.pid, entry.ownerId);
     }
     return result;
   }
@@ -151,6 +164,7 @@ export type ProcessGuard = {
   requestStop: (force: boolean) => ProcessGuardStopResult;
   cleanupForExit: () => ProcessGuardStopResult;
   snapshot: () => ReturnType<ProcessGuardRegistry["snapshot"]>;
+  activeSnapshot: () => ReturnType<ProcessGuardRegistry["snapshot"]>;
 };
 
 export const PROCESS_GUARD_EXIT_CLEANUP_NOTE =
@@ -173,22 +187,17 @@ export function createProcessGuard(
   deps: ProcessGuardDeps = {},
 ): ProcessGuard {
   const resolvedDeps = resolveDeps(deps);
-  const localPids = new Set<number>();
+  const ownerId = randomUUID();
   return {
-    track: (child, options) => {
-      const tracked = registry.track(child, options);
-      if (tracked && child.pid) {
-        localPids.add(child.pid);
-      }
-      return tracked;
-    },
+    track: (child, options) => registry.track(child, options, ownerId),
     requestStop: (force) =>
       recordStopResult(
-        registry.stopAll(force ? "force" : "graceful", force, resolvedDeps, true, localPids),
+        registry.stopAll(force ? "force" : "graceful", force, resolvedDeps, true, ownerId),
       ),
     cleanupForExit: () =>
-      recordStopResult(registry.stopAll("exit-cleanup", true, resolvedDeps, false, localPids)),
-    snapshot: () => registry.snapshot().filter((entry) => localPids.has(entry.pid)),
+      recordStopResult(registry.stopAll("exit-cleanup", true, resolvedDeps, false, ownerId)),
+    snapshot: () => registry.snapshot(ownerId),
+    activeSnapshot: () => registry.activeSnapshot(ownerId),
   };
 }
 

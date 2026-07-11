@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type { SelectedModelRuntime } from "./tui-model-runtime.js";
-import { resolveRuntimeFallback } from "./provider-loop-runtime.js";
+import { providerRuntimeKey, resolveRuntimeFallback } from "./provider-loop-runtime.js";
 
 function makeContext(provider: "gemini" | "grok", model: string): TuiContext {
   return {
@@ -52,6 +52,24 @@ describe("provider fallback reasoning contract", () => {
       endpointProfile: "chat_completions",
       reasoningSent: true,
     });
+  });
+
+  it("moves through configured fallbacks once and then terminates", () => {
+    const context = makeContext("gemini", "fallback-b");
+    context.config.providers.grok = { type: "grok", model: "fallback-c" };
+    context.config.modelRoutes.routes[0]!.fallbackModels = ["fallback-b", "fallback-c"];
+    const attempted = new Set([providerRuntimeKey(baseRuntime)]);
+    const error = Object.assign(new Error("gateway failed"), { status: 502 });
+
+    const fallbackB = resolveRuntimeFallback(context, baseRuntime, error, attempted);
+    expect(fallbackB?.runtime.model).toBe("fallback-b");
+    attempted.add(providerRuntimeKey(fallbackB!.runtime));
+
+    const fallbackC = resolveRuntimeFallback(context, fallbackB!.runtime, error, attempted);
+    expect(fallbackC?.runtime.model).toBe("fallback-c");
+    attempted.add(providerRuntimeKey(fallbackC!.runtime));
+
+    expect(resolveRuntimeFallback(context, fallbackC!.runtime, error, attempted)).toBeUndefined();
   });
 
   it("marks Grok reasoning as not sent", () => {

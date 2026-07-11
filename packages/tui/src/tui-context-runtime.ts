@@ -33,6 +33,7 @@ import type { PendingNaturalCommand } from "./natural-command-bridge.js";
 import type { SLASH_COMMAND_REGISTRY } from "./natural-command-bridge.js";
 import type { PermissionState, ReportWriteGuard } from "./permission-continuation-runtime.js";
 import type { ProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
+import type { ProcessGuard } from "./process-guard.js";
 import type { RequestActivityPhase } from "./request-lifecycle-presenter.js";
 import {
   LINGHUN_MAX_AGENTIC_TURNS,
@@ -262,6 +263,7 @@ export type PendingModelContinuation = {
   reportWriteGuard?: ReportWriteGuard;
   requestTurnId?: string;
   abortSignal?: AbortSignal;
+  attemptedRuntimeKeys?: string[];
 };
 
 export function runtimeFromContinuation(
@@ -315,6 +317,7 @@ export function createSingleToolCallContinuation(
 export type TuiContext = {
   store: SessionStore;
   sessionId?: string;
+  runtimeOwnerId?: string;
   runtimeContextId?: string;
   currentRequestTurnId?: string;
   currentRequestChangedFiles?: string[];
@@ -331,6 +334,8 @@ export type TuiContext = {
   permissionMode: PermissionMode;
   projectPath: string;
   tools: ToolContext;
+  processGuard?: ProcessGuard;
+  agentToolContexts?: Map<string, ToolContext>;
   permissions: PermissionState;
   language: Language;
   config: LinghunConfig;
@@ -561,6 +566,8 @@ export type TuiContext = {
   /** Session-local deep compact owner. Provider preflights wait on this so no request bypasses an in-flight compact. */
   deepCompactInFlight?: {
     sessionId: string;
+    ownerId: string;
+    isCurrent: () => boolean;
     promise: Promise<DeepCompactRunResult>;
   };
   /** Optional Ink output memory cleanup hook, invoked after context compaction succeeds. */
@@ -605,7 +612,7 @@ export type TuiContext = {
   briefMode?: boolean;
   /** Phase 9 — push a ProductBlockViewModel into the transcript block list. Set by the shell initializer. */
   pushTranscriptBlock?: (block: import("./shell/types.js").ProductBlockViewModel) => void;
-  /** Phase 15 — provider retry state, set by registerProviderHooks onRetry callback. */
+  /** Phase 15 — provider retry state, set by the current request's retry callback. */
   retryInfo?: { attempt: number; max: number; delaySec: number };
 };
 

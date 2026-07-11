@@ -30,10 +30,16 @@ import {
 } from "./shell/terminal-history-inserter.js";
 import { displayWidth, wrapText } from "./shell/text-utils.js";
 import type { ProductBlockViewModel, TranscriptViewportGeometryView } from "./shell/types.js";
-import { normalizeVisibleToolText } from "./shell/visible-output-normalizer.js";
+import {
+  normalizeVisibleToolText,
+  sanitizeDangerousTerminalControls,
+} from "./shell/visible-output-normalizer.js";
 import { createOutputBlock, redactSensitiveText } from "./shell/view-model.js";
 import { stripAnsi, writeLine } from "./startup-runtime.js";
-import type { StructuredToolOutput } from "./tool-output-presenter.js";
+import {
+  createAssistantPrimaryTextSanitizer,
+  type StructuredToolOutput,
+} from "./tool-output-presenter.js";
 
 const MAX_OUTPUT_BLOCKS = 80;
 const PRESERVE_RECENT_EPHEMERAL_BLOCKS = 12;
@@ -60,6 +66,7 @@ const TERMINAL_FIRST_CODE_THEME: Theme = {
   comment: (text) => ansiStyle("2", text),
   meta: (text) => ansiStyle("33", text),
 };
+const FALLBACK_VISIBLE_TEXT_SANITIZER = Symbol("linghunFallbackVisibleTextSanitizer");
 
 export type TerminalFirstAssistantSink = {
   stageStableAssistantText(text: string): void;
@@ -122,6 +129,7 @@ export class ShellBlockOutput extends Writable {
   private assistantTerminalFirstCommitted = false;
   private assistantTerminalFirstStaged = false;
   private assistantHoldStableCommit = false;
+  private readonly visibleTextSanitizer: ReturnType<typeof createAssistantPrimaryTextSanitizer>;
 
   constructor(
     private readonly context: TuiContext,
@@ -130,10 +138,13 @@ export class ShellBlockOutput extends Writable {
     private readonly terminalFirstAssistantSink?: TerminalFirstAssistantSink,
   ) {
     super();
+    this.visibleTextSanitizer = createAssistantPrimaryTextSanitizer(context.language, {
+      terminalControlsOnly: true,
+    });
   }
 
   override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: () => void): void {
-    const text = chunk.toString();
+    const text = this.visibleTextSanitizer.push(chunk.toString());
     const normalized = text.trim();
     if (normalized) {
       // D13E-P3 cleanup #4 — 拦截 plain TUI 用的 StatusTray raw 行（writeStatus
@@ -172,7 +183,7 @@ export class ShellBlockOutput extends Writable {
   }
 
   writeStructuredToolOutput(structured: StructuredToolOutput, primaryText = structured.text): void {
-    const normalizedPrimary = primaryText.replace(/\r/g, "").trim();
+    const normalizedPrimary = this.visibleTextSanitizer.push(primaryText).replace(/\r/g, "").trim();
     if (!normalizedPrimary) return;
     const base = createOutputBlock(normalizedPrimary, this.context.language);
     const details = createVisibleStructuredDetails(structured, this.context.language);
@@ -266,6 +277,7 @@ export class ShellBlockOutput extends Writable {
    * - 测试/非交互直接调用不带 expectedId 时，找不到 active id 再 fallback 到 _write
    */
   appendAssistantDelta(text: string, expectedId?: string): void {
+    text = this.visibleTextSanitizer.push(text);
     if (!text) return;
     const id = this.assistantBlockId;
     if (expectedId && id !== expectedId) {
@@ -370,6 +382,7 @@ export class ShellBlockOutput extends Writable {
    * lastFullOutput 同步为同一份安全文本，让 Ctrl+O / details 也只看降级版。
    */
   replaceAssistantBlockContent(id: string, text: string): void {
+    text = this.visibleTextSanitizer.push(text);
     if (this.assistantBlockId === id) {
       this.stopAssistantCommitTick();
       this.assistantStreamText = "";
@@ -414,7 +427,7 @@ export class ShellBlockOutput extends Writable {
    * 调用方应自己保证只用于真正的诊断输出（status / doctor 概要 / state dump）。
    */
   writeDiagnosticLine(text: string): void {
-    const normalized = text.replace(/\r/g, "").trim();
+    const normalized = this.visibleTextSanitizer.push(text).replace(/\r/g, "").trim();
     if (!normalized) return;
     const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
     const nonEmptyLines = normalized.split("\n").filter((line) => line.trim().length > 0).length;
@@ -458,7 +471,7 @@ export class ShellBlockOutput extends Writable {
    * 普通 writeLine / /mcp status / 普通 assistant 正文不要走这条路径。
    */
   writeErrorLine(text: string, title?: string, metadata?: ErrorLineMetadata): void {
-    const normalized = text.replace(/\r/g, "").trim();
+    const normalized = this.visibleTextSanitizer.push(text).replace(/\r/g, "").trim();
     if (!normalized) return;
     const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
     const nonEmptyLines = normalized.split("\n").filter((line) => line.trim().length > 0).length;
@@ -508,7 +521,7 @@ export class ShellBlockOutput extends Writable {
   }
 
   writeLocalCommandOutputLine(text: string): void {
-    const normalized = text.replace(/\r/g, "").trim();
+    const normalized = this.visibleTextSanitizer.push(text).replace(/\r/g, "").trim();
     if (!normalized) return;
     const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
     const nonEmptyLines = normalized.split("\n").filter((line) => line.trim().length > 0).length;
@@ -1007,7 +1020,7 @@ export function createTerminalFirstAssistantSink(
   const writeHistory = (text: string | undefined): boolean => {
     if (!text) return false;
     try {
-      return insertTerminalHistoryText(ttyOutput, text, {
+      return insertTerminalHistoryText(ttyOutput, sanitizeDangerousTerminalControls(text), {
         frameTopRow: resolveOptionalOption(options.frameTopRow),
         viewportGeometry: resolveOptionalOption(options.viewportGeometry),
         terminalRows: resolveOptionalOption(options.rows),
@@ -1349,12 +1362,13 @@ export function beginAssistantStream(
 }
 
 export function writeAssistantDelta(output: Writable, id: string, text: string): void {
-  if (!text) return;
   const candidate = output as { appendAssistantDelta?: (text: string, id?: string) => void };
   if (typeof candidate.appendAssistantDelta === "function") {
     candidate.appendAssistantDelta(text, id);
     return;
   }
+  text = sanitizeFallbackVisibleText(output, text);
+  if (!text) return;
   output.write(text);
 }
 
@@ -1408,7 +1422,8 @@ export function writeDiagnosticLine(output: Writable, text: string): void {
     candidate.writeDiagnosticLine(text);
     return;
   }
-  writeLine(output, text);
+  const sanitized = sanitizeFallbackVisibleText(output, text);
+  if (sanitized) writeLine(output, sanitized);
 }
 
 /**
@@ -1443,7 +1458,8 @@ export function writeErrorLine(
     candidate.writeErrorLine(text, title, metadata);
     return;
   }
-  writeLine(output, text);
+  const sanitized = sanitizeFallbackVisibleText(output, text);
+  if (sanitized) writeLine(output, sanitized);
 }
 
 export function writeLocalCommandOutputLine(output: Writable, text: string): void {
@@ -1452,7 +1468,8 @@ export function writeLocalCommandOutputLine(output: Writable, text: string): voi
     candidate.writeLocalCommandOutputLine(text);
     return;
   }
-  writeLine(output, text);
+  const sanitized = sanitizeFallbackVisibleText(output, text);
+  if (sanitized) writeLine(output, sanitized);
 }
 
 export function writeStructuredToolOutput(
@@ -1470,7 +1487,20 @@ export function writeStructuredToolOutput(
     candidate.writeStructuredToolOutput(structured, primaryText);
     return;
   }
-  writeLine(output, primaryText);
+  const sanitized = sanitizeFallbackVisibleText(output, primaryText);
+  if (sanitized) writeLine(output, sanitized);
+}
+
+function sanitizeFallbackVisibleText(output: Writable, text: string): string {
+  const ownedOutput = output as Writable & {
+    [FALLBACK_VISIBLE_TEXT_SANITIZER]?: ReturnType<typeof createAssistantPrimaryTextSanitizer>;
+  };
+  let sanitizer = ownedOutput[FALLBACK_VISIBLE_TEXT_SANITIZER];
+  if (!sanitizer) {
+    sanitizer = createAssistantPrimaryTextSanitizer("en-US", { terminalControlsOnly: true });
+    ownedOutput[FALLBACK_VISIBLE_TEXT_SANITIZER] = sanitizer;
+  }
+  return sanitizer.push(text);
 }
 
 /**

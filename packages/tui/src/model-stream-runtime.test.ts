@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
-import { SessionStore } from "@linghun/core";
+import { LinghunError, SessionStore } from "@linghun/core";
 import type { ModelGateway } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import {
@@ -12,7 +12,6 @@ import {
   __testBuildModelMessagesWithRecentContext,
   __testCurrentVerificationReportForRequest,
   __testScheduleApiTokenCountDiagnostics,
-  __testRunFinalGateEvidenceAction,
   __testSendMessage,
   __testStreamFinalModelAnswerWithoutTools,
   buildAggregatedDowngradedFinalAnswer,
@@ -24,6 +23,7 @@ import {
   createPreFallbackHardCutSkippedToolResult,
   createToolBatchFailFastSkippedResult,
   createToolExecutionBatches,
+  continueModelAfterToolResults,
   evaluateAggregatedFinalAnswerGate,
   handleNaturalInput,
   isPreEngineToolCall,
@@ -32,7 +32,6 @@ import {
   isToolBatchFallbackRequired,
   planFinalGateEvidenceGapAction,
   recordInterruptedForegroundTurn,
-  shouldContinueAfterFinalGateEvidenceAction,
   shouldRewriteFinalGateClaimAlignment,
   shouldContinueAfterToolFailureWithoutToolCall,
   shouldRetryHighReasoningToolsEmptyResponse,
@@ -90,6 +89,36 @@ class MemoryOutput extends Writable {
     callback();
   }
 }
+
+describe("continuation abort ownership", () => {
+  it("does not revive a continuation whose inherited signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort("stale owner");
+    let providerStarted = false;
+    const gateway = {
+      async *stream() {
+        providerStarted = true;
+        yield { type: "message_stop", chunkCount: 0, hadUsage: false };
+      },
+    } as unknown as ModelGateway;
+
+    await continueModelAfterToolResults(
+      {
+        messages: [],
+        provider: "openai-compatible",
+        model: "gpt-test",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        abortSignal: controller.signal,
+      },
+      {} as TuiContext,
+      gateway,
+      new MemoryOutput(),
+    );
+
+    expect(providerStarted).toBe(false);
+  });
+});
 
 type TestStreamEvent =
   | { type: "assistant_text_delta"; text: string }
@@ -465,6 +494,250 @@ describe("model message prompt cache layout", () => {
     );
   }, 30_000);
 
+  it("does not create a request owner after a caller-owned controller aborts during session init", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const store = context.store as SessionStore;
+    const originalCreate = store.create.bind(store);
+    let releaseCreate: (() => void) | undefined;
+    const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    vi.spyOn(store, "create").mockImplementation(async (metadata) => {
+      await createGate;
+      return originalCreate(metadata);
+    });
+    context.sessionId = undefined;
+    const controller = new AbortController();
+    const stream = vi.fn(async function* () {
+      yield { type: "assistant_text_delta", text: "must not run" } as const;
+    });
+    const gateway = { stream } as unknown as ModelGateway;
+
+    const running = __testSendMessage(
+      "must not start",
+      context,
+      gateway,
+      new MemoryOutput(),
+      controller,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort("deadline");
+    releaseCreate?.();
+    await running;
+
+    expect(stream).not.toHaveBeenCalled();
+    expect(context.currentRequestTurnId).toBeUndefined();
+    expect(events.some((event) => (event as { type?: string }).type === "user_message")).toBe(false);
+  });
+
+  it("drops a final assistant event when the main owner changes inside queued append", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const store = context.store as SessionStore;
+    const appendEvent = store.appendEvent.bind(store);
+    let enterAppend: (() => void) | undefined;
+    let releaseAppend: (() => void) | undefined;
+    const appendEntered = new Promise<void>((resolve) => { enterAppend = resolve; });
+    const appendGate = new Promise<void>((resolve) => { releaseAppend = resolve; });
+    store.appendEvent = async (sessionId, event, commitGuard) => {
+      if (event.type === "assistant_text_delta") {
+        enterAppend?.();
+        await appendGate;
+      }
+      return appendEvent(sessionId, event, commitGuard);
+    };
+    const gateway = gatewayByTurn(
+      [[
+        { type: "assistant_text_delta", text: "old owner final" },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ]],
+      { count: 0 },
+    );
+
+    const running = __testSendMessage("old request", context, gateway, new MemoryOutput());
+    await appendEntered;
+    beginForegroundRequestTurn(context, "new request");
+    releaseAppend?.();
+    await running;
+
+    expect(
+      events.some(
+        (event) =>
+          (event as { type?: string; text?: string }).type === "assistant_text_delta" &&
+          (event as { text?: string }).text === "old owner final",
+      ),
+    ).toBe(false);
+  });
+
+  it("drops a final assistant event when the continuation owner changes inside queued append", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const store = context.store as SessionStore;
+    const appendEvent = store.appendEvent.bind(store);
+    let enterAppend: (() => void) | undefined;
+    let releaseAppend: (() => void) | undefined;
+    const appendEntered = new Promise<void>((resolve) => { enterAppend = resolve; });
+    const appendGate = new Promise<void>((resolve) => { releaseAppend = resolve; });
+    store.appendEvent = async (sessionId, event, commitGuard) => {
+      if (event.type === "assistant_text_delta") {
+        enterAppend?.();
+        await appendGate;
+      }
+      return appendEvent(sessionId, event, commitGuard);
+    };
+    const gateway = gatewayByTurn(
+      [[
+        { type: "assistant_text_delta", text: "old continuation final" },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ]],
+      { count: 0 },
+    );
+
+    const running = continueModelAfterToolResults(
+      {
+        messages: [{ role: "user", content: "continue" }],
+        provider: "deepseek",
+        model: "deepseek-chat",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+      context,
+      gateway,
+      new MemoryOutput(),
+    );
+    await appendEntered;
+    beginForegroundRequestTurn(context, "new request");
+    releaseAppend?.();
+    await running;
+
+    expect(
+      events.some(
+        (event) =>
+          (event as { type?: string; text?: string }).type === "assistant_text_delta" &&
+          (event as { text?: string }).text === "old continuation final",
+      ),
+    ).toBe(false);
+  });
+
+  it("commits usage only from the terminal provider attempt after a partial retry", async () => {
+    const { context, events } = await makeSendMessageContext();
+    let attempts = 0;
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        if (attempts === 1) {
+          yield { type: "assistant_text_delta", id: "partial", text: "partial" } as const;
+          yield {
+            type: "usage",
+            usage: { inputTokens: 900, outputTokens: 90, totalTokens: 990 },
+          } as const;
+          yield {
+            type: "error",
+            error: new LinghunError({
+              code: "PROVIDER_SERVER_ERROR",
+              message: "retry this attempt",
+              recoverable: true,
+            }),
+          } as const;
+          return;
+        }
+        yield { type: "assistant_text_delta", id: "final", text: "最终回答" } as const;
+        yield {
+          type: "usage",
+          usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+        } as const;
+        yield {
+          type: "message_stop",
+          id: "stop-final",
+          chunkCount: 3,
+          hadUsage: true,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("测试 attempt usage", context, gateway, new MemoryOutput());
+
+    const usageEvents = events.filter(
+      (event): event is { type: "usage"; usage: { totalTokens?: number } } =>
+        (event as { type?: string }).type === "usage",
+    );
+    expect(attempts).toBe(2);
+    expect(usageEvents).toHaveLength(1);
+    expect(usageEvents[0]?.usage).toMatchObject({ inputTokens: 100, outputTokens: 10 });
+    expect(context.cache.contextUsage?.confirmedUsedTokens).toBe(100);
+    expect(JSON.stringify(events)).not.toContain('"totalTokens":990');
+  }, 30_000);
+
+  it("starts a complete tool_use before message_stop while preserving terminal usage", async () => {
+    const { context, events } = await makeSendMessageContext();
+    await writeFile(join(context.projectPath, "early-read.txt"), "early tool content", "utf8");
+    let releaseMessageStop!: () => void;
+    const messageStopGate = new Promise<void>((resolve) => {
+      releaseMessageStop = resolve;
+    });
+    let toolUseYielded!: () => void;
+    const toolUseSeen = new Promise<void>((resolve) => {
+      toolUseYielded = resolve;
+    });
+    let attempts = 0;
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        if (attempts === 1) {
+          yield {
+            type: "tool_use",
+            id: "tool-early-read",
+            name: "Read",
+            input: { path: "early-read.txt" },
+          } as const;
+          toolUseYielded();
+          await messageStopGate;
+          yield {
+            type: "usage",
+            usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+          } as const;
+          yield {
+            type: "message_stop",
+            id: "stop-tool",
+            chunkCount: 3,
+            hadUsage: true,
+            finishReason: "tool_use",
+          } as const;
+          return;
+        }
+        yield { type: "assistant_text_delta", id: "final", text: "读取完成。" } as const;
+        yield {
+          type: "message_stop",
+          id: "stop-final",
+          chunkCount: 2,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    const running = __testSendMessage("读取 early-read.txt", context, gateway, new MemoryOutput());
+    await toolUseSeen;
+    await vi.waitFor(() => {
+      expect(events.some((event) => (event as { type?: string }).type === "tool_call_start")).toBe(
+        true,
+      );
+    });
+    expect(attempts).toBe(1);
+
+    releaseMessageStop();
+    await running;
+
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    expect(
+      events.filter((event) => (event as { type?: string }).type === "usage"),
+    ).toHaveLength(1);
+    expect(JSON.stringify(events)).toContain("early tool content");
+  }, 30_000);
+
   it("records an empty provider stream as a structured resumable failure", async () => {
     const { context, events } = await makeSendMessageContext();
     const blocks: Array<Record<string, unknown>> = [];
@@ -601,6 +874,96 @@ describe("model message prompt cache layout", () => {
     expect(messages[1]).toMatchObject({ promptCache: "volatile" });
   });
 
+  it("exhausts multiple runtime fallbacks once without cycling", async () => {
+    const { context } = await makeSendMessageContext();
+    context.model = "primary-model";
+    context.config = {
+      ...defaultConfig,
+      defaultModel: "primary-model",
+      providers: {
+        primary: { type: "deepseek", model: "primary-model", apiKey: "test-key" },
+        fallbackB: { type: "deepseek", model: "fallback-b", apiKey: "test-key" },
+        fallbackC: { type: "deepseek", model: "fallback-c", apiKey: "test-key" },
+      },
+      modelRoutes: {
+        defaultModel: "primary-model",
+        routes: [
+          {
+            ...defaultConfig.modelRoutes.routes.find((route) => route.role === "executor")!,
+            role: "executor",
+            provider: "primary",
+            primaryModel: "primary-model",
+            fallbackModels: ["fallback-b", "fallback-c"],
+            allowTools: true,
+          },
+        ],
+      },
+    };
+    const attemptedModels: string[] = [];
+    const gateway = {
+      async *stream(_provider: string, request: { model?: string }) {
+        attemptedModels.push(request.model ?? "");
+        yield {
+          type: "error",
+          error: new LinghunError({
+            code: "PROVIDER_QUOTA_EXHAUSTED",
+            message: "quota exhausted",
+            recoverable: true,
+          }),
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("检查 fallback 有界性", context, gateway, new MemoryOutput());
+
+    expect(attemptedModels).toEqual(["primary-model", "fallback-b", "fallback-c"]);
+  });
+
+  it("does not reopen a verification final gap after an unrelated successful Read", async () => {
+    const { context, events } = await makeSendMessageContext();
+    await writeFile(join(context.projectPath, "unrelated.txt"), "unrelated evidence\n", "utf8");
+    let attempts = 0;
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        if (attempts === 2) {
+          yield {
+            type: "tool_use",
+            id: "unrelated-read",
+            name: "Read",
+            input: { path: "unrelated.txt" },
+          } as const;
+          yield {
+            type: "message_stop",
+            chunkCount: 1,
+            hadUsage: false,
+            finishReason: "tool_use",
+          } as const;
+          return;
+        }
+        yield { type: "assistant_text_delta", text: "测试已经通过。" } as const;
+        yield {
+          type: "message_stop",
+          chunkCount: 1,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("确认测试是否通过", context, gateway, new MemoryOutput());
+
+    expect(attempts).toBe(3);
+    expect(JSON.stringify(events)).toContain("final_gate_retry_disabled");
+    expect(JSON.stringify(events)).toContain("unrelated evidence");
+  }, 30_000);
+
   it("cuts model history at the latest compact projection boundary", async () => {
     const projection = {
       boundaryId: "compact-boundary-test",
@@ -657,7 +1020,7 @@ describe("model message prompt cache layout", () => {
     expect(serialized).not.toContain("RAW_OLD_CONTEXT");
   });
 
-  it("keeps the latest compact boundary with the complete active conversation", async () => {
+  it("stops the reverse transcript scan at the latest compact boundary", async () => {
     const projection = {
       boundaryId: "compact-boundary-outside-tail",
       summary: "STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL",
@@ -676,15 +1039,18 @@ describe("model message prompt cache layout", () => {
       { type: "user_message", text: "current user" },
     ];
     const readLimits: number[] = [];
+    const stopPredicates: boolean[] = [];
     const context = {
       model: "test-model",
       cache: { history: [] },
       store: {
-        readRecentTranscriptEvents: async (_sessionId: string, input: { limit: number }) => {
+        readRecentTranscriptEvents: async (
+          _sessionId: string,
+          input: { limit: number; stopPredicate?: (event: unknown) => boolean },
+        ) => {
           readLimits.push(input.limit);
-          return input.limit === 1
-            ? { events: [boundary] }
-            : { events: activeTail.slice(-input.limit) };
+          stopPredicates.push(Boolean(input.stopPredicate?.(boundary)));
+          return { events: [boundary, ...activeTail] };
         },
         appendEvent: async () => undefined,
       },
@@ -706,10 +1072,72 @@ describe("model message prompt cache layout", () => {
     );
     const serialized = JSON.stringify(messages);
 
-    expect(readLimits).toEqual([Number.MAX_SAFE_INTEGER, 1]);
+    expect(readLimits).toEqual([Number.MAX_SAFE_INTEGER]);
+    expect(stopPredicates).toEqual([true]);
     expect(serialized).toContain("STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL");
     expect(serialized).toContain("post-boundary answer 0");
     expect(serialized).toContain("post-boundary answer 29");
+  });
+
+  it("skips unusable compact records and stops at the latest usable boundary", async () => {
+    const validBoundary = {
+      type: "system_event",
+      level: "info",
+      message: 'compact_projection:{"summary":"VALID_COMPACT_SUMMARY"}',
+    };
+    const events = [
+      { type: "user_message", text: "RAW_BEFORE_VALID" },
+      validBoundary,
+      { type: "user_message", text: "between valid and invalid" },
+      { type: "system_event", level: "info", message: "compact_projection:{broken" },
+      { type: "deep_compact_packet", packet: { summary: "invalid packet" } },
+      { type: "assistant_text_delta", text: "tail after invalid boundaries" },
+      { type: "user_message", text: "current user" },
+    ];
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async (
+          _sessionId: string,
+          input: {
+            limit: number;
+            predicate?: (event: unknown) => boolean;
+            stopPredicate?: (event: unknown) => boolean;
+          },
+        ) => {
+          const selected: unknown[] = [];
+          for (let index = events.length - 1; index >= 0; index -= 1) {
+            const event = events[index]!;
+            if (!input.predicate || input.predicate(event)) selected.push(event);
+            if (input.stopPredicate?.(event) || selected.length >= input.limit) break;
+          }
+          return { events: selected.reverse() };
+        },
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-invalid-boundary",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(serialized).toContain("VALID_COMPACT_SUMMARY");
+    expect(serialized).toContain("between valid and invalid");
+    expect(serialized).toContain("tail after invalid boundaries");
+    expect(serialized).not.toContain("RAW_BEFORE_VALID");
   });
 
   it("keeps persisted compact memory constraints immutable across later memory changes", async () => {
@@ -1497,6 +1925,313 @@ describe("high reasoning tool empty response retry", () => {
 });
 
 describe("final answer gate aggregation", () => {
+  it("treats structured claims as hints when visible text asserts a stronger result", () => {
+    const result = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      withClaims("测试已经通过。", [{ kind: "code_fact", phrase: "查看了代码" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status === "needs_disclaimer") {
+      expect(result.unsupportedKinds).toContain("test_claim");
+    }
+  });
+
+  it("does not let an older request PASS support the current visible claim", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-owner",
+      currentRequestTurnId: "request-new",
+      evidence: [
+        makeEvidence({
+          kind: "test_result",
+          supportsClaims: ["verification_passed", "test_passed"],
+          ownerScope: {
+            ownerSessionId: "session-owner",
+            requestTurnId: "request-old",
+            cwd: "C:/repo",
+          },
+          data: {
+            verificationScope: {
+              ownerKey: "request:session-owner:request-old",
+              cwd: "C:/repo",
+              changedFiles: [],
+              ownerSessionId: "session-owner",
+              requestTurnId: "request-old",
+            },
+          },
+        }),
+      ],
+    };
+
+    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+      .toBe("needs_disclaimer");
+    context.evidence[0]!.ownerScope!.requestTurnId = "request-new";
+    const scope = (context.evidence[0]!.data as { verificationScope: { requestTurnId: string; ownerKey: string } })
+      .verificationScope;
+    scope.requestTurnId = "request-new";
+    scope.ownerKey = "request:session-owner:request-new";
+    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+      .toBe("passed");
+  });
+
+  it("keeps owner-scoped verification deterministic across 1000 request transitions", () => {
+    const evidence = makeEvidence({
+      kind: "test_result",
+      supportsClaims: ["verification_passed", "test_passed"],
+      ownerScope: {
+        ownerSessionId: "session-pressure",
+        requestTurnId: "request-current",
+        cwd: "C:/repo",
+      },
+      data: {
+        verificationScope: {
+          ownerKey: "request:session-pressure:request-current",
+          cwd: "C:/repo",
+          changedFiles: [],
+          ownerSessionId: "session-pressure",
+          requestTurnId: "request-current",
+        },
+      },
+    });
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-pressure",
+      currentRequestTurnId: "request-current",
+      evidence: [evidence],
+    };
+    const scope = evidence.data as { verificationScope: { ownerKey: string; requestTurnId: string } };
+
+    for (let index = 0; index < 1_000; index += 1) {
+      const requestTurnId = index % 2 === 0 ? "request-current" : `request-stale-${index}`;
+      evidence.ownerScope!.requestTurnId = requestTurnId;
+      scope.verificationScope.requestTurnId = requestTurnId;
+      scope.verificationScope.ownerKey = `request:session-pressure:${requestTurnId}`;
+      expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+        .toBe(index % 2 === 0 ? "passed" : "needs_disclaimer");
+    }
+  });
+
+  it("does not turn negative or proposed work into success claims", () => {
+    for (const text of [
+      "测试未通过，需要继续修复。",
+      "agent 未完成，建议执行下一条命令。",
+      "Tests did not pass; we should run another command.",
+    ]) {
+      expect(evaluateAggregatedFinalAnswerGate(makeGateContext() as never, text, false).status)
+        .toBe("passed");
+    }
+  });
+
+  it("keeps an earlier success claim visible when later work is only proposed", () => {
+    for (const text of [
+      "测试已通过，建议再跑 build。",
+      "Tests passed, but we should run build.",
+    ]) {
+      expect(evaluateAggregatedFinalAnswerGate(makeGateContext() as never, text, false).status)
+        .toBe("needs_disclaimer");
+    }
+  });
+
+  it("keeps a later success claim visible after an earlier proposal or failure clause", () => {
+    for (const text of [
+      "建议先观察，测试已通过。",
+      "We should investigate, tests passed.",
+      "测试未通过，修复后测试通过。",
+    ]) {
+      expect(evaluateAggregatedFinalAnswerGate(makeGateContext() as never, text, false).status)
+        .toBe("needs_disclaimer");
+    }
+  });
+
+  it("requires target evidence for every claim of the same kind", () => {
+    const context = {
+      ...makeGateContext(),
+      evidence: [
+        makeEvidence({
+          kind: "file_read",
+          summary: "Read packages/a.ts",
+          source: "Read",
+          ownerScope: { cwd: "C:/repo", targets: ["packages/a.ts"] },
+        }),
+      ],
+    };
+    const answer = withClaims("A 和 B 的代码事实如下。", [
+      { kind: "code_fact", phrase: "packages/a.ts code fact" },
+      { kind: "code_fact", phrase: "packages/b.ts code fact" },
+    ]);
+
+    expect(evaluateAggregatedFinalAnswerGate(context as never, answer, false).status)
+      .toBe("needs_disclaimer");
+  });
+
+  it("requires evidence for every visible target and every visible match", () => {
+    const context = {
+      ...makeGateContext(),
+      evidence: [
+        makeEvidence({
+          summary: "Edited packages/a.ts",
+          source: "Edit",
+          supportsClaims: ["file_written", "Edit"],
+          ownerScope: { cwd: "C:/repo", targets: ["packages/a.ts"] },
+        }),
+      ],
+    };
+
+    for (const answer of [
+      "修改 packages/a.ts 和 packages/b.ts 文件。",
+      "修改 packages/a.ts 文件。修改 packages/b.ts 文件。",
+    ]) {
+      expect(evaluateAggregatedFinalAnswerGate(context as never, answer, false).status)
+        .toBe("needs_disclaimer");
+    }
+  });
+
+  it("does not satisfy a target with a path suffix or owner id prefix collision", () => {
+    const fileContext = {
+      ...makeGateContext(),
+      evidence: [
+        makeEvidence({
+          summary: "Edited data.ts",
+          source: "Edit",
+          supportsClaims: ["file_written", "Edit"],
+          ownerScope: { cwd: "C:/repo", targets: ["data.ts"] },
+        }),
+      ],
+    };
+    expect(evaluateAggregatedFinalAnswerGate(fileContext as never, "修改 a.ts 文件。", false).status)
+      .toBe("needs_disclaimer");
+
+    const agentContext = {
+      ...makeGateContext(),
+      evidence: [
+        makeEvidence({
+          summary: "agent-10 completed",
+          source: "agent:agent-10",
+          supportsClaims: ["agent_execution", "agent_terminal_status"],
+          ownerScope: { cwd: "C:/repo", ownerAgentId: "agent-10" },
+        }),
+      ],
+    };
+    expect(evaluateAggregatedFinalAnswerGate(agentContext as never, "agent-1 已完成。", false).status)
+      .toBe("needs_disclaimer");
+  });
+
+  it("matches the same path across absolute relative slash and case normalization", () => {
+    const context = {
+      ...makeGateContext(),
+      evidence: [
+        makeEvidence({
+          summary: "Edited packages/a.ts",
+          source: "Edit",
+          supportsClaims: ["file_written", "Edit"],
+          ownerScope: { cwd: "C:/repo", targets: ["C:\\repo\\packages\\A.ts"] },
+        }),
+      ],
+    };
+
+    expect(evaluateAggregatedFinalAnswerGate(context as never, "修改 packages/a.ts 文件。", false).status)
+      .toBe("passed");
+  });
+
+  it("rejects the same relative suffix from a different repository root", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-cwd",
+      currentRequestTurnId: "request-cwd",
+      evidence: [
+        makeEvidence({
+          summary: "Edited D:/other/packages/a.ts",
+          source: "Edit",
+          supportsClaims: ["file_written", "Edit"],
+          ownerScope: {
+            ownerSessionId: "session-cwd",
+            requestTurnId: "request-cwd",
+            cwd: "D:/other",
+            targets: ["D:/other/packages/a.ts"],
+          },
+        }),
+      ],
+    };
+
+    expect(evaluateAggregatedFinalAnswerGate(context as never, "修改 packages/a.ts 文件。", false).status)
+      .toBe("needs_disclaimer");
+  });
+
+  it("rejects verification evidence produced under a different repository cwd", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-verify-cwd",
+      currentRequestTurnId: "request-verify-cwd",
+      currentRequestMentionedFiles: [],
+      evidence: [
+        makeEvidence({
+          kind: "test_result",
+          supportsClaims: ["verification_passed", "test_passed"],
+          ownerScope: {
+            ownerSessionId: "session-verify-cwd",
+            requestTurnId: "request-verify-cwd",
+            cwd: "D:/other",
+          },
+          data: {
+            verificationScope: {
+              ownerKey: "request:session-verify-cwd:request-verify-cwd",
+              cwd: "D:/other",
+              changedFiles: [],
+              ownerSessionId: "session-verify-cwd",
+              requestTurnId: "request-verify-cwd",
+            },
+          },
+        }),
+      ],
+    };
+
+    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+      .toBe("needs_disclaimer");
+  });
+
+  it("rejects session-scoped verification evidence without the current request owner", () => {
+    const evidence = makeEvidence({
+      kind: "test_result",
+      supportsClaims: ["verification_passed", "test_passed"],
+      ownerScope: {
+        ownerSessionId: "session-request-required",
+        cwd: "C:/repo",
+      },
+      data: {
+        verificationScope: {
+          ownerKey: "session:session-request-required",
+          cwd: "C:/repo",
+          changedFiles: [],
+          ownerSessionId: "session-request-required",
+        },
+      },
+    });
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-request-required",
+      currentRequestTurnId: "request-current",
+      currentRequestMentionedFiles: [],
+      evidence: [evidence],
+    };
+
+    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+      .toBe("needs_disclaimer");
+    const scope = (evidence.data as { verificationScope: { requestTurnId?: string } }).verificationScope;
+    scope.requestTurnId = "request-current";
+    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+      .toBe("needs_disclaimer");
+    evidence.ownerScope!.requestTurnId = "request-current";
+    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+      .toBe("passed");
+  });
+
   it("downgrades a structured completion claim for an actively blocked workflow", () => {
     const context = {
       ...makeGateContext(),
@@ -1741,7 +2476,7 @@ describe("final answer gate aggregation", () => {
     expect((context as { requestActivityPhase?: string }).requestActivityPhase).toBeUndefined();
   });
 
-  it("no-tool final rewrites claim alignment through the model before committing", async () => {
+  it("no-tool final deterministically downgrades unsupported completion claims", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-no-tool-final-"));
     const { context } = makeDispatcherContext(projectPath);
     Object.assign(context, {
@@ -1760,9 +2495,6 @@ describe("final answer gate aggregation", () => {
     const output = createShellBlockOutputForTest(context, blocks as never);
     const calls = { count: 0 };
     const rawDraft = withClaims("已完成。", [{ kind: "completion_claim", phrase: "已完成" }]);
-    const alignedAnswer = withClaims("已按已有验证证据收窄：验证通过。", [
-      { kind: "verification_claim", phrase: "验证通过" },
-    ]);
 
     const finalText = await __testStreamFinalModelAnswerWithoutTools(
       {
@@ -1779,10 +2511,6 @@ describe("final answer gate aggregation", () => {
             { type: "assistant_text_delta", text: rawDraft },
             { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
           ],
-          [
-            { type: "assistant_text_delta", text: alignedAnswer },
-            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
-          ],
         ],
         calls,
       ),
@@ -1792,17 +2520,15 @@ describe("final answer gate aggregation", () => {
     );
 
     const serializedBlocks = JSON.stringify(blocks);
-    expect(calls.count).toBe(2);
-    expect(finalText).toContain("验证通过");
-    expect(finalText).not.toMatch(
-      /当前证据不足|任务状态|当前证据|下一步|LinghunFinalAnswerClaims|completion_claim|task completion evidence|unsupportedKinds|retry|downgrade/iu,
-    );
-    expect(serializedBlocks).toContain("验证通过");
+    expect(calls.count).toBe(1);
+    expect(finalText).toContain("还需要补充");
+    expect(finalText).not.toContain("LinghunFinalAnswerClaims");
+    expect(serializedBlocks).toContain("还需要补充");
     expect(serializedBlocks).not.toContain(rawDraft);
     expect((context as { lastFullOutput?: string }).lastFullOutput ?? "").not.toContain(rawDraft);
   });
 
-  it("drops a delayed claim rewrite after a newer foreground request takes ownership", async () => {
+  it("does not start a second model rewrite for unsupported final claims", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-stale-final-rewrite-"));
     const { context, events } = makeDispatcherContext(projectPath);
     Object.assign(context, {
@@ -1831,34 +2557,20 @@ describe("final answer gate aggregation", () => {
         requestTurnId: turnA,
       },
     };
-    let releaseRewrite: (() => void) | undefined;
-    let markRewriteStarted: (() => void) | undefined;
-    const rewriteStarted = new Promise<void>((resolve) => {
-      markRewriteStarted = resolve;
-    });
-    const rewriteRelease = new Promise<void>((resolve) => {
-      releaseRewrite = resolve;
-    });
     let streamCalls = 0;
     const rawDraft = withClaims("已完成。", [{ kind: "completion_claim", phrase: "已完成" }]);
     const gateway = {
       async *stream() {
         streamCalls += 1;
-        if (streamCalls === 1) {
-          yield { type: "assistant_text_delta", text: rawDraft } as const;
-          yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
-          return;
-        }
-        markRewriteStarted?.();
-        await rewriteRelease;
-        yield { type: "assistant_text_delta", text: "迟到的 A 轮改写" } as const;
+        yield { type: "assistant_text_delta", text: rawDraft } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
       },
       async countMessagesTokensWithAPI() {
         return { source: "unavailable", reason: "test" } as const;
       },
     } as unknown as ModelGateway;
 
-    const pending = __testStreamFinalModelAnswerWithoutTools(
+    const finalText = await __testStreamFinalModelAnswerWithoutTools(
       {
         messages: [{ role: "user", content: "请给最终结论" }],
         provider: "test",
@@ -1875,18 +2587,9 @@ describe("final answer gate aggregation", () => {
       controller.signal,
     );
 
-    await rewriteStarted;
-    controller.abort();
-    const turnB = beginForegroundRequestTurn(context, "user-b");
-    const ownerState = context as unknown as TuiContext;
-    ownerState.requestActivityOwner = { kind: "foreground", requestTurnId: turnB };
-    ownerState.requestActivityPhase = "request_started";
-    releaseRewrite?.();
-
-    await expect(pending).resolves.toBe("");
-    expect(ownerState.requestActivityOwner).toEqual({ kind: "foreground", requestTurnId: turnB });
-    expect(ownerState.requestActivityPhase).toBe("request_started");
-    expect(JSON.stringify(blocks)).not.toContain("迟到的 A 轮改写");
+    expect(streamCalls).toBe(1);
+    expect(finalText).toContain("还需要补充");
+    expect(JSON.stringify(blocks)).not.toContain(rawDraft);
     expect(events.some(({ event }) => (event as { type?: string }).type === "assistant_message")).toBe(false);
   }, 15_000);
 
@@ -1940,7 +2643,7 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(events)).toContain("provider failure recovered");
   });
 
-  it("no-tool final gathers git evidence and returns to the model instead of downgrading", async () => {
+  it("no-tool final downgrades unsupported git claims without auto-probing", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-no-tool-git-final-"));
     const { context, events } = makeDispatcherContext(projectPath);
     Object.assign(context, {
@@ -1954,7 +2657,6 @@ describe("final answer gate aggregation", () => {
     const rawDraft = withClaims("稳定点已经确认。", [
       { kind: "git_operation", phrase: "稳定点已经确认" },
     ]);
-    const repairedAnswer = "当前只是完成了 Git 状态检查，还没有创建提交。";
 
     const finalText = await __testStreamFinalModelAnswerWithoutTools(
       {
@@ -1971,10 +2673,6 @@ describe("final answer gate aggregation", () => {
             { type: "assistant_text_delta", text: rawDraft },
             { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
           ],
-          [
-            { type: "assistant_text_delta", text: repairedAnswer },
-            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
-          ],
         ],
         calls,
       ),
@@ -1984,11 +2682,9 @@ describe("final answer gate aggregation", () => {
     );
 
     const eventsText = JSON.stringify(events);
-    expect(calls.count).toBe(2);
-    expect(eventsText).toContain("GitStatusInspect");
-    expect(finalText).toContain("还没有创建提交");
-    expect(finalText).not.toContain("任务状态");
-    expect(finalText).not.toContain("当前证据");
+    expect(calls.count).toBe(1);
+    expect(eventsText).not.toContain("GitStatusInspect");
+    expect(finalText).toContain("还需要补充");
     expect(finalText).not.toContain("git_operation");
     expect(JSON.stringify(blocks)).not.toContain(rawDraft);
   });
@@ -2182,22 +2878,42 @@ describe("final answer gate aggregation", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context as never,
-      "已完成，dist/app.bin 已生成。",
+      "dist/app.bin 产物存在。",
       false,
     );
 
     expect(result.status).toBe("passed");
   });
 
-  it("first final-gate retry runs the runtime evidence action dispatcher", async () => {
-    const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
-    expect(source).toContain("runFinalGateEvidenceAction");
-    expect(source).toContain("executeModelToolUse(");
-    expect(source).toContain("final_answer_gap_action dispatch");
-    expect(source).toContain("final_answer_gap_planner final_no_tools=yes");
-    expect(source).toContain("final_answer_gap_planner final_safety=yes");
-    expect(source).toContain("final_answer_gap_planner continuation_final_safety=yes");
-    expect(source).not.toContain("content: createAggregatedFinalAnswerReminder");
+  it("returns an evidence gap to the existing model loop instead of a second dispatcher", async () => {
+    const { context, events } = await makeSendMessageContext();
+    let attempts = 0;
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        yield {
+          type: "assistant_text_delta",
+          text: attempts === 1
+            ? withClaims("测试已经通过。", [{ kind: "completion_pass", phrase: "测试已经通过" }])
+            : "本轮没有运行测试，因此不能确认测试结果。",
+        } as const;
+        yield {
+          type: "message_stop",
+          chunkCount: 1,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("检查当前代码并准确汇报", context, gateway, new MemoryOutput());
+
+    expect(attempts).toBe(2);
+    expect(JSON.stringify(events)).toContain("final_answer_gap_returned_to_model_loop");
+    expect(JSON.stringify(events)).not.toContain("final_answer_gap_action dispatch");
   });
 
   it("keeps claim-alignment rewrite reachable after evidence_recorded and in continuation", async () => {
@@ -2207,7 +2923,7 @@ describe("final answer gate aggregation", () => {
     expect(source).toContain("final_answer_claim_alignment_rewrite continuation=yes");
     expect(source).toContain("final_answer_claim_alignment_rewrite final_safety=yes");
     expect(source).toContain("final_answer_claim_alignment_rewrite continuation_final_safety=yes");
-    expect(source).toContain("shouldContinueAfterFinalGateEvidenceAction(actionResult,");
+    expect(source).not.toContain("final_answer_gap_action dispatch");
   });
 
   it("plans verification gaps in plan mode without Bash or automatic test execution", () => {
@@ -2400,7 +3116,7 @@ describe("final answer gate aggregation", () => {
     });
   });
 
-  it("continues artifact evidence search even after the aggregate evidence retry budget is spent", () => {
+  it("downgrades artifact gaps after the evidence retry budget is spent", () => {
     const plan = planFinalGateEvidenceGapAction({
       result: {
         status: "needs_disclaimer",
@@ -2412,47 +3128,8 @@ describe("final answer gate aggregation", () => {
       evidenceActionRetryCount: 3,
     });
 
-    expect(plan.action).toBe("readonly_check");
-    expect(plan.reason).toBe("artifact_gap_readonly");
-    expect(plan.evidenceAction).toMatchObject({
-      toolName: "Grep",
-      strategy: "artifact_readonly_check",
-    });
-  });
-
-  it("continues recorded final-gate evidence even when attempt retry budget is spent", () => {
-    expect(
-      shouldContinueAfterFinalGateEvidenceAction(
-        {
-          status: "evidence_recorded",
-          messages: [],
-          result: { ok: true, tool: "GitStatusInspect", text: "ok" },
-        },
-        3,
-      ),
-    ).toBe(true);
-    expect(
-      shouldContinueAfterFinalGateEvidenceAction(
-        {
-          status: "attempt_recorded",
-          messages: [],
-          result: { ok: true, tool: "Grep", text: "no match" },
-          reason: "artifact_not_proven",
-        },
-        3,
-      ),
-    ).toBe(false);
-    expect(
-      shouldContinueAfterFinalGateEvidenceAction(
-        {
-          status: "attempt_recorded",
-          messages: [],
-          result: { ok: false, tool: "RunVerification", text: "TIMEOUT" },
-          reason: "verification_not_proven",
-        },
-        0,
-      ),
-    ).toBe(false);
+    expect(plan.action).toBe("downgrade_only");
+    expect(plan.reason).toBe("final_gate_retry_disabled");
   });
 
   it("downgrades immediately while background verification is resumable", () => {
@@ -2497,6 +3174,7 @@ describe("final answer gate aggregation", () => {
   it("only accepts verification evidence owned by the current request scope", () => {
     const context = {
       ...makeGateContext(),
+      projectPath: "C:/repo",
       currentRequestTurnId: "request-b",
       currentRequestChangedFiles: ["packages/tui/src/a.ts"],
       sessionId: "session-scope",
@@ -2505,6 +3183,11 @@ describe("final answer gate aggregation", () => {
         makeEvidence({
           kind: "test_result",
           supportsClaims: ["verification_passed", "typecheck_passed"],
+          ownerScope: {
+            ownerSessionId: "session-scope",
+            requestTurnId: "request-a",
+            cwd: "C:/repo/packages/tui",
+          },
           data: {
             verificationScope: {
               ownerKey: "request:session-scope:request-a",
@@ -2527,6 +3210,7 @@ describe("final answer gate aggregation", () => {
     const scope = (context.evidence[0]?.data as { verificationScope: { requestTurnId: string } })
       .verificationScope;
     scope.requestTurnId = "request-b";
+    context.evidence[0]!.ownerScope!.requestTurnId = "request-b";
     expect(evaluateAggregatedFinalAnswerGate(context, claim, false).status).toBe("passed");
     context.currentRequestChangedFiles?.push("packages/tui/src/b.ts");
     expect(evaluateAggregatedFinalAnswerGate(context, claim, false).status).toBe(
@@ -2616,54 +3300,6 @@ describe("final answer gate aggregation", () => {
     });
   });
 
-  it("records artifactHint evidence from final-gate artifact Read and clears stale artifact failure", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-artifact-read-"));
-    await writeFile(join(project, "final-audit.md"), "ok\n", "utf8");
-    const { context, events } = makeDispatcherContext(project);
-    const testContext = context as {
-      lastToolFailure?: { toolName: string; summary: string };
-      evidence: EvidenceRecord[];
-    };
-    Object.assign(testContext, {
-      lastToolFailure: { toolName: "Read", summary: "missing artifact final-audit.md not found" },
-    });
-    const output = new MemoryOutput();
-
-    const result = await __testRunFinalGateEvidenceAction({
-      actionPlan: {
-        action: "readonly_check",
-        reason: "artifact_gap_readonly",
-        directive: "test",
-        evidenceAction: {
-          toolName: "Read",
-          input: { path: "final-audit.md", limit: 200 },
-          strategy: "artifact_readonly_check",
-          summary: "read claimed artifact final-audit.md",
-        },
-      },
-      context: context as never,
-      output,
-      sessionId: "session-artifact-read",
-      messages: [{ role: "user", content: "确认产物" }],
-      runtime: {
-        provider: "test",
-        model: "test-model",
-        endpointProfile: "chat_completions",
-        reasoningSent: false,
-      },
-    });
-
-    expect(result.status).toBe("evidence_recorded");
-    expect(testContext.lastToolFailure).toBeUndefined();
-    expect(
-      testContext.evidence.some((item) => {
-        const data = item.data as { artifactHint?: { path?: string; exists?: boolean } } | undefined;
-        return data?.artifactHint?.path === "final-audit.md" && data.artifactHint.exists === true;
-      }),
-    ).toBe(true);
-    expect(JSON.stringify(events)).toContain("final_answer_gap_artifact_probe");
-  });
-
   it("plans git gaps as readonly GitStatusInspect first", () => {
     const plan = planFinalGateEvidenceGapAction({
       result: {
@@ -2683,7 +3319,7 @@ describe("final answer gate aggregation", () => {
     });
   });
 
-  it("continues git evidence collection even after the aggregate evidence retry budget is spent", () => {
+  it("downgrades git gaps after the evidence retry budget is spent", () => {
     const plan = planFinalGateEvidenceGapAction({
       result: {
         status: "needs_disclaimer",
@@ -2695,12 +3331,8 @@ describe("final answer gate aggregation", () => {
       evidenceActionRetryCount: 3,
     });
 
-    expect(plan.action).toBe("readonly_check");
-    expect(plan.reason).toBe("git_gap_readonly");
-    expect(plan.evidenceAction).toMatchObject({
-      toolName: "GitStatusInspect",
-      input: { includeDetails: true },
-    });
+    expect(plan.action).toBe("downgrade_only");
+    expect(plan.reason).toBe("final_gate_retry_disabled");
   });
 
   it("plans service/runtime gaps as readonly evidence checks, not verification passes", () => {
@@ -2742,209 +3374,6 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(plan.evidenceAction?.input)).toContain("health");
   });
 
-  it("records serviceHint evidence from final-gate service Read when the log shows ready", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-service-read-"));
-    await writeFile(join(project, "server.log"), "server listening on 127.0.0.1:3000\n", "utf8");
-    const { context, events } = makeDispatcherContext(project);
-    const testContext = context as { evidence: EvidenceRecord[] };
-    const output = new MemoryOutput();
-
-    const result = await __testRunFinalGateEvidenceAction({
-      actionPlan: {
-        action: "readonly_check",
-        reason: "service_runtime_gap_readonly",
-        directive: "test",
-        evidenceAction: {
-          toolName: "Read",
-          input: { path: "server.log", limit: 200 },
-          strategy: "service_runtime_readonly_check",
-          summary: "read claimed runtime evidence server.log",
-        },
-      },
-      context: context as never,
-      output,
-      sessionId: "session-service-read",
-      messages: [{ role: "user", content: "确认服务状态" }],
-      runtime: {
-        provider: "test",
-        model: "test-model",
-        endpointProfile: "chat_completions",
-        reasoningSent: false,
-      },
-    });
-
-    expect(result.status).toBe("evidence_recorded");
-    expect(
-      testContext.evidence.some((item) => {
-        const data = item.data as { serviceHint?: { target?: string; ready?: boolean } } | undefined;
-        return data?.serviceHint?.target === "127.0.0.1:3000" && data.serviceHint.ready === true;
-      }),
-    ).toBe(true);
-    expect(JSON.stringify(events)).toContain("final_answer_gap_service_probe");
-  });
-
-  it("does not mark final-gate service Read as ready when the log only shows failure", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-service-failed-read-"));
-    await writeFile(join(project, "server.log"), "server failed to listen on 127.0.0.1:3000\n", "utf8");
-    const { context } = makeDispatcherContext(project);
-    const testContext = context as { evidence: EvidenceRecord[] };
-    const output = new MemoryOutput();
-
-    const result = await __testRunFinalGateEvidenceAction({
-      actionPlan: {
-        action: "readonly_check",
-        reason: "service_runtime_gap_readonly",
-        directive: "test",
-        evidenceAction: {
-          toolName: "Read",
-          input: { path: "server.log", limit: 200 },
-          strategy: "service_runtime_readonly_check",
-          summary: "read claimed runtime evidence server.log",
-        },
-      },
-      context: context as never,
-      output,
-      sessionId: "session-service-failed-read",
-      messages: [{ role: "user", content: "确认服务状态" }],
-      runtime: {
-        provider: "test",
-        model: "test-model",
-        endpointProfile: "chat_completions",
-        reasoningSent: false,
-      },
-    });
-
-    expect(result.status).toBe("attempt_recorded");
-    if (result.status === "attempt_recorded") {
-      expect(result.reason).toBe("service_not_proven");
-      expect(result.messages.some((message) => message.role === "tool")).toBe(true);
-    }
-    expect(
-      testContext.evidence.some((item) => {
-        const data = item.data as { serviceHint?: { ready?: boolean } } | undefined;
-        return data?.serviceHint?.ready === true;
-      }),
-    ).toBe(false);
-  });
-
-  it("requires the current final-gate service probe to produce ready evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-service-stale-read-"));
-    await writeFile(join(project, "server.log"), "server failed to listen on 127.0.0.1:3000\n", "utf8");
-    const { context } = makeDispatcherContext(project);
-    const testContext = context as { evidence: EvidenceRecord[] };
-    testContext.evidence.push(
-      makeEvidence({
-        kind: "command_output",
-        summary: "old service probe: 127.0.0.1:3000 ready",
-        supportsClaims: ["runtime", "service", "service_ready"],
-        data: { serviceHint: { target: "127.0.0.1:3000", ready: true } },
-      }),
-    );
-    const output = new MemoryOutput();
-
-    const result = await __testRunFinalGateEvidenceAction({
-      actionPlan: {
-        action: "readonly_check",
-        reason: "service_runtime_gap_readonly",
-        directive: "test",
-        evidenceAction: {
-          toolName: "Read",
-          input: { path: "server.log", limit: 200 },
-          strategy: "service_runtime_readonly_check",
-          summary: "read claimed runtime evidence server.log",
-        },
-      },
-      context: context as never,
-      output,
-      sessionId: "session-service-stale-read",
-      messages: [{ role: "user", content: "确认服务状态" }],
-      runtime: {
-        provider: "test",
-        model: "test-model",
-        endpointProfile: "chat_completions",
-        reasoningSent: false,
-      },
-    });
-
-    expect(result.status).toBe("attempt_recorded");
-    if (result.status === "attempt_recorded") {
-      expect(result.reason).toBe("service_not_proven");
-    }
-  });
-
-  it("dispatches default verification evidence through Bash permission approval without committing held draft", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-final-gate-dispatch-"));
-    await writeFile(
-      join(project, "package.json"),
-      JSON.stringify({ scripts: { typecheck: "tsc --noEmit" } }),
-      "utf8",
-    );
-    const { context, events } = makeDispatcherContext(project);
-    const blocks: Array<{ id: string; fullText?: string }> = [];
-    const terminalWrites: string[] = [];
-    let stagedText = "";
-    const output = createShellBlockOutputForTest(context, blocks as never, () => undefined, {
-      stageStableAssistantText: (text) => {
-        stagedText += text;
-      },
-      commitStableAssistantText: () => {
-        terminalWrites.push(stagedText);
-        stagedText = "";
-        return true;
-      },
-      rollbackStableAssistantText: () => {
-        stagedText = "";
-      },
-    });
-    const rawDraft = "原始最终回答：测试已经全部通过。";
-
-    output.beginAssistantStream("assistant-held-final", { holdStableCommit: true });
-    output.appendAssistantDelta(rawDraft);
-    output.discardAssistantBlock("assistant-held-final");
-
-    const plan = planFinalGateEvidenceGapAction({
-      result: {
-        status: "needs_disclaimer",
-        unsupportedKinds: ["verification_claim"],
-      },
-      context,
-      userText: "继续修复",
-      assistantText: rawDraft,
-    });
-    expect(plan.evidenceAction).toMatchObject({
-      toolName: "Bash",
-      strategy: "minimal_bash_verification",
-    });
-
-    const result = await __testRunFinalGateEvidenceAction({
-      actionPlan: plan,
-      context,
-      output,
-      sessionId: "session-final-gate-dispatch",
-      messages: [{ role: "user", content: "继续修复" }],
-      runtime: {
-        provider: "test",
-        model: "test-model",
-        endpointProfile: "chat_completions",
-        reasoningSent: false,
-      },
-    });
-
-    expect(result.status).toBe("permission_pending");
-    expect(
-      (context as { pendingLocalApproval?: { kind?: string; toolName?: string; toolCall?: { name?: string } } })
-        .pendingLocalApproval,
-    ).toMatchObject({
-      kind: "model_tool_use",
-      toolName: "Bash",
-      toolCall: { name: "Bash" },
-    });
-    expect(events.some((item) => (item.event as { type?: string }).type === "permission_request")).toBe(true);
-    expect(events.some((item) => (item.event as { type?: string }).type === "permission_result")).toBe(true);
-    expect(blocks.some((block) => JSON.stringify(block).includes(rawDraft))).toBe(false);
-    expect((context as { lastFullOutput?: string }).lastFullOutput ?? "").not.toContain(rawDraft);
-    expect(terminalWrites).toEqual([]);
-  });
 });
 
 describe("natural input routing", () => {

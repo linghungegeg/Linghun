@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import {
 } from "./capability-runtime.js";
 import {
   connectAppConnector,
+  clearAppConnectorRuntime,
   disconnectAppConnector,
   formatAppConnectorDoctor,
   formatAppConnectorList,
@@ -442,6 +444,64 @@ describe("Connector Runtime Local HTTP", () => {
       disconnectAppConnector("demo.drawing", contextB);
     }
   });
+
+  it("keeps connector state isolated between runtimes in the same project", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-connector-shared-project-"));
+    const contextA = await createConnectorTestContext("default", project);
+    const contextB = await createConnectorTestContext("default", project);
+    const server = await startMockConnector();
+    try {
+      const manifestPath = await writeManifest(project, server.baseUrl);
+      await connectAppConnector(manifestPath, contextA);
+
+      expect(listAppConnectors(contextA)).toHaveLength(1);
+      expect(findCapability("demo.drawing.describe", contextA)).toBeTruthy();
+      expect(listAppConnectors(contextB)).toEqual([]);
+      expect(findCapability("demo.drawing.describe", contextB)).toBeUndefined();
+      expect(disconnectAppConnector("demo.drawing", contextB)).toBe(false);
+      expect(findCapability("demo.drawing.describe", contextA)).toBeTruthy();
+
+      clearAppConnectorRuntime(contextA);
+      expect(listAppConnectors(contextA)).toEqual([]);
+      expect(findCapability("demo.drawing.describe", contextA)).toBeUndefined();
+    } finally {
+      await server.close();
+      clearAppConnectorRuntime(contextA);
+      clearAppConnectorRuntime(contextB);
+    }
+  });
+
+  it("keeps 100 same-project connector runtimes isolated", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-connector-pressure-"));
+    const baseContext = await createConnectorTestContext("default", project);
+    const contexts = Array.from({ length: 100 }, (_, index) => ({
+      ...baseContext,
+      runtimeOwnerId: `connector-runtime-${index}`,
+      evidence: [],
+      tools: createToolContext(project),
+    })) as TuiContext[];
+    const server = await startMockConnector();
+    try {
+      const manifestPath = await writeManifest(project, server.baseUrl);
+      await Promise.all(contexts.map((context) => connectAppConnector(manifestPath, context)));
+
+      expect(
+        contexts.every(
+          (context) =>
+            listAppConnectors(context).length === 1 &&
+            findCapability("demo.drawing.describe", context)?.transport === "http",
+        ),
+      ).toBe(true);
+      clearAppConnectorRuntime(contexts[0]!);
+      expect(findCapability("demo.drawing.describe", contexts[0]!)).toBeUndefined();
+      expect(
+        contexts.slice(1).every((context) => findCapability("demo.drawing.describe", context)),
+      ).toBe(true);
+    } finally {
+      await server.close();
+      for (const context of contexts) clearAppConnectorRuntime(context);
+    }
+  }, 30_000);
 });
 
 type MockConnector = {
@@ -600,14 +660,16 @@ class MemoryOutput extends Writable {
 
 async function createConnectorTestContext(
   permissionMode: TuiContext["permissionMode"],
+  projectPath?: string,
 ): Promise<TuiContext> {
-  const project = await mkdtemp(join(tmpdir(), "linghun-connector-runtime-"));
+  const project = projectPath ?? await mkdtemp(join(tmpdir(), "linghun-connector-runtime-"));
   const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
   const session = await store.create({ model: "deepseek-chat" });
   const config = defaultConfig;
   return {
     store,
     sessionId: session.id,
+    runtimeOwnerId: randomUUID(),
     model: session.model,
     permissionMode,
     projectPath: project,

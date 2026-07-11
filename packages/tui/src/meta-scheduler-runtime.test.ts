@@ -15,6 +15,7 @@ import {
 } from "./meta-scheduler-runtime.js";
 import type { IndexState } from "./index-runtime.js";
 import { sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
+import { LINGHUN_MAX_AGENT_CHILD_TURNS } from "./runtime-budget.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type {
   BackgroundTaskState,
@@ -585,6 +586,24 @@ describe("Meta scheduler runtime", () => {
     const directive = formatMetaSchedulerDirective(decision);
     expect(directive).toContain("Windows shell boundary");
     expect(directive).toContain("Edit/MultiEdit/Write structured tools");
+  });
+
+  it("reports the executor agent turn ceiling instead of task-kind adaptive suggestions", () => {
+    const decisions = [
+      evaluateMetaScheduler({ ...baseInput(), userText: "start an agent to implement this" }),
+      evaluateMetaScheduler({ ...baseInput(), userText: "run the verification workflow" }),
+      evaluateMetaScheduler({ ...baseInput(), userText: "inspect this function" }),
+    ];
+
+    for (const decision of decisions) {
+      expect(decision.suggestedMaxAgentChildTurns).toBe(LINGHUN_MAX_AGENT_CHILD_TURNS);
+      expect(decision.suggestedMaxAgentToolRounds).toBe(LINGHUN_MAX_AGENT_CHILD_TURNS);
+      expect(decision.suggestedBackgroundConcurrency).toBe(0);
+      const directive = formatMetaSchedulerDirective(decision);
+      expect(directive).toContain(`agent-max-turns ${LINGHUN_MAX_AGENT_CHILD_TURNS}`);
+      expect(directive).toContain(`agent-tool-rounds ${LINGHUN_MAX_AGENT_CHILD_TURNS}`);
+      expect(directive).not.toContain("bg-concurrency");
+    }
   });
 
   it("projects latest verification, pending approval, and background occupancy signals", () => {

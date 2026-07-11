@@ -16,21 +16,7 @@ import {
 } from "./user-action-constraints.js";
 import { evaluateUserStateSignal } from "./user-state-signal-runtime.js";
 import {
-  LINGHUN_AGENT_CHILD_TURNS_AGENT,
-  LINGHUN_AGENT_CHILD_TURNS_BASE,
-  LINGHUN_AGENT_CHILD_TURNS_CODE_FACT,
-  LINGHUN_AGENT_CHILD_TURNS_VERIFICATION,
-  LINGHUN_AGENT_CHILD_TURNS_WORKFLOW,
-  LINGHUN_AGENT_TOOL_ROUNDS_AGENT,
-  LINGHUN_AGENT_TOOL_ROUNDS_BASE,
-  LINGHUN_AGENT_TOOL_ROUNDS_CODE_FACT,
-  LINGHUN_AGENT_TOOL_ROUNDS_VERIFICATION,
-  LINGHUN_AGENT_TOOL_ROUNDS_WORKFLOW,
-  LINGHUN_BACKGROUND_CONCURRENCY_AGENT,
-  LINGHUN_BACKGROUND_CONCURRENCY_BASE,
-  LINGHUN_BACKGROUND_CONCURRENCY_CODE_FACT,
-  LINGHUN_BACKGROUND_CONCURRENCY_VERIFICATION,
-  LINGHUN_BACKGROUND_CONCURRENCY_WORKFLOW,
+  LINGHUN_MAX_AGENT_CHILD_TURNS,
   LINGHUN_MAX_TODO_ONLY_AGENT,
   LINGHUN_MAX_TODO_ONLY_BASE,
   LINGHUN_MAX_TODO_ONLY_CODE_FACT,
@@ -401,11 +387,11 @@ export type MetaSchedulerDecision = {
   indexStrategy: "ready" | "stale" | "unknown-project" | "disabled" | "missing" | "error";
   /** Adaptive planning budget: derived from taskKind, fed into the runaway guard loop. */
   suggestedMaxTodoRounds: number;
-  /** Adaptive agent child turn budget: derived from taskKind. */
+  /** Agent child turn ceiling enforced by the agent executor. */
   suggestedMaxAgentChildTurns: number;
-  /** Adaptive agent tool rounds budget: derived from taskKind. */
+  /** Agent tool-round ceiling; tool rounds share the executor turn ceiling. */
   suggestedMaxAgentToolRounds: number;
-  /** Adaptive background concurrency budget: derived from taskKind. */
+  /** @deprecated Compatibility field only; background concurrency is executor-owned. */
   suggestedBackgroundConcurrency: number;
   internalEvents: string[];
 };
@@ -778,9 +764,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     shouldStopForBlockedRuntime: blockedRuntime,
     indexStrategy,
     suggestedMaxTodoRounds: computeSuggestedMaxTodoRounds(taskKind),
-    suggestedMaxAgentChildTurns: computeSuggestedAgentChildTurns(taskKind),
-    suggestedMaxAgentToolRounds: computeSuggestedAgentToolRounds(taskKind),
-    suggestedBackgroundConcurrency: computeSuggestedBackgroundConcurrency(taskKind),
+    suggestedMaxAgentChildTurns: LINGHUN_MAX_AGENT_CHILD_TURNS,
+    suggestedMaxAgentToolRounds: LINGHUN_MAX_AGENT_CHILD_TURNS,
+    suggestedBackgroundConcurrency: 0,
     internalEvents,
   };
 }
@@ -994,56 +980,11 @@ function computeSuggestedMaxTodoRounds(taskKind: PolicyDecision["taskKind"]): nu
   }
 }
 
-function computeSuggestedAgentChildTurns(taskKind: PolicyDecision["taskKind"]): number {
-  switch (taskKind) {
-    case "agent":
-      return LINGHUN_AGENT_CHILD_TURNS_AGENT;
-    case "workflow":
-      return LINGHUN_AGENT_CHILD_TURNS_WORKFLOW;
-    case "verification":
-      return LINGHUN_AGENT_CHILD_TURNS_VERIFICATION;
-    case "code_fact":
-      return LINGHUN_AGENT_CHILD_TURNS_CODE_FACT;
-    default:
-      return LINGHUN_AGENT_CHILD_TURNS_BASE;
-  }
-}
-
-function computeSuggestedAgentToolRounds(taskKind: PolicyDecision["taskKind"]): number {
-  switch (taskKind) {
-    case "agent":
-      return LINGHUN_AGENT_TOOL_ROUNDS_AGENT;
-    case "workflow":
-      return LINGHUN_AGENT_TOOL_ROUNDS_WORKFLOW;
-    case "verification":
-      return LINGHUN_AGENT_TOOL_ROUNDS_VERIFICATION;
-    case "code_fact":
-      return LINGHUN_AGENT_TOOL_ROUNDS_CODE_FACT;
-    default:
-      return LINGHUN_AGENT_TOOL_ROUNDS_BASE;
-  }
-}
-
-function computeSuggestedBackgroundConcurrency(taskKind: PolicyDecision["taskKind"]): number {
-  switch (taskKind) {
-    case "agent":
-      return LINGHUN_BACKGROUND_CONCURRENCY_AGENT;
-    case "workflow":
-      return LINGHUN_BACKGROUND_CONCURRENCY_WORKFLOW;
-    case "verification":
-      return LINGHUN_BACKGROUND_CONCURRENCY_VERIFICATION;
-    case "code_fact":
-      return LINGHUN_BACKGROUND_CONCURRENCY_CODE_FACT;
-    default:
-      return LINGHUN_BACKGROUND_CONCURRENCY_BASE;
-  }
-}
-
 export function formatMetaSchedulerDirective(decision: MetaSchedulerDecision): string {
   return [
     "MetaSchedulerForModel:",
     ...decision.directives.map((item) => `- ${item}`),
-    `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; budget ${decision.suggestedMaxTodoRounds} rounds; agent-max-turns ${decision.suggestedMaxAgentChildTurns}; agent-tool-rounds ${decision.suggestedMaxAgentToolRounds}; bg-concurrency ${decision.suggestedBackgroundConcurrency}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}; capability ${decision.policyDecision.capabilitySignal.active ? "candidate" : "none"}.`,
+    `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; budget ${decision.suggestedMaxTodoRounds} rounds; agent-max-turns ${decision.suggestedMaxAgentChildTurns}; agent-tool-rounds ${decision.suggestedMaxAgentToolRounds}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}; capability ${decision.policyDecision.capabilitySignal.active ? "candidate" : "none"}.`,
     `- Orchestration plan: action ${decision.orchestrationPlan.primaryAction}; steps ${decision.orchestrationPlan.steps.map((step) => `${step.id}:${step.executor}:${step.mode}`).join(" > ")}; hard-stops ${decision.orchestrationPlan.hardStops.join(",") || "none"}; degrade ${decision.orchestrationPlan.degradationPath.join(",") || "none"}.`,
     `- EngineeringTaskProfile: profile=${decision.policyDecision.engineeringSignal.profile}; strategy=${decision.policyDecision.engineeringSignal.strategyHint}; failure=${decision.policyDecision.engineeringSignal.failureCategory ?? "none"}; final-boundary=${decision.policyDecision.engineeringSignal.finalBoundaryHint ?? "normal"}.`,
     ...(decision.policyDecision.platformSignal.windowsSafeHint

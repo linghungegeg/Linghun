@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -841,13 +842,14 @@ export function resolveStoragePaths(
 ): ResolvedStoragePaths {
   const userData = resolveStorageLocation(config.storage.userData, projectPath, home, "");
   const projectData = resolveStorageLocation(config.storage.projectData, projectPath, home, "");
+  const projectMemoryPath = resolveGitCommonProjectRoot(projectPath);
   return {
     projectData,
     userData,
     sessions: resolveStorageLocation(config.storage.sessions, projectPath, home, "sessions"),
     memoryProject: resolveStorageLocation(
       config.storage.memory.project,
-      projectPath,
+      projectMemoryPath,
       home,
       "memory",
     ),
@@ -872,6 +874,43 @@ export function resolveStoragePaths(
     agentRuns: resolveStorageLocation({ scope: "project" }, projectPath, home, "agent-runs"),
     failures: resolveStorageLocation({ scope: "project" }, projectPath, home, "failures"),
   };
+}
+
+function resolveGitCommonProjectRoot(projectPath: string): string {
+  const resolvedProjectPath = resolve(projectPath);
+  let candidate = resolvedProjectPath;
+  try {
+    while (true) {
+      const dotGitPath = join(candidate, ".git");
+      if (existsSync(dotGitPath)) {
+        const gitRoot = realpathSync(candidate);
+        if (statSync(dotGitPath).isDirectory()) return gitRoot;
+        const gitDirMatch = readFileSync(dotGitPath, "utf8").match(/^gitdir:\s*(.+)\s*$/imu);
+        if (!gitDirMatch?.[1]) return gitRoot;
+        const gitDir = realpathSync(resolve(gitRoot, gitDirMatch[1]));
+        const commonDirPath = join(gitDir, "commondir");
+        if (!existsSync(commonDirPath)) return gitRoot;
+        const commonDir = realpathSync(resolve(gitDir, readFileSync(commonDirPath, "utf8").trim()));
+        if (!sameCanonicalPath(dirname(gitDir), join(commonDir, "worktrees"))) return gitRoot;
+        const backlink = realpathSync(readFileSync(join(gitDir, "gitdir"), "utf8").trim());
+        if (!sameCanonicalPath(backlink, join(gitRoot, ".git"))) return gitRoot;
+        return basename(commonDir) === ".git" ? dirname(commonDir) : commonDir;
+      }
+      const parent = dirname(candidate);
+      if (parent === candidate) return resolvedProjectPath;
+      candidate = parent;
+    }
+  } catch {
+    return resolvedProjectPath;
+  }
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+  const caseInsensitive = process.platform === "win32";
+  return (
+    canonicalPathForCompare(normalizePathSeparators(resolve(left)), caseInsensitive) ===
+    canonicalPathForCompare(normalizePathSeparators(resolve(right)), caseInsensitive)
+  );
 }
 
 function resolveStorageLocation(

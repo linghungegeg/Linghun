@@ -1,6 +1,7 @@
 import { LinghunError } from "@linghun/core";
 import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
 import { describe, expect, it, vi } from "vitest";
+import * as providerExports from "./index.js";
 import {
   DeepSeekProvider,
   GeminiProvider,
@@ -23,6 +24,12 @@ import {
 } from "./index.js";
 
 const EXPECTED_REQUEST_USER_AGENT = `${LINGHUN_NAME}/${LINGHUN_VERSION} (@linghun/${LINGHUN_CLI_NAME})`;
+
+describe("provider runtime ownership", () => {
+  it("does not expose a process-global retry hook", () => {
+    expect("registerHooks" in providerExports).toBe(false);
+  });
+});
 
 describe("Gemini and Grok native gateways", () => {
   it("uses Gemini chat hosted search with custom tools and reasoning", () => {
@@ -604,7 +611,7 @@ describe("OpenAI compatible provider", () => {
       sendReasoning: false,
       retryStatuses: [429, 502, 503, 504],
       maxAttempts: 10,
-      requestTimeoutMs: 600_000,
+      requestTimeoutMs: 120_000,
       streamIdleTimeoutMs: 60_000,
     });
     expect(strictChat).toMatchObject({
@@ -653,6 +660,153 @@ describe("OpenAI compatible provider", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).stream).toBe(false);
+  });
+
+  it("announces an attempt reset before yielding a successful non-streaming fallback", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ choices: [{ message: { content: "fallback ok" } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "chat_completions",
+    });
+    const order: string[] = [];
+    const events: LinghunEvent[] = [];
+
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+      {
+        onAttemptReset(info) {
+          order.push(`reset:${info.reason}:${info.replacement}`);
+        },
+      },
+    )) {
+      order.push(`event:${event.type}`);
+      events.push(event);
+    }
+
+    expect(order).toEqual([
+      "reset:stream_http_error:non_streaming_fallback",
+      "event:assistant_text_delta",
+      "event:message_stop",
+    ]);
+    expect(events).toContainEqual({
+      type: "assistant_text_delta",
+      id: "non-streaming-fallback",
+      text: "fallback ok",
+    });
+  });
+
+  it("keeps concurrent fallback attempt resets scoped to their provider request", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body)) as { stream?: boolean };
+      if (body.stream !== false) return new Response("bad gateway", { status: 502 });
+      const owner = url.includes("runtime-a.example") ? "a" : "b";
+      return new Response(JSON.stringify({ choices: [{ message: { content: `fallback ${owner}` } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const createProvider = (owner: "a" | "b") =>
+      new OpenAiCompatibleProvider({
+        id: `runtime-${owner}`,
+        type: "openai-compatible",
+        baseUrl: `https://runtime-${owner}.example/v1`,
+        apiKey: "test-key",
+        model: "gpt-5.5",
+        endpointProfile: "chat_completions",
+      });
+    const run = async (owner: "a" | "b") => {
+      const resets: string[] = [];
+      const text: string[] = [];
+      for await (const event of createProvider(owner).stream(
+        {
+          messages: [{ role: "user", content: owner }],
+          requestContext: "foreground",
+          requestContextId: `turn-${owner}`,
+          sessionId: `session-${owner}`,
+        },
+        new AbortController().signal,
+        { onAttemptReset: (info) => resets.push(`${info.reason}:${info.replacement}`) },
+      )) {
+        if (event.type === "assistant_text_delta") text.push(event.text);
+      }
+      return { owner, resets, text: text.join("") };
+    };
+
+    const results = await Promise.all([run("a"), run("b")]);
+
+    expect(results).toEqual([
+      {
+        owner: "a",
+        resets: ["stream_http_error:non_streaming_fallback"],
+        text: "fallback a",
+      },
+      {
+        owner: "b",
+        resets: ["stream_http_error:non_streaming_fallback"],
+        text: "fallback b",
+      },
+    ]);
+  });
+
+  it("does not start a transparent fallback after a complete tool_use was yielded", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const frames = [
+          'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-tool"}}\n\n',
+          'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"Read","input":{}}}\n\n',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"a.ts\\"}"}}\n\n',
+          'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        ];
+        for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn(async () =>
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "anthropic-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com",
+      apiKey: "test-key",
+      model: "claude-test",
+      endpointProfile: "anthropic_messages",
+    });
+    const resets: string[] = [];
+    const events: LinghunEvent[] = [];
+
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+      { onAttemptReset: (info) => resets.push(info.reason) },
+    )) {
+      events.push(event);
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(resets).toEqual([]);
+    expect(events.some((event) => event.type === "tool_use")).toBe(true);
+    expect(events.some((event) => event.type === "error")).toBe(true);
   });
 
   it("uses an internal abort signal when streaming without caller signal", async () => {
@@ -782,7 +936,7 @@ describe("OpenAI compatible provider", () => {
       };
 
       const result = expect(collect()).rejects.toMatchObject({ code: "PROVIDER_REQUEST_TIMEOUT" });
-      await vi.advanceTimersByTimeAsync(600_000);
+      await vi.advanceTimersByTimeAsync(120_000);
       await result;
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
@@ -823,7 +977,7 @@ describe("OpenAI compatible provider", () => {
       };
 
       const result = expect(collect()).rejects.toMatchObject({ code: "PROVIDER_REQUEST_TIMEOUT" });
-      await vi.advanceTimersByTimeAsync(600_000);
+      await vi.advanceTimersByTimeAsync(120_000);
       await result;
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
@@ -1629,6 +1783,78 @@ describe("ModelGateway", () => {
         message: "模型请求失败：无法连接到模型服务。",
         recoverable: true,
       },
+    });
+  });
+
+  it("normalizes provider aborts to the existing non-recoverable terminal code", async () => {
+    const provider: Provider = {
+      id: "mock",
+      displayName: "Mock",
+      supports: { streaming: true, usage: true },
+      async listModels() {
+        return [];
+      },
+      async *stream(): AsyncGenerator<LinghunEvent> {
+        if (Date.now() < 0) {
+          yield { type: "assistant_text_delta", id: "unused", text: "" };
+        }
+        throw new DOMException("This operation was aborted", "AbortError");
+      },
+    };
+    const gateway = new ModelGateway([provider]);
+    const events: LinghunEvent[] = [];
+
+    for await (const event of gateway.stream(
+      "mock",
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "error",
+        error: expect.objectContaining({ code: "ABORT_ERR", recoverable: false }),
+      }),
+    ]);
+    expect(normalizeProviderError(new DOMException("aborted", "AbortError"))).toMatchObject({
+      code: "ABORT_ERR",
+      recoverable: false,
+    });
+  });
+
+  it("uses the request signal as the abort owner even when fetch throws TypeError", async () => {
+    const provider: Provider = {
+      id: "mock",
+      displayName: "Mock",
+      supports: { streaming: true, usage: true },
+      async listModels() {
+        return [];
+      },
+      async *stream(): AsyncGenerator<LinghunEvent> {
+        if (Date.now() < 0) {
+          yield { type: "assistant_text_delta", id: "unused", text: "" };
+        }
+        throw new TypeError("invalid_argument");
+      },
+    };
+    const gateway = new ModelGateway([provider]);
+    const controller = new AbortController();
+    controller.abort("user_cancelled");
+    const events: LinghunEvent[] = [];
+
+    for await (const event of gateway.stream(
+      "mock",
+      { messages: [{ role: "user", content: "hi" }] },
+      controller.signal,
+    )) {
+      events.push(event);
+    }
+
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: { code: "ABORT_ERR", recoverable: false },
     });
   });
 

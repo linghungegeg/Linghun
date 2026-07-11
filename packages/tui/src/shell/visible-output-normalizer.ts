@@ -1,7 +1,7 @@
 const VISIBLE_TEXT_FIELDS = ["text", "content", "result", "details"] as const;
 const TOOL_RESULT_ARTIFACT = /\.linghun[\\/]session[\\/]tool-results[\\/]/iu;
 const ESCAPED_ANSI = /\\(?:u001b|x1b)/iu;
-const ANSI_SEQUENCE = /\u001B\[[0-?]*[ -/]*[@-~]/gu;
+const ANSI_SEQUENCE = /\u001B\[[0-?]*[ -/]*m/gu;
 
 export function normalizeVisibleToolText(text: string): string {
   if (!text) return text;
@@ -11,7 +11,9 @@ export function normalizeVisibleToolText(text: string): string {
   const wholeReporter = summarizeTestReporterJson(visibleText);
   const normalized =
     wholeReporter ?? visibleText.split(/\r?\n/u).map(normalizeTestReporterLine).join("\n");
-  return stripAnsi(decodeEscapedTerminalText(normalized));
+  return stripExternalToolSgr(
+    sanitizeDangerousTerminalControls(decodeEscapedTerminalText(normalized)),
+  );
 }
 
 function normalizeVisibleLine(line: string): string {
@@ -133,10 +135,13 @@ function decodeEscapedTerminalText(text: string): string {
     .replace(/\\r/gu, "\r");
 }
 
-function stripAnsi(text: string): string {
+function stripExternalToolSgr(text: string): string {
   return text.replace(ANSI_SEQUENCE, "");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+import { sanitizeDangerousTerminalControls } from "../startup-runtime.js";
+
+export { sanitizeDangerousTerminalControls } from "../startup-runtime.js";

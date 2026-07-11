@@ -128,6 +128,7 @@ export type ToolContext = {
   abortSignal?: AbortSignal;
   isHeadlessBench?: boolean;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
+  onBackgroundBashStart?: (taskId: string) => void;
   onBackgroundBashComplete?: (result: BashBackgroundResult) => void;
   trackChildProcess?: (
     child: Pick<ChildProcess, "kill" | "pid" | "exitCode" | "signalCode" | "once">,
@@ -1509,6 +1510,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   // Background execution: only when explicitly requested via runInBackground=true
   if (input.runInBackground === true) {
     const taskId = randomUUID();
+    context.onBackgroundBashStart?.(taskId);
     void runBackgroundBash({
       taskId,
       command: adapted.command,

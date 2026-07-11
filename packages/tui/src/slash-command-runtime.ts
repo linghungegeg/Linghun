@@ -975,7 +975,9 @@ import {
   formatVerificationLast,
   formatVerificationPlan,
   formatVerificationTaskSummary,
+  getRequestScopedVerificationChangedFiles,
   isCurrentVerificationReport,
+  resolveVerificationScopeCwd,
   runVerificationCommand,
   runVerificationPlan,
 } from "./verification-command-runtime.js";
@@ -2165,6 +2167,12 @@ export async function handleVerifyCommand(
     return;
   }
 
+  const focusedChangedFiles = action === "focused"
+    ? getRequestScopedVerificationChangedFiles(context)
+    : [];
+  const focusedCwd = action === "focused"
+    ? await resolveVerificationScopeCwd(context.projectPath, focusedChangedFiles)
+    : context.projectPath;
   let plan: Awaited<ReturnType<typeof createVerificationPlan>>;
   if (action === "typecheck") {
     const defaultPlan = await createVerificationPlan(context.projectPath, "default");
@@ -2173,7 +2181,10 @@ export async function handleVerifyCommand(
       plan = await createVerificationPlan(context.projectPath, "smoke");
     }
   } else if (action === "focused") {
-    plan = await createVerificationPlan(context.projectPath, "focused");
+    plan = await createVerificationPlan(context.projectPath, "focused", {
+      workspaceRoot: context.projectPath,
+      changedFiles: focusedChangedFiles,
+    });
   } else if (action === "real-smoke") {
     plan = await createVerificationPlan(context.projectPath, "real-smoke");
   } else {
@@ -2218,6 +2229,28 @@ export async function handleVerifyCommand(
     writeStatus(output, context);
     return;
   }
+  if (action === "focused" && plan.length === 0) {
+    const sessionId = await ensureSession(context);
+    const report = createVerificationUnavailableReport(
+      "focused",
+      "当前 changed-files scope 未发现可执行的 focused 验证。",
+    );
+    report.scope = {
+      ownerKey: context.currentRequestTurnId
+        ? `request:${sessionId}:${context.currentRequestTurnId}`
+        : `session:${sessionId}`,
+      cwd: focusedCwd,
+      changedFiles: focusedChangedFiles,
+      ownerSessionId: sessionId,
+      ...(context.currentRequestTurnId ? { requestTurnId: context.currentRequestTurnId } : {}),
+      level: "focused",
+    };
+    context.lastVerification = report;
+    await recordVerificationEvidence(context, sessionId, report);
+    writeLine(output, formatVerificationTaskSummary(report, context.language));
+    writeStatus(output, context);
+    return;
+  }
 
   const guard = checkBackgroundStartGuard(context, "verification", true);
   if (guard) {
@@ -2232,6 +2265,15 @@ export async function handleVerifyCommand(
     sessionId,
     output,
     appendBackgroundTaskEvent,
+    action === "focused"
+      ? {
+          cwd: focusedCwd,
+          ownerSessionId: sessionId,
+          requestTurnId: context.currentRequestTurnId,
+          changedFiles: focusedChangedFiles,
+          level: "focused",
+        }
+      : {},
   );
   if (isCurrentVerificationReport(context, report)) {
     context.lastVerification = report;

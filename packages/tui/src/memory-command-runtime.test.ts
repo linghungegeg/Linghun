@@ -125,6 +125,7 @@ describe("memory-command-runtime", () => {
   it("does not create tombstones for disable and rollback", async () => {
     const directory = await mkdtemp(join(tmpdir(), "linghun-memory-disable-"));
     const memory = makeMemory();
+    await writeFile(join(directory, `${memory.id}.json`), JSON.stringify(memory), "utf8");
     const context = makeContext(directory, memory);
     configureMemoryDeps();
 
@@ -371,6 +372,7 @@ function makeContext(directory: string, memory: MemoryCandidate): TuiContext {
       tombstones: {
         ids: new Set(),
         origins: new Set(),
+        logicalKeys: new Set(),
         unreadableScopes: new Set(),
         diagnostics: [],
       },

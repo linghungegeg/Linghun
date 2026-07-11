@@ -35,6 +35,7 @@ export type DeepCompactRuntimeDeps = {
     sessionId: string,
     message: string,
     level: "info" | "warning",
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   captureFailureLearning: (
     context: TuiContext,
@@ -77,25 +78,49 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
   trigger: DeepCompactTrigger;
   gateway?: ModelGateway;
   signal?: AbortSignal;
+  commitGuard?: () => boolean;
   deps: DeepCompactRuntimeDeps;
 }): Promise<DeepCompactRunResult> {
   if (!input.gateway) {
     return failMessage(input.context, "Deep compact unavailable: model gateway is not ready.");
   }
+  const ownerRequestTurnId = input.context.currentRequestTurnId;
+  const ownerRuntimeContextId = input.context.runtimeContextId;
+  const ownerId = ownerRequestTurnId
+    ? `request:${input.sessionId}:${ownerRequestTurnId}`
+    : `runtime:${input.sessionId}:${ownerRuntimeContextId ?? "standalone"}`;
+  const ownerIsCurrent = () =>
+    !input.signal?.aborted &&
+    (input.commitGuard?.() ?? true) &&
+    (input.context.sessionId === undefined || input.context.sessionId === input.sessionId) &&
+    (ownerRequestTurnId
+      ? input.context.currentRequestTurnId === ownerRequestTurnId
+      : input.context.currentRequestTurnId === undefined &&
+        input.context.runtimeContextId === ownerRuntimeContextId);
   const existing = input.context.deepCompactInFlight;
-  if (existing?.sessionId === input.sessionId) {
+  if (
+    existing?.sessionId === input.sessionId &&
+    existing.ownerId === ownerId &&
+    existing.isCurrent()
+  ) {
     return waitForDeepCompact(input.context, existing.promise, input.signal);
   }
-  const progress = input.context.cache.compactProgress ? undefined : createDeepCompactProgress();
+  const progress =
+    existing || !input.context.cache.compactProgress ? createDeepCompactProgress() : undefined;
   if (progress) {
     input.context.cache.compactProgress = progress;
     input.context.shellRerender?.();
   }
-  const run = runDeepCompactIfNeeded({ ...input, gateway: input.gateway });
-  input.context.deepCompactInFlight = { sessionId: input.sessionId, promise: run };
-  try {
-    return await waitForDeepCompact(input.context, run, input.signal);
-  } finally {
+  let slot: TuiContext["deepCompactInFlight"];
+  const commitGuard = () => ownerIsCurrent() && input.context.deepCompactInFlight === slot;
+  const run = runDeepCompactIfNeeded({
+    ...input,
+    gateway: input.gateway,
+    commitGuard,
+  });
+  slot = { sessionId: input.sessionId, ownerId, isCurrent: ownerIsCurrent, promise: run };
+  input.context.deepCompactInFlight = slot;
+  const clearSettledRun = () => {
     if (input.context.deepCompactInFlight?.promise === run) {
       input.context.deepCompactInFlight = undefined;
     }
@@ -103,7 +128,9 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
       input.context.cache.compactProgress = undefined;
       input.context.shellRerender?.();
     }
-  }
+  };
+  void run.then(clearSettledRun, clearSettledRun);
+  return waitForDeepCompact(input.context, run, input.signal);
 }
 
 async function runDeepCompactIfNeeded(input: {
@@ -113,19 +140,29 @@ async function runDeepCompactIfNeeded(input: {
   trigger: DeepCompactTrigger;
   gateway: ModelGateway;
   signal?: AbortSignal;
+  commitGuard?: () => boolean;
   deps: DeepCompactRuntimeDeps;
 }): Promise<DeepCompactRunResult> {
   const reusablePacket = await getReusableDeepCompactPacketFromTail(
     input.context,
     input.sessionId,
     input.trigger,
+    input.commitGuard,
   );
   if (reusablePacket) {
     return { ok: true, packet: reusablePacket };
   }
 
-  const resumed = await input.context.store.resume(input.sessionId);
-  const activeTranscript = resumed.transcript.filter(
+  const transcript = input.context.cache.deepCompact
+    ? (
+        await input.context.store.readRecentTranscriptEvents(input.sessionId, {
+          limit: Number.MAX_SAFE_INTEGER,
+          stopPredicate: (event) =>
+            event.type === DEEP_COMPACT_EVENT_TYPE && isDeepCompactPacket(event.packet),
+        })
+      ).events
+    : (await input.context.store.resume(input.sessionId)).transcript;
+  const activeTranscript = transcript.filter(
     (event) => !isCompactCommandControlEvent(event),
   );
   if (!shouldRunDeepCompact(input.context, activeTranscript, input.trigger)) {
@@ -152,6 +189,7 @@ async function getReusableDeepCompactPacketFromTail(
   context: TuiContext,
   sessionId: string,
   trigger: DeepCompactTrigger,
+  commitGuard?: () => boolean,
 ): Promise<DeepCompactPacket | undefined> {
   const packet = context.cache.deepCompact;
   if (!packet || trigger === "manual" || trigger === "workflow") return undefined;
@@ -160,9 +198,15 @@ async function getReusableDeepCompactPacketFromTail(
     const recent = await context.store.readRecentTranscriptEvents(sessionId, {
       limit: DEEP_COMPACT_RERUN_EVENT_THRESHOLD + 1,
     });
-    return recent.events.some((event) => event.type === DEEP_COMPACT_EVENT_TYPE)
-      ? packet
-      : undefined;
+    const latestPacket = [...recent.events].reverse().find(
+      (event) => event.type === DEEP_COMPACT_EVENT_TYPE && isDeepCompactPacket(event.packet),
+    );
+    if (latestPacket?.type !== DEEP_COMPACT_EVENT_TYPE || !isDeepCompactPacket(latestPacket.packet)) {
+      return undefined;
+    }
+    if (commitGuard && !commitGuard()) return undefined;
+    context.cache.deepCompact = latestPacket.packet;
+    return latestPacket.packet;
   } catch {
     return undefined;
   }
@@ -195,6 +239,7 @@ export async function runDeepCompact(input: {
   trigger: DeepCompactTrigger;
   gateway: ModelGateway;
   signal?: AbortSignal;
+  commitGuard?: () => boolean;
   deps: DeepCompactRuntimeDeps;
 }): Promise<DeepCompactRunResult> {
   const now = Date.now();
@@ -214,6 +259,10 @@ export async function runDeepCompact(input: {
     input.trigger,
   );
   const signal = input.signal ?? new AbortController().signal;
+  const ownerIsCurrent = () => !signal.aborted && (input.commitGuard?.() ?? true);
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   const providerRequest: ModelRequest = applyCacheWritePolicyToRequest(
     {
       messages: requestMessages,
@@ -225,6 +274,9 @@ export async function runDeepCompact(input: {
     },
     resolveCachePolicy("deep-compact"),
   );
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   recordCacheRequestObservation(
     input.context.cache,
     "deep-compact",
@@ -238,6 +290,9 @@ export async function runDeepCompact(input: {
     status: "consumed",
     summary: `deep compact trigger=${input.trigger}; messages=${requestMessages.length}`,
   });
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   await recordMetaOrchestrationRuntimeEvent(input.context, input.sessionId, {
     stepId: "provider-request",
     executor: "provider-runtime",
@@ -254,7 +309,7 @@ export async function runDeepCompact(input: {
       signal,
       { cooldownScope: "sidechain" },
     )) {
-      if (signal.aborted) {
+      if (!ownerIsCurrent()) {
         return failMessage(input.context, "Deep compact cancelled by user interrupt.");
       }
       if (event.type === "assistant_text_delta") {
@@ -268,6 +323,7 @@ export async function runDeepCompact(input: {
           input.sessionId,
           `compact_agent_tool_use_blocked:${event.name}`,
           input.deps,
+          ownerIsCurrent,
         );
         return failMessage(
           input.context,
@@ -284,19 +340,29 @@ export async function runDeepCompact(input: {
           input.sessionId,
           `compact_agent_error:${event.error.code}:${event.error.message}`,
           input.deps,
+          ownerIsCurrent,
         );
         return failMessage(input.context, "Deep compact provider request failed.");
       }
     }
   } catch (error) {
-    if (signal.aborted) {
+    if (!ownerIsCurrent()) {
       return failMessage(input.context, "Deep compact cancelled by user interrupt.");
     }
     const reason = error instanceof Error ? error.message : String(error);
-    await recordDeepCompactFailure(input.context, input.sessionId, reason, input.deps);
+    await recordDeepCompactFailure(
+      input.context,
+      input.sessionId,
+      reason,
+      input.deps,
+      ownerIsCurrent,
+    );
     return failMessage(input.context, "Deep compact failed before provider request.");
   }
 
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   advanceDeepCompactProgress(input.context, "trim_old_records");
   const packet = createDeepCompactPacket({
     context: input.context,
@@ -313,6 +379,26 @@ export async function runDeepCompact(input: {
     preservedFiles: packet.preservedFiles,
     handoffPacketId: input.context.memory.lastHandoff?.id,
   });
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
+  await projectDeepCompactMainScreen(
+    input.context,
+    input.deps,
+    input.sessionId,
+    ownerIsCurrent,
+  );
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
+  await input.context.store.appendEvent(input.sessionId, {
+    type: DEEP_COMPACT_EVENT_TYPE,
+    packet,
+    createdAt: packet.createdAt,
+  } as TranscriptEvent, ownerIsCurrent);
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   input.deps.recordCompactBoundary(input.context, boundary);
   input.context.pushTranscriptBlock?.(
     createCompactBoundaryBlock(
@@ -321,36 +407,40 @@ export async function runDeepCompact(input: {
       input.context.language,
     ),
   );
-  await projectDeepCompactMainScreen(input.context, input.deps, input.sessionId);
   advanceDeepCompactProgress(input.context, "restore_context");
   input.context.cache.deepCompact = packet;
   input.context.cache.compacted = true;
   input.context.cache.compactFailure = undefined;
   input.context.cache.deepCompactCooldownUntil = undefined;
   input.deps.refreshCacheFreshness(input.context);
-  await input.context.store.appendEvent(input.sessionId, {
-    type: DEEP_COMPACT_EVENT_TYPE,
-    packet,
-    createdAt: packet.createdAt,
-  } as TranscriptEvent);
   await input.deps.appendSystemEvent(
     input.context,
     input.sessionId,
     `deep compact success: id ${packet.id}; scope ${packet.scope}; trigger ${packet.trigger}`,
     "info",
+    ownerIsCurrent,
   );
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   await recordMetaOrchestrationRuntimeEvent(input.context, input.sessionId, {
     stepId: "compact-context",
     executor: "compact-runtime",
     status: "completed",
     summary: `packet=${packet.id}; scope=${packet.scope}; trigger=${packet.trigger}`,
   });
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   await recordMetaOrchestrationRuntimeEvent(input.context, input.sessionId, {
     stepId: "provider-request",
     executor: "provider-runtime",
     status: "completed",
     summary: `deep compact provider request completed; packet=${packet.id}`,
   });
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   advanceDeepCompactProgress(input.context, "complete");
   return { ok: true, packet };
 }
@@ -359,10 +449,14 @@ async function projectDeepCompactMainScreen(
   context: TuiContext,
   deps: DeepCompactRuntimeDeps,
   sessionId: string,
+  commitGuard: () => boolean = () => true,
 ): Promise<void> {
+  if (!commitGuard()) return;
   try {
     await context.compactOutputMemory?.({ projectMainScreen: true });
+    if (!commitGuard()) return;
   } catch (error) {
+    if (!commitGuard()) return;
     await deps.appendSystemEvent(
       context,
       sessionId,
@@ -372,6 +466,7 @@ async function projectDeepCompactMainScreen(
         180,
       )}`,
       "warning",
+      commitGuard,
     );
   }
 }
@@ -399,7 +494,8 @@ export function shouldRunDeepCompact(
   if (context.cache.deepCompact) {
     let latestCompactIndex = -1;
     for (let index = transcript.length - 1; index >= 0; index -= 1) {
-      if (transcript[index]?.type === DEEP_COMPACT_EVENT_TYPE) {
+      const event = transcript[index];
+      if (event?.type === DEEP_COMPACT_EVENT_TYPE && isDeepCompactPacket(event.packet)) {
         latestCompactIndex = index;
         break;
       }
@@ -511,39 +607,85 @@ export function createDeepCompactPacket(input: {
   trigger: DeepCompactTrigger;
 }): DeepCompactPacket {
   const context = input.context;
+  const previousPacketEvent = [...input.transcript]
+    .reverse()
+    .find((event) => event.type === DEEP_COMPACT_EVENT_TYPE && isDeepCompactPacket(event.packet));
+  const previousPacket =
+    previousPacketEvent?.type === DEEP_COMPACT_EVENT_TYPE &&
+    isDeepCompactPacket(previousPacketEvent.packet)
+      ? previousPacketEvent.packet
+      : undefined;
+  const currentSummary =
+    input.summary.trim() || synthesizeFallbackSummary(context, input.transcript);
+  const currentUserMessages = collectUserMessagesVerbatim(context, input.transcript);
+  const userMessagesVerbatim = unique([
+    ...(previousPacket?.userMessagesVerbatim ?? []),
+    ...currentUserMessages,
+  ]);
+  const retainedUserMessages =
+    userMessagesVerbatim.length <= VERBATIM_USER_MESSAGE_LIMIT
+      ? userMessagesVerbatim
+      : [
+          ...userMessagesVerbatim.slice(0, 2),
+          ...userMessagesVerbatim.slice(-(VERBATIM_USER_MESSAGE_LIMIT - 2)),
+        ];
+  const preservedEvidenceRefs: string[] = [];
+  for (const value of unique([
+    ...(previousPacket?.preservedEvidenceRefs ?? []),
+    ...context.evidence.map((item) => item.id),
+  ])) {
+    pushEarlyAndRecent(preservedEvidenceRefs, value, 20);
+  }
+  const preservedFiles: string[] = [];
+  for (const value of unique([
+    ...(previousPacket?.preservedFiles ?? []),
+    ...context.recentlyMentionedFiles,
+    ...context.tools.changedFiles,
+    ...context.evidence
+      .map((item) => item.source)
+      .filter((source) => source.includes(".") || source.includes("/")),
+  ]).map((file) => sanitizeDeepCompactText(context, file, 180))) {
+    pushEarlyAndRecent(preservedFiles, value, 20);
+  }
+  const decisions: string[] = [];
+  for (const value of unique([...(previousPacket?.decisions ?? []), ...collectDecisions(context)])) {
+    pushEarlyAndRecent(decisions, value, 20);
+  }
+  const risks: string[] = [];
+  for (const value of unique([...(previousPacket?.risks ?? []), ...collectRisks(context)])) {
+    pushEarlyAndRecent(risks, value, 20);
+  }
   return {
     id: `deep-${randomUUID().slice(0, 8)}`,
     kind: "deep",
     scope: "full transcript semantic compact",
     summary: sanitizeDeepCompactText(
       context,
-      input.summary.trim() || synthesizeFallbackSummary(context, input.transcript),
+      currentSummary,
       DEEP_COMPACT_SUMMARY_MAX_CHARS,
     ),
-    preservedEvidenceRefs: unique(context.evidence.map((item) => item.id)).slice(0, 20),
-    preservedFiles: unique([
-      ...context.recentlyMentionedFiles,
-      ...context.tools.changedFiles,
-      ...context.evidence
-        .map((item) => item.source)
-        .filter((source) => source.includes(".") || source.includes("/")),
-    ])
-      .map((file) => sanitizeDeepCompactText(context, file, 180))
-      .slice(0, 20),
+    preservedEvidenceRefs,
+    preservedFiles,
     narrativeSummary: sanitizeDeepCompactText(
       context,
-      input.summary.trim() || synthesizeFallbackSummary(context, input.transcript),
-      1_200,
+      previousPacket
+        ? `${sanitizeDeepCompactText(
+            context,
+            previousPacket.narrativeSummary || previousPacket.summary,
+            600,
+          )}\nLatest compact: ${sanitizeDeepCompactText(context, currentSummary, 600)}`
+        : currentSummary,
+      1_220,
     ),
-    userMessagesVerbatim: collectUserMessagesVerbatim(context, input.transcript),
+    userMessagesVerbatim: retainedUserMessages,
     toolResultSummaries: collectToolResultSummaries(context, input.transcript),
     codeSnippets: collectCodeSnippets(context, input.transcript),
     activeAgentsWorkflows: collectActiveAgentsWorkflows(context),
     needsAttentionAgentsWorkflows: collectNeedsAttentionAgentsWorkflows(context),
     staleResumableAgentsWorkflows: collectStaleResumableAgentsWorkflows(context),
     pendingItems: collectPendingItems(context),
-    decisions: collectDecisions(context),
-    risks: collectRisks(context),
+    decisions,
+    risks,
     createdAt: new Date().toISOString(),
     model: input.runtime.model,
     provider: input.runtime.provider,
@@ -628,6 +770,24 @@ function buildFullTranscriptSemanticOutline(
   const verificationFailures: string[] = [];
   const permissionsTodos: string[] = [];
   const eventTypeCounts = new Map<string, number>();
+  const previousPacketEvent = transcript.find(
+    (event) => event.type === DEEP_COMPACT_EVENT_TYPE && isDeepCompactPacket(event.packet),
+  );
+  const previousPacket =
+    previousPacketEvent?.type === DEEP_COMPACT_EVENT_TYPE &&
+    isDeepCompactPacket(previousPacketEvent.packet)
+      ? previousPacketEvent.packet
+      : undefined;
+  const previousAuthoritativeCompact = previousPacket
+    ? [
+        `narrative ${previousPacket.narrativeSummary || previousPacket.summary}`,
+        `user messages ${previousPacket.userMessagesVerbatim?.join(" | ") || "none"}`,
+        `decisions ${previousPacket.decisions.join(" | ") || "none"}`,
+        `risks ${previousPacket.risks.join(" | ") || "none"}`,
+        `evidence ${previousPacket.preservedEvidenceRefs.join(", ") || "none"}`,
+        `files ${previousPacket.preservedFiles.join(", ") || "none"}`,
+      ].join("\n")
+    : "none";
 
   for (const event of transcript) {
     eventTypeCounts.set(event.type, (eventTypeCounts.get(event.type) ?? 0) + 1);
@@ -651,6 +811,11 @@ function buildFullTranscriptSemanticOutline(
 
   return [
     "Full transcript semantic outline:",
+    `previous authoritative compact: ${sanitizeDeepCompactText(
+      context,
+      previousAuthoritativeCompact,
+      12_000,
+    )}`,
     `event type counts: ${Array.from(eventTypeCounts.entries()).map(([type, count]) => `${type}:${count}`).join(", ") || "none"}`,
     `first user goal: ${firstUser?.type === "user_message" ? sanitizeDeepCompactText(context, firstUser.text, EVENT_TEXT_LIMIT) : "none"}`,
     `latest user goal: ${latestUser?.type === "user_message" ? sanitizeDeepCompactText(context, latestUser.text, EVENT_TEXT_LIMIT) : "none"}`,
@@ -1013,7 +1178,9 @@ async function recordDeepCompactFailure(
   sessionId: string,
   reason: string,
   deps: DeepCompactRuntimeDeps,
+  commitGuard: () => boolean = () => true,
 ): Promise<void> {
+  if (!commitGuard()) return;
   const cooldownUntilMs = Date.now() + DEEP_COMPACT_FAILURE_COOLDOWN_MS;
   context.cache.deepCompactCooldownUntil = cooldownUntilMs;
   context.cache.compactFailure = {
@@ -1028,6 +1195,7 @@ async function recordDeepCompactFailure(
     `deep compact failed: blocked yes; reason ${context.cache.compactFailure.reason}; cooldown until ${context.cache.compactFailure.cooldownUntil}`,
     "warning",
   );
+  if (!commitGuard()) return;
   await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
     stepId: "compact-context",
     executor: "compact-runtime",
@@ -1035,6 +1203,7 @@ async function recordDeepCompactFailure(
     summary: `deep compact failed: ${context.cache.compactFailure.reason}`,
     level: "warning",
   });
+  if (!commitGuard()) return;
   await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
     stepId: "provider-request",
     executor: "provider-runtime",
@@ -1042,6 +1211,7 @@ async function recordDeepCompactFailure(
     summary: `deep compact provider path failed: ${context.cache.compactFailure.reason}`,
     level: "warning",
   });
+  if (!commitGuard()) return;
   await deps.captureFailureLearning(context, sessionId, {
     category: "resource_cap",
     failureSummary: "deep compact failed before provider request",
@@ -1079,6 +1249,7 @@ function failMessage(context: TuiContext, english: string): DeepCompactRunResult
             )
             .replace("Deep compact provider request failed.", "Deep compact provider 请求失败。")
             .replace("Deep compact cancelled by user interrupt.", "Deep compact 已被用户中断取消。")
+            .replace("Deep compact cancelled by stale request owner.", "Deep compact 因请求 owner 失效已取消。")
             .replace(
               "Deep compact failed before provider request.",
               "Deep compact 在 provider 请求前失败。",

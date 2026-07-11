@@ -29,6 +29,7 @@ type PersistedEvidenceEvent = Extract<TranscriptEvent, { type: "evidence_record"
   outputPath?: string;
   logPath?: string;
   data?: unknown;
+  ownerScope?: import("./tui-data-types.js").EvidenceRecord["ownerScope"];
 };
 const HANDOFF_KEY_FILE_LIMIT = 12;
 const DEFAULT_HANDOFF_KEY_FILES = [
@@ -94,7 +95,9 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   restorePendingMemoryCandidates(context, transcript);
   const deepCompact = [...transcript]
     .reverse()
-    .find((event) => event.type === "deep_compact_packet");
+    .find(
+      (event) => event.type === "deep_compact_packet" && isDeepCompactPacket(event.packet),
+    );
   if (deepCompact?.type === "deep_compact_packet" && isDeepCompactPacket(deepCompact.packet)) {
     context.cache.compacted = true;
     context.cache.deepCompact = deepCompact.packet;
@@ -260,6 +263,7 @@ function restoreEvidenceRecord(
       : {}),
     ...(event.logPath ? { logPath: event.logPath } : {}),
     ...(event.data !== undefined ? { data: event.data } : {}),
+    ...(event.ownerScope ? { ownerScope: event.ownerScope } : {}),
     supportsClaims: event.supportsClaims,
     createdAt: event.createdAt,
   };

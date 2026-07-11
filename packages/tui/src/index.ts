@@ -56,7 +56,6 @@ import {
   type ModelToolCall,
   type ModelUsage,
   findKnownModel,
-  registerHooks as registerProviderHooks,
 } from "@linghun/providers";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
 import {
@@ -104,7 +103,7 @@ import {
 } from "./break-cache-runtime.js";
 import { classifyBtwIntent, runBtwSideQuestion } from "./btw-runtime.js";
 import { handleCapabilitiesCommand } from "./capability-runtime.js";
-import { handleAppsCommand } from "./connector-runtime.js";
+import { clearAppConnectorRuntime, handleAppsCommand } from "./connector-runtime.js";
 // D.14A-2 — break-cache runtime moved to ./break-cache-runtime.ts.
 // Re-export the test hooks to preserve model-doctor-runtime.test.ts imports from "./index.js".
 export { type BreakCacheTestHooks, breakCacheTestHooks } from "./break-cache-runtime.js";
@@ -378,12 +377,8 @@ import {
 } from "./mcp-stdio-runtime.js";
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import {
-  cleanupTrackedProcessesForExit,
   createProcessGuard,
-  getActiveTrackedProcessSnapshot,
   installProcessGuardExitHandlers,
-  requestTrackedProcessStop,
-  trackChildProcess,
 } from "./process-guard.js";
 export { isPotentiallyMutatingMcpTool } from "./mcp-stdio-runtime.js";
 import { startFeishuLongConnection } from "./feishu-long-connection-runtime.js";
@@ -394,6 +389,7 @@ import {
   createProviderCircuitBreakerState,
   formatCooldownDoctorLine,
   formatCooldownMessage,
+  isRecoverableProviderFailure,
   recordProviderFailure,
   withProviderRetry,
 } from "./provider-circuit-breaker.js";
@@ -789,6 +785,7 @@ export type RunTuiOptions = {
   stdout?: Writable;
   stderr?: Writable;
   projectPath?: string;
+  signal?: AbortSignal;
 };
 
 export type HeadlessPermissionRequest = {
@@ -816,6 +813,7 @@ export type RunHeadlessOptions = {
   deadlineAtMs?: number;
   bench?: HeadlessBenchOptions;
   onEvent?: (event: TranscriptEvent) => void;
+  signal?: AbortSignal;
   // 桌面端双向审批接缝：当引擎在 headless run 中停在权限确认（decidePermission → "ask"，
   // 设置 pendingLocalApproval）时，若提供此回调则交由外部（GUI）决策，复用既有
   // executePermissionApprove / executePermissionDeny / addAllowRule，不新增第五种权限模式。
@@ -1028,7 +1026,7 @@ import {
   t,
   writeStatus,
 } from "./details-status-runtime.js";
-import { appendBackgroundTaskEvent, appendSystemEvent, createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
+import { appendBackgroundTaskEvent, appendSystemEvent, createEvidenceRecord, rememberEvidence, scopeEvidenceToContext } from "./evidence-runtime.js";
 import { finishBackgroundTaskFromToolOutput } from "./background-control-runtime.js";
 import {
   __testSendMessage,
@@ -1498,6 +1496,7 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
   const initialModel = resolveInitialModel(config);
   const context: TuiContext = {
     store,
+    runtimeOwnerId: randomUUID(),
     runtimeContextId: randomUUID(),
     model: initialModel,
     permissionMode: config.permission.defaultMode,
@@ -1539,7 +1538,8 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
     backgroundBashTaskMap: new Map(),
     discoveredDeferredToolNames: new Set<string>(),
   };
-  context.tools.trackChildProcess = (child, options) => trackChildProcess(child, options);
+  context.processGuard = createProcessGuard();
+  context.tools.trackChildProcess = context.processGuard.track;
   context.tools.onBackgroundBashComplete = (result) => {
     const tuiTaskId = context.backgroundBashTaskMap?.get(result.taskId);
     if (!tuiTaskId) return;
@@ -1570,6 +1570,10 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
         result.outputPath,
         result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
       );
+      scopeEvidenceToContext(context, evidence, {
+        ownerSessionId: sessionId,
+        ...(task.requestTurnId ? { requestTurnId: task.requestTurnId } : {}),
+      });
       if (context.sessionId === sessionId) rememberEvidence(context, evidence);
       void context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence }).catch(() => {});
     }
@@ -1598,45 +1602,7 @@ async function hydrateRuntimeContext(context: TuiContext): Promise<void> {
   context.failureLearning.records = await loadFailureRecords(context.failureLearning);
 }
 
-function attachProviderRuntimeHooks(context: TuiContext): void {
-  context.runtimeContextId ??= randomUUID();
-  registerProviderHooks({
-    onRetry: (info) => {
-      // Background provider retries must not overwrite main-screen status.
-      if (info.requestContext && info.requestContext !== "foreground") return;
-      if (info.requestContextId) {
-        if (!context.currentRequestTurnId) return;
-        if (info.requestContextId !== context.currentRequestTurnId) return;
-      }
-      const orchestration = resolveMetaOrchestrationAction(context, "provider-retry");
-      if (orchestration.shouldStop) {
-        void recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
-          stepId: "provider-retry",
-          executor: "provider-runtime",
-          status: "blocked",
-          summary: `client retry blocked; attempt=${info.attempt}/${info.maxAttempts}; status=${info.statusCode}; reason=${orchestration.reason}`,
-          level: "warning",
-        });
-        return;
-      }
-      context.requestActivityPhase = "provider_retrying";
-      context.requestActivityToolName = undefined;
-      context.retryInfo = {
-        attempt: info.attempt,
-        max: info.maxAttempts,
-        delaySec: Math.ceil(info.delayMs / 1000),
-      };
-      if (orchestration.shouldDegrade) {
-        void recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
-          stepId: "provider-retry",
-          executor: "provider-runtime",
-          status: "degraded",
-          summary: `client retry guard active; attempt=${info.attempt}/${info.maxAttempts}; status=${info.statusCode}; reason=${orchestration.reason}`,
-          level: "warning",
-        });
-      }
-    },
-  });
+function attachRuntimeCallbacks(context: TuiContext): void {
   context.pushNotification = (text, tone) => pushTransientNotification(context, text, tone);
 }
 
@@ -1645,29 +1611,49 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const output = options.stdout ?? defaultStdout;
   const errorOutput = options.stderr ?? defaultStderr;
   const projectPath = options.projectPath ?? process.cwd();
+  if (options.signal?.aborted) return 130;
   const { context, store } = await createTuiRuntimeContext(projectPath);
-  installProcessGuardExitHandlers();
-  const startup = await prepareTuiStartup(input, output, context);
-  await hydrateRuntimeContext(context);
-  const gateway = createModelGateway(context.config);
-  if (shouldWarmProviderDnsForStreams(input, output)) {
-    warmConfiguredProviderDns(context.config);
-  }
-  // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
-  context.modelGateway = gateway;
-  // R6 — Register provider retry hook so the TUI can show retry activity.
-  attachProviderRuntimeHooks(context);
-  // R6 — Initialize notification callback on context for circuit breaker and other runtimes.
-  const sigintHandler = () => {
-    requestTrackedProcessStop(false);
+  const runtimeAborted = Symbol("runtime-aborted");
+  let resolveRuntimeAbort: (() => void) | undefined;
+  const runtimeAbort = new Promise<typeof runtimeAborted>((resolve) => {
+    resolveRuntimeAbort = () => resolve(runtimeAborted);
+  });
+  const interruptHandler = () => {
+    resolveRuntimeAbort?.();
+    context.processGuard?.requestStop(false);
     void handleInterruptCommand([], context, output).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       writeLine(output, `Interrupt failed: ${message}`);
     });
   };
-  process.once("SIGINT", sigintHandler);
+  options.signal?.addEventListener("abort", interruptHandler, { once: true });
+  if (options.signal?.aborted) interruptHandler();
 
   try {
+    installProcessGuardExitHandlers();
+    const startupOperation = prepareTuiStartup(input, output, context);
+    const startup = options.signal
+      ? await Promise.race([startupOperation, runtimeAbort])
+      : await startupOperation;
+    if (startup === runtimeAborted) {
+      void startupOperation.catch(() => undefined);
+      return 130;
+    }
+    const hydrationOperation = hydrateRuntimeContext(context);
+    const hydration = options.signal
+      ? await Promise.race([hydrationOperation.then(() => true), runtimeAbort])
+      : await hydrationOperation.then(() => true);
+    if (hydration === runtimeAborted) {
+      void hydrationOperation.catch(() => undefined);
+      return 130;
+    }
+    if (options.signal?.aborted) return 130;
+    const gateway = createModelGateway(context.config);
+    if (shouldWarmProviderDnsForStreams(input, output)) {
+      warmConfiguredProviderDns(context.config);
+    }
+    context.modelGateway = gateway;
+    attachRuntimeCallbacks(context);
     const useInkShell = await shouldEnterInkShell(input, output);
     if (useInkShell) {
       return await runInkShell(
@@ -1678,16 +1664,16 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         gateway,
         store,
         startup,
-        sigintHandler,
       );
     }
-    return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
+    return await runPlainTui(input, output, context, gateway, store, startup);
   } catch (error) {
     const message = error instanceof Error ? error.message : "TUI 运行失败。";
     writeLine(errorOutput, `错误：${message}`);
     return 1;
   } finally {
-    process.removeListener("SIGINT", sigintHandler);
+    options.signal?.removeEventListener("abort", interruptHandler);
+    clearAppConnectorRuntime(context);
   }
 }
 
@@ -1700,11 +1686,33 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     writeLine(errorOutput, "错误：headless run prompt 不能为空。");
     return 2;
   }
+  if (options.signal?.aborted) return 130;
   const runtime =
     options.__testContext && options.__testStore
       ? { context: options.__testContext, store: options.__testStore }
       : await createTuiRuntimeContext(projectPath);
   const { context, store } = runtime;
+  if (!context.processGuard) {
+    context.processGuard = createProcessGuard();
+    context.tools.trackChildProcess = context.processGuard.track;
+  }
+  const runtimeAborted = Symbol("runtime-aborted");
+  let resolveRuntimeAbort: (() => void) | undefined;
+  const runtimeAbort = new Promise<typeof runtimeAborted>((resolve) => {
+    resolveRuntimeAbort = () => resolve(runtimeAborted);
+  });
+  const interruptHandler = () => {
+    resolveRuntimeAbort?.();
+    context.processGuard?.requestStop(false);
+    void handleInterruptCommand([], context, errorOutput).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      writeLine(errorOutput, `Interrupt failed: ${message}`);
+    });
+  };
+  options.signal?.addEventListener("abort", interruptHandler, { once: true });
+  if (options.signal?.aborted) interruptHandler();
+  let suppressGenericHeadlessPhases = false;
+  try {
   if (options.onEvent) {
     const { onEvent } = options;
     const _origAppend = store.appendEvent.bind(store);
@@ -1721,12 +1729,20 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   context.planAccepted = false;
   installProcessGuardExitHandlers();
   if (!options.__testSkipHydration) {
-    await hydrateRuntimeContext(context);
+    const hydrationOperation = hydrateRuntimeContext(context);
+    const hydration = options.signal
+      ? await Promise.race([hydrationOperation.then(() => true), runtimeAbort])
+      : await hydrationOperation.then(() => true);
+    if (hydration === runtimeAborted) {
+      void hydrationOperation.catch(() => undefined);
+      return 130;
+    }
   }
+  if (options.signal?.aborted) return 130;
   const gateway = options.__testGateway ?? createModelGateway(context.config);
   const sendHeadlessMessage = options.__testSendMessage ?? sendMessage;
   context.modelGateway = gateway;
-  attachProviderRuntimeHooks(context);
+  attachRuntimeCallbacks(context);
   const maxApprovals = Math.max(0, Math.min(options.maxApprovals ?? 32, 200));
   const autoApprove = options.autoApprove ?? true;
   const onPermissionRequest = options.onPermissionRequest;
@@ -1756,80 +1772,190 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   if (benchConfig.enabled && benchPreflight) {
     writeLine(output, `[headless] bench preflight: ${benchPreflight.summary}`);
   }
-  const suppressGenericHeadlessPhases = benchConfig.enabled;
+  suppressGenericHeadlessPhases = benchConfig.enabled;
   emitHeadlessPhase(output, "starting", `mode=${context.permissionMode}`, {
     suppress: suppressGenericHeadlessPhases,
   });
 
-  try {
     let approvals = 0;
     let continuations = 0;
     let requestAttempts = 0;
     let benchValidationPassed = !benchConfig.enabled;
     let lastValidation: HeadlessBenchValidationResult | undefined;
+    const initialEvidenceIds = new Set(context.evidence.map((record) => record.id));
+    const headlessRequestTurnIds = new Set<string>();
     const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
-      requestAttempts += 1;
-      emitHeadlessPhase(output, "waiting_first_delta", `attempt=${requestAttempts}`, {
-        suppress: suppressGenericHeadlessPhases,
-      });
-      const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
-      const deferredApprovals: HeadlessDeferredApproval[] = [];
-      const emitActivity = createHeadlessActivityEmitter(output, context, {
-        suppress: suppressGenericHeadlessPhases,
-      });
-      const messagePromise = sendHeadlessMessage(text, context, gateway, output);
-      const pump = createHeadlessApprovalPump({
-        context,
-        gateway,
-        output,
-        errorOutput,
-        autoApprove,
-        maxApprovals,
-        getApprovals: () => approvals,
-        setApprovals: (value) => {
-          approvals = value;
-        },
-        deferredApprovals,
-        onPermissionRequest,
-      });
-      const messageResult = await runWithHeadlessApprovalPump(messagePromise, pump, emitActivity);
-      if (messageResult.exitCode !== undefined) {
-        return { exitCode: messageResult.exitCode };
+      let nextText = text;
+      while (true) {
+        const remainingMs = remainingHeadlessDeadlineMs(deadlineAtMs);
+        if (remainingMs !== undefined && remainingMs <= 0) return { exitCode: 6 };
+        requestAttempts += 1;
+        emitHeadlessPhase(output, "waiting_first_delta", `attempt=${requestAttempts}`, {
+          suppress: suppressGenericHeadlessPhases,
+        });
+        const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
+        const deferredApprovals: HeadlessDeferredApproval[] = [];
+        const emitActivity = createHeadlessActivityEmitter(output, context, {
+          suppress: suppressGenericHeadlessPhases,
+        });
+        const requestController = new AbortController();
+        let deadlineExpired = false;
+        let resolveDeadline: (() => void) | undefined;
+        const deadlineReached = new Promise<void>((resolveDeadlinePromise) => {
+          resolveDeadline = resolveDeadlinePromise;
+        });
+        const expireDeadline = () => {
+          if (deadlineExpired) return;
+          deadlineExpired = true;
+          requestController.abort("headless_deadline");
+          context.activeAbortController?.abort("headless_deadline");
+          resolveDeadline?.();
+        };
+        const deadlineTimer =
+          remainingMs === undefined
+            ? undefined
+            : setTimeout(expireDeadline, Math.min(remainingMs, 2_147_483_647));
+        context.activeAbortController = requestController;
+        context.tools.abortSignal = requestController.signal;
+        const messagePromise = sendHeadlessMessage(
+          nextText,
+          context,
+          gateway,
+          output,
+          requestController,
+        );
+        if (isHeadlessDeadlineExpired(deadlineAtMs)) expireDeadline();
+        const pump = createHeadlessApprovalPump({
+          context,
+          gateway,
+          output,
+          errorOutput,
+          autoApprove,
+          maxApprovals,
+          getApprovals: () => approvals,
+          setApprovals: (value) => {
+            approvals = value;
+          },
+          deferredApprovals,
+          onPermissionRequest,
+          signal: requestController.signal,
+        });
+        const messageOperation = (async (): Promise<HeadlessApprovalPumpResult> => {
+          const messageResult = await runWithHeadlessApprovalPump(
+            messagePromise,
+            pump,
+            emitActivity,
+          );
+          if (messageResult.exitCode !== undefined) {
+            return { approvals, exitCode: messageResult.exitCode };
+          }
+          const approvalStatus = await pumpHeadlessApprovals({
+            context,
+            gateway,
+            output,
+            errorOutput,
+            autoApprove,
+            maxApprovals,
+            approvals,
+            deferredApprovals,
+            onPermissionRequest,
+            signal: requestController.signal,
+          });
+          approvals = approvalStatus.approvals;
+          if (approvalStatus.exitCode !== undefined) return approvalStatus;
+          const deferredStatus = await runDeferredHeadlessApprovals({
+            context,
+            gateway,
+            output,
+            errorOutput,
+            autoApprove,
+            maxApprovals,
+            approvals,
+            deferredApprovals,
+            onPermissionRequest,
+            signal: requestController.signal,
+          });
+          approvals = deferredStatus.approvals;
+          return deferredStatus;
+        })();
+        let messageRace:
+          | { kind: "message"; result: HeadlessApprovalPumpResult }
+          | { kind: "deadline" }
+          | { kind: "runtime_abort" };
+        try {
+          messageRace = await Promise.race([
+            messageOperation.then((result) => ({ kind: "message" as const, result })),
+            deadlineReached.then(() => ({ kind: "deadline" as const })),
+            runtimeAbort.then(() => ({ kind: "runtime_abort" as const })),
+          ]);
+        } finally {
+          if (deadlineTimer) clearTimeout(deadlineTimer);
+        }
+        if (messageRace.kind === "deadline") {
+          requestController.abort("headless_deadline");
+          context.activeAbortController?.abort("headless_deadline");
+          void messageOperation.catch(() => undefined);
+          await Promise.race([
+            messageOperation.catch(() => undefined),
+            sleep(HEADLESS_CLEANUP_SETTLE_MS),
+          ]);
+          return { exitCode: 6 };
+        }
+        if (messageRace.kind === "runtime_abort") {
+          requestController.abort(options.signal?.reason ?? "headless_interrupt");
+          context.activeAbortController?.abort(options.signal?.reason ?? "headless_interrupt");
+          void messageOperation.catch(() => undefined);
+          await Promise.race([
+            messageOperation.catch(() => undefined),
+            sleep(HEADLESS_CLEANUP_SETTLE_MS),
+          ]);
+          return { exitCode: 130 };
+        }
+        const messageResult = messageRace.result;
+        if (deadlineExpired || isHeadlessDeadlineExpired(deadlineAtMs)) return { exitCode: 6 };
+        if (messageResult.exitCode !== undefined) {
+          return { exitCode: messageResult.exitCode };
+        }
+        const providerFailure = context.lastProviderFailure;
+        const hasNewProviderFailure =
+          Boolean(providerFailure) && providerFailure?.evidenceId !== previousProviderFailureId;
+        if (!hasNewProviderFailure) return {};
+        if (providerFailure?.requestTurnId) {
+          headlessRequestTurnIds.add(providerFailure.requestTurnId);
+        }
+        if (
+          continuations >= maxContinuations ||
+          !shouldRunHeadlessProviderContinuation(context, {
+            initialEvidenceIds,
+            requestTurnIds: headlessRequestTurnIds,
+          })
+        ) {
+          return { providerFailure: true };
+        }
+        const backoffMs = createHeadlessContinuationBackoffMs(continuations + 1);
+        const retryRemainingMs = remainingHeadlessDeadlineMs(deadlineAtMs);
+        if (retryRemainingMs !== undefined && retryRemainingMs <= backoffMs) {
+          return { exitCode: 6 };
+        }
+        continuations += 1;
+        const sessionId = await ensureSession(context);
+        nextText = createHeadlessProviderContinuationPrompt(context);
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `headless_provider_stream_continuation: attempt=${continuations}; reason=${context.lastProviderFailure?.summary ?? "provider_failure"}`,
+          "warning",
+        );
+        writeLine(
+          output,
+          `[headless] provider stream failed; continuing attempt ${continuations}/${maxContinuations}`,
+        );
+        emitHeadlessPhase(output, "continuing", `attempt=${continuations}/${maxContinuations}`, {
+          suppress: suppressGenericHeadlessPhases,
+        });
+        context.lastProviderFailure = undefined;
+        await sleep(backoffMs);
       }
-      const approvalStatus = await pumpHeadlessApprovals({
-        context,
-        gateway,
-        output,
-        errorOutput,
-        autoApprove,
-        maxApprovals,
-        approvals,
-        deferredApprovals,
-        onPermissionRequest,
-      });
-      approvals = approvalStatus.approvals;
-      if (approvalStatus.exitCode !== undefined) {
-        return { exitCode: approvalStatus.exitCode };
-      }
-      const deferredStatus = await runDeferredHeadlessApprovals({
-        context,
-        gateway,
-        output,
-        errorOutput,
-        autoApprove,
-        maxApprovals,
-        approvals,
-        deferredApprovals,
-        onPermissionRequest,
-      });
-      approvals = deferredStatus.approvals;
-      if (deferredStatus.exitCode !== undefined) {
-        return { exitCode: deferredStatus.exitCode };
-      }
-      const providerFailure = context.lastProviderFailure;
-      const hasNewProviderFailure =
-        Boolean(providerFailure) && providerFailure?.evidenceId !== previousProviderFailureId;
-      return { providerFailure: hasNewProviderFailure };
     };
 
     const initialPrompt = createHeadlessBenchInitialPrompt({
@@ -1837,30 +1963,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       config: benchConfig,
       ...(benchPreflight ? { preflight: benchPreflight } : {}),
     });
-    let status = await runOneRequest(initialPrompt);
-    while (
-      status.exitCode === undefined &&
-      status.providerFailure &&
-      continuations < maxContinuations &&
-      shouldRunHeadlessProviderContinuation(context)
-    ) {
-      continuations += 1;
-      const sessionId = await ensureSession(context);
-      const continuationPrompt = createHeadlessProviderContinuationPrompt(context);
-      await appendSystemEvent(
-        context,
-        sessionId,
-        `headless_provider_stream_continuation: attempt=${continuations}; reason=${context.lastProviderFailure?.summary ?? "provider_failure"}`,
-        "warning",
-      );
-      writeLine(output, `[headless] provider stream failed; continuing attempt ${continuations}/${maxContinuations}`);
-      emitHeadlessPhase(output, "continuing", `attempt=${continuations}/${maxContinuations}`, {
-        suppress: suppressGenericHeadlessPhases,
-      });
-      context.lastProviderFailure = undefined;
-      await sleep(createHeadlessContinuationBackoffMs(continuations));
-      status = await runOneRequest(continuationPrompt);
-    }
+    const status = await runOneRequest(initialPrompt);
     if (continuations > 0 && !status.providerFailure) {
       context.lastProviderFailure = undefined;
     }
@@ -1882,25 +1985,42 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           maxContinuations,
         }),
       );
-      if (benchConfig.enabled && hasHeadlessRecoverableProgress(context)) {
+      if (
+        benchConfig.enabled &&
+        hasHeadlessOwnerProgress(context, {
+          initialEvidenceIds,
+          requestTurnIds: headlessRequestTurnIds,
+        })
+      ) {
         writeLine(
           output,
-          "[headless] provider stream failed after continuations, but workspace progress exists; yielding to verifier instead of failing the wrapper.",
+          "[headless] provider stream failed after continuations, but owner progress exists; running verification before deciding the exit status.",
         );
-        return 0;
+      } else {
+        return 1;
       }
-      return 1;
     }
     if (benchConfig.enabled) {
       for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
         emitHeadlessPhase(output, "validating", `bench attempt=${repairAttempt + 1}`, {
           suppress: suppressGenericHeadlessPhases,
         });
-        let validation = await validateHeadlessBenchCompletion({ projectPath, config: benchConfig });
+        let validation = await validateHeadlessBenchCompletion({
+          projectPath,
+          config: benchConfig,
+          ...(deadlineAtMs === undefined ? {} : { deadlineAtMs }),
+        });
         if (validation.ok) {
         }
         lastValidation = validation;
         if (validation.ok) {
+          if (!validation.testRan && benchConfig.requiredArtifacts.length === 0) {
+            writeLine(
+              errorOutput,
+              "错误：没有真实 test 或 artifact verification，不能返回成功。",
+            );
+            return 1;
+          }
           benchValidationPassed = true;
           writeLine(output, `[headless] bench validation passed: ${validation.summary}`);
           break;
@@ -1910,6 +2030,13 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           errorOutput,
           `[headless] bench validation failed: ${failure.category}; ${failure.summary.split(/\r?\n/u)[0]}`,
         );
+        if (failure.category === "agent_timeout" || isHeadlessDeadlineExpired(deadlineAtMs)) {
+          writeLine(
+            errorOutput,
+            `[headless] deadline reached (${formatHeadlessRemainingTime(deadlineAtMs)}); verification stopped.`,
+          );
+          return 6;
+        }
         if (repairAttempt >= benchConfig.maxRepairAttempts) {
           writeLine(
             errorOutput,
@@ -1976,7 +2103,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     writeLine(errorOutput, `错误：${message}`);
     return 1;
   } finally {
+    options.signal?.removeEventListener("abort", interruptHandler);
     await finishHeadlessRuntime(context);
+    clearAppConnectorRuntime(context);
   }
 }
 
@@ -2037,6 +2166,7 @@ async function pumpHeadlessApprovals(input: {
   approvals: number;
   deferredApprovals?: HeadlessDeferredApproval[];
   onPermissionRequest?: (request: HeadlessPermissionRequest) => Promise<HeadlessPermissionDecision>;
+  signal?: AbortSignal;
 }): Promise<HeadlessApprovalPumpResult> {
   let approvals = input.approvals;
   while (input.context.pendingLocalApproval) {
@@ -2049,6 +2179,12 @@ async function pumpHeadlessApprovals(input: {
         approval,
         input.onPermissionRequest,
       );
+      if (input.signal?.aborted) {
+        return {
+          approvals,
+          exitCode: input.signal.reason === "headless_deadline" ? 6 : 130,
+        };
+      }
       if (decision === "deny") {
         input.context.pendingLocalApproval = undefined;
         await executePermissionDeny(approval, input.context, input.gateway, input.output, false);
@@ -2106,9 +2242,16 @@ async function runDeferredHeadlessApprovals(input: {
   approvals: number;
   deferredApprovals: HeadlessDeferredApproval[];
   onPermissionRequest?: (request: HeadlessPermissionRequest) => Promise<HeadlessPermissionDecision>;
+  signal?: AbortSignal;
 }): Promise<HeadlessApprovalPumpResult> {
   let approvals = input.approvals;
   while (input.deferredApprovals.length > 0) {
+    if (input.signal?.aborted) {
+      return {
+        approvals,
+        exitCode: input.signal.reason === "headless_deadline" ? 6 : 130,
+      };
+    }
     const approval = input.deferredApprovals.shift();
     if (!approval) continue;
     await executePermissionApprove(approval, input.context, input.gateway, input.output);
@@ -2121,6 +2264,7 @@ async function runDeferredHeadlessApprovals(input: {
       maxApprovals: input.maxApprovals,
       approvals,
       onPermissionRequest: input.onPermissionRequest,
+      signal: input.signal,
     });
     approvals = nested.approvals;
     if (nested.exitCode !== undefined) {
@@ -2145,6 +2289,7 @@ function createHeadlessApprovalPump(input: {
   setApprovals: (value: number) => void;
   deferredApprovals: HeadlessDeferredApproval[];
   onPermissionRequest?: (request: HeadlessPermissionRequest) => Promise<HeadlessPermissionDecision>;
+  signal?: AbortSignal;
 }): () => Promise<HeadlessApprovalPumpResult> {
   let running: Promise<HeadlessApprovalPumpResult> | undefined;
   return async () => {
@@ -2159,6 +2304,7 @@ function createHeadlessApprovalPump(input: {
       approvals: input.getApprovals(),
       deferredApprovals: input.deferredApprovals,
       onPermissionRequest: input.onPermissionRequest,
+      signal: input.signal,
     }).then((result) => {
       input.setApprovals(result.approvals);
       return result;
@@ -2229,12 +2375,59 @@ function formatHeadlessRemainingTime(deadlineAtMs: number | undefined): string {
   return `${Math.max(0, Math.ceil((deadlineAtMs - Date.now()) / 1000))}s remaining`;
 }
 
-function shouldRunHeadlessProviderContinuation(context: TuiContext): boolean {
-  return hasHeadlessRecoverableProgress(context);
+function shouldRunHeadlessProviderContinuation(
+  context: TuiContext,
+  progressOwner: HeadlessProgressOwner,
+): boolean {
+  const failure = context.lastProviderFailure;
+  const recoverable =
+    failure?.recoverability === "resumable" ||
+    (failure?.recoverability === undefined &&
+      Boolean(failure?.code) &&
+      isRecoverableProviderFailure(failure?.code ?? ""));
+  return recoverable && hasHeadlessOwnerProgress(context, progressOwner);
 }
 
-function hasHeadlessRecoverableProgress(context: TuiContext): boolean {
-  return context.tools.changedFiles.length > 0;
+type HeadlessProgressOwner = {
+  initialEvidenceIds: ReadonlySet<string>;
+  requestTurnIds: ReadonlySet<string>;
+};
+
+function hasHeadlessOwnerProgress(
+  context: TuiContext,
+  owner: HeadlessProgressOwner,
+): boolean {
+  const projectPath = normalizeHeadlessProgressPath(context.projectPath, context.projectPath);
+  return context.evidence.some((record) => {
+    if (owner.initialEvidenceIds.has(record.id)) return false;
+    if (record.supportsClaims.includes("provider_failure")) return false;
+    if (record.supportsClaims.includes("tool_failure")) return false;
+    if (record.ownerScope?.ownerAgentId || record.ownerScope?.workflowRunId) return false;
+    if (/^(?:agent|workflow):/u.test(record.source)) return false;
+    if (!context.sessionId || record.ownerScope?.ownerSessionId !== context.sessionId) return false;
+    if (
+      !record.ownerScope.requestTurnId ||
+      !owner.requestTurnIds.has(record.ownerScope.requestTurnId)
+    ) {
+      return false;
+    }
+    if (!record.ownerScope.cwd) return false;
+    return normalizeHeadlessProgressPath(context.projectPath, record.ownerScope.cwd) === projectPath;
+  });
+}
+
+function normalizeHeadlessProgressPath(projectPath: string, file: string): string {
+  const normalized = resolve(projectPath, file);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function remainingHeadlessDeadlineMs(deadlineAtMs: number | undefined): number | undefined {
+  return deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
+}
+
+function isHeadlessDeadlineExpired(deadlineAtMs: number | undefined): boolean {
+  const remainingMs = remainingHeadlessDeadlineMs(deadlineAtMs);
+  return remainingMs !== undefined && remainingMs <= 0;
 }
 
 async function recordHeadlessArtifactChecklist(
@@ -2309,9 +2502,15 @@ async function finishHeadlessRuntime(context: TuiContext): Promise<{ ok: boolean
   context.interrupt = { type: "idle" };
   clearRequestActivity(context);
   context.activeAbortController = undefined;
-  const stopResult = cleanupTrackedProcessesForExit();
+  const stopResult = context.processGuard?.cleanupForExit() ?? {
+    kind: "exit-cleanup" as const,
+    force: true,
+    attempted: 0,
+    skipped: 0,
+    failures: [],
+  };
   await sleep(HEADLESS_CLEANUP_SETTLE_MS);
-  const stillTracked = getActiveTrackedProcessSnapshot();
+  const stillTracked = context.processGuard?.activeSnapshot() ?? [];
   if (stopResult.failures.length > 0) {
     return {
       ok: false,
@@ -2472,7 +2671,6 @@ async function runPlainTui(
   gateway: ModelGateway,
   store: SessionStore,
   startup: TuiStartupState,
-  sigintHandler: () => void,
 ): Promise<number> {
   const { isNoColorTerminal } = await import("./shell/ink-renderer.js");
   const isTty = (input as { isTTY?: boolean }).isTTY === true;
@@ -2513,8 +2711,6 @@ async function runPlainTui(
     onShiftTab: () => handleTuiKeypress("shift-tab", context, output),
     shouldMaskInput: () => context.pendingModelSetup?.step === "apiKey",
   })) {
-    process.removeListener("SIGINT", sigintHandler);
-    process.once("SIGINT", sigintHandler);
     const result = await processTuiLine(line, context, gateway, output, store);
     if (result === "exit") return 0;
 
@@ -2600,13 +2796,12 @@ async function runInkShell(
   gateway: ModelGateway,
   store: SessionStore,
   startup: TuiStartupState,
-  sigintHandler: () => void,
 ): Promise<number> {
   const { renderInkShell, isNoColorTerminal, shouldUseInkShell } = await import(
     "./shell/ink-renderer.js"
   );
   if (!shouldUseInkShell(input, output)) {
-    return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
+    return await runPlainTui(input, output, context, gateway, store, startup);
   }
   // D.13Q-UX Closure: 标记 ink session，让 /btw / /sessions / /resume 等
   // handler 选择 panel 路径（而不是 plain TUI 的 writeLine fallback）。
@@ -2707,8 +2902,6 @@ async function runInkShell(
       });
     },
     onInput: async (event: ShellInputEvent) => {
-      process.removeListener("SIGINT", sigintHandler);
-      process.once("SIGINT", sigintHandler);
       if (event.type === "escape") {
         submittedPending = false;
         if (context.transcriptSelectionState) {
@@ -3884,7 +4077,7 @@ async function runInkShell(
     );
     writePlainShell(output, controller.getViewModel());
     if (activityTicker) clearInterval(activityTicker);
-    return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
+    return await runPlainTui(input, output, context, gateway, store, startup);
   }
   try {
     return await exitPromise;

@@ -136,13 +136,16 @@ export function recordConfirmedContextUsage(context: TuiContext, usage: ModelUsa
   const contextWindowTokens = getContextWindowTokens(context);
   const compactTriggerTokens = getCompactTriggerTokens(context);
   const existing = context.cache.contextUsage;
+  const confirmedEstimatedChars = confirmedUsedTokens * LINGHUN_BYTES_PER_TOKEN;
   context.cache.contextUsage = {
     ...(existing ?? {
-      estimatedChars: confirmedUsedTokens * LINGHUN_BYTES_PER_TOKEN,
+      estimatedChars: confirmedEstimatedChars,
       maxChars: contextWindowTokens * LINGHUN_BYTES_PER_TOKEN,
       updatedAt: new Date().toISOString(),
       source: "provider_usage" as const,
     }),
+    estimatedChars: Math.max(existing?.estimatedChars ?? 0, confirmedEstimatedChars),
+    maxChars: contextWindowTokens * LINGHUN_BYTES_PER_TOKEN,
     updatedAt: new Date().toISOString(),
     confirmedUsedTokens,
     contextWindowTokens,
@@ -349,6 +352,12 @@ export async function handleCompactCommand(
       return;
     }
     const progress = createDeepCompactProgress();
+    const compactAbortController = context.activeAbortController ?? new AbortController();
+    const ownsAbortController = context.activeAbortController === undefined;
+    if (ownsAbortController) {
+      context.activeAbortController = compactAbortController;
+      context.tools.abortSignal = compactAbortController.signal;
+    }
     context.cache.compactProgress = progress;
     context.shellRerender?.();
     let result: Awaited<ReturnType<typeof runDeepCompact>> | undefined;
@@ -359,11 +368,18 @@ export async function handleCompactCommand(
         runtime,
         trigger: "manual",
         gateway: context.modelGateway,
+        signal: compactAbortController.signal,
         deps: compactPreflightDeps.runDeepCompact,
       });
     } finally {
       if (context.cache.compactProgress === progress) {
         context.cache.compactProgress = undefined;
+      }
+      if (ownsAbortController && context.activeAbortController === compactAbortController) {
+        context.activeAbortController = undefined;
+        if (context.tools.abortSignal === compactAbortController.signal) {
+          context.tools.abortSignal = undefined;
+        }
       }
       context.shellRerender?.();
     }

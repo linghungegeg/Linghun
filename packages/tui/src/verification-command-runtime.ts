@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
@@ -29,6 +29,7 @@ import { isRecord } from "./tui-state-runtime.js";
 export async function createVerificationPlan(
   projectPath: string,
   mode: "default" | "smoke" | "focused" | "real-smoke",
+  options: { workspaceRoot?: string; changedFiles?: string[] } = {},
 ): Promise<VerificationStep[]> {
   if (mode === "smoke") {
     return [
@@ -40,6 +41,13 @@ export async function createVerificationPlan(
         synthetic: true,
       },
     ];
+  }
+
+  if (mode === "focused" && options.changedFiles !== undefined) {
+    return createChangedFilesFocusedPlan(
+      resolve(options.workspaceRoot ?? projectPath),
+      options.changedFiles,
+    );
   }
 
   const packageJson = await safeReadJson(join(projectPath, "package.json"));
@@ -67,7 +75,9 @@ export async function createVerificationPlan(
       const focused = steps.filter(
         (step) => step.kind === "typecheck" || step.kind === "test" || step.kind === "lint",
       );
-      return focused.length > 0 ? focused : steps.slice(0, 1);
+      if (focused.length > 0) return focused;
+      const lightweightFallback = steps.find((step) => step.kind === "smoke") ?? steps[0];
+      return lightweightFallback ? [lightweightFallback] : [];
     }
     return steps;
   }
@@ -90,6 +100,209 @@ export async function createVerificationPlan(
       synthetic: true,
     },
   ];
+}
+
+async function createChangedFilesFocusedPlan(
+  workspaceRoot: string,
+  changedFiles: string[],
+): Promise<VerificationStep[]> {
+  const canonicalWorkspaceRoot = await realpath(workspaceRoot).catch(() => undefined);
+  if (!canonicalWorkspaceRoot) return [];
+  const normalizedChanges: string[] = [];
+  for (const file of changedFiles) {
+    const normalized = normalizeWorkspaceRelativePath(workspaceRoot, file);
+    if (
+      normalized &&
+      await pathResolvesWithinWorkspace(workspaceRoot, canonicalWorkspaceRoot, normalized)
+    ) {
+      normalizedChanges.push(normalized);
+    }
+  }
+  const rejectedCount = changedFiles.length - normalizedChanges.length;
+  if (normalizedChanges.some(isRootVerificationConfig)) {
+    return createProjectScriptPlan(workspaceRoot, "focused", workspaceRoot);
+  }
+
+  const packageManager = await detectPackageManager(workspaceRoot);
+  const rootPackageJson = await safeReadJson(join(workspaceRoot, "package.json"));
+  const rootScripts = isRecord(rootPackageJson?.scripts) ? rootPackageJson.scripts : {};
+  const rootOwnsVitest = typeof rootScripts.test === "string" && /(?:^|\s)vitest(?:\s|$)/u.test(rootScripts.test);
+  const packageChanges = new Map<string, string[]>();
+  for (const changedFile of normalizedChanges) {
+    const packageRoot = await findNearestPackageRoot(
+      workspaceRoot,
+      canonicalWorkspaceRoot,
+      changedFile,
+    );
+    const files = packageChanges.get(packageRoot) ?? [];
+    files.push(changedFile);
+    packageChanges.set(packageRoot, files);
+  }
+
+  const steps: VerificationStep[] = [];
+  const coverageGaps: string[] = rejectedCount > 0
+    ? [`${rejectedCount} changed path(s) were outside the workspace or unsafe for focused verification.`]
+    : [];
+  for (const [packageRoot, files] of [...packageChanges.entries()].sort(([left], [right]) =>
+    left.localeCompare(right)
+  )) {
+    const packageJson = await safeReadJson(join(packageRoot, "package.json"));
+    const scripts = isRecord(packageJson?.scripts) ? packageJson.scripts : {};
+    const packageSteps: VerificationStep[] = [];
+    addPackageStep(packageSteps, scripts, "typecheck", "typecheck", "TypeScript 类型检查。 ", packageManager, packageRoot);
+    const packageOwnsTests = packageRoot !== workspaceRoot && typeof scripts.test === "string";
+    if (packageOwnsTests) {
+      addPackageStep(packageSteps, scripts, "test", "test", "包级测试套件。 ", packageManager, packageRoot);
+    }
+    addPackageStep(packageSteps, scripts, "lint", "lint", "lint 静态检查。 ", packageManager, packageRoot);
+
+    let hasRelevantTest = packageOwnsTests;
+    if (!packageOwnsTests && rootOwnsVitest) {
+      const targets = await findExactRootVitestTargets(
+        workspaceRoot,
+        canonicalWorkspaceRoot,
+        files,
+      );
+      for (const target of targets) {
+        packageSteps.push({
+          kind: "test",
+          command: formatTargetedTestCommand(packageManager, target),
+          reason: `根级 Vitest 精确验证 ${target}。`,
+          cwd: workspaceRoot,
+        });
+      }
+      hasRelevantTest = targets.length > 0;
+    }
+    if (!hasRelevantTest) {
+      coverageGaps.push(
+        `No relevant focused test was found for ${relative(workspaceRoot, packageRoot).replaceAll("\\", "/") || "."}.`,
+      );
+    }
+    steps.push(...packageSteps);
+  }
+
+  if (steps.length > 0 && coverageGaps.length > 0) {
+    steps[0] = { ...steps[0], coverageGap: [...new Set(coverageGaps)].join(" ") };
+  }
+  return deduplicateVerificationSteps(steps);
+}
+
+async function createProjectScriptPlan(
+  projectPath: string,
+  mode: "default" | "focused",
+  cwd: string,
+): Promise<VerificationStep[]> {
+  const packageJson = await safeReadJson(join(projectPath, "package.json"));
+  const scripts = isRecord(packageJson?.scripts) ? packageJson.scripts : {};
+  const packageManager = await detectPackageManager(projectPath);
+  const steps: VerificationStep[] = [];
+  addPackageStep(steps, scripts, "typecheck", "typecheck", "TypeScript 类型检查。 ", packageManager, cwd);
+  addPackageStep(steps, scripts, "test", "test", "项目测试套件。 ", packageManager, cwd);
+  addPackageStep(steps, scripts, "lint", "lint", "lint 静态检查。 ", packageManager, cwd);
+  if (mode === "default") {
+    addPackageStep(steps, scripts, "build", "build", "构建验证。 ", packageManager, cwd);
+    addPackageStep(steps, scripts, "smoke", "smoke", "项目自定义 smoke 验证。 ", packageManager, cwd);
+  }
+  return mode === "focused"
+    ? steps.filter((step) => step.kind === "typecheck" || step.kind === "test" || step.kind === "lint")
+    : steps;
+}
+
+function normalizeWorkspaceRelativePath(workspaceRoot: string, file: string): string | undefined {
+  if (!file.trim() || /[\u0000-\u001f\u007f]/u.test(file)) return undefined;
+  const absolutePath = resolve(isAbsolute(file) ? file : join(workspaceRoot, file));
+  const workspaceRelative = relative(workspaceRoot, absolutePath);
+  if (!workspaceRelative || workspaceRelative.startsWith("..") || isAbsolute(workspaceRelative)) {
+    return undefined;
+  }
+  return workspaceRelative.replaceAll("\\", "/");
+}
+
+function isRootVerificationConfig(file: string): boolean {
+  if (file.includes("/")) return false;
+  return /^(?:package\.json|pnpm-workspace\.yaml|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?|vitest\.config\.[^.]+|tsconfig(?:\.[^.]+)?\.json)$/u.test(file);
+}
+
+async function pathResolvesWithinWorkspace(
+  workspaceRoot: string,
+  canonicalWorkspaceRoot: string,
+  workspaceRelativePath: string,
+): Promise<boolean> {
+  let candidate = join(workspaceRoot, workspaceRelativePath);
+  while (true) {
+    const canonicalCandidate = await realpath(candidate).catch(() => undefined);
+    if (canonicalCandidate) {
+      return canonicalPathIsWithin(canonicalWorkspaceRoot, canonicalCandidate);
+    }
+    const parent = dirname(candidate);
+    if (parent === candidate) return false;
+    candidate = parent;
+  }
+}
+
+function canonicalPathIsWithin(canonicalRoot: string, canonicalPath: string): boolean {
+  const canonicalRelative = relative(canonicalRoot, canonicalPath);
+  return canonicalRelative === "" || (!canonicalRelative.startsWith("..") && !isAbsolute(canonicalRelative));
+}
+
+async function findNearestPackageRoot(
+  workspaceRoot: string,
+  canonicalWorkspaceRoot: string,
+  changedFile: string,
+): Promise<string> {
+  let candidate = dirname(join(workspaceRoot, changedFile));
+  while (candidate !== workspaceRoot) {
+    if (await fileExists(join(candidate, "package.json"))) {
+      const canonicalPackageRoot = await realpath(candidate).catch(() => undefined);
+      return canonicalPackageRoot && canonicalPathIsWithin(canonicalWorkspaceRoot, canonicalPackageRoot)
+        ? candidate
+        : workspaceRoot;
+    }
+    const parent = dirname(candidate);
+    if (parent === candidate || relative(workspaceRoot, parent).startsWith("..")) break;
+    candidate = parent;
+  }
+  return workspaceRoot;
+}
+
+async function findExactRootVitestTargets(
+  workspaceRoot: string,
+  canonicalWorkspaceRoot: string,
+  changedFiles: string[],
+): Promise<string[]> {
+  const targets = new Set<string>();
+  for (const changedFile of changedFiles) {
+    const candidates = /\.(?:test|spec)\.[cm]?[jt]sx?$/u.test(changedFile)
+      ? [changedFile]
+      : changedFile.match(/\.[cm]?[jt]sx?$/u)
+        ? [
+            changedFile.replace(/(\.[cm]?[jt]sx?)$/u, ".test$1"),
+            changedFile.replace(/(\.[cm]?[jt]sx?)$/u, ".spec$1"),
+          ]
+        : [];
+    for (const candidate of candidates) {
+      if (!/^[A-Za-z0-9_./-]+$/u.test(candidate)) continue;
+      const normalized = normalizeWorkspaceRelativePath(workspaceRoot, candidate);
+      if (
+        normalized === candidate &&
+        await fileExists(join(workspaceRoot, candidate)) &&
+        await pathResolvesWithinWorkspace(workspaceRoot, canonicalWorkspaceRoot, candidate)
+      ) {
+        targets.add(candidate);
+      }
+    }
+  }
+  return [...targets].sort();
+}
+
+function deduplicateVerificationSteps(steps: VerificationStep[]): VerificationStep[] {
+  const seen = new Set<string>();
+  return steps.filter((step) => {
+    const key = `${step.kind}\u0000${step.cwd ?? ""}\u0000${step.command}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function createVerificationUnavailableReport(
@@ -145,11 +358,12 @@ export function addPackageStep(
   kind: VerificationStepKind,
   reason: string,
   packageManager: PackageManager = "pnpm",
+  cwd?: string,
 ): void {
   if (typeof scripts[scriptName] !== "string") {
     return;
   }
-  steps.push({ kind, command: formatPackageManagerCommand(packageManager, scriptName), reason });
+  steps.push({ kind, command: formatPackageManagerCommand(packageManager, scriptName), reason, cwd });
 }
 
 function createRealSmokePlan(
@@ -211,6 +425,11 @@ function formatPackageManagerCommand(packageManager: PackageManager, scriptName:
   if (packageManager === "yarn") return `corepack yarn ${scriptName}`;
   if (packageManager === "bun") return `bun run ${scriptName}`;
   return `corepack pnpm ${scriptName}`;
+}
+
+function formatTargetedTestCommand(packageManager: PackageManager, target: string): string {
+  const command = formatPackageManagerCommand(packageManager, "test");
+  return packageManager === "npm" ? `${command} -- ${target}` : `${command} ${target}`;
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -345,8 +564,8 @@ export async function runVerificationPlan(
     writeLine(output, report.summary);
     return report;
   }
-  const effectivePlan = orchestration.shouldDegrade && plan.length > 1 ? plan.slice(0, 1) : plan;
-  const skippedByDegrade = plan.length - effectivePlan.length;
+  const effectivePlan = plan;
+  const skippedByDegrade = 0;
   const logRoot = join(
     resolveStoragePaths(context.config, context.projectPath).logs,
     "verification",
@@ -382,32 +601,34 @@ export async function runVerificationPlan(
     nextAction: "等待 PASS / FAIL / PARTIAL 结果，失败后按建议修复并复跑 /verify。",
   };
   rememberBackgroundTask(context, task);
-  await context.store.appendEvent(sessionId, {
-    type: "verification_start",
-    run: { id: runId, plan: effectivePlan, startedAt },
-    createdAt: startedAt,
-  });
-  await appendBackgroundTaskEvent(context, sessionId, task);
-  await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
-    stepId: "verification",
-    executor: "verification-runtime",
-    status: "consumed",
-    summary: `mode=${orchestration.mode}; run=${runId}; steps=${effectivePlan.length}; skipped=${skippedByDegrade}`,
-  });
-  writeLine(output, formatBackgroundTask(task, context.language));
-
   const results: VerificationCommandResult[] = [];
-  const unverified: string[] =
-    skippedByDegrade > 0
-      ? [
-          `meta orchestration degrade skipped ${skippedByDegrade} verification step(s): ${orchestration.reason}`,
-        ]
-      : [];
+  const unverified: string[] = [
+    ...new Set(effectivePlan.map((step) => step.coverageGap).filter((gap): gap is string => Boolean(gap))),
+    ...(effectivePlan.length === 0 ? ["verification plan contained no executable steps"] : []),
+    ...(skippedByDegrade > 0
+      ? [`meta orchestration degrade skipped ${skippedByDegrade} verification step(s): ${orchestration.reason}`]
+      : []),
+  ];
   const risk: string[] =
     skippedByDegrade > 0
       ? ["Verification was degraded by meta orchestration; do not claim full verification PASS."]
       : [];
+  let report: VerificationReport | undefined;
   try {
+    await context.store.appendEvent(sessionId, {
+      type: "verification_start",
+      run: { id: runId, plan: effectivePlan, startedAt },
+      createdAt: startedAt,
+    });
+    await appendBackgroundTaskEvent(context, sessionId, task);
+    await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
+      stepId: "verification",
+      executor: "verification-runtime",
+      status: "consumed",
+      summary: `mode=${orchestration.mode}; run=${runId}; steps=${effectivePlan.length}; skipped=${skippedByDegrade}`,
+    });
+    writeLine(output, formatBackgroundTask(task, context.language));
+
     for (const [index, step] of effectivePlan.entries()) {
       const stepStarted = Date.now();
       task.currentStep = `${step.kind} ${index + 1}/${plan.length}`;
@@ -422,7 +643,8 @@ export async function runVerificationPlan(
         task.updatedAt = new Date().toISOString();
         void appendBackgroundTaskEvent(context, sessionId, task).catch(() => undefined);
       }, task.heartbeatIntervalMs);
-      const result = await runVerificationCommand(step.command, cwd, controller.signal).finally(
+      const stepCwd = resolve(step.cwd ?? cwd);
+      const result = await runVerificationCommand(step.command, stepCwd, controller.signal).finally(
         () => clearInterval(heartbeat),
       );
       const durationMs = Date.now() - stepStarted;
@@ -490,8 +712,10 @@ export async function runVerificationPlan(
     const timedOut = results.filter((item) => item.status === "timeout");
     const stale = results.filter((item) => item.status === "stale");
     const hasRunnerError = partial.some((item) => item.runnerError);
-    const status: VerificationReport["status"] =
-      cancelled.length > 0
+    let status: VerificationReport["status"] =
+      results.length === 0
+        ? "partial"
+        : cancelled.length > 0
         ? "cancelled"
         : timedOut.length > 0
           ? "timeout"
@@ -504,14 +728,19 @@ export async function runVerificationPlan(
                 : "pass";
     const syntheticOnlyPass =
       status === "pass" && results.every((item) => item.synthetic === true || item.status !== "pass");
-    const report: VerificationReport = {
+    if (syntheticOnlyPass) {
+      status = "partial";
+      unverified.push("synthetic self-check passed, but real verification did not run");
+      risk.push("Synthetic self-check success cannot support a verification PASS claim.");
+    }
+    report = {
       id: runId,
       status,
       summary:
-        status === "pass"
-          ? syntheticOnlyPass
-            ? "SELF-CHECK：synthetic self-check 已通过；真实验证未运行，不能作为真实 PASS 证据。"
-            : `PASS：${results.length} 个验证步骤通过。`
+        syntheticOnlyPass
+          ? "PARTIAL：synthetic self-check 已通过；真实验证未运行，不能作为真实 PASS 证据。"
+          : status === "pass"
+            ? `PASS：${results.length} 个验证步骤通过。`
           : status === "fail"
             ? `FAIL：${failed.length}/${results.length} 个验证步骤失败。`
             : status === "cancelled"
@@ -531,37 +760,71 @@ export async function runVerificationPlan(
       endedAt,
       durationMs: Date.parse(endedAt) - Date.parse(startedAt),
       nextAction:
-        status === "pass"
+        syntheticOnlyPass
+          ? "补充并运行真实 focused/smoke/test 验证后再声明 PASS。"
+          : status === "pass"
           ? "可继续审查结果或进入交付总结。"
           : hasRunnerError
             ? "查看 runner error 日志，记录 Node 版本，并建议用 Node 22 LTS 复核。"
             : "先查看失败命令与日志，修复后复跑 /verify。",
       scope,
     };
-    task.status =
-      status === "fail"
-        ? "failed"
-        : status === "cancelled" || status === "timeout" || status === "stale"
-          ? status
-          : "completed";
-    task.result = status;
-    task.currentStep = status === "pass" ? "verification finished" : `verification ${status}`;
-    task.progress = { completed: results.length, total: effectivePlan.length, label: "verify" };
-    task.updatedAt = endedAt;
-    task.nextAction = report.nextAction;
-    task.userVisibleSummary = report.summary;
-    await appendBackgroundTaskEvent(context, sessionId, task);
+    return report;
+  } catch (error) {
+    const endedAt = new Date().toISOString();
+    const ownerStale =
+      options.commitGuard?.() === false ||
+      context.latestVerificationRunIds?.get(ownerKey) !== runId;
+    const status: VerificationReport["status"] = controller.signal.aborted
+      ? "cancelled"
+      : ownerStale
+        ? "stale"
+        : "partial";
+    const message = error instanceof Error ? error.message : String(error);
+    report = {
+      id: runId,
+      status,
+      summary:
+        status === "cancelled"
+          ? "CANCELLED：验证在异常处理期间被取消，未生成 PASS 证据。"
+          : status === "stale"
+            ? "STALE：验证在异常处理期间失去 owner，未生成 PASS 证据。"
+            : "PARTIAL：验证运行时发生异常，未生成 PASS 证据。",
+      commands: results,
+      unverified: [...unverified, `verification runtime error: ${message}`],
+      risk: [...risk, "Verification runtime did not reach a clean terminal persist."],
+      logPath: logRoot,
+      startedAt,
+      endedAt,
+      durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+      nextAction: "查看 verification runtime 错误并复跑最小验证。",
+      scope,
+    };
+    return report;
+  } finally {
+    if (!report) {
+      const endedAt = new Date().toISOString();
+      report = {
+        id: runId,
+        status: controller.signal.aborted ? "cancelled" : "partial",
+        summary: controller.signal.aborted
+          ? "CANCELLED：验证已取消，未生成 PASS 证据。"
+          : "PARTIAL：验证未形成终态报告，未生成 PASS 证据。",
+        commands: results,
+        unverified: [...unverified, "verification finalizer created a fallback terminal report"],
+        risk: [...risk, "Verification did not produce a normal terminal report."],
+        logPath: logRoot,
+        startedAt,
+        endedAt,
+        durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+        nextAction: "查看 verification runtime 日志并复跑最小验证。",
+        scope,
+      };
+    }
     const passCommitStillValid = (): boolean =>
       !controller.signal.aborted &&
-      task.status !== "cancelled" &&
-      task.status !== "stale" &&
       options.commitGuard?.() !== false &&
       context.latestVerificationRunIds?.get(ownerKey) === runId;
-    await context.store.appendEvent(sessionId, {
-      type: "verification_end",
-      report,
-      createdAt: endedAt,
-    }, report.status === "pass" ? passCommitStillValid : undefined);
     if (report.status === "pass" && !passCommitStillValid()) {
       report.status = controller.signal.aborted ? "cancelled" : "stale";
       report.summary = controller.signal.aborted
@@ -569,26 +832,81 @@ export async function runVerificationPlan(
         : "STALE：验证在提交 PASS 前失去 owner，未生成 PASS 证据。";
       report.unverified.push(`${report.status}: owner changed before PASS commit.`);
       report.risk.push("Verification PASS was discarded before commit.");
-      task.status = report.status;
-      task.result = report.status;
-      task.currentStep = `verification ${report.status}`;
-      task.userVisibleSummary = report.summary;
-      await appendBackgroundTaskEvent(context, sessionId, task);
+    }
+    task.status =
+      report.status === "fail"
+        ? "failed"
+        : report.status === "cancelled" || report.status === "timeout" || report.status === "stale"
+          ? report.status
+          : "completed";
+    task.result = report.status;
+    task.currentStep = report.status === "pass" ? "verification finished" : `verification ${report.status}`;
+    task.progress = { completed: results.length, total: effectivePlan.length, label: "verify" };
+    task.updatedAt = report.endedAt;
+    task.nextAction = report.nextAction;
+    task.userVisibleSummary = report.summary;
+    let terminalTaskPersisted = true;
+    await appendBackgroundTaskEvent(context, sessionId, task).catch((error) => {
+      terminalTaskPersisted = false;
+      report!.risk.push(`verification task terminal persist failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    let reportChangedAfterTaskPersist = false;
+    await context.store.appendEvent(sessionId, {
+      type: "verification_end",
+      report,
+      createdAt: report.endedAt,
+    }, report.status === "pass" ? passCommitStillValid : undefined).catch((error) => {
+      if (report!.status === "pass") {
+        report!.status = "partial";
+        report!.summary = "PARTIAL：验证命令通过，但终态证据持久化失败，不能作为 PASS 证据。";
+        report!.unverified.push("verification terminal evidence was not persisted");
+        reportChangedAfterTaskPersist = true;
+      }
+      report!.risk.push(`verification end persist failed: ${error instanceof Error ? error.message : String(error)}`);
+      task.status = "completed";
+      task.result = report!.status;
+      task.currentStep = `verification ${report!.status}`;
+      task.userVisibleSummary = report!.summary;
+    });
+    if (reportChangedAfterTaskPersist) {
       await context.store.appendEvent(sessionId, {
         type: "verification_end",
         report,
         createdAt: new Date().toISOString(),
+      }).catch((error) => {
+        report!.risk.push(`verification end retry failed: ${error instanceof Error ? error.message : String(error)}`);
       });
+    }
+    if (!terminalTaskPersisted || reportChangedAfterTaskPersist) {
+      await appendBackgroundTaskEvent(context, sessionId, task).catch((error) => {
+        report!.risk.push(`verification task terminal retry failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+    if (report.status === "pass" && !passCommitStillValid()) {
+      report.status = controller.signal.aborted ? "cancelled" : "stale";
+      report.summary = controller.signal.aborted
+        ? "CANCELLED：验证在提交 PASS 时已取消，未生成 PASS 证据。"
+        : "STALE：验证在提交 PASS 时失去 owner，未生成 PASS 证据。";
+      report.unverified.push(`${report.status}: owner changed during PASS commit.`);
+      report.risk.push("Verification PASS was discarded during commit.");
+      task.status = report.status;
+      task.result = report.status;
+      task.currentStep = `verification ${report.status}`;
+      task.userVisibleSummary = report.summary;
+      await appendBackgroundTaskEvent(context, sessionId, task).catch(() => undefined);
+      await context.store.appendEvent(sessionId, {
+        type: "verification_end",
+        report,
+        createdAt: new Date().toISOString(),
+      }).catch(() => undefined);
     }
     await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
       stepId: "verification",
       executor: "verification-runtime",
       status: report.status === "pass" ? "completed" : report.status === "fail" ? "failed" : "degraded",
-      summary: `${report.status}; run=${runId}; commands=${results.length}; unverified=${unverified.length}`,
+      summary: `${report.status}; run=${runId}; commands=${results.length}; unverified=${report.unverified.length}`,
       level: report.status === "pass" ? "info" : "warning",
-    });
-    return report;
-  } finally {
+    }).catch(() => undefined);
     options.ownerSignal?.removeEventListener("abort", abortFromOwner);
     if (context.activeVerificationAbortControllers?.get(runId) === controller) {
       context.activeVerificationAbortControllers.delete(runId);

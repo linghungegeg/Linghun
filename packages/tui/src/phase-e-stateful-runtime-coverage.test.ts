@@ -47,6 +47,7 @@ import {
 import { hydrateResumeContext, loadOrCreateHandoffPacket } from "./handoff-session-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { createMcpStdioRunner, runMcpStdioToolCall } from "./mcp-stdio-runtime.js";
+import { mcpSseRequest, type McpTransportLimits } from "./mcp-sse-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { buildModelMessagesWithRecentContext } from "./model-stream-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
@@ -65,6 +66,13 @@ import {
   createRemoteState,
 } from "./tui-state-runtime.js";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
+
+const SMALL_MCP_LIMITS: McpTransportLimits = {
+  maxFrameBytes: 256,
+  maxStreamBytes: 2_048,
+  maxFrames: 8,
+  maxStderrBytes: 32,
+};
 
 describe("Phase E MCP stdio runtime coverage", () => {
   it("covers tools/call ok, tool-not-found, timeout, and spawn error paths", async () => {
@@ -263,6 +271,269 @@ describe("Phase E MCP stdio runtime coverage", () => {
         idleTimeoutMs: 1_000,
       }),
     ).resolves.toMatchObject({ ok: false, errorCode: "ETIMEDOUT" });
+  });
+
+  it("fails closed when an unterminated stdio frame exceeds the request-local limit", async () => {
+    const server = await createMcpServerScript(`
+      process.stdout.write("x".repeat(257));
+      setTimeout(() => {}, 10_000);
+    `);
+    const result = await createMcpStdioRunner({
+      server,
+      cwd: server.cwd,
+      timeoutMs: 5_000,
+      label: "mcp-stdio-frame-limit-test",
+      timeoutSummary: "timeout",
+      captureStderr: false,
+      limits: SMALL_MCP_LIMITS,
+      run: async (sendRequest) => await sendRequest("initialize", {}),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: "MCP_STDIO_FRAME_TOO_LARGE",
+    });
+  });
+
+  it("bounds stdio frame count and retained stderr without a second accumulator", async () => {
+    const frameServer = await createMcpServerScript(`
+      for (let index = 0; index < 9; index += 1) console.log("noise-" + index);
+      setTimeout(() => {}, 10_000);
+    `);
+    const frameResult = await createMcpStdioRunner({
+      server: frameServer,
+      cwd: frameServer.cwd,
+      timeoutMs: 5_000,
+      label: "mcp-stdio-frame-count-test",
+      timeoutSummary: "timeout",
+      captureStderr: false,
+      limits: SMALL_MCP_LIMITS,
+      run: async (sendRequest) => await sendRequest("initialize", {}),
+    });
+    expect(frameResult).toMatchObject({
+      ok: false,
+      errorCode: "MCP_STDIO_FRAME_LIMIT_EXCEEDED",
+    });
+
+    const stderrServer = await createMcpServerScript(`
+      process.stderr.write("stderr-prefix-" + "z".repeat(128));
+      process.exit(7);
+    `);
+    const stderrResult = await createMcpStdioRunner({
+      server: stderrServer,
+      cwd: stderrServer.cwd,
+      timeoutMs: 5_000,
+      label: "mcp-stdio-stderr-limit-test",
+      timeoutSummary: "timeout",
+      captureStderr: true,
+      limits: SMALL_MCP_LIMITS,
+      run: async (sendRequest) => await sendRequest("initialize", {}),
+    });
+    expect(stderrResult).toMatchObject({ ok: false });
+    if (!stderrResult.ok) {
+      expect(stderrResult.summary).toContain("stderr-prefix-");
+      expect(stderrResult.summary).toContain("[stderr truncated]");
+      expect(stderrResult.summary).not.toContain("z".repeat(64));
+    }
+  });
+
+  it("fails closed when cumulative stdio output exceeds the stream limit", async () => {
+    const server = await createMcpServerScript(`
+      for (let index = 0; index < 3; index += 1) console.log("x".repeat(200));
+      setTimeout(() => {}, 10_000);
+    `);
+    const result = await createMcpStdioRunner({
+      server,
+      cwd: server.cwd,
+      timeoutMs: 5_000,
+      label: "mcp-stdio-stream-limit-test",
+      timeoutSummary: "timeout",
+      captureStderr: false,
+      limits: { ...SMALL_MCP_LIMITS, maxStreamBytes: 512, maxFrames: 100 },
+      run: async (sendRequest) => await sendRequest("initialize", {}),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: "MCP_STDIO_STREAM_LIMIT_EXCEEDED",
+    });
+  });
+});
+
+describe("Phase E MCP SSE bounded transport coverage", () => {
+  it("rejects oversized JSON and unterminated SSE bodies with structured errors", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () =>
+        new Response("x".repeat(257), {
+          headers: { "content-type": "application/json" },
+        })) as typeof fetch;
+      await expect(
+        mcpSseRequest("https://mcp.test/json", "tools/list", {}, 5_000, undefined, undefined, 5_000, SMALL_MCP_LIMITS),
+      ).resolves.toMatchObject({ ok: false, errorCode: "MCP_SSE_BODY_TOO_LARGE" });
+
+      globalThis.fetch = (async () =>
+        new Response(`data: ${"x".repeat(257)}`, {
+          headers: { "content-type": "text/event-stream" },
+        })) as typeof fetch;
+      await expect(
+        mcpSseRequest("https://mcp.test/sse", "tools/list", {}, 5_000, undefined, undefined, 5_000, SMALL_MCP_LIMITS),
+      ).resolves.toMatchObject({ ok: false, errorCode: "MCP_SSE_FRAME_TOO_LARGE" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("discards progress frames while preserving heartbeat and the matching response", async () => {
+    const originalFetch = globalThis.fetch;
+    const progressEvents: number[] = [];
+    const limits: McpTransportLimits = {
+      ...SMALL_MCP_LIMITS,
+      maxFrameBytes: 512,
+      maxStreamBytes: 128_000,
+      maxFrames: 1_001,
+    };
+    try {
+      globalThis.fetch = (async (_input, init) => {
+        const request = JSON.parse(String(init?.body)) as { id: number };
+        const progress = `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } })}\n\n`;
+        const response = `data: ${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { ok: true } })}\n\n`;
+        const encoder = new TextEncoder();
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let index = 0; index < 10; index += 1) {
+              controller.enqueue(encoder.encode(progress.repeat(100)));
+            }
+            controller.enqueue(encoder.encode(response));
+            controller.close();
+          },
+        });
+        return new Response(body, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as typeof fetch;
+
+      const result = await mcpSseRequest(
+        "https://mcp.test/progress",
+        "tools/call",
+        {},
+        5_000,
+        undefined,
+        (event) => {
+          if (event.receivedBytes !== undefined) progressEvents.push(event.receivedBytes);
+        },
+        5_000,
+        limits,
+      );
+      expect(result).toMatchObject({ ok: true, data: { ok: true } });
+      expect(progressEvents).toHaveLength(1_001);
+      expect(progressEvents.at(-1)).toBeGreaterThan(progressEvents[0] ?? 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails closed after the bounded SSE frame count instead of retaining progress", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        const progress = `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } })}\n\n`;
+        return new Response(progress.repeat(9), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as typeof fetch;
+
+      await expect(
+        mcpSseRequest("https://mcp.test/count", "tools/call", {}, 5_000, undefined, undefined, 5_000, SMALL_MCP_LIMITS),
+      ).resolves.toMatchObject({
+        ok: false,
+        errorCode: "MCP_SSE_FRAME_LIMIT_EXCEEDED",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("consumes progress when a CRLF frame boundary is split across chunks", async () => {
+    const originalFetch = globalThis.fetch;
+    const progressEvents: number[] = [];
+    try {
+      globalThis.fetch = (async (_input, init) => {
+        const request = JSON.parse(String(init?.body)) as { id: number };
+        const progress = `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } })}\r\n\r\n`;
+        const response = `data: ${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { ok: true } })}\r\n\r\n`;
+        const encoder = new TextEncoder();
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(progress.slice(0, -3)));
+            setTimeout(() => {
+              controller.enqueue(encoder.encode(`${progress.slice(-3)}${response}`));
+              controller.close();
+            }, 30);
+          },
+        });
+        return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      }) as typeof fetch;
+
+      const result = await mcpSseRequest(
+        "https://mcp.test/split-crlf",
+        "tools/call",
+        {},
+        1_000,
+        undefined,
+        (event) => {
+          if (event.receivedBytes !== undefined) progressEvents.push(event.receivedBytes);
+        },
+        100,
+        SMALL_MCP_LIMITS,
+      );
+
+      expect(result).toMatchObject({ ok: true, data: { ok: true } });
+      expect(progressEvents).toHaveLength(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails closed and cancels the reader after the cumulative SSE stream limit", async () => {
+    const originalFetch = globalThis.fetch;
+    let cancelled = false;
+    try {
+      globalThis.fetch = (async () => {
+        const encoder = new TextEncoder();
+        const progress = `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } })}\n\n`;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let index = 0; index < 6; index += 1) {
+              controller.enqueue(encoder.encode(progress));
+            }
+          },
+          cancel() {
+            cancelled = true;
+          },
+        });
+        return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      }) as typeof fetch;
+
+      await expect(
+        mcpSseRequest(
+          "https://mcp.test/stream-limit",
+          "tools/call",
+          {},
+          5_000,
+          undefined,
+          undefined,
+          5_000,
+          { ...SMALL_MCP_LIMITS, maxStreamBytes: 400, maxFrames: 100 },
+        ),
+      ).resolves.toMatchObject({
+        ok: false,
+        errorCode: "MCP_SSE_STREAM_LIMIT_EXCEEDED",
+      });
+      expect(cancelled).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 
@@ -1653,7 +1924,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     await Promise.resolve();
 
     expect(completed).toBe(false);
-    expect(pushedMessageKinds).toEqual(["compact_boundary"]);
+    expect(pushedMessageKinds).toEqual([]);
     expect(projections).toContainEqual({ projectMainScreen: true });
     releaseProjection();
     const result = await run;

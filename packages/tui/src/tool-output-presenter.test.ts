@@ -12,6 +12,58 @@ import {
 
 describe("tool-output-presenter", () => {
   describe("assistant primary sanitizer", () => {
+    it("removes dangerous terminal controls while preserving Markdown and SGR", () => {
+      const raw = [
+        "```ts\nconst ok = true;\n```\n| a | b |\n| - | - |\n",
+        "\u001B]52;c;secret\u0007",
+        "\u001BPdanger\u001B\\",
+        "\u001B[2J\u001B[H\u001B[?25l",
+        "\u001B[32mgreen\u001B[0m",
+      ].join("");
+
+      const out = sanitizeAssistantPrimaryText(raw, "en-US");
+
+      expect(out).toContain("```ts");
+      expect(out).toContain("| a | b |");
+      expect(out).toContain("\u001B[32mgreen\u001B[0m");
+      expect(out).not.toContain("secret");
+      expect(out).not.toContain("danger");
+      expect(out).not.toContain("\u001B[2J");
+      expect(out).not.toContain("\u001B[H");
+      expect(out).not.toContain("\u001B[?25l");
+    });
+
+    it("removes raw and escaped OSC controls split across streamed chunks", () => {
+      const rawSanitizer = createAssistantPrimaryTextSanitizer("en-US");
+      const raw = [
+        rawSanitizer.push("before\u001B]52;c;"),
+        rawSanitizer.push("secret"),
+        rawSanitizer.push("\u0007after"),
+        rawSanitizer.flush(),
+      ].join("");
+      const escapedSanitizer = createAssistantPrimaryTextSanitizer("en-US");
+      const escaped = [
+        escapedSanitizer.push("before\\u00"),
+        escapedSanitizer.push("1b]52;c;secret"),
+        escapedSanitizer.push("\\u0007after"),
+        escapedSanitizer.flush(),
+      ].join("");
+
+      expect(raw).toBe("beforeafter");
+      expect(escaped).toBe("beforeafter");
+    });
+
+    it("bounds an unterminated streamed terminal control", () => {
+      const sanitizer = createAssistantPrimaryTextSanitizer("en-US");
+      const out = [
+        sanitizer.push(`before\u001B]52;c;${"x".repeat(9_000)}`),
+        sanitizer.push("after"),
+        sanitizer.flush(),
+      ].join("");
+
+      expect(out).toBe("beforeafter");
+    });
+
     it("naturalizes internal tool labels in streaming output", () => {
       const text = "没有运行过 RunVerification 来验证测试通过或构建成功。";
       const out = sanitizeAssistantPrimaryText(text, "zh-CN");
@@ -344,11 +396,9 @@ describe("tool-output-presenter", () => {
       expect(bash.preview).toContain("✓ ok");
       expect(bash.preview).not.toContain('{"text"');
       expect(bash.preview).not.toContain("\\u001b");
-      expect(bash.preview).not.toContain("[32m");
       expect(artifactLine.preview).toContain("FAIL");
       expect(artifactLine.preview).not.toContain('{"text"');
       expect(artifactLine.preview).not.toContain("\\u001b");
-      expect(artifactLine.preview).not.toContain("[31m");
     });
 
     it("summarizes test reporter JSON before Bash summary-first routing", () => {

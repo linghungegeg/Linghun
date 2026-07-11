@@ -17,19 +17,21 @@ import {
   applyMemoryExtractionDecision,
   decideMemoryExtraction,
   findUnsavableReason,
-  refreshAutoMemoryFiles,
   topicForSummary,
-  writeAutoMemoryFiles,
   type MemoryExtractionDecision,
+  type PersistentMemoryCommitResult,
 } from "./memory-extraction-runtime.js";
 import {
-  appendMemoryTombstone,
   createAiSessionsImportOrigin,
   isMemoryTombstoned,
-  rememberMemoryTombstone,
 } from "./memory-tombstone-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
-import type { MemoryCandidate, MemoryLearningRun, MemoryTaxonomy } from "./tui-data-types.js";
+import type {
+  MemoryCandidate,
+  MemoryLearningRun,
+  MemoryScope,
+  MemoryTaxonomy,
+} from "./tui-data-types.js";
 import {
   createEvidenceBackedMemoryCandidates,
   createLinghunMdTemplate,
@@ -41,7 +43,6 @@ import {
   formatMemoryStats,
   formatMemoryStatus,
   formatMemoryStorage,
-  getMemoryDirectory,
   parseMemoryCandidateArgs,
   removeMemoryFromState,
   removeMemoryRecord,
@@ -279,8 +280,12 @@ export async function handleMemoryCommand(
       "manual /memory candidate",
       ["user:/memory candidate"],
     );
-    context.memory.candidates.unshift(candidate);
-    await writeMemoryRecord(candidate, context);
+    const commit = await writeMemoryRecord(candidate, context);
+    if (!memoryCommitAccepted(context, candidate, commit)) {
+      writeLine(output, `候选记忆未提交：${commit?.status ?? "stale"}`);
+      return;
+    }
+    if (candidate.scope === "session") context.memory.candidates.unshift(candidate);
     const sessionId = await deps().ensureSession(context);
     await context.store.appendEvent(sessionId, {
       type: "memory_candidate",
@@ -461,6 +466,44 @@ async function appendMemoryLifecycleEvent(
   );
 }
 
+function applyPersistentMemoryCommit(
+  context: TuiContext,
+  scope: Exclude<MemoryScope, "session">,
+  result: PersistentMemoryCommitResult,
+): void {
+  const replaceScope = (items: MemoryCandidate[], status: MemoryCandidate["status"]): MemoryCandidate[] => [
+    ...result.records.filter((item) => item.status === status),
+    ...items.filter((item) => item.scope !== scope),
+  ];
+  context.memory.candidates = replaceScope(context.memory.candidates, "candidate");
+  context.memory.accepted = replaceScope(context.memory.accepted, "accepted");
+  context.memory.rejected = replaceScope(context.memory.rejected, "rejected");
+  context.memory.disabled = replaceScope(context.memory.disabled, "disabled");
+  context.memory.retired = replaceScope(context.memory.retired, "retired");
+  if (context.memory.tombstones) {
+    for (const id of result.tombstones.ids) context.memory.tombstones.ids.add(id);
+    for (const origin of result.tombstones.origins) context.memory.tombstones.origins.add(origin);
+    for (const key of result.tombstones.logicalKeys) context.memory.tombstones.logicalKeys.add(key);
+    for (const unreadable of result.tombstones.unreadableScopes) {
+      context.memory.tombstones.unreadableScopes.add(unreadable);
+    }
+    context.memory.tombstones.diagnostics.push(...result.tombstones.diagnostics);
+  } else {
+    context.memory.tombstones = result.tombstones;
+  }
+}
+
+function memoryCommitAccepted(
+  context: TuiContext,
+  memory: MemoryCandidate,
+  result: PersistentMemoryCommitResult | undefined,
+): boolean {
+  if (memory.scope === "session") return true;
+  if (!result) return false;
+  applyPersistentMemoryCommit(context, memory.scope, result);
+  return result.status === "committed";
+}
+
 export async function executeMemoryMutation(
   context: TuiContext,
   output: Writable,
@@ -468,12 +511,15 @@ export async function executeMemoryMutation(
 ): Promise<void> {
   if (mutation.action === "accept") {
     const accepted = { ...mutation.candidate, status: "accepted" as const };
-    await writeMemoryRecord(accepted, context);
-    if (accepted.taxonomy && accepted.scope !== "session") {
-      await writeAutoMemoryFiles(getMemoryDirectory(accepted.scope, context), accepted);
+    const commit = await writeMemoryRecord(accepted, context, { expected: mutation.candidate });
+    if (!memoryCommitAccepted(context, accepted, commit)) {
+      writeLine(output, `记忆接受未提交：${commit?.status ?? "stale"}`);
+      return;
     }
-    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== accepted.id);
-    context.memory.accepted.unshift(accepted);
+    if (accepted.scope === "session") {
+      context.memory.candidates = context.memory.candidates.filter((item) => item.id !== accepted.id);
+      context.memory.accepted.unshift(accepted);
+    }
     const sessionId = await deps().ensureSession(context);
     await context.store.appendEvent(sessionId, {
       type: "memory_accepted",
@@ -491,9 +537,15 @@ export async function executeMemoryMutation(
   }
   if (mutation.action === "reject") {
     const rejected = { ...mutation.candidate, status: "rejected" as const };
-    await writeMemoryRecord(rejected, context);
-    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== rejected.id);
-    context.memory.rejected.unshift(rejected);
+    const commit = await writeMemoryRecord(rejected, context, { expected: mutation.candidate });
+    if (!memoryCommitAccepted(context, rejected, commit)) {
+      writeLine(output, `记忆拒绝未提交：${commit?.status ?? "stale"}`);
+      return;
+    }
+    if (rejected.scope === "session") {
+      context.memory.candidates = context.memory.candidates.filter((item) => item.id !== rejected.id);
+      context.memory.rejected.unshift(rejected);
+    }
     const sessionId = await deps().ensureSession(context);
     await appendMemoryLifecycleEvent(context, sessionId, "rejected", rejected);
     await deps().recordMemoryMutationEvidence(context, sessionId, "rejected", rejected);
@@ -503,15 +555,14 @@ export async function executeMemoryMutation(
   }
   if (mutation.action === "disable") {
     const disabled = { ...mutation.memory, status: "disabled" as const };
-    await writeMemoryRecord(disabled, context);
-    context.memory.accepted = context.memory.accepted.filter((item) => item.id !== disabled.id);
-    context.memory.disabled.unshift(disabled);
-    if (disabled.taxonomy && disabled.scope !== "session") {
-      await refreshAutoMemoryFiles(
-        getMemoryDirectory(disabled.scope, context),
-        context.memory.accepted.filter((item) => item.scope === disabled.scope),
-        context.memory.disabled.filter((item) => item.scope === disabled.scope),
-      );
+    const commit = await writeMemoryRecord(disabled, context, { expected: mutation.memory });
+    if (!memoryCommitAccepted(context, disabled, commit)) {
+      writeLine(output, `记忆禁用未提交：${commit?.status ?? "stale"}`);
+      return;
+    }
+    if (disabled.scope === "session") {
+      context.memory.accepted = context.memory.accepted.filter((item) => item.id !== disabled.id);
+      context.memory.disabled.unshift(disabled);
     }
     const sessionId = await deps().ensureSession(context);
     await appendMemoryLifecycleEvent(context, sessionId, "disabled", disabled);
@@ -522,15 +573,14 @@ export async function executeMemoryMutation(
   }
   if (mutation.action === "rollback") {
     const accepted = { ...mutation.memory, status: "accepted" as const };
-    await writeMemoryRecord(accepted, context);
-    context.memory.disabled = context.memory.disabled.filter((item) => item.id !== accepted.id);
-    context.memory.accepted.unshift(accepted);
-    if (accepted.taxonomy && accepted.scope !== "session") {
-      await refreshAutoMemoryFiles(
-        getMemoryDirectory(accepted.scope, context),
-        context.memory.accepted.filter((item) => item.scope === accepted.scope),
-        context.memory.disabled.filter((item) => item.scope === accepted.scope),
-      );
+    const commit = await writeMemoryRecord(accepted, context, { expected: mutation.memory });
+    if (!memoryCommitAccepted(context, accepted, commit)) {
+      writeLine(output, `记忆回滚未提交：${commit?.status ?? "stale"}`);
+      return;
+    }
+    if (accepted.scope === "session") {
+      context.memory.disabled = context.memory.disabled.filter((item) => item.id !== accepted.id);
+      context.memory.accepted.unshift(accepted);
     }
     const sessionId = await deps().ensureSession(context);
     await appendMemoryLifecycleEvent(context, sessionId, "rollback", accepted);
@@ -541,16 +591,15 @@ export async function executeMemoryMutation(
   }
   if (mutation.action === "delete") {
     const sessionId = await deps().ensureSession(context);
-    await persistMemoryDeletionTombstone(context, mutation.memory, sessionId);
-    await removeMemoryRecord(mutation.memory, context);
-    removeMemoryFromState(context.memory, mutation.memory.id);
-    if (mutation.memory.taxonomy && mutation.memory.scope !== "session") {
-      await refreshAutoMemoryFiles(
-        getMemoryDirectory(mutation.memory.scope, context),
-        context.memory.accepted.filter((item) => item.scope === mutation.memory.scope),
-        context.memory.disabled.filter((item) => item.scope === mutation.memory.scope),
-      );
+    const commit = await removeMemoryRecord(mutation.memory, context, {
+      sessionId,
+      requestTurnId: context.currentRequestTurnId,
+    });
+    if (!memoryCommitAccepted(context, mutation.memory, commit)) {
+      writeLine(output, `记忆删除未提交：${commit?.status ?? "stale"}`);
+      return;
     }
+    if (mutation.memory.scope === "session") removeMemoryFromState(context.memory, mutation.memory.id);
     await appendMemoryLifecycleEvent(context, sessionId, "deleted", mutation.memory);
     await deps().recordMemoryMutationEvidence(context, sessionId, "deleted", mutation.memory);
     deps().refreshCacheFreshness(context);
@@ -589,10 +638,13 @@ export async function executeMemoryMutation(
 
 async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryLearningRun> {
   const candidates = createEvidenceBackedMemoryCandidates(context).slice(0, 3);
-  context.memory.candidates.unshift(...candidates);
   const sessionId = await deps().ensureSession(context);
+  let committedCandidates = 0;
   for (const candidate of candidates) {
-    await writeMemoryRecord(candidate, context);
+    const commit = await writeMemoryRecord(candidate, context);
+    if (!memoryCommitAccepted(context, candidate, commit)) continue;
+    committedCandidates += 1;
+    if (candidate.scope === "session") context.memory.candidates.unshift(candidate);
     await context.store.appendEvent(sessionId, {
       type: "memory_candidate",
       candidate,
@@ -601,9 +653,9 @@ async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryL
   }
   const run: MemoryLearningRun = {
     trigger: "manual",
-    candidatesCreated: candidates.length,
+    candidatesCreated: committedCandidates,
     modelCalled: false,
-    ...(candidates.length === 0
+    ...(committedCandidates === 0
       ? { skippedReason: "no bounded evidence/todo/verification/handoff source" }
       : {}),
     createdAt: new Date().toISOString(),
@@ -613,7 +665,7 @@ async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryL
     context,
     sessionId,
     `memory_learning trigger=${run.trigger} candidates=${run.candidatesCreated} modelCalled=no skipped=${run.skippedReason ?? "none"}`,
-    candidates.length === 0 ? "warning" : "info",
+    committedCandidates === 0 ? "warning" : "info",
   );
   deps().refreshCacheFreshness(context);
   return run;
@@ -671,29 +723,31 @@ export async function runAutoLearningOnTurnEnd(
     const existing = context.memory.accepted.find((item) => item.id === decision.id);
     const applied = await applyMemoryExtractionDecision({
       decision,
-      memoryDir: getMemoryDirectory(decision.scope, context),
       existing,
     });
     if (!applied.memory) {
       throw new Error("memory extraction returned no accepted memory");
     }
-    await writeMemoryRecord(applied.memory, context);
-    context.memory.accepted = [
-      applied.memory,
-      ...context.memory.accepted.filter((item) => item.id !== applied.memory?.id),
-    ];
+    const commit = await writeMemoryRecord(applied.memory, context, {
+      expected: existing,
+      commitGuard: owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined,
+    });
+    if (!memoryCommitAccepted(context, applied.memory, commit)) {
+      return createSkippedMemoryLearningRun(`memory_extraction:${commit?.status ?? "stale"}`);
+    }
+    const committedMemory = commit?.memory ?? applied.memory;
     const sessionId = owner?.sessionId ?? (await deps().ensureSession(context));
     await context.store.appendEvent(sessionId, {
       type: "memory_accepted",
-      memory: applied.memory,
+      memory: committedMemory,
       createdAt: new Date().toISOString(),
     });
-    await appendMemoryLifecycleEvent(context, sessionId, `auto_${decision.action}`, applied.memory);
+    await appendMemoryLifecycleEvent(context, sessionId, `auto_${decision.action}`, committedMemory);
     await deps().recordMemoryMutationEvidence(
       context,
       sessionId,
       `auto_${decision.action}`,
-      applied.memory,
+      committedMemory,
     );
     const run: MemoryLearningRun = {
       trigger: "evidence",
@@ -729,25 +783,15 @@ export async function runAutoLearningOnTurnEnd(
       };
     }
     const sessionId = owner?.sessionId ?? (await deps().ensureSession(context));
-    const deletionCommitted = await persistMemoryDeletionTombstone(
-      context,
-      existing,
+    const commit = await removeMemoryRecord(existing, context, {
       sessionId,
-      owner?.requestTurnId,
-      owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined,
-    );
-    if (!deletionCommitted) {
-      return createSkippedMemoryLearningRun("stale_request_owner");
+      requestTurnId: owner?.requestTurnId,
+      commitGuard: owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined,
+    });
+    if (!memoryCommitAccepted(context, existing, commit)) {
+      return createSkippedMemoryLearningRun(`memory_extraction:${commit?.status ?? "stale"}`);
     }
-    await removeMemoryRecord(existing, context);
-    removeMemoryFromState(context.memory, existing.id);
-    if (existing.taxonomy && existing.scope !== "session") {
-      await refreshAutoMemoryFiles(
-        getMemoryDirectory(existing.scope, context),
-        context.memory.accepted.filter((item) => item.scope === existing.scope),
-        context.memory.disabled.filter((item) => item.scope === existing.scope),
-      );
-    }
+    if (existing.scope === "session") removeMemoryFromState(context.memory, existing.id);
     await appendMemoryLifecycleEvent(context, sessionId, "deleted", existing);
     await deps().recordMemoryMutationEvidence(context, sessionId, "auto_deleted", existing);
     const run: MemoryLearningRun = {
@@ -1155,28 +1199,12 @@ export async function importAiSessions(
     ),
     origin,
   };
-  context.memory.candidates.unshift(candidate);
-  await writeMemoryRecord(candidate, context);
+  const commit = await writeMemoryRecord(candidate, context);
+  if (!memoryCommitAccepted(context, candidate, commit)) {
+    writeLine(output, `候选记忆未提交：${commit?.status ?? "stale"}`);
+    return;
+  }
   deps().refreshCacheFreshness(context);
   writeLine(output, summary);
   writeLine(output, `已创建候选记忆等待确认：${candidate.id}`);
-}
-
-async function persistMemoryDeletionTombstone(
-  context: TuiContext,
-  memory: MemoryCandidate,
-  sessionId: string,
-  requestTurnId = context.currentRequestTurnId,
-  commitGuard?: () => boolean,
-): Promise<boolean> {
-  const tombstone = await appendMemoryTombstone({
-    directory: getMemoryDirectory(memory.scope, context),
-    memory,
-    sessionId,
-    ...(requestTurnId ? { requestTurnId } : {}),
-    ...(commitGuard ? { commitGuard } : {}),
-  });
-  if (memory.scope !== "session" && !tombstone) return false;
-  rememberMemoryTombstone(context.memory.tombstones, tombstone);
-  return true;
 }

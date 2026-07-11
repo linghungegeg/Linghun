@@ -28,6 +28,7 @@ import type {
 } from "./headless-bench-runtime.js";
 import type { IndexState } from "./index-runtime.js";
 import type { SolutionCompletenessStatus } from "./model-loop-runtime.js";
+import type { UserActionConstraints } from "./user-action-constraints.js";
 import type { WorkspaceReferenceCache } from "./workspace-reference-cache.js";
 
 export type PlanProposal = {
@@ -140,6 +141,14 @@ export type EvidenceRecord = {
   supportsClaims: string[];
   claimSeeds?: EvidenceClaimSeed[];
   createdAt: string;
+  ownerScope?: {
+    ownerSessionId?: string;
+    requestTurnId?: string;
+    ownerAgentId?: string;
+    workflowRunId?: string;
+    cwd?: string;
+    targets?: string[];
+  };
   data?: unknown;
 };
 
@@ -149,6 +158,8 @@ export type VerificationStep = {
   kind: VerificationStepKind;
   command: string;
   reason: string;
+  cwd?: string;
+  coverageGap?: string;
   // D.14A-R-Fix P1-2 — true 表示这是 Linghun 自动生成的合成 smoke（如
   // `node -e "console.log(...)"` 或无脚本时的 `node --version` 降级），只能证明
   // 本地 Node 进程可运行，不能当作真实 provider/TUI/render/report 主链 smoke。
@@ -709,6 +720,8 @@ export type AgentRun = {
   allowedTools?: ToolName[];
   maxTurns?: number;
   permissionMode: PermissionMode;
+  invokingRequestTurnId?: string;
+  userActionConstraints?: UserActionConstraints;
   status: "running" | "idle" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
   lastTerminalStatus?: "completed" | "failed" | "blocked";
   activityStatus?:
@@ -861,6 +874,8 @@ export type DurableJobState = {
   capReason?: string;
   timeoutMs: number;
   permissionPolicy: PermissionMode;
+  invokingRequestTurnId?: string;
+  userActionConstraints?: UserActionConstraints;
   allowEdit: boolean;
   allowBash: boolean;
   allowMultiAgent: boolean;
@@ -1092,6 +1107,7 @@ export type MemoryOrigin = {
 export type MemoryTombstoneIndex = {
   ids: Set<string>;
   origins: Set<string>;
+  logicalKeys: Set<string>;
   unreadableScopes: Set<MemoryScope>;
   diagnostics: string[];
 };
@@ -1280,6 +1296,9 @@ export type WorkflowRunState = {
   ownerSessionId?: string;
   cwd?: string;
   changedFiles?: string[];
+  permissionMode?: PermissionMode;
+  invokingRequestTurnId?: string;
+  userActionConstraints?: UserActionConstraints;
   goal: string;
   planId: string;
   status: "running" | "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale";

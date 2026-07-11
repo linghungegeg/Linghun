@@ -67,13 +67,13 @@ export type CliResult = {
   exitCode: number;
 };
 
-export async function runCli(argv: string[]): Promise<CliResult> {
+export async function runCli(argv: string[], signal?: AbortSignal): Promise<CliResult> {
   const [command] = argv;
 
   if (!command) {
     configureCliBundledRoot();
     const { runTui } = await import("@linghun/tui");
-    const exitCode = await runTui();
+    const exitCode = await runTui({ signal });
     return { stdout: "", stderr: "", exitCode };
   }
 
@@ -87,7 +87,7 @@ export async function runCli(argv: string[]): Promise<CliResult> {
 
   const normalized = normalizeSlashCommand(argv);
   if (normalized[0] === "run") {
-    return runHeadlessCommand(normalized.slice(1));
+    return runHeadlessCommand(normalized.slice(1), signal);
   }
   if (normalized[0] === "sessions") {
     return runSessionsCommand(normalized.slice(1));
@@ -383,7 +383,7 @@ function maskSecret(secret: string): string {
   return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
 }
 
-async function runHeadlessCommand(argv: string[]): Promise<CliResult> {
+async function runHeadlessCommand(argv: string[], signal?: AbortSignal): Promise<CliResult> {
   if (argv.includes("--help") || argv.includes("-h")) {
     return {
       stdout:
@@ -439,6 +439,7 @@ async function runHeadlessCommand(argv: string[]): Promise<CliResult> {
     ...(maxApprovals !== undefined ? { maxApprovals } : {}),
     stdout,
     stderr,
+    signal,
   });
   return { stdout: stdout.toString(), stderr: stderr.toString(), exitCode };
 }

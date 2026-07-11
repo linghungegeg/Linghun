@@ -243,6 +243,62 @@ describe("ProcessGuard", () => {
     );
   });
 
+  it("keeps cleanup scoped to the runtime that owns each child", () => {
+    const registry = new ProcessGuardRegistry();
+    const guardA = createProcessGuard(registry, { platform: "linux" });
+    const guardB = createProcessGuard(registry, { platform: "linux" });
+    const childA = createFakeChild(5010);
+    const childB = createFakeChild(5011);
+    guardA.track(childA, { label: "runtime-a" });
+    guardB.track(childB, { label: "runtime-b" });
+
+    expect(guardB.cleanupForExit()).toMatchObject({ attempted: 1, failures: [] });
+
+    expect(childA.killMock).not.toHaveBeenCalled();
+    expect(childB.killMock).toHaveBeenCalledWith("SIGKILL");
+    expect(guardA.activeSnapshot()).toEqual([{ pid: 5010, detached: false, label: "runtime-a" }]);
+    expect(guardB.activeSnapshot()).toEqual([]);
+  });
+
+  it("does not stop a newer runtime child when the operating system reuses a pid", () => {
+    const registry = new ProcessGuardRegistry();
+    const guardA = createProcessGuard(registry, { platform: "linux" });
+    const guardB = createProcessGuard(registry, { platform: "linux" });
+    const oldChild = createFakeChild(5012);
+    const newChild = createFakeChild(5012);
+    guardA.track(oldChild, { label: "runtime-a-old" });
+    guardB.track(newChild, { label: "runtime-b-new" });
+
+    oldChild.emitExit();
+    expect(guardA.cleanupForExit()).toMatchObject({ attempted: 0, failures: [] });
+
+    expect(newChild.killMock).not.toHaveBeenCalled();
+    expect(guardB.activeSnapshot()).toEqual([
+      { pid: 5012, detached: false, label: "runtime-b-new" },
+    ]);
+    expect(guardB.cleanupForExit()).toMatchObject({ attempted: 1, failures: [] });
+    expect(newChild.killMock).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("keeps 100 runtime cleanups isolated on one shared registry", () => {
+    const registry = new ProcessGuardRegistry();
+    const runtimes = Array.from({ length: 100 }, (_, index) => {
+      const guard = createProcessGuard(registry, { platform: "linux" });
+      const child = createFakeChild(5100 + index);
+      guard.track(child, { label: `runtime-${index}` });
+      return { guard, child };
+    });
+
+    for (const [index, runtime] of runtimes.entries()) {
+      expect(runtime.guard.cleanupForExit()).toMatchObject({ attempted: 1, failures: [] });
+      expect(runtime.child.killMock).toHaveBeenCalledTimes(1);
+      expect(
+        runtimes.slice(index + 1).every((candidate) => candidate.child.killMock.mock.calls.length === 0),
+      ).toBe(true);
+    }
+    expect(registry.activeSnapshot()).toEqual([]);
+  });
+
   it("documents exit cleanup as synchronous best-effort only", () => {
     const registry = new ProcessGuardRegistry();
     const child = createFakeChild(5004);

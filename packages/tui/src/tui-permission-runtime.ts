@@ -83,6 +83,8 @@ export type PermissionArchitectureDriftSignal = {
 
 export type PermissionDecisionOptions = {
   architectureDrift?: PermissionArchitectureDriftSignal;
+  permissionMode?: PermissionMode;
+  userActionConstraints?: UserActionConstraints;
 };
 
 export type AddAllowRuleResult =
@@ -207,6 +209,11 @@ export async function decidePermission(
   _sessionId: string,
   options: PermissionDecisionOptions = {},
 ): Promise<PermissionCheck> {
+  const effectivePermissionMode = options.permissionMode ?? context.permissionMode;
+  const effectiveConstraints =
+    "userActionConstraints" in options
+      ? options.userActionConstraints
+      : currentRequestUserActionConstraints(context);
   const tool = builtInTools[name];
   const files = collectInputFiles(input);
   const toolPermission = (() => {
@@ -223,7 +230,7 @@ export async function decidePermission(
   const request = {
     id: randomUUID(),
     toolName: name,
-    mode: context.permissionMode,
+    mode: effectivePermissionMode,
     risk: tool.permission.risk,
     summary: formatPermissionSummary(name, files, tool.permission.risk),
     files,
@@ -231,7 +238,7 @@ export async function decidePermission(
   };
   await recordPermissionOrchestration(context, _sessionId, {
     status: "consumed",
-    summary: `${name}; mode=${context.permissionMode}; risk=${tool.permission.risk}`,
+    summary: `${name}; mode=${effectivePermissionMode}; risk=${tool.permission.risk}`,
   });
   // D.13Q-UX Closure: 始终算一次 verdict 用于 UI 解释行（即使 auto-allow 不命中）。
   // engine 是纯函数，调用便宜；后续任何 ask/deny 分支返回时都附带 verdict，
@@ -245,11 +252,11 @@ export async function decidePermission(
   const constraintDenyReason = currentUserConstraintDenyReason(
     name,
     verdict,
-    currentRequestUserActionConstraints(context),
+    effectiveConstraints,
     context.language,
   );
   if (constraintDenyReason) {
-    await recordPermissionDenied(context, name, constraintDenyReason);
+    await recordPermissionDenied(context, name, constraintDenyReason, effectivePermissionMode);
     await recordPermissionOrchestration(context, _sessionId, {
       status: "failed",
       summary: `${name}; current user constraint deny`,
@@ -257,17 +264,8 @@ export async function decidePermission(
     });
     return { request, decision: "deny", reason: constraintDenyReason, verdict };
   }
-  if (context.permissionMode === "full-access") {
-    return {
-      request,
-      decision: "allow",
-      reason: "full-access 已由本地用户显式开启，TUI 权限确认已放行。",
-      verdict,
-      architectureDrift: options.architectureDrift,
-    };
-  }
   if (hardDeny) {
-    await recordPermissionDenied(context, name, hardDeny);
+    await recordPermissionDenied(context, name, hardDeny, effectivePermissionMode);
     await recordPermissionOrchestration(context, _sessionId, {
       status: "failed",
       summary: `${name}; hard deny: ${hardDeny}`,
@@ -276,7 +274,7 @@ export async function decidePermission(
     return { request, decision: "deny", reason: hardDeny, verdict };
   }
   if (toolPermission.behavior === "deny") {
-    await recordPermissionDenied(context, name, toolPermission.reason);
+    await recordPermissionDenied(context, name, toolPermission.reason, effectivePermissionMode);
     await recordPermissionOrchestration(context, _sessionId, {
       status: "failed",
       summary: `${name}; tool policy deny: ${toolPermission.reason}`,
@@ -284,14 +282,35 @@ export async function decidePermission(
     });
     return { request, decision: "deny", reason: toolPermission.reason, verdict };
   }
-  if (toolPermission.behavior === "allow") {
+  const rule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
+  if (rule?.effect === "deny") {
+    const reason = "命中拒绝规则。";
+    await recordPermissionDenied(context, name, reason, effectivePermissionMode);
+    await recordPermissionOrchestration(context, _sessionId, {
+      status: "failed",
+      summary: `${name}; rule deny`,
+      level: "warning",
+    });
+    return { request, decision: "deny", reason, verdict };
+  }
+  if (rule?.effect === "ask") {
+    const reason = "命中需确认规则。需要用户确认后才会执行本次工具。";
+    await recordPermissionDenied(context, name, reason, effectivePermissionMode);
+    await recordPermissionOrchestration(context, _sessionId, {
+      status: "blocked",
+      summary: `${name}; rule ask`,
+      level: "warning",
+    });
+    return { request, decision: "ask", reason, verdict };
+  }
+  if (toolPermission.behavior === "allow" && !rule) {
     return { request, decision: "allow", reason: toolPermission.reason, verdict };
   }
 
   // 哲学模块 1.3：权限引擎读取调度决策，预加热写入确认。
   const schedulerDecision = context.lastMetaSchedulerDecision;
   if (schedulerDecision?.policyDecision.permissionPlan.requireExplicitGate && verdict.semantic === "mutating") {
-    if (context.permissionMode === "default") {
+    if (effectivePermissionMode === "default") {
       await recordPermissionOrchestration(context, _sessionId, {
         status: "blocked",
         summary: `${name}; scheduler explicit mutating gate`,
@@ -317,7 +336,7 @@ export async function decidePermission(
   // here unchanged so the existing decision tree owns the `ask` / `allow` /
   // `deny` outcome. auto-review intentionally handles the same readonly verdict
   // in its own branch after explicit rules, so user rules still win there too.
-  if (context.permissionMode !== "plan" && context.permissionMode !== "auto-review") {
+  if (effectivePermissionMode !== "plan" && effectivePermissionMode !== "auto-review") {
     if (verdict.decision === "auto_allow_readonly") {
       // Honor explicit deny/ask rules even for readonly tools — never override
       // a user-configured decision boundary.
@@ -335,13 +354,13 @@ export async function decidePermission(
     }
   }
 
-  if (context.permissionMode === "plan") {
+  if (effectivePermissionMode === "plan") {
     if (isPlanAllowedTool(name, tool.isReadOnly)) {
       return { request, decision: "allow", reason: "Plan 模式允许只读或会话内规划工具。", verdict };
     }
     const reason =
       "Plan 模式禁止写入、编辑和 Bash 执行；请先 /plan accept 确认方案并切回执行模式。";
-    await recordPermissionDenied(context, name, reason);
+    await recordPermissionDenied(context, name, reason, effectivePermissionMode);
     await recordPermissionOrchestration(context, _sessionId, {
       status: "failed",
       summary: `${name}; plan mode deny`,
@@ -350,7 +369,7 @@ export async function decidePermission(
     return { request, decision: "deny", reason, verdict };
   }
 
-  if (options.architectureDrift && context.permissionMode !== "auto-review") {
+  if (options.architectureDrift && effectivePermissionMode !== "auto-review") {
     await recordPermissionOrchestration(context, _sessionId, {
       status: "blocked",
       summary: `${name}; architecture drift confirmation required`,
@@ -368,34 +387,25 @@ export async function decidePermission(
     };
   }
 
-  const rule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
-  if (rule) {
-    if (rule.effect === "deny") {
-      // D.13Q-UX：reason 不再拼 rule.id（randomUUID）。user-facing 文案稳定，
-      // 内部 rule.id 仍可在 system event log / details debug 区追踪。
-      const reason = "命中拒绝规则。";
-      await recordPermissionDenied(context, name, reason);
-      await recordPermissionOrchestration(context, _sessionId, {
-        status: "failed",
-        summary: `${name}; rule deny`,
-        level: "warning",
-      });
-      return { request, decision: "deny", reason, verdict };
-    }
-    if (rule.effect === "ask") {
-      const reason = "命中需确认规则。需要用户确认后才会执行本次工具。";
-      await recordPermissionDenied(context, name, reason);
-      await recordPermissionOrchestration(context, _sessionId, {
-        status: "blocked",
-        summary: `${name}; rule ask`,
-        level: "warning",
-      });
-      return { request, decision: "ask", reason, verdict };
-    }
+  if (rule?.effect === "allow") {
     return { request, decision: "allow", reason: "命中允许规则。", verdict };
   }
 
-  if (context.permissionMode === "auto-review") {
+  if (effectivePermissionMode === "full-access") {
+    return {
+      request,
+      decision: "allow",
+      reason: "full-access 已由本地用户显式开启，TUI 权限确认已放行。",
+      verdict,
+      architectureDrift: options.architectureDrift,
+    };
+  }
+
+  if (toolPermission.behavior === "allow") {
+    return { request, decision: "allow", reason: toolPermission.reason, verdict };
+  }
+
+  if (effectivePermissionMode === "auto-review") {
     // Policy engine shortcuts take priority even in auto-review.
     if (verdict.decision === "auto_allow_readonly" || verdict.decision === "auto_allow_development") {
       return {
@@ -437,7 +447,7 @@ export async function decidePermission(
   }
   const reason =
     "default 模式不会静默执行 Bash、写入、编辑、删除、配置、安装、联网或权限变更；需要用户确认后才会执行本次工具。";
-  await recordPermissionDenied(context, name, reason);
+  await recordPermissionDenied(context, name, reason, effectivePermissionMode);
   await recordPermissionOrchestration(context, _sessionId, {
     status: "blocked",
     summary: `${name}; default mode ask`,
@@ -450,11 +460,12 @@ export async function recordPermissionDenied(
   context: TuiContext,
   toolName: ToolName,
   reason: string,
+  permissionMode: PermissionMode = context.permissionMode,
 ): Promise<void> {
   context.permissions.recentDenied.unshift({
     id: randomUUID(),
     toolName,
-    mode: context.permissionMode,
+    mode: permissionMode,
     reason,
     createdAt: new Date().toISOString(),
   });

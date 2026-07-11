@@ -25,6 +25,20 @@ type McpRuntimeOptions = {
   onProgress?: (progress: McpRuntimeProgress) => void;
 };
 
+export type McpTransportLimits = {
+  maxFrameBytes: number;
+  maxStreamBytes: number;
+  maxFrames: number;
+  maxStderrBytes: number;
+};
+
+export const MCP_TRANSPORT_LIMITS: Readonly<McpTransportLimits> = Object.freeze({
+  maxFrameBytes: 64 * 1024 * 1024,
+  maxStreamBytes: 256 * 1024 * 1024,
+  maxFrames: 1_000_000,
+  maxStderrBytes: 8 * 1024 * 1024,
+});
+
 const MCP_SSE_CONNECTION_TIMEOUT_MS = 15_000;
 const MCP_SSE_TOOL_CALL_TIMEOUT_MS = 100_000_000;
 const MCP_SSE_TOOL_LIST_CACHE_TTL_MS = 5_000;
@@ -96,7 +110,7 @@ async function getMcpSseToolNames(
   return { ok: true, toolNames };
 }
 
-async function mcpSseRequest(
+export async function mcpSseRequest(
   url: string,
   method: string,
   params: unknown,
@@ -104,6 +118,7 @@ async function mcpSseRequest(
   signal?: AbortSignal,
   onProgress?: McpRuntimeOptions["onProgress"],
   idleTimeoutMs = timeoutMs,
+  limits: Readonly<McpTransportLimits> = MCP_TRANSPORT_LIMITS,
 ): Promise<McpSseResult> {
   const controller = new AbortController();
   let timeoutKind: "idle" | "hard" | undefined;
@@ -138,7 +153,7 @@ async function mcpSseRequest(
     }
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("json")) {
-      const json = await response.json();
+      const json = await readBoundedJsonResponse(response, limits);
       if (isValidMcpProtocolActivity(json, id)) {
         armInactivityTimeout();
         onProgress?.({ phase: "receiving", transport: "sse" });
@@ -148,15 +163,18 @@ async function mcpSseRequest(
     const frame = await readSseJsonFrame(response, id, (receivedBytes) => {
       armInactivityTimeout();
       onProgress?.({ phase: "receiving", transport: "sse", receivedBytes });
-    });
+    }, limits);
     return unwrapJsonRpc(frame, id);
   } catch (error) {
+    if (error instanceof McpSseStructuredError) controller.abort(error);
     const callerAborted = signal?.aborted === true;
     return {
       ok: false,
       summary: `MCP SSE error: ${sanitizeDiagnosticText(error instanceof Error ? error.message : String(error))}`,
       errorCode:
-        error instanceof Error && error.name === "AbortError"
+        error instanceof McpSseStructuredError
+          ? error.errorCode
+          : error instanceof Error && error.name === "AbortError"
           ? callerAborted
             ? "MCP_SSE_ABORTED"
             : timeoutKind
@@ -168,6 +186,52 @@ async function mcpSseRequest(
     if (idleTimer) clearTimeout(idleTimer);
     if (hardTimer) clearTimeout(hardTimer);
     signal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+class McpSseStructuredError extends Error {
+  constructor(
+    message: string,
+    readonly errorCode: string,
+  ) {
+    super(message);
+  }
+}
+
+async function readBoundedJsonResponse(
+  response: Response,
+  limits: Readonly<McpTransportLimits>,
+): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > limits.maxFrameBytes) {
+    throw new McpSseStructuredError(
+      `MCP SSE JSON body exceeds ${limits.maxFrameBytes} bytes`,
+      "MCP_SSE_BODY_TOO_LARGE",
+    );
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return undefined;
+  const decoder = new TextDecoder();
+  let body = "";
+  let receivedBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > limits.maxFrameBytes || receivedBytes > limits.maxStreamBytes) {
+        throw new McpSseStructuredError(
+          `MCP SSE JSON body exceeds ${Math.min(limits.maxFrameBytes, limits.maxStreamBytes)} bytes`,
+          "MCP_SSE_BODY_TOO_LARGE",
+        );
+      }
+      body += decoder.decode(value, { stream: true });
+    }
+    body += decoder.decode();
+    return JSON.parse(body);
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
   }
 }
 
@@ -207,17 +271,25 @@ function unwrapJsonRpc(value: unknown, expectedId: number): McpSseResult {
   return { ok: true, summary: "MCP SSE ok", data: frame.result };
 }
 
-async function readSseJsonFrame(
+export async function readSseJsonFrame(
   response: Response,
   expectedId: number,
   protocolActivity: (receivedBytes: number) => void,
+  limits: Readonly<McpTransportLimits> = MCP_TRANSPORT_LIMITS,
 ): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) return undefined;
   const decoder = new TextDecoder();
   let buffer = "";
-  const parsedFrames: unknown[] = [];
+  let receivedBytes = 0;
+  let parsedFrameCount = 0;
   const consumeBlock = (block: string): unknown => {
+    if (Buffer.byteLength(block, "utf8") > limits.maxFrameBytes) {
+      throw new McpSseStructuredError(
+        `MCP SSE frame exceeds ${limits.maxFrameBytes} bytes`,
+        "MCP_SSE_FRAME_TOO_LARGE",
+      );
+    }
     const data = block
       .split(/\r?\n/u)
       .filter((line) => line.startsWith("data:"))
@@ -225,6 +297,13 @@ async function readSseJsonFrame(
       .filter((line) => line && line !== "[DONE]")
       .join("\n");
     if (!data) return undefined;
+    parsedFrameCount += 1;
+    if (parsedFrameCount > limits.maxFrames) {
+      throw new McpSseStructuredError(
+        `MCP SSE frame count exceeds ${limits.maxFrames}`,
+        "MCP_SSE_FRAME_LIMIT_EXCEEDED",
+      );
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(data);
@@ -235,34 +314,51 @@ async function readSseJsonFrame(
       return parsed;
     }
     if (parsed && typeof parsed === "object" && (parsed as { id?: unknown }).id === expectedId) {
-      protocolActivity(Buffer.byteLength(block, "utf8"));
+      protocolActivity(receivedBytes);
       return parsed;
     }
     if (isValidMcpProgressNotification(parsed)) {
-      protocolActivity(Buffer.byteLength(block, "utf8"));
+      protocolActivity(receivedBytes);
     }
-    parsedFrames.push(parsed);
     return undefined;
   };
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/gu, "\n");
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      const matched = consumeBlock(buffer.slice(0, boundary));
-      buffer = buffer.slice(boundary + 2);
-      if (matched !== undefined) {
-        await reader.cancel();
-        return matched;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > limits.maxStreamBytes) {
+        throw new McpSseStructuredError(
+          `MCP SSE stream exceeds ${limits.maxStreamBytes} bytes`,
+          "MCP_SSE_STREAM_LIMIT_EXCEEDED",
+        );
       }
-      boundary = buffer.indexOf("\n\n");
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = /\r?\n\r?\n/u.exec(buffer);
+      while (boundary) {
+        const matched = consumeBlock(buffer.slice(0, boundary.index));
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+        if (matched !== undefined) {
+          await reader.cancel();
+          return matched;
+        }
+        boundary = /\r?\n\r?\n/u.exec(buffer);
+      }
+      if (Buffer.byteLength(buffer, "utf8") > limits.maxFrameBytes) {
+        throw new McpSseStructuredError(
+          `MCP SSE frame exceeds ${limits.maxFrameBytes} bytes`,
+          "MCP_SSE_FRAME_TOO_LARGE",
+        );
+      }
     }
+    buffer += decoder.decode();
+    const trailing = consumeBlock(buffer);
+    if (trailing !== undefined) return trailing;
+    return undefined;
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
   }
-  buffer += decoder.decode();
-  const trailing = consumeBlock(buffer);
-  if (trailing !== undefined) return trailing;
-  return parsedFrames[0];
 }
 
 function isValidMcpProgressNotification(value: unknown): boolean {

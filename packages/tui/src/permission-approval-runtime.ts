@@ -30,7 +30,11 @@ import { handleJobCommand } from "./job-agent-command-runtime.js";
 import { parseJobRunOptions } from "./job-runtime.js";
 import { executeMemoryMutation } from "./memory-command-runtime.js";
 import { WRITE_REPORT_TOOL_NAME } from "./model-loop-runtime.js";
-import { continueModelAfterToolResults, handleNaturalInput } from "./model-stream-runtime.js";
+import {
+  beginForegroundRequestTurn,
+  continueModelAfterToolResults,
+  handleNaturalInput,
+} from "./model-stream-runtime.js";
 import {
   executeApprovedIndexToolUse,
   executeApprovedModelToolUse,
@@ -482,6 +486,61 @@ export async function executePermissionApprove(
   output: Writable,
 ): Promise<void> {
   await recordPermissionUserDecision(context, approval, "approved", "approve");
+  let foregroundRequestOwner: { requestTurnId: string; signal: AbortSignal } | undefined;
+  let foregroundApprovalController: AbortController | undefined;
+  if (gateway && "continuation" in approval && approval.continuation) {
+    const invokingRequestTurnId = approval.continuation.requestTurnId;
+    const hasConflictingOwner = Boolean(
+      invokingRequestTurnId &&
+        context.currentRequestTurnId &&
+        context.currentRequestTurnId !== invokingRequestTurnId,
+    );
+    if (!hasConflictingOwner) {
+      const requestTurnId = invokingRequestTurnId ?? beginForegroundRequestTurn(context);
+      if (invokingRequestTurnId) {
+        context.runtimeContextId = requestTurnId;
+        context.currentRequestTurnId = requestTurnId;
+      }
+      const previousSignal = approval.continuation.abortSignal;
+      foregroundApprovalController = new AbortController();
+      const signal = previousSignal
+        ? AbortSignal.any([previousSignal, foregroundApprovalController.signal])
+        : foregroundApprovalController.signal;
+      approval.continuation.requestTurnId = requestTurnId;
+      approval.continuation.abortSignal = signal;
+      context.activeAbortController = foregroundApprovalController;
+      context.tools.abortSignal = signal;
+      context.interrupt = { type: "running", taskId: "approved-model-tool", canCancel: true };
+      foregroundRequestOwner = { requestTurnId, signal };
+    } else if (invokingRequestTurnId && approval.continuation.abortSignal) {
+      foregroundRequestOwner = {
+        requestTurnId: invokingRequestTurnId,
+        signal: approval.continuation.abortSignal,
+      };
+    }
+  }
+  const stopStaleForegroundApproval = (): boolean => {
+    const stale = Boolean(
+      foregroundRequestOwner &&
+        (foregroundRequestOwner.signal.aborted ||
+          context.currentRequestTurnId !== foregroundRequestOwner.requestTurnId),
+    );
+    if (
+      stale &&
+      foregroundRequestOwner &&
+      context.currentRequestTurnId === foregroundRequestOwner.requestTurnId
+    ) {
+      if (context.activeAbortController === foregroundApprovalController) {
+        context.activeAbortController = undefined;
+      }
+      if (context.tools.abortSignal === foregroundRequestOwner.signal) {
+        context.tools.abortSignal = undefined;
+      }
+      context.interrupt = { type: "idle" };
+      context.currentRequestTurnId = undefined;
+    }
+    return stale;
+  };
   if (approval.kind === "agent_tool_use") {
     const agent = context.agents.find((item) => item.id === approval.agentId);
     if (!agent) {
@@ -551,7 +610,9 @@ export async function executePermissionApprove(
       output,
       undefined,
       approval.continuation?.reportWriteGuard,
+      foregroundRequestOwner,
     );
+    if (stopStaleForegroundApproval()) return;
     await recordModelToolFailureForMetaScheduler(context, approval.sessionId, result);
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
     if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
@@ -589,7 +650,9 @@ export async function executePermissionApprove(
         ? formatBoundaryEditPreflightPrompt(approval.boundaryPreflight, context.language)
         : undefined,
       approval.continuation?.reportWriteGuard,
+      foregroundRequestOwner,
     );
+    if (stopStaleForegroundApproval()) return;
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
     if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
       reportWriteGuard.completed = true;
@@ -676,7 +739,9 @@ export async function executePermissionApprove(
       output,
       undefined,
       approval.continuation?.reportWriteGuard,
+      foregroundRequestOwner,
     );
+    if (stopStaleForegroundApproval()) return;
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
     if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
       reportWriteGuard.completed = true;

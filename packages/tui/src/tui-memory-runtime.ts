@@ -46,6 +46,11 @@ import { join } from "node:path";
 import { resolveStoragePaths } from "@linghun/config";
 import type { Language } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
+import {
+  commitPersistentMemoryMutation,
+  type PersistentMemoryCommitResult,
+  writePersistentMemoryLearningState,
+} from "./memory-extraction-runtime.js";
 import { MEMORY_LEARNING_STATE_FILE } from "./runtime-utils.js";
 import { formatDisplayPath, formatError, truncateDisplay } from "./startup-runtime.js";
 import type {
@@ -63,7 +68,6 @@ const MEMORY_PROMPT_TOP_K = 3;
 const MEMORY_PROMPT_ITEM_WIDTH = 180;
 const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 const PROJECT_RULES_STATUS_WIDTH = 160;
-const MEMORY_PROMPT_SCOPE_ORDER: readonly MemoryScope[] = ["user", "project", "session"];
 export function createMemoryCandidate(
   scope: MemoryScope,
   summary: string,
@@ -101,21 +105,25 @@ export function parseMemoryCandidateArgs(args: string[]): {
 export async function writeMemoryRecord(
   candidate: MemoryCandidate,
   context: TuiContext,
-): Promise<void> {
+  options: { expected?: MemoryCandidate; commitGuard?: () => boolean } = {},
+): Promise<PersistentMemoryCommitResult | undefined> {
   if (candidate.scope === "session") {
-    return;
+    return undefined;
   }
   const directory = getMemoryDirectory(candidate.scope, context);
-  await mkdir(directory, { recursive: true });
-  const path = join(directory, `${candidate.id}.json`);
-  await writeFile(path, `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
+  return commitPersistentMemoryMutation(directory, candidate.scope, {
+    action: "upsert",
+    next: candidate,
+    expected: options.expected,
+    commitGuard: options.commitGuard,
+  });
 }
 
 export async function writeMemoryLearningMode(context: TuiContext): Promise<void> {
-  const userDir = resolveStoragePaths(context.config, context.projectPath).memoryUser;
+  const userDir = context.memory.userDir || resolveStoragePaths(context.config, context.projectPath).memoryUser;
   await mkdir(userDir, { recursive: true });
-  await writeFile(
-    join(userDir, MEMORY_LEARNING_STATE_FILE),
+  await writePersistentMemoryLearningState(
+    userDir,
     `${JSON.stringify(
       {
         learningMode: context.memory.learningMode,
@@ -124,7 +132,6 @@ export async function writeMemoryLearningMode(context: TuiContext): Promise<void
       null,
       2,
     )}\n`,
-    "utf8",
   );
   context.memory.userDir = userDir;
   context.memory.learningModeSource = "persisted";
@@ -134,15 +141,21 @@ export async function writeMemoryLearningMode(context: TuiContext): Promise<void
 export async function removeMemoryRecord(
   candidate: MemoryCandidate,
   context: TuiContext,
-): Promise<void> {
+  options: { sessionId: string; requestTurnId?: string; commitGuard?: () => boolean },
+): Promise<PersistentMemoryCommitResult | undefined> {
   if (candidate.scope === "session") {
-    return;
+    return undefined;
   }
   const directory = getMemoryDirectory(candidate.scope, context);
-  await Promise.all([
-    rm(join(directory, `${candidate.id}.json`), { force: true }),
-    rm(join(directory, "candidates", `${candidate.id}.json`), { force: true }),
-  ]);
+  return commitPersistentMemoryMutation(directory, candidate.scope, {
+    action: "delete",
+    expected: candidate,
+    deletion: {
+      sessionId: options.sessionId,
+      requestTurnId: options.requestTurnId,
+    },
+    commitGuard: options.commitGuard,
+  });
 }
 
 export function getMemoryDirectory(scope: MemoryScope, context: TuiContext): string {
@@ -337,6 +350,13 @@ export function createEvidenceBackedMemoryCandidates(context: TuiContext): Memor
     summaries.push(createMemoryCandidate("project", normalized, source, refs));
   };
   for (const evidence of context.evidence.slice(0, 3)) {
+    if (
+      evidence.supportsClaims.includes("verification_self_check_passed") ||
+      evidence.supportsClaims.includes("verification_not_run") ||
+      /synthetic self-check|SELF-CHECK/iu.test(evidence.summary)
+    ) {
+      continue;
+    }
     add(`证据线索：${evidence.summary}`, `evidence:${evidence.kind}`, [evidence.id]);
   }
   for (const todo of context.tools.todos.slice(0, 3)) {
@@ -344,7 +364,12 @@ export function createEvidenceBackedMemoryCandidates(context: TuiContext): Memor
       add(`已完成任务线索：${todo.content}`, "todo:completed", [`todo:${todo.id}`]);
     }
   }
-  if (context.lastVerification?.status === "pass") {
+  if (
+    context.lastVerification?.status === "pass" &&
+    context.lastVerification.commands.some(
+      (command) => command.status === "pass" && command.synthetic !== true,
+    )
+  ) {
     add(`验证通过线索：${context.lastVerification.summary}`, "verification:pass", [
       context.lastVerification.id,
     ]);
@@ -396,30 +421,21 @@ export function formatMemoryLearningRun(run: MemoryLearningRun, language: Langua
   ].join("\n");
 }
 
-export function createControlledMemoryInjection(context: TuiContext): {
+export function createControlledMemoryInjection(context: TuiContext, query?: string): {
   items: MemoryCandidate[];
   text: string;
 } {
-  const accepted = context.memory.accepted
+  const items = context.memory.accepted
     .filter((item) => normalizeMemoryStatus(item) === "accepted")
-    .sort((a, b) => a.id.localeCompare(b.id));
-  const items: MemoryCandidate[] = [];
-  const selected = new Set<string>();
-  for (const scope of MEMORY_PROMPT_SCOPE_ORDER) {
-    const item = accepted.find(
-      (candidate) => candidate.scope === scope && !selected.has(candidate.id),
-    );
-    if (!item) continue;
-    items.push(item);
-    selected.add(item.id);
-    if (items.length >= MEMORY_PROMPT_TOP_K) break;
-  }
-  for (const item of accepted) {
-    if (items.length >= MEMORY_PROMPT_TOP_K) break;
-    if (selected.has(item.id)) continue;
-    items.push(item);
-    selected.add(item.id);
-  }
+    .map((item, index) => ({
+      item,
+      index,
+      score: query === undefined ? 1 : memoryRelevanceScore(item, query),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .slice(0, MEMORY_PROMPT_TOP_K)
+    .map((entry) => entry.item);
   const text = truncateDisplay(
     items
       .map(
@@ -432,12 +448,40 @@ export function createControlledMemoryInjection(context: TuiContext): {
   return { items, text };
 }
 
+function memoryRelevanceScore(memory: MemoryCandidate, query: string): number {
+  const queryTokens = memorySearchTokens(query);
+  const memoryTokens = memorySearchTokens(`${memory.topic ?? ""} ${memory.summary}`);
+  let score = 0;
+  for (const token of queryTokens) {
+    if (memoryTokens.has(token)) score += token.length >= 4 ? 3 : 1;
+  }
+  const normalizedQuery = query.toLocaleLowerCase().replace(/\s+/g, " ").trim();
+  const normalizedTopic = memory.topic?.toLocaleLowerCase().replace(/[-_]+/g, " ").trim();
+  if (normalizedTopic && normalizedQuery.includes(normalizedTopic)) score += 5;
+  return score;
+}
+
+function memorySearchTokens(text: string): Set<string> {
+  const normalized = text.toLocaleLowerCase();
+  const tokens = new Set(
+    normalized
+      .split(/[^a-z0-9\u4e00-\u9fff]+/u)
+      .filter((token) => token.length >= 2),
+  );
+  for (const sequence of normalized.match(/[\u4e00-\u9fff]{2,}/gu) ?? []) {
+    for (let index = 0; index < sequence.length - 1; index += 1) {
+      tokens.add(sequence.slice(index, index + 2));
+    }
+  }
+  return tokens;
+}
+
 export function estimateMemoryTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-export function formatControlledMemoryForModel(context: TuiContext): string {
-  const injection = createControlledMemoryInjection(context);
+export function formatControlledMemoryForModel(context: TuiContext, query = ""): string {
+  const injection = createControlledMemoryInjection(context, query);
   if (injection.items.length === 0) {
     return "[]";
   }

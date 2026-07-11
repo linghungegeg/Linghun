@@ -1,7 +1,10 @@
 import type { Language } from "@linghun/shared";
 import type { ToolName, ToolOutput } from "@linghun/tools";
 import type { DisplayBlock } from "./shell/types.js";
-import { normalizeVisibleToolText } from "./shell/visible-output-normalizer.js";
+import {
+  normalizeVisibleToolText,
+  sanitizeDangerousTerminalControls,
+} from "./shell/visible-output-normalizer.js";
 
 export type TuiOutputLayer = "primary" | "details" | "debug";
 
@@ -86,6 +89,7 @@ const INTERNAL_STREAM_LABEL_REPLACEMENTS = [
 const INTERNAL_STREAM_LABEL_PREFIXES = INTERNAL_STREAM_LABEL_REPLACEMENTS.flatMap(([label]) =>
   Array.from({ length: label.length - 1 }, (_, index) => label.slice(0, index + 1)),
 ).sort((a, b) => b.length - a.length);
+const TERMINAL_CONTROL_PENDING_LIMIT = 8 * 1024;
 
 export function createLayeredToolOutput(
   name: ToolName,
@@ -513,7 +517,8 @@ export function sanitizeAssistantPrimaryTextWithMetadata(
   text: string,
   language: Language,
 ): { text: string; removedRawToolProtocol: boolean } {
-  let sanitized = text;
+  let sanitized = sanitizeDangerousTerminalControls(text);
+  const removedTerminalControl = sanitized !== text;
   let removed = false;
   let removedThinking = false;
   let replacedInternalLabel = false;
@@ -535,7 +540,10 @@ export function sanitizeAssistantPrimaryTextWithMetadata(
   }
   if (!removed) {
     return {
-      text: replacedInternalLabel || removedThinking ? sanitized.replace(/\n{3,}/gu, "\n\n") : text,
+      text:
+        replacedInternalLabel || removedThinking || removedTerminalControl
+          ? sanitized.replace(/\n{3,}/gu, "\n\n")
+          : text,
       removedRawToolProtocol: false,
     };
   }
@@ -547,7 +555,10 @@ export function sanitizeAssistantPrimaryTextWithMetadata(
   };
 }
 
-export function createAssistantPrimaryTextSanitizer(language: Language): {
+export function createAssistantPrimaryTextSanitizer(
+  language: Language,
+  options: { terminalControlsOnly?: boolean } = {},
+): {
   push(text: string): string;
   flush(): string;
   hadRawToolProtocol(): boolean;
@@ -558,30 +569,46 @@ export function createAssistantPrimaryTextSanitizer(language: Language): {
   function sanitizeBuffered(text: string): string {
     if (!text) return "";
     const combined = pending + text;
-    const holdAt = firstDefinedNumber(
-      findPendingRawThinkingStart(combined),
-      findPendingRawToolStart(combined),
-      findRawThinkingPrefixAtEnd(combined),
-      findRawToolPrefixAtEnd(combined),
+    const terminalHoldAt = firstDefinedNumber(
+      findIncompleteTerminalControlStart(combined),
+      findEscapedTerminalControlPrefixAtEnd(combined),
     );
+    const holdAt = options.terminalControlsOnly
+      ? terminalHoldAt
+      : firstDefinedNumber(
+          terminalHoldAt,
+          findPendingRawThinkingStart(combined),
+          findPendingRawToolStart(combined),
+          findRawThinkingPrefixAtEnd(combined),
+          findRawToolPrefixAtEnd(combined),
+        );
+    const sanitize = (value: string) =>
+      options.terminalControlsOnly
+        ? { text: sanitizeDangerousTerminalControls(value), removedRawToolProtocol: false }
+        : sanitizeAssistantPrimaryTextWithMetadata(value, language);
     if (holdAt !== undefined) {
+      if (combined.length - holdAt > TERMINAL_CONTROL_PENDING_LIMIT) {
+        pending = "";
+        const result = sanitize(combined);
+        removedRawToolProtocol ||= result.removedRawToolProtocol;
+        return result.text;
+      }
       pending = combined.slice(holdAt);
-      const result = sanitizeAssistantPrimaryTextWithMetadata(combined.slice(0, holdAt), language);
+      const result = sanitize(combined.slice(0, holdAt));
       removedRawToolProtocol ||= result.removedRawToolProtocol;
       return result.text;
     }
-    const internalLabelPrefix = findInternalStreamLabelPrefixAtEnd(combined);
+    const internalLabelPrefix = options.terminalControlsOnly
+      ? undefined
+      : findInternalStreamLabelPrefixAtEnd(combined);
     if (internalLabelPrefix) {
       pending = internalLabelPrefix;
-      const result = sanitizeAssistantPrimaryTextWithMetadata(
-        combined.slice(0, -internalLabelPrefix.length),
-        language,
-      );
+      const result = sanitize(combined.slice(0, -internalLabelPrefix.length));
       removedRawToolProtocol ||= result.removedRawToolProtocol;
       return result.text;
     }
     pending = "";
-    const result = sanitizeAssistantPrimaryTextWithMetadata(combined, language);
+    const result = sanitize(combined);
     removedRawToolProtocol ||= result.removedRawToolProtocol;
     return result.text;
   }
@@ -590,7 +617,9 @@ export function createAssistantPrimaryTextSanitizer(language: Language): {
     push: sanitizeBuffered,
     flush() {
       const result = pending
-        ? sanitizeAssistantPrimaryTextWithMetadata(pending, language)
+        ? options.terminalControlsOnly
+          ? { text: sanitizeDangerousTerminalControls(pending), removedRawToolProtocol: false }
+          : sanitizeAssistantPrimaryTextWithMetadata(pending, language)
         : { text: "", removedRawToolProtocol: false };
       removedRawToolProtocol ||= result.removedRawToolProtocol;
       pending = "";
@@ -600,6 +629,37 @@ export function createAssistantPrimaryTextSanitizer(language: Language): {
       return removedRawToolProtocol;
     },
   };
+}
+
+function findIncompleteTerminalControlStart(text: string): number | undefined {
+  const introducer = /\u001B([\]PX^_[])|\\(?:u001b|x1b)([\]PX^_[])/giu;
+  let match: RegExpExecArray | null;
+  while ((match = introducer.exec(text)) !== null) {
+    const kind = match[1] ?? match[2];
+    const remainder = text.slice(match.index + match[0].length);
+    if (kind === "[") {
+      if (!/[@-~]/u.test(remainder)) return match.index;
+      continue;
+    }
+    const terminator =
+      kind === "]"
+        ? /\u0007|\u009C|\u001B\\|\\(?:u0007|x07)|\\(?:u001b|x1b)\\/iu
+        : /\u009C|\u001B\\|\\(?:u001b|x1b)\\/iu;
+    if (!terminator.test(remainder)) return match.index;
+  }
+  if (text.endsWith("\u001B")) return text.length - 1;
+  return undefined;
+}
+
+function findEscapedTerminalControlPrefixAtEnd(text: string): number | undefined {
+  const lower = text.toLowerCase();
+  for (const prefix of ["\\u001b", "\\x1b"]) {
+    for (let length = prefix.length; length >= 2; length -= 1) {
+      const partial = prefix.slice(0, length);
+      if (lower.endsWith(partial)) return text.length - partial.length;
+    }
+  }
+  return undefined;
 }
 
 function findInternalStreamLabelPrefixAtEnd(text: string): string | undefined {

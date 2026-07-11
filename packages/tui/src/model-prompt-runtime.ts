@@ -150,7 +150,7 @@ export function createModelSystemPromptSegments(
     memorySummary = "(memory skipped per scheduler policy)";
   } else {
     const _t0 = Date.now();
-    memorySummary = formatControlledMemoryForModel(context);
+    memorySummary = formatControlledMemoryForModel(context, text);
     context.lastMetaSchedulerDecision?.internalEvents.push(`perf:memory_format_ms=${Date.now() - _t0}`);
   }
   const stable = `${
@@ -180,7 +180,7 @@ export function createModelSystemPromptSegments(
       text: `RuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}`,
       volatile: false,
     },
-    { name: "memory", text: `ControlledMemorySummary=${memorySummary}`, volatile: false },
+    { name: "memory", text: `ControlledMemorySummary=${memorySummary}`, volatile: true },
     {
       name: "memory_boundary",
       text: `MemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; autoExtractionRuntime; dedicatedMemoryDir; manualLearnCandidateOnly; noSecretsOrFullDumps`,

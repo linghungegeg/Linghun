@@ -114,7 +114,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
       },
     });
 
-    const segments = createModelSystemPromptSegments("继续", context, { runtime: "test" });
+    const segments = createModelSystemPromptSegments("progress bar simple", context, { runtime: "test" });
 
     expect(segments.dynamic).toContain("User preference: keep progress bar simple");
     expect(context.cache.lastPromptSections).toBeDefined();
@@ -143,7 +143,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     });
 
     const segments = createModelSystemPromptSegments(
-      "继续",
+      "focused validation",
       context,
       { runtime: "test" },
       undefined,
@@ -151,7 +151,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
       { count: 1, text: '[{"category":"tool_failure","avoid":"retry blindly","severity":"medium","count":1}]' },
     );
 
-    expect(segments.cacheable.map((segment) => segment.content).join("\n")).toContain(
+    expect(segments.cacheable.map((segment) => segment.content).join("\n")).not.toContain(
       "ControlledMemorySummary=",
     );
     expect(segments.cacheable.map((segment) => segment.content).join("\n")).toContain(
@@ -160,7 +160,54 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(segments.cacheable.map((segment) => segment.content).join("\n")).toContain(
       "RuntimeStatusForModel=",
     );
-    expect(segments.volatile).toEqual([]);
+    expect(segments.volatile.map((segment) => segment.content).join("\n")).toContain(
+      "ControlledMemorySummary=",
+    );
+  });
+
+  it("keeps memory fresh across requests within the same compact boundary", () => {
+    const context = createPromptTestContext({
+      memory: {
+        ...createPromptTestContext().memory,
+        accepted: [
+          {
+            id: "mem-stale",
+            scope: "project",
+            taxonomy: "project",
+            topic: "project-verification",
+            summary: "Project verification uses focused tests",
+            source: "test",
+            sourceRefs: ["test"],
+            risk: "low",
+            inferred: false,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            status: "accepted",
+          },
+        ],
+      },
+    });
+
+    const first = createModelSystemPromptSegments("focused tests", context, { runtime: "test" });
+    expect(first.dynamic).toContain("Project verification uses focused tests");
+    context.memory.accepted = [];
+    context.memory.disabled = [{
+      id: "mem-stale",
+      scope: "project",
+      taxonomy: "project",
+      topic: "project-verification",
+      summary: "Project verification uses focused tests",
+      source: "test",
+      sourceRefs: ["test"],
+      risk: "low",
+      inferred: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      status: "disabled",
+    }];
+    const second = createModelSystemPromptSegments("focused tests", context, { runtime: "test" });
+
+    expect(second.dynamic).not.toContain("Project verification uses focused tests");
+    expect(second.dynamic).toContain("ControlledMemorySummary=[]");
+    expect(second.cacheable).toEqual(first.cacheable);
   });
 
   it("does not inject deferred pre-engine guidance during pre fallback recovery", () => {
@@ -221,7 +268,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     );
 
     expect(second.cacheable).toEqual(first.cacheable);
-    expect(second.volatile).toEqual([]);
+    expect(second.volatile).toEqual(first.volatile);
     expect(second.dynamic).toBe(first.dynamic);
 
     context.cache.compactProjection = { boundaryId: "compact-1" } as never;

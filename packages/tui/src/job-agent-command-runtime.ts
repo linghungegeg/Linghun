@@ -10,9 +10,10 @@ import {
   type ModelRequest,
   type ModelToolCall,
   type ModelToolDefinition,
+  type ModelUsage,
   resolveProviderRuntimeContract,
 } from "@linghun/providers";
-import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
+import { formatDiagnosticError, isNodeErrorWithCode, type PermissionMode } from "@linghun/shared";
 import type { ToolName, ToolOutput, ToolRunResult } from "@linghun/tools";
 import { builtInTools, createToolContext, runTool } from "@linghun/tools";
 import {
@@ -152,6 +153,10 @@ import { formatAgentDetails } from "./tui-details-runtime.js";
 import { messages } from "./tui-messages.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
 import { decidePermission } from "./tui-permission-runtime.js";
+import {
+  currentRequestUserActionConstraints,
+  type UserActionConstraints,
+} from "./user-action-constraints.js";
 import {
   createVerificationPlan,
   isCurrentVerificationReport,
@@ -472,7 +477,17 @@ function clearAgentAbortController(
     return;
   }
   context.backgroundAbortControllers?.delete(agentId);
+  const pendingApproval = context.pendingLocalApproval;
+  if (
+    !pendingApproval ||
+    pendingApproval.kind !== "agent_tool_use" ||
+    pendingApproval.agentId !== agentId
+  ) {
+    context.agentToolContexts?.delete(agentId);
+  }
 }
+
+export const __testClearAgentAbortController = clearAgentAbortController;
 
 function mapAgentCompletionStatusFromRun(agent: AgentRun): AgentCompletionStatus {
   if (agent.status === "cancelled" || agent.status === "failed" || agent.status === "stale")
@@ -802,6 +817,11 @@ export async function handleJobCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
+  runtimeOptions: {
+    permissionMode?: PermissionMode;
+    invokingRequestTurnId?: string;
+    userActionConstraints?: UserActionConstraints;
+  } = {},
 ): Promise<void> {
   const action = args[0] ?? "list";
   await hydrateDurableJobBackgroundTasks(context);
@@ -875,7 +895,7 @@ export async function handleJobCommand(
         level: "warning",
       });
     }
-    const job = await createDurableJob(context, options, effectiveStart);
+    const job = await createDurableJob(context, options, effectiveStart, runtimeOptions);
     await persistDurableJobProgress(
       context,
       job,
@@ -1125,6 +1145,11 @@ export async function createDurableJob(
   context: TuiContext,
   options: ParsedJobRunOptions,
   start: boolean,
+  runtimeOptions: {
+    permissionMode?: PermissionMode;
+    invokingRequestTurnId?: string;
+    userActionConstraints?: UserActionConstraints;
+  } = {},
 ): Promise<DurableJobState> {
   const now = new Date().toISOString();
   const id = `job-${randomUUID().slice(0, 8)}`;
@@ -1185,7 +1210,19 @@ export async function createDurableJob(
     effectiveAgentCap: effectiveCap,
     capReason,
     timeoutMs: options.timeoutMs,
-    permissionPolicy: context.permissionMode,
+    permissionPolicy: runtimeOptions.permissionMode ?? context.permissionMode,
+    ...(runtimeOptions.invokingRequestTurnId
+      ? { invokingRequestTurnId: runtimeOptions.invokingRequestTurnId }
+      : context.currentRequestTurnId
+        ? { invokingRequestTurnId: context.currentRequestTurnId }
+        : {}),
+    ...(Object.prototype.hasOwnProperty.call(runtimeOptions, "userActionConstraints")
+      ? runtimeOptions.userActionConstraints
+        ? { userActionConstraints: { ...runtimeOptions.userActionConstraints } }
+        : {}
+      : currentRequestUserActionConstraints(context)
+        ? { userActionConstraints: { ...currentRequestUserActionConstraints(context)! } }
+        : {}),
     allowEdit: options.allowEdit,
     allowBash: options.allowBash,
     allowMultiAgent: options.allowMultiAgent,
@@ -1424,7 +1461,13 @@ async function startDurableJobAgentRun(
     ...(job.contextMode ? { contextMode: job.contextMode } : {}),
     engineeringSignal: snapshotEngineeringSignal(context),
     model: effectiveModel,
-    permissionMode: getAgentPermissionMode(assignment.type, context.permissionMode),
+    permissionMode: getAgentPermissionMode(assignment.type, job.permissionPolicy),
+    ...(job.invokingRequestTurnId
+      ? { invokingRequestTurnId: job.invokingRequestTurnId }
+      : {}),
+    ...(job.userActionConstraints
+      ? { userActionConstraints: { ...job.userActionConstraints } }
+      : {}),
     status: routeUsable ? "running" : "blocked",
     activityStatus: routeUsable ? "processing" : "blocked",
     activitySummary: routeUsable ? "job child agent running" : "route/worktree unusable",
@@ -2357,6 +2400,9 @@ export async function handleForkCommand(
     workflowRunId?: string;
     ownerSessionId?: string;
     engineeringSignal?: EngineeringSignalSnapshot;
+    permissionMode?: PermissionMode;
+    invokingRequestTurnId?: string;
+    userActionConstraints?: UserActionConstraints;
   } = {},
 ): Promise<AgentRun | undefined> {
   const options = parseForkCommandArgs(args);
@@ -2471,7 +2517,22 @@ export async function handleForkCommand(
     ...(registryAgent ? { registryAgentId: registryAgent.id } : {}),
     ...(registryAllowedTools ? { allowedTools: registryAllowedTools } : {}),
     ...(registryMaxTurns ? { maxTurns: registryMaxTurns } : {}),
-    permissionMode: getAgentPermissionMode(effectiveType, context.permissionMode),
+    permissionMode: getAgentPermissionMode(
+      effectiveType,
+      runtimeOptions.permissionMode ?? context.permissionMode,
+    ),
+    ...(runtimeOptions.invokingRequestTurnId
+      ? { invokingRequestTurnId: runtimeOptions.invokingRequestTurnId }
+      : context.currentRequestTurnId
+        ? { invokingRequestTurnId: context.currentRequestTurnId }
+        : {}),
+    ...(Object.prototype.hasOwnProperty.call(runtimeOptions, "userActionConstraints")
+      ? runtimeOptions.userActionConstraints
+        ? { userActionConstraints: { ...runtimeOptions.userActionConstraints } }
+        : {}
+      : currentRequestUserActionConstraints(context)
+        ? { userActionConstraints: { ...currentRequestUserActionConstraints(context)! } }
+        : {}),
     status: "running",
     activityStatus: "processing",
     activitySummary: "agent running",
@@ -2499,7 +2560,7 @@ export async function handleForkCommand(
     type: "system_event",
     id: randomUUID(),
     level: "info",
-    message: `${agent.contextSummary} | cwd ${cwdResult.cwd} | isolation ${cwdResult.isolation ?? "none"} | registry ${agent.registryAgentId ?? "none"} | model ${agent.model} | max turns ${agent.maxTurns ?? AGENT_MAX_MODEL_TURNS} | allowed tools ${agent.allowedTools?.join(",") ?? "default"}`,
+    message: `${agent.contextSummary} | cwd ${cwdResult.cwd} | isolation ${cwdResult.isolation ?? "none"} | registry ${agent.registryAgentId ?? "none"} | model ${agent.model} | max turns ${getAgentMaxTurns(agent)} | allowed tools ${agent.allowedTools?.join(",") ?? "default"}`,
     createdAt: now,
   });
   if (cwdResult.evidenceText) {
@@ -3056,9 +3117,13 @@ export async function runModelBackedAgent(
     let toolCalls: ModelToolCall[] = [];
     let assistantText = "";
     let providerRequestCompleted = false;
+    let agentAttemptGeneration = 0;
+    let pendingAttemptUsage: ModelUsage | undefined;
     while (!providerRequestCompleted) {
       toolCalls = [];
       assistantText = "";
+      pendingAttemptUsage = undefined;
+      const agentAttemptId = `${agent.id}:${round}:${agentAttemptGeneration}:${randomUUID()}`;
       const preflight = await deps().prepareProviderPreflight(
         context,
         agent.transcriptSessionId,
@@ -3070,6 +3135,13 @@ export async function runModelBackedAgent(
         },
         "agent-child",
       );
+      if (isAgentExecutionCancelled(agent, signal)) {
+        return {
+          status: "blocked",
+          summary: `${agent.type} cancelled：agent preflight result was discarded.`,
+          evidenceRefs: [],
+        };
+      }
       if (preflight.blocked) {
         writeLine(output, preflight.message);
         return {
@@ -3086,7 +3158,7 @@ export async function runModelBackedAgent(
           model: currentRuntime.model,
           endpointProfile: currentRuntime.endpointProfile,
           requestContext: "agent",
-          requestContextId: context.runtimeContextId,
+          requestContextId: agentAttemptId,
           sessionId: agent.transcriptSessionId,
           ...(currentRuntime.reasoningSent
             ? { reasoningLevel: currentRuntime.reasoningLevel }
@@ -3115,10 +3187,24 @@ export async function runModelBackedAgent(
         signal,
         {
           cooldownScope: "sidechain",
+          onAttemptReset: () => {
+            if (isAgentExecutionCancelled(agent, signal)) return;
+            agentAttemptGeneration += 1;
+            toolCalls = [];
+            assistantText = "";
+            pendingAttemptUsage = undefined;
+          },
           onRetry: (info) =>
             handleProviderRetryForMetaOrchestration(context, agent.transcriptSessionId, info),
         },
       )) {
+        if (isAgentExecutionCancelled(agent, signal)) {
+          return {
+            status: "blocked",
+            summary: `${agent.type} cancelled：agent-owned provider event was discarded.`,
+            evidenceRefs: [],
+          };
+        }
         if (event.type === "assistant_text_delta") {
           assistantText += event.text;
           continue;
@@ -3128,14 +3214,19 @@ export async function runModelBackedAgent(
           continue;
         }
         if (event.type === "usage") {
-          agent.cost.inputTokens += event.usage.inputTokens;
-          agent.cost.outputTokens += event.usage.outputTokens;
-          recordCacheUsageObservation(context.cache, event.usage, "agent-child");
+          pendingAttemptUsage = event.usage;
           continue;
         }
         if (event.type === "error") {
           const code = event.error.code ?? "PROVIDER_ERROR";
           const kind = classifyProviderFailure(event.error);
+          if (isAgentExecutionCancelled(agent, signal)) {
+            return {
+              status: "blocked",
+              summary: `${agent.type} cancelled：provider failure was discarded.`,
+              evidenceRefs: [],
+            };
+          }
           await context.store.appendEvent(agent.transcriptSessionId, {
             type: "system_event",
             id: randomUUID(),
@@ -3143,6 +3234,13 @@ export async function runModelBackedAgent(
             message: `agent child provider failure: kind ${kind}; code ${code}; provider ${currentRuntime.provider}; model ${currentRuntime.model}`,
             createdAt: new Date().toISOString(),
           });
+          if (isAgentExecutionCancelled(agent, signal)) {
+            return {
+              status: "blocked",
+              summary: `${agent.type} cancelled：late provider failure was discarded.`,
+              evidenceRefs: [],
+            };
+          }
           const fallback = resolveAgentRuntimeFallback(
             context,
             agent,
@@ -3172,6 +3270,13 @@ export async function runModelBackedAgent(
                 message: `agent child provider cooldown: provider ${fallback.runtime.provider}; model ${fallback.runtime.model}; code ${fallbackCooldown.reasonCode}`,
                 createdAt: new Date().toISOString(),
               });
+              if (isAgentExecutionCancelled(agent, signal)) {
+                return {
+                  status: "blocked",
+                  summary: `${agent.type} cancelled：late provider cooldown was discarded.`,
+                  evidenceRefs: [],
+                };
+              }
               return {
                 status: "blocked",
                 summary:
@@ -3194,7 +3299,17 @@ export async function runModelBackedAgent(
                 status: "attempted",
               },
             );
+            if (isAgentExecutionCancelled(agent, signal)) {
+              return {
+                status: "blocked",
+                summary: `${agent.type} cancelled：late provider fallback was discarded.`,
+                evidenceRefs: [],
+              };
+            }
             writeLine(output, summary);
+            agentAttemptGeneration += 1;
+            toolCalls = [];
+            assistantText = "";
             activeFallback = {
               from: fromRuntime,
               to: fallback.runtime,
@@ -3227,6 +3342,22 @@ export async function runModelBackedAgent(
         }
       }
       if (!retryWithFallback) {
+        const acceptedAttemptGeneration = agentAttemptGeneration;
+        if (pendingAttemptUsage) {
+          agent.cost.inputTokens += pendingAttemptUsage.inputTokens;
+          agent.cost.outputTokens += pendingAttemptUsage.outputTokens;
+          recordCacheUsageObservation(context.cache, pendingAttemptUsage, "agent-child");
+        }
+        if (
+          acceptedAttemptGeneration !== agentAttemptGeneration ||
+          isAgentExecutionCancelled(agent, signal)
+        ) {
+          return {
+            status: "blocked",
+            summary: `${agent.type} cancelled：stale provider usage was discarded.`,
+            evidenceRefs: [],
+          };
+        }
         providerRequestCompleted = true;
         // Clear breaker on every successful agent provider request.
         clearProviderBreaker(
@@ -3236,17 +3367,45 @@ export async function runModelBackedAgent(
           "sidechain",
         );
         if (activeFallback) {
+          if (isAgentExecutionCancelled(agent, signal)) {
+            return {
+              status: "blocked",
+              summary: `${agent.type} cancelled：fallback metadata was discarded.`,
+              evidenceRefs: [],
+            };
+          }
           syncAgentRuntimeFallbackMetadata(context, agent, activeFallback.from, activeFallback.to);
           await persistAgentRun(context, agent);
+          if (isAgentExecutionCancelled(agent, signal)) {
+            return {
+              status: "blocked",
+              summary: `${agent.type} cancelled：late fallback persistence was discarded.`,
+              evidenceRefs: [],
+            };
+          }
           await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, {
             ...activeFallback,
             status: "succeeded",
           });
+          if (isAgentExecutionCancelled(agent, signal)) {
+            return {
+              status: "blocked",
+              summary: `${agent.type} cancelled：late fallback completion was discarded.`,
+              evidenceRefs: [],
+            };
+          }
           activeFallback = undefined;
         }
       }
     }
     if (assistantText || toolCalls.length > 0) {
+      if (isAgentExecutionCancelled(agent, signal)) {
+        return {
+          status: "blocked",
+          summary: `${agent.type} cancelled：assistant result was discarded.`,
+          evidenceRefs: [],
+        };
+      }
       messages.push({ role: "assistant", content: assistantText, toolCalls });
       if (assistantText) {
         await context.store.appendEvent(agent.transcriptSessionId, {
@@ -3255,6 +3414,13 @@ export async function runModelBackedAgent(
           text: assistantText,
           createdAt: new Date().toISOString(),
         });
+        if (isAgentExecutionCancelled(agent, signal)) {
+          return {
+            status: "blocked",
+            summary: `${agent.type} cancelled：late assistant transcript was discarded.`,
+            evidenceRefs: [],
+          };
+        }
       }
     }
     if (toolCalls.length === 0) {
@@ -3468,7 +3634,10 @@ async function executeAgentToolCall(
     await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
     return { ok: false, tool: toolName, text };
   }
-  const permission = await decidePermission(toolName, toolCall.input, context, parentSessionId);
+  const permission = await decidePermission(toolName, toolCall.input, context, parentSessionId, {
+    permissionMode: agent.permissionMode,
+    userActionConstraints: agent.userActionConstraints,
+  });
   await context.store.appendEvent(parentSessionId, {
     type: "permission_request",
     request: permission.request,
@@ -3682,6 +3851,7 @@ export async function executeApprovedAgentToolUse(
       syncBackgroundWithAgentStatus(background, agent);
       await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
       await persistAgentRun(context, agent);
+      clearAgentAbortController(context, agent.id, controller);
       return {
         ok: false,
         tool: toolName,
@@ -3728,6 +3898,7 @@ export async function executeApprovedAgentToolUse(
     syncBackgroundWithAgentStatus(background, agent);
     await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
     await persistAgentRun(context, agent);
+    clearAgentAbortController(context, agent.id, controller);
     return { ok: false, tool: toolName, text, evidenceId };
   }
 }
@@ -3770,6 +3941,7 @@ export async function denyAgentToolUse(
   syncBackgroundWithAgentStatus(background, agent);
   await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
   await persistAgentRun(context, agent);
+  clearAgentAbortController(context, agent.id);
   return { ok: false, tool: toolName, text, evidenceId };
 }
 
@@ -4046,8 +4218,9 @@ export async function cancelAgent(
     background.cancelRequestedAt ??= now;
     background.confirmedExitedAt = now;
   }
-  context.backgroundAbortControllers?.get(agent.id)?.abort();
-  context.backgroundAbortControllers?.delete(agent.id);
+  const controller = context.backgroundAbortControllers?.get(agent.id);
+  controller?.abort();
+  clearAgentAbortController(context, agent.id, controller);
   for (const verificationTask of context.backgroundTasks.filter(
     (task) => task.kind === "verification" && task.ownerAgentId === agent.id,
   )) {
@@ -4260,9 +4433,9 @@ export async function markRunningAgentsStaleForInterrupt(
     syncBackgroundWithAgentStatus(background, agent);
     if (controller) {
       controller.abort();
-      context.backgroundAbortControllers?.delete(agent.id);
       aborted += 1;
     }
+    clearAgentAbortController(context, agent.id, controller);
     await persistAgentRun(context, agent);
     await deps().appendBackgroundTaskEvent(context, sessionId, background);
     marked += 1;
@@ -4915,22 +5088,27 @@ async function runAgentToolInCwd(
   signal: AbortSignal,
 ): ReturnType<typeof runTool> {
   const cwd = agent.cwd ?? context.projectPath;
-  const scoped =
-    cwd === context.projectPath ? { ...context.tools } : createToolContext(cwd);
-  scoped.abortSignal = signal;
-  scoped.todos = context.tools.todos;
-  scoped.readSnapshots = context.tools.readSnapshots;
-  scoped.patchSummaries = context.tools.patchSummaries;
-  const result = await runTool(toolName, input, scoped);
-  if (result.output.changedFiles?.length) {
-    agent.changedFiles = Array.from(
-      new Set([...(agent.changedFiles ?? []), ...result.output.changedFiles]),
-    );
+  context.agentToolContexts ??= new Map();
+  let scoped = context.agentToolContexts.get(agent.id);
+  if (!scoped) {
+    scoped = createToolContext(cwd);
+    context.agentToolContexts.set(agent.id, scoped);
   }
-  if (cwd !== context.projectPath) {
-    context.tools.changedFiles.push(
-      ...scoped.changedFiles.map((file) => relative(context.projectPath, resolve(cwd, file))),
+  scoped.abortSignal = signal;
+  const result = await runTool(toolName, input, scoped);
+  const changedFiles = result.output.changedFiles ?? [];
+  if (changedFiles.length > 0) {
+    agent.changedFiles = Array.from(
+      new Set([...(agent.changedFiles ?? []), ...changedFiles]),
+    );
+    context.tools.changedFiles = Array.from(
+      new Set([
+        ...context.tools.changedFiles,
+        ...changedFiles.map((file) => relative(context.projectPath, resolve(cwd, file))),
+      ]),
     );
   }
   return result;
 }
+
+export const __testRunAgentToolInCwd = runAgentToolInCwd;

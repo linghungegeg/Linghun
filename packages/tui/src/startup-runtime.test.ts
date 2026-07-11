@@ -125,6 +125,28 @@ describe("startup-runtime", () => {
   });
 
   describe("sanitizeDiagnosticText", () => {
+    it("removes dangerous terminal controls from diagnostic sinks", () => {
+      const text = "safe\u001B]52;c;secret\u0007\u001BPdcs\u001B\\\u001B[2Jtail";
+      expect(sanitizeDiagnosticText(text)).toBe("safetail");
+    });
+
+    it.each([
+      ["OSC", "\u001B]52;c;secret\u0007"],
+      ["DCS", "\u001BPsecret\u001B\\"],
+      ["SOS", "\u001BXsecret\u001B\\"],
+      ["PM", "\u001B^secret\u001B\\"],
+      ["APC", "\u001B_secret\u001B\\"],
+      ["C1 OSC", "\u009D52;c;secret\u009C"],
+      ["non-SGR CSI", "\u001B[2J\u001B[H\u001B[?25l"],
+      ["C0", "\u0001\u0007\u007F"],
+      ["escaped OSC", "\\u001b]52;c;secret\\u0007"],
+      ["escaped DCS", "\\x1bPsecret\\x1b\\"],
+      ["escaped C1", "\\u009d52;c;secret\\u009c"],
+      ["escaped CSI/C0", "\\u001b[2J\\u0001"],
+    ])("removes %s controls", (_name, control) => {
+      expect(sanitizeDiagnosticText(`before${control}after`)).toBe("beforeafter");
+    });
+
     it("redacts API keys", () => {
       expect(sanitizeDiagnosticText("api_key=sk-abc123")).toBe("api_key=***");
     });

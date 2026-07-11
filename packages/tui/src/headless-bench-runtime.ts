@@ -200,7 +200,17 @@ export function createHeadlessBenchInitialPrompt(input: {
 export async function validateHeadlessBenchCompletion(input: {
   projectPath: string;
   config: HeadlessBenchConfig;
+  deadlineAtMs?: number;
 }): Promise<HeadlessBenchValidationResult> {
+  if ((remainingDeadlineMs(input.deadlineAtMs) ?? 1) <= 0) {
+    return {
+      ok: false,
+      failure: {
+        category: "agent_timeout",
+        summary: "Headless deadline reached before validation could start.",
+      },
+    };
+  }
   const artifactResult = await validateRequiredArtifacts(input.projectPath, input.config.requiredArtifacts);
   if (!artifactResult.ok) {
     return {
@@ -224,10 +234,23 @@ export async function validateHeadlessBenchCompletion(input: {
   let result: Awaited<ReturnType<typeof runOfficialTestCommand>> | undefined;
   let setupRetry = 0;
   while (setupRetry <= input.config.environmentSetupRetries) {
+    const remainingMs = remainingDeadlineMs(input.deadlineAtMs);
+    if (remainingMs !== undefined && remainingMs <= 0) {
+      return {
+        ok: false,
+        failure: {
+          category: "agent_timeout",
+          summary: "Headless deadline reached before official validation could complete.",
+        },
+      };
+    }
     result = await runOfficialTestCommand({
       projectPath: input.projectPath,
       command: input.config.testCommand,
-      timeoutMs: input.config.testTimeoutMs,
+      timeoutMs: Math.max(
+        1,
+        Math.min(input.config.testTimeoutMs, remainingMs ?? input.config.testTimeoutMs),
+      ),
     });
     const setupFailure = classifyEnvironmentSetupFailure(result.output);
     if (
@@ -239,7 +262,18 @@ export async function validateHeadlessBenchCompletion(input: {
       break;
     }
     setupRetry += 1;
-    await sleep(Math.min(500 * 2 ** (setupRetry - 1), 2_000));
+    const retryDelayMs = Math.min(500 * 2 ** (setupRetry - 1), 2_000);
+    const retryRemainingMs = remainingDeadlineMs(input.deadlineAtMs);
+    if (retryRemainingMs !== undefined && retryRemainingMs <= retryDelayMs) {
+      return {
+        ok: false,
+        failure: {
+          category: "agent_timeout",
+          summary: "Headless deadline reached before environment setup retry.",
+        },
+      };
+    }
+    await sleep(retryDelayMs);
   }
   if (!result) {
     throw new Error("headless validation did not run");
@@ -267,6 +301,10 @@ export async function validateHeadlessBenchCompletion(input: {
       summary: summarizeFailureOutput(result.output, category),
     },
   };
+}
+
+function remainingDeadlineMs(deadlineAtMs: number | undefined): number | undefined {
+  return deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
 }
 
 export async function collectHeadlessArtifactChecklist(input: {

@@ -97,15 +97,20 @@ type ConnectorRuntimeState = {
 type ResolvedAuth = AppConnectorState["auth"] & { value?: string };
 
 const HTTP_TIMEOUT_MS = 5_000;
-const runtimeByProject = new Map<string, ConnectorRuntimeState>();
+const runtimeByContext = new WeakMap<TuiContext, ConnectorRuntimeState>();
 
 function getRuntimeState(context: TuiContext): ConnectorRuntimeState {
-  let state = runtimeByProject.get(context.projectPath);
+  let state = runtimeByContext.get(context);
   if (!state) {
     state = { apps: new Map(), authConfigs: new Map() };
-    runtimeByProject.set(context.projectPath, state);
+    runtimeByContext.set(context, state);
   }
   return state;
+}
+
+function getRuntimeOwnerId(context: TuiContext): string {
+  context.runtimeOwnerId ??= randomUUID();
+  return context.runtimeOwnerId;
 }
 
 export function listAppConnectors(context: TuiContext): AppConnectorState[] {
@@ -207,7 +212,7 @@ export async function connectAppConnector(
         transport: "http",
         auth: manifest.value.auth.type,
       },
-      { projectPath: context.projectPath },
+      { projectPath: context.projectPath, runtimeOwnerId: getRuntimeOwnerId(context) },
     );
   }
   const runtime = getRuntimeState(context);
@@ -220,8 +225,17 @@ export function disconnectAppConnector(appId: string, context: TuiContext): bool
   const state = getRuntimeState(context);
   const existed = state.apps.delete(appId);
   state.authConfigs.delete(appId);
-  unregisterCapabilitiesByApp(appId, { projectPath: context.projectPath });
+  unregisterCapabilitiesByApp(appId, { runtimeOwnerId: getRuntimeOwnerId(context) });
   return existed;
+}
+
+export function clearAppConnectorRuntime(context: TuiContext): void {
+  const state = runtimeByContext.get(context);
+  if (!state) return;
+  for (const appId of state.apps.keys()) {
+    unregisterCapabilitiesByApp(appId, { runtimeOwnerId: getRuntimeOwnerId(context) });
+  }
+  runtimeByContext.delete(context);
 }
 
 export function formatAppConnectorList(context: TuiContext): string {

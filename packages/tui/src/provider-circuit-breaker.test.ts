@@ -447,6 +447,58 @@ describe("provider-circuit-breaker", () => {
   });
 
   describe("withProviderRetry", () => {
+    it("does not retry or open the breaker when the caller aborts", async () => {
+      let calls = 0;
+      const retries: string[] = [];
+      const provider: Provider = {
+        id: "openai",
+        displayName: "OpenAI",
+        supports: { streaming: true, usage: true },
+        async listModels() {
+          return [];
+        },
+        async *stream(_request, signal) {
+          calls += 1;
+          await new Promise<void>((_resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("This operation was aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        },
+      };
+      const gateway = new ModelGateway([provider]);
+      const controller = new AbortController();
+      const events: LinghunEvent[] = [];
+      const run = (async () => {
+        for await (const event of withProviderRetry(
+          gateway,
+          state,
+          "openai",
+          { messages: [], model: "gpt-4o" },
+          controller.signal,
+          { onRetry: (info) => retries.push(info.code) },
+        )) {
+          events.push(event);
+        }
+      })();
+
+      await Promise.resolve();
+      controller.abort("user_cancelled");
+      await run;
+
+      expect(calls).toBe(1);
+      expect(retries).toEqual([]);
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: "error",
+          error: expect.objectContaining({ code: "ABORT_ERR", recoverable: false }),
+        }),
+      ]);
+      expect(state.entries.size).toBe(0);
+    });
+
     it("queues requests above the provider active limit", async () => {
       const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
       try {
@@ -543,6 +595,7 @@ describe("provider-circuit-breaker", () => {
       try {
         let calls = 0;
         const retryEvents: Array<{ attempt: number; maxAttempts: number; code: string }> = [];
+        const attemptResets: string[] = [];
         const model: ModelInfo = {
           id: "gpt-4o",
           displayName: "GPT-4o",
@@ -582,7 +635,12 @@ describe("provider-circuit-breaker", () => {
             "openai",
             { messages: [], model: "gpt-4o" },
             new AbortController().signal,
-            { maxRetries: 3, onRetry: (info) => retryEvents.push(info) },
+            {
+              maxRetries: 3,
+              onRetry: (info) => retryEvents.push(info),
+              onAttemptReset: (info) =>
+                attemptResets.push(`${info.reason}:${info.replacement}`),
+            },
           )) {
             events.push(event);
           }
@@ -602,6 +660,11 @@ describe("provider-circuit-breaker", () => {
           "2/3:PROVIDER_SERVER_ERROR",
           "3/3:PROVIDER_SERVER_ERROR",
         ]);
+        expect(attemptResets).toEqual([
+          "same_provider_retry:same_provider_stream",
+          "same_provider_retry:same_provider_stream",
+          "same_provider_retry:same_provider_stream",
+        ]);
         expect(events).toHaveLength(1);
         expect(events[0]?.type).toBe("error");
         expect(state.entries.get("openai::gpt-4o")?.consecutiveFailures).toBe(1);
@@ -610,6 +673,99 @@ describe("provider-circuit-breaker", () => {
         randomSpy.mockRestore();
       }
     });
+
+    it("keeps 100 concurrent runtimes isolated across 1,000 attempt replacements", async () => {
+      vi.useRealTimers();
+      const callsByRuntime = new Map<string, number>();
+      const provider: Provider = {
+        id: "shared-provider",
+        displayName: "Shared Provider",
+        supports: { streaming: true, usage: true },
+        async listModels() {
+          return [];
+        },
+        async *stream(request) {
+          const runtimeId = request.requestContextId ?? "missing";
+          const calls = (callsByRuntime.get(runtimeId) ?? 0) + 1;
+          callsByRuntime.set(runtimeId, calls);
+          if (calls <= 10) {
+            yield {
+              type: "assistant_text_delta",
+              id: `partial-${runtimeId}-${calls}`,
+              text: `partial-${runtimeId}-${calls}`,
+            } satisfies LinghunEvent;
+            yield {
+              type: "usage",
+              usage: { inputTokens: calls, outputTokens: calls, totalTokens: calls * 2 },
+            } satisfies LinghunEvent;
+            yield {
+              type: "error",
+              error: new LinghunError({
+                code: "PROVIDER_SERVER_ERROR",
+                message: `retry ${runtimeId}/${calls}`,
+                recoverable: true,
+              }),
+            } satisfies LinghunEvent;
+            return;
+          }
+          yield {
+            type: "assistant_text_delta",
+            id: `final-${runtimeId}`,
+            text: `final-${runtimeId}`,
+          } satisfies LinghunEvent;
+          yield {
+            type: "usage",
+            usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+          } satisfies LinghunEvent;
+          yield {
+            type: "message_stop",
+            id: `stop-${runtimeId}`,
+            chunkCount: 3,
+            hadUsage: true,
+          } satisfies LinghunEvent;
+        },
+      };
+      const gateway = new ModelGateway([provider]);
+      const runs = Array.from({ length: 100 }, async (_, runtimeIndex) => {
+        let resets = 0;
+        let text = "";
+        let usageTotal = 0;
+        const runtimeId = `runtime-${runtimeIndex}`;
+        const runtimeState = createProviderCircuitBreakerState();
+        for await (const event of withProviderRetry(
+          gateway,
+          runtimeState,
+          provider.id,
+          { messages: [], model: "shared-model", requestContextId: runtimeId },
+          new AbortController().signal,
+          {
+            maxRetries: 10,
+            baseDelayMs: 0,
+            maxDelayMs: 0,
+            onAttemptReset: () => {
+              resets += 1;
+              text = "";
+              usageTotal = 0;
+            },
+          },
+        )) {
+          if (event.type === "assistant_text_delta") text += event.text;
+          if (event.type === "usage") usageTotal = event.usage.totalTokens;
+        }
+        return { runtimeId, resets, text, usageTotal };
+      });
+
+      const results = await Promise.all(runs);
+      expect(results).toHaveLength(100);
+      expect([...callsByRuntime.values()].every((calls) => calls === 11)).toBe(true);
+      expect(results.reduce((sum, result) => sum + result.resets, 0)).toBe(1_000);
+      expect(
+        results.every(
+          (result) =>
+            result.text === `final-${result.runtimeId}` && result.usageTotal === 110,
+        ),
+      ).toBe(true);
+    }, 20_000);
 
     it("records withProviderRetry failures in the requested cooldown scope", async () => {
       const model: ModelInfo = {
@@ -1049,10 +1205,19 @@ describe("provider-circuit-breaker", () => {
           yield { type: "assistant_text_delta", id: "td-1", text: "thinking" } satisfies LinghunEvent;
           yield { type: "tool_use", id: "tu-1", name: "read_file", input: { path: "a.ts" } } satisfies LinghunEvent;
           yield {
+            type: "usage",
+            usage: {
+              inputTokens: 100,
+              outputTokens: 10,
+              totalTokens: 110,
+              cacheReadTokens: 80,
+            },
+          } satisfies LinghunEvent;
+          yield {
             type: "message_stop",
             id: "stop-1",
-            chunkCount: 3,
-            hadUsage: false,
+            chunkCount: 4,
+            hadUsage: true,
             finishReason: "tool_use",
           } satisfies LinghunEvent;
         },
@@ -1072,60 +1237,10 @@ describe("provider-circuit-breaker", () => {
       }
 
       const types = events.map((e) => e.type);
-      expect(types).toEqual(["assistant_text_delta", "tool_use", "message_stop"]);
+      expect(types).toEqual(["assistant_text_delta", "tool_use", "usage", "message_stop"]);
       // Critical assertion: tool_use MUST precede message_stop
       expect(types.indexOf("tool_use")).toBeLessThan(types.indexOf("message_stop"));
-    });
-
-    it("can stop after a complete tool_use without waiting for a delayed message_stop", async () => {
-      const model: ModelInfo = {
-        id: "gpt-4o",
-        displayName: "GPT-4o",
-        providerId: "openai",
-        contextWindow: 128_000,
-        maxOutputTokens: 4_096,
-        supportsTools: true,
-        supportsVision: false,
-        supportsThinking: false,
-        supportsPromptCache: false,
-      };
-      const provider: Provider = {
-        id: "openai",
-        displayName: "OpenAI",
-        supports: { streaming: true, usage: true },
-        async listModels() {
-          return [model];
-        },
-        async *stream() {
-          yield { type: "tool_use", id: "tu-early", name: "read_file", input: { path: "a.ts" } } satisfies LinghunEvent;
-          await new Promise((resolve) => setTimeout(resolve, 60_000));
-          yield {
-            type: "message_stop",
-            id: "stop-late",
-            chunkCount: 2,
-            hadUsage: false,
-            finishReason: "tool_use",
-          } satisfies LinghunEvent;
-        },
-      };
-      const gateway = new ModelGateway([provider]);
-      const events: LinghunEvent[] = [];
-
-      for await (const event of withProviderRetry(
-        gateway,
-        state,
-        "openai",
-        { messages: [], model: "gpt-4o" },
-        new AbortController().signal,
-        { maxRetries: 1, stopAfterToolUse: true },
-      )) {
-        events.push(event);
-      }
-
-      expect(events).toEqual([
-        { type: "tool_use", id: "tu-early", name: "read_file", input: { path: "a.ts" } },
-      ]);
-      expect(state.entries.size).toBe(0);
+      expect(types.indexOf("tool_use")).toBeLessThan(types.indexOf("usage"));
     });
 
     it("surfaces errors after a yielded tool_use instead of retrying into a second tool attempt", async () => {

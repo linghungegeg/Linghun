@@ -5,6 +5,7 @@ import {
   hasStructuredArtifactEvidenceForPath,
   readEvidenceDataRecord,
 } from "./artifact-evidence-runtime.js";
+import { evidenceMatchesRequestOwner } from "./evidence-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
   evaluateArchitectureAndCompletenessClaims,
@@ -31,6 +32,7 @@ export function needsSolutionCompletenessReportClosure(
 export function runArchitectureAndCompletenessFinalGate(
   context: TuiContext,
   assistantText: string,
+  evidence: EvidenceRecord[] = context.evidence,
 ):
   | {
       status: "passed";
@@ -56,7 +58,7 @@ export function runArchitectureAndCompletenessFinalGate(
     {
       hasActiveCard: Boolean(card),
       driftWarnings,
-      hasArchitectureEvidence: hasArchitectureEvidenceForClaims(context.evidence),
+      hasArchitectureEvidence: hasArchitectureEvidenceForClaims(evidence),
     },
     {
       classificationRequired: context.solutionCompleteness.classificationRequired,
@@ -274,7 +276,13 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
       (item) => item.kind === "architecture_boundary" || item.kind === "completeness",
     )
   ) {
-    const extended = runArchitectureAndCompletenessFinalGate(context, claim);
+    const extended = runArchitectureAndCompletenessFinalGate(
+      context,
+      claim,
+      context.currentRequestTurnId
+        ? context.evidence.filter((record) => evidenceMatchesRequestOwner(record, context))
+        : context.evidence,
+    );
     if (extended.status === "needs_disclaimer") {
       return {
         status: "needs_disclaimer",
@@ -284,7 +292,12 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
       };
     }
   }
-  const verdict = evaluateFinalAnswerClaims(claim, context.evidence);
+  const verdict = evaluateFinalAnswerClaims(
+    claim,
+    context.currentRequestTurnId
+      ? context.evidence.filter((record) => evidenceMatchesRequestOwner(record, context))
+      : context.evidence,
+  );
   if (verdict.status === "passed") {
     return { status: "passed", unsupportedClaims: [] };
   }

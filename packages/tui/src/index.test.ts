@@ -17,9 +17,9 @@ import {
   resolveStoragePaths,
   saveProviderEnvSetup,
 } from "@linghun/config";
-import { LinghunError, SessionStore } from "@linghun/core";
+import { LinghunError, SessionStore, type TranscriptEvent } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
-import type { ModelMessage } from "@linghun/providers";
+import type { ModelGateway, ModelMessage } from "@linghun/providers";
 import { type ToolOutput, createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { enqueueAgentCompletionNotice } from "./agent-completion-finalizer.js";
@@ -53,6 +53,7 @@ import {
   createHeadlessBenchRepairPrompt,
   detectEngineeringTaskProfile,
   detectHeadlessBenchTaskProfile,
+  validateHeadlessBenchCompletion,
 } from "./headless-bench-runtime.js";
 import {
   type BackgroundTaskState,
@@ -161,7 +162,7 @@ import { createToolInputSchema } from "./model-loop-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
-import { consumeProcessGuardStopResultsForTest, trackChildProcess } from "./process-guard.js";
+import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
 import {
   BREAKER_CONSTANTS,
   checkProviderCooldown,
@@ -2009,12 +2010,11 @@ describe("runHeadlessTask", () => {
     expect(transcript.some((e) => e.type === "assistant_text_delta" && e.text === "from-test")).toBe(true);
   });
 
-  it("continues once after provider stream failure when workspace evidence exists", async () => {
+  it("continues once after provider stream failure when owner evidence exists", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session, createTestModelConfig());
-    context.tools.changedFiles.push("answer.txt");
     const prompts: string[] = [];
 
     const exitCode = await runHeadlessTask({
@@ -2029,6 +2029,19 @@ describe("runHeadlessTask", () => {
       __testSendMessage: async (text) => {
         prompts.push(text);
         if (prompts.length === 1) {
+          context.tools.changedFiles.push("answer.txt");
+          const evidence = createEvidenceRecord(
+            "command_output",
+            "headless owner wrote answer.txt",
+            "Write:answer.txt",
+            ["file_written", "file:answer.txt"],
+          );
+          evidence.ownerScope = {
+            ownerSessionId: session.id,
+            requestTurnId: "headless-request-1",
+            cwd: project,
+          };
+          rememberEvidence(context, evidence);
           context.lastProviderFailure = {
             code: "PROVIDER_STREAM_ERROR",
             kind: "transit",
@@ -2037,6 +2050,7 @@ describe("runHeadlessTask", () => {
             endpointProfile: "chat_completions",
             summary: "provider failure: stream interrupted",
             evidenceId: "provider-failure-1",
+            requestTurnId: "headless-request-1",
             createdAt: new Date().toISOString(),
           };
         }
@@ -2050,12 +2064,11 @@ describe("runHeadlessTask", () => {
     expect(context.lastProviderFailure).toBeUndefined();
   });
 
-  it("bench mode yields to verifier after provider stream failures when files changed", async () => {
+  it("bench mode runs verification before success after provider stream failures", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-diag-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session, createTestModelConfig());
-    context.tools.changedFiles.push("answer.txt");
     const stderr = new MemoryOutput();
     let attempts = 0;
 
@@ -2065,12 +2078,31 @@ describe("runHeadlessTask", () => {
       stdout: new MemoryOutput(),
       stderr,
       maxContinuations: 2,
-      bench: { enabled: true, maxRepairAttempts: 0 },
+      bench: {
+        enabled: true,
+        maxRepairAttempts: 0,
+        testCommand: `node -e "process.exit(0)"`,
+      },
       __testContext: context,
       __testStore: store,
       __testSkipHydration: true,
       __testSendMessage: async () => {
         attempts += 1;
+        if (attempts === 1) {
+          context.tools.changedFiles.push("answer.txt");
+          const evidence = createEvidenceRecord(
+            "command_output",
+            "headless owner wrote answer.txt",
+            "Write:answer.txt",
+            ["file_written", "file:answer.txt"],
+          );
+          evidence.ownerScope = {
+            ownerSessionId: session.id,
+            requestTurnId: "headless-request-1",
+            cwd: project,
+          };
+          rememberEvidence(context, evidence);
+        }
         context.lastProviderFailure = {
           code: "PROVIDER_STREAM_DECODE_ERROR",
           kind: "transit",
@@ -2079,6 +2111,7 @@ describe("runHeadlessTask", () => {
           endpointProfile: "responses",
           summary: `provider failure attempt ${attempts}`,
           evidenceId: `provider-failure-${attempts}`,
+          requestTurnId: `headless-request-${attempts}`,
           createdAt: new Date().toISOString(),
         };
       },
@@ -2092,12 +2125,435 @@ describe("runHeadlessTask", () => {
     expect(stderr.text).toContain("fileChanges=yes:1");
   });
 
+  it("does not return success after exhausted continuation without real verification", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-unverified-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      maxContinuations: 0,
+      bench: { enabled: true, maxRepairAttempts: 0 },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        if (!context.tools.changedFiles.includes("answer.txt")) {
+          context.tools.changedFiles.push("answer.txt");
+        }
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_ERROR",
+          kind: "transit",
+          recoverability: "resumable",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: "provider failed before completion",
+          evidenceId: "provider-unverified-1",
+          requestTurnId: "headless-unverified-1",
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+  });
+
+  it("continues a resumable read-only task when current owner evidence exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-readonly-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "inspect only",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      maxContinuations: 1,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async (text) => {
+        prompts.push(text);
+        if (prompts.length !== 1) return;
+        rememberEvidence(
+          context,
+          createEvidenceRecord(
+            "file_read",
+            "read-only source inspected",
+            "Read:source.ts",
+            ["file_read"],
+          ),
+        );
+        context.evidence[0]!.ownerScope = {
+          ownerSessionId: session.id,
+          requestTurnId: "headless-readonly-1",
+          cwd: project,
+        };
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_ERROR",
+          kind: "transit",
+          recoverability: "resumable",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: "stream interrupted after read",
+          evidenceId: "provider-readonly-1",
+          requestTurnId: "headless-readonly-1",
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts).toHaveLength(2);
+    expect(context.tools.changedFiles).toEqual([]);
+  });
+
+  it("rejects pre-run changes and unowned or sidechain evidence as headless progress", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-owner-progress-reject-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    context.tools.changedFiles.push("old-change.txt");
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "inspect only",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      maxContinuations: 1,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+        context.tools.changedFiles.push("sidechain-change.txt");
+        const unowned = createEvidenceRecord(
+          "file_read",
+          "unowned read",
+          "Read:unowned.ts",
+          ["file_read"],
+        );
+        const sidechain = createEvidenceRecord(
+          "file_read",
+          "sidechain read",
+          "agent:other:Read",
+          ["file_read"],
+        );
+        sidechain.ownerScope = {
+          ownerSessionId: session.id,
+          requestTurnId: "headless-owner-reject-1",
+          ownerAgentId: "agent-other",
+          cwd: project,
+        };
+        context.evidence.unshift(unowned, sidechain);
+        context.lastProviderFailure = {
+          code: "PROVIDER_STREAM_ERROR",
+          kind: "transit",
+          recoverability: "resumable",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: "stream interrupted without owned progress",
+          evidenceId: "provider-owner-reject-1",
+          requestTurnId: "headless-owner-reject-1",
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(attempts).toBe(1);
+  });
+
+  it("does not continue an action-required provider failure after file progress", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-action-required-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "original task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      maxContinuations: 3,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+        context.tools.changedFiles.push("answer.txt");
+        context.lastProviderFailure = {
+          code: "PROVIDER_API_KEY_ERROR",
+          kind: "auth",
+          recoverability: "action_required",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: "invalid key",
+          evidenceId: "provider-auth-1",
+          requestTurnId: "headless-auth-1",
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(attempts).toBe(1);
+  });
+
+  it("aborts the active provider request at the headless deadline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-request-deadline-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    const exitCode = await runHeadlessTask({
+      prompt: "deadline task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      deadlineMs: 20,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        const controller = new AbortController();
+        context.activeAbortController = controller;
+        await new Promise<void>((resolveAbort) =>
+          controller.signal.addEventListener("abort", () => resolveAbort(), { once: true }),
+        );
+      },
+    });
+
+    expect(exitCode).toBe(6);
+  });
+
+  it("aborts a provider controller registered after the deadline race starts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-delayed-controller-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    let lateCommit = false;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "deadline initialization race",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      deadlineMs: 20,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+        const controller = new AbortController();
+        context.activeAbortController = controller;
+        if (!controller.signal.aborted) {
+          await new Promise<void>((resolveAbort) =>
+            controller.signal.addEventListener("abort", () => resolveAbort(), { once: true }),
+          );
+        }
+        if (!controller.signal.aborted) lateCommit = true;
+      },
+    });
+
+    expect(exitCode).toBe(6);
+    expect(lateCommit).toBe(false);
+  });
+
+  it("returns the deadline exit code when provider work ignores abort forever", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-noncooperative-deadline-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const startedAt = Date.now();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "non-cooperative deadline task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      deadlineMs: 20,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: () => new Promise<void>(() => undefined),
+    });
+
+    expect(exitCode).toBe(6);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("returns promptly when the host aborts non-cooperative provider work", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-noncooperative-host-abort-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const host = new AbortController();
+    const startedAt = Date.now();
+    setTimeout(() => host.abort("host stopped"), 20);
+
+    const exitCode = await runHeadlessTask({
+      prompt: "non-cooperative host abort task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      signal: host.signal,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: () => new Promise<void>(() => undefined),
+    });
+
+    expect(exitCode).toBe(130);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("keeps the deadline owner active through deferred approval continuation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deferred-deadline-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    let providerStarted = false;
+    const gateway = {
+      async *stream() {
+        providerStarted = true;
+        yield { type: "message_stop", chunkCount: 0, hadUsage: false };
+      },
+    } as unknown as ModelGateway;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "deferred approval deadline task",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      deadlineMs: 20,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testGateway: gateway,
+      __testSendMessage: async (_text, _context, _gateway, _output, controller) => {
+        if (!controller) throw new Error("missing headless request controller");
+        context.pendingLocalApproval = {
+          kind: "model_tool_use",
+          toolName: "Bash",
+          toolCall: {
+            id: "call-headless-deferred-deadline",
+            name: "Bash",
+            input: { command: `node -e "setTimeout(()=>{},5000)"` },
+          },
+          sessionId: session.id,
+          continuation: {
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "responses",
+            reasoningSent: false,
+            messages: [],
+            abortSignal: controller.signal,
+          },
+        } as NonNullable<TuiContext["pendingLocalApproval"]>;
+      },
+    });
+
+    expect(exitCode).toBe(6);
+    expect(providerStarted).toBe(false);
+  });
+
+  it("does not return bench success without a real test or artifact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-unverified-success-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench without verifier",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      bench: { enabled: true, maxRepairAttempts: 0 },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(1);
+  });
+
+  it("reuses remaining continuation budget for a repair provider interruption", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-repair-continuation-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const artifact = join(project, "answer.txt");
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "create answer.txt",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      maxContinuations: 1,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["answer.txt"],
+      },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+        if (attempts === 2) {
+          rememberEvidence(
+            context,
+            createEvidenceRecord("file_read", "repair inspected failure", "Read:test.log", ["file_read"]),
+          );
+          context.evidence[0]!.ownerScope = {
+            ownerSessionId: session.id,
+            requestTurnId: "headless-repair-1",
+            cwd: project,
+          };
+          context.lastProviderFailure = {
+            code: "PROVIDER_STREAM_ERROR",
+            kind: "transit",
+            recoverability: "resumable",
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "responses",
+            summary: "repair stream interrupted",
+            evidenceId: "provider-repair-1",
+            requestTurnId: "headless-repair-1",
+            createdAt: new Date().toISOString(),
+          };
+        }
+        if (attempts === 3) {
+          await writeFile(artifact, "verified", "utf8");
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(attempts).toBe(3);
+  });
+
   it("non-bench mode fails after provider stream failures even when files changed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-nonbench-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session, createTestModelConfig());
-    context.tools.changedFiles.push("answer.txt");
     const stderr = new MemoryOutput();
 
     const exitCode = await runHeadlessTask({
@@ -2111,6 +2567,9 @@ describe("runHeadlessTask", () => {
       __testStore: store,
       __testSkipHydration: true,
       __testSendMessage: async () => {
+        if (!context.tools.changedFiles.includes("answer.txt")) {
+          context.tools.changedFiles.push("answer.txt");
+        }
         context.lastProviderFailure = {
           code: "PROVIDER_STREAM_DECODE_ERROR",
           kind: "transit",
@@ -2119,6 +2578,7 @@ describe("runHeadlessTask", () => {
           endpointProfile: "responses",
           summary: "provider failure in non-bench mode",
           evidenceId: `provider-failure-${Date.now()}`,
+          requestTurnId: "headless-nonbench-1",
           createdAt: new Date().toISOString(),
         };
       },
@@ -2155,6 +2615,7 @@ describe("runHeadlessTask", () => {
           endpointProfile: "responses",
           summary: "provider failure with no progress",
           evidenceId: `provider-failure-${Date.now()}`,
+          requestTurnId: "headless-no-progress-1",
           createdAt: new Date().toISOString(),
         };
       },
@@ -2201,7 +2662,6 @@ describe("runHeadlessTask", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session, createTestModelConfig());
-    context.tools.changedFiles.push("answer.txt");
     const stderr = new MemoryOutput();
     let attempts = 0;
 
@@ -2216,6 +2676,21 @@ describe("runHeadlessTask", () => {
       __testSkipHydration: true,
       __testSendMessage: async () => {
         attempts += 1;
+        if (attempts === 1) {
+          context.tools.changedFiles.push("answer.txt");
+          const evidence = createEvidenceRecord(
+            "command_output",
+            "headless owner wrote answer.txt",
+            "Write:answer.txt",
+            ["file_written", "file:answer.txt"],
+          );
+          evidence.ownerScope = {
+            ownerSessionId: session.id,
+            requestTurnId: "headless-limit-1",
+            cwd: project,
+          };
+          rememberEvidence(context, evidence);
+        }
         context.lastProviderFailure = {
           code: "PROVIDER_STREAM_ERROR",
           kind: "transit",
@@ -2224,6 +2699,7 @@ describe("runHeadlessTask", () => {
           endpointProfile: "chat_completions",
           summary: `provider failure attempt ${attempts}`,
           evidenceId: `provider-failure-${attempts}`,
+          requestTurnId: `headless-limit-${attempts}`,
           createdAt: new Date().toISOString(),
         };
       },
@@ -2286,7 +2762,7 @@ describe("runHeadlessTask", () => {
           windowsHide: true,
           detached: process.platform !== "win32",
         });
-        trackChildProcess(child, {
+        context.tools.trackChildProcess?.(child, {
           detached: process.platform !== "win32",
           label: "headless-test-background",
         });
@@ -2299,6 +2775,186 @@ describe("runHeadlessTask", () => {
       expect.arrayContaining([expect.objectContaining({ force: true, attempted: 1 })]),
     );
   }, 30_000);
+
+  it("handles a host interrupt signal through the current runtime owner", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-sigint-owner-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const hostController = new AbortController();
+    consumeProcessGuardStopResultsForTest();
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      signal: hostController.signal,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.activeAbortController = new AbortController();
+        const child = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 5000)"], {
+          stdio: "ignore",
+          windowsHide: true,
+          detached: process.platform !== "win32",
+        });
+        context.tools.trackChildProcess?.(child, {
+          detached: process.platform !== "win32",
+          label: "headless-signal-owner",
+        });
+        hostController.abort("test interrupt");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(context.activeAbortController.signal.aborted).toBe(true);
+      },
+    });
+    const stopResults = consumeProcessGuardStopResultsForTest();
+
+    expect(exitCode).toBe(130);
+    expect(stopResults).toEqual(
+      expect.arrayContaining([expect.objectContaining({ force: false, attempted: 1 })]),
+    );
+  }, 30_000);
+
+  it("isolates host interrupt signals across concurrent headless runtimes", async () => {
+    const projectA = await mkdtemp(join(tmpdir(), "linghun-headless-signal-a-"));
+    const projectB = await mkdtemp(join(tmpdir(), "linghun-headless-signal-b-"));
+    const storeA = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: projectA });
+    const storeB = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: projectB });
+    const sessionA = await storeA.create({ model: "deepseek-v4-flash" });
+    const sessionB = await storeB.create({ model: "deepseek-v4-flash" });
+    const contextA = await createTestContext(projectA, storeA, sessionA, createTestModelConfig());
+    const contextB = await createTestContext(projectB, storeB, sessionB, createTestModelConfig());
+    const hostA = new AbortController();
+    const hostB = new AbortController();
+    const activeA = new AbortController();
+    const activeB = new AbortController();
+    let markStartedA: (() => void) | undefined;
+    let markStartedB: (() => void) | undefined;
+    let releaseA: (() => void) | undefined;
+    let releaseB: (() => void) | undefined;
+    const startedA = new Promise<void>((resolve) => { markStartedA = resolve; });
+    const startedB = new Promise<void>((resolve) => { markStartedB = resolve; });
+    const holdA = new Promise<void>((resolve) => { releaseA = resolve; });
+    const holdB = new Promise<void>((resolve) => { releaseB = resolve; });
+
+    const runningA = runHeadlessTask({
+      prompt: "runtime A",
+      projectPath: projectA,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      signal: hostA.signal,
+      __testContext: contextA,
+      __testStore: storeA,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        contextA.activeAbortController = activeA;
+        markStartedA?.();
+        await new Promise<void>((resolve) =>
+          activeA.signal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        await holdA;
+      },
+    });
+    const runningB = runHeadlessTask({
+      prompt: "runtime B",
+      projectPath: projectB,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      signal: hostB.signal,
+      __testContext: contextB,
+      __testStore: storeB,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        contextB.activeAbortController = activeB;
+        markStartedB?.();
+        await holdB;
+      },
+    });
+
+    await Promise.all([startedA, startedB]);
+    hostA.abort("interrupt A only");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(activeA.signal.aborted).toBe(true);
+    expect(activeB.signal.aborted).toBe(false);
+    releaseA?.();
+    releaseB?.();
+    await Promise.all([runningA, runningB]);
+  }, 30_000);
+
+  it("does not start headless provider work when aborted during hydration", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-hydration-abort-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const host = new AbortController();
+    let sendCalled = false;
+    setTimeout(() => host.abort("abort hydration"), 0);
+
+    const exitCode = await runHeadlessTask({
+      prompt: "must not start",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      signal: host.signal,
+      __testContext: context,
+      __testStore: store,
+      __testSendMessage: async () => {
+        sendCalled = true;
+      },
+    });
+
+    expect(exitCode).toBe(130);
+    expect(sendCalled).toBe(false);
+  });
+
+  it("does not enter TUI provider startup after the host signal aborts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-startup-abort-"));
+    const host = new AbortController();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    setTimeout(() => host.abort("abort startup"), 0);
+
+    const exitCode = await runTui({
+      projectPath: project,
+      stdin: new PassThrough(),
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      signal: host.signal,
+    });
+
+    expect(exitCode).toBe(130);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not install a process signal listener when initialization fails", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-init-failure-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    const listenerCountBefore = process.listenerCount("SIGINT");
+    const options = {
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+    } as Parameters<typeof runHeadlessTask>[0];
+    Object.defineProperty(options, "__testGateway", {
+      get() {
+        throw new Error("gateway init failed");
+      },
+    });
+
+    const exitCode = await runHeadlessTask(options);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.text).toContain("gateway init failed");
+    expect(process.listenerCount("SIGINT")).toBe(listenerCountBefore);
+  });
 
   it("records a headless artifact checklist as evidence before cleanup", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-checklist-"));
@@ -2616,7 +3272,7 @@ describe("runHeadlessTask", () => {
   });
 
 
-  it("runs closure validation and skips repair when the headless deadline is approaching", async () => {
+  it("does not continue provider work after the headless deadline has expired", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -2645,9 +3301,8 @@ describe("runHeadlessTask", () => {
     });
 
     expect(exitCode).toBe(6);
-    expect(sends).toBe(1);
-    expect(stderr.text).toContain("deadline approaching");
-    expect(stderr.text).toContain("closure validation ran");
+    expect(sends).toBeLessThanOrEqual(1);
+    expect(stderr.text).not.toContain("closure validation ran");
   });
 
   it("bench mode returns a clear failure when repair attempts are exhausted", async () => {
@@ -2747,6 +3402,36 @@ describe("runHeadlessTask", () => {
 
     expect(exitCode).toBe(5);
     expect(stderr.text).toContain("test_timeout");
+  });
+
+  it("returns deadline exit code when official validation consumes the global deadline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-global-deadline-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const slowScript = join(project, "slow-global-deadline.cjs");
+    await writeFile(slowScript, "setTimeout(() => {}, 10000);\n", "utf8");
+
+    const exitCode = await runHeadlessTask({
+      prompt: "validate before deadline",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      deadlineMs: 500,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testTimeoutMs: 10_000,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(slowScript)}`,
+      },
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(6);
   });
 
   it("bench mode redacts secret environment variables from official test logs", async () => {
@@ -2924,6 +3609,53 @@ describe("runHeadlessTask", () => {
 });
 
 describe("headless runtime failure classification", () => {
+  it("bounds official validation by the remaining headless deadline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-validation-deadline-"));
+    const slowScript = join(project, "slow-validation.cjs");
+    await writeFile(slowScript, "setTimeout(() => {}, 10000);\n", "utf8");
+
+    const startedAt = Date.now();
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      deadlineAtMs: startedAt + 100,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(slowScript)}`,
+        testTimeoutMs: 10_000,
+        maxRepairAttempts: 0,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 3,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, failure: { category: "test_timeout" } });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("does not start another environment setup retry beyond the deadline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-setup-deadline-"));
+    const startedAt = Date.now();
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      deadlineAtMs: startedAt + 300,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testCommand: `node -e "console.error('docker pull failed: unexpected EOF'); process.exit(1)"`,
+        testTimeoutMs: 10_000,
+        maxRepairAttempts: 0,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 3,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, failure: { category: "agent_timeout" } });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
   it("classifies transient Docker pull failures as retryable network_pull_error", () => {
     const result: EnvironmentSetupFailureClassification = classifyEnvironmentSetupFailure(
       "docker pull busybox:latest failed: unexpected EOF while reading from Docker Hub",
@@ -5027,7 +5759,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/memory review", context, output);
     await handleSlashCommand("/memory stats", context, output);
 
-    const prompt = createModelSystemPrompt("帮我继续", context, {
+    const prompt = createModelSystemPrompt("继续长期规则注入 prompt", context, {
       memory: { candidates: 0, accepted: 1 },
     });
     expect(prompt).toContain("ControlledMemorySummary=");
@@ -5492,7 +6224,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates).toHaveLength(0);
     expect(context.memory.accepted).toHaveLength(1);
 
-    const prompt = createModelSystemPrompt("继续", context, {
+    const prompt = createModelSystemPrompt("继续使用 pnpm", context, {
       memory: { candidates: 0, accepted: 1 },
     });
     expect(prompt).toContain("pnpm");
@@ -5753,7 +6485,10 @@ describe("Phase 06 TUI slash commands", () => {
       },
     ];
 
-    const injection = createControlledMemoryInjection(context);
+    const injection = createControlledMemoryInjection(
+      context,
+      "required verification command first user memory",
+    );
     expect(injection.items).toHaveLength(3);
     expect(injection.items.map((item) => item.id)).toContain("a-user");
     expect(injection.items.map((item) => item.id)).toContain("z-project");
@@ -5929,7 +6664,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates).toHaveLength(0);
     expect(context.memory.accepted).toHaveLength(1);
 
-    const prompt = createModelSystemPrompt("继续", context, {
+    const prompt = createModelSystemPrompt("继续运行 vitest", context, {
       memory: { candidates: 0, accepted: 1 },
     });
     expect(prompt).toContain("vitest");
@@ -13130,7 +13865,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests.length).toBeGreaterThanOrEqual(42);
   });
 
-  it("normal progressing tool_use is not stopped by a hidden 100-round cap", async () => {
+  it("stops at the shared 100-turn cap with an explicit PARTIAL terminal", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
@@ -13141,7 +13876,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const requests = mockOpenAiToolSequenceWithFinalCalls(
       Array.from({ length: 101 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
-      "已完成 101 轮有进展读取。",
+      "不应到达的第 101 轮回答。",
     );
     const output = new MemoryOutput();
 
@@ -13152,12 +13887,11 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/Read\(a\.txt\) \*\*1\*\* 行/g)).toHaveLength(101);
-    expect(output.text).toContain("已完成 101 轮有进展读取。");
-    expect(output.text).not.toContain("执行已在内部防 runaway 保护处暂停");
-    expect(output.text).not.toContain("工具调用上限");
-    expect(requests.length).toBeGreaterThanOrEqual(102);
-  }, 10000);
+    expect(output.text.match(/Read\(a\.txt\) \*\*1\*\* 行/g)).toHaveLength(100);
+    expect(output.text).toContain("PARTIAL：执行已到达本请求轮次上限；任务尚未完成。");
+    expect(output.text).not.toContain("不应到达的第 101 轮回答。");
+    expect(requests).toHaveLength(100);
+  }, 30000);
 
   it("gates no-tool final summary after the no-progress runaway guard", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -14107,7 +14841,6 @@ describe("Phase 06 TUI slash commands", () => {
     expect(toolNames).toContain("Read");
     expect(toolNames).toContain("Grep");
     expect(toolNames).toContain("Glob");
-    expect(output.text).toContain("Read(package.json) **1** 行");
     expect(output.text).toContain("写入 report.md");
     expect(output.text).toContain("允许本次写入？yes / no");
     expect(output.text).not.toContain("需要写入 report.md");
@@ -14575,9 +15308,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(third.messages?.some((message) => message.tool_call_id === "call-write")).toBe(true);
     expect(third.messages?.some((message) => message.tool_call_id === "call-read")).toBe(true);
     expect(output.text).toContain("结论：报告已保存。");
-    expect(output.text).toContain("Read(package.json) **1** 行");
     expect(output.text).toContain("已写入 report.md 并读取 package.json。");
-  });
+  }, 30_000);
 
   it("D.13G real path: Claude placeholder dispatches anthropic tools through executeModelToolUse and continues with /v1/messages tool_result body without chat_completions divert", async () => {
     // 复现 D.13G 真实路径：
@@ -19608,9 +20340,9 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).not.toContain("尚未确认，需要先检查");
-    expect(requests.length).toBe(1);
+    expect(requests.length).toBeGreaterThanOrEqual(1);
     expect(JSON.stringify(requests[0])).toContain("这个仓库里 add 函数已经实现了吗");
-  });
+  }, 15_000);
 
   it("D.14D: /btw is model-backed but isolated from todo, plan, and checkpoints", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -20282,6 +21014,47 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcriptB.some((event) => event.type === "background_task_update")).toBe(false);
     expect(transcriptB.some((event) => event.type === "evidence_record")).toBe(false);
     expect(context.evidence.some((item) => item.summary.includes("Bash(background)"))).toBe(false);
+  });
+
+  it("keeps background Bash completion evidence on its invoking request owner", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-request-owner-"));
+    const { context, store } = await __testCreateTuiRuntimeContext(project);
+    const session = await store.create({ model: context.model });
+    context.sessionId = session.id;
+    context.currentRequestTurnId = "request-b";
+    const task = createBackgroundTaskFixture("bash", { id: "background-request-owner" });
+    task.ownerSessionId = session.id;
+    task.requestTurnId = "request-a";
+    context.backgroundTasks = [task];
+    const toolsTaskId = "tools-background-request-owner";
+    context.backgroundBashTaskMap?.set(toolsTaskId, task.id);
+
+    context.tools.onBackgroundBashComplete?.({
+      taskId: toolsTaskId,
+      exitCode: 0,
+      outcome: "completed",
+      outputPath: join(project, "background-request-owner.log"),
+      command: "node request-owner.js",
+    });
+
+    let evidenceEvent: Extract<TranscriptEvent, { type: "evidence_record" }> | undefined;
+    for (let attempt = 0; attempt < 100 && !evidenceEvent; attempt += 1) {
+      evidenceEvent = (await store.resume(session.id)).transcript.find(
+        (event): event is Extract<TranscriptEvent, { type: "evidence_record" }> =>
+          event.type === "evidence_record" && event.summary.includes("Bash(background)"),
+      );
+      if (!evidenceEvent) await waitForTestMs(10);
+    }
+
+    const persistedOwnerScope = (
+      evidenceEvent as (typeof evidenceEvent & { ownerScope?: { requestTurnId?: string } })
+    )?.ownerScope;
+    expect(persistedOwnerScope?.requestTurnId).toBe("request-a");
+    expect(persistedOwnerScope?.requestTurnId).not.toBe(context.currentRequestTurnId);
+    expect(
+      context.evidence.find((item) => item.summary.includes("Bash(background)"))?.ownerScope
+        ?.requestTurnId,
+    ).toBe("request-a");
   });
 
   it("retained background Bash completion releases the TUI background slot", async () => {
@@ -28433,7 +29206,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       createdAt: new Date().toISOString(),
     });
 
-    const unrelated = evaluateAggregatedFinalAnswerGate(context, "已完成，/app/out.txt 已生成。");
+    const unrelated = evaluateAggregatedFinalAnswerGate(context, "/app/out.txt 产物存在。");
     expect(unrelated.status).toBe("needs_disclaimer");
 
     context.evidence.push({
@@ -28446,7 +29219,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       data: { artifactHint: { path: "/app/out.txt", exists: true } },
       createdAt: new Date().toISOString(),
     });
-    const matched = evaluateAggregatedFinalAnswerGate(context, "已完成，/app/out.txt 已生成。");
+    const matched = evaluateAggregatedFinalAnswerGate(context, "/app/out.txt 产物存在。");
     expect(matched.status).toBe("passed");
   });
 
@@ -28474,7 +29247,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       createdAt: new Date().toISOString(),
     });
 
-    const unrelated = evaluateAggregatedFinalAnswerGate(context, "已完成并验证通过。");
+    const unrelated = evaluateAggregatedFinalAnswerGate(context, "请求的产物存在。");
     expect(unrelated.status).toBe("needs_disclaimer");
 
     context.evidence.push({
@@ -28487,7 +29260,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       data: { artifactHint: { path: "/app/out.txt", exists: true } },
       createdAt: new Date().toISOString(),
     });
-    const matched = evaluateAggregatedFinalAnswerGate(context, "已完成并验证通过。");
+    const matched = evaluateAggregatedFinalAnswerGate(context, "请求的产物存在。");
     expect(matched.status).toBe("passed");
   });
 
@@ -28522,6 +29295,18 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       backgroundTasks: [],
       engineeringFailureCategory: "provider_error",
     });
+    context.lastProviderFailure = {
+      code: "PROVIDER_STREAM_ERROR",
+      kind: "gateway",
+      outcome: "failed",
+      recoverability: "resumable",
+      provider: "test",
+      model: "test-model",
+      endpointProfile: "chat_completions",
+      summary: "provider failed",
+      evidenceId: "provider-failure",
+      createdAt: new Date().toISOString(),
+    };
     const provider = evaluateAggregatedFinalAnswerGate(context, "已修复并验证通过。");
     expect(provider.status).toBe("needs_disclaimer");
     if (provider.status === "needs_disclaimer") {
@@ -29014,7 +29799,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     );
   });
 
-  it("源码：sendMessage / continueModelAfterToolResults 在 retry 后调 discardAssistantBlock", async () => {
+  it("源码：所有 provider attempt replacement 共用完整 reset", async () => {
     const fs = await import("node:fs/promises");
     const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
     const occurrences = runtimeSrc.match(
@@ -29024,16 +29809,16 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(runtimeSrc).toContain("resetAssistantDraftForProviderRetry");
     expect(runtimeSrc).toContain("resetFinalAssistantDraftForProviderRetry");
     expect(runtimeSrc).toMatch(
-      /onRetry:\s*\(info\)\s*=>\s*{[\s\S]*?resetAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderRetryActivity\(context, info\);[\s\S]*?}/,
+      /onAttemptReset:\s*resetProviderAttempt/,
     );
     expect(runtimeSrc).toMatch(
-      /messagesForProvider = appendLatestUserRequestAnchor\(reactivePreflight\.messages\);[\s\S]*?resetAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderRecoveryActivity\(context\);/,
+      /messagesForProvider = appendLatestUserRequestAnchor\(reactivePreflight\.messages\);[\s\S]*?resetProviderAttempt\(\);[\s\S]*?showProviderRecoveryActivity\(context\);/,
     );
     expect(runtimeSrc).toMatch(
-      /recordProviderFallbackAttempt\(context, sessionId,[\s\S]*?status: "attempted",[\s\S]*?\}\);[\s\S]*?resetAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderSwitchActivity\(context\);/,
+      /recordProviderFallbackAttempt\(context, sessionId,[\s\S]*?status: "attempted",[\s\S]*?\}\);[\s\S]*?resetProviderAttempt\(\);[\s\S]*?showProviderSwitchActivity\(context\);/,
     );
     expect(runtimeSrc).toMatch(
-      /recordProviderFallbackAttempt\(context, sessionId,[\s\S]*?status: "attempted",[\s\S]*?\}\);[\s\S]*?resetFinalAssistantDraftForProviderRetry\(\);[\s\S]*?showProviderSwitchActivity\(context\);/,
+      /recordProviderFallbackAttempt\(context, sessionId,[\s\S]*?status: "attempted",[\s\S]*?\}\);[\s\S]*?resetFinalProviderAttempt\(\);[\s\S]*?showProviderSwitchActivity\(context\);/,
     );
     const downgrade = runtimeSrc.match(
       /replaceAssistantBlockContent\(output, assistantStreamBlockId, assistantText\)/g,

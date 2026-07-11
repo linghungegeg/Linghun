@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,6 +103,98 @@ describe("config directories", () => {
     if (process.platform === "win32") {
       expect(paths.sessions.startsWith("G:\\")).toBe(true);
     }
+  });
+
+  it("shares only project memory across a real git repository and linked worktree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-memory-worktree-"));
+    const project = join(root, "project");
+    const worktree = join(root, "worktree");
+    const isolatedDataDir = join(root, "data");
+    await mkdir(project, { recursive: true });
+    execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "linghun-test@example.invalid"], {
+      cwd: project,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "Linghun Test"], {
+      cwd: project,
+      stdio: "ignore",
+    });
+    await writeFile(join(project, "tracked.txt"), "tracked\n", "utf8");
+    execFileSync("git", ["add", "tracked.txt"], { cwd: project, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "fixture"], { cwd: project, stdio: "ignore" });
+    execFileSync("git", ["worktree", "add", "-b", "memory-worktree", worktree, "HEAD"], {
+      cwd: project,
+      stdio: "ignore",
+    });
+    vi.stubEnv("LINGHUN_DATA_DIR", isolatedDataDir);
+
+    const projectPaths = resolveStoragePaths(defaultConfig, project);
+    const worktreePaths = resolveStoragePaths(defaultConfig, worktree);
+
+    expect(worktreePaths.memoryProject).toBe(projectPaths.memoryProject);
+    expect(worktreePaths.memoryUser).toBe(projectPaths.memoryUser);
+    expect(worktreePaths.projectData).not.toBe(projectPaths.projectData);
+    expect(worktreePaths.memorySession).not.toBe(projectPaths.memorySession);
+    expect(worktreePaths.cache).not.toBe(projectPaths.cache);
+  });
+
+  it("rejects forged worktree common-dir chains and backlink mismatches", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-memory-forged-worktree-"));
+    const victimCommon = join(root, "victim", ".git");
+    const victimEntry = join(victimCommon, "worktrees", "borrowed");
+    const victimWorktree = join(root, "victim-worktree");
+    await mkdir(victimEntry, { recursive: true });
+    await mkdir(victimWorktree, { recursive: true });
+    await writeFile(join(victimWorktree, ".git"), "victim backlink target\n", "utf8");
+    await writeFile(join(victimEntry, "commondir"), "../..\n", "utf8");
+    await writeFile(join(victimEntry, "gitdir"), join(victimWorktree, ".git"), "utf8");
+
+    const absoluteCommon = join(root, "absolute-common");
+    const absoluteMeta = join(root, "absolute-meta");
+    await mkdir(absoluteCommon, { recursive: true });
+    await mkdir(absoluteMeta, { recursive: true });
+    await writeFile(join(absoluteCommon, ".git"), `gitdir: ${absoluteMeta}\n`, "utf8");
+    await writeFile(join(absoluteMeta, "commondir"), victimCommon, "utf8");
+    await writeFile(join(absoluteMeta, "gitdir"), join(absoluteCommon, ".git"), "utf8");
+
+    const borrowedEntry = join(root, "borrowed-entry");
+    await mkdir(borrowedEntry, { recursive: true });
+    await writeFile(join(borrowedEntry, ".git"), `gitdir: ${victimEntry}\n`, "utf8");
+
+    const mismatchedBacklink = join(root, "mismatched-backlink");
+    const ownCommon = join(root, "owner", ".git");
+    const ownEntry = join(ownCommon, "worktrees", "mismatch");
+    const otherBacklink = join(root, "other", ".git");
+    await mkdir(ownEntry, { recursive: true });
+    await mkdir(join(root, "other"), { recursive: true });
+    await writeFile(otherBacklink, "other backlink target\n", "utf8");
+    await writeFile(join(ownEntry, "commondir"), "../..\n", "utf8");
+    await writeFile(join(ownEntry, "gitdir"), otherBacklink, "utf8");
+    await mkdir(mismatchedBacklink, { recursive: true });
+    await writeFile(join(mismatchedBacklink, ".git"), `gitdir: ${ownEntry}\n`, "utf8");
+
+    for (const project of [absoluteCommon, borrowedEntry, mismatchedBacklink]) {
+      expect(resolveStoragePaths(defaultConfig, project).memoryProject).toBe(
+        join(project, ".linghun", "memory"),
+      );
+    }
+  });
+
+  it("uses a valid bare common dir as the shared project-memory identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-memory-bare-worktree-"));
+    const commonDir = join(root, "shared.git");
+    const gitDir = join(commonDir, "worktrees", "linked");
+    const worktree = join(root, "linked-worktree");
+    await mkdir(gitDir, { recursive: true });
+    await mkdir(worktree, { recursive: true });
+    await writeFile(join(worktree, ".git"), `gitdir: ${gitDir}\n`, "utf8");
+    await writeFile(join(gitDir, "commondir"), "../..\n", "utf8");
+    await writeFile(join(gitDir, "gitdir"), join(worktree, ".git"), "utf8");
+
+    expect(resolveStoragePaths(defaultConfig, worktree).memoryProject).toBe(
+      resolveStoragePaths(defaultConfig, commonDir).memoryProject,
+    );
   });
 
   it("saves and loads the real DeepSeek default model in project settings", async () => {

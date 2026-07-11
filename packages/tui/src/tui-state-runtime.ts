@@ -28,15 +28,15 @@ import {
 } from "@linghun/config";
 import { builtInTools } from "@linghun/tools";
 import { createCacheFreshness } from "./cache-freshness.js";
+import { loadPersistentMemorySnapshot } from "./memory-extraction-runtime.js";
 import { loadMemoryRulesFile, parseMemoryRuleFrontmatter } from "./memory-rules-runtime.js";
 import {
-  isMemoryTombstoned,
-  loadMemoryTombstoneIndex,
-  parseMemoryOrigin,
+  createEmptyMemoryTombstoneIndex,
 } from "./memory-tombstone-runtime.js";
 import { createReplBridgeState } from "./remote-repl-bridge-runtime.js";
 import { MEMORY_LEARNING_STATE_FILE } from "./runtime-utils.js";
 import { formatError, truncateDisplay } from "./startup-runtime.js";
+import type { TuiContext } from "./tui-context-runtime.js";
 import type {
   CacheState,
   ExtensionLifecycleRecord,
@@ -50,7 +50,7 @@ import type {
   MemoryCandidate,
   MemoryState,
   MemoryStatus,
-  MemoryTaxonomy,
+  MemoryTombstoneIndex,
   PluginState,
   PluginSummary,
   RemoteChannelState,
@@ -300,18 +300,16 @@ export async function createMemoryState(
 ): Promise<MemoryState> {
   const paths = resolveStoragePaths(config, projectPath);
   const projectRulesPath = join(projectPath, "LINGHUN.md");
-  const [projectRules, tombstones, candidates, accepted, rejected, disabled, retired] =
-    await Promise.all([
-      loadProjectRulesSummary(projectRulesPath),
-      loadMemoryTombstoneIndex(paths.memoryProject, paths.memoryUser),
-      loadMemoryByStatus(paths, "candidate"),
-      loadMemoryByStatus(paths, "accepted"),
-      loadMemoryByStatus(paths, "rejected"),
-      loadMemoryByStatus(paths, "disabled"),
-      loadMemoryByStatus(paths, "retired"),
-    ]);
-  const visible = (items: MemoryCandidate[]): MemoryCandidate[] =>
-    items.filter((item) => !isMemoryTombstoned(tombstones, item));
+  const [projectRules, projectMemory, userMemory] = await Promise.all([
+    loadProjectRulesSummary(projectRulesPath),
+    loadPersistentMemorySnapshot(paths.memoryProject, "project"),
+    loadPersistentMemorySnapshot(paths.memoryUser, "user"),
+  ]);
+  const updatedAtById = { ...projectMemory.updatedAtById, ...userMemory.updatedAtById };
+  const records = [...projectMemory.records, ...userMemory.records].sort(
+    (left, right) => (updatedAtById[right.id] ?? 0) - (updatedAtById[left.id] ?? 0),
+  );
+  const tombstones = mergeMemoryTombstoneIndexes(projectMemory.tombstones, userMemory.tombstones);
   return {
     projectRulesPath,
     projectRulesExists: projectRules.exists,
@@ -325,17 +323,68 @@ export async function createMemoryState(
     projectDir: paths.memoryProject,
     userDir: paths.memoryUser,
     sessionDir: paths.memorySession,
-    candidates: visible(candidates),
-    accepted: visible(accepted),
-    rejected: visible(rejected),
-    disabled: visible(disabled),
-    retired: visible(retired),
+    candidates: records.filter((item) => item.status === "candidate"),
+    accepted: records.filter((item) => item.status === "accepted"),
+    rejected: records.filter((item) => item.status === "rejected"),
+    disabled: records.filter((item) => item.status === "disabled"),
+    retired: records.filter((item) => item.status === "retired"),
     tombstones,
     ...((await loadMemoryLearningMode(paths)) ?? {
       learningMode: "active" as const,
       learningModeSource: "default" as const,
     }),
   };
+}
+
+export async function refreshPersistentMemoryState(
+  context: TuiContext,
+  commitGuard?: () => boolean,
+): Promise<"refreshed" | "stale"> {
+  if (commitGuard && !commitGuard()) return "stale";
+  const paths = {
+    ...resolveStoragePaths(context.config, context.projectPath),
+    memoryProject: context.memory.projectDir,
+    memoryUser: context.memory.userDir,
+  };
+  const [projectMemory, userMemory, learningMode] = await Promise.all([
+    loadPersistentMemorySnapshot(paths.memoryProject, "project"),
+    loadPersistentMemorySnapshot(paths.memoryUser, "user"),
+    loadMemoryLearningMode(paths),
+  ]);
+  if (commitGuard && !commitGuard()) return "stale";
+  const updatedAtById = { ...projectMemory.updatedAtById, ...userMemory.updatedAtById };
+  const persistent = [...projectMemory.records, ...userMemory.records].sort(
+    (left, right) => (updatedAtById[right.id] ?? 0) - (updatedAtById[left.id] ?? 0),
+  );
+  const keepSession = (items: MemoryCandidate[]): MemoryCandidate[] =>
+    items.filter((item) => item.scope === "session");
+  const byStatus = (status: MemoryStatus): MemoryCandidate[] =>
+    persistent.filter((item) => item.status === status);
+  context.memory.candidates = [...byStatus("candidate"), ...keepSession(context.memory.candidates)];
+  context.memory.accepted = [...byStatus("accepted"), ...keepSession(context.memory.accepted)];
+  context.memory.rejected = [...byStatus("rejected"), ...keepSession(context.memory.rejected)];
+  context.memory.disabled = [...byStatus("disabled"), ...keepSession(context.memory.disabled)];
+  context.memory.retired = [...byStatus("retired"), ...keepSession(context.memory.retired)];
+  context.memory.tombstones = mergeMemoryTombstoneIndexes(
+    projectMemory.tombstones,
+    userMemory.tombstones,
+  );
+  if (learningMode) Object.assign(context.memory, learningMode);
+  return "refreshed";
+}
+
+function mergeMemoryTombstoneIndexes(
+  ...indexes: MemoryTombstoneIndex[]
+): MemoryTombstoneIndex {
+  const merged = createEmptyMemoryTombstoneIndex();
+  for (const index of indexes) {
+    for (const id of index.ids) merged.ids.add(id);
+    for (const origin of index.origins) merged.origins.add(origin);
+    for (const key of index.logicalKeys) merged.logicalKeys.add(key);
+    for (const scope of index.unreadableScopes) merged.unreadableScopes.add(scope);
+    merged.diagnostics.push(...index.diagnostics);
+  }
+  return merged;
 }
 
 async function loadProjectRulesSummary(path: string): Promise<{
@@ -375,17 +424,6 @@ export function summarizeProjectRules(content: string): string {
   return truncateDisplay(normalized || "empty", PROJECT_RULES_SUMMARY_WIDTH);
 }
 
-async function loadMemoryByStatus(
-  paths: ReturnType<typeof resolveStoragePaths>,
-  status: MemoryStatus,
-): Promise<MemoryCandidate[]> {
-  const [projectMemory, userMemory] = await Promise.all([
-    loadMemoryDirByStatus(paths.memoryProject, status),
-    loadMemoryDirByStatus(paths.memoryUser, status),
-  ]);
-  return [...projectMemory, ...userMemory].sort((a, b) => a.id.localeCompare(b.id));
-}
-
 async function loadMemoryLearningMode(
   paths: ReturnType<typeof resolveStoragePaths>,
 ): Promise<{
@@ -416,89 +454,6 @@ async function loadMemoryLearningMode(
     learningMode: "off",
     learningModeSource: "persisted",
     learningModeDiagnostic: "learning-state invalid; auto-learning fail-closed off",
-  };
-}
-
-async function loadMemoryDirByStatus(
-  directory: string,
-  status: MemoryStatus,
-): Promise<MemoryCandidate[]> {
-  let entries: string[];
-  try {
-    entries = await readdir(directory);
-  } catch {
-    return [];
-  }
-
-  const memory = await Promise.all(
-    entries
-      .filter((entry) => entry.endsWith(".json"))
-      .map(async (entry) => readMemoryCandidate(join(directory, entry))),
-  );
-  return memory.filter(
-    (item): item is MemoryCandidate => item !== null && normalizeMemoryStatus(item) === status,
-  );
-}
-
-async function readMemoryCandidate(path: string): Promise<MemoryCandidate | null> {
-  try {
-    const value = JSON.parse(await readFile(path, "utf8")) as unknown;
-    return parseMemoryCandidate(value);
-  } catch {
-    return null;
-  }
-}
-
-function parseMemoryCandidate(value: unknown): MemoryCandidate | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-  if (
-    typeof value.id !== "string" ||
-    typeof value.summary !== "string" ||
-    typeof value.source !== "string" ||
-    typeof value.createdAt !== "string"
-  ) {
-    return null;
-  }
-  if (value.scope !== "project" && value.scope !== "user" && value.scope !== "session") {
-    return null;
-  }
-  const taxonomy: MemoryTaxonomy | undefined =
-    value.taxonomy === "user" ||
-    value.taxonomy === "feedback" ||
-    value.taxonomy === "project" ||
-    value.taxonomy === "reference"
-      ? value.taxonomy
-      : undefined;
-  const status =
-    value.status === "candidate" ||
-    value.status === "accepted" ||
-    value.status === "rejected" ||
-    value.status === "disabled" ||
-    value.status === "retired"
-      ? value.status
-      : "accepted";
-  const risk = value.risk === "medium" || value.risk === "high" ? value.risk : "low";
-  const sourceRefs = Array.isArray(value.sourceRefs)
-    ? value.sourceRefs.filter((item): item is string => typeof item === "string")
-    : [value.source];
-  const origin = parseMemoryOrigin(value.origin);
-  return {
-    id: value.id,
-    scope: value.scope,
-    status,
-    ...(taxonomy ? { taxonomy } : {}),
-    ...(typeof value.topic === "string" && value.topic.trim().length > 0
-      ? { topic: truncateDisplay(value.topic.trim(), 80) }
-      : {}),
-    summary: truncateDisplay(value.summary.replace(/\s+/g, " "), 240),
-    source: value.source,
-    sourceRefs: sourceRefs.slice(0, 6),
-    ...(origin ? { origin } : {}),
-    risk,
-    inferred: value.inferred === true,
-    createdAt: value.createdAt,
   };
 }
 

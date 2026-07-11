@@ -67,7 +67,7 @@ describe("context usage ledger", () => {
 
     expect(context.cache.contextUsage).toMatchObject({
       source: "pressure",
-      estimatedChars: 12,
+      estimatedChars: 500,
       confirmedUsedTokens: 125,
       staleReason: undefined,
       lastConfirmedTurn: 7,
@@ -76,6 +76,27 @@ describe("context usage ledger", () => {
     });
     expect(context.cache.contextUsage?.contextWindowTokens).toBeGreaterThan(125);
     expect(context.cache.contextUsage?.compactTriggerTokens).toBeGreaterThan(0);
+  });
+
+  it("keeps the displayed context total monotonic between compactions", () => {
+    const context = makeContext();
+    context.cache.contextUsage = {
+      estimatedChars: 800,
+      maxChars: 200_000 * 4,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      source: "pressure",
+    };
+
+    recordConfirmedContextUsage(context, {
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+    });
+
+    expect(context.cache.contextUsage).toMatchObject({
+      estimatedChars: 800,
+      confirmedUsedTokens: 100,
+    });
   });
 
   it("marks usage stale without clearing the confirmed ledger", () => {

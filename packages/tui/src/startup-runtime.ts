@@ -78,6 +78,92 @@ export function stripAnsi(text: string): string {
   return text.replace(new RegExp(`${escapeChar}\\[[0-9;]*m`, "g"), "");
 }
 
+export function sanitizeDangerousTerminalControls(text: string): string {
+  const value = text
+    .replace(/\\(?:u001b|x1b)/giu, "\u001B")
+    .replace(/\\(?:u0007|x07)/giu, "\u0007")
+    .replace(/\\u00([0-9a-f]{2})/giu, (match, hex: string) => {
+      const code = Number.parseInt(hex, 16);
+      return isDangerousControlCode(code) ? String.fromCharCode(code) : match;
+    })
+    .replace(/\\x([0-9a-f]{2})/giu, (match, hex: string) => {
+      const code = Number.parseInt(hex, 16);
+      return isDangerousControlCode(code) ? String.fromCharCode(code) : match;
+    });
+  let sanitized = "";
+  let index = 0;
+  while (index < value.length) {
+    const code = value.charCodeAt(index);
+    if (code === 0x1b || code === 0x9b) {
+      const csiStart = code === 0x9b ? index + 1 : value[index + 1] === "[" ? index + 2 : -1;
+      if (csiStart >= 0) {
+        let end = csiStart;
+        while (end < value.length) {
+          const finalCode = value.charCodeAt(end);
+          if (finalCode >= 0x40 && finalCode <= 0x7e) break;
+          end += 1;
+        }
+        if (end >= value.length) break;
+        if (value[end] === "m") sanitized += value.slice(index, end + 1);
+        index = end + 1;
+        continue;
+      }
+      const introducer = code === 0x1b ? value[index + 1] : undefined;
+      if (code === 0x1b && introducer === "]") {
+        index = findTerminalControlEnd(value, index + 2, true);
+        continue;
+      }
+      if (
+        code === 0x1b &&
+        (introducer === "P" || introducer === "X" || introducer === "^" || introducer === "_")
+      ) {
+        index = findTerminalControlEnd(value, index + 2, false);
+        continue;
+      }
+      index += code === 0x1b && introducer ? 2 : 1;
+      continue;
+    }
+    if (code === 0x9d) {
+      index = findTerminalControlEnd(value, index + 1, true);
+      continue;
+    }
+    if (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+      index = findTerminalControlEnd(value, index + 1, false);
+      continue;
+    }
+    if (
+      code === 0x7f ||
+      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
+      (code >= 0x80 && code <= 0x9f)
+    ) {
+      index += 1;
+      continue;
+    }
+    sanitized += value[index];
+    index += 1;
+  }
+  return sanitized;
+}
+
+function isDangerousControlCode(code: number): boolean {
+  return (
+    code === 0x7f ||
+    (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
+    (code >= 0x80 && code <= 0x9f)
+  );
+}
+
+function findTerminalControlEnd(value: string, start: number, allowBell: boolean): number {
+  let index = start;
+  while (index < value.length) {
+    const code = value.charCodeAt(index);
+    if ((allowBell && code === 0x07) || code === 0x9c) return index + 1;
+    if (code === 0x1b && value[index + 1] === "\\") return index + 2;
+    index += 1;
+  }
+  return value.length;
+}
+
 export function uniqueStrings(items: string[]): string[] {
   return [...new Set(items)];
 }
@@ -87,7 +173,7 @@ export function uniqueStrings(items: string[]): string[] {
 // ---------------------------------------------------------------------------
 
 export function sanitizeDiagnosticText(text: string): string {
-  return text
+  return sanitizeDangerousTerminalControls(text)
     .replace(/prompt=[^\s&]+/giu, "prompt=***")
     .replace(/api[_-]?key=[^\s&]+/giu, "api_key=***")
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")

@@ -2,11 +2,15 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { SessionStore } from "@linghun/core";
+import { createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
 import {
   createEvidenceRecord,
+  appendDerivedToolEvents,
+  appendToolResultEvent,
   deriveEvidenceClaimSeeds,
   isToolOutputFailure,
+  recordToolFailureEvidence,
   recordToolEvidence,
   recordToolResultBudgetEvidence,
   recordVerificationEvidence,
@@ -18,9 +22,78 @@ import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 
 describe("evidence-runtime", () => {
+  it("does not retain diagnostics or derived events after their owner guard expires", async () => {
+    let currentOwner = true;
+    let releaseAppend!: () => void;
+    let markAppendStarted!: () => void;
+    const appendStarted = new Promise<void>((resolve) => {
+      markAppendStarted = resolve;
+    });
+    const appendRelease = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const events: Array<{ type?: string }> = [];
+    const context = {
+      projectPath: "F:/repo",
+      sessionId: "session-guard",
+      currentRequestTurnId: "request-guard",
+      tools: createToolContext("F:/repo"),
+      evidence: [{ id: "evidence-guard", kind: "command_output", summary: "guarded", source: "Bash" }],
+      store: {
+        appendEvent: async (
+          _sessionId: string,
+          event: { type?: string },
+          commitGuard?: () => boolean,
+        ) => {
+          if (event.type === "tool_result") {
+            markAppendStarted();
+            await appendRelease;
+          }
+          if (!commitGuard || commitGuard()) events.push(event);
+        },
+      },
+    } as unknown as TuiContext;
+
+    const pending = appendToolResultEvent(
+      context,
+      "session-guard",
+      "tool-guard",
+      "Bash",
+      {
+        text: "late diagnostic",
+        data: {
+          diagnostics: [{ type: "timeout", severity: "blocking", evidence: "late" }],
+          artifactHint: { path: "late.txt" },
+        },
+      },
+      false,
+      "evidence-guard",
+      () => currentOwner,
+    );
+    await appendStarted;
+    currentOwner = false;
+    releaseAppend();
+    await pending;
+    await appendDerivedToolEvents(
+      context,
+      "session-guard",
+      "Todo",
+      { text: "late todo" },
+      () => currentOwner,
+    );
+
+    expect(context.tools.recentDiagnostics).toEqual([]);
+    expect(context.evidence[0]?.data).toBeUndefined();
+    expect(events.some((event) => event.type === "tool_result")).toBe(false);
+    expect(events.some((event) => event.type === "todo_update")).toBe(false);
+  });
+
   it("links persisted large-result evidence to its tool use", async () => {
     const events: unknown[] = [];
     const context = {
+      projectPath: "F:/repo",
+      sessionId: "session-1",
+      currentRequestTurnId: "request-1",
       evidence: [],
       store: {
         appendEvent: async (_sessionId: string, event: unknown) => {
@@ -59,8 +132,46 @@ describe("evidence-runtime", () => {
           version: 1,
           replacement: expect.stringContaining("<persisted-tool-result>"),
         }),
+        ownerScope: expect.objectContaining({
+          ownerSessionId: "session-1",
+          requestTurnId: "request-1",
+          cwd: "F:/repo",
+        }),
       }),
     );
+  });
+
+  it("persists owner scope before guarded tool failure evidence append", async () => {
+    const events: Array<{ type?: string; ownerScope?: unknown }> = [];
+    const context = {
+      projectPath: "F:/repo",
+      sessionId: "session-owner",
+      currentRequestTurnId: "request-owner",
+      evidence: [],
+      store: {
+        appendEvent: async (_sessionId: string, event: { type?: string; ownerScope?: unknown }) => {
+          events.push(structuredClone(event));
+        },
+      },
+    } as unknown as TuiContext;
+
+    await recordToolFailureEvidence(
+      context,
+      "session-owner",
+      "Read",
+      "failed",
+      () => true,
+      "tool-owner",
+    );
+
+    expect(events[0]).toMatchObject({
+      type: "evidence_record",
+      ownerScope: {
+        ownerSessionId: "session-owner",
+        requestTurnId: "request-owner",
+        cwd: "F:/repo",
+      },
+    });
   });
 
   it("restores legacy budget artifact evidence by structured claim and tool use", async () => {
@@ -127,6 +238,40 @@ describe("evidence-runtime", () => {
     );
     expect(budgeted.messages[1]?.content).toContain("<persisted-tool-result>");
     expect(budgeted.messages[1]?.content).not.toBe("legacy raw result");
+  });
+
+  it("restores persisted evidence owner scope on resume", () => {
+    const context = {
+      projectPath: "C:/repo",
+      sessionId: "session-owner",
+      evidence: [],
+      checkpoints: [],
+      cache: { history: [], compactBoundaries: [] },
+      tools: { todos: [] },
+      memory: { candidates: [], accepted: [], rejected: [], disabled: [], retired: [] },
+    } as unknown as TuiContext;
+
+    hydrateResumeContext(context, [{
+      type: "evidence_record",
+      id: "evidence-owner",
+      kind: "file_read",
+      summary: "Read packages/a.ts",
+      source: "Read",
+      supportsClaims: ["code_fact"],
+      ownerScope: {
+        ownerSessionId: "session-owner",
+        requestTurnId: "request-owner",
+        cwd: "C:/repo",
+        targets: ["packages/a.ts"],
+      },
+      createdAt: new Date().toISOString(),
+    } as never]);
+
+    expect(context.evidence[0]?.ownerScope).toMatchObject({
+      ownerSessionId: "session-owner",
+      requestTurnId: "request-owner",
+      targets: ["packages/a.ts"],
+    });
   });
 
   it("records read-only tool evidence with low-noise summaries", async () => {

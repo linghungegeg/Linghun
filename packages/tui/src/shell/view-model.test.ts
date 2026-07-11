@@ -18,6 +18,7 @@ import {
   createShellBlockOutputForTest,
   createTerminalFirstAssistantSink,
   writeAssistantDelta,
+  writeDiagnosticLine as writeDiagnosticOutputLine,
   writeStructuredToolOutput,
 } from "../tui-output-surface.js";
 import {
@@ -7111,6 +7112,89 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(blocks[0]?.fullText).toBe("Bearer [masked-key]");
     expect(blocks[0]?.fullText).not.toContain("\u001b");
     expect(blocks[0]?.fullText).not.toContain("secret-token-12345");
+  });
+
+  it("removes dangerous terminal controls at assistant, tool, diagnostic, error, and local sinks", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = createShellBlockOutputForTest(ctx, blocks) as ReturnType<
+      typeof createShellBlockOutputForTest
+    > & {
+      writeDiagnosticLine(text: string): void;
+      writeErrorLine(text: string): void;
+      writeLocalCommandOutputLine(text: string): void;
+    };
+    const dangerous = "safe\u001B]52;c;clipboard-secret\u0007\u001BPdcs-secret\u001B\\\u001B[2J\u001B[Htail";
+
+    output.beginAssistantStream("safe-assistant", { holdStableCommit: true });
+    output.replaceAssistantBlockContent("safe-assistant", dangerous);
+    output.write(dangerous);
+    output.writeDiagnosticLine(dangerous);
+    output.writeErrorLine(dangerous);
+    output.writeLocalCommandOutputLine(dangerous);
+    output.writeStructuredToolOutput(
+      createStructuredToolOutput("Glob", { text: dangerous, details: dangerous }, "en-US"),
+    );
+
+    expect(blocks).toHaveLength(6);
+    for (const block of blocks) {
+      expect(block.fullText).toContain("safetail");
+      expect(block.fullText).not.toContain("clipboard-secret");
+      expect(block.fullText).not.toContain("dcs-secret");
+      expect(block.fullText).not.toContain("\u001B]52");
+      expect(block.fullText).not.toContain("\u001B[2J");
+      expect(block.fullText).not.toContain("\u001B[H");
+    }
+  });
+
+  it("keeps raw and escaped terminal-control payloads out of chunked shell and plain sinks", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = createShellBlockOutputForTest(ctx, blocks);
+
+    output.write("before\u001B]52;c;");
+    output.write("clipboard-secret\u0007after");
+    output.write("one\\u00");
+    output.write("1bPescaped-secret\\u001b\\two");
+
+    expect(blocks.map((block) => block.fullText)).toEqual(["before", "after", "one", "two"]);
+    expect(ctx.lastFullOutput).toBe("two");
+
+    const plainChunks: string[] = [];
+    const plain = new Writable({
+      write(chunk, _encoding, callback) {
+        plainChunks.push(chunk.toString());
+        callback();
+      },
+    });
+    writeDiagnosticOutputLine(plain, "plain\u001B]52;c;");
+    writeDiagnosticOutputLine(plain, "plain-secret\u0007safe");
+    expect(plainChunks.join("")).toBe("plain\nsafe\n");
+  });
+
+  it("keeps dangerous payloads out of terminal-first history", () => {
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const tty = new TestTtyOutput();
+    const sink = createTerminalFirstAssistantSink(tty, {
+      columns: 80,
+      rows: 24,
+      frameTopRow: 10,
+    });
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = createShellBlockOutputForTest(ctx, blocks, () => {}, sink);
+
+    output.beginAssistantStream("terminal-safe", { holdStableCommit: true });
+    output.replaceAssistantBlockContent(
+      "terminal-safe",
+      "before\u001B]52;c;clipboard-secret\u0007\u001BPdcs-secret\u001B\\after",
+    );
+    output.endAssistantStream();
+
+    const history = tty.chunks.join("");
+    expect(history).toContain("beforeafter");
+    expect(history).not.toContain("clipboard-secret");
+    expect(history).not.toContain("dcs-secret");
   });
 
   it("path-only structured details remain reachable through Ctrl+O", () => {

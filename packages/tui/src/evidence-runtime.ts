@@ -141,8 +141,56 @@ export function deriveEvidenceClaimSeeds(evidence: EvidenceRecord): EvidenceClai
 }
 
 export function rememberEvidence(context: TuiContext, evidence: EvidenceRecord): void {
+  scopeEvidenceToContext(context, evidence);
   context.evidence.unshift(evidence);
   context.evidence = context.evidence.slice(0, MAX_EVIDENCE_RECORDS);
+}
+
+export function scopeEvidenceToContext(
+  context: TuiContext,
+  evidence: EvidenceRecord,
+  owner: Partial<NonNullable<EvidenceRecord["ownerScope"]>> = {},
+): EvidenceRecord {
+  evidence.ownerScope = {
+    ...inferEvidenceOwnerScope(context, evidence),
+    ...evidence.ownerScope,
+    ...owner,
+  };
+  return evidence;
+}
+
+export function evidenceMatchesRequestOwner(
+  record: EvidenceRecord,
+  context: Pick<TuiContext, "currentRequestTurnId" | "projectPath" | "sessionId">,
+): boolean {
+  if (record.kind === "user_provided") return true;
+  if (!context.currentRequestTurnId) return false;
+  const owner = record.ownerScope;
+  if (!owner || owner.ownerAgentId || owner.workflowRunId) return false;
+  if (context.sessionId && owner.ownerSessionId !== context.sessionId) return false;
+  if (owner.requestTurnId !== context.currentRequestTurnId) return false;
+  if (typeof owner.cwd !== "string" || typeof context.projectPath !== "string") return false;
+  const cwd = owner.cwd.trim().replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase();
+  const project = context.projectPath.trim().replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase();
+  return cwd === project || cwd.startsWith(`${project}/`);
+}
+
+function inferEvidenceOwnerScope(
+  context: TuiContext,
+  evidence: EvidenceRecord,
+): NonNullable<EvidenceRecord["ownerScope"]> {
+  const agentMatch = /^agent:([^:]+)/u.exec(evidence.source);
+  const workflowMatch = /^workflow:([^:]+)/u.exec(evidence.source);
+  const targets = [evidence.outputPath, evidence.fullOutputPath, evidence.logPath]
+    .filter((item): item is string => typeof item === "string" && item.length > 0);
+  return {
+    ...(context.sessionId ? { ownerSessionId: context.sessionId } : {}),
+    ...(context.currentRequestTurnId ? { requestTurnId: context.currentRequestTurnId } : {}),
+    ...(agentMatch?.[1] ? { ownerAgentId: agentMatch[1] } : {}),
+    ...(workflowMatch?.[1] ? { workflowRunId: workflowMatch[1] } : {}),
+    cwd: context.projectPath,
+    ...(targets.length > 0 ? { targets: Array.from(new Set(targets)) } : {}),
+  };
 }
 
 export function pickEvidence(
@@ -218,6 +266,10 @@ export async function recordProviderFailureEvidence(
       runtime.endpointProfile,
     ],
   );
+  scopeEvidenceToContext(context, evidence, {
+    ownerSessionId: sessionId,
+    ...(options?.requestTurnId ? { requestTurnId: options.requestTurnId } : {}),
+  });
   if (options?.commitGuard && !options.commitGuard()) return evidence;
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
@@ -411,6 +463,7 @@ export async function recordToolFailureEvidence(
     ),
     ...(toolUseId ? { toolUseId } : {}),
   };
+  scopeEvidenceToContext(context, evidence);
   if (!commitGuard) {
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, {
@@ -552,6 +605,15 @@ export async function recordToolEvidence(
     ? input as Record<string, unknown>
     : undefined;
   const verificationScope = inputRecord?.verificationScope;
+  const targetValues = ["path", "file", "cwd", "url"]
+    .map((key) => inputRecord?.[key])
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  evidence.ownerScope = {
+    ...(context.sessionId ? { ownerSessionId: context.sessionId } : { ownerSessionId: sessionId }),
+    ...(context.currentRequestTurnId ? { requestTurnId: context.currentRequestTurnId } : {}),
+    cwd: context.projectPath,
+    ...(targetValues.length > 0 ? { targets: Array.from(new Set(targetValues)) } : {}),
+  };
   if (
     name === "Bash" &&
     verificationScope &&
@@ -559,6 +621,11 @@ export async function recordToolEvidence(
     !Array.isArray(verificationScope)
   ) {
     evidence.data = { verificationScope };
+  } else if (
+    (name === "Write" || name === "Edit" || name === "MultiEdit") &&
+    targetValues[0]
+  ) {
+    evidence.data = { artifactHint: { path: targetValues[0], exists: true } };
   }
   if (!commitGuard) {
     rememberEvidence(context, evidence);
@@ -689,7 +756,17 @@ export async function recordVerificationEvidence(
     report.logPath ?? "Verification Runner",
     supportsClaims,
   );
-  if (report.scope) evidence.data = { verificationScope: report.scope };
+  if (report.scope) {
+    evidence.data = { verificationScope: report.scope };
+    evidence.ownerScope = {
+      ownerSessionId: report.scope.ownerSessionId,
+      ...(report.scope.requestTurnId ? { requestTurnId: report.scope.requestTurnId } : {}),
+      ...(report.scope.ownerAgentId ? { ownerAgentId: report.scope.ownerAgentId } : {}),
+      ...(report.scope.workflowRunId ? { workflowRunId: report.scope.workflowRunId } : {}),
+      cwd: report.scope.cwd,
+      targets: [...report.scope.changedFiles],
+    };
+  }
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
@@ -785,6 +862,7 @@ export async function recordToolResultBudgetEvidence(
     outputPath: record.artifact.path,
     data: createToolResultBudgetLedgerData(record),
   };
+  scopeEvidenceToContext(context, evidence);
   if (commitGuard && !commitGuard()) return evidence.id;
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
@@ -800,12 +878,14 @@ export async function appendBackgroundTaskEvent(
   context: TuiContext,
   sessionId: string,
   task: BackgroundTaskState,
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   await context.store.appendEvent(sessionId, {
     type: "background_task_update",
     task,
     createdAt: new Date().toISOString(),
-  });
+  }, commitGuard);
 }
 
 export async function appendSystemEvent(
@@ -1023,20 +1103,23 @@ export async function appendDerivedToolEvents(
   sessionId: string,
   name: ToolName,
   output: ToolOutput,
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   if (name === "Todo") {
     await context.store.appendEvent(sessionId, {
       type: "todo_update",
       items: context.tools.todos as TodoItem[],
       createdAt: new Date().toISOString(),
-    });
+    }, commitGuard);
   }
+  if (commitGuard && !commitGuard()) return;
   if (name === "Diff" && isDiffSummary(output.data)) {
     await context.store.appendEvent(sessionId, {
       type: "diff_update",
       summary: output.data,
       createdAt: new Date().toISOString(),
-    });
+    }, commitGuard);
   }
 }
 
@@ -1090,8 +1173,7 @@ export async function appendToolResultEvent(
   evidenceId?: string,
   commitGuard?: () => boolean,
 ): Promise<unknown> {
-  rememberRecentDiagnostics(context, toolName, content, toolUseId, evidenceId);
-  rememberToolEvidenceData(context, evidenceId, content);
+  if (commitGuard && !commitGuard()) return content;
   const contentWithDiagnostics = appendToolResultContentDiagnostics(content);
   const modelHistoryContent = compactToolResultForModelHistory(toolName, contentWithDiagnostics);
   const budgetedContent = await budgetToolResultTranscriptContent(
@@ -1112,6 +1194,9 @@ export async function appendToolResultEvent(
     evidenceId,
     createdAt: new Date().toISOString(),
   }, commitGuard);
+  if (commitGuard && !commitGuard()) return budgetedContent;
+  rememberRecentDiagnostics(context, toolName, content, toolUseId, evidenceId);
+  rememberToolEvidenceData(context, evidenceId, content);
   return budgetedContent;
 }
 

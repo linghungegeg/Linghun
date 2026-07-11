@@ -2,7 +2,11 @@ import { spawn } from "node:child_process";
 import type { McpServerConfig } from "@linghun/config";
 import { createProcessGuard } from "./process-guard.js";
 import { sanitizeDiagnosticText } from "./startup-runtime.js";
-import type { McpRuntimeProgress } from "./mcp-sse-runtime.js";
+import {
+  MCP_TRANSPORT_LIMITS,
+  type McpRuntimeProgress,
+  type McpTransportLimits,
+} from "./mcp-sse-runtime.js";
 
 // D.13J Block 4 — mutating heuristic for generic MCP tools。我们不知道具体 server 的工具语义，
 // 只能依赖工具名前缀/关键字保守判定：write/delete/update/create/remove/index 等被视为 mutating。
@@ -74,6 +78,7 @@ type McpStdioRunnerOptions<T> = {
   captureStderr: boolean;
   signal?: AbortSignal;
   onProgress?: (progress: McpRuntimeProgress) => void;
+  limits?: Readonly<McpTransportLimits>;
   run: (sendRequest: McpStdioRequestSender) => Promise<T>;
 };
 
@@ -139,6 +144,7 @@ export async function createMcpStdioRunner<T>(
     }
 
     let settled = false;
+    const limits = options.limits ?? MCP_TRANSPORT_LIMITS;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let hardTimer: ReturnType<typeof setTimeout> | undefined;
     let abortFromCaller: (() => void) | undefined;
@@ -178,7 +184,9 @@ export async function createMcpStdioRunner<T>(
       }, options.idleTimeoutMs ?? options.timeoutMs);
     };
 
-    const stderrChunks: Buffer[] = [];
+    let stderrText = "";
+    let stderrBytes = 0;
+    let stderrTruncated = false;
     let stdoutBuffer = "";
     const stdin = child.stdin;
     const stdout = child.stdout;
@@ -253,14 +261,44 @@ export async function createMcpStdioRunner<T>(
 
     stdout.setEncoding("utf8");
     let receivedBytes = 0;
+    let streamBytes = 0;
+    let frameCount = 0;
     stdout.on("data", (chunk: string) => {
+      if (settled) return;
+      streamBytes += Buffer.byteLength(chunk, "utf8");
+      if (streamBytes > limits.maxStreamBytes) {
+        settle({
+          ok: false,
+          summary: `MCP stdio stream exceeds ${limits.maxStreamBytes} bytes`,
+          errorCode: "MCP_STDIO_STREAM_LIMIT_EXCEEDED",
+        });
+        return;
+      }
       stdoutBuffer += chunk;
       let newlineIdx = stdoutBuffer.indexOf("\n");
       // line-delimited JSON-RPC; each newline is a frame.
       while (newlineIdx >= 0) {
-        const line = stdoutBuffer.slice(0, newlineIdx).trim();
+        const rawLine = stdoutBuffer.slice(0, newlineIdx);
         stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+        if (Buffer.byteLength(rawLine, "utf8") > limits.maxFrameBytes) {
+          settle({
+            ok: false,
+            summary: `MCP stdio frame exceeds ${limits.maxFrameBytes} bytes`,
+            errorCode: "MCP_STDIO_FRAME_TOO_LARGE",
+          });
+          return;
+        }
+        const line = rawLine.trim();
         if (line !== "") {
+          frameCount += 1;
+          if (frameCount > limits.maxFrames) {
+            settle({
+              ok: false,
+              summary: `MCP stdio frame count exceeds ${limits.maxFrames}`,
+              errorCode: "MCP_STDIO_FRAME_LIMIT_EXCEEDED",
+            });
+            return;
+          }
           let frame: unknown;
           try {
             frame = JSON.parse(line);
@@ -314,11 +352,25 @@ export async function createMcpStdioRunner<T>(
         }
         newlineIdx = stdoutBuffer.indexOf("\n");
       }
+      if (Buffer.byteLength(stdoutBuffer, "utf8") > limits.maxFrameBytes) {
+        settle({
+          ok: false,
+          summary: `MCP stdio frame exceeds ${limits.maxFrameBytes} bytes`,
+          errorCode: "MCP_STDIO_FRAME_TOO_LARGE",
+        });
+      }
     });
     stderr.on("data", (chunk: Buffer) => {
-      if (options.captureStderr) {
-        stderrChunks.push(chunk);
+      if (!options.captureStderr || stderrTruncated) return;
+      const remainingBytes = limits.maxStderrBytes - stderrBytes;
+      if (remainingBytes <= 0) {
+        stderrTruncated = true;
+        return;
       }
+      const retained = chunk.byteLength > remainingBytes ? chunk.subarray(0, remainingBytes) : chunk;
+      stderrText += retained.toString("utf8");
+      stderrBytes += retained.byteLength;
+      stderrTruncated = chunk.byteLength > remainingBytes;
     });
     child.on("error", (error: Error) => {
       const nodeError = error as NodeJS.ErrnoException;
@@ -331,12 +383,10 @@ export async function createMcpStdioRunner<T>(
     child.on("exit", (code, signal) => {
       // 让 settle 决定 outcome：如果 tools/call 已经 resolve 过，settle 会被忽略。
       if (!settled) {
-        const stderrText = sanitizeDiagnosticText(
-          Buffer.concat(stderrChunks).toString("utf8").slice(0, 400),
-        );
+        const stderrPreview = sanitizeDiagnosticText(stderrText.slice(0, 400));
         settle({
           ok: false,
-          summary: `MCP stdio child exited prematurely (code=${code ?? "?"} signal=${signal ?? "-"})${stderrText ? `: ${stderrText}` : ""}`,
+          summary: `MCP stdio child exited prematurely (code=${code ?? "?"} signal=${signal ?? "-"})${stderrPreview ? `: ${stderrPreview}${stderrTruncated ? " [stderr truncated]" : ""}` : ""}`,
         });
       }
     });

@@ -68,6 +68,7 @@ export type ResumeSessionResult = {
 export type ReadRecentTranscriptEventsInput = {
   limit: number;
   predicate?: (event: TranscriptEvent) => boolean;
+  stopPredicate?: (event: TranscriptEvent) => boolean;
 };
 
 export class SessionStore {
@@ -169,6 +170,7 @@ export class SessionStore {
     const transcript = await readJsonlTail<TranscriptEvent>(session.transcriptPath, {
       limit: input.limit,
       predicate: input.predicate,
+      stopPredicate: input.stopPredicate,
     });
     return {
       events: transcript.records,

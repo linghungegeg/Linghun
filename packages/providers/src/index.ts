@@ -11,10 +11,9 @@ import {
 } from "@linghun/shared";
 import {
   getRegisteredClientFactories,
-  getRegisteredHooks,
   registerClientFactories,
 } from "./provider-client-runtime.js";
-export { registerClientFactories, registerHooks } from "./provider-client-runtime.js";
+export { registerClientFactories } from "./provider-client-runtime.js";
 
 export type ModelUsage = {
   inputTokens: number;
@@ -211,7 +210,18 @@ export type Provider = {
   supports: ProviderCapabilities;
   listModels(): Promise<ModelInfo[]>;
   countTokens?(request: ModelRequest, signal?: AbortSignal): Promise<TokenCountResult>;
-  stream(request: ModelRequest, signal?: AbortSignal): AsyncGenerator<LinghunEvent>;
+  stream(
+    request: ModelRequest,
+    signal?: AbortSignal,
+    control?: ProviderStreamControl,
+  ): AsyncGenerator<LinghunEvent>;
+};
+
+export type ProviderStreamControl = {
+  onAttemptReset?: (info: {
+    reason: "same_provider_retry" | "stream_incomplete" | "stream_http_error";
+    replacement: "same_provider_stream" | "non_streaming_fallback";
+  }) => void;
 };
 
 export type OpenAiChatRequest = {
@@ -455,7 +465,6 @@ export type ProviderBaseUrlDiagnostic = {
 
 const PROVIDER_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const PROVIDER_MAX_ATTEMPTS = 10;
-const PROVIDER_BASE_RETRY_MS = 500;
 
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = readPositiveIntEnv(
   "LINGHUN_PROVIDER_STREAM_IDLE_TIMEOUT_MS",
@@ -531,6 +540,7 @@ export class ModelGateway {
     providerId: string,
     request: ModelRequest,
     signal: AbortSignal,
+    control?: ProviderStreamControl,
   ): AsyncGenerator<LinghunEvent> {
     const provider = this.findProvider(providerId);
     try {
@@ -540,9 +550,11 @@ export class ModelGateway {
       // 详见 tui/src/index.ts streamFinalModelAnswerWithoutTools 与
       // recordProviderEmptyResponse / formatProviderEmptyResponsePrimary。
       // 此处不在 gateway 再 yield PROVIDER_EMPTY_RESPONSE error 事件，避免覆盖现存路径。
-      yield* provider.stream(safeRequest, signal);
+      yield* provider.stream(safeRequest, signal, control);
     } catch (error) {
-      const linghunError = normalizeProviderError(error);
+      const linghunError = signal.aborted
+        ? createProviderAbortError(error)
+        : normalizeProviderError(error);
       yield { type: "error", error: linghunError };
     }
   }
@@ -795,7 +807,11 @@ export class OpenAiCompatibleProvider implements Provider {
     });
   }
 
-  async *stream(request: ModelRequest, signal?: AbortSignal): AsyncGenerator<LinghunEvent> {
+  async *stream(
+    request: ModelRequest,
+    signal?: AbortSignal,
+    control?: ProviderStreamControl,
+  ): AsyncGenerator<LinghunEvent> {
     this.assertReady();
     const requestController = new AbortController();
     if (signal?.aborted) {
@@ -812,8 +828,6 @@ export class OpenAiCompatibleProvider implements Provider {
       contract.endpointProfile,
     );
     const url = joinBaseUrlAndEndpoint(baseUrlDiagnostic.normalizedBaseUrl, contract.endpoint);
-    await getRegisteredHooks().beforeRequest?.({ config: this.config, request, contract, url });
-
     if (contract.endpointProfile === "anthropic_messages") {
       const body = this.createAnthropicMessagesRequest(request);
       // D.13H：Anthropic Context Editing / cache_edits 收口。仅在
@@ -852,9 +866,6 @@ export class OpenAiCompatibleProvider implements Provider {
           body: JSON.stringify(body),
           signal: requestSignal,
         },
-        request.requestContext,
-        request.requestContextId,
-        request.sessionId,
       );
 
       if (!response.ok) {
@@ -869,11 +880,9 @@ export class OpenAiCompatibleProvider implements Provider {
           requestSignal,
         });
         if (fallback) {
-          await getRegisteredHooks().afterFallback?.({
-            config: this.config,
-            request,
-            contract,
-            reason: `stream_http_${response.status}`,
+          control?.onAttemptReset?.({
+            reason: "stream_http_error",
+            replacement: "non_streaming_fallback",
           });
           yield* fallback;
           return;
@@ -902,6 +911,7 @@ export class OpenAiCompatibleProvider implements Provider {
 
       await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
+      let yieldedToolUse = false;
       for await (const event of parseAnthropicMessagesStream(
         withStreamIdleTimeout(
           response.body,
@@ -911,7 +921,8 @@ export class OpenAiCompatibleProvider implements Provider {
         ),
         contract.endpoint,
       )) {
-        if (isProviderIncompleteStreamErrorEvent(event)) {
+        if (event.type === "tool_use") yieldedToolUse = true;
+        if (!yieldedToolUse && isProviderIncompleteStreamErrorEvent(event)) {
           const fallback = await tryNonStreamingFallback({
             providerConfig: this.config,
             request,
@@ -920,11 +931,9 @@ export class OpenAiCompatibleProvider implements Provider {
             requestSignal,
           });
           if (fallback) {
-            await getRegisteredHooks().afterFallback?.({
-              config: this.config,
-              request,
-              contract,
+            control?.onAttemptReset?.({
               reason: "stream_incomplete",
+              replacement: "non_streaming_fallback",
             });
             yield* fallback;
             return;
@@ -951,9 +960,6 @@ export class OpenAiCompatibleProvider implements Provider {
         body: JSON.stringify(body),
         signal: requestSignal,
       },
-      request.requestContext,
-      request.requestContextId,
-      request.sessionId,
     );
 
     if (!response.ok) {
@@ -968,11 +974,9 @@ export class OpenAiCompatibleProvider implements Provider {
         requestSignal,
       });
       if (fallback) {
-        await getRegisteredHooks().afterFallback?.({
-          config: this.config,
-          request,
-          contract,
-          reason: `stream_http_${response.status}`,
+        control?.onAttemptReset?.({
+          reason: "stream_http_error",
+          replacement: "non_streaming_fallback",
         });
         yield* fallback;
         return;
@@ -1001,6 +1005,7 @@ export class OpenAiCompatibleProvider implements Provider {
 
     await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
+    let yieldedToolUse = false;
     for await (const event of parseOpenAiStream(
       withStreamIdleTimeout(
         response.body,
@@ -1010,7 +1015,8 @@ export class OpenAiCompatibleProvider implements Provider {
       ),
       contract.endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
     )) {
-      if (isProviderIncompleteStreamErrorEvent(event)) {
+      if (event.type === "tool_use") yieldedToolUse = true;
+      if (!yieldedToolUse && isProviderIncompleteStreamErrorEvent(event)) {
         const fallback = await tryNonStreamingFallback({
           providerConfig: this.config,
           request,
@@ -1019,11 +1025,9 @@ export class OpenAiCompatibleProvider implements Provider {
           requestSignal,
         });
         if (fallback) {
-          await getRegisteredHooks().afterFallback?.({
-            config: this.config,
-            request,
-            contract,
+          control?.onAttemptReset?.({
             reason: "stream_incomplete",
+            replacement: "non_streaming_fallback",
           });
           yield* fallback;
           return;
@@ -1381,40 +1385,8 @@ function inferEndpointProfileFromBaseUrl(baseUrl: string | undefined): EndpointP
 async function fetchWithProviderRetry(
   url: string,
   init: RequestInit,
-  requestContext?: "foreground" | "agent",
-  requestContextId?: string,
-  sessionId?: string,
 ): Promise<Response> {
-  try {
-    const response = await fetchWithRequestTimeout(url, init, PROVIDER_REQUEST_TIMEOUT_MS);
-    if (PROVIDER_RETRY_STATUSES.has(response.status)) {
-      const retryAfterMs = readRetryAfterMs(response);
-      const delayMs = retryAfterMs ?? PROVIDER_BASE_RETRY_MS;
-      getRegisteredHooks().onRetry?.({
-        attempt: 1,
-        maxAttempts: PROVIDER_MAX_ATTEMPTS,
-        delayMs,
-        statusCode: response.status,
-        requestContext,
-        requestContextId,
-        sessionId,
-      });
-    }
-    return response;
-  } catch (error) {
-    if (error instanceof TypeError) {
-      getRegisteredHooks().onRetry?.({
-        attempt: 1,
-        maxAttempts: PROVIDER_MAX_ATTEMPTS,
-        delayMs: PROVIDER_BASE_RETRY_MS,
-        statusCode: 0,
-        requestContext,
-        requestContextId,
-        sessionId,
-      });
-    }
-    throw error;
-  }
+  return fetchWithRequestTimeout(url, init, PROVIDER_REQUEST_TIMEOUT_MS);
 }
 
 async function fetchWithRequestTimeout(
@@ -1462,22 +1434,6 @@ function createProviderRequestTimeoutError(timeoutMs: number): LinghunError {
       "请检查网络、provider/baseUrl/model 是否可用；如持续超时，运行 /model doctor 或切换 provider/model 后重试。",
     recoverable: true,
   });
-}
-
-function readRetryAfterMs(response: Response): number | undefined {
-  const value = response.headers.get("retry-after");
-  if (!value) {
-    return undefined;
-  }
-  const seconds = Number(value);
-  if (Number.isFinite(seconds)) {
-    return Math.max(0, seconds * 1000);
-  }
-  const date = Date.parse(value);
-  if (Number.isFinite(date)) {
-    return Math.max(0, date - Date.now());
-  }
-  return undefined;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -1576,9 +1532,6 @@ async function tryNonStreamingFallback(input: {
       body: JSON.stringify(body),
       signal: input.requestSignal,
     },
-    input.request.requestContext,
-    input.request.requestContextId,
-    input.request.sessionId,
   );
   if (!response.ok) {
     return undefined;
@@ -3539,6 +3492,9 @@ export function normalizeProviderError(error: unknown): LinghunError {
   if (error instanceof LinghunError) {
     return error;
   }
+  if (isProviderAbortError(error)) {
+    return createProviderAbortError(error);
+  }
   const status = readStatus(error);
   if (status === 401 || status === 403) {
     return createApiKeyError(status, error);
@@ -3581,6 +3537,21 @@ export function normalizeProviderError(error: unknown): LinghunError {
     suggestion: "请运行 /model doctor 检查当前 provider 配置。",
     cause: error,
     recoverable: true,
+  });
+}
+
+function isProviderAbortError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { name?: unknown; code?: unknown };
+  return candidate.name === "AbortError" || candidate.code === "ABORT_ERR";
+}
+
+function createProviderAbortError(cause?: unknown): LinghunError {
+  return new LinghunError({
+    code: "ABORT_ERR",
+    message: "Request aborted.",
+    cause,
+    recoverable: false,
   });
 }
 

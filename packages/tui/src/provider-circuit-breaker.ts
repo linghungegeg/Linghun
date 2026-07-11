@@ -1,6 +1,6 @@
 import type { Language } from "@linghun/shared";
 import { readPositiveIntEnv } from "@linghun/shared";
-import type { LinghunEvent, ModelGateway, ModelRequest } from "@linghun/providers";
+import type { LinghunEvent, ModelGateway, ModelRequest, ProviderStreamControl } from "@linghun/providers";
 import { LinghunError } from "@linghun/core";
 import { classifyProviderFailure, type ProviderFailureKind } from "./request-lifecycle-presenter.js";
 
@@ -528,7 +528,7 @@ export async function* withProviderRetry(
     skipGate?: boolean;
     skipCooldownCheck?: boolean;
     streamEventIdleMs?: number;
-    stopAfterToolUse?: boolean;
+    onAttemptReset?: ProviderStreamControl["onAttemptReset"];
     onRetry?: (info: {
       attempt: number;
       maxAttempts: number;
@@ -610,7 +610,11 @@ export async function* withProviderRetry(
       } else {
         signal?.addEventListener("abort", forwardAbort, { once: true });
       }
-      const iterator = gateway.stream(provider, request, streamController.signal)[Symbol.asyncIterator]();
+      const iterator = gateway
+        .stream(provider, request, streamController.signal, {
+          onAttemptReset: opts?.onAttemptReset,
+        })
+        [Symbol.asyncIterator]();
       try {
         while (true) {
           const next = await readNextProviderStreamEvent(iterator, {
@@ -629,12 +633,6 @@ export async function* withProviderRetry(
           if (event.type === "tool_use") {
             yieldedToolUse = true;
             yield event;
-            if (opts?.stopAfterToolUse) {
-              streamCompleted = true;
-              clearProviderBreaker(state, provider, model, cooldownScope);
-              streamController.abort("tool_use_early_dispatch");
-              return;
-            }
             continue;
           }
           yield event;
@@ -717,6 +715,10 @@ export async function* withProviderRetry(
       };
       return;
     }
+    opts?.onAttemptReset?.({
+      reason: "same_provider_retry",
+      replacement: "same_provider_stream",
+    });
     await sleepAbortable(delayMs, signal);
   }
 }

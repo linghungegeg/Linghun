@@ -1026,11 +1026,24 @@ export function isEvidenceStaleForClaim(
   kind: FinalAnswerClaimKind,
   now: Date = new Date(),
 ): boolean {
+  if (isRequestOwnedLocalEvidence(record)) return false;
   const threshold = STALE_THRESHOLDS_MS[kind];
   if (threshold === null) return false;
   const created = Date.parse(record.createdAt);
   if (Number.isNaN(created)) return false;
   return now.getTime() - created > threshold;
+}
+
+function isRequestOwnedLocalEvidence(record: EvidenceRecord): boolean {
+  if (record.kind === "web_source" || record.kind === "user_provided") return false;
+  const owner = record.ownerScope;
+  return Boolean(
+    owner?.ownerSessionId &&
+      owner.requestTurnId &&
+      owner.cwd &&
+      !owner.ownerAgentId &&
+      !owner.workflowRunId,
+  );
 }
 
 const FINAL_ANSWER_CLAIM_KINDS: readonly FinalAnswerClaimKind[] = [
@@ -1138,6 +1151,24 @@ function isTestCompletionClaim(text: string, phrase: string): boolean {
   return /(?:测试|tests?\s+passed|vitest|jest|pytest|go\s+test|cargo\s+test)/iu.test(lowered);
 }
 
+function isFullSuiteTestClaim(text: string, phrase: string): boolean {
+  return /(?:全部|所有|全量|完整|完整的)\s*(?:测试|用例)|(?:all|full|entire|complete)\s+(?:test|tests|test\s+suite)|full[-\s]?suite/iu.test(
+    claimWindow(text, phrase),
+  );
+}
+
+function evidenceSupportsTestClaim(
+  record: EvidenceRecord,
+  text: string,
+  match: FinalAnswerClaimMatch,
+): boolean {
+  if (!evidenceSupportsCommandClaim(record, "test")) return false;
+  if (!isFullSuiteTestClaim(text, match.phrase)) return true;
+  return record.supportsClaims.some((claim) =>
+    /^(?:test_scope[:=]full|full_test_suite_passed|all_tests_passed)$/iu.test(claim),
+  );
+}
+
 function isTypecheckCompletionClaim(text: string, phrase: string): boolean {
   const lowered = phrase.toLowerCase();
   return (
@@ -1209,7 +1240,7 @@ function evidenceSupportsCompletionClaim(
   match: FinalAnswerClaimMatch,
 ): boolean {
   if (isTestCompletionClaim(text, match.phrase)) {
-    return evidenceSupportsCommandClaim(record, "test");
+    return evidenceSupportsTestClaim(record, text, match);
   }
   if (isTypecheckCompletionClaim(text, match.phrase)) {
     return evidenceSupportsCommandClaim(record, "typecheck");
@@ -1397,7 +1428,122 @@ export function evaluateFinalAnswerClaims(
   const structured = extractStructuredFinalAnswerClaims(text).filter(
     (claim) => claim.kind !== "architecture_boundary" && claim.kind !== "completeness",
   );
-  return evaluateStructuredFinalAnswerClaims(structured, evidence, now, text);
+  const inferred = inferVisibleFinalAnswerClaims(text);
+  const seen = new Set<string>();
+  const claims = [...inferred, ...structured].filter((claim) => {
+    const key = `${claim.kind}\u0000${claim.phrase}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return evaluateStructuredFinalAnswerClaims(claims, evidence, now, text);
+}
+
+export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMatch[] {
+  const visible = stripStructuredFinalAnswerClaims(text);
+  const claims: FinalAnswerClaimMatch[] = [];
+  const add = (kind: FinalAnswerClaimKind, pattern: RegExp): void => {
+    for (const clause of splitClaimClauses(visible)) {
+      const claimText = stripClaimExplanationExamples(clause);
+      if (!claimText) continue;
+      if (
+        kind === "completion_claim" &&
+        /(?:agent|子\s*agent|智能体|workflow|工作流)/iu.test(claimText)
+      ) {
+        continue;
+      }
+      const matches = claimText.matchAll(
+        new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`),
+      );
+      for (const match of matches) {
+        if (
+          match[0] &&
+          !isNegatedOrProspectiveClaim(
+            claimText.slice(0, (match.index ?? 0) + match[0].length),
+          )
+        ) {
+          claims.push({ kind, phrase: match[0].trim() });
+        }
+      }
+    }
+  };
+  add("test_claim", /(?:测试|tests?|vitest|jest|pytest|go\s+test|cargo\s+test).{0,40}(?:通过|passed|pass)/iu);
+  add("verification_claim", /(?:验证|typecheck|lint|build|构建|smoke|冒烟).{0,40}(?:通过|passed|pass|成功)/iu);
+  add("file_change_claim", /(?:已|已经|successfully\s+)?(?:修改|写入|创建|更新|删除|edited|wrote|created|updated|deleted).{0,100}(?:文件|file|[\w./\\-]+\.[A-Za-z0-9._-]+)/iu);
+  add("agent_status_claim", /(?:agent|子\s*agent|智能体).{0,60}(?:完成|completed|通过|passed|成功)/iu);
+  add("workflow_status_claim", /(?:workflow|工作流).{0,60}(?:完成|completed|通过|passed|成功)/iu);
+  add("action_executed", /(?:已|已经|successfully\s+)?(?:执行|安装|启动|停止|ran|executed|installed|started|stopped).{0,100}(?:命令|command|服务|service|依赖|package)?/iu);
+  add("external_current_fact", /(?:当前|最新|今天|现在|current|latest|today).{0,100}(?:版本|状态|价格|文档|发布|version|status|price|release|docs?)/iu);
+  add("code_fact", /(?:代码|函数|方法|类|模块|function|method|class|module).{0,100}(?:负责|会|调用|返回|实现|uses?|calls?|returns?|implements?)/iu);
+  add("completion_claim", /(?:已完成|已经完成|已修复|已经修复|completed|fixed|done)/iu);
+  return claims;
+}
+
+function stripClaimExplanationExamples(clause: string): string {
+  const lastMatchIndex = (text: string, pattern: RegExp): number =>
+    Array.from(text.matchAll(pattern)).at(-1)?.index ?? -1;
+  return clause
+    .replace(
+      /'[^'\r\n]*'|"[^"\r\n]*"|`[^`\r\n]*`|“[^”\r\n]*”|‘[^’\r\n]*’/gu,
+      (quoted, offset: number) => {
+        const prefix = clause
+          .slice(0, offset)
+          .replace(
+            /'[^'\r\n]*'|"[^"\r\n]*"|`[^`\r\n]*`|“[^”\r\n]*”|‘[^’\r\n]*’/gu,
+            " ",
+          );
+        const explanationIndex = Math.max(
+          lastMatchIndex(prefix, /(?:示例|例子|examples?)/giu),
+          lastMatchIndex(
+            prefix,
+            /(?:反幻觉|claim|声明|高风险).{0,40}(?:会|将|can|will).{0,20}(?:检测|识别|detect)/giu,
+          ),
+        );
+        const currentOutcomeIndex = lastMatchIndex(
+          prefix,
+          /(?:结果|结论|状态|现在|当前|实际(?:状态)?|result|verdict|outcome|status|state|now|current|actual)/giu,
+        );
+        return explanationIndex > currentOutcomeIndex ? " " : quoted;
+      },
+    )
+    .trim();
+}
+
+function splitClaimClauses(text: string): string[] {
+  return text
+    .split(/(?:\.(?=\s|$)|[!?;,\n。！？；，]|\bbut\b|但是|不过|然而|修复后|\band\s+(?=(?:read|wrote|written|write|created|create|updated|update|edited|edit|deleted|delete|ran|executed|installed|started|stopped)\b)|并(?=(?:读取|修改|写入|创建|更新|删除|执行|安装|启动|停止)))/giu)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+}
+
+function isNegatedOrProspectiveClaim(text: string): boolean {
+  return /(?:未|没有|尚未|失败|需要|建议|计划|将要|准备|不得|不能|not\b|did\s+not|didn't|failed|need\s+to|should|plan(?:ned)?\s+to|will\s+)/iu.test(
+    text,
+  );
+}
+
+function evaluateEachClaimMatch(
+  claims: FinalAnswerClaimMatch[],
+  evidence: EvidenceRecord[],
+  supporter: (record: EvidenceRecord, claim: FinalAnswerClaimMatch) => boolean,
+  kind: FinalAnswerClaimKind,
+  now: Date,
+): { supported: boolean; stale: boolean } {
+  let stale = false;
+  const supported = claims.every((claim) => {
+    const supporting = evidence.filter((record) => supporter(record, claim));
+    const targets = extractClaimTargets(claim);
+    const targetGroups = targets.length > 0 ? targets : [undefined];
+    return targetGroups.every((target) => {
+      const matching = target
+        ? supporting.filter((record) => evidenceMatchesTarget(record, target))
+        : supporting;
+      const fresh = matching.filter((record) => !isEvidenceStaleForClaim(record, kind, now));
+      if (matching.length > 0 && fresh.length === 0) stale = true;
+      return fresh.length > 0;
+    });
+  });
+  return { supported, stale };
 }
 
 export function evaluateStructuredFinalAnswerClaims(
@@ -1423,36 +1569,51 @@ export function evaluateStructuredFinalAnswerClaims(
     let supported = false;
     let supporter: (record: EvidenceRecord) => boolean;
     if (kind === "completion_claim") {
-      const matching = evidence.filter(evidenceSupportsTaskCompletion);
-      const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
-      supported = fresh.length > 0;
+      const result = evaluateEachClaimMatch(
+        matches.filter((match) => match.kind === kind),
+        evidence,
+        (record) => evidenceSupportsTaskCompletion(record),
+        kind,
+        now,
+      );
+      supported = result.supported;
       if (!supported) {
         unsupported.push(kind);
-        if (matching.length > 0 && fresh.length === 0) {
+        if (result.stale) {
           staleKinds.push(kind);
         }
       }
       continue;
     }
     if (kind === "test_claim") {
-      const matching = evidence.filter((record) => evidenceSupportsCommandClaim(record, "test"));
-      const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
-      supported = fresh.length > 0;
+      const result = evaluateEachClaimMatch(
+        matches.filter((match) => match.kind === kind),
+        evidence,
+        (record, match) => evidenceSupportsTestClaim(record, sourceText, match),
+        kind,
+        now,
+      );
+      supported = result.supported;
       if (!supported) {
         unsupported.push(kind);
-        if (matching.length > 0 && fresh.length === 0) {
+        if (result.stale) {
           staleKinds.push(kind);
         }
       }
       continue;
     }
     if (kind === "verification_claim") {
-      const matching = evidence.filter(evidenceSupportsVerificationClaim);
-      const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
-      supported = fresh.length > 0;
+      const result = evaluateEachClaimMatch(
+        matches.filter((match) => match.kind === kind),
+        evidence,
+        (record) => evidenceSupportsVerificationClaim(record),
+        kind,
+        now,
+      );
+      supported = result.supported;
       if (!supported) {
         unsupported.push(kind);
-        if (matching.length > 0 && fresh.length === 0) {
+        if (result.stale) {
           staleKinds.push(kind);
         }
       }
@@ -1460,18 +1621,17 @@ export function evaluateStructuredFinalAnswerClaims(
     }
     if (kind === "completion_pass") {
       const completionMatches = matches.filter((item) => item.kind === "completion_pass");
-      const matching = evidence.filter((record) =>
-        completionMatches.some((match) =>
-          evidenceSupportsCompletionClaim(record, sourceText, match),
-        ),
+      const result = evaluateEachClaimMatch(
+        completionMatches,
+        evidence,
+        (record, match) => evidenceSupportsCompletionClaim(record, sourceText, match),
+        kind,
+        now,
       );
-      const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
-      supported = completionMatches.every((match) =>
-        fresh.some((record) => evidenceSupportsCompletionClaim(record, sourceText, match)),
-      );
+      supported = result.supported;
       if (!supported) {
         unsupported.push(kind);
-        if (matching.length > 0 && fresh.length === 0) {
+        if (result.stale) {
           staleKinds.push(kind);
         }
       }
@@ -1497,13 +1657,18 @@ export function evaluateStructuredFinalAnswerClaims(
       // beta_readiness / architecture_boundary / completeness 由专门 gate 主管，primary evaluator 不放行。
       supporter = () => false;
     }
-    const matching = evidence.filter(supporter);
-    const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
-    supported = fresh.length > 0;
+    const result = evaluateEachClaimMatch(
+      matches.filter((match) => match.kind === kind),
+      evidence,
+      (record) => supporter(record),
+      kind,
+      now,
+    );
+    supported = result.supported;
     if (!supported) {
       unsupported.push(kind);
       // \u4ec5\u5f53\u5b58\u5728\u88ab\u5254\u9664\u7684 stale \u8bc1\u636e\u65f6\u8bb0\u5f55\uff1b\u7eaf\u7cb9\u7f3a\u8bc1\u636e\u7684\u4e0d\u7b97 stale\u3002
-      if (matching.length > 0 && fresh.length === 0) {
+      if (result.stale) {
         staleKinds.push(kind);
       }
     }
@@ -1537,6 +1702,62 @@ export function evaluateStructuredFinalAnswerClaims(
     verdict.staleKinds = staleKinds;
   }
   return verdict;
+}
+
+function extractClaimTargets(claim: FinalAnswerClaimMatch): string[] {
+  return Array.from(
+    claim.phrase.matchAll(
+      /(?:agent-[\w-]+|workflow-[\w-]+|(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[\w.@()-]+(?:[\\/][\w.@() -]+)*\.[A-Za-z0-9._-]+)/giu,
+    ),
+    (match) => match[0].trim().toLowerCase(),
+  );
+}
+
+function evidenceMatchesTarget(record: EvidenceRecord, target: string): boolean {
+  const normalizedTarget = normalizeEvidenceTarget(target);
+  const explicitIds = [record.ownerScope?.ownerAgentId, record.ownerScope?.workflowRunId]
+    .filter((item): item is string => Boolean(item))
+    .map(normalizeEvidenceTarget);
+  const extracted = [
+    record.source,
+    record.summary,
+    ...(record.ownerScope?.targets ?? []),
+  ].flatMap((value) =>
+    Array.from(
+      value.matchAll(
+        /(?:agent-[\w-]+|workflow-[\w-]+|(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[\w.@()-]+(?:[\\/][\w.@() -]+)*\.[A-Za-z0-9._-]+)/giu,
+      ),
+      (match) => normalizeEvidenceTarget(match[0]),
+    ),
+  );
+  const candidates = [...explicitIds, ...extracted];
+  if (/^(?:agent|workflow)-/u.test(normalizedTarget)) {
+    return candidates.some((candidate) => candidate === normalizedTarget);
+  }
+  return candidates.some((candidate) =>
+    evidencePathMatches(candidate, normalizedTarget, record.ownerScope?.cwd),
+  );
+}
+
+function normalizeEvidenceTarget(target: string): string {
+  return target.trim().replace(/\\/gu, "/").replace(/^\.\//u, "").toLowerCase();
+}
+
+function evidencePathMatches(candidate: string, target: string, cwd: string | undefined): boolean {
+  if (candidate === target) return true;
+  const candidateHasDirectory = candidate.includes("/");
+  const targetHasDirectory = target.includes("/");
+  if (!candidateHasDirectory || !targetHasDirectory) {
+    return candidate.split("/").at(-1) === target.split("/").at(-1);
+  }
+  const candidateAbsolute = /^(?:[a-z]:\/|\/)/u.test(candidate);
+  const targetAbsolute = /^(?:[a-z]:\/|\/)/u.test(target);
+  if (candidateAbsolute === targetAbsolute) return false;
+  if (!cwd) return false;
+  const normalizedCwd = normalizeEvidenceTarget(cwd).replace(/\/+$/u, "");
+  const resolvedCandidate = candidateAbsolute ? candidate : `${normalizedCwd}/${candidate}`;
+  const resolvedTarget = targetAbsolute ? target : `${normalizedCwd}/${target}`;
+  return resolvedCandidate === resolvedTarget;
 }
 
 // \u7ed9\u6a21\u578b\u6ce8\u5165\u7684 user reminder\uff08\u4ec5\u4e00\u8f6e\uff09\u3002\u4e2d\u6587\u77ed\u53e5 + \u5217\u51fa\u7f3a\u4ec0\u4e48\u7c7b\u578b\u8bc1\u636e\u3002
@@ -1973,6 +2194,7 @@ export function deriveToolSupportsClaims(
         /(?:^|[\s&|;])(?:vitest|jest|pytest|go\s+test|cargo\s+test|mocha|jasmine|tap\b)/iu.test(cmd)
       ) {
         claims.add("test_passed");
+        claims.add(isFullTestCommand(cmd) ? "test_scope:full" : "test_scope:focused");
       }
       if (/(?:^|[\s&|;])(?:tsc)(?:\s|$)/iu.test(cmd) || /tsc\s+--noemit/iu.test(cmd)) {
         claims.add("typecheck_passed");
@@ -1996,4 +2218,21 @@ export function deriveToolSupportsClaims(
     }
   }
   return Array.from(claims);
+}
+
+function isFullTestCommand(command: string): boolean {
+  if (
+    /(?:\.test|\.spec)\.[cm]?[jt]sx?\b|(?:^|\s)(?:-t|-k|-m|--testnamepattern|--test-path-pattern|--filter|--project|--changed|--related)(?:\s|=|$)/iu.test(
+      command,
+    )
+  ) {
+    return false;
+  }
+  return (
+    /(?:^|[;&|]\s*|\s)(?:vitest)(?:\s+(?:run|--run))?(?:\s+--(?:coverage|passwithnotests|reporter)(?:=[^\s]+)?)?\s*$/iu.test(command) ||
+    /(?:^|[;&|]\s*|\s)(?:jest|mocha|jasmine|tap)(?:\s+--(?:coverage|passwithnotests|runinband))?\s*$/iu.test(command) ||
+    /(?:^|[;&|]\s*|\s)pytest(?:\s+-(?:q|x|s|v|vv|ra|maxfail=\d+))*\s*$/iu.test(command) ||
+    /(?:^|[;&|]\s*|\s)go\s+test\s+\.\/\.\.\.(?:\s+-[^\s]+)*\s*$/iu.test(command) ||
+    /(?:^|[;&|]\s*|\s)cargo\s+test(?:\s+--(?:workspace|all|all-targets))*\s*$/iu.test(command)
+  );
 }

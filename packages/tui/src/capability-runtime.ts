@@ -102,6 +102,7 @@ const TRANSPORT_PRIORITY: CapabilityTransport[] = [
 type CapabilityRegistryEntry = {
   definition: CapabilityDefinition;
   projectPath?: string;
+  runtimeOwnerId?: string;
 };
 
 export type CapabilityDispatchRuntimePolicy =
@@ -139,21 +140,31 @@ let externalConnectionResolver:
 
 export function registerCapability(
   definition: CapabilityDefinition,
-  options: { projectPath?: string } = {},
+  options: { projectPath?: string; runtimeOwnerId?: string } = {},
 ): void {
   const entries = registry.get(definition.id) ?? [];
-  const next = entries.filter((entry) => entry.projectPath !== options.projectPath);
-  next.push({ definition, projectPath: options.projectPath });
+  const next = entries.filter(
+    (entry) =>
+      entry.projectPath !== options.projectPath || entry.runtimeOwnerId !== options.runtimeOwnerId,
+  );
+  next.push({
+    definition,
+    projectPath: options.projectPath,
+    runtimeOwnerId: options.runtimeOwnerId,
+  });
   registry.set(definition.id, next);
 }
 
 export function unregisterCapabilitiesByApp(
   appId: string,
-  options: { projectPath?: string } = {},
+  options: { projectPath?: string; runtimeOwnerId?: string } = {},
 ): void {
   for (const [id, entries] of registry.entries()) {
     const next = entries.filter((entry) => {
       if (entry.definition.appId !== appId) return true;
+      if (options.runtimeOwnerId !== undefined) {
+        return entry.runtimeOwnerId !== options.runtimeOwnerId;
+      }
       return options.projectPath !== undefined && entry.projectPath !== options.projectPath;
     });
     if (next.length === 0) {
@@ -382,6 +393,7 @@ export async function executeCapability(
 }
 
 function capabilityEntryVisible(entry: CapabilityRegistryEntry, context?: TuiContext): boolean {
+  if (entry.runtimeOwnerId) return context?.runtimeOwnerId === entry.runtimeOwnerId;
   if (!entry.projectPath) return true;
   return context?.projectPath === entry.projectPath;
 }
@@ -390,8 +402,14 @@ function selectCapabilityEntry(
   entries: CapabilityRegistryEntry[],
   context?: TuiContext,
 ): CapabilityRegistryEntry | undefined {
+  const runtimeEntry = context?.runtimeOwnerId
+    ? entries.find((entry) => entry.runtimeOwnerId === context.runtimeOwnerId)
+    : undefined;
+  if (runtimeEntry) return runtimeEntry;
   const projectEntry = context
-    ? entries.find((entry) => entry.projectPath === context.projectPath)
+    ? entries.find(
+        (entry) => !entry.runtimeOwnerId && entry.projectPath === context.projectPath,
+      )
     : undefined;
   if (projectEntry) return projectEntry;
   return entries.find((entry) => capabilityEntryVisible(entry, context));
@@ -402,8 +420,8 @@ export function formatCapabilityDoctor(language: Language = "zh-CN", context?: T
   const lines = [
     isEn ? "Capability doctor" : "Capability doctor",
     isEn
-      ? "- Runtime: Capability Runtime with mock provider and project-scoped Local HTTP connectors."
-      : "- 运行时：Capability Runtime；mock provider 全局可用，Local HTTP connector 按项目隔离。",
+      ? "- Runtime: Capability Runtime with mock provider and runtime-scoped Local HTTP connectors."
+      : "- 运行时：Capability Runtime；mock provider 全局可用，Local HTTP connector 按运行实例隔离。",
   ];
   for (const item of listCapabilities(context)) {
     const connection = resolveCapabilityConnection(item, context);

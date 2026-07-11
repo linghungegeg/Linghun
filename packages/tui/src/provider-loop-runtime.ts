@@ -28,6 +28,10 @@ function shouldAttemptRuntimeFallback(kind: ProviderFailureKind): boolean {
   );
 }
 
+export function providerRuntimeKey(runtime: Pick<SelectedModelRuntime, "provider" | "model">): string {
+  return `${runtime.provider}\u0000${runtime.model}`;
+}
+
 function createRuntimeForFallbackModel(
   context: TuiContext,
   baseRuntime: SelectedModelRuntime,
@@ -59,6 +63,7 @@ export function resolveRuntimeFallback(
   context: TuiContext,
   runtime: SelectedModelRuntime,
   error: unknown,
+  attemptedRuntimeKeys?: ReadonlySet<string>,
 ): { runtime: SelectedModelRuntime; kind: ProviderFailureKind; code: string } | undefined {
   const kind = classifyProviderFailure(error);
   if (!shouldAttemptRuntimeFallback(kind)) return undefined;
@@ -69,6 +74,7 @@ export function resolveRuntimeFallback(
     if (fallbackRuntime.provider === runtime.provider && fallbackRuntime.model === runtime.model) {
       continue;
     }
+    if (attemptedRuntimeKeys?.has(providerRuntimeKey(fallbackRuntime))) continue;
     return { runtime: fallbackRuntime, kind, code: getProviderErrorCode(error) };
   }
   return undefined;
@@ -83,8 +89,10 @@ export async function recordProviderFallbackAttempt(
     kind: ProviderFailureKind;
     code: string;
     status: "attempted" | "succeeded" | "failed";
+    commitGuard?: () => boolean;
   },
 ): Promise<void> {
+  if (input.commitGuard && !input.commitGuard()) return;
   const summary = formatProviderFallbackAttemptSummary(
     {
       fromProvider: input.from.provider,
@@ -95,6 +103,7 @@ export async function recordProviderFallbackAttempt(
     },
     context.language,
   );
+  if (input.commitGuard && !input.commitGuard()) return;
   context.lastProviderFallbackAttempt = {
     fromProvider: input.from.provider,
     fromModel: input.from.model,
@@ -127,13 +136,14 @@ export async function recordProviderFallbackAttempt(
       createdAt: new Date().toISOString(),
     });
   }
+  if (input.commitGuard && !input.commitGuard()) return;
   await context.store.appendEvent(sessionId, {
     type: "system_event",
     id: randomUUID(),
     level: input.status === "succeeded" ? "info" : "warning",
     message: `provider fallback attempt: from ${input.from.provider}/${input.from.model}; to ${input.to.provider}/${input.to.model}; reason ${input.kind}; code ${input.code}; status ${input.status}`,
     createdAt: new Date().toISOString(),
-  });
+  }, input.commitGuard);
 }
 
 export function checkAndWriteProviderCooldown(

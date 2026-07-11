@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createToolContext } from "@linghun/tools";
 import {
+  __testRunAgentToolInCwd,
+  __testClearAgentAbortController,
   createAgentRuntimeForFallbackModel,
   evaluateChildAgentSummaryClaims,
   resolveAgentRuntimeForModel,
@@ -64,6 +70,106 @@ describe("agent terminal status and full report consumption", () => {
 
   it("keeps missing agents explicit instead of fabricating a report", () => {
     expect(formatAgentRunToolResultData(undefined)).toEqual({ status: "not_found" });
+  });
+});
+
+describe("agent-owned tool context", () => {
+  it("keeps Read snapshots across calls without sharing the main context", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-agent-tools-"));
+    await writeFile(join(projectPath, "note.txt"), "before", "utf8");
+    const context = {
+      projectPath,
+      tools: createToolContext(projectPath),
+      agentToolContexts: new Map(),
+    } as unknown as TuiContext;
+    const agent = makeAgent({ id: "agent-snapshot", cwd: projectPath, status: "running" });
+    const signal = new AbortController().signal;
+
+    const read = await __testRunAgentToolInCwd(
+      "Read",
+      { path: "note.txt" },
+      agent,
+      context,
+      signal,
+    );
+    const edit = await __testRunAgentToolInCwd(
+      "Edit",
+      { path: "note.txt", oldText: "before", newText: "after" },
+      agent,
+      context,
+      signal,
+    );
+
+    expect(read.output.text).toContain("before");
+    expect(edit.output.changedFiles).toContain("note.txt");
+    expect(await readFile(join(projectPath, "note.txt"), "utf8")).toBe("after");
+    expect(context.agentToolContexts?.get(agent.id)?.readSnapshots).toBeDefined();
+    expect(context.tools.readSnapshots).toEqual({});
+    expect(context.tools.changedFiles).toEqual(["note.txt"]);
+  });
+
+  it("isolates 100 interleaved agent snapshots and clears only terminal owners", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-agent-pressure-"));
+    const context = {
+      projectPath,
+      tools: createToolContext(projectPath),
+      agentToolContexts: new Map(),
+      backgroundAbortControllers: new Map(),
+    } as unknown as TuiContext;
+    const signal = new AbortController().signal;
+    const agents = Array.from({ length: 100 }, (_, index) => {
+      const cwd = join(projectPath, `agent-${index}`);
+      return makeAgent({ id: `agent-${index}`, cwd, status: "running" });
+    });
+
+    await Promise.all(
+      agents.map(async (agent, index) => {
+        await mkdir(agent.cwd!, { recursive: true });
+        await writeFile(join(agent.cwd!, "note.txt"), `before-${index}`, "utf8");
+      }),
+    );
+    await Promise.all(
+      agents.map((agent) =>
+        __testRunAgentToolInCwd("Read", { path: "note.txt" }, agent, context, signal),
+      ),
+    );
+    await Promise.all(
+      agents.map((agent, index) =>
+        __testRunAgentToolInCwd(
+          "Edit",
+          { path: "note.txt", oldText: `before-${index}`, newText: `after-${index}` },
+          agent,
+          context,
+          signal,
+        ),
+      ),
+    );
+
+    expect(context.agentToolContexts?.size).toBe(100);
+    expect(context.tools.readSnapshots).toEqual({});
+    expect(new Set(context.tools.changedFiles).size).toBe(100);
+    expect(context.tools.changedFiles).toHaveLength(100);
+    await Promise.all(
+      agents.map(async (agent, index) => {
+        expect(await readFile(join(agent.cwd!, "note.txt"), "utf8")).toBe(`after-${index}`);
+      }),
+    );
+
+    context.pendingLocalApproval = {
+      kind: "agent_tool_use",
+      agentId: agents[0]!.id,
+      agentTranscriptSessionId: "child-session",
+      toolCall: { id: "tool-1", name: "Edit", input: {} },
+      toolName: "Edit",
+      sessionId: "session-1",
+    };
+    for (const agent of agents) __testClearAgentAbortController(context, agent.id);
+    expect(context.agentToolContexts?.size).toBe(1);
+    expect(context.agentToolContexts?.has(agents[0]!.id)).toBe(true);
+
+    context.pendingLocalApproval = undefined;
+    __testClearAgentAbortController(context, agents[0]!.id);
+    expect(context.agentToolContexts?.size).toBe(0);
   });
 });
 

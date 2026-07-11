@@ -46,7 +46,6 @@ import { WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT } from "./tui-context-runtime.j
 import {
   currentRequestUserActionConstraints,
   forbidsVerificationEvidence,
-  hasReadOnlyUserConstraint,
 } from "./user-action-constraints.js";
 import type {
   BackgroundTaskState,
@@ -1088,6 +1087,13 @@ async function runWorkflowPlanSteps(
     ownerSessionId: sessionId,
     cwd: context.projectPath,
     changedFiles: getRequestScopedVerificationChangedFiles(context),
+    permissionMode: plan.permissionMode,
+    ...(context.currentRequestTurnId
+      ? { invokingRequestTurnId: context.currentRequestTurnId }
+      : {}),
+    ...(currentRequestUserActionConstraints(context)
+      ? { userActionConstraints: { ...currentRequestUserActionConstraints(context)! } }
+      : {}),
     goal,
     planId: plan.id,
     status: "running",
@@ -1430,6 +1436,13 @@ export async function runRegistryWorkflow(
     ownerSessionId: sessionId,
     cwd: context.projectPath,
     changedFiles: getRequestScopedVerificationChangedFiles(context),
+    permissionMode: context.permissionMode,
+    ...(context.currentRequestTurnId
+      ? { invokingRequestTurnId: context.currentRequestTurnId }
+      : {}),
+    ...(currentRequestUserActionConstraints(context)
+      ? { userActionConstraints: { ...currentRequestUserActionConstraints(context)! } }
+      : {}),
     goal: goal || workflow.description,
     planId: workflow.id,
     status: "running",
@@ -1626,6 +1639,11 @@ async function executeRegistryWorkflowStep(
         ...(workflowRunId ? { workflowRunId } : {}),
         ...(run?.ownerSessionId ? { ownerSessionId: run.ownerSessionId } : {}),
         ...(run?.engineeringSignal ? { engineeringSignal: run.engineeringSignal } : {}),
+        ...(run?.permissionMode ? { permissionMode: run.permissionMode } : {}),
+        ...(run?.invokingRequestTurnId
+          ? { invokingRequestTurnId: run.invokingRequestTurnId }
+          : {}),
+        userActionConstraints: run?.userActionConstraints,
       });
       if (!agent) {
         return {
@@ -1870,7 +1888,7 @@ async function executeWorkflowStep(
   const run = workflowRunId ? getWorkflowRun(context, workflowRunId) : context.workflows.activeRun;
   const confirmedStopPoints = new Set(run?.confirmedPhaseStopPoints ?? []);
   const capability = decideWorkflowStepCapability({
-    permissionMode: context.permissionMode,
+    permissionMode: run?.permissionMode ?? context.permissionMode,
     phaseStopPointConfirmed: currentPhaseId ? confirmedStopPoints.has(currentPhaseId) : false,
     target:
       request.safety.mutating || request.request
@@ -1932,6 +1950,11 @@ async function executeWorkflowStep(
           workflowRunId,
           ...(run?.ownerSessionId ? { ownerSessionId: run.ownerSessionId } : {}),
           ...(run?.engineeringSignal ? { engineeringSignal: run.engineeringSignal } : {}),
+          ...(run?.permissionMode ? { permissionMode: run.permissionMode } : {}),
+          ...(run?.invokingRequestTurnId
+            ? { invokingRequestTurnId: run.invokingRequestTurnId }
+            : {}),
+          userActionConstraints: run?.userActionConstraints,
         },
       );
       const agentTask = agent
@@ -2046,10 +2069,9 @@ async function executeWorkflowStep(
         evidenceRefs: agentEvidenceRefs,
       };
     } else if (req.mainChain === "verification") {
-      const constraints = currentRequestUserActionConstraints(context);
+      const constraints = run?.userActionConstraints;
       const verificationBlockedByUser =
-        constraints !== undefined &&
-        (hasReadOnlyUserConstraint(constraints) || forbidsVerificationEvidence(constraints));
+        constraints !== undefined && forbidsVerificationEvidence(constraints);
       const report = await runWorkflowVerificationStep(
         verificationBlockedByUser ? "plan-only" : req.level,
         context,
@@ -2122,6 +2144,9 @@ async function executeWorkflowStep(
           {
             ignoreForegroundModelGuard: options.ignoreForegroundModelGuard === true,
             workflowRunId,
+            permissionMode: run?.permissionMode,
+            invokingRequestTurnId: run?.invokingRequestTurnId,
+            userActionConstraints: run?.userActionConstraints,
           },
         );
       } else {
@@ -2132,6 +2157,9 @@ async function executeWorkflowStep(
           {
             ignoreForegroundModelGuard: options.ignoreForegroundModelGuard === true,
             workflowRunId,
+            permissionMode: run?.permissionMode,
+            invokingRequestTurnId: run?.invokingRequestTurnId,
+            userActionConstraints: run?.userActionConstraints,
           },
         );
       }
@@ -2269,6 +2297,7 @@ async function executeWorkflowArchitectureReviewStep(
       "workflow-architecture-review:no-files",
       ["architecture_boundary_check", "workflow_slice_architecture_review", "partial_evidence"],
     );
+    evidence.ownerScope = workflowEvidenceOwnerScope(context);
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendSystemEvent(
@@ -2308,6 +2337,7 @@ async function executeWorkflowArchitectureReviewStep(
       "workflow-architecture-review:unreadable",
       ["architecture_boundary_check", "workflow_slice_architecture_review", "partial_evidence"],
     );
+    evidence.ownerScope = workflowEvidenceOwnerScope(context);
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendSystemEvent(
@@ -2342,6 +2372,7 @@ async function executeWorkflowArchitectureReviewStep(
       ...riskKinds.map((kind) => `architecture_risk:${kind}`),
     ],
   );
+  evidence.ownerScope = workflowEvidenceOwnerScope(context);
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
   await appendSystemEvent(
@@ -2625,10 +2656,8 @@ export async function runWorkflowVerificationStep(
     : undefined;
   let effectiveOwnerSignal = options.ownerSignal ?? workflowController?.signal;
   const changedFiles = options.changedFiles ?? getRequestScopedVerificationChangedFiles(context);
-  const verificationCwd = await resolveVerificationScopeCwd(
-    options.cwd ?? context.projectPath,
-    changedFiles,
-  );
+  const verificationRoot = resolve(options.cwd ?? context.projectPath);
+  const verificationCwd = await resolveVerificationScopeCwd(verificationRoot, changedFiles);
   const verificationScope: VerificationScope = {
     ownerKey: options.requestTurnId
       ? `request:${sessionId}:${options.requestTurnId}`
@@ -2676,16 +2705,21 @@ export async function runWorkflowVerificationStep(
         );
   const effectivePlan =
     level === "focused"
-      ? await createVerificationPlan(verificationCwd, "focused")
+      ? await createVerificationPlan(verificationRoot, "focused", {
+          workspaceRoot: verificationRoot,
+          changedFiles,
+        })
       : level === "real-smoke"
         ? await createVerificationPlan(verificationCwd, "real-smoke")
         : plan.length > 0
           ? plan
           : await createVerificationPlan(verificationCwd, "smoke");
-  if (level === "real-smoke" && effectivePlan.length === 0) {
+  if ((level === "real-smoke" || level === "focused") && effectivePlan.length === 0) {
     const report = createVerificationUnavailableReport(
-      "real-smoke",
-      "package.json smoke script is missing; synthetic smoke is not real-smoke.",
+      level,
+      level === "real-smoke"
+        ? "package.json smoke script is missing; synthetic smoke is not real-smoke."
+        : "the current changed-files scope has no executable focused verification.",
     );
     report.scope = verificationScope;
     if (options.publishResult !== false && ownerStillValid()) {
@@ -2756,7 +2790,13 @@ async function runNestedWorkflowJobCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
-  options: { ignoreForegroundModelGuard?: boolean; workflowRunId?: string } = {},
+  options: {
+    ignoreForegroundModelGuard?: boolean;
+    workflowRunId?: string;
+    permissionMode?: WorkflowRunState["permissionMode"];
+    invokingRequestTurnId?: string;
+    userActionConstraints?: WorkflowRunState["userActionConstraints"];
+  } = {},
 ): Promise<void> {
   const workflowTaskIndex = context.backgroundTasks.findIndex(
     (task) =>
@@ -2771,7 +2811,7 @@ async function runNestedWorkflowJobCommand(
   }
   if (workflowTaskIndex < 0) {
     try {
-      await handleJobCommand(args, context, output);
+      await handleJobCommand(args, context, output, options);
       return;
     } finally {
       if (activeAbortController && context.activeAbortController === undefined) {
@@ -2781,7 +2821,7 @@ async function runNestedWorkflowJobCommand(
   }
   const [workflowTask] = context.backgroundTasks.splice(workflowTaskIndex, 1);
   try {
-    await handleJobCommand(args, context, output);
+    await handleJobCommand(args, context, output, options);
   } finally {
     if (activeAbortController && context.activeAbortController === undefined) {
       context.activeAbortController = activeAbortController;
@@ -2941,7 +2981,7 @@ async function recordWorkflowPlanPreviewEvidence(
   result: Extract<WorkflowPlannerEntryResult, { ok: true }>,
 ): Promise<void> {
   const evidence = createEvidenceRecord(
-    "user_provided",
+    "command_output",
     `workflow plan preview: ${result.plan.title}; evidence merge ${result.surface.evidenceMergeSummary}; requests runnable ${result.bridgeResult.summary.runnable}; start gate ${result.bridgeResult.summary.startGateNeeded}; blocked ${result.bridgeResult.summary.blocked}`,
     `workflow-plan-preview:${result.plan.id}`,
     [
@@ -2950,6 +2990,7 @@ async function recordWorkflowPlanPreviewEvidence(
       `workflow_evidence_merge:${result.surface.evidenceMergeSummary}`,
     ],
   );
+  evidence.ownerScope = workflowEvidenceOwnerScope(context);
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
   await appendSystemEvent(
@@ -2958,6 +2999,18 @@ async function recordWorkflowPlanPreviewEvidence(
     `workflow plan preview: evidence ${evidence.id}; plan ${result.plan.id}; preview only yes; pass evidence no`,
     "info",
   );
+}
+
+function workflowEvidenceOwnerScope(context: TuiContext): NonNullable<EvidenceRecord["ownerScope"]> {
+  const run = context.workflows.activeRun;
+  return {
+    ...(context.sessionId ? { ownerSessionId: context.sessionId } : {}),
+    ...(run?.invokingRequestTurnId ?? context.currentRequestTurnId
+      ? { requestTurnId: run?.invokingRequestTurnId ?? context.currentRequestTurnId }
+      : {}),
+    ...(run?.id ? { workflowRunId: run.id } : {}),
+    cwd: run?.cwd ?? context.projectPath,
+  };
 }
 
 function summarizeWorkflowCacheFreshness(freshness: CacheFreshness): string {

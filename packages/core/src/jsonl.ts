@@ -48,6 +48,7 @@ export async function readJsonl<T>(filePath: string): Promise<JsonlReadResult<T>
 export type JsonlTailReadOptions<T> = {
   limit: number;
   predicate?: (record: T) => boolean;
+  stopPredicate?: (record: T) => boolean;
 };
 
 export async function readJsonlTail<T>(
@@ -61,8 +62,9 @@ export async function readJsonlTail<T>(
 
   const recordsNewestFirst: T[] = [];
   const diagnostics: JsonlDiagnostic[] = [];
+  let stopped = false;
   const handleLine = (lineBuffer: Buffer) => {
-    if (recordsNewestFirst.length >= options.limit) {
+    if (recordsNewestFirst.length >= options.limit || stopped) {
       return;
     }
     const line = lineBuffer.toString("utf8");
@@ -74,6 +76,7 @@ export async function readJsonlTail<T>(
       if (!options.predicate || options.predicate(record)) {
         recordsNewestFirst.push(record);
       }
+      if (options.stopPredicate?.(record)) stopped = true;
     } catch (error) {
       diagnostics.push({
         line: 0,
@@ -89,7 +92,7 @@ export async function readJsonlTail<T>(
     let position = size;
     let carry = Buffer.alloc(0);
 
-    while (position > 0 && recordsNewestFirst.length < options.limit) {
+    while (position > 0 && recordsNewestFirst.length < options.limit && !stopped) {
       const readSize = Math.min(chunkSize, position);
       position -= readSize;
       const chunk = Buffer.allocUnsafe(readSize);
@@ -103,7 +106,7 @@ export async function readJsonlTail<T>(
         }
         handleLine(data.subarray(index + 1, lineEnd));
         lineEnd = index;
-        if (recordsNewestFirst.length >= options.limit) {
+        if (recordsNewestFirst.length >= options.limit || stopped) {
           break;
         }
       }
@@ -111,7 +114,12 @@ export async function readJsonlTail<T>(
       carry = data.subarray(0, lineEnd);
     }
 
-    if (position === 0 && recordsNewestFirst.length < options.limit && carry.length > 0) {
+    if (
+      position === 0 &&
+      recordsNewestFirst.length < options.limit &&
+      !stopped &&
+      carry.length > 0
+    ) {
       handleLine(carry);
     }
   } finally {

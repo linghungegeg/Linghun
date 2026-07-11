@@ -6,7 +6,7 @@ import { defaultConfig } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import type { ModelToolCall } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ArchitectureCard } from "./architecture-runtime.js";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
@@ -88,7 +88,87 @@ describe("tui permission runtime — CCB-aligned modes", () => {
 
     expect(read.decision).toBe("allow");
     expect(edit.decision).toBe("allow");
-    expect(secret.decision).toBe("allow");
+    expect(secret.decision).toBe("deny");
+    expect(context.pendingLocalApproval).toBeUndefined();
+  });
+
+  it("uses an explicit sidechain overlay instead of rereading foreground permission state", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.permissionMode = "full-access";
+    context.currentRequestTurnId = "new-turn";
+    context.currentUserActionConstraintsRequestTurnId = "new-turn";
+    context.currentUserActionConstraints = parseUserActionConstraints("只读，不要写文件");
+
+    const sidechain = await decidePermission(
+      "Write",
+      { path: "report.md", content: "x" },
+      context,
+      sessionId,
+      { permissionMode: "full-access", userActionConstraints: undefined },
+    );
+
+    expect(sidechain.decision).toBe("allow");
+    expect(sidechain.request.mode).toBe("full-access");
+  });
+
+  it("keeps a fixed sidechain overlay stable across 1,000 foreground switches", async () => {
+    const { context, sessionId } = await createTestContext();
+    vi.spyOn(context.store, "appendEvent").mockResolvedValue(undefined);
+    const modes = ["default", "auto-review", "plan", "full-access"] as const;
+
+    for (let index = 0; index < 1_000; index += 1) {
+      context.permissionMode = modes[index % modes.length]!;
+      context.currentRequestTurnId = `foreground-${index}`;
+      context.currentUserActionConstraintsRequestTurnId = `foreground-${index}`;
+      context.currentUserActionConstraints = parseUserActionConstraints(
+        index % 2 === 0 ? "只读，不要写文件" : "不要运行命令",
+      );
+
+      const sidechain = await decidePermission(
+        "Write",
+        { path: "report.md", content: "x" },
+        context,
+        sessionId,
+        { permissionMode: "full-access", userActionConstraints: undefined },
+      );
+      expect(sidechain.decision).toBe("allow");
+      expect(sidechain.request.mode).toBe("full-access");
+    }
+  });
+
+  it("keeps explicit deny rules ahead of full-access", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.permissionMode = "full-access";
+    context.permissions.rules.push({ id: "deny-bash", effect: "deny", toolName: "Bash" });
+
+    const permission = await decidePermission(
+      "Bash",
+      { command: "echo blocked" },
+      context,
+      sessionId,
+    );
+
+    expect(permission.decision).toBe("deny");
+  });
+
+  it("keeps explicit deny ahead of architecture drift and scheduler gates", async () => {
+    const { context, sessionId } = await createTestContext();
+    context.permissionMode = "full-access";
+    context.permissions.rules.push({ id: "deny-edit", effect: "deny", toolName: "Edit" });
+    context.lastMetaSchedulerDecision = {
+      policyDecision: { permissionPlan: { requireExplicitGate: true } },
+      orchestrationPlan: { steps: [] },
+    } as unknown as TuiContext["lastMetaSchedulerDecision"];
+
+    const permission = await decidePermission(
+      "Edit",
+      { path: "packages/other/src/new-runtime.ts", oldText: "a", newText: "b" },
+      context,
+      sessionId,
+      { architectureDrift: { warnings: ["scope changed"] } as never },
+    );
+
+    expect(permission.decision).toBe("deny");
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 
@@ -276,6 +356,12 @@ describe("tui permission runtime — CCB-aligned modes", () => {
         expect(result.pendingApproval, mode).not.toBe(true);
         expect(result.ok, mode).toBe(false);
         expect(context.pendingLocalApproval, mode).toBeUndefined();
+        continue;
+      }
+      if (mode === "full-access") {
+        expect(result.pendingApproval, mode).toBe(true);
+        expect(context.pendingLocalApproval, mode).toBeDefined();
+        expect(output.text, mode).toContain("允许本次执行");
         continue;
       }
       expect(result.pendingApproval, mode).not.toBe(true);

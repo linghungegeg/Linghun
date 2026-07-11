@@ -164,11 +164,11 @@ async function recordGitOperationEvidence(
     `git-operation:${operation}`,
     ["git_operation", operation, ...extraClaims],
   );
+  deps.rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
   });
-  deps.rememberEvidence(context, evidence);
   return evidence;
 }
 

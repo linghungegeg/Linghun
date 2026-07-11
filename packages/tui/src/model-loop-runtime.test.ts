@@ -912,6 +912,28 @@ describe("model-loop-runtime", () => {
       expect(verdict.status).toBe("passed");
     });
 
+    it("matches parallel Write and Read claims to their own evidence targets", () => {
+      const verdict = evaluateFinalAnswerClaims("已写入 report.md 并读取 package.json。", [
+        makeEvidence({
+          kind: "command_output",
+          source: "Write",
+          supportsClaims: ["Write", "file_written"],
+          ownerScope: { targets: ["report.md"] },
+        }),
+        makeEvidence({
+          kind: "file_read",
+          source: "Read",
+          supportsClaims: ["Read", "local_read"],
+          ownerScope: { targets: ["package.json"] },
+        }),
+      ]);
+
+      expect(verdict.status).toBe("passed");
+      expect(verdict.matchedClaims).toEqual([
+        { kind: "file_change_claim", phrase: "已写入 report.md" },
+      ]);
+    });
+
     it("passes meta explanation examples without evidence", () => {
       const verdict = evaluateFinalAnswerClaims(
         "反幻觉系统会检测'已完成'、'测试通过'、'代码里已经实现 X'、'索引已刷新'等高风险声明。",
@@ -919,6 +941,50 @@ describe("model-loop-runtime", () => {
       );
       expect(verdict.status).toBe("passed");
       expect(verdict.matchedClaims).toEqual([]);
+    });
+
+    it("does not let a meta explanation hide an unquoted real completion claim", () => {
+      const verdict = evaluateFinalAnswerClaims("反幻觉系统会检测我已完成所有修改", []);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_claim");
+    });
+
+    it("keeps quoted meta examples exempt across Chinese and English punctuation", () => {
+      for (const text of [
+        "反幻觉声明示例：‘已完成’、“测试通过”。",
+        'Claim examples: "completed" and `tests passed`.',
+      ]) {
+        const verdict = evaluateFinalAnswerClaims(text, []);
+        expect(verdict.status).toBe("passed");
+        expect(verdict.matchedClaims).toEqual([]);
+      }
+    });
+
+    it("still detects a real claim after a quoted meta example", () => {
+      for (const text of [
+        "反幻觉系统会检测‘已完成’等声明，但是我已经完成实际修改",
+        "反幻觉声明示例：‘已完成’而且我已经修复实际问题",
+        'Claim examples: "completed" and I have fixed the actual issue',
+      ]) {
+        const verdict = evaluateFinalAnswerClaims(text, []);
+        expect(verdict.status).toBe("needs_disclaimer");
+        expect(verdict.unsupportedKinds).toContain("completion_claim");
+      }
+    });
+
+    it("does not treat quoted current verdicts as meta examples", () => {
+      for (const text of [
+        "反幻觉检测结果为‘已完成’",
+        "反幻觉检测结论：`测试通过`",
+        "反幻觉声明示例‘已完成’而现在实际状态是‘已经修复’",
+        'The anti-hallucination verdict is "completed"',
+        "The current claim result is `tests passed`",
+        'Claim example "completed" and the actual status is "fixed"',
+        'The word "example" is a label and status is "completed"',
+        "“示例”是标签而状态是“已完成”",
+      ]) {
+        expect(evaluateFinalAnswerClaims(text, []).status).toBe("needs_disclaimer");
+      }
     });
 
     it("blocks completion/PASS without test/build evidence even if Read evidence exists", () => {
@@ -936,13 +1002,25 @@ describe("model-loop-runtime", () => {
       );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
-      expect(verdict.missingEvidenceByClaim).toEqual([
-        {
-          kind: "completion_pass",
-          phrase: "测试通过",
-          missingEvidenceKind: "test/build/typecheck/diff-check/smoke",
-        },
-      ]);
+      expect(verdict.missingEvidenceByClaim).toEqual(
+        expect.arrayContaining([
+          {
+            kind: "test_claim",
+            phrase: "测试通过",
+            missingEvidenceKind: "test result evidence",
+          },
+          {
+            kind: "completion_claim",
+            phrase: "已完成",
+            missingEvidenceKind: "task completion evidence",
+          },
+          {
+            kind: "completion_pass",
+            phrase: "测试通过",
+            missingEvidenceKind: "test/build/typecheck/diff-check/smoke",
+          },
+        ]),
+      );
     });
 
     it("passes test PASS claim when test_passed evidence exists", () => {
@@ -957,6 +1035,39 @@ describe("model-loop-runtime", () => {
         withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
         evidence,
       );
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("does not let focused test evidence support an all-tests claim", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("全部测试通过。", [{ kind: "completion_pass", phrase: "全部测试通过" }]),
+        [
+          makeEvidence({
+            kind: "test_result",
+            supportsClaims: ["verification_passed", "test_passed", "test_scope:focused"],
+            summary: "focused verification passed",
+          }),
+        ],
+      );
+
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toEqual(
+        expect.arrayContaining(["test_claim", "completion_pass"]),
+      );
+    });
+
+    it("requires an explicit full scope claim before accepting all-tests passed", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("All tests passed.", [{ kind: "completion_pass", phrase: "All tests passed" }]),
+        [
+          makeEvidence({
+            kind: "test_result",
+            supportsClaims: ["verification_passed", "test_passed", "test_scope:full"],
+            summary: "full test suite passed",
+          }),
+        ],
+      );
+
       expect(verdict.status).toBe("passed");
     });
 
@@ -1471,7 +1582,36 @@ describe("model-loop-runtime", () => {
         { text: "all good", data: { exitCode: 0 } },
       );
       expect(claims).toContain("test_passed");
+      expect(claims).toContain("test_scope:full");
       expect(claims).toContain("bash_exit_0");
+    });
+
+    it("Bash focused vitest derives focused rather than full test scope", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "vitest --run packages/tui/src/model-loop-runtime.test.ts" },
+        { text: "all good", data: { exitCode: 0 } },
+      );
+
+      expect(claims).toContain("test_passed");
+      expect(claims).toContain("test_scope:focused");
+      expect(claims).not.toContain("test_scope:full");
+    });
+
+    it.each([
+      "pytest -k foo",
+      "pytest tests/unit",
+      "go test ./pkg/foo",
+      "cargo test one_case",
+    ])("keeps targeted runner command focused: %s", (command) => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command },
+        { text: "all good", data: { exitCode: 0 } },
+      );
+
+      expect(claims).toContain("test_scope:focused");
+      expect(claims).not.toContain("test_scope:full");
     });
 
     it("Bash exit 0 tsc --noEmit derives typecheck_passed", () => {
@@ -1620,7 +1760,7 @@ describe("model-loop-runtime", () => {
       expect(verdict.status).toBe("passed");
     });
 
-    it("stale test_passed evidence (>30min) blocks test PASS", () => {
+    it("unowned stale test_passed evidence (>30min) blocks test PASS", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "command_output",
@@ -1637,6 +1777,54 @@ describe("model-loop-runtime", () => {
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
       expect(verdict.staleKinds ?? []).toContain("completion_pass");
+    });
+
+    it("keeps current-request local execution evidence valid past wall-clock TTL", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "test_result",
+          supportsClaims: ["verification_passed", "test_passed"],
+          summary: "focused verification passed",
+          createdAt: minutesAgo(120),
+          ownerScope: {
+            ownerSessionId: "session-current",
+            requestTurnId: "request-current",
+            cwd: "C:/repo/packages/tui",
+            targets: ["src/model-loop-runtime.ts"],
+          },
+          data: {
+            verificationScope: {
+              ownerSessionId: "session-current",
+              requestTurnId: "request-current",
+              cwd: "C:/repo/packages/tui",
+              changedFiles: ["src/model-loop-runtime.ts"],
+            },
+          },
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        evidence,
+        NOW,
+      );
+
+      expect(verdict.status).toBe("passed");
+      expect(isEvidenceStaleForClaim(evidence[0]!, "completion_pass", NOW)).toBe(false);
+    });
+
+    it("keeps external evidence on its TTL even when it has an owner scope", () => {
+      const evidence = makeEvidence({
+        kind: "web_source",
+        supportsClaims: ["web_source", "external_current_fact"],
+        createdAt: hoursAgo(48),
+        ownerScope: {
+          ownerSessionId: "session-current",
+          requestTurnId: "request-current",
+          cwd: "C:/repo",
+        },
+      });
+
+      expect(isEvidenceStaleForClaim(evidence, "external_current_fact", NOW)).toBe(true);
     });
 
     it("fresh Read evidence still allows code_fact (baseline)", () => {

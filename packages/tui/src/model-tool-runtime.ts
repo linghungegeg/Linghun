@@ -49,6 +49,7 @@ import {
   recordToolFailureEvidence,
   recordToolResultBudgetEvidence,
   rememberEvidence,
+  scopeEvidenceToContext,
 } from "./evidence-runtime.js";
 import { validateExtensionContributionExecution } from "./extension-command-runtime.js";
 import { executeGitToolUse } from "./git-tool-dispatch-runtime.js";
@@ -444,6 +445,20 @@ export async function executeModelToolUse(
   if (!toolName) {
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
   }
+  const requestOwner = continuation?.requestTurnId && continuation.abortSignal
+    ? { requestTurnId: continuation.requestTurnId, signal: continuation.abortSignal }
+    : undefined;
+  const requestIsStale = (): boolean =>
+    Boolean(
+      requestOwner &&
+        (requestOwner.signal.aborted || context.currentRequestTurnId !== requestOwner.requestTurnId),
+    );
+  const staleResult = (): { ok: false; tool: string; text: string } => ({
+    ok: false,
+    tool: toolName,
+    text: "cancelled: stale foreground tool request discarded",
+  });
+  if (requestIsStale()) return staleResult();
   const architectureDrift =
     !architectureDriftConfirmed &&
     context.currentArchitectureCard &&
@@ -461,37 +476,54 @@ export async function executeModelToolUse(
     sessionId,
     architectureDrift?.drift ? { architectureDrift: { warnings: architectureDrift.warnings } } : undefined,
   );
-  await context.store.appendEvent(sessionId, {
-    type: "permission_request",
-    request: permission.request,
-    createdAt: new Date().toISOString(),
-  });
-  await context.store.appendEvent(sessionId, {
-    type: "permission_result",
-    requestId: permission.request.id,
-    decision: permission.decision,
-    reason: permission.reason,
-    createdAt: new Date().toISOString(),
-  });
+  if (requestIsStale()) return staleResult();
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "permission_request",
+      request: permission.request,
+      createdAt: new Date().toISOString(),
+    },
+    () => !requestIsStale(),
+  );
+  if (requestIsStale()) return staleResult();
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "permission_result",
+      requestId: permission.request.id,
+      decision: permission.decision,
+      reason: permission.reason,
+      createdAt: new Date().toISOString(),
+    },
+    () => !requestIsStale(),
+  );
+  if (requestIsStale()) return staleResult();
   await appendPolicyToolFeedback(
     context,
     sessionId,
     `permission verdict: tool ${toolName}; decision ${permission.decision}; risk ${permission.request.risk}; mode ${permission.request.mode}`,
     permission.decision === "allow" ? "info" : "warning",
+    () => !requestIsStale(),
   );
+  if (requestIsStale()) return staleResult();
   if (permission.architectureDrift) {
     await appendSystemEvent(
       context,
       sessionId,
       `architecture drift ${permission.decision}: tool ${toolName}; mode ${context.permissionMode}; warnings ${permission.architectureDrift.warnings.join("|")}`,
       permission.decision === "allow" ? "info" : "warning",
+      () => !requestIsStale(),
     );
+    if (requestIsStale()) return staleResult();
     await appendPolicyToolFeedback(
       context,
       sessionId,
       `architecture drift ${permission.decision}: tool ${toolName}; warnings ${permission.architectureDrift.warnings.join("|")}`,
       permission.decision === "allow" ? "info" : "warning",
+      () => !requestIsStale(),
     );
+    if (requestIsStale()) return staleResult();
   }
   if (permission.autoAllowPolicy) {
     // Engine short-circuited this tool to an auto-allow policy path.
@@ -504,9 +536,12 @@ export async function executeModelToolUse(
       sessionId,
       formatPermissionAutoAllowEvent(toolName, verdict),
       "info",
+      () => !requestIsStale(),
     );
+    if (requestIsStale()) return staleResult();
   }
   if (permission.decision !== "allow") {
+    if (requestIsStale()) return staleResult();
     clearRequestActivity(context);
     const text = `${permission.decision}: ${permission.reason}`;
     const isAskWithPanel = permission.decision === "ask";
@@ -551,20 +586,42 @@ export async function executeModelToolUse(
       sessionId,
       toolName,
       `permission ${permission.decision}: ${permission.reason}; ${permission.request.summary}`,
+      () => !requestIsStale(),
+      toolCall.id,
     );
-    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
+    if (requestIsStale()) return staleResult();
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      toolName,
+      text,
+      true,
+      evidence.id,
+      () => !requestIsStale(),
+    );
+    if (requestIsStale()) return staleResult();
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
   const boundaryPreflight =
     context.permissionMode === "full-access" || context.permissionMode === "auto-review"
       ? { decision: "allow" as const, reason: `${context.permissionMode} skips TUI boundary confirmation` }
       : await runBoundaryEditPreflight(toolCall, toolName, context);
+  if (requestIsStale()) return staleResult();
   if (boundaryPreflight.decision === "confirm") {
     clearRequestActivity(context);
     const prompt = formatBoundaryEditPreflightPrompt(boundaryPreflight, context.language);
     if (!context.isInkSession) {
       writeLine(output, prompt);
     }
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `architecture_boundary_preflight_confirm: tool=${toolName} path=${boundaryPreflight.path} lines=${boundaryPreflight.lineCount} added=${boundaryPreflight.estimatedAddedLines}`,
+      "warning",
+      () => !requestIsStale(),
+    );
+    if (requestIsStale()) return staleResult();
     context.pendingLocalApproval = {
       kind: "model_tool_use",
       toolCall,
@@ -576,12 +633,6 @@ export async function executeModelToolUse(
       verdict: permission.verdict,
       boundaryPreflight,
     };
-    await appendSystemEvent(
-      context,
-      sessionId,
-      `architecture_boundary_preflight_confirm: tool=${toolName} path=${boundaryPreflight.path} lines=${boundaryPreflight.lineCount} added=${boundaryPreflight.estimatedAddedLines}`,
-      "warning",
-    );
     return { ok: false, tool: toolName, text: boundaryPreflight.reason, pendingApproval: true };
   }
   return executeApprovedModelToolUse(
@@ -592,9 +643,7 @@ export async function executeModelToolUse(
     output,
     permission.preflight,
     continuation?.reportWriteGuard,
-    continuation?.requestTurnId && continuation.abortSignal
-      ? { requestTurnId: continuation.requestTurnId, signal: continuation.abortSignal }
-      : undefined,
+    requestOwner,
   );
 }
 
@@ -741,13 +790,31 @@ export async function executeApprovedModelToolUse(
   evidenceId?: string;
   modelContent?: unknown;
 }> {
+  const requestIsStale = (): boolean =>
+    Boolean(
+      requestOwner &&
+        (requestOwner.signal.aborted || context.currentRequestTurnId !== requestOwner.requestTurnId),
+    );
+  if (requestIsStale()) {
+    return { ok: false, tool: toolName, text: "cancelled: stale foreground tool request discarded" };
+  }
   if (preflight) {
     writeLine(output, preflight);
   }
   if (toolName === "Bash" && shouldTrackBashAsBackground(toolCall.input)) {
     const guard = checkBackgroundStartGuard(context, "bash", true);
     if (guard) {
-      const evidence = await recordToolFailureEvidence(context, sessionId, toolName, guard);
+      const evidence = await recordToolFailureEvidence(
+        context,
+        sessionId,
+        toolName,
+        guard,
+        () => !requestIsStale(),
+        toolCall.id,
+      );
+      if (requestIsStale()) {
+        return { ok: false, tool: toolName, text: "cancelled: stale foreground tool request discarded" };
+      }
       await appendToolResultEvent(
         context,
         sessionId,
@@ -756,40 +823,51 @@ export async function executeApprovedModelToolUse(
         guard,
         true,
         evidence.id,
+        () => !requestIsStale(),
       );
+      if (requestIsStale()) {
+        return { ok: false, tool: toolName, text: "cancelled: stale foreground tool request discarded" };
+      }
       return { ok: false, tool: toolName, text: guard, evidenceId: evidence.id };
     }
   }
   const task =
     toolName === "Bash" && shouldTrackBashAsBackground(toolCall.input)
-      ? createBackgroundTask(toolName, toolCall.input, context)
+      ? createBackgroundTask(toolName, toolCall.input, context, requestOwner?.requestTurnId)
       : undefined;
-  if (task) {
-    task.ownerSessionId = sessionId;
-    rememberBackgroundTask(context, task);
-    await appendBackgroundTaskEvent(context, sessionId, task);
-  }
   const activityOwner = requestOwner
     ? { kind: "foreground" as const, requestTurnId: requestOwner.requestTurnId }
     : undefined;
-  const requestIsStale = (): boolean =>
-    Boolean(
-      requestOwner &&
-        (requestOwner.signal.aborted || context.currentRequestTurnId !== requestOwner.requestTurnId),
-    );
   startRequestActivity(output, context, "tool_running", {
     toolName,
     toolTarget: extractToolTarget(toolName, toolCall.input),
     toolUseId: toolCall.id,
     ...(requestOwner ? { requestTurnId: requestOwner.requestTurnId } : {}),
   });
-  await context.store.appendEvent(sessionId, {
-    type: "tool_call_start",
-    id: toolCall.id,
-    name: toolName,
-    input: toolCall.input,
-    createdAt: new Date().toISOString(),
-  });
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "tool_call_start",
+      id: toolCall.id,
+      name: toolName,
+      input: toolCall.input,
+      createdAt: new Date().toISOString(),
+    },
+    () => !requestIsStale(),
+  );
+  if (requestIsStale()) {
+    clearRequestActivity(context, activityOwner);
+    return { ok: false, tool: toolName, text: "cancelled: stale foreground tool request discarded" };
+  }
+  if (task) {
+    task.ownerSessionId = sessionId;
+    await appendBackgroundTaskEvent(context, sessionId, task, () => !requestIsStale());
+    if (requestIsStale()) {
+      clearRequestActivity(context, activityOwner);
+      return { ok: false, tool: toolName, text: "cancelled: stale foreground tool request discarded" };
+    }
+    rememberBackgroundTask(context, task);
+  }
   const backgroundController = task
     ? registerBackgroundAbortController(context, task.id)
     : undefined;
@@ -809,9 +887,35 @@ export async function executeApprovedModelToolUse(
     }
     clearToolRequestActivity();
   };
+  let completedToolOutput: ToolOutput | undefined;
   const dropStaleToolResult = async (
     kind: "result" | "error",
   ): Promise<{ ok: false; tool: string; text: string }> => {
+    if (task?.status === "running") {
+      const backgroundData = completedToolOutput?.data as
+        | { backgroundTaskId?: string; outputPath?: string }
+        | undefined;
+      if (backgroundData?.backgroundTaskId) {
+        context.backgroundBashTaskMap?.set(backgroundData.backgroundTaskId, task.id);
+        task.outputPath = backgroundData.outputPath;
+      }
+      const abortSignalSent = Boolean(backgroundController && !backgroundController.signal.aborted);
+      backgroundController?.abort("stale request owner");
+      const now = new Date().toISOString();
+      task.status = abortSignalSent ? "cancelled" : "stale";
+      task.result = abortSignalSent ? "cancelled" : "partial";
+      task.updatedAt = now;
+      task.cancelState = abortSignalSent ? "abort_signal_sent" : "marked_stale";
+      task.cancelRequestedAt = now;
+      task.nextAction = abortSignalSent
+        ? context.language === "en-US"
+          ? "Abort signal sent; process exit is not confirmed yet. Review /background and the log before continuing."
+          : "已发送取消信号；尚未确认进程退出。继续前可先查看 /background 和日志。"
+        : context.language === "en-US"
+          ? "No live abort controller was available; state marked stale."
+          : "未找到可用取消 controller；状态已标记为 stale。";
+      await appendBackgroundTaskEvent(context, sessionId, task);
+    }
     cleanupFinishedTool();
     context.evidence = context.evidence.filter((item) => item.toolUseId !== toolCall.id);
     await appendSystemEvent(
@@ -838,6 +942,7 @@ export async function executeApprovedModelToolUse(
   // Verbose/brief mode (R7) will re-enable when needed.
   try {
     const result = await runTool(toolName, toolCall.input, progress.toolContext);
+    completedToolOutput = result.output;
     progress.restore();
     await Promise.all(progress.pending);
     if (requestIsStale()) {
@@ -852,7 +957,13 @@ export async function executeApprovedModelToolUse(
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
-    await appendDerivedToolEvents(context, sessionId, toolName, result.output);
+    await appendDerivedToolEvents(
+      context,
+      sessionId,
+      toolName,
+      result.output,
+      () => !requestIsStale(),
+    );
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
@@ -912,12 +1023,14 @@ export async function executeApprovedModelToolUse(
       const bgData = result.output.data as { backgroundTaskId?: string; outputPath?: string } | undefined;
       if (bgData?.backgroundTaskId) {
         // Background bash started — register correlation, don't finish yet
-        context.backgroundBashTaskMap?.set(bgData.backgroundTaskId, task.id);
+        if (task.status === "running") {
+          context.backgroundBashTaskMap?.set(bgData.backgroundTaskId, task.id);
+        }
         task.outputPath = bgData.outputPath;
       } else {
         finishBackgroundTaskFromToolOutput(task, result.output, context);
       }
-      await appendBackgroundTaskEvent(context, sessionId, task);
+      await appendBackgroundTaskEvent(context, sessionId, task, () => !requestIsStale());
     }
     if (requestIsStale()) {
       return dropStaleToolResult("result");
@@ -1054,6 +1167,9 @@ export async function executeApprovedModelToolUse(
       evidence.id,
       () => !requestIsStale(),
     );
+    if (requestIsStale()) {
+      return dropStaleToolResult("error");
+    }
     await captureFailureLearning(context, sessionId, {
       category: "tool_failure",
       failureSummary: text,
@@ -1078,8 +1194,9 @@ async function appendPolicyToolFeedback(
   sessionId: string,
   summary: string,
   level: "info" | "warning" = "info",
+  commitGuard?: () => boolean,
 ): Promise<void> {
-  await appendSystemEvent(context, sessionId, `policy_tool_feedback: ${summary}`, level);
+  await appendSystemEvent(context, sessionId, `policy_tool_feedback: ${summary}`, level, commitGuard);
 }
 
 // Module 3 — toPermissionPromptView 已移至 ./tui-permission-runtime.ts。
@@ -1928,6 +2045,19 @@ export async function executeLinghunControlToolUse(
           data: { status: report.status, reportId: report.id, level: input.level },
         };
       }
+      const syntheticOnlyPass =
+        report.status === "pass" &&
+        report.commands.some((command) => command.status === "pass") &&
+        report.commands.every(
+          (command) => command.status !== "pass" || command.synthetic === true,
+        );
+      if (syntheticOnlyPass) {
+        report.status = "partial";
+        report.summary =
+          "PARTIAL：synthetic self-check 已通过；真实验证未运行，不能作为真实 PASS 证据。";
+        report.unverified.push("synthetic self-check only; real verification did not run");
+        report.risk.push("Synthetic self-check success cannot support a verification PASS claim.");
+      }
       const ok = report.status === "pass";
       const text = report
         ? `Verification ${report.status.toUpperCase()}: ${report.summary} Scope: ${report.scope?.cwd ?? context.projectPath}.`
@@ -2529,9 +2659,9 @@ function deriveRunVerificationSupportsClaims(data: unknown): string[] {
     ? record.commands.filter((item): item is Record<string, unknown> => isRecord(item))
     : [];
   const passedCommands = commands.filter((command) => command.status === "pass");
-  if (passedCommands.length === 0 || passedCommands.some((command) => command.synthetic !== true)) {
+  if (passedCommands.some((command) => command.synthetic !== true)) {
     claims.add("verification_passed");
-  } else {
+  } else if (passedCommands.length > 0) {
     claims.add("verification_self_check_passed");
     claims.add("verification_not_run");
   }
@@ -2543,13 +2673,6 @@ function deriveRunVerificationSupportsClaims(data: unknown): string[] {
     else if (command.kind === "smoke") {
       claims.add(command.synthetic === true ? "smoke_ran" : "smoke_passed");
     }
-  }
-  if (passedCommands.length === 0) {
-    if (record.level === "test") claims.add("test_passed");
-    else if (record.level === "typecheck") claims.add("typecheck_passed");
-    else if (record.level === "build") claims.add("build_passed");
-    else if (record.level === "lint") claims.add("lint_passed");
-    else if (record.level === "smoke") claims.add("smoke_passed");
   }
   return [...claims];
 }
@@ -2587,6 +2710,7 @@ async function finishControlToolResult(
     spec.supportsClaims,
   );
   evidence.toolUseId = toolCall.id;
+  scopeEvidenceToContext(context, evidence, { ownerSessionId: sessionId });
   if (toolCall.name === RUN_VERIFICATION_TOOL_NAME && isRecord(data) && isRecord(data.scope)) {
     evidence.data = { verificationScope: data.scope };
   }
@@ -3460,7 +3584,9 @@ export async function handleToolCommand(
     if (checkpoint && !shouldKeepAutoReviewWorkspaceEditQuiet) {
       writeLine(output, `${t(context, "checkpointCreated")}：${checkpoint.id}`);
     }
-    const task = name === "Bash" ? createBackgroundTask(name, input, context) : undefined;
+    const task = name === "Bash"
+      ? createBackgroundTask(name, input, context, owner.requestTurnId ?? context.currentRequestTurnId)
+      : undefined;
     if (task) {
       task.ownerSessionId = sessionId;
       rememberBackgroundTask(context, task);
@@ -3503,7 +3629,9 @@ export async function handleToolCommand(
     if (task) {
       const bgData = result.output.data as { backgroundTaskId?: string; outputPath?: string } | undefined;
       if (bgData?.backgroundTaskId) {
-        context.backgroundBashTaskMap?.set(bgData.backgroundTaskId, task.id);
+        if (task.status === "running") {
+          context.backgroundBashTaskMap?.set(bgData.backgroundTaskId, task.id);
+        }
         task.outputPath = bgData.outputPath ?? undefined;
       } else {
         finishBackgroundTaskFromToolOutput(task, result.output, context);
@@ -3675,6 +3803,7 @@ function createBackgroundTask(
   name: ToolName,
   input: unknown,
   context: TuiContext,
+  requestTurnId?: string,
 ): BackgroundTaskState {
   const now = new Date().toISOString();
   const command =
@@ -3684,6 +3813,7 @@ function createBackgroundTask(
   return {
     id: randomUUID(),
     kind: "bash",
+    ...(requestTurnId ? { requestTurnId } : {}),
     title,
     status: "running",
     currentStep: context.language === "en-US" ? "running command" : "正在执行命令",
@@ -3743,6 +3873,7 @@ function installToolProgressHandler(
   requestOwner?: { requestTurnId: string; signal: AbortSignal },
 ): { toolContext: ToolContext; pending: Promise<void>[]; restore: () => void } {
   const previous = context.tools.onProgress;
+  const previousBackgroundStart = context.tools.onBackgroundBashStart;
   const pending: Promise<void>[] = [];
   let visibleProgressLines = 0;
   let progressSuppressed = false;
@@ -3834,7 +3965,15 @@ function installToolProgressHandler(
   };
   const toolContext = new Proxy(context.tools, {
     get(target, property, receiver) {
-      return property === "onProgress" ? handler : Reflect.get(target, property, receiver);
+      if (property === "onProgress") return handler;
+      if (property === "onBackgroundBashStart" && task) {
+        return (taskId: string) => {
+          context.backgroundBashTaskMap ??= new Map();
+          context.backgroundBashTaskMap.set(taskId, task.id);
+          previousBackgroundStart?.(taskId);
+        };
+      }
+      return Reflect.get(target, property, receiver);
     },
   });
   return {

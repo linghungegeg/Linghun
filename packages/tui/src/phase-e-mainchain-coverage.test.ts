@@ -6,7 +6,7 @@ import { defaultConfig } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import type { ModelGateway, ModelMessage, ModelRequest, ModelToolCall } from "@linghun/providers";
 import { builtInTools, createToolContext, type ToolOutput } from "@linghun/tools";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
@@ -14,7 +14,9 @@ import { rememberCacheSafePrefix } from "./cache-policy-runtime.js";
 import {
   configureJobAgentCommandRuntime,
   cancelAgent,
+  denyAgentToolUse,
   executeApprovedAgentToolUse,
+  markRunningAgentsStaleForInterrupt,
   runModelBackedAgent,
 } from "./job-agent-command-runtime.js";
 import {
@@ -34,6 +36,7 @@ import {
 import { __testSendMessage } from "./model-stream-runtime.js";
 import {
   __testSelectWorkflowCurrentStepForToolResult,
+  executeApprovedModelToolUse,
   executeDeferredDispatchToolUse,
   executeLinghunControlToolUse,
   executeModelToolUse,
@@ -51,6 +54,7 @@ import type {
   VerificationReport,
 } from "./tui-data-types.js";
 import { decidePermission } from "./tui-permission-runtime.js";
+import { parseUserActionConstraints } from "./user-action-constraints.js";
 import {
   createAgentBackgroundTask,
   registerBackgroundAbortController,
@@ -387,6 +391,307 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
 });
 
 describe("Phase E agent, slash, workflow, permission, and natural intent coverage", () => {
+  it("drops a permission decision when its continuation owner changes while deciding", async () => {
+    const context = await createTestContext([]);
+    const sessionId = context.sessionId!;
+    const controller = new AbortController();
+    context.currentRequestTurnId = "permission-owner-old";
+    const decisionBlocked = deferred<void>();
+    const releaseDecision = deferred<void>();
+    const originalAppendEvent = context.store.appendEvent.bind(context.store);
+    let blocked = false;
+    context.store.appendEvent = async (targetSessionId, event, commitGuard) => {
+      if (!blocked) {
+        blocked = true;
+        decisionBlocked.resolve();
+        await releaseDecision.promise;
+      }
+      return originalAppendEvent(targetSessionId, event, commitGuard);
+    };
+
+    const pending = executeModelToolUse(
+      call("Write", { path: "stale-permission.txt", content: "stale" }),
+      context,
+      sessionId,
+      new MemoryOutput(),
+      {
+        requestTurnId: "permission-owner-old",
+        abortSignal: controller.signal,
+        messages: [],
+      } as never,
+    );
+    await decisionBlocked.promise;
+    context.currentRequestTurnId = "permission-owner-new";
+    controller.abort();
+    releaseDecision.resolve();
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("stale foreground tool request discarded");
+    expect(context.pendingLocalApproval).toBeUndefined();
+    const transcript = (await context.store.resume(sessionId)).transcript;
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(false);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(false);
+  });
+
+  it("does not start an approved tool after tool_call_start waits behind a stale owner", async () => {
+    const context = await createTestContext([]);
+    const sessionId = context.sessionId!;
+    const controller = new AbortController();
+    context.currentRequestTurnId = "tool-start-owner-old";
+    const startBlocked = deferred<void>();
+    const releaseStart = deferred<void>();
+    const originalAppendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (targetSessionId, event, commitGuard) => {
+      if ((event as { type?: string }).type === "tool_call_start") {
+        startBlocked.resolve();
+        await releaseStart.promise;
+      }
+      return originalAppendEvent(targetSessionId, event, commitGuard);
+    };
+    const originalWrite = builtInTools.Write.call;
+    const writeCall = vi.fn(async () => ({ text: "must not run" }));
+    builtInTools.Write.call = writeCall as typeof originalWrite;
+
+    try {
+      const pending = executeApprovedModelToolUse(
+        call("Write", { path: "stale-start.txt", content: "stale" }),
+        "Write",
+        context,
+        sessionId,
+        new MemoryOutput(),
+        undefined,
+        undefined,
+        { requestTurnId: "tool-start-owner-old", signal: controller.signal },
+      );
+      await startBlocked.promise;
+      context.currentRequestTurnId = "tool-start-owner-new";
+      controller.abort();
+      releaseStart.resolve();
+      const result = await pending;
+
+      expect(result.ok).toBe(false);
+      expect(result.text).toContain("stale foreground tool request discarded");
+      expect(writeCall).not.toHaveBeenCalled();
+      const transcript = (await context.store.resume(sessionId)).transcript;
+      expect(transcript.some((event) => event.type === "tool_call_start")).toBe(false);
+      expect(context.pendingLocalApproval).toBeUndefined();
+    } finally {
+      builtInTools.Write.call = originalWrite;
+    }
+  });
+
+  it("does not retain a background Bash task when its queued start event loses owner", async () => {
+    const context = await createTestContext([]);
+    const sessionId = context.sessionId!;
+    const controller = new AbortController();
+    context.currentRequestTurnId = "background-owner-old";
+    const updateBlocked = deferred<void>();
+    const releaseUpdate = deferred<void>();
+    const originalAppendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (targetSessionId, event, commitGuard) => {
+      if ((event as { type?: string }).type === "background_task_update") {
+        updateBlocked.resolve();
+        await releaseUpdate.promise;
+      }
+      return originalAppendEvent(targetSessionId, event, commitGuard);
+    };
+    const originalBash = builtInTools.Bash.call;
+    const bashCall = vi.fn(async () => ({ text: "must not run" }));
+    builtInTools.Bash.call = bashCall as typeof originalBash;
+
+    try {
+      const pending = executeApprovedModelToolUse(
+        call("Bash", { command: "long-running", runInBackground: true }),
+        "Bash",
+        context,
+        sessionId,
+        new MemoryOutput(),
+        undefined,
+        undefined,
+        { requestTurnId: "background-owner-old", signal: controller.signal },
+      );
+      await updateBlocked.promise;
+      context.currentRequestTurnId = "background-owner-new";
+      controller.abort();
+      releaseUpdate.resolve();
+      const result = await pending;
+
+      expect(result.ok).toBe(false);
+      expect(result.text).toContain("stale foreground tool request discarded");
+      expect(bashCall).not.toHaveBeenCalled();
+      expect(context.backgroundTasks).toEqual([]);
+      const transcript = (await context.store.resume(sessionId)).transcript;
+      expect(transcript.some((event) => event.type === "background_task_update")).toBe(false);
+    } finally {
+      builtInTools.Bash.call = originalBash;
+    }
+  });
+
+  it("drops a queued background resource-guard failure after owner cancellation", async () => {
+    const context = await createTestContext([]);
+    const sessionId = context.sessionId!;
+    const controller = new AbortController();
+    context.currentRequestTurnId = "guard-owner-old";
+    context.backgroundTasks = [{
+      id: "existing-heavy-task",
+      kind: "bash",
+      title: "existing",
+      status: "running",
+      currentStep: "running",
+      progress: { completed: 0, total: 1, label: "Bash" },
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      heartbeatIntervalMs: 30_000,
+      staleAfterMs: 120_000,
+      hasOutput: false,
+      userVisibleSummary: "running",
+      nextAction: "wait",
+    }];
+    const evidenceBlocked = deferred<void>();
+    const releaseEvidence = deferred<void>();
+    const originalAppendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (targetSessionId, event, commitGuard) => {
+      if ((event as { type?: string }).type === "evidence_record") {
+        evidenceBlocked.resolve();
+        await releaseEvidence.promise;
+      }
+      return originalAppendEvent(targetSessionId, event, commitGuard);
+    };
+
+    const pending = executeApprovedModelToolUse(
+      call("Bash", { command: "blocked", runInBackground: true }),
+      "Bash",
+      context,
+      sessionId,
+      new MemoryOutput(),
+      undefined,
+      undefined,
+      { requestTurnId: "guard-owner-old", signal: controller.signal },
+    );
+    await evidenceBlocked.promise;
+    context.currentRequestTurnId = "guard-owner-new";
+    controller.abort();
+    releaseEvidence.resolve();
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("stale foreground tool request discarded");
+    expect(context.evidence).toEqual([]);
+    const transcript = (await context.store.resume(sessionId)).transcript;
+    expect(transcript.some((event) => event.type === "evidence_record")).toBe(false);
+    expect(transcript.some((event) => event.type === "tool_result")).toBe(false);
+  });
+
+  it("terminalizes an already-started background Bash when its owner becomes stale", async () => {
+    const context = await createTestContext([]);
+    const sessionId = context.sessionId!;
+    const controller = new AbortController();
+    context.currentRequestTurnId = "running-background-old";
+    context.backgroundBashTaskMap = new Map();
+    const started = deferred<void>();
+    const result = deferred<ToolOutput>();
+    const originalBash = builtInTools.Bash.call;
+    builtInTools.Bash.call = (async (_input, toolContext) => {
+      toolContext.onBackgroundBashStart?.("tools-background-id");
+      started.resolve();
+      return result.promise;
+    }) as typeof originalBash;
+
+    try {
+      const pending = executeApprovedModelToolUse(
+        call("Bash", { command: "long-running", runInBackground: true }),
+        "Bash",
+        context,
+        sessionId,
+        new MemoryOutput(),
+        undefined,
+        undefined,
+        { requestTurnId: "running-background-old", signal: controller.signal },
+      );
+      await started.promise;
+      context.currentRequestTurnId = "running-background-new";
+      controller.abort();
+      result.resolve({
+        text: "started",
+        data: { backgroundTaskId: "tools-background-id", outputPath: "background.log" },
+      });
+      const response = await pending;
+
+      expect(response.ok).toBe(false);
+      expect(context.backgroundTasks).toHaveLength(1);
+      expect(context.backgroundTasks[0]).toMatchObject({
+        status: "cancelled",
+        result: "cancelled",
+        cancelState: "abort_signal_sent",
+        outputPath: "background.log",
+      });
+      expect(context.backgroundBashTaskMap?.get("tools-background-id"))
+        .toBe(context.backgroundTasks[0]?.id);
+      const transcript = (await context.store.resume(sessionId)).transcript;
+      expect(
+        transcript.some(
+          (event) =>
+            event.type === "background_task_update" && event.task.status === "cancelled",
+        ),
+      ).toBe(true);
+    } finally {
+      builtInTools.Bash.call = originalBash;
+    }
+  });
+
+  it("correlates a background Bash completion that arrives before runTool returns", async () => {
+    const context = await createTestContext([]);
+    const sessionId = context.sessionId!;
+    context.currentRequestTurnId = "fast-background-owner";
+    context.backgroundBashTaskMap = new Map();
+    let completedTuiTaskId: string | undefined;
+    context.tools.onBackgroundBashComplete = (completion) => {
+      completedTuiTaskId = context.backgroundBashTaskMap?.get(completion.taskId);
+      context.backgroundBashTaskMap?.delete(completion.taskId);
+      const task = context.backgroundTasks.find((item) => item.id === completedTuiTaskId);
+      if (task) {
+        task.status = "completed";
+        task.result = "pass";
+      }
+    };
+    const originalBash = builtInTools.Bash.call;
+    builtInTools.Bash.call = (async (_input, toolContext) => {
+      toolContext.onBackgroundBashStart?.("fast-tools-task");
+      toolContext.onBackgroundBashComplete?.({
+        taskId: "fast-tools-task",
+        exitCode: 0,
+        outcome: "completed",
+        outputPath: "fast.log",
+        command: "fast",
+      });
+      return {
+        text: "started",
+        data: { backgroundTaskId: "fast-tools-task", outputPath: "fast.log" },
+      };
+    }) as typeof originalBash;
+
+    try {
+      const response = await executeApprovedModelToolUse(
+        call("Bash", { command: "fast", runInBackground: true }),
+        "Bash",
+        context,
+        sessionId,
+        new MemoryOutput(),
+        undefined,
+        undefined,
+        { requestTurnId: "fast-background-owner", signal: new AbortController().signal },
+      );
+
+      expect(response.ok).toBe(true);
+      expect(completedTuiTaskId).toBe(context.backgroundTasks[0]?.id);
+      expect(context.backgroundTasks[0]).toMatchObject({ status: "completed", result: "pass" });
+      expect(context.backgroundBashTaskMap.has("fast-tools-task")).toBe(false);
+    } finally {
+      builtInTools.Bash.call = originalBash;
+    }
+  });
+
   it("runModelBackedAgent completes final answer, consumes mailbox, and lets tool errors self-recover", async () => {
     const context = await createTestContext();
     const agent = createAgentRun(context, { id: "agent-loop", maxTurns: 2 });
@@ -485,8 +790,10 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       await startedA.promise;
       const runB = runModelBackedAgent(agentB, context, new MemoryOutput());
       await startedB.promise;
+      expect(context.agentToolContexts?.has(agentA.id)).toBe(true);
 
       await cancelAgent(agentA, context, new MemoryOutput());
+      expect(context.agentToolContexts?.has(agentA.id)).toBe(false);
       expect(controllerA.signal.aborted).toBe(true);
       expect(controllerB.signal.aborted).toBe(false);
       expect(foregroundController.signal.aborted).toBe(false);
@@ -542,7 +849,9 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       );
       await started.promise;
       expect(agent.status).toBe("running");
+      expect(context.agentToolContexts?.has(agent.id)).toBe(true);
       await cancelAgent(agent, context, new MemoryOutput());
+      expect(context.agentToolContexts?.has(agent.id)).toBe(false);
       delayed.resolve({ text: "late approved write result" });
       const result = await pending;
 
@@ -553,6 +862,44 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     } finally {
       builtInTools.Write.call = originalWrite;
     }
+  });
+
+  it("clears agent tool contexts on stale and permission-denied terminals", async () => {
+    const context = await createTestContext([]);
+    const childA = await context.store.create({ model: context.model });
+    const staleAgent = createAgentRun(context, {
+      id: "agent-stale-cleanup",
+      transcriptPath: childA.transcriptPath,
+      transcriptSessionId: childA.id,
+    });
+    const childB = await context.store.create({ model: context.model });
+    const deniedAgent = createAgentRun(context, {
+      id: "agent-denied-cleanup",
+      transcriptPath: childB.transcriptPath,
+      transcriptSessionId: childB.id,
+    });
+    deniedAgent.status = "blocked";
+    context.agents.push(staleAgent, deniedAgent);
+    rememberBackgroundTask(context, createAgentBackgroundTask(staleAgent, context));
+    rememberBackgroundTask(context, createAgentBackgroundTask(deniedAgent, context));
+    context.agentToolContexts = new Map([
+      [staleAgent.id, createToolContext(context.projectPath)],
+      [deniedAgent.id, createToolContext(context.projectPath)],
+    ]);
+    registerBackgroundAbortController(context, staleAgent.id);
+
+    await markRunningAgentsStaleForInterrupt(context, context.sessionId!);
+    expect(context.agentToolContexts.has(staleAgent.id)).toBe(false);
+
+    await denyAgentToolUse(
+      deniedAgent,
+      { id: "denied-cleanup", name: "Write", input: {} },
+      "Write",
+      context,
+      context.sessionId!,
+      "denied",
+    );
+    expect(context.agentToolContexts.has(deniedAgent.id)).toBe(false);
   });
 
   it("runModelBackedAgent keeps default handoff separate from explicit full-context fork", async () => {
@@ -770,6 +1117,88 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(registryUnknown.status).toBe("blocked");
   }, 60_000);
 
+  it("keeps workflow verification on its invocation constraints", async () => {
+    const context = await createTestContext();
+    context.currentRequestTurnId = "foreground-new";
+    context.currentUserActionConstraintsRequestTurnId = "foreground-new";
+    context.currentUserActionConstraints = parseUserActionConstraints(
+      "不要运行 test、build、lint、typecheck 或 shell 命令",
+    );
+    context.workflows.activeRun = {
+      id: "wf-owned-verification",
+      goal: "readonly audit",
+      planId: "wf",
+      status: "running",
+      result: "partial",
+      phaseGateConfirmed: true,
+      confirmedPhaseStopPoints: ["phase-e"],
+      permissionMode: "full-access",
+      invokingRequestTurnId: "foreground-old",
+      userActionConstraints: parseUserActionConstraints("只读审计，不要修改文件"),
+      steps: [],
+      startedAt: new Date().toISOString(),
+    };
+
+    const result = await __testExecuteWorkflowStep(
+      workflowRequest("verification-owned", {
+        mainChain: "verification",
+        level: "focused",
+        workflowId: "wf",
+        phaseId: "phase-e",
+        sliceId: "verification-owned",
+        evidenceRefs: [],
+      }),
+      context,
+      new MemoryOutput(),
+      "wf-owned-verification",
+    );
+
+    expect(result.summary).not.toContain("plan-only requested");
+    expect(context.lastVerification?.summary).not.toContain("plan-only requested");
+  }, 60_000);
+
+  it("propagates workflow invocation ownership into forked agents", async () => {
+    const context = await createTestContext();
+    context.permissionMode = "plan";
+    context.currentRequestTurnId = "foreground-new";
+    context.currentUserActionConstraintsRequestTurnId = "foreground-new";
+    context.currentUserActionConstraints = parseUserActionConstraints("只读，不要写文件");
+    context.workflows.activeRun = {
+      id: "wf-owned-fork",
+      goal: "implement",
+      planId: "wf",
+      status: "running",
+      result: "partial",
+      phaseGateConfirmed: true,
+      confirmedPhaseStopPoints: ["phase-e"],
+      permissionMode: "full-access",
+      invokingRequestTurnId: "foreground-old",
+      steps: [],
+      startedAt: new Date().toISOString(),
+    };
+
+    await __testExecuteWorkflowStep(
+      workflowRequest("fork-owned", {
+        mainChain: "fork",
+        role: "worker",
+        task: "inspect ownership",
+        workflowId: "wf",
+        phaseId: "phase-e",
+        sliceId: "fork-owned",
+        contextRefs: emptyWorkflowContextRefs(),
+      }),
+      context,
+      new MemoryOutput(),
+      "wf-owned-fork",
+      1,
+    );
+
+    const agent = context.agents.find((item) => item.task === "inspect ownership");
+    expect(agent?.permissionMode).toBe("full-access");
+    expect(agent?.invokingRequestTurnId).toBe("foreground-old");
+    expect(agent?.userActionConstraints).toBeUndefined();
+  }, 60_000);
+
   it("covers executePermissionApprove across all pending approval kinds", async () => {
     const base = await createTestContext();
     const sessionId = base.sessionId ?? "session";
@@ -854,6 +1283,124 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
       ).resolves.toBeUndefined();
     }
   }, 60_000);
+
+  it("drops an approved foreground tool result after its continuation owner becomes stale", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const toolCall = call("Bash", { command: "vitest --run" });
+    const controller = new AbortController();
+    const started = deferred<void>();
+    const result = deferred<ToolOutput>();
+    const originalCall = builtInTools.Bash.call;
+    builtInTools.Bash.call = (async () => {
+      started.resolve();
+      return result.promise;
+    }) as typeof originalCall;
+
+    try {
+      const approval = executePermissionApprove(
+        {
+          kind: "model_tool_use",
+          toolCall,
+          toolName: "Bash",
+          sessionId,
+          continuation: {
+            messages: [
+              { role: "user", content: "run tests" },
+              { role: "assistant", content: "", toolCalls: [toolCall] },
+            ],
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            requestTurnId: "invoking-request",
+            abortSignal: controller.signal,
+          },
+        },
+        context,
+        gateway([]),
+        new MemoryOutput(),
+      );
+      await started.promise;
+      context.currentRequestTurnId = "replacement-request";
+      controller.abort("replacement-request");
+      result.resolve({ text: "late pass", data: { exitCode: 0 } });
+      await approval;
+
+      const transcript = (await context.store.resume(sessionId)).transcript;
+      expect(
+        transcript.some(
+          (event) =>
+            (event.type === "tool_call_end" && event.id === toolCall.id) ||
+            (event.type === "tool_result" && event.toolUseId === toolCall.id) ||
+            (event.type === "evidence_record" && event.toolUseId === toolCall.id),
+        ),
+      ).toBe(false);
+      expect(context.evidence.some((evidence) => evidence.toolUseId === toolCall.id)).toBe(false);
+      expect(context.currentRequestTurnId).toBe("replacement-request");
+    } finally {
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("scopes approved Bash verification evidence to the resumed foreground owner", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const toolCall = call("Bash", { command: "vitest --run" });
+    const controller = new AbortController();
+    const originalCall = builtInTools.Bash.call;
+    builtInTools.Bash.call = (async () => ({
+      text: "tests passed",
+      data: { exitCode: 0 },
+    })) as typeof originalCall;
+
+    try {
+      await executePermissionApprove(
+        {
+          kind: "model_tool_use",
+          toolCall,
+          toolName: "Bash",
+          sessionId,
+          continuation: {
+            messages: [
+              { role: "user", content: "run tests" },
+              { role: "assistant", content: "", toolCalls: [toolCall] },
+            ],
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            requestTurnId: "invoking-request",
+            abortSignal: controller.signal,
+          },
+        },
+        context,
+        gateway([
+          { type: "assistant_text_delta", text: "verification recorded" },
+          { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+        ]),
+        new MemoryOutput(),
+      );
+
+      const evidence = context.evidence.find((item) => item.toolUseId === toolCall.id);
+      const verificationScope = (evidence?.data as { verificationScope?: Record<string, unknown> })
+        ?.verificationScope;
+      expect(evidence?.supportsClaims).toContain("test_passed");
+      expect(evidence?.ownerScope).toMatchObject({
+        ownerSessionId: sessionId,
+        requestTurnId: verificationScope?.requestTurnId,
+        cwd: context.projectPath,
+      });
+      expect(verificationScope).toMatchObject({
+        ownerSessionId: sessionId,
+        requestTurnId: "invoking-request",
+        cwd: context.projectPath,
+        changedFiles: [],
+      });
+    } finally {
+      builtInTools.Bash.call = originalCall;
+    }
+  });
 
   it("covers permission policy auto-allow, require-permission, hard-deny, and natural intent branches", async () => {
     const context = await createTestContext();

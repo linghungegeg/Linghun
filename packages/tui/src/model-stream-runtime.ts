@@ -64,6 +64,7 @@ import {
   captureFailureLearning,
   compactToolResultForModelHistory,
   createEvidenceRecord,
+  evidenceMatchesRequestOwner,
   getToolResultBudgetState,
   recordArchitectureRuntimeCard,
   recordModelToolFailureForMetaScheduler,
@@ -71,6 +72,7 @@ import {
   recordToolResultBudgetEvidence,
   rememberEvidence,
   sanitizeProviderFailureError,
+  scopeEvidenceToContext,
   truncateRoundAssistantForProvider,
 } from "./evidence-runtime.js";
 import {
@@ -144,6 +146,7 @@ import {
 import { clearProviderBreaker, withProviderRetry } from "./provider-circuit-breaker.js";
 import {
   checkAndWriteProviderCooldown,
+  providerRuntimeKey,
   recordProviderFallbackAttempt,
   resolveRuntimeFallback,
 } from "./provider-loop-runtime.js";
@@ -178,11 +181,7 @@ import {
   forbidsVerificationEvidence,
   parseUserActionConstraints,
 } from "./user-action-constraints.js";
-import {
-  createVerificationPlan,
-  getRequestScopedVerificationChangedFiles,
-  resolveVerificationScopeCwd,
-} from "./verification-command-runtime.js";
+import { getRequestScopedVerificationChangedFiles } from "./verification-command-runtime.js";
 import type { PendingModelContinuation, TuiContext } from "./tui-context-runtime.js";
 import { updateTurnContinuity } from "./turn-continuity-runtime.js";
 import {
@@ -191,16 +190,18 @@ import {
 } from "./tui-context-runtime.js";
 import {
   MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
+  MAX_MODEL_TOTAL_TOOL_ROUNDS,
   REQUEST_SLOW_HINT_MS,
   TODO_ONLY_KILL_GRACE,
   MAX_TODO_ONLY_CODE_FACT,
 } from "./tui-context-runtime.js";
-import type { RemoteInboundDecision, RemoteInboundMessage } from "./tui-data-types.js";
+import type { EvidenceRecord, RemoteInboundDecision, RemoteInboundMessage } from "./tui-data-types.js";
 import {
   getRuntimeStatusProvider,
   getSelectedModelRuntime,
   shouldOfferUserScopedModelSetup,
 } from "./tui-model-runtime.js";
+import { refreshPersistentMemoryState } from "./tui-state-runtime.js";
 import {
   beginAssistantStream,
   cancelAssistantStream,
@@ -248,17 +249,9 @@ export type FinalGateEvidenceGapActionPlan = {
   };
 };
 
-export type FinalGateEvidenceActionResult =
-  | { status: "evidence_recorded"; messages: ModelMessage[]; result: ModelToolExecutionResult }
-  | { status: "attempt_recorded"; messages: ModelMessage[]; result: ModelToolExecutionResult; reason: string }
-  | { status: "permission_pending" }
-  | { status: "blocked"; reason: string }
-  | { status: "unsupported"; reason: string };
-
 const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 16;
 const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 24;
-const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 2;
-const MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES = 3;
+const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 0;
 const SAME_TOOL_FAILURE_RETRY_GUARD_LIMIT = 4;
 const TOOL_FAILURE_NO_TOOL_RECOVERY_PROMPT_LIMIT = 4;
 const MAX_PARALLEL_READONLY_TOOL_CALLS = 2;
@@ -484,6 +477,27 @@ type ToolBatchExecutionState = {
   roundFailureFingerprints: string[];
   stoppedByFailFast: boolean;
 };
+
+function mergeToolBatchExecutionResults(
+  left: ToolBatchExecutionState & { pendingApproval: boolean },
+  right: ToolBatchExecutionState & { pendingApproval: boolean },
+): ToolBatchExecutionState & { pendingApproval: boolean } {
+  return {
+    roundHadProgress: left.roundHadProgress || right.roundHadProgress,
+    roundHadRealFallbackToolProgress:
+      left.roundHadRealFallbackToolProgress || right.roundHadRealFallbackToolProgress,
+    roundFallbackRequiredCount:
+      left.roundFallbackRequiredCount + right.roundFallbackRequiredCount,
+    batchFailureCount: left.batchFailureCount + right.batchFailureCount,
+    lastBatchFailureReason: right.lastBatchFailureReason ?? left.lastBatchFailureReason,
+    roundFailureFingerprints: [
+      ...left.roundFailureFingerprints,
+      ...right.roundFailureFingerprints,
+    ],
+    stoppedByFailFast: left.stoppedByFailFast || right.stoppedByFailFast,
+    pendingApproval: left.pendingApproval || right.pendingApproval,
+  };
+}
 
 type ToolBatchExecutionOptions = {
   continuation: PendingModelContinuation;
@@ -967,14 +981,15 @@ export function evaluateAggregatedFinalAnswerGate(
   assistantText: string,
   runExtendedGate = true,
 ): AggregatedFinalAnswerGateResult {
+  const scopedEvidence = evidenceForCurrentVerificationScope(context);
   const claimVerdict = evaluateFinalAnswerClaims(
     assistantText,
-    evidenceForCurrentVerificationScope(context),
+    scopedEvidence,
   );
   const extended = runExtendedGate
-    ? runArchitectureAndCompletenessFinalGate(context, assistantText)
+    ? runArchitectureAndCompletenessFinalGate(context, assistantText, scopedEvidence)
     : { status: "passed" as const };
-  const engineeringVerdict = evaluateEngineeringFinalBoundary(context, assistantText);
+  const engineeringVerdict = evaluateEngineeringFinalBoundary(context, assistantText, scopedEvidence);
   const blockedWorkflowClaim =
     context.lastMetaSchedulerDecision?.shouldStopForBlockedRuntime === true &&
     claimVerdict.matchedClaims.some((claim) => claim.kind === "workflow_status_claim");
@@ -1009,7 +1024,81 @@ export function evaluateAggregatedFinalAnswerGate(
 function evidenceForCurrentVerificationScope(context: TuiContext): TuiContext["evidence"] {
   if (!context.currentRequestTurnId) return context.evidence;
   return context.evidence.filter(
-    (record) => !isVerificationEvidenceRecord(record) || verificationEvidenceMatchesContext(record, context),
+    (record) => isVerificationEvidenceRecord(record)
+      ? verificationEvidenceMatchesContext(record, context)
+      : evidenceMatchesRequestOwner(record, context),
+  );
+}
+
+type FinalGapProgressState = {
+  unsupportedKinds: string[];
+  relevantEvidenceIds: Set<string>;
+  evidenceAction?: FinalGateEvidenceGapActionPlan["evidenceAction"];
+};
+
+function finalGapHasProgress(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  context: TuiContext,
+  previous: FinalGapProgressState | undefined,
+): boolean {
+  if (!previous) return true;
+  const currentKinds = new Set(result.unsupportedKinds);
+  const previousKinds = new Set(previous.unsupportedKinds);
+  if (
+    currentKinds.size < previousKinds.size &&
+    [...currentKinds].every((kind) => previousKinds.has(kind))
+  ) {
+    return true;
+  }
+  if (!previous.evidenceAction) return false;
+  return evidenceForCurrentVerificationScope(context).some(
+    (record) =>
+      !previous.relevantEvidenceIds.has(record.id) &&
+      evidenceMatchesFinalGapAction(record, previous.evidenceAction!),
+  );
+}
+
+function captureFinalGapProgressState(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  context: TuiContext,
+  evidenceAction: FinalGateEvidenceGapActionPlan["evidenceAction"],
+): FinalGapProgressState {
+  return {
+    unsupportedKinds: [...new Set(result.unsupportedKinds)],
+    relevantEvidenceIds: new Set(
+      evidenceForCurrentVerificationScope(context)
+        .filter((record) => evidenceAction && evidenceMatchesFinalGapAction(record, evidenceAction))
+        .map((record) => record.id),
+    ),
+    evidenceAction,
+  };
+}
+
+function evidenceMatchesFinalGapAction(
+  record: EvidenceRecord,
+  action: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>,
+): boolean {
+  if (action.toolName === "RunVerification" || action.toolName === "Bash") {
+    return (
+      record.kind === "test_result" ||
+      record.supportsClaims.some((claim) =>
+        /^(?:verification_(?:attempted|passed)|test_passed|test_scope:|typecheck_passed|build_passed|lint_passed|diff_check_passed|smoke_passed|full_test_suite_passed|all_tests_passed)$/u.test(
+          claim,
+        )
+      )
+    );
+  }
+  const toolMatches =
+    record.source === action.toolName ||
+    record.source.startsWith(`${action.toolName}:`) ||
+    record.supportsClaims.includes(action.toolName);
+  if (!toolMatches) return false;
+  const expectedPath = readToolCallPath(action.input);
+  if (!expectedPath) return true;
+  return (
+    record.ownerScope?.targets?.some((target) =>
+      pathsReferToSameArtifactHint(target, expectedPath)
+    ) === true || hasStructuredArtifactEvidenceForPath([record], expectedPath)
   );
 }
 
@@ -1030,20 +1119,37 @@ function verificationEvidenceMatchesContext(
   context: TuiContext,
 ): boolean {
   const scope = readEvidenceDataRecord(record, "verificationScope");
-  if (!scope) return false;
+  const owner = record.ownerScope;
+  if (!scope || !owner) return false;
   if (typeof scope.ownerAgentId === "string" || typeof scope.workflowRunId === "string") {
     return false;
   }
-  if (typeof scope.requestTurnId === "string") {
-    if (scope.requestTurnId !== context.currentRequestTurnId) return false;
-  }
-  if (typeof scope.ownerSessionId === "string" && context.sessionId) {
-    if (scope.ownerSessionId !== context.sessionId) return false;
-  }
+  if (scope.requestTurnId !== context.currentRequestTurnId) return false;
+  if (!context.sessionId || scope.ownerSessionId !== context.sessionId) return false;
+  if (owner.requestTurnId !== context.currentRequestTurnId) return false;
+  if (owner.ownerSessionId !== context.sessionId) return false;
+  if (!evidenceCwdBelongsToProject(scope.cwd, context.projectPath)) return false;
+  if (!evidenceCwdBelongsToProject(owner.cwd, context.projectPath)) return false;
   return sameVerificationChangedFiles(
     scope.changedFiles,
     getRequestScopedVerificationChangedFiles(context),
   );
+}
+
+function evidenceCwdBelongsToProject(cwd: unknown, projectPath: unknown): boolean {
+  if (
+    typeof cwd !== "string" ||
+    !cwd.trim() ||
+    typeof projectPath !== "string" ||
+    !projectPath.trim()
+  ) return false;
+  const normalizedCwd = normalizeEvidenceCwd(cwd);
+  const normalizedProject = normalizeEvidenceCwd(projectPath);
+  return normalizedCwd === normalizedProject || normalizedCwd.startsWith(`${normalizedProject}/`);
+}
+
+function normalizeEvidenceCwd(path: string): string {
+  return path.trim().replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase();
 }
 
 function sameVerificationChangedFiles(left: unknown, right: string[]): boolean {
@@ -1079,15 +1185,16 @@ export function __testCurrentVerificationReportForRequest(context: TuiContext) {
 function evaluateEngineeringFinalBoundary(
   context: TuiContext,
   assistantText: string,
+  evidence: TuiContext["evidence"] = context.evidence,
 ): { status: "passed" } | { status: "needs_disclaimer"; unsupportedKinds: string[]; message: string } {
   const signal = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal;
   if (!signal) return { status: "passed" };
   const highRiskFinal =
-    /(?:已完成|已修复|测试通过|全部通过|验证通过|pass(?:ed)?|completed|fixed|verified|tests? passed)/iu.test(
+    /(?:已完成|已修复|已生成|产物存在|测试通过|全部通过|验证通过|pass(?:ed)?|completed|fixed|generated|verified|tests? passed)/iu.test(
       assistantText,
     );
   if (!highRiskFinal && !signal.failureCategory) return { status: "passed" };
-  if (signal.failureCategory === "missing_artifact" && !hasArtifactEvidence(context)) {
+  if (signal.failureCategory === "missing_artifact" && !hasArtifactEvidence(context, evidence)) {
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_missing_artifact"],
@@ -1109,7 +1216,7 @@ function evaluateEngineeringFinalBoundary(
       message: signal.finalBoundaryHint ?? "provider output was interrupted",
     };
   }
-  if (signal.profile === "binary_or_artifact" && highRiskFinal && !hasArtifactEvidence(context)) {
+  if (signal.profile === "binary_or_artifact" && highRiskFinal && !hasArtifactEvidence(context, evidence)) {
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_artifact_unverified"],
@@ -1119,7 +1226,7 @@ function evaluateEngineeringFinalBoundary(
   if (
     (signal.profile === "swe_python" || signal.profile === "large_python_project") &&
     /\b(?:all|full|entire)\s+(?:tests?|suite)\s+pass(?:ed)?|全部测试|所有测试/iu.test(assistantText) &&
-    !hasFullVerificationEvidence(context)
+    !hasFullVerificationEvidence(context, evidence)
   ) {
     return {
       status: "needs_disclaimer",
@@ -1132,7 +1239,7 @@ function evaluateEngineeringFinalBoundary(
     /(?:service|server|port|health|daemon|服务|端口|健康检查).{0,80}(?:verified|pass(?:ed)?|正常|通过)/iu.test(
       assistantText,
     ) &&
-    !hasServiceVerificationEvidence(context)
+    !hasServiceVerificationEvidence({ evidence })
   ) {
     return {
       status: "needs_disclaimer",
@@ -1143,16 +1250,21 @@ function evaluateEngineeringFinalBoundary(
   return { status: "passed" };
 }
 
-function hasArtifactEvidence(context: TuiContext): boolean {
+function hasArtifactEvidence(context: TuiContext, evidence: TuiContext["evidence"] = context.evidence): boolean {
   const signalTargets =
     context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
-  return hasStructuredArtifactEvidence(context.evidence, signalTargets);
+  return hasStructuredArtifactEvidence(evidence, signalTargets);
 }
 
-function hasFullVerificationEvidence(context: TuiContext): boolean {
-  return evidenceForCurrentVerificationScope(context).some((item) =>
-    /full(?: test)? suite|all tests|entire suite|test_passed|verification_passed|全部测试|所有测试/iu.test(
-      [item.summary, item.source, ...item.supportsClaims].join(" "),
+function hasFullVerificationEvidence(
+  context: TuiContext,
+  evidence: TuiContext["evidence"] = evidenceForCurrentVerificationScope(context),
+): boolean {
+  return evidence.some((item) =>
+    item.supportsClaims.some((claim) =>
+      claim === "test_scope:full" ||
+      claim === "full_test_suite_passed" ||
+      claim === "all_tests_passed"
     ),
   );
 }
@@ -1163,53 +1275,6 @@ function hasServiceVerificationEvidence(context: Pick<TuiContext, "evidence">): 
     const serviceHint = readEvidenceDataRecord(item, "serviceHint");
     return service?.ready === true || serviceHint?.ready === true;
   });
-}
-
-function isFinalGateEvidenceActionSatisfied(
-  actionPlan: FinalGateEvidenceGapActionPlan,
-  newEvidence: TuiContext["evidence"],
-  result: ModelToolExecutionResult,
-): boolean {
-  if (result.ok !== true) return false;
-  if (actionPlan.action === "verification_request") {
-    return hasFreshVerificationEvidenceForFinalClaimAlignment(newEvidence);
-  }
-  if (actionPlan.reason === "artifact_gap_readonly") {
-    return newEvidence.some((item) => {
-      const artifactHint = readEvidenceDataRecord(item, "artifactHint");
-      return artifactHint?.exists === true;
-    });
-  }
-  if (actionPlan.reason === "git_gap_readonly") {
-    return true;
-  }
-  if (actionPlan.reason === "service_runtime_gap_readonly") {
-    return hasServiceVerificationEvidence({ evidence: newEvidence });
-  }
-  return false;
-}
-
-function classifyFinalGateEvidenceAttemptGap(
-  actionPlan: FinalGateEvidenceGapActionPlan,
-  result: ModelToolExecutionResult,
-): string {
-  if (result.ok !== true) return "tool_failed";
-  if (actionPlan.action === "verification_request") return "verification_not_proven";
-  if (actionPlan.reason === "artifact_gap_readonly") return "artifact_not_proven";
-  if (actionPlan.reason === "git_gap_readonly") return "git_not_proven";
-  if (actionPlan.reason === "service_runtime_gap_readonly") return "service_not_proven";
-  return "evidence_not_proven";
-}
-
-export function shouldContinueAfterFinalGateEvidenceAction(
-  result: FinalGateEvidenceActionResult,
-  evidenceActionRetryCount: number,
-): result is Extract<FinalGateEvidenceActionResult, { status: "evidence_recorded" | "attempt_recorded" }> {
-  if (result.status === "evidence_recorded") return true;
-  if (result.status === "attempt_recorded" && result.reason === "verification_not_proven") {
-    return false;
-  }
-  return result.status === "attempt_recorded" && evidenceActionRetryCount < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES;
 }
 
 export function planFinalGateEvidenceGapAction(input: {
@@ -1223,6 +1288,13 @@ export function planFinalGateEvidenceGapAction(input: {
 }): FinalGateEvidenceGapActionPlan {
   const { result, context } = input;
   const language = context.language;
+  if (input.retryBudgetRemaining === false) {
+    return {
+      action: "downgrade_only",
+      reason: "final_gate_retry_disabled",
+      directive: createFinalGateEvidenceTaskDirective(result, language),
+    };
+  }
   const gap = classifyFinalGateEvidenceGap(result.unsupportedKinds);
   const constraints = parseUserActionConstraints(input.userText);
   if (gap === "verification" || gap === "completion") {
@@ -1436,209 +1508,6 @@ function selectFinalGateVerificationLevel(
     return "smoke";
   }
   return "typecheck";
-}
-
-function isTerminalFinalGateGapAction(actionPlan: FinalGateEvidenceGapActionPlan): boolean {
-  return actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only";
-}
-
-async function recordFinalGateGapPlan(input: {
-  context: TuiContext;
-  output: Writable;
-  sessionId: string;
-  actionPlan: FinalGateEvidenceGapActionPlan;
-  scope?: string;
-}): Promise<void> {
-  startRequestActivity(input.output, input.context, "verifying_final_answer");
-  const scope = input.scope ? ` ${input.scope}` : "";
-  const tool = input.actionPlan.evidenceAction?.toolName ?? "none";
-  await appendSystemEvent(
-    input.context,
-    input.sessionId,
-    `final_answer_gap_planner${scope} action=${input.actionPlan.action} reason=${input.actionPlan.reason} evidence_action=${tool}`,
-    isTerminalFinalGateGapAction(input.actionPlan) ? "warning" : "info",
-  );
-}
-
-async function runFinalGateEvidenceAction(input: {
-  actionPlan: FinalGateEvidenceGapActionPlan;
-  context: TuiContext;
-  output: Writable;
-  sessionId: string;
-  messages: ModelMessage[];
-  runtime: {
-    provider: string;
-    model: string;
-    endpointProfile: EndpointProfile;
-    reasoningLevel?: string;
-    reasoningSent: boolean;
-  };
-  reportWriteGuard?: PendingModelContinuation["reportWriteGuard"];
-  requestTurnId?: string;
-  abortSignal?: AbortSignal;
-}): Promise<FinalGateEvidenceActionResult> {
-  const toolCall = await createFinalGateEvidenceToolCall(input.actionPlan, input.context);
-  if (!toolCall) {
-    return { status: "unsupported", reason: input.actionPlan.reason };
-  }
-  const continuation: PendingModelContinuation = {
-    messages: [
-      ...input.messages,
-      {
-        role: "assistant",
-        content: "",
-        toolCalls: [toolCall],
-      },
-    ],
-    provider: input.runtime.provider,
-    model: input.runtime.model,
-    endpointProfile: input.runtime.endpointProfile,
-    reasoningLevel: input.runtime.reasoningLevel,
-    reasoningSent: input.runtime.reasoningSent,
-    ...(input.requestTurnId ? { requestTurnId: input.requestTurnId } : {}),
-    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-    ...(input.reportWriteGuard ? { reportWriteGuard: input.reportWriteGuard } : {}),
-  };
-  await appendSystemEvent(
-    input.context,
-    input.sessionId,
-    `final_answer_gap_action dispatch tool=${toolCall.name} reason=${input.actionPlan.reason}`,
-    "info",
-  );
-  const existingEvidenceIds = new Set(input.context.evidence.map((item) => item.id));
-  const result = await executeModelToolUse(
-    toolCall,
-    input.context,
-    input.sessionId,
-    input.output,
-    continuation,
-  );
-  await recordModelToolFailureForMetaScheduler(input.context, input.sessionId, result);
-  await recordFinalGateArtifactProbeEvidence({
-    context: input.context,
-    sessionId: input.sessionId,
-    actionPlan: input.actionPlan,
-    toolCall,
-    result,
-  });
-  await recordFinalGateServiceProbeEvidence({
-    context: input.context,
-    sessionId: input.sessionId,
-    actionPlan: input.actionPlan,
-    toolCall,
-    result,
-  });
-  if (result.pendingApproval) {
-    return { status: "permission_pending" };
-  }
-  continuation.messages.push({
-    role: "tool",
-    tool_call_id: toolCall.id,
-    content: JSON.stringify(result),
-  });
-  const newEvidence = input.context.evidence.filter((item) => !existingEvidenceIds.has(item.id));
-  const evidenceSatisfied = isFinalGateEvidenceActionSatisfied(
-    input.actionPlan,
-    newEvidence,
-    result,
-  );
-  if (evidenceSatisfied) {
-    return { status: "evidence_recorded", messages: continuation.messages, result };
-  }
-  const reason = classifyFinalGateEvidenceAttemptGap(input.actionPlan, result);
-  await appendSystemEvent(
-    input.context,
-    input.sessionId,
-    `final_answer_gap_action_attempt_recorded reason=${reason} tool=${toolCall.name} ok=${result.ok ? "yes" : "no"}`,
-    result.ok ? "info" : "warning",
-  );
-  return { status: "attempt_recorded", messages: continuation.messages, result, reason };
-}
-
-export async function __testRunFinalGateEvidenceAction(
-  input: Parameters<typeof runFinalGateEvidenceAction>[0],
-): Promise<FinalGateEvidenceActionResult> {
-  return runFinalGateEvidenceAction(input);
-}
-
-async function createFinalGateEvidenceToolCall(
-  actionPlan: FinalGateEvidenceGapActionPlan,
-  context: TuiContext,
-): Promise<ModelToolCall | undefined> {
-  const action = actionPlan.evidenceAction;
-  if (!action) return undefined;
-  if (action.strategy === "minimal_bash_verification") {
-    const actionInput = isFinalGateRecord(action.input) ? action.input : {};
-    const command = await selectMinimalBashVerificationCommand(
-      context,
-      readFinalGateVerificationLevel(actionInput.level),
-    );
-    if (!command) return undefined;
-    return {
-      id: `final-gate-evidence-${randomUUID()}`,
-      name: "Bash",
-      input: {
-        command,
-        description: "final gate minimal verification evidence",
-        timeoutMs: 120_000,
-      },
-    };
-  }
-  return {
-    id: `final-gate-evidence-${randomUUID()}`,
-    name: action.toolName,
-    input: action.input ?? {},
-  };
-}
-
-async function selectMinimalBashVerificationCommand(
-  context: TuiContext,
-  preferredKind?: FinalGateVerificationLevel,
-): Promise<string | undefined> {
-  const changedFiles = getRequestScopedVerificationChangedFiles(context);
-  const cwd = await resolveVerificationScopeCwd(context.projectPath, changedFiles);
-  const plan = await createVerificationPlan(
-    cwd,
-    preferredKind === "build" || preferredKind === "smoke" ? "default" : "focused",
-  );
-  const step =
-    (preferredKind
-      ? plan.find((item) => item.kind === preferredKind && item.synthetic !== true)
-      : undefined) ??
-    plan.find((item) => item.kind === "typecheck" && item.synthetic !== true) ??
-    plan.find((item) => item.synthetic !== true);
-  return step ? formatVerificationCommandForDirectory(step.command, cwd) : undefined;
-}
-
-function formatVerificationCommandForDirectory(command: string, cwd: string): string {
-  const quotedCwd = `"${cwd.replaceAll('"', '\\"')}"`;
-  if (command.startsWith("corepack pnpm ")) {
-    return `corepack pnpm --dir ${quotedCwd} ${command.slice("corepack pnpm ".length)}`;
-  }
-  if (command.startsWith("npm run ")) {
-    return `npm --prefix ${quotedCwd} run ${command.slice("npm run ".length)}`;
-  }
-  if (command.startsWith("corepack yarn ")) {
-    return `corepack yarn --cwd ${quotedCwd} ${command.slice("corepack yarn ".length)}`;
-  }
-  if (command.startsWith("bun run ")) {
-    return `bun --cwd ${quotedCwd} run ${command.slice("bun run ".length)}`;
-  }
-  return command;
-}
-
-function readFinalGateVerificationLevel(value: unknown): FinalGateVerificationLevel | undefined {
-  return value === "typecheck" ||
-    value === "test" ||
-    value === "build" ||
-    value === "lint" ||
-    value === "smoke"
-    ? value
-    : undefined;
-}
-
-function isFinalGateRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function buildAggregatedDowngradedFinalAnswer(
@@ -1926,119 +1795,6 @@ function extractLikelyFilePathsFromText(text: string): string[] {
   )
     .map((match) => match[1]?.trim())
     .filter((item): item is string => Boolean(item));
-}
-
-async function recordFinalGateArtifactProbeEvidence(input: {
-  context: TuiContext;
-  sessionId: string;
-  actionPlan: FinalGateEvidenceGapActionPlan;
-  toolCall: ModelToolCall;
-  result: ModelToolExecutionResult;
-}): Promise<void> {
-  if (input.actionPlan.reason !== "artifact_gap_readonly") return;
-  if (input.actionPlan.evidenceAction?.strategy !== "artifact_readonly_check") return;
-  if (input.toolCall.name !== "Read" || input.result.ok !== true) return;
-  const path = readToolCallPath(input.toolCall.input);
-  if (!path || !artifactProbeMatchesRequestedTarget(input.context, path)) return;
-  if (hasArtifactProbeEvidenceForPath(input.context.evidence, path)) return;
-  const evidence = createEvidenceRecord(
-    "command_output",
-    `final gate artifact probe: ${path} exists`,
-    "final-gate:artifact-probe",
-    ["artifact", "artifact_exists", "readonly_low_noise_evidence"],
-  );
-  evidence.outputPath = path;
-  evidence.data = { artifactHint: { path, exists: true } };
-  rememberEvidence(input.context, evidence);
-  await input.context.store.appendEvent(input.sessionId, { type: "evidence_record", ...evidence });
-  await appendSystemEvent(
-    input.context,
-    input.sessionId,
-    `final_answer_gap_artifact_probe evidence=${evidence.id} path=${path}`,
-    "info",
-  );
-  if (isMissingArtifactToolFailure(input.context.lastToolFailure)) {
-    input.context.lastToolFailure = undefined;
-    await appendSystemEvent(
-      input.context,
-      input.sessionId,
-      "final_answer_gap_artifact_probe cleared stale missing-artifact tool failure",
-      "info",
-    );
-  }
-}
-
-async function recordFinalGateServiceProbeEvidence(input: {
-  context: TuiContext;
-  sessionId: string;
-  actionPlan: FinalGateEvidenceGapActionPlan;
-  toolCall: ModelToolCall;
-  result: ModelToolExecutionResult;
-}): Promise<void> {
-  if (input.actionPlan.reason !== "service_runtime_gap_readonly") return;
-  if (input.actionPlan.evidenceAction?.strategy !== "service_runtime_readonly_check") return;
-  if (input.toolCall.name !== "Read" && input.toolCall.name !== "Grep") return;
-  if (input.result.ok !== true || !serviceProbeHasReadySignal(input.result.text)) return;
-  const path = readToolCallPath(input.toolCall.input);
-  const target = extractServiceProbeTarget(input.result.text) ?? path ?? "service";
-  if (hasServiceProbeEvidenceForTarget(input.context.evidence, target)) return;
-  const evidence = createEvidenceRecord(
-    "command_output",
-    `final gate service probe: ${target} ready`,
-    "final-gate:service-probe",
-    ["runtime", "service", "service_ready", "readonly_low_noise_evidence"],
-  );
-  evidence.data = { serviceHint: { target, ready: true } };
-  rememberEvidence(input.context, evidence);
-  await input.context.store.appendEvent(input.sessionId, { type: "evidence_record", ...evidence });
-  await appendSystemEvent(
-    input.context,
-    input.sessionId,
-    `final_answer_gap_service_probe evidence=${evidence.id} target=${target}`,
-    "info",
-  );
-}
-
-function serviceProbeHasReadySignal(text: string): boolean {
-  const lines = text.split(/\r?\n/u);
-  return lines.some((line) => {
-    const normalized = line.trim();
-    if (!normalized) return false;
-    if (/(?:not\s+ready|unhealthy|error|failed|failure|timeout|refused|crash|panic|异常|失败|错误|拒绝|超时)/iu.test(normalized)) {
-      return false;
-    }
-    return /(?:\bready\b|\blistening\b|\bstarted\b|\brunning\b|\bhealthy\b|health\s*(?:check)?\s*(?:ok|pass)|server.{0,24}(?:up|ready|running)|port.{0,24}(?:open|ready|listening)|正常|已启动|启动完成|监听|就绪|健康)/iu.test(
-      normalized,
-    );
-  });
-}
-
-function extractServiceProbeTarget(text: string): string | undefined {
-  const hostPort = text.match(/\b(?:https?:\/\/)?((?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[[0-9a-f:]+\]|[A-Za-z0-9.-]+):\d{2,5})\b/iu);
-  if (hostPort?.[1]) return hostPort[1];
-  const port = text.match(/\bport\s+(\d{2,5})\b/iu) ?? text.match(/\b端口\s*(\d{2,5})\b/iu);
-  if (port?.[1]) return `port:${port[1]}`;
-  return undefined;
-}
-
-function hasServiceProbeEvidenceForTarget(evidence: TuiContext["evidence"], target: string): boolean {
-  return evidence.some((item) => {
-    const service = readEvidenceDataRecord(item, "service");
-    const serviceHint = readEvidenceDataRecord(item, "serviceHint");
-    return serviceProbeTargetMatches(service, target) || serviceProbeTargetMatches(serviceHint, target);
-  });
-}
-
-function serviceProbeTargetMatches(data: Record<string, unknown> | undefined, target: string): boolean {
-  if (data?.ready !== true) return false;
-  const existing = typeof data.target === "string" ? data.target : "";
-  return existing === target || (existing !== "" && target !== "" && existing.includes(target));
-}
-
-function artifactProbeMatchesRequestedTarget(context: TuiContext, path: string): boolean {
-  const targets = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
-  if (targets.length === 0) return true;
-  return uniqueArtifactTargets(targets).some((target) => pathsReferToSameArtifactHint(path, target));
 }
 
 function readToolCallPath(input: unknown): string | undefined {
@@ -2591,8 +2347,11 @@ export async function sendMessage(
   context: TuiContext,
   gateway: ModelGateway,
   output: Writable,
+  controller: AbortController = new AbortController(),
 ): Promise<void> {
-  const modelGuard = checkResourceGuard(context, "model");
+  if (controller.signal.aborted) return;
+  const modelGuard =
+    context.activeAbortController === controller ? null : checkResourceGuard(context, "model");
   if (modelGuard) {
     writeLine(output, modelGuard);
     // D.14B — 并发上限拒绝是真实的"任务无法继续"事件（不是权限拒绝、不是用户取消）。
@@ -2610,12 +2369,15 @@ export async function sendMessage(
     });
     return;
   }
+  if (controller.signal.aborted) return;
   const selectedRuntimeForCooldown = getSelectedModelRuntime(context);
   if (checkAndWriteProviderCooldown(context, selectedRuntimeForCooldown, output)) {
     const cooldownSessionId = await ensureSession(context);
     await appendRuntimePolicyHint(context, cooldownSessionId, text, {});
   }
+  if (controller.signal.aborted) return;
   const sessionId = await ensureSession(context);
+  if (controller.signal.aborted) return;
   context.sessionEnded = false;
   const userMessageEvent = createUserMessageEvent(text) as {
     type: "user_message";
@@ -2631,8 +2393,8 @@ export async function sendMessage(
   let committedIntermediateAssistantText = "";
   let finalAnswerEvidenceActionRetries = 0;
   let finalAnswerClaimAlignmentRewrites = 0;
+  let finalGapProgressState: FinalGapProgressState | undefined;
   let modelLoopCompleted = false;
-  const controller = new AbortController();
   let staleRequestRecorded = false;
   const requestOwnerIsCurrent = (): boolean =>
     !controller.signal.aborted && isCurrentForegroundRequestTurn(context, requestTurnId);
@@ -2666,6 +2428,7 @@ export async function sendMessage(
   await context.store.appendEvent(sessionId, userMessageEvent);
   if (await stopStaleRequest()) return;
   let selectedRuntime = getSelectedModelRuntime(context);
+  const attemptedRuntimeKeys = new Set([providerRuntimeKey(selectedRuntime)]);
   // Remember the original provider+model for correct breaker clear after fallback.
   const originalProvider = selectedRuntime.provider;
   const originalModel = selectedRuntime.model;
@@ -2795,6 +2558,8 @@ export async function sendMessage(
     ].slice(-5);
   }
   await clearStaleMissingArtifactToolFailure(context, sessionId);
+  const memoryRefresh = await refreshPersistentMemoryState(context, requestOwnerIsCurrent);
+  if (memoryRefresh === "stale" || await stopStaleRequest()) return;
 
   const _tMsInput0 = Date.now();
   const _msInput = createMetaSchedulerInput(context, selectedRuntime, text, false);
@@ -2897,6 +2662,22 @@ export async function sendMessage(
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
     modelRoundLoop: for (let round = 0; ; round += 1) {
       if (await stopStaleRequest()) return;
+      if (round >= MAX_MODEL_TOTAL_TOOL_ROUNDS) {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `model_round_limit_reached rounds=${round}/${MAX_MODEL_TOTAL_TOOL_ROUNDS}`,
+          "warning",
+          requestOwnerIsCurrent,
+        );
+        writeLine(
+          output,
+          context.language === "en-US"
+            ? "PARTIAL: execution stopped at the request turn limit; the task is not complete."
+            : "PARTIAL：执行已到达本请求轮次上限；任务尚未完成。",
+        );
+        break;
+      }
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
@@ -2908,9 +2689,27 @@ export async function sendMessage(
       let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       let roundChunkCount = 0;
       let roundHadUsage = false;
+      let pendingRoundUsage: ModelUsage | undefined;
       let roundFinishReason: string | undefined;
       let roundHadThinking = false;
       const modelSupportsTools = selectedTools;
+      let toolAttemptController = new AbortController();
+      let forwardToolAttemptAbort = () => toolAttemptController.abort(controller.signal.reason);
+      if (controller.signal.aborted) {
+        forwardToolAttemptAbort();
+      } else {
+        controller.signal.addEventListener("abort", forwardToolAttemptAbort, { once: true });
+      }
+      let earlyToolExecution:
+        | Promise<Awaited<ReturnType<typeof executeToolCallsWithReadonlyParallelism>>>
+        | undefined;
+      let earlyToolContinuation: PendingModelContinuation | undefined;
+      let earlyToolGeneration: number | undefined;
+      let earlyToolBaseMessageCount = 0;
+      let earlyToolBatchResult:
+        | Awaited<ReturnType<typeof executeToolCallsWithReadonlyParallelism>>
+        | undefined;
+      let earlyToolResultMessages: ModelMessage[] = [];
       if (!modelSupportsTools && round === 0) {
         writeLine(
           output,
@@ -2999,6 +2798,44 @@ export async function sendMessage(
         lastAssistantPreviewFlushAt = 0;
         textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       };
+      let providerAttemptGeneration = 0;
+      const resetProviderAttempt = () => {
+        if (!requestOwnerIsCurrent()) return;
+        const staleToolSignal = toolAttemptController.signal;
+        controller.signal.removeEventListener("abort", forwardToolAttemptAbort);
+        toolAttemptController.abort("provider_attempt_reset");
+        if (
+          context.pendingLocalApproval &&
+          "continuation" in context.pendingLocalApproval &&
+          context.pendingLocalApproval.continuation?.abortSignal === staleToolSignal
+        ) {
+          context.pendingLocalApproval = undefined;
+        }
+        if (earlyToolExecution) void earlyToolExecution.catch(() => undefined);
+        earlyToolExecution = undefined;
+        earlyToolContinuation = undefined;
+        earlyToolGeneration = undefined;
+        earlyToolBaseMessageCount = 0;
+        earlyToolBatchResult = undefined;
+        earlyToolResultMessages = [];
+        toolAttemptController = new AbortController();
+        const nextToolAttemptController = toolAttemptController;
+        forwardToolAttemptAbort = () => nextToolAttemptController.abort(controller.signal.reason);
+        if (controller.signal.aborted) {
+          toolAttemptController.abort(controller.signal.reason);
+        } else {
+          controller.signal.addEventListener("abort", forwardToolAttemptAbort, { once: true });
+        }
+        providerAttemptGeneration += 1;
+        resetAssistantDraftForProviderRetry();
+        toolCalls.length = 0;
+        roundChunkCount = 0;
+        roundHadUsage = false;
+        pendingRoundUsage = undefined;
+        roundFinishReason = undefined;
+        roundHadThinking = false;
+        markContextUsageStale(context, "disconnected_mid_stream");
+      };
       for await (const event of withProviderRetry(
         gateway,
         context.providerBreaker,
@@ -3006,12 +2843,11 @@ export async function sendMessage(
         providerRequest,
         controller.signal,
         {
-          stopAfterToolUse: providerRequest.parallelToolCalls === false,
           onRetry: (info) => {
-            resetAssistantDraftForProviderRetry();
             showProviderRetryActivity(context, info);
             return handleProviderRetryForMetaOrchestration(context, sessionId, info);
           },
+          onAttemptReset: resetProviderAttempt,
         },
       )) {
         if (!requestOwnerIsCurrent()) {
@@ -3024,7 +2860,12 @@ export async function sendMessage(
         }
         recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
-          await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
+          await clearActiveProviderFailureAfterRecovery(
+            context,
+            sessionId,
+            selectedRuntime,
+            requestOwnerIsCurrent,
+          );
           if (await stopStaleRequest()) return;
           clearRequestActivity(context, { kind: "foreground", requestTurnId });
           const visibleText = textSanitizer.push(event.text);
@@ -3043,7 +2884,13 @@ export async function sendMessage(
           continue;
         }
         if (event.type === "tool_use") {
-          await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
+          await clearActiveProviderFailureAfterRecovery(
+            context,
+            sessionId,
+            selectedRuntime,
+            requestOwnerIsCurrent,
+          );
+          if (await stopStaleRequest()) return;
           const visibleText = textSanitizer.flush();
           assistantText += visibleText;
           roundAssistantText += visibleText;
@@ -3056,27 +2903,58 @@ export async function sendMessage(
           pendingAssistantPreviewText = result.text;
           if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
           clearRequestActivity(context, { kind: "foreground", requestTurnId });
-          toolCalls.push({ id: event.id, name: event.name, input: event.input });
+          const toolCall = { id: event.id, name: event.name, input: event.input };
+          toolCalls.push(toolCall);
+          if (!earlyToolExecution) {
+            earlyToolGeneration = providerAttemptGeneration;
+            earlyToolBaseMessageCount = messagesForProvider.length;
+            earlyToolContinuation = {
+              messages: [
+                ...messagesForProvider,
+                {
+                  role: "assistant",
+                  content: truncateRoundAssistantForProvider(roundAssistantText, context),
+                  toolCalls: [toolCall],
+                },
+              ],
+              provider: selectedRuntime.provider,
+              model: selectedRuntime.model,
+              endpointProfile: selectedRuntime.endpointProfile,
+              reasoningLevel: selectedRuntime.reasoningLevel,
+              reasoningSent: selectedRuntime.reasoningSent,
+              requestTurnId,
+              abortSignal: toolAttemptController.signal,
+              attemptedRuntimeKeys: [...attemptedRuntimeKeys],
+              ...(reportWriteGuard ? { reportWriteGuard } : {}),
+            };
+            earlyToolExecution = executeToolCallsWithReadonlyParallelism(
+              [toolCall],
+              context,
+              sessionId,
+              output,
+              {
+                continuation: earlyToolContinuation,
+                failFastContext: "streaming tool call",
+                collectFailureFingerprints: true,
+              },
+            );
+          }
           continue;
         }
         if (event.type === "assistant_thinking_delta") {
-          await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
+          await clearActiveProviderFailureAfterRecovery(
+            context,
+            sessionId,
+            selectedRuntime,
+            requestOwnerIsCurrent,
+          );
+          if (await stopStaleRequest()) return;
           roundHadThinking = true;
           continue;
         }
         if (event.type === "usage") {
           roundHadUsage = true;
-          recordCacheUsageObservation(context, "main", event.usage);
-          const stats = recordModelUsage(context, event.usage);
-          await appendUsageEvents(context, sessionId, stats);
-          scheduleApiTokenCountDiagnostics({
-            context,
-            gateway,
-            runtime: selectedRuntime,
-            messages: requestMessages,
-            signal: controller.signal,
-            requestTurnId,
-          });
+          pendingRoundUsage = event.usage;
           continue;
         }
         if (event.type === "message_stop") {
@@ -3086,6 +2964,7 @@ export async function sendMessage(
           continue;
         }
         if (event.type === "error") {
+          const hadToolUse = toolCalls.length > 0 || earlyToolExecution !== undefined;
           const retryInfo = context.retryInfo;
           clearRequestActivity(context, { kind: "foreground", requestTurnId });
           markContextUsageStale(context, "disconnected_mid_stream");
@@ -3095,7 +2974,7 @@ export async function sendMessage(
             commitGuard: requestOwnerIsCurrent,
           });
           if (await stopStaleRequest()) return;
-          if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
+          if (!hadToolUse && !reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
             reactiveCompactRetried = true;
             const reactivePreflight = await prepareMessagesForProviderPreflight({
               messages: messagesForProvider,
@@ -3105,13 +2984,14 @@ export async function sendMessage(
               trigger: "reactive",
               deps: compactPreflightDeps,
             });
+            if (await stopStaleRequest()) return;
             if (reactivePreflight.blocked) {
               writeLine(output, reactivePreflight.message);
               writeStatus(output, context);
               return;
             }
             messagesForProvider = appendLatestUserRequestAnchor(reactivePreflight.messages);
-            resetAssistantDraftForProviderRetry();
+            resetProviderAttempt();
             showProviderRecoveryActivity(context);
             await appendSystemEvent(
               context,
@@ -3119,17 +2999,19 @@ export async function sendMessage(
               `reactive_compact_retry: provider=${selectedRuntime.provider} model=${selectedRuntime.model} messages=${messagesForProvider.length}`,
               "warning",
             );
+            if (await stopStaleRequest()) return;
             continue modelRoundLoop;
           }
           const toolCallingKey = runtimeToolCallingKey(selectedRuntime);
           if (
+            !hadToolUse &&
             modelSupportsTools &&
             toolCallingDegradedForRuntime !== toolCallingKey &&
             isToolCallingCompatibilityError(event.error)
           ) {
             selectedTools = false;
             toolCallingDegradedForRuntime = toolCallingKey;
-            resetAssistantDraftForProviderRetry();
+            resetProviderAttempt();
             showProviderRecoveryActivity(context);
             await appendSystemEvent(
               context,
@@ -3137,20 +3019,27 @@ export async function sendMessage(
               `tool_calling_degraded_retry: provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile ?? "default"}`,
               "warning",
             );
+            if (await stopStaleRequest()) return;
             continue modelRoundLoop;
           }
           // withProviderRetry already handled same-provider retries, concurrency gating,
           // and breaker transitions. Only fallback to a different model remains.
-          const fallback = resolveRuntimeFallback(context, selectedRuntime, event.error);
+          const fallback =
+            hadToolUse
+              ? undefined
+              : resolveRuntimeFallback(context, selectedRuntime, event.error, attemptedRuntimeKeys);
           if (fallback) {
+            attemptedRuntimeKeys.add(providerRuntimeKey(fallback.runtime));
             await recordProviderFallbackAttempt(context, sessionId, {
               from: selectedRuntime,
               to: fallback.runtime,
               kind: fallback.kind,
               code: fallback.code,
               status: "attempted",
+              commitGuard: requestOwnerIsCurrent,
             });
-            resetAssistantDraftForProviderRetry();
+            if (await stopStaleRequest()) return;
+            resetProviderAttempt();
             showProviderSwitchActivity(context);
             await appendRuntimePolicyHint(context, sessionId, text, {
               providerFailure: {
@@ -3160,6 +3049,7 @@ export async function sendMessage(
                 message: fallback.kind,
               },
             });
+            if (await stopStaleRequest()) return;
             writeLine(
               output,
               context.lastProviderFallbackAttempt?.summary ??
@@ -3187,6 +3077,9 @@ export async function sendMessage(
             reason: "provider_disconnect",
             userMessageId: userMessageEvent.id,
           });
+          if (hadToolUse) {
+            toolAttemptController.abort("provider_stream_failed_after_tool_use");
+          }
           if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
             writeProviderTerminalError(output, event.error, context, requestTurnId);
           }
@@ -3194,6 +3087,28 @@ export async function sendMessage(
         }
       }
       if (await stopStaleRequest()) return;
+      const acceptedAttemptGeneration = providerAttemptGeneration;
+      if (pendingRoundUsage) {
+        recordCacheUsageObservation(context, "main", pendingRoundUsage);
+        const stats = recordModelUsage(context, pendingRoundUsage);
+        await appendUsageEvents(context, sessionId, stats);
+        if (
+          acceptedAttemptGeneration !== providerAttemptGeneration ||
+          (await stopStaleRequest())
+        ) {
+          return;
+        }
+        scheduleApiTokenCountDiagnostics({
+          context,
+          gateway,
+          runtime: selectedRuntime,
+          messages: requestMessages,
+          signal: controller.signal,
+          requestTurnId,
+          commitGuard: () =>
+            requestOwnerIsCurrent() && acceptedAttemptGeneration === providerAttemptGeneration,
+        });
+      }
       const finalVisibleText = textSanitizer.flush();
       assistantText += finalVisibleText;
       roundAssistantText += finalVisibleText;
@@ -3206,6 +3121,19 @@ export async function sendMessage(
         );
         pendingAssistantPreviewText = result.text;
         if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
+      }
+      if (earlyToolExecution && earlyToolContinuation) {
+        earlyToolBatchResult = await earlyToolExecution;
+        if (
+          earlyToolGeneration !== providerAttemptGeneration ||
+          (await stopStaleRequest())
+        ) {
+          return;
+        }
+        if (earlyToolBatchResult.pendingApproval) return;
+        earlyToolResultMessages = earlyToolContinuation.messages.slice(
+          earlyToolBaseMessageCount + 1,
+        );
       }
 
       if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
@@ -3276,6 +3204,7 @@ export async function sendMessage(
           content: truncateRoundAssistantForProvider(roundAssistantText, context),
           toolCalls,
         });
+        messagesForProvider.push(...earlyToolResultMessages);
       }
       if (toolCalls.length === 0) {
         if (
@@ -3344,7 +3273,24 @@ export async function sendMessage(
         }
         // D.13U — Final Answer Claim Gate 和 Extended Gate 聚合检查
         if (assistantText) {
-          await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
+          const coherentDraft = enforceSuccessfulToolCoherence(assistantText, context);
+          if (coherentDraft !== assistantText) {
+            assistantText = coherentDraft;
+            roundAssistantText = coherentDraft;
+            replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+            await appendSystemEvent(
+              context,
+              sessionId,
+              "final_answer_coherence_guard: replaced contradictory pre-tool failure/success text with evidence-backed final answer",
+              "warning",
+            );
+          }
+          await clearActiveProviderFailureAfterRecovery(
+            context,
+            sessionId,
+            selectedRuntime,
+            requestOwnerIsCurrent,
+          );
           if (await stopStaleRequest()) return;
           const gateResult = evaluateAggregatedFinalAnswerGate(
             context,
@@ -3386,8 +3332,11 @@ export async function sendMessage(
               context,
               userText: text,
               assistantText,
-              retryBudgetRemaining:
-                finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+              retryBudgetRemaining: finalGapHasProgress(
+                gateResult,
+                context,
+                finalGapProgressState,
+              ),
               evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
             });
             await appendSystemEvent(
@@ -3405,7 +3354,7 @@ export async function sendMessage(
               assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
-                context.evidence,
+                evidenceForCurrentVerificationScope(context),
               );
               replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
               break;
@@ -3413,41 +3362,20 @@ export async function sendMessage(
             discardAssistantBlock(output, assistantStreamBlockId);
             assistantText = "";
             roundAssistantText = "";
-            const actionResult = await runFinalGateEvidenceAction({
-              actionPlan,
-              context,
-              output,
-              sessionId,
-              messages: messagesForProvider,
-              runtime: selectedRuntime,
-              requestTurnId,
-              abortSignal: controller.signal,
-              ...(reportWriteGuard ? { reportWriteGuard } : {}),
-            });
-            if (await stopStaleRequest()) return;
-            if (actionResult.status === "permission_pending") {
-              return;
-            }
-            if (shouldContinueAfterFinalGateEvidenceAction(actionResult, finalAnswerEvidenceActionRetries)) {
-              messagesForProvider = actionResult.messages;
-              finalAnswerEvidenceActionRetries += 1;
-              continue;
-            }
-            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-            if (await stopStaleRequest()) return;
-            assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+            noProgressRounds += 1;
+            finalGapProgressState = captureFinalGapProgressState(
               gateResult,
-              context.language,
-              context.evidence,
+              context,
+              actionPlan.evidenceAction,
             );
-            replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+            messagesForProvider.push({ role: "user", content: actionPlan.directive });
             await appendSystemEvent(
               context,
               sessionId,
-              `final_answer_gap_action_${actionResult.status} reason=${actionResult.reason}`,
+              `final_answer_gap_returned_to_model_loop reason=${actionPlan.reason} noProgress=${noProgressRounds}/${_killThreshold}`,
               "warning",
             );
-            break;
+            continue;
           }
         }
         break;
@@ -3469,27 +3397,38 @@ export async function sendMessage(
         consecutiveTodoOnlyRounds = 0;
         evidenceRounds += 1;
       }
-      const toolBatchResult = await executeToolCallsWithReadonlyParallelism(
-        toolCalls,
-        context,
-        sessionId,
-        output,
-        {
-          continuation: {
-            messages: messagesForProvider,
-            provider: selectedRuntime.provider,
-            model: selectedRuntime.model,
-            endpointProfile: selectedRuntime.endpointProfile,
-            reasoningLevel: selectedRuntime.reasoningLevel,
-            reasoningSent: selectedRuntime.reasoningSent,
-            requestTurnId,
-            abortSignal: controller.signal,
-            ...(reportWriteGuard ? { reportWriteGuard } : {}),
+      const remainingToolCalls = earlyToolBatchResult ? toolCalls.slice(1) : toolCalls;
+      let toolBatchResult = earlyToolBatchResult;
+      if (remainingToolCalls.length > 0) {
+        const remainingResult = await executeToolCallsWithReadonlyParallelism(
+          remainingToolCalls,
+          context,
+          sessionId,
+          output,
+          {
+            continuation: {
+              messages: messagesForProvider,
+              provider: selectedRuntime.provider,
+              model: selectedRuntime.model,
+              endpointProfile: selectedRuntime.endpointProfile,
+              reasoningLevel: selectedRuntime.reasoningLevel,
+              reasoningSent: selectedRuntime.reasoningSent,
+              requestTurnId,
+              abortSignal: controller.signal,
+              attemptedRuntimeKeys: [...attemptedRuntimeKeys],
+              ...(reportWriteGuard ? { reportWriteGuard } : {}),
+            },
+            failFastContext: "this batch",
+            collectFailureFingerprints: true,
           },
-          failFastContext: "this batch",
-          collectFailureFingerprints: true,
-        },
-      );
+        );
+        toolBatchResult = toolBatchResult
+          ? mergeToolBatchExecutionResults(toolBatchResult, remainingResult)
+          : remainingResult;
+      }
+      if (!toolBatchResult) {
+        throw new Error("tool batch completed without an execution result");
+      }
       if (await stopStaleRequest()) return;
       if (toolBatchResult.pendingApproval) {
         return;
@@ -3580,7 +3519,12 @@ export async function sendMessage(
     clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
   }
   if (assistantText) {
-    await clearActiveProviderFailureAfterRecovery(context, sessionId, selectedRuntime);
+    await clearActiveProviderFailureAfterRecovery(
+      context,
+      sessionId,
+      selectedRuntime,
+      requestOwnerIsCurrent,
+    );
     if (await stopStaleRequest()) return;
   }
 
@@ -3597,6 +3541,7 @@ export async function sendMessage(
     // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
     // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
     {
+      const assistantTextBeforeFinalGate = assistantText;
       const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
       if (gateResult.status === "needs_disclaimer") {
         const shouldRewriteClaimAlignment = shouldRewriteFinalGateClaimAlignment(gateResult, context);
@@ -3653,8 +3598,7 @@ export async function sendMessage(
             context,
             userText: text,
             assistantText,
-            retryBudgetRemaining:
-              finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+            retryBudgetRemaining: false,
             evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
           });
           await appendSystemEvent(
@@ -3666,73 +3610,13 @@ export async function sendMessage(
               : "info",
           );
           if (await stopStaleRequest()) return;
-          if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
-            replaceAssistantBlockContent(output, assistantStreamBlockId, "");
-            const actionResult = await runFinalGateEvidenceAction({
-              actionPlan,
-              context,
-              output,
-              sessionId,
-              messages: messagesForProvider,
-              runtime: selectedRuntime,
-              requestTurnId,
-              abortSignal: controller.signal,
-              ...(reportWriteGuard ? { reportWriteGuard } : {}),
-            });
-            if (await stopStaleRequest()) return;
-            if (actionResult.status === "permission_pending") {
-              return;
-            }
-            if (shouldContinueAfterFinalGateEvidenceAction(actionResult, finalAnswerEvidenceActionRetries)) {
-              finalAnswerEvidenceActionRetries += 1;
-              assistantText = await streamFinalModelAnswerWithoutTools(
-                {
-                  messages: actionResult.messages,
-                  provider: selectedRuntime.provider,
-                  model: selectedRuntime.model,
-                  endpointProfile: selectedRuntime.endpointProfile,
-                  reasoningLevel: selectedRuntime.reasoningLevel,
-                  reasoningSent: selectedRuntime.reasoningSent,
-                  ...(reportWriteGuard ? { reportWriteGuard } : {}),
-                },
-                context,
-                gateway,
-                sessionId,
-                output,
-                controller.signal,
-                assistantStreamBlockId,
-                false,
-                finalAnswerClaimAlignmentRewrites,
-                finalAnswerEvidenceActionRetries,
-              );
-              if (await stopStaleRequest()) return;
-              if (context.pendingLocalApproval) return;
-            } else {
-              await appendSystemEvent(
-                context,
-                sessionId,
-                `final_answer_gap_action_${actionResult.status} final_safety=yes reason=${actionResult.reason}`,
-                "warning",
-              );
-              if (await stopStaleRequest()) return;
-              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-              if (await stopStaleRequest()) return;
-              assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-                gateResult,
-                context.language,
-                context.evidence,
-              );
-            }
-          } else {
-            if (await stopStaleRequest()) return;
-            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-            if (await stopStaleRequest()) return;
-            assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-              gateResult,
-              context.language,
-              context.evidence,
-            );
-          }
+          await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+          if (await stopStaleRequest()) return;
+          assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+            gateResult,
+            context.language,
+            evidenceForCurrentVerificationScope(context),
+          );
         }
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
@@ -3741,7 +3625,14 @@ export async function sendMessage(
         assistantText = visibleAssistantText;
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
-      const coherentAssistantText = enforceSuccessfulToolCoherence(assistantText, context);
+      const evidenceCorrectedDraft = enforceSuccessfulToolCoherence(
+        assistantTextBeforeFinalGate,
+        context,
+      );
+      const coherentAssistantText =
+        evidenceCorrectedDraft === assistantTextBeforeFinalGate
+          ? enforceSuccessfulToolCoherence(assistantText, context)
+          : evidenceCorrectedDraft;
       if (coherentAssistantText !== assistantText) {
         if (await stopStaleRequest()) return;
         await appendSystemEvent(
@@ -3776,6 +3667,19 @@ export async function sendMessage(
       });
       if (await stopStaleRequest()) return;
     }
+    const finalVisibleGate = evaluateAggregatedFinalAnswerGate(
+      context,
+      assistantText,
+      metaSchedulerDecision.shouldRunFinalAnswerGate,
+    );
+    if (finalVisibleGate.status === "needs_disclaimer") {
+      assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+        finalVisibleGate,
+        context.language,
+        evidenceForCurrentVerificationScope(context),
+      );
+      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+    }
     const visibleAssistantBlockText =
       committedIntermediateAssistantText && assistantText.startsWith(committedIntermediateAssistantText)
         ? assistantText.slice(committedIntermediateAssistantText.length).trimStart()
@@ -3784,17 +3688,17 @@ export async function sendMessage(
       replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
     }
     if (await stopStaleRequest()) return;
-    endAssistantStream(output);
-    clearRequestActivity(context, { kind: "foreground", requestTurnId });
-    writeFinalAssistantText(output, assistantText);
-    output.write("\n");
     await context.store.appendEvent(sessionId, {
       type: "assistant_text_delta",
       id: assistantEventId,
       text: assistantText,
       createdAt: new Date().toISOString(),
-    });
+    }, requestOwnerIsCurrent);
     if (await stopStaleRequest()) return;
+    endAssistantStream(output);
+    clearRequestActivity(context, { kind: "foreground", requestTurnId });
+    writeFinalAssistantText(output, assistantText);
+    output.write("\n");
     await commitAutoLearningAfterSuccessfulTurn(context, text, {
       requestTurnId,
       sessionId,
@@ -3849,8 +3753,9 @@ export async function __testSendMessage(
   context: TuiContext,
   gateway: ModelGateway,
   output: Writable,
+  controller?: AbortController,
 ): Promise<void> {
-  await sendMessage(text, context, gateway, output);
+  await sendMessage(text, context, gateway, output, controller);
 }
 
 export async function __testStreamFinalModelAnswerWithoutTools(
@@ -3905,13 +3810,16 @@ async function clearActiveProviderFailureAfterRecovery(
   context: TuiContext,
   sessionId: string,
   runtime: { provider: string; model: string },
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   const fallbackAttempt = context.lastProviderFallbackAttempt;
   const recoveredByFallback =
     fallbackAttempt?.toProvider === runtime.provider &&
     fallbackAttempt.toModel === runtime.model &&
     fallbackAttempt.status === "attempted";
   if (recoveredByFallback) {
+    if (commitGuard && !commitGuard()) return;
     fallbackAttempt.status = "succeeded";
     fallbackAttempt.createdAt = new Date().toISOString();
     await appendSystemEvent(
@@ -3919,8 +3827,10 @@ async function clearActiveProviderFailureAfterRecovery(
       sessionId,
       `provider fallback attempt: status succeeded; to ${runtime.provider}/${runtime.model}`,
       "info",
+      commitGuard,
     );
   }
+  if (commitGuard && !commitGuard()) return;
   if (!context.lastProviderFailure) return;
   context.lastProviderFailure = undefined;
   await appendSystemEvent(
@@ -3928,6 +3838,7 @@ async function clearActiveProviderFailureAfterRecovery(
     sessionId,
     `provider failure recovered: active provider failure cleared after successful response from ${runtime.provider}/${runtime.model}`,
     "info",
+    commitGuard,
   );
 }
 
@@ -4351,10 +4262,7 @@ function compactModelMessageForHistory(message: ModelMessage): ModelMessage {
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
 
 function isModelHistoryCompactBoundary(event: TranscriptEvent): boolean {
-  return (
-    event.type === "deep_compact_packet" ||
-    (event.type === "system_event" && event.message.startsWith(COMPACT_PROJECTION_EVENT_PREFIX))
-  );
+  return modelHistoryCompactSummary(event) !== undefined;
 }
 
 function modelHistoryCompactSummary(
@@ -4417,17 +4325,9 @@ export async function buildModelMessagesWithRecentContext(
         event.type === "tool_result" ||
         event.type === "interrupt" ||
         isModelHistoryCompactBoundary(event),
+      stopPredicate: isModelHistoryCompactBoundary,
     });
-    let recent = recentTranscript.events;
-    if (!recent.some(isModelHistoryCompactBoundary)) {
-      const latestBoundary = await context.store.readRecentTranscriptEvents(sessionId, {
-        limit: 1,
-        predicate: isModelHistoryCompactBoundary,
-      });
-      if (latestBoundary.events[0] && isModelHistoryCompactBoundary(latestBoundary.events[0])) {
-        recent = [latestBoundary.events[0], ...recent];
-      }
-    }
+    const recent = recentTranscript.events;
     let compactBoundaryIndex = -1;
     for (let index = recent.length - 1; index >= 0; index -= 1) {
       if (!isModelHistoryCompactBoundary(recent[index])) continue;
@@ -4624,11 +4524,14 @@ async function streamFinalModelAnswerWithoutTools(
   // assistantStreamBlockId 累计 round 文本，这里复用同一 id，downgrade/discard
   // 才能命中真实 block。不传则保持旧行为新建一个 final 专用 id。
   reuseAssistantStreamBlockId?: string,
-  fallbackAttempted = false,
+  _fallbackAttempted = false,
   claimAlignmentRewriteCount = 0,
   evidenceActionRetryCount = 0,
 ): Promise<string> {
   const requestTurnId = continuation.requestTurnId;
+  const attemptedRuntimeKeys = new Set(
+    continuation.attemptedRuntimeKeys ?? [providerRuntimeKey(runtimeFromContinuation(continuation))],
+  );
   const requestIsStale = (): boolean =>
     signal.aborted ||
     continuation.abortSignal?.aborted === true ||
@@ -4648,6 +4551,7 @@ async function streamFinalModelAnswerWithoutTools(
   }
   let chunkCount = 0;
   let hadUsage = false;
+  let pendingUsage: ModelUsage | undefined;
   let finishReason: string | undefined;
   let hadThinking = false;
   let ignoredRawToolProtocolText = false;
@@ -4708,6 +4612,18 @@ async function streamFinalModelAnswerWithoutTools(
     lastAssistantPreviewFlushAt = 0;
     textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
   };
+  let providerAttemptGeneration = 0;
+  const resetFinalProviderAttempt = () => {
+    if (requestIsStale()) return;
+    providerAttemptGeneration += 1;
+    resetFinalAssistantDraftForProviderRetry();
+    chunkCount = 0;
+    hadUsage = false;
+    pendingUsage = undefined;
+    finishReason = undefined;
+    hadThinking = false;
+    markContextUsageStale(context, "disconnected_mid_stream");
+  };
   for await (const event of withProviderRetry(
     gateway,
     context.providerBreaker,
@@ -4716,10 +4632,10 @@ async function streamFinalModelAnswerWithoutTools(
     signal,
     {
       onRetry: (info) => {
-        resetFinalAssistantDraftForProviderRetry();
         showProviderRetryActivity(context, info);
         return handleProviderRetryForMetaOrchestration(context, sessionId, info);
       },
+      onAttemptReset: resetFinalProviderAttempt,
     },
   )) {
     if (requestIsStale()) {
@@ -4732,7 +4648,12 @@ async function streamFinalModelAnswerWithoutTools(
     }
     recordRequestFirstDelta(context, event.type);
     if (event.type === "assistant_text_delta") {
-      await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
+      await clearActiveProviderFailureAfterRecovery(
+        context,
+        sessionId,
+        continuation,
+        () => !requestIsStale(),
+      );
       if (requestIsStale()) return "";
       clearRequestActivity(context, activityOwner);
       const visibleText = textSanitizer.push(event.text);
@@ -4750,23 +4671,19 @@ async function streamFinalModelAnswerWithoutTools(
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
-      await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
+      await clearActiveProviderFailureAfterRecovery(
+        context,
+        sessionId,
+        continuation,
+        () => !requestIsStale(),
+      );
+      if (requestIsStale()) return "";
       hadThinking = true;
       continue;
     }
     if (event.type === "usage") {
       hadUsage = true;
-      recordCacheUsageObservation(context, "final", event.usage);
-      const stats = recordModelUsage(context, event.usage);
-      await appendUsageEvents(context, sessionId, stats);
-      scheduleApiTokenCountDiagnostics({
-        context,
-        gateway,
-        runtime: runtimeFromContinuation(continuation),
-        messages: preflight.messages,
-        signal,
-        runtimeContextId: context.runtimeContextId,
-      });
+      pendingUsage = event.usage;
       continue;
     }
     if (event.type === "message_stop") {
@@ -4785,6 +4702,7 @@ async function streamFinalModelAnswerWithoutTools(
         `final_no_tools_ignored_tool_use: ${event.name}`,
         "warning",
       );
+      if (requestIsStale()) return "";
       continue;
     }
     if (event.type === "error") {
@@ -4799,18 +4717,25 @@ async function streamFinalModelAnswerWithoutTools(
       if (requestIsStale()) return "";
       // withProviderRetry already recorded the failure and exhausted same-provider
       // retries. Only fallback to a different model remains.
-      const fallback = fallbackAttempted
-        ? undefined
-        : resolveRuntimeFallback(context, currentRuntime, event.error);
+      const fallback = resolveRuntimeFallback(
+        context,
+        currentRuntime,
+        event.error,
+        attemptedRuntimeKeys,
+      );
       if (fallback) {
+        attemptedRuntimeKeys.add(providerRuntimeKey(fallback.runtime));
+        continuation.attemptedRuntimeKeys = [...attemptedRuntimeKeys];
         await recordProviderFallbackAttempt(context, sessionId, {
           from: currentRuntime,
           to: fallback.runtime,
           kind: fallback.kind,
           code: fallback.code,
           status: "attempted",
+          commitGuard: () => !requestIsStale(),
         });
-        resetFinalAssistantDraftForProviderRetry();
+        if (requestIsStale()) return "";
+        resetFinalProviderAttempt();
         showProviderSwitchActivity(context);
         await appendRuntimePolicyHint(context, sessionId, "continuation", {
           providerFailure: {
@@ -4820,6 +4745,7 @@ async function streamFinalModelAnswerWithoutTools(
             message: fallback.kind,
           },
         });
+        if (requestIsStale()) return "";
         writeLine(output, context.lastProviderFallbackAttempt?.summary ?? "");
         continuation.provider = fallback.runtime.provider;
         continuation.messages = appendLatestUserRequestAnchor(continuation.messages);
@@ -4847,6 +4773,23 @@ async function streamFinalModelAnswerWithoutTools(
       writeProviderTerminalError(output, event.error, context, requestTurnId);
       return assistantText;
     }
+  }
+  const acceptedAttemptGeneration = providerAttemptGeneration;
+  if (pendingUsage && !requestIsStale()) {
+    recordCacheUsageObservation(context, "final", pendingUsage);
+    const stats = recordModelUsage(context, pendingUsage);
+    await appendUsageEvents(context, sessionId, stats);
+    if (acceptedAttemptGeneration !== providerAttemptGeneration || requestIsStale()) return "";
+    scheduleApiTokenCountDiagnostics({
+      context,
+      gateway,
+      runtime: runtimeFromContinuation(continuation),
+      messages: preflight.messages,
+      signal,
+      runtimeContextId: context.runtimeContextId,
+      commitGuard: () =>
+        !requestIsStale() && acceptedAttemptGeneration === providerAttemptGeneration,
+    });
   }
   if (requestIsStale()) return "";
   const finalVisibleText = textSanitizer.flush();
@@ -4887,7 +4830,12 @@ async function streamFinalModelAnswerWithoutTools(
     if (continuation.provider !== originalProvider || continuation.model !== originalModel) {
       clearProviderBreaker(context.providerBreaker, originalProvider, originalModel);
     }
-    await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
+    await clearActiveProviderFailureAfterRecovery(
+      context,
+      sessionId,
+      continuation,
+      () => !requestIsStale(),
+    );
     if (requestIsStale()) return "";
     startRequestActivity(output, context, "checking_final_evidence", {
       ...(requestTurnId ? { requestTurnId } : {}),
@@ -4918,7 +4866,7 @@ async function streamFinalModelAnswerWithoutTools(
           output,
           signal,
           assistantStreamBlockId,
-          fallbackAttempted,
+          false,
           claimAlignmentRewriteCount + 1,
           evidenceActionRetryCount,
         );
@@ -4928,8 +4876,7 @@ async function streamFinalModelAnswerWithoutTools(
         context,
         userText: latestUserTextFromMessages(continuation.messages),
         assistantText,
-        retryBudgetRemaining:
-          evidenceActionRetryCount < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+        retryBudgetRemaining: false,
         evidenceActionRetryCount,
       });
       await appendSystemEvent(
@@ -4941,57 +4888,12 @@ async function streamFinalModelAnswerWithoutTools(
           : "info",
       );
       if (requestIsStale()) return "";
-      if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
-        startRequestActivity(output, context, "collecting_final_evidence", {
-          ...(requestTurnId ? { requestTurnId } : {}),
-        });
-        replaceAssistantBlockContent(output, assistantStreamBlockId, "");
-        const actionResult = await runFinalGateEvidenceAction({
-          actionPlan,
-          context,
-          output,
-          sessionId,
-          messages: continuation.messages,
-          runtime,
-          requestTurnId,
-          abortSignal: continuation.abortSignal ?? signal,
-          ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
-        });
-        if (requestIsStale()) return "";
-        if (actionResult.status === "permission_pending") {
-          return "";
-        }
-        if (shouldContinueAfterFinalGateEvidenceAction(actionResult, evidenceActionRetryCount)) {
-          continuation.messages = actionResult.messages;
-          startRequestActivity(output, context, "rewriting_final_answer", {
-            ...(requestTurnId ? { requestTurnId } : {}),
-          });
-          return streamFinalModelAnswerWithoutTools(
-            continuation,
-            context,
-            gateway,
-            sessionId,
-            output,
-            signal,
-            assistantStreamBlockId,
-            fallbackAttempted,
-            claimAlignmentRewriteCount,
-            evidenceActionRetryCount + 1,
-          );
-        }
-        await appendSystemEvent(
-          context,
-          sessionId,
-          `final_answer_gap_action_${actionResult.status} final_no_tools=yes reason=${actionResult.reason}`,
-          "warning",
-        );
-      }
       await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
       if (requestIsStale()) return "";
       assistantText = buildEvidenceBackedFinalBoundaryAnswer(
         gateResult,
         context.language,
-        context.evidence,
+        evidenceForCurrentVerificationScope(context),
       );
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
@@ -5124,9 +5026,17 @@ export async function continueModelAfterToolResults(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
+  const inheritedSignal = continuation.abortSignal;
+  if (inheritedSignal?.aborted) return;
   const sessionId = await ensureSession(context);
-  const requestTurnId = beginForegroundRequestTurn(context);
+  const requestTurnId =
+    continuation.requestTurnId && continuation.requestTurnId === context.currentRequestTurnId
+      ? continuation.requestTurnId
+      : beginForegroundRequestTurn(context);
   const controller = new AbortController();
+  const abortFromInheritedSignal = () => controller.abort(inheritedSignal?.reason);
+  inheritedSignal?.addEventListener("abort", abortFromInheritedSignal, { once: true });
+  if (inheritedSignal?.aborted) controller.abort(inheritedSignal.reason);
   continuation.requestTurnId = requestTurnId;
   continuation.abortSignal = controller.signal;
   const originalContProvider = continuation.provider;
@@ -5139,6 +5049,7 @@ export async function continueModelAfterToolResults(
   let committedIntermediateAssistantText = "";
   let finalAnswerEvidenceActionRetries = 0;
   let finalAnswerClaimAlignmentRewrites = 0;
+  let finalGapProgressState: FinalGapProgressState | undefined;
   let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
@@ -5171,16 +5082,36 @@ export async function continueModelAfterToolResults(
     let todoOnlyHintSent = false;
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
-    let runtimeFallbackAttempted = false;
+    const attemptedRuntimeKeys = new Set(
+      continuation.attemptedRuntimeKeys ?? [providerRuntimeKey(runtimeFromContinuation(continuation))],
+    );
     let continuationToolsEnabled = currentModelSupportsTools(context, runtimeFromContinuation(continuation));
     let toolCallingDegradedForRuntime: string | undefined;
     let highReasoningToolsEmptyRetried = false;
     let reactiveCompactRetried = false;
     let preFallbackRecoveryPrompts = 0;
+    let toolFailureRecoveryState: ToolFailureRecoveryState = { repeatedFailureRounds: 0 };
+    let toolFailureNoToolRecoveryPrompts = 0;
     const _suggestedMax = context.lastMetaSchedulerDecision?.suggestedMaxTodoRounds ?? MAX_TODO_ONLY_CODE_FACT;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
     const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
     continuationRoundLoop: for (let round = 0; ; round += 1) {
+      if (round >= MAX_MODEL_TOTAL_TOOL_ROUNDS) {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `model_round_limit_reached continuation=yes rounds=${round}/${MAX_MODEL_TOTAL_TOOL_ROUNDS}`,
+          "warning",
+          requestOwnerIsCurrent,
+        );
+        writeLine(
+          output,
+          context.language === "en-US"
+            ? "PARTIAL: continuation stopped at the request turn limit; the task is not complete."
+            : "PARTIAL：续轮执行已到达本请求轮次上限；任务尚未完成。",
+        );
+        break;
+      }
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
@@ -5191,6 +5122,7 @@ export async function continueModelAfterToolResults(
       let lastAssistantPreviewFlushAt = 0;
       let roundChunkCount = 0;
       let roundHadUsage = false;
+      let pendingRoundUsage: ModelUsage | undefined;
       let roundFinishReason: string | undefined;
       let roundHadThinking = false;
       let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -5214,6 +5146,23 @@ export async function continueModelAfterToolResults(
       const requestMessages = preflight.messages;
       const promptCacheFields = await buildPromptCacheRequestFields(context);
       const pendingContinuationToolUses: Array<{ id: string; name: string; input: unknown }> = [];
+      let toolAttemptController = new AbortController();
+      let forwardToolAttemptAbort = () => toolAttemptController.abort(controller.signal.reason);
+      if (controller.signal.aborted) {
+        toolAttemptController.abort(controller.signal.reason);
+      } else {
+        controller.signal.addEventListener("abort", forwardToolAttemptAbort, { once: true });
+      }
+      let earlyToolExecution:
+        | Promise<Awaited<ReturnType<typeof executeToolCallsWithReadonlyParallelism>>>
+        | undefined;
+      let earlyToolContinuation: PendingModelContinuation | undefined;
+      let earlyToolGeneration: number | undefined;
+      let earlyToolBaseMessageCount = 0;
+      let earlyToolBatchResult:
+        | Awaited<ReturnType<typeof executeToolCallsWithReadonlyParallelism>>
+        | undefined;
+      let earlyToolResultMessages: ModelMessage[] = [];
       let providerRequest: ModelRequest = {
         messages: requestMessages,
         model: continuation.model,
@@ -5257,6 +5206,44 @@ export async function continueModelAfterToolResults(
         lastAssistantPreviewFlushAt = 0;
         textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       };
+      let providerAttemptGeneration = 0;
+      const resetProviderAttempt = () => {
+        if (!requestOwnerIsCurrent()) return;
+        const staleToolSignal = toolAttemptController.signal;
+        controller.signal.removeEventListener("abort", forwardToolAttemptAbort);
+        toolAttemptController.abort("provider_attempt_reset");
+        if (
+          context.pendingLocalApproval &&
+          "continuation" in context.pendingLocalApproval &&
+          context.pendingLocalApproval.continuation?.abortSignal === staleToolSignal
+        ) {
+          context.pendingLocalApproval = undefined;
+        }
+        if (earlyToolExecution) void earlyToolExecution.catch(() => undefined);
+        earlyToolExecution = undefined;
+        earlyToolContinuation = undefined;
+        earlyToolGeneration = undefined;
+        earlyToolBaseMessageCount = 0;
+        earlyToolBatchResult = undefined;
+        earlyToolResultMessages = [];
+        toolAttemptController = new AbortController();
+        const nextToolAttemptController = toolAttemptController;
+        forwardToolAttemptAbort = () => nextToolAttemptController.abort(controller.signal.reason);
+        if (controller.signal.aborted) {
+          toolAttemptController.abort(controller.signal.reason);
+        } else {
+          controller.signal.addEventListener("abort", forwardToolAttemptAbort, { once: true });
+        }
+        providerAttemptGeneration += 1;
+        resetAssistantDraftForProviderRetry();
+        pendingContinuationToolUses.length = 0;
+        roundChunkCount = 0;
+        roundHadUsage = false;
+        pendingRoundUsage = undefined;
+        roundFinishReason = undefined;
+        roundHadThinking = false;
+        markContextUsageStale(context, "disconnected_mid_stream");
+      };
       for await (const event of withProviderRetry(
         gateway,
         context.providerBreaker,
@@ -5264,12 +5251,11 @@ export async function continueModelAfterToolResults(
         providerRequest,
         controller.signal,
         {
-          stopAfterToolUse: providerRequest.parallelToolCalls === false,
           onRetry: (info) => {
-            resetAssistantDraftForProviderRetry();
             showProviderRetryActivity(context, info);
             return handleProviderRetryForMetaOrchestration(context, sessionId, info);
           },
+          onAttemptReset: resetProviderAttempt,
         },
       )) {
         // D.13O — abort 后必须早返回，迟到的 SSE delta 不再写主屏 / transcript /
@@ -5293,7 +5279,13 @@ export async function continueModelAfterToolResults(
         }
         recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
-          await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
+          await clearActiveProviderFailureAfterRecovery(
+            context,
+            sessionId,
+            runtimeFromContinuation(continuation),
+            requestOwnerIsCurrent,
+          );
+          if (await stopStaleContinuation()) return;
           clearRequestActivity(context);
           const visibleText = textSanitizer.push(event.text);
           assistantText += visibleText;
@@ -5311,7 +5303,13 @@ export async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "tool_use") {
-          await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
+          await clearActiveProviderFailureAfterRecovery(
+            context,
+            sessionId,
+            runtimeFromContinuation(continuation),
+            requestOwnerIsCurrent,
+          );
+          if (await stopStaleContinuation()) return;
           const visibleText = textSanitizer.flush();
           assistantText += visibleText;
           roundAssistantText += visibleText;
@@ -5324,27 +5322,51 @@ export async function continueModelAfterToolResults(
           pendingAssistantPreviewText = result.text;
           if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
           clearRequestActivity(context);
-          pendingContinuationToolUses.push({ id: event.id, name: event.name, input: event.input });
+          const toolCall = { id: event.id, name: event.name, input: event.input };
+          pendingContinuationToolUses.push(toolCall);
+          if (!earlyToolExecution) {
+            earlyToolGeneration = providerAttemptGeneration;
+            earlyToolBaseMessageCount = continuation.messages.length;
+            earlyToolContinuation = {
+              ...continuation,
+              messages: [
+                ...continuation.messages,
+                {
+                  role: "assistant",
+                  content: truncateRoundAssistantForProvider(roundAssistantText, context),
+                  toolCalls: [toolCall],
+                },
+              ],
+              abortSignal: toolAttemptController.signal,
+            };
+            earlyToolExecution = executeToolCallsWithReadonlyParallelism(
+              [toolCall],
+              context,
+              sessionId,
+              output,
+              {
+                continuation: earlyToolContinuation,
+                failFastContext: "streaming continuation tool call",
+                collectFailureFingerprints: true,
+              },
+            );
+          }
           continue;
         }
         if (event.type === "assistant_thinking_delta") {
-          await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
+          await clearActiveProviderFailureAfterRecovery(
+            context,
+            sessionId,
+            runtimeFromContinuation(continuation),
+            requestOwnerIsCurrent,
+          );
+          if (await stopStaleContinuation()) return;
           roundHadThinking = true;
           continue;
         }
         if (event.type === "usage") {
           roundHadUsage = true;
-          recordCacheUsageObservation(context, "continuation", event.usage);
-          const stats = recordModelUsage(context, event.usage);
-          await appendUsageEvents(context, sessionId, stats);
-          scheduleApiTokenCountDiagnostics({
-            context,
-            gateway,
-            runtime: runtimeFromContinuation(continuation),
-            messages: preflight.messages,
-            signal: controller.signal,
-            requestTurnId,
-          });
+          pendingRoundUsage = event.usage;
           continue;
         }
         if (event.type === "message_stop") {
@@ -5354,8 +5376,13 @@ export async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "error") {
+          const hadToolUse =
+            pendingContinuationToolUses.length > 0 || earlyToolExecution !== undefined;
           const retryInfo = context.retryInfo;
           clearRequestActivity(context);
+          if (hadToolUse) {
+            toolAttemptController.abort("provider_stream_failed_after_tool_use");
+          }
           pendingContinuationToolUses.length = 0;
           const currentRuntime = runtimeFromContinuation(continuation);
           markContextUsageStale(context, "disconnected_mid_stream");
@@ -5365,7 +5392,7 @@ export async function continueModelAfterToolResults(
             commitGuard: requestOwnerIsCurrent,
           });
           if (await stopStaleContinuation()) return;
-          if (!reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
+          if (!hadToolUse && !reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
             reactiveCompactRetried = true;
             const reactivePreflight = await prepareMessagesForProviderPreflight({
               messages: continuation.messages,
@@ -5375,13 +5402,14 @@ export async function continueModelAfterToolResults(
               trigger: "reactive",
               deps: compactPreflightDeps,
             });
+            if (await stopStaleContinuation()) return;
             if (reactivePreflight.blocked) {
               writeLine(output, reactivePreflight.message);
               writeStatus(output, context);
               return;
             }
             continuation.messages = appendLatestUserRequestAnchor(reactivePreflight.messages);
-            resetAssistantDraftForProviderRetry();
+            resetProviderAttempt();
             showProviderRecoveryActivity(context);
             await appendSystemEvent(
               context,
@@ -5389,10 +5417,12 @@ export async function continueModelAfterToolResults(
               `reactive_compact_retry: provider=${currentRuntime.provider} model=${currentRuntime.model} messages=${continuation.messages.length}`,
               "warning",
             );
+            if (await stopStaleContinuation()) return;
             continue continuationRoundLoop;
           }
           const toolCallingKey = runtimeToolCallingKey(currentRuntime);
           if (
+            !hadToolUse &&
             continuationToolsEnabled &&
             toolCallingDegradedForRuntime !== toolCallingKey &&
             isToolCallingCompatibilityError(event.error)
@@ -5400,7 +5430,7 @@ export async function continueModelAfterToolResults(
             continuationToolsEnabled = false;
             toolCallingDegradedForRuntime = toolCallingKey;
             continuation.messages = appendLatestUserRequestAnchor(continuation.messages);
-            resetAssistantDraftForProviderRetry();
+            resetProviderAttempt();
             showProviderRecoveryActivity(context);
             await appendSystemEvent(
               context,
@@ -5408,23 +5438,27 @@ export async function continueModelAfterToolResults(
               `tool_calling_degraded_retry: provider=${currentRuntime.provider} model=${currentRuntime.model} endpointProfile=${currentRuntime.endpointProfile ?? "default"}`,
               "warning",
             );
+            if (await stopStaleContinuation()) return;
             continue continuationRoundLoop;
           }
           // withProviderRetry already handled same-provider retries, concurrency gating,
           // and breaker transitions. Only fallback to a different model remains.
-          const fallback = runtimeFallbackAttempted
+          const fallback = hadToolUse
             ? undefined
-            : resolveRuntimeFallback(context, currentRuntime, event.error);
+            : resolveRuntimeFallback(context, currentRuntime, event.error, attemptedRuntimeKeys);
           if (fallback) {
-            runtimeFallbackAttempted = true;
+            attemptedRuntimeKeys.add(providerRuntimeKey(fallback.runtime));
+            continuation.attemptedRuntimeKeys = [...attemptedRuntimeKeys];
             await recordProviderFallbackAttempt(context, sessionId, {
               from: currentRuntime,
               to: fallback.runtime,
               kind: fallback.kind,
               code: fallback.code,
               status: "attempted",
+              commitGuard: requestOwnerIsCurrent,
             });
-            resetAssistantDraftForProviderRetry();
+            if (await stopStaleContinuation()) return;
+            resetProviderAttempt();
             showProviderSwitchActivity(context);
             await appendRuntimePolicyHint(context, sessionId, "continuation", {
               providerFailure: {
@@ -5434,6 +5468,7 @@ export async function continueModelAfterToolResults(
                 message: fallback.kind,
               },
             });
+            if (await stopStaleContinuation()) return;
             writeLine(output, context.lastProviderFallbackAttempt?.summary ?? "");
             continuation.provider = fallback.runtime.provider;
             continuation.messages = appendLatestUserRequestAnchor(continuation.messages);
@@ -5456,6 +5491,28 @@ export async function continueModelAfterToolResults(
           return;
         }
       }
+      const acceptedAttemptGeneration = providerAttemptGeneration;
+      if (pendingRoundUsage && requestOwnerIsCurrent()) {
+        recordCacheUsageObservation(context, "continuation", pendingRoundUsage);
+        const stats = recordModelUsage(context, pendingRoundUsage);
+        await appendUsageEvents(context, sessionId, stats);
+        if (
+          acceptedAttemptGeneration !== providerAttemptGeneration ||
+          (await stopStaleContinuation())
+        ) {
+          return;
+        }
+        scheduleApiTokenCountDiagnostics({
+          context,
+          gateway,
+          runtime: runtimeFromContinuation(continuation),
+          messages: preflight.messages,
+          signal: controller.signal,
+          requestTurnId,
+          commitGuard: () =>
+            requestOwnerIsCurrent() && acceptedAttemptGeneration === providerAttemptGeneration,
+        });
+      }
       for (const ev of pendingContinuationToolUses) {
         toolCalls.push(ev);
       }
@@ -5471,6 +5528,19 @@ export async function continueModelAfterToolResults(
         );
         pendingAssistantPreviewText = result.text;
         if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
+      }
+      if (earlyToolExecution && earlyToolContinuation) {
+        earlyToolBatchResult = await earlyToolExecution;
+        if (
+          earlyToolGeneration !== providerAttemptGeneration ||
+          (await stopStaleContinuation())
+        ) {
+          return;
+        }
+        if (earlyToolBatchResult.pendingApproval) return;
+        earlyToolResultMessages = earlyToolContinuation.messages.slice(
+          earlyToolBaseMessageCount + 1,
+        );
       }
       if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
         await appendSystemEvent(
@@ -5499,8 +5569,31 @@ export async function continueModelAfterToolResults(
           content: truncateRoundAssistantForProvider(roundAssistantText, context),
           toolCalls,
         });
+        continuation.messages.push(...earlyToolResultMessages);
       }
       if (toolCalls.length === 0) {
+        if (
+          shouldContinueAfterToolFailureWithoutToolCall(
+            toolFailureRecoveryState,
+            toolFailureNoToolRecoveryPrompts,
+          )
+        ) {
+          discardAssistantBlock(output, assistantStreamBlockId);
+          assistantText = committedIntermediateAssistantText;
+          roundAssistantText = "";
+          toolFailureNoToolRecoveryPrompts += 1;
+          continuation.messages.push({
+            role: "user",
+            content: createToolFailureRecoveryReminder(context.language),
+          });
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `tool_failure_recovery_no_tool_continue continuation=yes prompts=${toolFailureNoToolRecoveryPrompts}`,
+            "warning",
+          );
+          continue;
+        }
         if (!roundAssistantText) {
           if (
             shouldRetryHighReasoningToolsEmptyResponse({
@@ -5569,7 +5662,24 @@ export async function continueModelAfterToolResults(
         }
         // D.13U — Final Answer Claim Gate + Extended Gate 聚合（continuation 镜像）
         if (assistantText) {
-          await clearActiveProviderFailureAfterRecovery(context, sessionId, runtimeFromContinuation(continuation));
+          const coherentDraft = enforceSuccessfulToolCoherence(assistantText, context);
+          if (coherentDraft !== assistantText) {
+            assistantText = coherentDraft;
+            roundAssistantText = coherentDraft;
+            replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+            await appendSystemEvent(
+              context,
+              sessionId,
+              "final_answer_coherence_guard: replaced contradictory pre-tool failure/success text with evidence-backed final answer",
+              "warning",
+            );
+          }
+          await clearActiveProviderFailureAfterRecovery(
+            context,
+            sessionId,
+            runtimeFromContinuation(continuation),
+            requestOwnerIsCurrent,
+          );
           const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
           if (gateResult.status === "needs_disclaimer") {
             await appendSystemEvent(
@@ -5603,8 +5713,11 @@ export async function continueModelAfterToolResults(
               context,
               userText: latestUserTextFromMessages(continuation.messages),
               assistantText,
-              retryBudgetRemaining:
-                finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+              retryBudgetRemaining: finalGapHasProgress(
+                gateResult,
+                context,
+                finalGapProgressState,
+              ),
               evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
             });
             await appendSystemEvent(
@@ -5620,7 +5733,7 @@ export async function continueModelAfterToolResults(
               assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
-                context.evidence,
+                evidenceForCurrentVerificationScope(context),
               );
               replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
               break;
@@ -5628,37 +5741,20 @@ export async function continueModelAfterToolResults(
             discardAssistantBlock(output, assistantStreamBlockId);
             assistantText = "";
             roundAssistantText = "";
-            const actionResult = await runFinalGateEvidenceAction({
-              actionPlan,
-              context,
-              output,
-              sessionId,
-              messages: continuation.messages,
-              runtime: runtimeFromContinuation(continuation),
-              ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
-            });
-            if (actionResult.status === "permission_pending") {
-              return;
-            }
-            if (shouldContinueAfterFinalGateEvidenceAction(actionResult, finalAnswerEvidenceActionRetries)) {
-              continuation.messages = actionResult.messages;
-              finalAnswerEvidenceActionRetries += 1;
-              continue;
-            }
-            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-            assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+            noProgressRounds += 1;
+            finalGapProgressState = captureFinalGapProgressState(
               gateResult,
-              context.language,
-              context.evidence,
+              context,
+              actionPlan.evidenceAction,
             );
-            replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+            continuation.messages.push({ role: "user", content: actionPlan.directive });
             await appendSystemEvent(
               context,
               sessionId,
-              `final_answer_gap_action_${actionResult.status} reason=${actionResult.reason}`,
+              `final_answer_gap_returned_to_model_loop continuation=yes reason=${actionPlan.reason} noProgress=${noProgressRounds}/${_killThreshold}`,
               "warning",
             );
-            break;
+            continue;
           }
         }
         break;
@@ -5680,23 +5776,56 @@ export async function continueModelAfterToolResults(
         consecutiveTodoOnlyRounds = 0;
         evidenceRounds += 1;
       }
-      const toolBatchResult = await executeToolCallsWithReadonlyParallelism(
-        toolCalls,
-        context,
-        sessionId,
-        output,
-        { continuation, failFastContext: "continuation batch" },
-      );
+      const remainingToolCalls = earlyToolBatchResult ? toolCalls.slice(1) : toolCalls;
+      let toolBatchResult = earlyToolBatchResult;
+      if (remainingToolCalls.length > 0) {
+        const remainingResult = await executeToolCallsWithReadonlyParallelism(
+          remainingToolCalls,
+          context,
+          sessionId,
+          output,
+          {
+            continuation,
+            failFastContext: "continuation batch",
+            collectFailureFingerprints: true,
+          },
+        );
+        toolBatchResult = toolBatchResult
+          ? mergeToolBatchExecutionResults(toolBatchResult, remainingResult)
+          : remainingResult;
+      }
+      if (!toolBatchResult) {
+        throw new Error("continuation tool batch completed without an execution result");
+      }
       if (toolBatchResult.pendingApproval) {
         return;
       }
       const roundHadProgress = toolBatchResult.roundHadProgress;
       const roundHadRealFallbackToolProgress = toolBatchResult.roundHadRealFallbackToolProgress;
       const roundFallbackRequiredCount = toolBatchResult.roundFallbackRequiredCount;
+      const roundFailureFingerprints = toolBatchResult.roundFailureFingerprints;
+      const roundHadToolFailure = roundFailureFingerprints.length > 0;
       const roundNeedsRealToolFallback =
         toolCalls.length > 0 && !roundHadRealFallbackToolProgress && roundFallbackRequiredCount > 0;
-      if (roundNeedsRealToolFallback) {
+      if (roundHadToolFailure) {
+        const recovery = updateToolFailureRecoveryState(
+          toolFailureRecoveryState,
+          roundFailureFingerprints,
+        );
+        toolFailureRecoveryState = recovery.state;
+        if (recovery.shouldStop) {
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `meta_scheduler:retry_guard_limit continuation=yes repeated_same_failure=yes rounds=${toolFailureRecoveryState.repeatedFailureRounds}`,
+            "warning",
+          );
+          break;
+        }
+      } else if (roundNeedsRealToolFallback) {
         recordPreEngineFallbackPreference(context);
+        toolFailureRecoveryState = { repeatedFailureRounds: 0 };
+        toolFailureNoToolRecoveryPrompts = 0;
         continuation.messages.push({
           role: "user",
           content: createToolFallbackRecoveryReminder(context.language, preFallbackRecoveryPrompts),
@@ -5710,6 +5839,9 @@ export async function continueModelAfterToolResults(
         );
         noProgressRounds = 0;
         continue;
+      } else if (roundHadProgress) {
+        toolFailureRecoveryState = { repeatedFailureRounds: 0 };
+        toolFailureNoToolRecoveryPrompts = 0;
       }
       if (todoOnly && consecutiveTodoOnlyRounds >= _hintThreshold) {
         if (!todoOnlyHintSent) {
@@ -5743,12 +5875,18 @@ export async function continueModelAfterToolResults(
       if (continuation.provider !== originalContProvider || continuation.model !== originalContModel) {
         clearProviderBreaker(context.providerBreaker, originalContProvider, originalContModel);
       }
-      await clearActiveProviderFailureAfterRecovery(context, sessionId, continuation);
+      await clearActiveProviderFailureAfterRecovery(
+        context,
+        sessionId,
+        continuation,
+        requestOwnerIsCurrent,
+      );
       if (await stopStaleContinuation()) return;
       startRequestActivity(output, context, "verifying_final_answer", { requestTurnId });
       // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
       // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
       {
+        const assistantTextBeforeFinalGate = assistantText;
         const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
         if (gateResult.status === "needs_disclaimer") {
           const shouldRewriteClaimAlignment = shouldRewriteFinalGateClaimAlignment(gateResult, context);
@@ -5795,8 +5933,7 @@ export async function continueModelAfterToolResults(
               context,
               userText: latestUserTextFromMessages(continuation.messages),
               assistantText,
-              retryBudgetRemaining:
-                finalAnswerEvidenceActionRetries < MAX_FINAL_GATE_EVIDENCE_ACTION_RETRIES,
+              retryBudgetRemaining: false,
               evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
             });
             await appendSystemEvent(
@@ -5808,65 +5945,13 @@ export async function continueModelAfterToolResults(
                   : "info",
               );
               if (await stopStaleContinuation()) return;
-            if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
-              replaceAssistantBlockContent(output, assistantStreamBlockId, "");
-              const actionResult = await runFinalGateEvidenceAction({
-                actionPlan,
-                context,
-                output,
-                sessionId,
-                messages: continuation.messages,
-                runtime: runtimeFromContinuation(continuation),
-                requestTurnId,
-                abortSignal: controller.signal,
-                ...(continuation.reportWriteGuard ? { reportWriteGuard: continuation.reportWriteGuard } : {}),
-              });
-              if (await stopStaleContinuation()) return;
-              if (actionResult.status === "permission_pending") {
-                return;
-              }
-              if (shouldContinueAfterFinalGateEvidenceAction(actionResult, finalAnswerEvidenceActionRetries)) {
-                finalAnswerEvidenceActionRetries += 1;
-                continuation.messages = actionResult.messages;
-                assistantText = await streamFinalModelAnswerWithoutTools(
-                  continuation,
-                  context,
-                  gateway,
-                  sessionId,
-                  output,
-                  controller.signal,
-                  assistantStreamBlockId,
-                  false,
-                  finalAnswerClaimAlignmentRewrites,
-                  finalAnswerEvidenceActionRetries,
-                );
-                if (await stopStaleContinuation()) return;
-                if (context.pendingLocalApproval) return;
-              } else {
-                await appendSystemEvent(
-                  context,
-                  sessionId,
-                  `final_answer_gap_action_${actionResult.status} continuation_final_safety=yes reason=${actionResult.reason}`,
-                  "warning",
-                );
-                if (await stopStaleContinuation()) return;
-                await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-                if (await stopStaleContinuation()) return;
-                assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-                  gateResult,
-                  context.language,
-                  context.evidence,
-                );
-              }
-            } else {
-              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-              if (await stopStaleContinuation()) return;
-              assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-                gateResult,
-                context.language,
-                context.evidence,
-              );
-            }
+            await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+            if (await stopStaleContinuation()) return;
+            assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+              gateResult,
+              context.language,
+              evidenceForCurrentVerificationScope(context),
+            );
           }
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
@@ -5875,7 +5960,14 @@ export async function continueModelAfterToolResults(
           assistantText = visibleAssistantText;
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
-        const coherentAssistantText = enforceSuccessfulToolCoherence(assistantText, context);
+        const evidenceCorrectedDraft = enforceSuccessfulToolCoherence(
+          assistantTextBeforeFinalGate,
+          context,
+        );
+        const coherentAssistantText =
+          evidenceCorrectedDraft === assistantTextBeforeFinalGate
+            ? enforceSuccessfulToolCoherence(assistantText, context)
+            : evidenceCorrectedDraft;
         if (coherentAssistantText !== assistantText) {
           await appendSystemEvent(
             context,
@@ -5898,6 +5990,19 @@ export async function continueModelAfterToolResults(
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
       }
+      const finalVisibleGate = evaluateAggregatedFinalAnswerGate(
+        context,
+        assistantText,
+        context.lastMetaSchedulerDecision?.shouldRunFinalAnswerGate ?? true,
+      );
+      if (finalVisibleGate.status === "needs_disclaimer") {
+        assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+          finalVisibleGate,
+          context.language,
+          evidenceForCurrentVerificationScope(context),
+        );
+        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      }
       const visibleAssistantBlockText =
         committedIntermediateAssistantText && assistantText.startsWith(committedIntermediateAssistantText)
           ? assistantText.slice(committedIntermediateAssistantText.length).trimStart()
@@ -5906,23 +6011,24 @@ export async function continueModelAfterToolResults(
         replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
       }
       if (await stopStaleContinuation()) return;
-      endAssistantStream(output);
-      clearRequestActivity(context, { kind: "foreground", requestTurnId });
-      writeFinalAssistantText(output, assistantText);
-      output.write("\n");
       await context.store.appendEvent(sessionId, {
         type: "assistant_text_delta",
         id: assistantEventId,
         text: assistantText,
         createdAt: new Date().toISOString(),
-      });
+      }, requestOwnerIsCurrent);
       if (await stopStaleContinuation()) return;
+      endAssistantStream(output);
+      clearRequestActivity(context, { kind: "foreground", requestTurnId });
+      writeFinalAssistantText(output, assistantText);
+      output.write("\n");
       const reportedAt = new Date().toISOString();
       for (const noticeId of agentCompletionNoticeIdsForTurn) {
         markAgentCompletionNoticeReported(context, noticeId, reportedAt);
       }
     }
   } finally {
+    inheritedSignal?.removeEventListener("abort", abortFromInheritedSignal);
     if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
       if (!continuationLoopCompleted || !assistantText) {
         endAssistantStream(output);
@@ -5965,6 +6071,7 @@ async function recordProviderEmptyResponse(
       `provider:${provider}:model:${model}`,
       ["provider_reasoning_only", "reasoning_stream_observed", provider, model],
     );
+    scopeEvidenceToContext(context, evidence);
     if (commitGuard && !commitGuard()) {
       return { message: formatProviderThinkingOnlyResponsePrimary(context.language), isError: false };
     }
@@ -6107,6 +6214,7 @@ type ApiTokenCountDiagnosticsInput = {
   signal: AbortSignal;
   requestTurnId?: string;
   runtimeContextId?: string;
+  commitGuard?: () => boolean;
 };
 
 function scheduleApiTokenCountDiagnostics(input: ApiTokenCountDiagnosticsInput): void {
@@ -6121,6 +6229,7 @@ async function recordApiTokenCountIfAvailable({
   signal,
   requestTurnId,
   runtimeContextId,
+  commitGuard,
 }: ApiTokenCountDiagnosticsInput): Promise<void> {
   const result = await gateway
     .countMessagesTokensWithAPI(
@@ -6138,6 +6247,7 @@ async function recordApiTokenCountIfAvailable({
     }));
   if (requestTurnId && !isCurrentForegroundRequestTurn(context, requestTurnId)) return;
   if (runtimeContextId !== undefined && context.runtimeContextId !== runtimeContextId) return;
+  if (commitGuard && !commitGuard()) return;
   context.lastApiTokenCount =
     result.source === "api"
       ? {

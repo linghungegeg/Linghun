@@ -6,6 +6,7 @@ import type {
   MemoryCandidate,
   MemoryOrigin,
   MemoryScope,
+  MemoryTaxonomy,
   MemoryTombstoneIndex,
 } from "./tui-data-types.js";
 
@@ -20,12 +21,15 @@ export type MemoryTombstone = {
   sessionId: string;
   requestTurnId?: string;
   origin?: MemoryOrigin;
+  taxonomy?: MemoryTaxonomy;
+  topic?: string;
 };
 
 export function createEmptyMemoryTombstoneIndex(): MemoryTombstoneIndex {
   return {
     ids: new Set(),
     origins: new Set(),
+    logicalKeys: new Set(),
     unreadableScopes: new Set(),
     diagnostics: [],
   };
@@ -43,14 +47,28 @@ export async function loadMemoryTombstoneIndex(
   return index;
 }
 
+export async function loadMemoryTombstoneScope(
+  directory: string,
+  scope: "project" | "user",
+): Promise<MemoryTombstoneIndex> {
+  const index = createEmptyMemoryTombstoneIndex();
+  await loadMemoryTombstoneFile(directory, scope, index);
+  return index;
+}
+
 export function isMemoryTombstoned(
   index: MemoryTombstoneIndex | undefined,
-  memory: Pick<MemoryCandidate, "id" | "scope" | "origin">,
+  memory: Pick<MemoryCandidate, "id" | "scope" | "origin" | "taxonomy" | "topic">,
 ): boolean {
   if (!index || memory.scope === "session") return false;
   if (index.unreadableScopes.has(memory.scope)) return true;
   if (index.ids.has(memoryIdKey(memory.scope, memory.id))) return true;
-  return Boolean(memory.origin && index.origins.has(memoryOriginKey(memory.scope, memory.origin)));
+  if (memory.origin && index.origins.has(memoryOriginKey(memory.scope, memory.origin))) return true;
+  return Boolean(
+    memory.taxonomy &&
+      memory.topic &&
+      index.logicalKeys.has(memoryLogicalKey(memory.scope, memory.taxonomy, memory.topic)),
+  );
 }
 
 export async function appendMemoryTombstone(input: {
@@ -71,6 +89,8 @@ export async function appendMemoryTombstone(input: {
     sessionId: input.sessionId,
     ...(input.requestTurnId ? { requestTurnId: input.requestTurnId } : {}),
     ...(input.memory.origin ? { origin: input.memory.origin } : {}),
+    ...(input.memory.taxonomy ? { taxonomy: input.memory.taxonomy } : {}),
+    ...(input.memory.topic ? { topic: input.memory.topic } : {}),
   };
   const path = join(input.directory, MEMORY_TOMBSTONE_FILE);
   if (input.commitGuard && !input.commitGuard()) return undefined;
@@ -96,6 +116,9 @@ export function rememberMemoryTombstone(
   index.ids.add(memoryIdKey(tombstone.scope, tombstone.memoryId));
   if (tombstone.origin) {
     index.origins.add(memoryOriginKey(tombstone.scope, tombstone.origin));
+  }
+  if (tombstone.taxonomy && tombstone.topic) {
+    index.logicalKeys.add(memoryLogicalKey(tombstone.scope, tombstone.taxonomy, tombstone.topic));
   }
 }
 
@@ -165,6 +188,9 @@ function parseMemoryTombstone(
   }
   const origin = value.origin === undefined ? undefined : parseMemoryOrigin(value.origin);
   if (value.origin !== undefined && !origin) return undefined;
+  const taxonomy = parseMemoryTaxonomy(value.taxonomy);
+  if (value.taxonomy !== undefined && !taxonomy) return undefined;
+  if (value.topic !== undefined && typeof value.topic !== "string") return undefined;
   if (value.requestTurnId !== undefined && typeof value.requestTurnId !== "string") return undefined;
   return {
     version: 1,
@@ -175,7 +201,23 @@ function parseMemoryTombstone(
     sessionId: value.sessionId,
     ...(typeof value.requestTurnId === "string" ? { requestTurnId: value.requestTurnId } : {}),
     ...(origin ? { origin } : {}),
+    ...(taxonomy ? { taxonomy } : {}),
+    ...(typeof value.topic === "string" ? { topic: value.topic } : {}),
   };
+}
+
+function parseMemoryTaxonomy(value: unknown): MemoryTaxonomy | undefined {
+  return value === "user" || value === "feedback" || value === "project" || value === "reference"
+    ? value
+    : undefined;
+}
+
+function memoryLogicalKey(
+  scope: Exclude<MemoryScope, "session">,
+  taxonomy: MemoryTaxonomy,
+  topic: string,
+): string {
+  return `${scope}\u0000${taxonomy}\u0000${topic}`;
 }
 
 function memoryIdKey(scope: MemoryScope, memoryId: string): string {

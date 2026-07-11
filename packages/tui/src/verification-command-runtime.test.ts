@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -8,8 +8,11 @@ import { recordToolEvidence, recordVerificationEvidence } from "./evidence-runti
 import { hydrateResumeContext } from "./handoff-session-runtime.js";
 import type { TuiContext } from "./index.js";
 import { createCacheState, createHookState } from "./index.js";
+import { createIndexState } from "./index-runtime.js";
 import { executeLinghunControlToolUse } from "./model-tool-runtime.js";
+import { handleVerifyCommand } from "./slash-command-runtime.js";
 import { createMemoryState } from "./tui-state-runtime.js";
+import { createEvidenceBackedMemoryCandidates } from "./tui-memory-runtime.js";
 import { runWorkflowVerificationStep } from "./workflow-command-runtime.js";
 import type { VerificationReport, VerificationStepKind } from "./tui-data-types.js";
 import {
@@ -47,6 +50,21 @@ describe("verification-command-runtime", () => {
       const typecheckSteps = defaultPlan.filter((step) => step.kind === "typecheck");
       expect(typecheckSteps.length).toBeGreaterThan(0);
       expect(typecheckSteps[0].command).toContain("typecheck");
+    });
+
+    it("prefers smoke over build as the focused fallback", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-fallback-"));
+      await writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { build: "node build.mjs", smoke: "node smoke.mjs" } }),
+        "utf8",
+      );
+      await writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8");
+
+      const plan = await createVerificationPlan(projectPath, "focused");
+
+      expect(plan).toHaveLength(1);
+      expect(plan[0]?.kind).toBe("smoke");
     });
 
     it.each([
@@ -117,6 +135,226 @@ describe("verification-command-runtime", () => {
         synthetic: false,
       });
     });
+
+    it("combines package typecheck with an exact root-owned Vitest target", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-root-test-"));
+      const packagePath = join(projectPath, "packages", "feature");
+      await mkdir(join(packagePath, "src"), { recursive: true });
+      await Promise.all([
+        writeFile(
+          join(projectPath, "package.json"),
+          JSON.stringify({ scripts: { test: "vitest run" } }),
+          "utf8",
+        ),
+        writeFile(join(projectPath, "package-lock.json"), "", "utf8"),
+        writeFile(
+          join(packagePath, "package.json"),
+          JSON.stringify({ scripts: { typecheck: "tsc --noEmit" } }),
+          "utf8",
+        ),
+        writeFile(join(packagePath, "src", "feature.ts"), "export {};\n", "utf8"),
+        writeFile(join(packagePath, "src", "feature.test.ts"), "export {};\n", "utf8"),
+      ]);
+
+      const plan = await createVerificationPlan(projectPath, "focused", {
+        workspaceRoot: projectPath,
+        changedFiles: ["packages/feature/src/feature.ts"],
+      });
+
+      expect(plan).toEqual([
+        expect.objectContaining({
+          kind: "typecheck",
+          command: "npm run typecheck",
+          cwd: packagePath,
+        }),
+        expect.objectContaining({
+          kind: "test",
+          command: "npm run test -- packages/feature/src/feature.test.ts",
+          cwd: projectPath,
+        }),
+      ]);
+      expect(plan.every((step) => step.coverageGap === undefined)).toBe(true);
+    });
+
+    it("keeps multiple changed packages package-scoped instead of falling back to root full scripts", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-multi-"));
+      await Promise.all([
+        writeFile(
+          join(projectPath, "package.json"),
+          JSON.stringify({
+            scripts: {
+              typecheck: "root-full-typecheck",
+              test: "vitest run",
+              lint: "root-full-lint",
+            },
+          }),
+          "utf8",
+        ),
+        writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+      ]);
+      for (const name of ["alpha", "beta"]) {
+        const packagePath = join(projectPath, "packages", name);
+        await mkdir(join(packagePath, "src"), { recursive: true });
+        await Promise.all([
+          writeFile(
+            join(packagePath, "package.json"),
+            JSON.stringify({ scripts: { typecheck: "tsc --noEmit" } }),
+            "utf8",
+          ),
+          writeFile(join(packagePath, "src", `${name}.ts`), "export {};\n", "utf8"),
+          writeFile(join(packagePath, "src", `${name}.test.ts`), "export {};\n", "utf8"),
+        ]);
+      }
+
+      const plan = await createVerificationPlan(projectPath, "focused", {
+        workspaceRoot: projectPath,
+        changedFiles: ["packages/alpha/src/alpha.ts", "packages/beta/src/beta.ts"],
+      });
+
+      expect(plan.filter((step) => step.kind === "typecheck")).toHaveLength(2);
+      expect(plan.filter((step) => step.kind === "test")).toHaveLength(2);
+      expect(plan.filter((step) => step.kind === "test").map((step) => step.command)).toEqual([
+        "corepack pnpm test packages/alpha/src/alpha.test.ts",
+        "corepack pnpm test packages/beta/src/beta.test.ts",
+      ]);
+      expect(plan.some((step) => step.cwd === projectPath && step.command === "corepack pnpm typecheck"))
+        .toBe(false);
+      expect(plan.some((step) => step.command === "corepack pnpm test")).toBe(false);
+      expect(plan.some((step) => step.command.includes("root-full"))).toBe(false);
+    });
+
+    it("allows root verification fallback for root-owned verification config changes", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-root-config-"));
+      await Promise.all([
+        writeFile(
+          join(projectPath, "package.json"),
+          JSON.stringify({ scripts: { typecheck: "tsc -b", test: "vitest run", lint: "biome lint ." } }),
+          "utf8",
+        ),
+        writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+        writeFile(join(projectPath, "vitest.config.ts"), "export default {};\n", "utf8"),
+      ]);
+
+      const plan = await createVerificationPlan(projectPath, "focused", {
+        workspaceRoot: projectPath,
+        changedFiles: ["vitest.config.ts"],
+      });
+
+      expect(plan.map((step) => step.kind)).toEqual(["typecheck", "test", "lint"]);
+      expect(plan.every((step) => step.cwd === projectPath)).toBe(true);
+    });
+
+    it("never interpolates unsafe or escaping changed paths into focused commands", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-unsafe-"));
+      await Promise.all([
+        writeFile(
+          join(projectPath, "package.json"),
+          JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc -b" } }),
+          "utf8",
+        ),
+        writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+      ]);
+
+      const plan = await createVerificationPlan(projectPath, "focused", {
+        workspaceRoot: projectPath,
+        changedFiles: ["src/value.ts;echo-owned", "../escape.test.ts"],
+      });
+      const commands = plan.map((step) => step.command).join("\n");
+
+      expect(commands).not.toContain("echo-owned");
+      expect(commands).not.toContain("escape.test.ts");
+      expect(plan[0]?.coverageGap).toContain("outside the workspace or unsafe");
+      expect(plan[0]?.coverageGap).toContain("No relevant focused test");
+    });
+
+    it("keeps a 100-package 1,000-path focused plan linear and deduplicated", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-pressure-"));
+      await Promise.all([
+        writeFile(join(projectPath, "package.json"), JSON.stringify({ scripts: {} }), "utf8"),
+        writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+      ]);
+      const changedFiles: string[] = [];
+      for (let packageIndex = 0; packageIndex < 100; packageIndex += 1) {
+        const packagePath = join(projectPath, "packages", `package-${packageIndex}`);
+        await mkdir(join(packagePath, "src"), { recursive: true });
+        await writeFile(
+          join(packagePath, "package.json"),
+          JSON.stringify({ scripts: { typecheck: "tsc --noEmit" } }),
+          "utf8",
+        );
+        for (let fileIndex = 0; fileIndex < 10; fileIndex += 1) {
+          changedFiles.push(`packages/package-${packageIndex}/src/file-${fileIndex}.ts`);
+        }
+      }
+
+      const plan = await createVerificationPlan(projectPath, "focused", {
+        workspaceRoot: projectPath,
+        changedFiles,
+      });
+      const keys = plan.map((step) => `${step.kind}:${step.cwd}:${step.command}`);
+
+      expect(changedFiles).toHaveLength(1_000);
+      expect(plan).toHaveLength(100);
+      expect(new Set(keys).size).toBe(plan.length);
+    }, 30_000);
+
+    it("treats an explicitly empty changed-files scope as no focused plan", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-empty-plan-"));
+      await writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { typecheck: "root-full-typecheck", test: "vitest run" } }),
+        "utf8",
+      );
+
+      await expect(createVerificationPlan(projectPath, "focused", {
+        workspaceRoot: projectPath,
+        changedFiles: [],
+      })).resolves.toEqual([]);
+    });
+
+    it("rejects a focused package reached through an escaping symlink or junction", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-link-root-"));
+      const externalPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-link-external-"));
+      const linkedPackage = join(projectPath, "packages", "linked");
+      await mkdir(join(projectPath, "packages"), { recursive: true });
+      await mkdir(join(externalPath, "src"), { recursive: true });
+      await Promise.all([
+        writeFile(join(projectPath, "package.json"), JSON.stringify({ scripts: {} }), "utf8"),
+        writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+        writeFile(
+          join(externalPath, "package.json"),
+          JSON.stringify({ scripts: { test: "node outside-workspace.js" } }),
+          "utf8",
+        ),
+        writeFile(join(externalPath, "src", "changed.ts"), "export {};\n", "utf8"),
+      ]);
+      await symlink(externalPath, linkedPackage, process.platform === "win32" ? "junction" : "dir");
+
+      const plan = await createVerificationPlan(projectPath, "focused", {
+        workspaceRoot: projectPath,
+        changedFiles: ["packages/linked/src/changed.ts"],
+      });
+
+      expect(plan).toEqual([]);
+      expect(plan.some((step) => step.command.includes("outside-workspace"))).toBe(false);
+    });
+  });
+
+  it("returns PARTIAL when the runner is directly given an empty plan", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-empty-runner-"));
+    const context = await createRunnableVerificationContext(projectPath);
+
+    const report = await runVerificationPlan(
+      [],
+      context,
+      "session-empty-runner",
+      new MockWritable(),
+      async () => {},
+    );
+
+    expect(report.status).toBe("partial");
+    expect(report.commands).toEqual([]);
+    expect(report.unverified).toContain("verification plan contained no executable steps");
   });
 
   it("writes verification logs under LINGHUN_DATA_DIR when isolated", async () => {
@@ -137,7 +375,14 @@ describe("verification-command-runtime", () => {
     } as unknown as TuiContext;
     const output = new MockWritable();
     const plan = await createVerificationPlan(projectPath, "smoke");
-    await runVerificationPlan(plan, context, "session-1", output, async () => {});
+    const report = await runVerificationPlan(plan, context, "session-1", output, async () => {});
+
+    expect(report.status).toBe("partial");
+    expect(report.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ status: "pass", synthetic: true })]),
+    );
+    expect(report.summary).toContain("synthetic self-check 已通过");
+    expect(report.unverified.join(" ")).toContain("real verification did not run");
 
     const logRoot = join(resolveStoragePaths(defaultConfig, projectPath).logs, "verification");
     expect(logRoot).toContain(isolatedDataDir);
@@ -145,6 +390,53 @@ describe("verification-command-runtime", () => {
     const files = await readdir(logRoot);
     expect(files.some((file) => file.endsWith("-smoke.log"))).toBe(true);
     await expect(readdir(join(projectPath, ".linghun", "logs", "verification"))).rejects.toThrow();
+  });
+
+  it("returns synthetic RunVerification to the model as partial rather than ok", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-synthetic-tool-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    context.currentRequestTurnId = "request-synthetic";
+    context.tools = { changedFiles: [], todos: [] } as unknown as TuiContext["tools"];
+
+    const result = await executeLinghunControlToolUse(
+      { id: "verify-synthetic", name: "RunVerification", input: { level: "smoke" } },
+      context,
+      "session-synthetic",
+      new MockWritable(),
+      { requestTurnId: "request-synthetic" } as never,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.data).toMatchObject({
+      status: "partial",
+      commands: [expect.objectContaining({ status: "pass", synthetic: true })],
+    });
+    expect(result.text).toContain("PARTIAL");
+    expect(context.lastVerification?.status).toBe("partial");
+    expect(context.evidence.flatMap((item) => item.supportsClaims)).not.toContain(
+      "verification_passed",
+    );
+  });
+
+  it("does not turn synthetic self-check diagnostics into memory candidates", () => {
+    const report = makeReport("pass", [{ kind: "smoke", synthetic: true }]);
+    const candidates = createEvidenceBackedMemoryCandidates({
+      memory: { candidates: [], accepted: [], disabled: [] },
+      evidence: [
+        {
+          id: "synthetic-evidence",
+          kind: "test_result",
+          summary: "SELF-CHECK synthetic self-check passed",
+          source: "Verification Runner",
+          supportsClaims: ["verification_self_check_passed", "verification_not_run"],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      tools: { todos: [] },
+      lastVerification: report,
+    } as unknown as TuiContext);
+
+    expect(candidates).toEqual([]);
   });
 
   it("records scoped verification evidence without upgrading synthetic smoke to verification pass", async () => {
@@ -222,7 +514,7 @@ describe("verification-command-runtime", () => {
     expect(report.summary).toContain("中枢调度要求 verification stop");
   });
 
-  it("runs only the first verification step when meta orchestration degrades verification", async () => {
+  it("does not let meta orchestration re-plan or truncate verification steps", async () => {
     const context = await createVerificationRunContext("degrade");
     const report = await runVerificationPlan(
       [
@@ -233,7 +525,7 @@ describe("verification-command-runtime", () => {
         },
         {
           kind: "test",
-          command: "node -e \"throw new Error('second should be skipped')\"",
+          command: "node -e \"console.log('second')\"",
           reason: "second step",
         },
       ],
@@ -243,9 +535,9 @@ describe("verification-command-runtime", () => {
       async () => {},
     );
 
-    expect(report.status).toBe("partial");
-    expect(report.commands).toHaveLength(1);
-    expect(report.unverified.join("\n")).toContain("meta orchestration degrade skipped 1");
+    expect(report.status).toBe("pass");
+    expect(report.commands).toHaveLength(2);
+    expect(report.unverified.join("\n")).not.toContain("meta orchestration degrade skipped");
   });
 
   it("creates and runs verification in the owner worktree cwd", async () => {
@@ -281,12 +573,11 @@ describe("verification-command-runtime", () => {
     );
 
     expect(report.status).toBe("pass");
-    expect(report.commands.map((command) => command.summary).join("\n")).toContain(
-      "worktree-marker",
+    const commandLogs = await Promise.all(
+      report.commands.map((command) => readFile(command.logPath!, "utf8")),
     );
-    expect(report.commands.map((command) => command.summary).join("\n")).not.toContain(
-      "main-marker",
-    );
+    expect(commandLogs.join("\n")).toContain("worktree-marker");
+    expect(commandLogs.join("\n")).not.toContain("main-marker");
     expect(context.backgroundTasks[0]).toMatchObject({
       ownerAgentId: "agent-worktree",
       ownerSessionId: "session-owner",
@@ -500,7 +791,12 @@ describe("verification-command-runtime", () => {
       writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
       writeFile(
         join(packagePath, "package.json"),
-        JSON.stringify({ scripts: { typecheck: 'node -e "console.log(\'package scoped\')"' } }),
+        JSON.stringify({
+          scripts: {
+            typecheck: 'node -e "console.log(\'package scoped typecheck\')"',
+            test: 'node -e "console.log(\'package scoped test\')"',
+          },
+        }),
         "utf8",
       ),
       writeFile(join(packagePath, "src", "changed.ts"), "export {};\n", "utf8"),
@@ -524,8 +820,46 @@ describe("verification-command-runtime", () => {
     );
     expect(report.status).toBe("pass");
     expect(report.scope?.cwd).toBe(packagePath);
+    expect(report.commands).toHaveLength(2);
+    expect(report.commands.every((command) => command.status === "pass" && command.cwd === packagePath))
+      .toBe(true);
+  }, 30_000);
+
+  it("returns PARTIAL when focused typecheck has no relevant test target", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-focused-gap-"));
+    const packagePath = join(projectPath, "packages", "feature");
+    await mkdir(join(packagePath, "src"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { test: "vitest run" } }),
+        "utf8",
+      ),
+      writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+      writeFile(
+        join(packagePath, "package.json"),
+        JSON.stringify({ scripts: { typecheck: 'node -e "console.log(\'typed\')"' } }),
+        "utf8",
+      ),
+      writeFile(join(packagePath, "src", "feature.ts"), "export {};\n", "utf8"),
+    ]);
+    const context = await createRunnableVerificationContext(projectPath);
+    context.currentRequestTurnId = "focused-gap-request";
+    context.currentRequestChangedFiles = ["packages/feature/src/feature.ts"];
+
+    const report = await runWorkflowVerificationStep(
+      "focused",
+      context,
+      new MockWritable(),
+      { ownerSessionId: "session-focused-gap", requestTurnId: "focused-gap-request" },
+    );
+
+    expect(report.status).toBe("partial");
     expect(report.commands).toHaveLength(1);
-    expect(report.commands[0]?.summary).toContain("package scoped");
+    expect(report.commands[0]?.status).toBe("pass");
+    expect(report.unverified).toEqual([
+      expect.stringContaining("No relevant focused test was found"),
+    ]);
   }, 30_000);
 
   it("does not inherit global changed files into an empty current request scope", async () => {
@@ -545,6 +879,60 @@ describe("verification-command-runtime", () => {
     expect(getRequestScopedVerificationChangedFiles(context)).toEqual([
       "packages/side-agent/src/old.ts",
     ]);
+  });
+
+  it("keeps slash, workflow, and RunVerification empty request scopes PARTIAL", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-empty-entries-"));
+    await writeFile(
+      join(projectPath, "package.json"),
+      JSON.stringify({ scripts: { typecheck: "root-full-typecheck", test: "vitest run" } }),
+      "utf8",
+    );
+
+    const slashContext = await createRunnableVerificationContext(projectPath);
+    slashContext.sessionId = "session-empty-slash";
+    slashContext.sessionStoreVerifiedId = "session-empty-slash";
+    slashContext.currentRequestTurnId = "request-empty-slash";
+    slashContext.currentRequestChangedFiles = [];
+    slashContext.currentRequestMentionedFiles = [];
+    slashContext.memory = await createMemoryState(defaultConfig, projectPath);
+    slashContext.index = createIndexState(defaultConfig);
+    slashContext.tools = { changedFiles: ["old-global.ts"], todos: [] } as unknown as TuiContext["tools"];
+    await handleVerifyCommand(["focused"], slashContext, new MockWritable());
+    expect(slashContext.lastVerification).toMatchObject({ status: "partial", commands: [] });
+
+    const workflowContext = await createRunnableVerificationContext(projectPath);
+    workflowContext.currentRequestTurnId = "request-empty-workflow";
+    workflowContext.currentRequestChangedFiles = [];
+    workflowContext.currentRequestMentionedFiles = [];
+    const workflowReport = await runWorkflowVerificationStep(
+      "focused",
+      workflowContext,
+      new MockWritable(),
+      { ownerSessionId: "session-empty-workflow", requestTurnId: "request-empty-workflow" },
+    );
+    expect(workflowReport).toMatchObject({ status: "partial", commands: [] });
+
+    const toolContext = await createRunnableVerificationContext(projectPath);
+    toolContext.currentRequestTurnId = "request-empty-tool";
+    toolContext.currentRequestChangedFiles = [];
+    toolContext.currentRequestMentionedFiles = [];
+    toolContext.tools = {
+      changedFiles: [],
+      todos: [],
+      abortSignal: new AbortController().signal,
+    } as unknown as TuiContext["tools"];
+    const toolResult = await executeLinghunControlToolUse(
+      { id: "verify-empty-tool", name: "RunVerification", input: { level: "focused" } },
+      toolContext,
+      "session-empty-tool",
+      new MockWritable(),
+      { requestTurnId: "request-empty-tool" } as never,
+    );
+    expect(toolResult).toMatchObject({
+      ok: false,
+      data: { status: "partial", level: "focused" },
+    });
   });
 
   it("keeps foreground activity and interrupt ownership while verification runs", async () => {
@@ -656,6 +1044,120 @@ describe("verification-command-runtime", () => {
     expect(events.some((event) => event.type === "verification_end" && event.report?.status === "pass"))
       .toBe(false);
     expect(events.some((event) => event.type === "verification_end" && event.report?.status === "cancelled"))
+      .toBe(true);
+  }, 30_000);
+
+  it("finalizes the task when verification persistence throws", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-persist-failure-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const events: Array<{ type?: string; report?: VerificationReport }> = [];
+    let failedStart = false;
+    context.store = {
+      appendEvent: vi.fn(async (_sessionId: string, event: { type?: string; report?: VerificationReport }) => {
+        if (event.type === "verification_start" && !failedStart) {
+          failedStart = true;
+          throw new Error("persist start failed");
+        }
+        events.push(event);
+      }),
+    } as unknown as TuiContext["store"];
+
+    const report = await runVerificationPlan(
+      [{ kind: "test", command: 'node -e "console.log(\'unused\')"', reason: "persist failure" }],
+      context,
+      "session-persist-failure",
+      new MockWritable(),
+      async () => {},
+      { requestTurnId: "request-persist-failure" },
+    );
+
+    expect(report.status).toBe("partial");
+    expect(report.unverified.join(" ")).toContain("persist start failed");
+    const task = context.backgroundTasks.find((item) => item.id === report.id);
+    expect(task?.status).not.toBe("running");
+    expect(task?.result).toBe("partial");
+    expect(events.some((event) => event.type === "verification_end" && event.report?.status === "partial"))
+      .toBe(true);
+    expect(context.activeVerificationAbortControllers?.has(report.id)).toBe(false);
+  });
+
+  it("persists the downgraded terminal task when verification_end fails once", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-end-retry-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const events: Array<{ type?: string; report?: VerificationReport; task?: { result?: string } }> = [];
+    let failedEnd = false;
+    context.store = {
+      appendEvent: vi.fn(async (_sessionId: string, event: { type?: string; report?: VerificationReport; task?: { result?: string } }) => {
+        if (event.type === "verification_end" && event.report?.status === "pass" && !failedEnd) {
+          failedEnd = true;
+          throw new Error("persist end failed once");
+        }
+        events.push(structuredClone(event));
+      }),
+    } as unknown as TuiContext["store"];
+
+    const report = await runVerificationPlan(
+      [{ kind: "test", command: 'node -e "console.log(\'pass\')"', reason: "end retry" }],
+      context,
+      "session-end-retry",
+      new MockWritable(),
+      async (targetContext, targetSessionId, task) => {
+        await targetContext.store.appendEvent(targetSessionId, {
+          type: "background_task_update",
+          task,
+          createdAt: new Date().toISOString(),
+        });
+      },
+      { requestTurnId: "request-end-retry" },
+    );
+
+    expect(report.status).toBe("partial");
+    expect(events.some((event) => event.type === "verification_end" && event.report?.status === "pass"))
+      .toBe(false);
+    expect(events.some((event) => event.type === "verification_end" && event.report?.status === "partial"))
+      .toBe(true);
+    const terminalTasks = events.filter((event) => event.type === "background_task_update");
+    expect(terminalTasks.at(-1)?.task?.result).toBe("partial");
+  }, 30_000);
+
+  it("retries a failed terminal background task update without leaving running authoritative", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-task-retry-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const events: Array<{ type?: string; report?: VerificationReport; task?: { status?: string; result?: string } }> = [];
+    let failedTerminalTask = false;
+    context.store = {
+      appendEvent: vi.fn(async (_sessionId: string, event: { type?: string; report?: VerificationReport; task?: { status?: string; result?: string } }) => {
+        if (
+          event.type === "background_task_update" &&
+          event.task?.status !== "running" &&
+          !failedTerminalTask
+        ) {
+          failedTerminalTask = true;
+          throw new Error("persist terminal task failed once");
+        }
+        events.push(structuredClone(event));
+      }),
+    } as unknown as TuiContext["store"];
+
+    const report = await runVerificationPlan(
+      [{ kind: "test", command: 'node -e "console.log(\'pass\')"', reason: "task retry" }],
+      context,
+      "session-task-retry",
+      new MockWritable(),
+      async (targetContext, targetSessionId, task) => {
+        await targetContext.store.appendEvent(targetSessionId, {
+          type: "background_task_update",
+          task,
+          createdAt: new Date().toISOString(),
+        });
+      },
+      { requestTurnId: "request-task-retry" },
+    );
+
+    expect(report.status).toBe("pass");
+    const taskUpdates = events.filter((event) => event.type === "background_task_update");
+    expect(taskUpdates.at(-1)?.task).toMatchObject({ status: "completed", result: "pass" });
+    expect(events.some((event) => event.type === "verification_end" && event.report?.status === "pass"))
       .toBe(true);
   }, 30_000);
 
@@ -778,8 +1280,9 @@ describe("verification-command-runtime", () => {
 
     expect(report.status).toBe("pass");
     expect(report.scope).toMatchObject({ cwd: workflowCwd, workflowRunId: "workflow-cwd" });
-    expect(report.commands[0]?.summary).toContain("owned-workflow");
-    expect(report.commands[0]?.summary).not.toContain("main-workflow");
+    const commandLog = await readFile(report.commands[0]!.logPath!, "utf8");
+    expect(commandLog).toContain("owned-workflow");
+    expect(commandLog).not.toContain("main-workflow");
   }, 30_000);
 
   it("does not leak a workflow controller for plan-only or unavailable real-smoke", async () => {
