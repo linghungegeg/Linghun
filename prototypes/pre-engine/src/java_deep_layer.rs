@@ -131,12 +131,14 @@ impl JavaDeepLayer {
         symbols: &[String],
         symbol_positions: &[Value],
         import_tokens: &[Value],
+        dependency_tokens: &[Value],
         allow_workspace_symbol: bool,
     ) -> Result<StructureResult, String> {
         let root = self.root.to_string_lossy().replace('\\', "/");
         let (response, elapsed_ms) = self.request(json!({
             "op": "analyze", "root": root, "files": files, "symbols": symbols,
             "symbol_positions": symbol_positions, "import_tokens": import_tokens,
+            "dependency_tokens": dependency_tokens,
             "allow_workspace_symbol": allow_workspace_symbol,
         }))?;
         Ok(StructureResult {
@@ -209,13 +211,16 @@ pub fn run_structure(
     symbols: &[String],
     symbol_positions: &[Value],
     import_tokens: &[Value],
+    dependency_tokens: &[Value],
     allow_workspace_symbol: bool,
 ) -> StructureResult {
     let layer = match ensure_layer(deep, root) {
         Ok(layer) => layer,
         Err(reason) => return unavailable_structure(symbols, "partially_verified", reason),
     };
-    match layer.query_structure(files, symbols, symbol_positions, import_tokens, allow_workspace_symbol) {
+    match layer.query_structure(
+        files, symbols, symbol_positions, import_tokens, dependency_tokens, allow_workspace_symbol,
+    ) {
         Ok(result) => result,
         Err(reason) => {
             *deep = None;

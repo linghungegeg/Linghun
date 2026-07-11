@@ -54,6 +54,23 @@ function findJdtls() {
   return findCommand("jdtls", process.env.LINGHUN_JDTLS);
 }
 
+function findAndroidJar() {
+  if (process.env.LINGHUN_ANDROID_JAR) {
+    const configured = path.resolve(process.env.LINGHUN_ANDROID_JAR);
+    return fs.existsSync(configured) ? configured : null;
+  }
+  const sdkRoot = process.env.ANDROID_SDK_ROOT || process.env.ANDROID_HOME;
+  if (!sdkRoot) return null;
+  const platforms = path.join(sdkRoot, "platforms");
+  let entries;
+  try { entries = fs.readdirSync(platforms, { withFileTypes: true }); } catch { return null; }
+  return entries
+    .filter(entry => entry.isDirectory())
+    .map(entry => path.join(platforms, entry.name, "android.jar"))
+    .filter(file => fs.existsSync(file))
+    .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }))[0] || null;
+}
+
 function wordAt(text, position) {
   const lines = text.split(/\r?\n/);
   const line = lines[position.line] || "";
@@ -147,6 +164,13 @@ class JdtlsSession {
     this.stderr = Buffer.alloc(0);
     this.stderrTruncated = false;
     this.currentConfigStamp = configStamp(this.root);
+    this.androidJar = findAndroidJar();
+    this.settings = {
+      "java.jdt.ls.androidSupport.enabled": Boolean(this.androidJar),
+      ...(this.androidJar
+        ? { "java.project.referencedLibraries": [normalize(this.androidJar)] }
+        : {}),
+    };
   }
 
   appendStderr(chunk) {
@@ -166,7 +190,7 @@ class JdtlsSession {
   }
 
   async start() {
-    const dataDir = path.join(os.tmpdir(), "linghun-jdtls", String(process.pid));
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "linghun-jdtls-"));
     const isBatch = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(this.executable);
     const command = isBatch ? (process.env.ComSpec || "cmd.exe") : this.executable;
     const args = isBatch
@@ -199,7 +223,11 @@ class JdtlsSession {
       workspaceFolders: [{ uri: rootUri, name: path.basename(this.root) }],
       capabilities: {
         window: { workDoneProgress: true },
-        workspace: { symbol: { dynamicRegistration: false } },
+        workspace: {
+          configuration: true,
+          didChangeConfiguration: { dynamicRegistration: false },
+          symbol: { dynamicRegistration: false },
+        },
         textDocument: {
           definition: { dynamicRegistration: false, linkSupport: true },
           references: { dynamicRegistration: false },
@@ -208,8 +236,10 @@ class JdtlsSession {
           publishDiagnostics: { relatedInformation: true, versionSupport: true },
         },
       },
+      initializationOptions: { settings: this.settings },
     });
     this.notify("initialized", {});
+    this.notify("workspace/didChangeConfiguration", { settings: this.settings });
     this.buildCount += 1;
     await this.waitUntilReady();
     this.currentConfigStamp = configStamp(this.root);
@@ -296,7 +326,13 @@ class JdtlsSession {
     if (message.id != null && message.method) {
       let result = null;
       if (message.method === "workspace/configuration") {
-        result = (message.params && message.params.items || []).map(() => null);
+        result = (message.params && message.params.items || []).map(item => {
+          if (!item.section) return this.settings;
+          return item.section.split(".").reduce(
+            (value, part) => value && Object.prototype.hasOwnProperty.call(value, part) ? value[part] : null,
+            this.settings,
+          );
+        });
       }
       this.send({ jsonrpc: "2.0", id: message.id, result });
     }
@@ -438,7 +474,7 @@ class JdtlsSession {
     return { targets, origins };
   }
 
-  async dependencies(files, importTokens) {
+  async dependencies(files, importTokens, dependencyTokens) {
     const dependencies = {};
     const metadata = {};
     for (const file of files) {
@@ -449,10 +485,19 @@ class JdtlsSession {
       for (const token of importTokens.filter(item => normalize(item.file) === normalize(file))) {
         if (!statements.has(token.specifier)) statements.set(token.specifier, false);
         const definitions = await this.definitions(document.uri, { line: token.line, character: token.character });
+        if (definitions.length > 0) statements.set(token.specifier, true);
         for (const definition of definitions) {
           const uri = locationUri(definition);
           if (!uri || !uri.startsWith("file:")) continue;
-          statements.set(token.specifier, true);
+          const rel = relativeTo(this.root, fileURLToPath(uri));
+          if (!rel.startsWith("../") && !path.isAbsolute(rel) && rel !== file) deps.add(rel);
+        }
+      }
+      for (const token of dependencyTokens.filter(item => normalize(item.file) === normalize(file))) {
+        const definitions = await this.definitions(document.uri, { line: token.line, character: token.character });
+        for (const definition of definitions) {
+          const uri = locationUri(definition);
+          if (!uri || !uri.startsWith("file:")) continue;
           const rel = relativeTo(this.root, fileURLToPath(uri));
           if (!rel.startsWith("../") && !path.isAbsolute(rel) && rel !== file) deps.add(rel);
         }
@@ -499,11 +544,11 @@ class JdtlsSession {
     }
   }
 
-  async analyze(files, symbols, symbolPositions, importTokens, allowWorkspaceSymbol) {
+  async analyze(files, symbols, symbolPositions, importTokens, dependencyTokens, allowWorkspaceSymbol) {
     const rebuilt = await this.ensureCurrent();
     const normalizedFiles = [...new Set(files.map(file => normalize(file)))];
     for (const file of normalizedFiles) await this.openFile(file);
-    const { dependencies, metadata } = await this.dependencies(normalizedFiles, importTokens);
+    const { dependencies, metadata } = await this.dependencies(normalizedFiles, importTokens, dependencyTokens);
     const relations = {};
     const missing = [];
     for (const symbol of symbols) {
@@ -608,6 +653,7 @@ class JdtlsSession {
         verification: { coverage: [], missing: ["java_documents"] },
         program_build_count: this.buildCount, program_rebuilt: rebuilt, snapshot_id: String(this.snapshot) };
     }
+    const androidSource = documents.some(document => /^\s*import\s+android(?:x)?\./mu.test(document.text));
     try {
       const diagnosticsByDocument = [];
       for (const document of documents) {
@@ -632,11 +678,24 @@ class JdtlsSession {
       const issues = [];
       const issueKeys = new Set();
       let diagnosticCount = 0;
+      const androidTypes = new Set();
+      for (const document of documents) {
+        for (const match of document.text.matchAll(/^\s*import\s+(android(?:x)?\.[\w.]+);/gmu)) {
+          androidTypes.add(match[1]);
+          androidTypes.add(match[1].split(".").pop());
+        }
+      }
+      let unresolvedAndroidClasspath = false;
       diagnosticsByDocument.forEach((diagnostics, index) => {
         const document = documents[index];
         for (const diagnostic of diagnostics) {
           diagnosticCount += 1;
           if (diagnostic.severity !== 1) continue;
+          const detail = diagnostic.message || "unknown error";
+          if (androidSource && /cannot be resolved|unresolved|not found/iu.test(detail)
+              && ([...androidTypes].some(type => detail.includes(type)) || /android/iu.test(detail))) {
+            unresolvedAndroidClasspath = true;
+          }
           const key = `${document.uri}:${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.message}`;
           if (issueKeys.has(key)) continue;
           issueKeys.add(key);
@@ -645,8 +704,25 @@ class JdtlsSession {
             detail: diagnostic.message || "unknown error", source: "java-deep-layer" });
         }
       });
+      if (androidSource && !this.androidJar) {
+        return { status: "partially_verified", reason: "android_classpath_missing", issues,
+          verification: { coverage: ["syntax", "types", "packages", "imports"],
+            missing: ["android_classpath"], diagnostic_count: diagnosticCount },
+          android_classpath: null,
+          program_build_count: this.buildCount, program_rebuilt: rebuilt, snapshot_id: String(this.snapshot) };
+      }
+      if (unresolvedAndroidClasspath) {
+        return { status: "partially_verified",
+          reason: this.androidJar ? "Android classpath is incomplete" : "android_classpath_missing",
+          issues,
+          verification: { coverage: ["syntax", "types", "packages", "imports"],
+            missing: ["android_classpath"], diagnostic_count: diagnosticCount },
+          android_classpath: this.androidJar ? normalize(this.androidJar) : null,
+          program_build_count: this.buildCount, program_rebuilt: rebuilt, snapshot_id: String(this.snapshot) };
+      }
       return { status: "verified", reason: null, issues,
         verification: { coverage: ["syntax", "types", "packages", "imports", "classpath"], missing: [], diagnostic_count: diagnosticCount },
+        android_classpath: this.androidJar ? normalize(this.androidJar) : null,
         program_build_count: this.buildCount, program_rebuilt: rebuilt, snapshot_id: String(this.snapshot) };
     } catch (error) {
       return { status: "partially_verified", reason: error.message, issues: [],
@@ -677,7 +753,7 @@ async function handle(request) {
   }
   if (request.op === "analyze") {
     return session.analyze(request.files || [], request.symbols || [], request.symbol_positions || [],
-      request.import_tokens || [], Boolean(request.allow_workspace_symbol));
+      request.import_tokens || [], request.dependency_tokens || [], Boolean(request.allow_workspace_symbol));
   }
   if (request.op === "discover") return session.discover(request.terms || []);
   return session.verify(request.files || []);

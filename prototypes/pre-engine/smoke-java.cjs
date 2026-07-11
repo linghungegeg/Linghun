@@ -258,14 +258,35 @@ async function run() {
   if (fs.existsSync(binary) && !process.env.JAVA_SMOKE_HELPER_ONLY) {
     const client = new PreEngineClient(binary, process.env);
     try {
+      const consumerFile = "src/main/java/demo/Consumer.java";
       await client.initialize(root);
       const context = await client.tool("pre_context", { symbol: "format", path: "src/main/java/demo/Consumer.java" });
       const plan = await client.tool("pre_plan", { task: "change format", target_files: ["src/main/java/demo/Consumer.java"], target_symbols: ["format"] });
       const impact = await client.tool("pre_impact", { changes: [{ path: "src/main/java/demo/Consumer.java", symbols: ["format"] }] });
+      const hierarchyImpact = await client.tool("pre_impact", {
+        changes: [{ path: "src/main/java/demo/Service.java", symbols: ["Service"] }],
+      });
       const verify = await client.tool("pre_verify", { changed_files: ["src/main/java/demo/TypeError.java"] });
-      check(results, "pre_context Java semantic closure", context.java_semantic_engine_status === "verified");
-      check(results, "pre_plan Java semantic closure", plan.java_semantic_engine_status === "verified");
-      check(results, "pre_impact Java semantic closure", impact.java_semantic_engine_status === "verified");
+      check(results, "pre_context Java semantic closure",
+        context.java_semantic_engine_status === "verified"
+          && context.definition?.file.replace(/\\/g, "/").endsWith("/src/main/java/demo/Service.java")
+          && context.references.some(reference => reference.file.replace(/\\/g, "/").endsWith(`/${consumerFile}`)));
+      const plannedFiles = plan.edit_order.map(step => step.file);
+      check(results, "pre_plan Java semantic closure",
+        plan.java_semantic_engine_status === "verified" && plan.module_graph_truncated === false
+          && ["src/main/java/demo/Consumer.java", "src/main/java/demo/Service.java", "src/main/java/demo/Formatter.java"]
+            .every(file => plannedFiles.includes(file))
+          && !plannedFiles.some(file => file.endsWith("Collision.java")));
+      check(results, "pre_impact Java semantic closure",
+        impact.java_semantic_engine_status === "verified"
+          && impact.affected_files.includes(consumerFile)
+          && impact.affected_references.some(reference => reference.file === consumerFile)
+          && !impact.affected_references.some(reference =>
+            reference.file === "src/main/java/demo/Service.java" && reference.line === 4));
+      check(results, "pre_impact Java type hierarchy",
+        hierarchyImpact.java_semantic_engine_status === "verified"
+          && hierarchyImpact.affected_files.includes("src/main/java/demo/Formatter.java")
+          && hierarchyImpact.affected_files.includes(consumerFile));
       check(results, "pre_verify Java semantic closure",
         verify.java_deep_layer.status === "verified" && verify.verification.status === "verified",
         JSON.stringify({ java: verify.java_deep_layer, verification: verify.verification, issues: verify.issues }));

@@ -509,7 +509,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                         .filter(|path| language::Lang::from_path(Path::new(path)) == Some(language::Lang::Java))
                         .cloned().collect()
                 };
-                let (java_symbol_positions, java_import_tokens) = java_lsp_inputs(
+                let (java_symbol_positions, java_import_tokens, java_dependency_tokens) = java_lsp_inputs(
                     idx, &root_str, &java_structure_files, &[symbol.to_string()],
                 );
                 let java_structure = if (requested_paths.is_empty() && java_files.is_empty())
@@ -519,7 +519,8 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 } else {
                     java_deep_layer::run_structure(
                         java_layer, &idx.root, &java_structure_files, &[symbol.to_string()],
-                        &java_symbol_positions, &java_import_tokens, requested_paths.is_empty(),
+                        &java_symbol_positions, &java_import_tokens, &java_dependency_tokens,
+                        requested_paths.is_empty(),
                     )
                 };
                 let ts_relations = if structure_files.is_empty() {
@@ -1059,6 +1060,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
 const MAX_IMPACT_SEED_SYMBOLS: usize = 100;
 const MAX_AFFECTED_REFERENCES: usize = 200;
 const MAX_IMPACT_MINIMAL_READS: usize = 20;
+const MAX_JAVA_PLAN_CLOSURE_ROUNDS: usize = 16;
 
 fn truncate_impact_minimal_reads(reads: &mut Vec<Value>) -> bool {
     let truncated = reads.len() > MAX_IMPACT_MINIMAL_READS;
@@ -1264,14 +1266,14 @@ fn handle_pre_impact(
         .filter(|path| language::Lang::from_path(Path::new(path)) == Some(language::Lang::Java))
         .cloned()
         .collect();
-    let (java_symbol_positions, java_import_tokens) =
+    let (java_symbol_positions, java_import_tokens, java_dependency_tokens) =
         java_lsp_inputs(idx, &root_str, &java_change_files, &java_symbols_requested);
     let java_structure = if java_change_files.is_empty() {
         java_deep_layer::disabled_structure(&java_symbols_requested)
     } else {
         java_deep_layer::run_structure(
             java_layer, &idx.root, &java_change_files, &java_symbols_requested,
-            &java_symbol_positions, &java_import_tokens, false,
+            &java_symbol_positions, &java_import_tokens, &java_dependency_tokens, false,
         )
     };
     let ts_relations = structure.relations.clone();
@@ -1970,11 +1972,12 @@ fn java_lsp_inputs(
     root_str: &str,
     files: &[String],
     symbols: &[String],
-) -> (Vec<Value>, Vec<Value>) {
+) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
     let file_set: HashSet<String> = files.iter().map(|file| make_relative(file, root_str)).collect();
     let symbol_set: HashSet<String> = symbols.iter().cloned().collect();
     let mut symbol_positions = Vec::new();
     let mut import_tokens = Vec::new();
+    let mut dependency_tokens = Vec::new();
     for entry in idx.files().filter(|entry| entry.lang == language::Lang::Java) {
         let file = make_relative(&entry.path.to_string_lossy(), root_str);
         if !file_set.contains(&file) { continue; }
@@ -1991,13 +1994,24 @@ fn java_lsp_inputs(
         import_tokens.extend(
             symbols::extract_java_import_tokens(&entry.tree, &entry.source)
                 .into_iter()
-                .filter_map(|position| position.specifier.map(|specifier| json!({
-                    "file": file, "specifier": specifier,
+                .filter_map(|position| {
+                    let specifier = position.specifier?;
+                    specifier.starts_with("import ").then(|| json!({
+                        "file": file, "specifier": specifier,
+                        "line": position.line, "character": position.character,
+                    }))
+                }),
+        );
+        dependency_tokens.extend(
+            symbols::extract_java_symbol_positions(&entry.tree, &entry.source, &HashSet::new())
+                .into_iter()
+                .map(|position| json!({
+                    "file": file, "symbol": position.name,
                     "line": position.line, "character": position.character,
-                }))),
+                })),
         );
     }
-    (symbol_positions, import_tokens)
+    (symbol_positions, import_tokens, dependency_tokens)
 }
 
 fn handle_pre_plan(
@@ -2217,25 +2231,68 @@ fn handle_pre_plan(
         }
     }
     let has_java_files = idx.files().any(|entry| entry.lang == language::Lang::Java);
-    let java_structure_files: Vec<String> = if target_files.is_empty() {
+    let mut java_structure_files: Vec<String> = if target_files.is_empty() {
         Vec::new()
     } else {
         target_files.iter()
             .filter(|file| language::Lang::from_path(Path::new(file)) == Some(language::Lang::Java))
             .cloned().collect()
     };
-    let (java_symbol_positions, java_import_tokens) =
+    let (java_symbol_positions, java_import_tokens, java_dependency_tokens) =
         java_lsp_inputs(idx, &root_str, &java_structure_files, &target_symbols);
-    let java_structure = if (!has_java_files && target_files.is_empty())
+    let mut java_structure = if (!has_java_files && target_files.is_empty())
         || (!target_files.is_empty() && java_structure_files.is_empty())
     {
         java_deep_layer::disabled_structure(&target_symbols)
     } else {
         java_deep_layer::run_structure(
             java_layer, &idx.root, &java_structure_files, &target_symbols,
-            &java_symbol_positions, &java_import_tokens, target_files.is_empty(),
+            &java_symbol_positions, &java_import_tokens, &java_dependency_tokens,
+            target_files.is_empty(),
         )
     };
+    for _ in 0..MAX_JAVA_PLAN_CLOSURE_ROUNDS {
+        let mut expanded: HashSet<String> = java_structure_files.iter().cloned().collect();
+        expanded.extend(java_structure.module_dependencies.values().flatten().cloned());
+        expanded.extend(
+            java_structure
+                .relations
+                .values()
+                .flat_map(|relations| relations.related_files.iter().cloned()),
+        );
+        if expanded.len() == java_structure_files.len() {
+            break;
+        }
+        java_structure_files = expanded.into_iter().collect();
+        java_structure_files.sort();
+        idx.refresh_paths(&java_structure_files);
+        let (_, expanded_import_tokens, expanded_dependency_tokens) =
+            java_lsp_inputs(idx, &root_str, &java_structure_files, &[]);
+        java_structure = java_deep_layer::run_structure(
+            java_layer,
+            &idx.root,
+            &java_structure_files,
+            &target_symbols,
+            &java_symbol_positions,
+            &expanded_import_tokens,
+            &expanded_dependency_tokens,
+            target_files.is_empty(),
+        );
+    }
+    let mut final_java_closure: HashSet<String> = java_structure_files.iter().cloned().collect();
+    final_java_closure.extend(java_structure.module_dependencies.values().flatten().cloned());
+    final_java_closure.extend(
+        java_structure
+            .relations
+            .values()
+            .flat_map(|relations| relations.related_files.iter().cloned()),
+    );
+    let java_graph_truncated = final_java_closure.len() > java_structure_files.len();
+    if java_graph_truncated {
+        for relations in java_structure.relations.values_mut() {
+            relations.graph_truncated = true;
+        }
+    }
     let ts_relations = structure.relations.clone();
     let py_relations = py_structure.relations.clone();
     let rust_relations = rust_structure.relations.clone();
@@ -2375,7 +2432,8 @@ fn handle_pre_plan(
         .chain(rust_relations.values())
         .chain(java_relations.values())
         .any(|relations| relations.graph_truncated)
-        || rust_graph_truncated;
+        || rust_graph_truncated
+        || java_graph_truncated;
     let unresolved_external_modules = ts_relations.values().chain(py_relations.values()).chain(rust_relations.values()).chain(java_relations.values()).any(|relations| {
         relations.targets.is_empty() && !relations.external_module_specifiers.is_empty()
     });

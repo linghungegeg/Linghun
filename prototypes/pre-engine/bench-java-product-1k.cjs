@@ -15,11 +15,34 @@ const platformBinary = path.resolve(__dirname, "..", "..", "packages", `pre-engi
 const sourceHelper = path.resolve(__dirname, "java-deep-layer.cjs");
 const cliHelper = path.join(path.dirname(cliBinary), "java-deep-layer.cjs");
 const platformHelper = path.join(path.dirname(platformBinary), "java-deep-layer.cjs");
+const reportPath = path.join(os.tmpdir(), "linghun-java-product-1k-final.json");
 const rounds = 3;
+const deepChainFiles = 1000;
+const sampleCounts = { context: 100, plan: 50, impact: 50, verify: 50 };
+const thresholds = {
+  cold_start_ms: Number(process.env.JAVA_BENCH_MAX_COLD_START_MS || 60000),
+  context_p95_ms: Number(process.env.JAVA_BENCH_MAX_CONTEXT_P95_MS || 2500),
+  plan_p95_ms: Number(process.env.JAVA_BENCH_MAX_PLAN_P95_MS || 5000),
+  impact_p95_ms: Number(process.env.JAVA_BENCH_MAX_IMPACT_P95_MS || 2500),
+  verify_p95_ms: Number(process.env.JAVA_BENCH_MAX_VERIFY_P95_MS || 15000),
+  deep_plan_ms: Number(process.env.JAVA_BENCH_MAX_DEEP_PLAN_MS || 120000),
+  instability_ratio: Number(process.env.JAVA_BENCH_MAX_INSTABILITY_RATIO || 4),
+};
+
+const shortFiles = {
+  shared: "src/main/java/shortbase/Shared.java",
+  bridge: "src/main/java/shortbridge/Bridge.java",
+  entry: "src/main/java/shortapp/Entry.java",
+  typeError: "src/main/java/stress/TypeError.java",
+};
 
 class Client {
   constructor(root) {
-    this.child = spawn(cliBinary, [], { cwd: __dirname, env: process.env, stdio: ["pipe", "pipe", "inherit"] });
+    this.child = spawn(cliBinary, [], {
+      cwd: __dirname,
+      env: process.env,
+      stdio: ["pipe", "pipe", "inherit"],
+    });
     this.buffer = "";
     this.nextId = 1;
     this.pending = new Map();
@@ -38,31 +61,43 @@ class Client {
         else pending.resolve(message.result);
       }
     });
+    this.child.on("exit", (code, signal) => {
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(`pre-engine exited: code=${code} signal=${signal || "none"}`));
+      }
+      this.pending.clear();
+    });
     this.ready = this.request("initialize", { rootUri: root });
   }
 
-  request(method, params, timeout = 180000) {
+  request(method, params, timeoutMs = 180000) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out`));
-      }, timeout);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });
   }
 
-  async tool(name, args) {
+  async tool(name, args, timeoutMs) {
     await this.ready;
-    const result = await this.request("tools/call", { name, arguments: args });
+    const result = await this.request("tools/call", { name, arguments: args }, timeoutMs);
     if (!result || result.isError) throw new Error(`${name}: ${JSON.stringify(result)}`);
-    return JSON.parse(result.content.find(item => item.type === "text").text);
+    const text = result.content && result.content.find(item => item.type === "text");
+    if (!text) throw new Error(`${name}: missing text result`);
+    return JSON.parse(text.text);
   }
 
   close() {
     return new Promise(resolve => {
-      if (this.child.exitCode != null) { resolve(); return; }
+      if (this.child.exitCode != null) {
+        resolve();
+        return;
+      }
       this.child.once("close", resolve);
       this.child.stdin.end();
     });
@@ -78,106 +113,328 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-function hash(file) {
+function assertThreshold(name, actual, maximum) {
+  assert(actual <= maximum, `${name} threshold exceeded: ${actual.toFixed(1)}ms > ${maximum}ms`);
+}
+
+function hashFile(file) {
   return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
-function command(commandName, args, cwd) {
+function percentile(values, fraction) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
+}
+
+async function timed(samples, operation) {
+  const started = performance.now();
+  const result = await operation();
+  samples.push(performance.now() - started);
+  return result;
+}
+
+function endsWithPath(value, expected) {
+  return typeof value === "string" && value.replace(/\\/g, "/").endsWith(expected);
+}
+
+function hasPath(values, expected) {
+  return Array.isArray(values) && values.some(value => endsWithPath(value.file || value, expected));
+}
+
+function runCommand(command, args, options) {
   return new Promise((resolve, reject) => {
-    const child = spawn(commandName, args, { cwd, env: process.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    let output = "";
-    child.stdout.on("data", chunk => { output += chunk.toString(); });
-    child.stderr.on("data", chunk => { output += chunk.toString(); });
+    const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk.toString(); });
+    child.stderr.on("data", chunk => { stderr += chunk.toString(); });
     child.on("error", reject);
-    child.on("exit", code => code === 0 ? resolve(output) : reject(new Error(`${commandName} failed (${code})\n${output}`)));
+    child.on("exit", code => code === 0
+      ? resolve({ stdout, stderr })
+      : reject(new Error(`${command} ${args.join(" ")} failed (${code})\n${stderr || stdout}`)));
   });
+}
+
+function assertContext(context, label) {
+  assert(context.java_semantic_engine_status === "verified",
+    `${label} context degraded: ${context.java_semantic_engine_status}/${context.java_semantic_engine_reason || "none"}`);
+  assert(endsWithPath(context.definition && context.definition.file, shortFiles.bridge),
+    `${label} context resolved the wrong definition: ${JSON.stringify(context.definition)}`);
+  assert(hasPath(context.references, shortFiles.entry), `${label} context missed Entry reference`);
+  assert(hasPath(context.callers, shortFiles.entry), `${label} context missed Entry caller`);
+}
+
+function assertPlan(plan, label) {
+  assert(plan.java_semantic_engine_status === "verified",
+    `${label} plan degraded: ${plan.java_semantic_engine_status}/${plan.java_semantic_engine_reason || "none"}`);
+  assert(plan.module_graph_truncated === false, `${label} short plan unexpectedly truncated`);
+  assert(!plan.answer_pack.missing_evidence.includes("module_resolution"),
+    `${label} short plan retained false module-resolution evidence`);
+  const steps = new Map(plan.edit_order.map(step => [step.file, step]));
+  assert(plan.total_files === 3 && steps.size === 3,
+    `${label} short plan included unrelated files: ${JSON.stringify([...steps.keys()])}`);
+  assert(steps.has(shortFiles.shared) && steps.has(shortFiles.bridge) && steps.has(shortFiles.entry),
+    `${label} plan did not converge across the short chain: ${JSON.stringify([...steps.keys()])}`);
+  assert(steps.get(shortFiles.entry).depends_on.includes(shortFiles.bridge), `${label} Entry dependency missing`);
+  assert(steps.get(shortFiles.bridge).depends_on.includes(shortFiles.shared), `${label} Bridge dependency missing`);
+}
+
+function assertImpact(impact, label) {
+  assert(impact.java_semantic_engine_status === "verified",
+    `${label} impact degraded: ${impact.java_semantic_engine_status}/${impact.java_semantic_engine_reason || "none"}`);
+  assert(impact.affected_files.includes(shortFiles.shared), `${label} impact omitted changed Shared file`);
+  assert(impact.affected_files.includes(shortFiles.bridge), `${label} impact omitted Bridge reference`);
+  assert(impact.affected_references.some(reference => endsWithPath(reference.file, shortFiles.bridge)),
+    `${label} impact omitted exact Bridge reference evidence`);
+}
+
+function assertVerify(verify, label) {
+  assert(verify.java_deep_layer.status === "verified" && verify.verification.status === "verified",
+    `${label} verify degraded: ${verify.java_deep_layer.status}/${verify.verification.status}`);
+  assert(verify.issues.some(issue => issue.source === "java-deep-layer"
+      && endsWithPath(issue.file, shortFiles.typeError)
+      && /cannot convert from int to String/iu.test(issue.detail || "")),
+    `${label} verify missed the exact Java diagnostic`);
+  assert((verify.java_deep_layer.verification?.diagnostic_count || 0) > 0,
+    `${label} verify diagnostic_count was not reported`);
 }
 
 async function runRound(root, round) {
   const client = new Client(root);
-  const started = performance.now();
+  const samples = { context: [], plan: [], impact: [], verify: [] };
+  const coldStarted = performance.now();
   try {
-    const context = await client.tool("pre_context", { symbol: "Symbol0999", path: "src/main/java/stress/Symbol0999.java" });
-    assert(context.java_semantic_engine_status === "verified", `round ${round} context degraded`);
-    const plan = await client.tool("pre_plan", {
-      task: "change Symbol0999", target_files: ["src/main/java/stress/Symbol0999.java"], target_symbols: ["Symbol0999"],
+    const coldContext = await client.tool("pre_context", { symbol: "execute", path: shortFiles.entry });
+    const coldStartMs = performance.now() - coldStarted;
+    assertContext(coldContext, `round ${round} cold`);
+    assertThreshold(`round ${round} cold start`, coldStartMs, thresholds.cold_start_ms);
+
+    const exactPlan = await client.tool("pre_plan", {
+      task: "change the short Java entry chain",
+      target_files: [shortFiles.entry],
+      target_symbols: ["Entry"],
     });
-    assert(plan.java_semantic_engine_status === "verified", `round ${round} plan degraded`);
-    const impact = await client.tool("pre_impact", {
-      changes: [{ path: "src/main/java/stress/Symbol0999.java", symbols: ["Symbol0999"] }],
+    assertPlan(exactPlan, `round ${round} exact`);
+
+    const exactImpact = await client.tool("pre_impact", {
+      changes: [{ path: shortFiles.shared, symbols: ["Shared"] }],
     });
-    assert(impact.java_semantic_engine_status === "verified", `round ${round} impact degraded`);
-    const verify = await client.tool("pre_verify", { changed_files: ["src/main/java/stress/TypeError.java"] });
-    assert(verify.java_deep_layer.status === "verified" && verify.verification.status === "verified",
-      `round ${round} verify degraded`);
-    assert(verify.issues.some(issue => issue.source === "java-deep-layer"), `round ${round} missed diagnostic`);
+    assertImpact(exactImpact, `round ${round} exact`);
+
+    const exactVerify = await client.tool("pre_verify", { changed_files: [shortFiles.typeError] });
+    assertVerify(exactVerify, `round ${round} exact`);
+
+    const deepPlanStarted = performance.now();
+    const deepPlan = await client.tool("pre_plan", {
+      task: "change the deepest Java dependency",
+      target_files: ["src/main/java/deep/Node0999.java"],
+      target_symbols: ["Node0999"],
+    }, thresholds.deep_plan_ms + 30000);
+    const deepPlanMs = performance.now() - deepPlanStarted;
+    assert(deepPlan.java_semantic_engine_status === "verified",
+      `round ${round} deep plan degraded: ${deepPlan.java_semantic_engine_status}`);
+    assert(deepPlan.module_graph_truncated === true,
+      `round ${round} 1000-file dependency chain was not marked truncated`);
+    assert(deepPlan.answer_pack.missing_evidence.includes("module_graph_truncated"),
+      `round ${round} deep plan omitted truncation evidence`);
+    assert(deepPlan.total_files < deepChainFiles,
+      `round ${round} deep plan unexpectedly claimed complete 1000-file closure`);
+    assertThreshold(`round ${round} deep plan`, deepPlanMs, thresholds.deep_plan_ms);
+
+    for (let iteration = 0; iteration < sampleCounts.context; iteration += 1) {
+      const context = await timed(samples.context, () => client.tool("pre_context", {
+        symbol: "execute", path: shortFiles.entry,
+      }));
+      assertContext(context, `round ${round} context ${iteration}`);
+    }
+    for (let iteration = 0; iteration < sampleCounts.plan; iteration += 1) {
+      const plan = await timed(samples.plan, () => client.tool("pre_plan", {
+        task: "change the short Java entry chain",
+        target_files: [shortFiles.entry],
+        target_symbols: ["Entry"],
+      }));
+      assertPlan(plan, `round ${round} plan ${iteration}`);
+    }
+    for (let iteration = 0; iteration < sampleCounts.impact; iteration += 1) {
+      const impact = await timed(samples.impact, () => client.tool("pre_impact", {
+        changes: [{ path: shortFiles.shared, symbols: ["Shared"] }],
+      }));
+      assertImpact(impact, `round ${round} impact ${iteration}`);
+    }
+    for (let iteration = 0; iteration < sampleCounts.verify; iteration += 1) {
+      const verify = await timed(samples.verify, () => client.tool("pre_verify", {
+        changed_files: [shortFiles.typeError],
+      }));
+      assertVerify(verify, `round ${round} verify ${iteration}`);
+    }
+
+    const p95 = Object.fromEntries(
+      Object.entries(samples).map(([operation, values]) => [operation, percentile(values, 0.95)]),
+    );
+    assertThreshold(`round ${round} context P95`, p95.context, thresholds.context_p95_ms);
+    assertThreshold(`round ${round} plan P95`, p95.plan, thresholds.plan_p95_ms);
+    assertThreshold(`round ${round} impact P95`, p95.impact, thresholds.impact_p95_ms);
+    assertThreshold(`round ${round} verify P95`, p95.verify, thresholds.verify_p95_ms);
+
     return {
       round,
-      elapsed_ms: performance.now() - started,
-      indexed_files: 1001,
-      java_program_build_count: impact.java_program_build_count,
-      java_snapshot_id: impact.java_semantic_snapshot_id,
+      cold_start_ms: coldStartMs,
+      p95_ms: p95,
+      sample_counts: Object.fromEntries(
+        Object.entries(samples).map(([operation, values]) => [operation, values.length]),
+      ),
+      short_chain: {
+        context_definition: shortFiles.bridge,
+        context_reference: shortFiles.entry,
+        context_caller: shortFiles.entry,
+        plan_files: exactPlan.edit_order.map(step => step.file),
+        impact_files: exactImpact.affected_files,
+        verify_diagnostic: shortFiles.typeError,
+      },
+      deep_chain: {
+        files: deepChainFiles,
+        plan_ms: deepPlanMs,
+        total_files_returned: deepPlan.total_files,
+        module_graph_truncated: deepPlan.module_graph_truncated,
+        missing_evidence: deepPlan.answer_pack.missing_evidence,
+      },
+      java_program_build_count: exactVerify.java_deep_layer.program_build_count,
+      java_snapshot_id: exactVerify.java_deep_layer.semantic_snapshot_id,
     };
   } finally {
     await client.close();
   }
 }
 
-async function parallelGate(root) {
-  const cargoTest = command("cargo", ["test", "--manifest-path", path.join(__dirname, "Cargo.toml")], path.resolve(__dirname, "..", ".."));
-  const clients = Array.from({ length: 3 }, () => new Client(root));
+async function runParallelLoadGate(root) {
+  const clients = [];
   try {
-    const results = await Promise.all(clients.map((client, index) => client.tool("pre_context", {
-      symbol: `Symbol${String(997 + index).padStart(4, "0")}`,
-      path: `src/main/java/stress/Symbol${String(997 + index).padStart(4, "0")}.java`,
-    })));
-    assert(results.every(result => result.java_semantic_engine_status === "verified"), "parallel context degraded");
+    for (let index = 0; index < 4; index += 1) {
+      const client = new Client(root);
+      clients.push(client);
+      await client.ready;
+    }
+    const cargoTest = runCommand("cargo", ["test", "--manifest-path", path.join(__dirname, "Cargo.toml")], {
+      cwd: path.resolve(__dirname, "..", ".."),
+      env: process.env,
+      windowsHide: true,
+    });
+    const [context, plan, impact, verify] = await Promise.all([
+      clients[0].tool("pre_context", { symbol: "execute", path: shortFiles.entry }),
+      clients[1].tool("pre_plan", {
+        task: "parallel short-chain plan", target_files: [shortFiles.entry], target_symbols: ["Entry"],
+      }),
+      clients[2].tool("pre_impact", { changes: [{ path: shortFiles.shared, symbols: ["Shared"] }] }),
+      clients[3].tool("pre_verify", { changed_files: [shortFiles.typeError] }),
+    ]);
+    assertContext(context, "parallel");
+    assertPlan(plan, "parallel");
+    assertImpact(impact, "parallel");
+    assertVerify(verify, "parallel");
     await cargoTest;
-    return { clients: clients.length, cargo_test: "passed", semantic_status: "verified" };
+    return {
+      clients: clients.length,
+      cargo_test: "passed",
+      context: "verified",
+      plan: "verified",
+      impact: "verified",
+      verify: "verified",
+      diagnostic: "reported",
+    };
   } finally {
     await Promise.all(clients.map(client => client.close()));
   }
 }
 
+function createFixture(root) {
+  write(path.join(root, "pom.xml"),
+    "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>stress</groupId><artifactId>java-1k</artifactId><version>1</version><properties><maven.compiler.release>17</maven.compiler.release></properties></project>\n");
+  write(path.join(root, shortFiles.shared),
+    "package shortbase; public class Shared { public String message() { return \"ok\"; } }\n");
+  write(path.join(root, shortFiles.bridge),
+    "package shortbridge; import shortbase.Shared; public class Bridge { public String execute() { return new Shared().message(); } }\n");
+  write(path.join(root, shortFiles.entry),
+    "package shortapp; import shortbridge.Bridge; public class Entry { public String run() { return new Bridge().execute(); } }\n");
+  write(path.join(root, shortFiles.typeError),
+    "package stress; public class TypeError { public String broken() { return 1; } }\n");
+
+  for (let index = 0; index < deepChainFiles; index += 1) {
+    const suffix = String(index).padStart(4, "0");
+    const previousSuffix = String(index - 1).padStart(4, "0");
+    const body = index === 0
+      ? "public int value() { return 0; }"
+      : `public int value() { return new Node${previousSuffix}().value() + 1; }`;
+    const importLine = index === 0 ? "" : `import deep.Node${previousSuffix}; `;
+    write(path.join(root, `src/main/java/deep/Node${suffix}.java`),
+      `package deep; ${importLine}public class Node${suffix} { ${body} }\n`);
+  }
+}
+
 async function run() {
+  fs.rmSync(reportPath, { force: true });
   for (const file of [cliBinary, releaseBinary, platformBinary, sourceHelper, cliHelper, platformHelper]) {
     assert(fs.existsSync(file), `release provenance file missing: ${file}`);
   }
-  const binaryHashes = [cliBinary, releaseBinary, platformBinary].map(hash);
-  const helperHashes = [sourceHelper, cliHelper, platformHelper].map(hash);
-  assert(new Set(binaryHashes).size === 1, `binary hash mismatch: ${binaryHashes.join(",")}`);
-  assert(new Set(helperHashes).size === 1, `helper hash mismatch: ${helperHashes.join(",")}`);
+  const binaryHashes = [cliBinary, releaseBinary, platformBinary].map(hashFile);
+  const helperHashes = [sourceHelper, cliHelper, platformHelper].map(hashFile);
+  assert(new Set(binaryHashes).size === 1,
+    `release/CLI/platform binary hash mismatch: ${binaryHashes.join(",")}`);
+  assert(new Set(helperHashes).size === 1,
+    `source/CLI/platform helper hash mismatch: ${helperHashes.join(",")}`);
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "linghun-java-1k-"));
-  write(path.join(root, "pom.xml"),
-    "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>stress</groupId><artifactId>java-1k</artifactId><version>1</version><properties><maven.compiler.release>17</maven.compiler.release></properties></project>\n");
-  for (let index = 0; index < 1000; index += 1) {
-    const suffix = String(index).padStart(4, "0");
-    const previous = index === 0 ? "return 0;" : `return new Symbol${String(index - 1).padStart(4, "0")}().value() + 1;`;
-    write(path.join(root, `src/main/java/stress/Symbol${suffix}.java`),
-      `package stress; public class Symbol${suffix} { public int value() { ${previous} } }\n`);
-  }
-  write(path.join(root, "src/main/java/stress/TypeError.java"),
-    "package stress; public class TypeError { public String broken() { return 1; } }\n");
+  try {
+    createFixture(root);
+    const roundResults = [];
+    for (let round = 1; round <= rounds; round += 1) {
+      const result = await runRound(root, round);
+      roundResults.push(result);
+      console.log(JSON.stringify({ event: "java_bench_round_pass", round, p95_ms: result.p95_ms }));
+    }
 
-  const roundResults = [];
-  for (let round = 1; round <= rounds; round += 1) roundResults.push(await runRound(root, round));
-  const slowest = Math.max(...roundResults.map(result => result.elapsed_ms));
-  const fastest = Math.min(...roundResults.map(result => result.elapsed_ms));
-  assert(slowest / fastest <= Number(process.env.JAVA_BENCH_MAX_INSTABILITY_RATIO || 4),
-    `three-round instability exceeded: ${(slowest / fastest).toFixed(2)}`);
-  const parallel = await parallelGate(root);
-  console.log(JSON.stringify({
-    root,
-    files: 1001,
-    rounds: roundResults,
-    instability_ratio: slowest / fastest,
-    parallel,
-    sha256: { binary: binaryHashes[0], helper: helperHashes[0] },
-  }, null, 2));
+    const stability = {};
+    for (const operation of Object.keys(sampleCounts)) {
+      const values = roundResults.map(result => result.p95_ms[operation]);
+      const minimum = Math.min(...values);
+      const maximum = Math.max(...values);
+      const ratio = minimum === 0 ? 1 : maximum / minimum;
+      assert(maximum <= minimum * thresholds.instability_ratio + 50,
+        `${operation} P95 unstable across rounds: min=${minimum.toFixed(1)}ms max=${maximum.toFixed(1)}ms`);
+      stability[operation] = { minimum_p95_ms: minimum, maximum_p95_ms: maximum, ratio };
+    }
+
+    const parallelLoadGate = await runParallelLoadGate(root);
+    const report = {
+      deep_chain_files: deepChainFiles,
+      java_source_files: deepChainFiles + 4,
+      rounds,
+      build_profile: "release",
+      binary: cliBinary,
+      binary_sha256: binaryHashes[0],
+      release_binary: releaseBinary,
+      release_binary_sha256: binaryHashes[1],
+      platform_binary: platformBinary,
+      platform_binary_sha256: binaryHashes[2],
+      java_helper: cliHelper,
+      java_helper_sha256: helperHashes[1],
+      source_java_helper_sha256: helperHashes[0],
+      platform_java_helper_sha256: helperHashes[2],
+      thresholds,
+      required_sample_counts: sampleCounts,
+      round_results: roundResults,
+      stability,
+      parallel_load_gate: parallelLoadGate,
+      generated_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+    console.log(JSON.stringify({ ...report, report: reportPath }, null, 2));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 }
 
 run().catch(error => {
-  console.error(error.stack || error.message);
+  fs.rmSync(reportPath, { force: true });
+  console.log(error.stack || error.message);
   process.exitCode = 1;
 });
