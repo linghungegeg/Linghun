@@ -362,31 +362,10 @@ fn ambiguous_definition_symbols(idx: &Index, target_symbols: &[String]) -> Vec<S
     ambiguous
 }
 
-fn handle_tool_call(
-    tool_name: &str,
-    arguments: &Value,
-    index: &mut Option<Index>,
-    deep_layer: &mut Option<ts_deep_layer::DeepLayer>,
-    py_layer: &mut Option<py_deep_layer::PyDeepLayer>,
-    rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>,
-    go_layer: &mut Option<go_deep_layer::GoDeepLayer>,
-    java_layer: &mut Option<java_deep_layer::JavaDeepLayer>,
-    sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>,
-    shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>,
-    csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>,
-    php_layer: &mut Option<php_deep_layer::PhpDeepLayer>,
-    ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>,
-    kotlin_layer: &mut Option<kotlin_deep_layer::KotlinDeepLayer>,
-    dart_layer: &mut Option<dart_deep_layer::DartDeepLayer>,
-    swift_layer: &mut Option<swift_deep_layer::SwiftDeepLayer>,
-    cpp_layer: &mut Option<cpp_deep_layer::CppDeepLayer>,
-) -> Value {
+fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index>, deep_layer: &mut Option<ts_deep_layer::DeepLayer>, py_layer: &mut Option<py_deep_layer::PyDeepLayer>, rust_layer: &mut Option<rust_deep_layer::RustDeepLayer>, go_layer: &mut Option<go_deep_layer::GoDeepLayer>, java_layer: &mut Option<java_deep_layer::JavaDeepLayer>, sql_layer: &mut Option<sql_deep_layer::SqlDeepLayer>, shell_layer: &mut Option<shell_deep_layer::ShellDeepLayer>, csharp_layer: &mut Option<csharp_deep_layer::CsharpDeepLayer>, php_layer: &mut Option<php_deep_layer::PhpDeepLayer>, ruby_layer: &mut Option<ruby_deep_layer::RubyDeepLayer>, kotlin_layer: &mut Option<kotlin_deep_layer::KotlinDeepLayer>, dart_layer: &mut Option<dart_deep_layer::DartDeepLayer>, swift_layer: &mut Option<swift_deep_layer::SwiftDeepLayer>, cpp_layer: &mut Option<cpp_deep_layer::CppDeepLayer>) -> Value {
     match tool_name {
         "pre_context" => {
-            let symbol = arguments
-                .get("symbol")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
+            let symbol = arguments.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
             if symbol.is_empty() {
                 return tool_error("symbol is required");
             }
@@ -403,7 +382,8 @@ fn handle_tool_call(
                 let requested_path = requested_paths
                     .first()
                     .map(|path| make_relative(path, &root_str));
-                let preferred_files: HashSet<String> = requested_path.iter().cloned().collect();
+                let preferred_files: HashSet<String> =
+                    requested_path.iter().cloned().collect();
                 let index_consistency = if requested_paths.is_empty() {
                     if idx.refresh() {
                         "full"
@@ -416,9 +396,7 @@ fn handle_tool_call(
                 };
                 let ts_files: Vec<String> = idx
                     .files()
-                    .filter(|entry| {
-                        matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
-                    })
+                    .filter(|entry| matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx))
                     .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str))
                     .collect();
                 let py_files: Vec<String> = idx
@@ -443,11 +421,9 @@ fn handle_tool_call(
                         .iter()
                         .filter(|path| {
                             idx.files().any(|entry| {
-                                matches!(
-                                    entry.lang,
-                                    language::Lang::TypeScript | language::Lang::Tsx
-                                ) && make_relative(&entry.path.to_string_lossy(), &root_str)
-                                    .eq_ignore_ascii_case(&make_relative(path, &root_str))
+                                matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
+                                    && make_relative(&entry.path.to_string_lossy(), &root_str)
+                                        .eq_ignore_ascii_case(&make_relative(path, &root_str))
                             })
                         })
                         .cloned()
@@ -475,10 +451,18 @@ fn handle_tool_call(
                         .cloned()
                         .collect()
                 };
-                let (py_symbol_positions, _) =
-                    python_lsp_inputs(idx, &root_str, &requested_paths, &[symbol.to_string()]);
-                let (_, py_import_tokens) =
-                    python_lsp_inputs(idx, &root_str, &py_structure_files, &[]);
+                let (py_symbol_positions, _) = python_lsp_inputs(
+                    idx,
+                    &root_str,
+                    &requested_paths,
+                    &[symbol.to_string()],
+                );
+                let (_, py_import_tokens) = python_lsp_inputs(
+                    idx,
+                    &root_str,
+                    &py_structure_files,
+                    &[],
+                );
                 let py_structure = if py_structure_files.is_empty() {
                     py_deep_layer::disabled_structure(&[symbol.to_string()])
                 } else {
@@ -494,32 +478,25 @@ fn handle_tool_call(
                 let rust_structure_files = if requested_paths.is_empty() {
                     Vec::new()
                 } else {
-                    requested_paths
-                        .iter()
-                        .filter(|path| {
-                            idx.files().any(|entry| {
-                                entry.lang == language::Lang::Rust
-                                    && make_relative(&entry.path.to_string_lossy(), &root_str)
-                                        .eq_ignore_ascii_case(&make_relative(path, &root_str))
-                            })
+                    requested_paths.iter().filter(|path| {
+                        idx.files().any(|entry| {
+                            entry.lang == language::Lang::Rust
+                                && make_relative(&entry.path.to_string_lossy(), &root_str)
+                                    .eq_ignore_ascii_case(&make_relative(path, &root_str))
                         })
-                        .cloned()
-                        .collect()
+                    }).cloned().collect()
                 };
-                let (rust_symbol_positions, rust_import_tokens) =
-                    rust_lsp_inputs(idx, &root_str, &rust_structure_files, &[symbol.to_string()]);
+                let (rust_symbol_positions, rust_import_tokens) = rust_lsp_inputs(
+                    idx, &root_str, &rust_structure_files, &[symbol.to_string()],
+                );
                 let rust_structure = if rust_files.is_empty()
                     || (!requested_paths.is_empty() && rust_structure_files.is_empty())
                 {
                     rust_deep_layer::disabled_structure(&[symbol.to_string()])
                 } else {
                     rust_deep_layer::run_structure(
-                        rust_layer,
-                        &idx.root,
-                        &rust_structure_files,
-                        &[symbol.to_string()],
-                        &rust_symbol_positions,
-                        &rust_import_tokens,
+                        rust_layer, &idx.root, &rust_structure_files, &[symbol.to_string()],
+                        &rust_symbol_positions, &rust_import_tokens,
                         requested_paths.is_empty(),
                     )
                 };
@@ -560,30 +537,19 @@ fn handle_tool_call(
                 } else {
                     structure.relations.get(symbol).cloned().unwrap_or_default()
                 };
-                let py_relations = py_structure
-                    .relations
-                    .get(symbol)
-                    .cloned()
-                    .unwrap_or_default();
-                let rust_relations = rust_structure
-                    .relations
-                    .get(symbol)
-                    .cloned()
-                    .unwrap_or_default();
+                let py_relations = py_structure.relations.get(symbol).cloned().unwrap_or_default();
+                let rust_relations = rust_structure.relations.get(symbol).cloned().unwrap_or_default();
                 let go_relations = go_structure
                     .relations
                     .get(symbol)
                     .cloned()
                     .unwrap_or_default();
                 let structure_verified = structure.status == "verified";
-                let structure_available =
-                    !structure_files.is_empty() && structure.status != "tool_missing";
+                let structure_available = !structure_files.is_empty() && structure.status != "tool_missing";
                 let py_structure_verified = py_structure.status == "verified";
-                let py_structure_available =
-                    matches!(py_structure.status, "verified" | "partially_verified");
+                let py_structure_available = matches!(py_structure.status, "verified" | "partially_verified");
                 let rust_structure_verified = rust_structure.status == "verified";
-                let rust_structure_available =
-                    matches!(rust_structure.status, "verified" | "partially_verified");
+                let rust_structure_available = matches!(rust_structure.status, "verified" | "partially_verified");
                 let go_structure_verified = go_structure.status == "verified";
                 let go_structure_available =
                     matches!(go_structure.status, "verified" | "partially_verified");
@@ -602,13 +568,12 @@ fn handle_tool_call(
                     if requested_path.as_ref().is_some_and(|requested| {
                         !rel.eq_ignore_ascii_case(requested)
                             && !(use_ts_program && ts_relations.related_files.contains(&rel))
-                            && !(py_structure_available
-                                && py_relations.related_files.contains(&rel))
-                            && !(rust_structure_available
-                                && rust_relations.related_files.contains(&rel))
+                            && !(py_structure_available && py_relations.related_files.contains(&rel))
+                            && !(rust_structure_available && rust_relations.related_files.contains(&rel))
                             && !(go_structure_available
                                 && go_relations.related_files.contains(&rel))
-                    }) {
+                    })
+                    {
                         continue;
                     }
                     if entry.parse_error
@@ -700,11 +665,7 @@ fn handle_tool_call(
                     }
                     if entry.lang == language::Lang::Python {
                         if py_structure_available {
-                            for target in py_relations
-                                .targets
-                                .iter()
-                                .filter(|target| target.file == rel)
-                            {
+                            for target in py_relations.targets.iter().filter(|target| target.file == rel) {
                                 definitions.extend(
                                     symbols::extract_definitions(
                                         &entry.tree,
@@ -719,110 +680,66 @@ fn handle_tool_call(
                                     }),
                                 );
                             }
-                            references.extend(
-                                py_relations
-                                    .references
-                                    .iter()
-                                    .filter(|reference| reference.file == rel)
-                                    .map(|reference| symbols::Reference {
-                                        name: reference.name.clone(),
-                                        qualified_name: None,
-                                        file: entry.path.to_string_lossy().to_string(),
-                                        line: reference.line,
-                                    }),
-                            );
-                            callers.extend(
-                                py_relations
-                                    .callers
-                                    .iter()
-                                    .filter(|caller| caller.file == rel)
-                                    .map(|caller| symbols::Callee {
-                                        name: caller.name.clone(),
-                                        qualified_name: None,
-                                        file: entry.path.to_string_lossy().to_string(),
-                                        line: caller.line,
-                                        is_member: false,
-                                        arg_count: 0,
-                                    }),
-                            );
-                            callees.extend(
-                                py_relations
-                                    .callees
-                                    .iter()
-                                    .filter(|callee| callee.file == rel)
-                                    .map(|callee| symbols::Callee {
-                                        name: callee.name.clone(),
-                                        qualified_name: None,
-                                        file: entry.path.to_string_lossy().to_string(),
-                                        line: callee.line,
-                                        is_member: false,
-                                        arg_count: 0,
-                                    }),
-                            );
+                            references.extend(py_relations.references.iter()
+                                .filter(|reference| reference.file == rel)
+                                .map(|reference| symbols::Reference {
+                                    name: reference.name.clone(),
+                                    qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(),
+                                    line: reference.line,
+                                }));
+                            callers.extend(py_relations.callers.iter()
+                                .filter(|caller| caller.file == rel)
+                                .map(|caller| symbols::Callee {
+                                    name: caller.name.clone(),
+                                    qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(),
+                                    line: caller.line,
+                                    is_member: false,
+                                    arg_count: 0,
+                                }));
+                            callees.extend(py_relations.callees.iter()
+                                .filter(|callee| callee.file == rel)
+                                .map(|callee| symbols::Callee {
+                                    name: callee.name.clone(),
+                                    qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(),
+                                    line: callee.line,
+                                    is_member: false,
+                                    arg_count: 0,
+                                }));
                         }
                         continue;
                     }
                     if entry.lang == language::Lang::Rust {
                         if rust_structure_available {
-                            for target in rust_relations
-                                .targets
-                                .iter()
-                                .filter(|target| target.file == rel)
-                            {
+                            for target in rust_relations.targets.iter().filter(|target| target.file == rel) {
                                 definitions.extend(
-                                    symbols::extract_definitions(
-                                        &entry.tree,
-                                        &entry.source,
-                                        &entry.path,
-                                        entry.lang,
-                                    )
-                                    .into_iter()
-                                    .filter(|definition| {
-                                        definition.name == target.name
-                                            && definition.line == target.line
-                                    }),
+                                    symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang)
+                                        .into_iter()
+                                        .filter(|definition| definition.name == target.name && definition.line == target.line),
                                 );
                             }
-                            references.extend(
-                                rust_relations
-                                    .references
-                                    .iter()
-                                    .filter(|reference| reference.file == rel)
-                                    .map(|reference| symbols::Reference {
-                                        name: reference.name.clone(),
-                                        qualified_name: None,
-                                        file: entry.path.to_string_lossy().to_string(),
-                                        line: reference.line,
-                                    }),
-                            );
-                            callers.extend(
-                                rust_relations
-                                    .callers
-                                    .iter()
-                                    .filter(|caller| caller.file == rel)
-                                    .map(|caller| symbols::Callee {
-                                        name: caller.name.clone(),
-                                        qualified_name: None,
-                                        file: entry.path.to_string_lossy().to_string(),
-                                        line: caller.line,
-                                        is_member: false,
-                                        arg_count: 0,
-                                    }),
-                            );
-                            callees.extend(
-                                rust_relations
-                                    .callees
-                                    .iter()
-                                    .filter(|callee| callee.file == rel)
-                                    .map(|callee| symbols::Callee {
-                                        name: callee.name.clone(),
-                                        qualified_name: None,
-                                        file: entry.path.to_string_lossy().to_string(),
-                                        line: callee.line,
-                                        is_member: false,
-                                        arg_count: 0,
-                                    }),
-                            );
+                            references.extend(rust_relations.references.iter()
+                                .filter(|reference| reference.file == rel)
+                                .map(|reference| symbols::Reference {
+                                    name: reference.name.clone(), qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(), line: reference.line,
+                                }));
+                            callers.extend(rust_relations.callers.iter()
+                                .filter(|caller| caller.file == rel)
+                                .map(|caller| symbols::Callee {
+                                    name: caller.name.clone(), qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(), line: caller.line,
+                                    is_member: false, arg_count: 0,
+                                }));
+                            callees.extend(rust_relations.callees.iter()
+                                .filter(|callee| callee.file == rel)
+                                .map(|callee| symbols::Callee {
+                                    name: callee.name.clone(), qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(), line: callee.line,
+                                    is_member: false, arg_count: 0,
+                                }));
                         }
                         continue;
                     }
@@ -890,39 +807,17 @@ fn handle_tool_call(
                         }
                         continue;
                     }
-                    let defs = symbols::extract_definitions(
-                        &entry.tree,
-                        &entry.source,
-                        &entry.path,
-                        entry.lang,
-                    );
+                    let defs = symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
                     for d in &defs {
                         if d.name == symbol {
                             definitions.push(d.clone());
                         }
                     }
-                    let refs = symbols::extract_references(
-                        &entry.tree,
-                        &entry.source,
-                        &entry.path,
-                        symbol,
-                    );
+                    let refs = symbols::extract_references(&entry.tree, &entry.source, &entry.path, symbol);
                     references.extend(refs);
-                    let ces = symbols::extract_callees(
-                        &entry.tree,
-                        &entry.source,
-                        &entry.path,
-                        symbol,
-                        entry.lang,
-                    );
+                    let ces = symbols::extract_callees(&entry.tree, &entry.source, &entry.path, symbol, entry.lang);
                     callees.extend(ces);
-                    let crs = symbols::extract_callers(
-                        &entry.tree,
-                        &entry.source,
-                        &entry.path,
-                        symbol,
-                        entry.lang,
-                    );
+                    let crs = symbols::extract_callers(&entry.tree, &entry.source, &entry.path, symbol, entry.lang);
                     callers.extend(crs);
                 }
                 definitions.sort_by(|left, right| {
@@ -962,25 +857,19 @@ fn handle_tool_call(
                     "signature": d.signature,
                     })
                 });
-                let definition_candidates: Vec<Value> = definitions
-                    .iter()
-                    .map(|d| {
-                        json!({
-                            "name": d.name,
-                            "file": d.file,
-                            "line": d.line,
-                            "kind": format!("{:?}", d.kind),
-                            "signature": d.signature,
-                        })
-                    })
-                    .collect();
-                let unresolved_module_specifiers = ts_relations
-                    .unresolved_module_specifiers
-                    .iter()
-                    .chain(&py_relations.unresolved_module_specifiers)
-                    .chain(&rust_relations.unresolved_module_specifiers)
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let definition_candidates: Vec<Value> = definitions.iter().map(|d| json!({
+                    "name": d.name,
+                    "file": d.file,
+                    "line": d.line,
+                    "kind": format!("{:?}", d.kind),
+                    "signature": d.signature,
+                })).collect();
+                let unresolved_module_specifiers =
+                    ts_relations.unresolved_module_specifiers.iter()
+                        .chain(&py_relations.unresolved_module_specifiers)
+                        .chain(&rust_relations.unresolved_module_specifiers)
+                        .cloned()
+                        .collect::<Vec<_>>();
                 let external_module_specifiers = ts_relations
                     .external_module_specifiers
                     .iter()
@@ -988,42 +877,27 @@ fn handle_tool_call(
                     .chain(&rust_relations.external_module_specifiers)
                     .cloned()
                     .collect::<Vec<_>>();
-                let refs_json: Vec<Value> = references
-                    .iter()
-                    .map(|r| {
-                        json!({
-                            "name": r.name,
-                            "qualified_name": r.qualified_name,
-                            "is_member": r.qualified_name.is_some(),
-                            "file": r.file,
-                            "line": r.line,
-                        })
-                    })
-                    .collect();
-                let callees_json: Vec<Value> = callees
-                    .iter()
-                    .map(|c| {
-                        json!({
-                            "name": c.name,
-                            "qualified_name": c.qualified_name,
-                            "is_member": c.is_member,
-                            "file": c.file,
-                            "line": c.line,
-                        })
-                    })
-                    .collect();
-                let callers_json: Vec<Value> = callers
-                    .iter()
-                    .map(|c| {
-                        json!({
-                            "name": c.name,
-                            "qualified_name": c.qualified_name,
-                            "is_member": c.is_member,
-                            "file": c.file,
-                            "line": c.line,
-                        })
-                    })
-                    .collect();
+                let refs_json: Vec<Value> = references.iter().map(|r| json!({
+                    "name": r.name,
+                    "qualified_name": r.qualified_name,
+                    "is_member": r.qualified_name.is_some(),
+                    "file": r.file,
+                    "line": r.line,
+                })).collect();
+                let callees_json: Vec<Value> = callees.iter().map(|c| json!({
+                    "name": c.name,
+                    "qualified_name": c.qualified_name,
+                    "is_member": c.is_member,
+                    "file": c.file,
+                    "line": c.line,
+                })).collect();
+                let callers_json: Vec<Value> = callers.iter().map(|c| json!({
+                    "name": c.name,
+                    "qualified_name": c.qualified_name,
+                    "is_member": c.is_member,
+                    "file": c.file,
+                    "line": c.line,
+                })).collect();
                 let mut affected_files: HashSet<String> = HashSet::new();
                 let mut suggested_minimal_reads: Vec<Value> = Vec::new();
                 for d in &definitions {
@@ -1047,12 +921,7 @@ fn handle_tool_call(
                 }
                 let related_tests = find_related_tests(&affected_files, &HashSet::new(), idx);
                 for test in related_tests.iter().take(4) {
-                    push_read_hint_unique(
-                        &mut suggested_minimal_reads,
-                        test.clone(),
-                        1,
-                        "related test",
-                    );
+                    push_read_hint_unique(&mut suggested_minimal_reads, test.clone(), 1, "related test");
                 }
                 let mut missing_evidence = Vec::new();
                 if definitions.is_empty() {
@@ -1132,27 +1001,23 @@ fn handle_tool_call(
                 let entry_points: Vec<Value> = definitions
                     .iter()
                     .take(3)
-                    .map(|d| {
-                        json!({
-                            "name": d.name,
-                            "file": make_relative(&d.file, &root_str),
-                            "line": d.line,
-                            "kind": format!("{:?}", d.kind),
-                        })
-                    })
+                    .map(|d| json!({
+                        "name": d.name,
+                        "file": make_relative(&d.file, &root_str),
+                        "line": d.line,
+                        "kind": format!("{:?}", d.kind),
+                    }))
                     .collect();
                 let caller_chain: Vec<Value> = callers
                     .iter()
                     .take(8)
-                    .map(|c| {
-                        json!({
-                            "name": c.name,
-                            "qualified_name": c.qualified_name,
-                            "is_member": c.is_member,
-                            "file": make_relative(&c.file, &root_str),
-                            "line": c.line,
-                        })
-                    })
+                    .map(|c| json!({
+                        "name": c.name,
+                        "qualified_name": c.qualified_name,
+                        "is_member": c.is_member,
+                        "file": make_relative(&c.file, &root_str),
+                        "line": c.line,
+                    }))
                     .collect();
                 let mut result = json!({
                     "definition": definition,
@@ -1221,25 +1086,12 @@ fn handle_tool_call(
         "pre_impact" => {
             handle_pre_impact(arguments, index, deep_layer, py_layer, rust_layer, go_layer)
         }
-        "pre_plan" => handle_pre_plan(arguments, index, deep_layer, py_layer, rust_layer, go_layer),
-        "pre_verify" => handle_pre_verify(
-            arguments,
-            index,
-            deep_layer,
-            py_layer,
-            rust_layer,
-            go_layer,
-            java_layer,
-            sql_layer,
-            shell_layer,
-            csharp_layer,
-            php_layer,
-            ruby_layer,
-            kotlin_layer,
-            dart_layer,
-            swift_layer,
-            cpp_layer,
-        ),
+        "pre_plan" => {
+            handle_pre_plan(arguments, index, deep_layer, py_layer, rust_layer, go_layer)
+        }
+        "pre_verify" => {
+            handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer, ruby_layer, kotlin_layer, dart_layer, swift_layer, cpp_layer)
+        }
         _ => {
             json!({
                 "content": [{
@@ -1311,9 +1163,7 @@ fn handle_pre_impact(
                 if let Some(name) = s.as_str() {
                     let seed_language = change_path.as_ref().and_then(|path| {
                         idx.files()
-                            .find(|entry| {
-                                make_relative(&entry.path.to_string_lossy(), &root_str) == *path
-                            })
+                            .find(|entry| make_relative(&entry.path.to_string_lossy(), &root_str) == *path)
                             .map(|entry| entry.lang)
                             .or_else(|| language::Lang::from_path(Path::new(path)))
                     });
@@ -1350,12 +1200,7 @@ fn handle_pre_impact(
         for entry in idx.files() {
             let entry_rel = make_relative(&entry.path.to_string_lossy(), &root_str);
             if changed_files.contains(&entry_rel) {
-                let defs = symbols::extract_definitions(
-                    &entry.tree,
-                    &entry.source,
-                    &entry.path,
-                    entry.lang,
-                );
+                let defs = symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
                 for d in defs {
                     if matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx) {
                         ts_seed_symbols.insert(d.name.clone());
@@ -1456,12 +1301,8 @@ fn handle_pre_impact(
         rust_deep_layer::disabled_structure(&rust_symbols_requested)
     } else {
         rust_deep_layer::run_structure(
-            rust_layer,
-            &idx.root,
-            &rust_change_files,
-            &rust_symbols_requested,
-            &rust_symbol_positions,
-            &rust_import_tokens,
+            rust_layer, &idx.root, &rust_change_files, &rust_symbols_requested,
+            &rust_symbol_positions, &rust_import_tokens,
             false,
         )
     };
@@ -1495,8 +1336,7 @@ fn handle_pre_impact(
     let py_structure_verified = py_structure.status == "verified";
     let py_structure_available = matches!(py_structure.status, "verified" | "partially_verified");
     let rust_structure_verified = rust_structure.status == "verified";
-    let rust_structure_available =
-        matches!(rust_structure.status, "verified" | "partially_verified");
+    let rust_structure_available = matches!(rust_structure.status, "verified" | "partially_verified");
     let go_structure_verified = go_structure.status == "verified";
     let go_structure_available = matches!(go_structure.status, "verified" | "partially_verified");
     let related_ts_files: Vec<String> = ts_relations
@@ -1509,10 +1349,8 @@ fn handle_pre_impact(
         .flat_map(|relations| relations.related_files.iter().cloned())
         .collect();
     idx.refresh_paths(&related_py_files);
-    let related_rust_files: Vec<String> = rust_relations
-        .values()
-        .flat_map(|relations| relations.related_files.iter().cloned())
-        .collect();
+    let related_rust_files: Vec<String> = rust_relations.values()
+        .flat_map(|relations| relations.related_files.iter().cloned()).collect();
     idx.refresh_paths(&related_rust_files);
     let related_go_files: Vec<String> = go_relations
         .values()
@@ -1522,7 +1360,8 @@ fn handle_pre_impact(
     let ts_symbols: HashSet<String> = ts_relations
         .iter()
         .filter_map(|(symbol, relations)| {
-            (relations.has_evidence() || (structure_available && ts_seed_symbols.contains(symbol)))
+            (relations.has_evidence()
+                || (structure_available && ts_seed_symbols.contains(symbol)))
                 .then_some(symbol.clone())
         })
         .collect();
@@ -1531,17 +1370,13 @@ fn handle_pre_impact(
         .filter_map(|(symbol, relations)| {
             (relations.has_evidence()
                 || (py_structure_available && py_seed_symbols.contains(symbol)))
-            .then_some(symbol.clone())
+                .then_some(symbol.clone())
         })
         .collect();
-    let rust_symbols: HashSet<String> = rust_relations
-        .iter()
-        .filter_map(|(symbol, relations)| {
-            (relations.has_evidence()
-                || (rust_structure_available && rust_seed_symbols.contains(symbol)))
+    let rust_symbols: HashSet<String> = rust_relations.iter().filter_map(|(symbol, relations)| {
+        (relations.has_evidence() || (rust_structure_available && rust_seed_symbols.contains(symbol)))
             .then_some(symbol.clone())
-        })
-        .collect();
+    }).collect();
     let go_symbols: HashSet<String> = go_relations
         .iter()
         .filter_map(|(symbol, relations)| {
@@ -1583,10 +1418,9 @@ fn handle_pre_impact(
         relation_files.sort();
         for file in relation_files {
             let names = &relations.names_by_file[file];
-            let Some((path, tree, source, lang)) = file_entries
-                .iter()
-                .find(|(path, _, _, _)| make_relative(&path.to_string_lossy(), &root_str) == *file)
-            else {
+            let Some((path, tree, source, lang)) = file_entries.iter().find(|(path, _, _, _)| {
+                make_relative(&path.to_string_lossy(), &root_str) == *file
+            }) else {
                 continue;
             };
             let mut names: Vec<&String> = names.iter().collect();
@@ -1638,11 +1472,7 @@ fn handle_pre_impact(
     let mut semantic_relation_symbols: Vec<_> = py_relations
         .iter()
         .filter(|(symbol, _)| py_symbols.contains(*symbol))
-        .chain(
-            rust_relations
-                .iter()
-                .filter(|(symbol, _)| rust_symbols.contains(*symbol)),
-        )
+        .chain(rust_relations.iter().filter(|(symbol, _)| rust_symbols.contains(*symbol)))
         .chain(
             go_relations
                 .iter()
@@ -1697,10 +1527,7 @@ fn handle_pre_impact(
             {
                 continue;
             }
-            if matches!(
-                lang,
-                language::Lang::Python | language::Lang::Rust | language::Lang::Go
-            ) {
+            if matches!(lang, language::Lang::Python | language::Lang::Rust | language::Lang::Go) {
                 continue;
             }
             let references = symbols::extract_references(tree, source, path, &sym);
@@ -1793,20 +1620,16 @@ fn handle_pre_impact(
     let blocked_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
         &relations.blocked_module_specifiers
     });
-    let dynamic_import_files =
-        sorted_relation_values(&ts_relations, |relations| &relations.dynamic_import_files);
+    let dynamic_import_files = sorted_relation_values(&ts_relations, |relations| {
+        &relations.dynamic_import_files
+    });
     let module_graph_cycle = ts_relations.values().any(|relations| relations.graph_cycle);
     let module_graph_truncated = ts_relations
         .values()
         .any(|relations| relations.graph_truncated);
-    let unresolved_external_modules = ts_relations
-        .values()
-        .chain(py_relations.values())
-        .chain(rust_relations.values())
-        .chain(go_relations.values())
-        .any(|relations| {
-            relations.targets.is_empty() && !relations.external_module_specifiers.is_empty()
-        });
+    let unresolved_external_modules = ts_relations.values().chain(py_relations.values()).chain(rust_relations.values()).chain(go_relations.values()).any(|relations| {
+        relations.targets.is_empty() && !relations.external_module_specifiers.is_empty()
+    });
     let mut ambiguous_symbols = ambiguous_definition_symbols(
         idx,
         &seed_symbols
@@ -1821,21 +1644,15 @@ fn handle_pre_impact(
             .cloned()
             .collect::<Vec<_>>(),
     );
-    ambiguous_symbols.extend(
-        ts_relations.iter().filter_map(|(symbol, relations)| {
-            (relations.targets.len() > 1).then_some(symbol.clone())
-        }),
-    );
-    ambiguous_symbols.extend(
-        py_relations.iter().filter_map(|(symbol, relations)| {
-            (relations.targets.len() > 1).then_some(symbol.clone())
-        }),
-    );
-    ambiguous_symbols.extend(
-        rust_relations.iter().filter_map(|(symbol, relations)| {
-            (relations.targets.len() > 1).then_some(symbol.clone())
-        }),
-    );
+    ambiguous_symbols.extend(ts_relations.iter().filter_map(|(symbol, relations)| {
+        (relations.targets.len() > 1).then_some(symbol.clone())
+    }));
+    ambiguous_symbols.extend(py_relations.iter().filter_map(|(symbol, relations)| {
+        (relations.targets.len() > 1).then_some(symbol.clone())
+    }));
+    ambiguous_symbols.extend(rust_relations.iter().filter_map(|(symbol, relations)| {
+        (relations.targets.len() > 1).then_some(symbol.clone())
+    }));
     ambiguous_symbols.extend(
         go_relations.iter().filter_map(|(symbol, relations)| {
             (relations.targets.len() > 1).then_some(symbol.clone())
@@ -1918,12 +1735,7 @@ fn handle_pre_impact(
         .map(|file| read_hint(file.clone(), 1, "affected file"))
         .collect();
     for test in related_tests.iter().take(6) {
-        push_read_hint_unique(
-            &mut suggested_minimal_reads,
-            test.clone(),
-            1,
-            "related test",
-        );
+        push_read_hint_unique(&mut suggested_minimal_reads, test.clone(), 1, "related test");
     }
     let minimal_reads_truncated = truncate_impact_minimal_reads(&mut suggested_minimal_reads);
     if minimal_reads_truncated {
@@ -2310,11 +2122,7 @@ fn handle_pre_plan(
     let target_files: Vec<String> = arguments
         .get("target_files")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(|x| make_relative(x, &root_str)))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|x| make_relative(x, &root_str))).collect())
         .unwrap_or_default();
     if let Some(result) = reject_non_structural_paths("pre_plan", &target_files) {
         return result;
@@ -2322,11 +2130,7 @@ fn handle_pre_plan(
     let target_symbols: Vec<String> = arguments
         .get("target_symbols")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let index_consistency = if target_files.is_empty() {
         if idx.refresh() {
@@ -2389,7 +2193,8 @@ fn handle_pre_plan(
     };
     let (py_symbol_positions, _) =
         python_lsp_inputs(idx, &root_str, &target_files, &target_symbols);
-    let (_, py_import_tokens) = python_lsp_inputs(idx, &root_str, &py_structure_files, &[]);
+    let (_, py_import_tokens) =
+        python_lsp_inputs(idx, &root_str, &py_structure_files, &[]);
     let mut py_structure = if py_structure_files.is_empty() {
         py_deep_layer::disabled_structure(&target_symbols)
     } else {
@@ -2404,7 +2209,13 @@ fn handle_pre_plan(
     };
     for _ in 0..16 {
         let mut expanded: HashSet<String> = py_structure_files.iter().cloned().collect();
-        expanded.extend(py_structure.module_dependencies.values().flatten().cloned());
+        expanded.extend(
+            py_structure
+                .module_dependencies
+                .values()
+                .flatten()
+                .cloned(),
+        );
         expanded.extend(
             py_structure
                 .relations
@@ -2429,7 +2240,13 @@ fn handle_pre_plan(
         );
     }
     let mut final_py_closure: HashSet<String> = py_structure_files.iter().cloned().collect();
-    final_py_closure.extend(py_structure.module_dependencies.values().flatten().cloned());
+    final_py_closure.extend(
+        py_structure
+            .module_dependencies
+            .values()
+            .flatten()
+            .cloned(),
+    );
     final_py_closure.extend(
         py_structure
             .relations
@@ -2445,49 +2262,33 @@ fn handle_pre_plan(
     let mut rust_structure_files: Vec<String> = if target_files.is_empty() {
         Vec::new()
     } else {
-        target_files
-            .iter()
-            .filter(|file| {
-                idx.files().any(|entry| {
-                    entry.lang == language::Lang::Rust
-                        && make_relative(&entry.path.to_string_lossy(), &root_str) == **file
-                })
-            })
-            .cloned()
-            .collect()
+        target_files.iter().filter(|file| {
+            idx.files().any(|entry| entry.lang == language::Lang::Rust
+                && make_relative(&entry.path.to_string_lossy(), &root_str) == **file)
+        }).cloned().collect()
     };
-    let (rust_symbol_positions, _) =
-        rust_lsp_inputs(idx, &root_str, &rust_structure_files, &target_symbols);
+    let (rust_symbol_positions, _) = rust_lsp_inputs(idx, &root_str, &rust_structure_files, &target_symbols);
     let (_, rust_import_tokens) = rust_lsp_inputs(idx, &root_str, &rust_structure_files, &[]);
-    let mut rust_structure =
-        if !has_rust_files || (!target_files.is_empty() && rust_structure_files.is_empty()) {
+    let mut rust_structure = if !has_rust_files
+        || (!target_files.is_empty() && rust_structure_files.is_empty())
+    {
             rust_deep_layer::disabled_structure(&target_symbols)
         } else {
             rust_deep_layer::run_structure(
-                rust_layer,
-                &idx.root,
-                &rust_structure_files,
-                &target_symbols,
-                &rust_symbol_positions,
-                &rust_import_tokens,
+            rust_layer, &idx.root, &rust_structure_files, &target_symbols,
+            &rust_symbol_positions, &rust_import_tokens,
                 target_files.is_empty(),
             )
         };
     for _ in 0..15 {
         let mut expanded: HashSet<String> = rust_structure_files.iter().cloned().collect();
+        expanded.extend(rust_structure.module_dependencies.values().flatten().cloned());
         expanded.extend(
             rust_structure
-                .module_dependencies
-                .values()
-                .flatten()
-                .cloned(),
-        );
-        expanded.extend(
-            rust_structure
-                .relations
-                .values()
-                .flat_map(|relations| relations.related_files.iter().cloned()),
-        );
+            .relations
+            .values()
+            .flat_map(|relations| relations.related_files.iter().cloned()),
+    );
         if expanded.len() == rust_structure_files.len() {
             break;
         }
@@ -2507,13 +2308,7 @@ fn handle_pre_plan(
         );
     }
     let mut final_rust_closure: HashSet<String> = rust_structure_files.iter().cloned().collect();
-    final_rust_closure.extend(
-        rust_structure
-            .module_dependencies
-            .values()
-            .flatten()
-            .cloned(),
-    );
+    final_rust_closure.extend(rust_structure.module_dependencies.values().flatten().cloned());
     final_rust_closure.extend(
         rust_structure
             .relations
@@ -2547,7 +2342,7 @@ fn handle_pre_plan(
     let mut go_structure =
         if !has_go_files || (!target_files.is_empty() && go_structure_files.is_empty()) {
             go_deep_layer::disabled_structure(&target_symbols)
-        } else {
+    } else {
             go_deep_layer::run_structure(
                 go_layer,
                 &idx.root,
@@ -2555,9 +2350,9 @@ fn handle_pre_plan(
                 &target_symbols,
                 &go_symbol_positions,
                 &go_import_tokens,
-                target_files.is_empty(),
-            )
-        };
+            target_files.is_empty(),
+        )
+    };
     for _ in 0..15 {
         let mut expanded: HashSet<String> = go_structure_files.iter().cloned().collect();
         expanded.extend(go_structure.module_dependencies.values().flatten().cloned());
@@ -2608,8 +2403,7 @@ fn handle_pre_plan(
     let py_structure_verified = py_structure.status == "verified";
     let py_structure_available = matches!(py_structure.status, "verified" | "partially_verified");
     let rust_structure_verified = rust_structure.status == "verified";
-    let rust_structure_available =
-        matches!(rust_structure.status, "verified" | "partially_verified");
+    let rust_structure_available = matches!(rust_structure.status, "verified" | "partially_verified");
     let go_structure_verified = go_structure.status == "verified";
     let go_structure_available = matches!(go_structure.status, "verified" | "partially_verified");
     let related_ts_files: Vec<String> = ts_relations
@@ -2622,10 +2416,8 @@ fn handle_pre_plan(
         .flat_map(|relations| relations.related_files.iter().cloned())
         .collect();
     idx.refresh_paths(&related_py_files);
-    let related_rust_files: Vec<String> = rust_relations
-        .values()
-        .flat_map(|relations| relations.related_files.iter().cloned())
-        .collect();
+    let related_rust_files: Vec<String> = rust_relations.values()
+        .flat_map(|relations| relations.related_files.iter().cloned()).collect();
     idx.refresh_paths(&related_rust_files);
     let related_go_files: Vec<String> = go_relations
         .values()
@@ -2647,11 +2439,8 @@ fn handle_pre_plan(
         .filter(|file| py_structure_files.contains(file))
         .cloned()
         .collect();
-    let rust_target_files: HashSet<String> = target_files
-        .iter()
-        .filter(|file| rust_structure_files.contains(file))
-        .cloned()
-        .collect();
+    let rust_target_files: HashSet<String> = target_files.iter()
+        .filter(|file| rust_structure_files.contains(file)).cloned().collect();
     let go_target_files: HashSet<String> = target_files
         .iter()
         .filter(|file| go_structure_files.contains(file))
@@ -2662,14 +2451,7 @@ fn handle_pre_plan(
         .filter(|entry| {
             let rel = make_relative(&entry.path.to_string_lossy(), &root_str);
             target_files.contains(&rel)
-                && !matches!(
-                    entry.lang,
-                    language::Lang::TypeScript
-                        | language::Lang::Tsx
-                        | language::Lang::Python
-                        | language::Lang::Rust
-                        | language::Lang::Go
-                )
+                && !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python | language::Lang::Rust | language::Lang::Go)
         })
         .flat_map(|entry| {
             symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang)
@@ -2685,7 +2467,7 @@ fn handle_pre_plan(
                 || (structure_available
                     && !ts_target_files.is_empty()
                     && !non_ts_target_symbols.contains(symbol)))
-            .then_some(symbol.clone())
+                .then_some(symbol.clone())
         })
         .collect();
     let py_symbols: HashSet<String> = py_relations
@@ -2695,27 +2477,23 @@ fn handle_pre_plan(
                 || (py_structure_available
                     && !py_target_files.is_empty()
                     && !non_ts_target_symbols.contains(symbol)))
-            .then_some(symbol.clone())
+                .then_some(symbol.clone())
         })
         .collect();
-    let rust_symbols: HashSet<String> = rust_relations
-        .iter()
-        .filter_map(|(symbol, relations)| {
-            (relations.has_evidence()
-                || (rust_structure_available
-                    && !rust_target_files.is_empty()
-                    && !non_ts_target_symbols.contains(symbol)))
-            .then_some(symbol.clone())
-        })
-        .collect();
+    let rust_symbols: HashSet<String> = rust_relations.iter().filter_map(|(symbol, relations)| {
+        (relations.has_evidence()
+            || (rust_structure_available && !rust_target_files.is_empty()
+                && !non_ts_target_symbols.contains(symbol)))
+        .then_some(symbol.clone())
+    }).collect();
     let go_symbols: HashSet<String> = go_relations
         .iter()
         .filter_map(|(symbol, relations)| {
-            (relations.has_evidence()
+        (relations.has_evidence()
                 || (go_structure_available
                     && !go_target_files.is_empty()
-                    && !non_ts_target_symbols.contains(symbol)))
-            .then_some(symbol.clone())
+                && !non_ts_target_symbols.contains(symbol)))
+        .then_some(symbol.clone())
         })
         .collect();
     let mut unresolved_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
@@ -2771,8 +2549,8 @@ fn handle_pre_plan(
         .chain(rust_relations.values())
         .chain(go_relations.values())
         .any(|relations| {
-            relations.targets.is_empty() && !relations.external_module_specifiers.is_empty()
-        });
+        relations.targets.is_empty() && !relations.external_module_specifiers.is_empty()
+    });
     let mut ambiguous_symbols = ambiguous_definition_symbols(
         idx,
         &target_symbols
@@ -2789,17 +2567,17 @@ fn handle_pre_plan(
     );
     ambiguous_symbols.extend(
         ts_relations.iter().filter_map(|(symbol, relations)| {
-            (relations.targets.len() > 1).then_some(symbol.clone())
+        (relations.targets.len() > 1).then_some(symbol.clone())
         }),
     );
     ambiguous_symbols.extend(
         py_relations.iter().filter_map(|(symbol, relations)| {
-            (relations.targets.len() > 1).then_some(symbol.clone())
+        (relations.targets.len() > 1).then_some(symbol.clone())
         }),
     );
     ambiguous_symbols.extend(
         rust_relations.iter().filter_map(|(symbol, relations)| {
-            (relations.targets.len() > 1).then_some(symbol.clone())
+        (relations.targets.len() > 1).then_some(symbol.clone())
         }),
     );
     ambiguous_symbols.extend(
@@ -2945,14 +2723,9 @@ fn handle_pre_plan(
         );
     }
     for (file, dependencies) in &rust_structure.module_dependencies {
-        if !scope_files.contains(file) {
-            continue;
-        }
+        if !scope_files.contains(file) { continue; }
         file_deps.entry(file.clone()).or_default().extend(
-            dependencies
-                .iter()
-                .filter(|dependency| scope_files.contains(*dependency))
-                .cloned(),
+            dependencies.iter().filter(|dependency| scope_files.contains(*dependency)).cloned(),
         );
     }
     for (file, dependencies) in &go_structure.module_dependencies {
@@ -2972,14 +2745,7 @@ fn handle_pre_plan(
 
     let mut all_defs: HashMap<String, Vec<String>> = HashMap::new();
     for entry in idx.files().filter(|entry| {
-        !matches!(
-            entry.lang,
-            language::Lang::TypeScript
-                | language::Lang::Tsx
-                | language::Lang::Python
-                | language::Lang::Rust
-                | language::Lang::Go
-        )
+        !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python | language::Lang::Rust | language::Lang::Go)
     }) {
         let rel = make_relative(&entry.path.to_string_lossy(), &root_str);
         for definition in
@@ -2997,34 +2763,18 @@ fn handle_pre_plan(
         if !scope_files.contains(&rel) {
             continue;
         }
-        if matches!(
-            entry.lang,
-            language::Lang::TypeScript
-                | language::Lang::Tsx
-                | language::Lang::Python
-                | language::Lang::Rust
-                | language::Lang::Go
-        ) {
+        if matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python | language::Lang::Rust | language::Lang::Go) {
             continue;
         }
-        let defs =
-            symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
+        let defs = symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
         for d in &defs {
-            let callees = symbols::extract_callees(
-                &entry.tree,
-                &entry.source,
-                &entry.path,
-                &d.name,
-                entry.lang,
-            );
+            let callees = symbols::extract_callees(&entry.tree, &entry.source, &entry.path, &d.name, entry.lang);
             for callee in &callees {
                 if let Some(def_files) = all_defs.get(&callee.name) {
                     if def_files.len() == 1 {
                         let def_file = &def_files[0];
                         if def_file != &rel && scope_files.contains(def_file) {
-                            file_deps
-                                .get_mut(&rel)
-                                .map(|deps| deps.insert(def_file.clone()));
+                            file_deps.get_mut(&rel).map(|deps| deps.insert(def_file.clone()));
                         }
                     }
                 }
@@ -3045,12 +2795,12 @@ fn handle_pre_plan(
                 .get(file)
                 .map(|s| s.iter().collect())
                 .unwrap_or_default();
-            deps.sort();
-            json!({
-                "order": i + 1,
-                "file": file,
-                "depends_on": deps,
-            })
+        deps.sort();
+        json!({
+            "order": i + 1,
+            "file": file,
+            "depends_on": deps,
+        })
         })
         .collect();
 
@@ -3072,7 +2822,9 @@ fn handle_pre_plan(
         || (!go_structure_files.is_empty() && !go_structure_verified)
     {
         "medium"
-    } else if target_symbols.is_empty() || (target_definition_found && target_usage_found) {
+    } else if target_symbols.is_empty()
+        || (target_definition_found && target_usage_found)
+    {
         "high"
     } else {
         "medium"
@@ -3213,9 +2965,7 @@ fn handle_pre_plan_discovery(
     let has_ts_files = idx
         .files()
         .any(|entry| matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx));
-    let has_python_files = idx
-        .files()
-        .any(|entry| entry.lang == language::Lang::Python);
+    let has_python_files = idx.files().any(|entry| entry.lang == language::Lang::Python);
     let has_rust_files = idx.files().any(|entry| entry.lang == language::Lang::Rust);
     let has_go_files = idx.files().any(|entry| entry.lang == language::Lang::Go);
     let mut discovery_terms: Vec<String> = task_terms.iter().cloned().collect();
@@ -3328,14 +3078,7 @@ fn handle_pre_plan_discovery(
     let file_entries: Vec<_> = idx
         .files()
         .filter(|entry| {
-            !matches!(
-                entry.lang,
-                language::Lang::TypeScript
-                    | language::Lang::Tsx
-                    | language::Lang::Python
-                    | language::Lang::Rust
-                    | language::Lang::Go
-            )
+            !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python | language::Lang::Rust | language::Lang::Go)
         })
         .collect();
 
@@ -3346,14 +3089,14 @@ fn handle_pre_plan_discovery(
                 continue;
             }
             candidates.entry(d.name.clone()).or_insert_with(|| {
-                PlanCandidate::new(
-                    d.name.clone(),
-                    rel.clone(),
-                    d.line,
-                    format!("{:?}", d.kind),
-                    relevance_score(task, &task_terms, &d.name, &rel),
-                )
-            });
+                    PlanCandidate::new(
+                        d.name.clone(),
+                        rel.clone(),
+                        d.line,
+                        format!("{:?}", d.kind),
+                        relevance_score(task, &task_terms, &d.name, &rel),
+                    )
+                });
         }
     }
 
@@ -3399,14 +3142,14 @@ fn handle_pre_plan_discovery(
         .iter()
         .map(|c| {
             json!({
-                "name": &c.name,
-                "file": &c.file,
-                "line": c.line,
-                "kind": &c.kind,
-                "score": c.score(),
-                "relevance": c.relevance,
-                "caller_count": c.caller_count,
-                "callee_count": c.callee_count,
+            "name": &c.name,
+            "file": &c.file,
+            "line": c.line,
+            "kind": &c.kind,
+            "score": c.score(),
+            "relevance": c.relevance,
+            "caller_count": c.caller_count,
+            "callee_count": c.callee_count,
             })
         })
         .collect();
@@ -3420,13 +3163,13 @@ fn handle_pre_plan_discovery(
         .take(4)
         .map(|c| {
             json!({
-                "tool": "pre_context",
-                "arguments": {
-                    "symbol": &c.name,
-                    "path": &c.file,
-                    "depth": 2
-                },
-                "reason": "semantic discovery anchor",
+            "tool": "pre_context",
+            "arguments": {
+                "symbol": &c.name,
+                "path": &c.file,
+                "depth": 2
+            },
+            "reason": "semantic discovery anchor",
             })
         })
         .collect();
@@ -4072,14 +3815,14 @@ fn handle_pre_verify(
             )
         };
     let (tsx_deep_layer_status, tsx_deep_layer_reason, tsx_verification) = if tsx_files.is_empty() {
-        (
-            "disabled",
-            Some("no TSX files in changed_files".to_string()),
-            json!({ "coverage": [], "missing": ["no_tsx_files"] }),
-        )
-    } else {
+            (
+                "disabled",
+                Some("no TSX files in changed_files".to_string()),
+                json!({ "coverage": [], "missing": ["no_tsx_files"] }),
+            )
+        } else {
         ts_deep_layer::result_for_language(typescript_and_tsx_result.as_ref().unwrap(), "TSX")
-    };
+        };
     let deep_layer_ms = typescript_and_tsx_result
         .as_ref()
         .map_or(0, |result| result.elapsed_ms);
@@ -4153,7 +3896,7 @@ fn handle_pre_verify(
             issues: vec![],
             status: "disabled",
             reason: Some("no Go files in changed_files".to_string()),
-            verification: json!({ "coverage": [], "missing": ["no_go_files"] }),
+            verification: json!({ "coverage": [], "missing": ["go_documents"] }),
             program_build_count: 0,
             program_rebuilt: false,
             snapshot_id: "0".to_string(),
@@ -4795,6 +4538,71 @@ mod tests {
         assert_eq!(summary.get("status"), Some(&json!("verified")));
         assert_eq!(summary.get("fully_verified"), Some(&json!(true)));
         assert_eq!(verification_result_status(false, &summary), "pass");
+    }
+
+    #[test]
+    fn go_verification_degradation_contract_is_preserved() {
+        struct Case {
+            status: &'static str,
+            reason: Option<&'static str>,
+            missing: &'static [&'static str],
+            expected_status: &'static str,
+            expected_missing_tools: &'static [&'static str],
+        }
+
+        let cases = [
+            Case {
+                status: "partially_verified",
+                reason: Some("no Go documents"),
+                missing: &["go_documents"],
+                expected_status: "partially_verified",
+                expected_missing_tools: &[],
+            },
+            Case {
+                status: "tool_missing",
+                reason: Some("gopls_not_found"),
+                missing: &["gopls"],
+                expected_status: "tool_missing",
+                expected_missing_tools: &["gopls"],
+            },
+            Case {
+                status: "partially_verified",
+                reason: Some("gopls_protocol_error"),
+                missing: &["gopls_diagnostics"],
+                expected_status: "partially_verified",
+                expected_missing_tools: &[],
+            },
+            Case {
+                status: "verified",
+                reason: Some("gopls_diagnostics_complete"),
+                missing: &[],
+                expected_status: "verified",
+                expected_missing_tools: &[],
+            },
+        ];
+
+        for case in cases {
+            let files = vec!["service.go".to_string()];
+            let verification = json!({
+                "coverage": if case.status == "verified" { json!(["gopls_diagnostics"]) } else { json!([]) },
+                "missing": case.missing,
+            });
+            let summary = build_verification_summary(
+                &files,
+                &[VerificationLayerResult {
+                    language: "Go",
+                    files: &files,
+                    status: case.status,
+                    reason: case.reason,
+                    verification: Some(&verification),
+                }],
+            );
+
+            assert_eq!(summary.get("status"), Some(&json!(case.expected_status)));
+            assert_eq!(summary.get("fully_verified"), Some(&json!(case.status == "verified")));
+            assert_eq!(summary.pointer("/language_results/0/missing"), Some(&json!(case.missing)));
+            assert_eq!(summary.get("missing_tools"), Some(&json!(case.expected_missing_tools)));
+        }
     }
 
     #[test]

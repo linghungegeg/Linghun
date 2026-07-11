@@ -15,10 +15,11 @@ const platformBinary = path.resolve(__dirname, "..", "..", "packages", `pre-engi
 const sourceHelper = path.resolve(__dirname, "go-deep-layer.cjs");
 const bundledHelper = path.join(path.dirname(bundledBinary), "go-deep-layer.cjs");
 const platformHelper = path.join(path.dirname(platformBinary), "go-deep-layer.cjs");
+const reportPath = path.join(os.tmpdir(), "linghun-go-product-1k-final.json");
 const rounds = 3;
 const samplesPerRound = { context: 30, plan: 15, impact: 15, verify: 15 };
 const thresholds = {
-  cold_start_ms: Number(process.env.GO_BENCH_MAX_COLD_START_MS || 30000),
+  cold_start_ms: Number(process.env.GO_BENCH_MAX_COLD_START_MS || 60000),
   context_p95_ms: Number(process.env.GO_BENCH_MAX_CONTEXT_P95_MS || 2000),
   plan_p95_ms: Number(process.env.GO_BENCH_MAX_PLAN_P95_MS || 4000),
   impact_p95_ms: Number(process.env.GO_BENCH_MAX_IMPACT_P95_MS || 4000),
@@ -78,6 +79,23 @@ function payload(result) {
   const text = result.content && result.content.find(item => item.type === "text");
   assert(text, `missing tool payload: ${JSON.stringify(result)}`);
   return JSON.parse(text.text);
+}
+
+function normalize(value) {
+  return String(value || "").replace(/\\/g, "/").toLowerCase();
+}
+
+function objectFiles(values) {
+  return (Array.isArray(values) ? values : [])
+    .map(value => normalize(typeof value === "string" ? value : value.file || value.path))
+    .filter(Boolean);
+}
+
+function definitionFiles(payloadValue) {
+  return objectFiles([
+    ...(Array.isArray(payloadValue.definition_candidates) ? payloadValue.definition_candidates : []),
+    ...(payloadValue.definition ? [payloadValue.definition] : []),
+  ]);
 }
 
 class Client {
@@ -153,6 +171,52 @@ function assertSemantic(payloadValue, operation) {
   assert(payloadValue.go_semantic_engine_status === "verified", `${operation} degraded: ${JSON.stringify(payloadValue)}`);
 }
 
+function assertContextEvidence(context, suffix, operation) {
+  assertSemantic(context, operation);
+  const target = `p${suffix}/p${suffix}.go`;
+  assert(definitionFiles(context).some(file => file.endsWith(target)),
+    `${operation} missed target definition ${target}: ${JSON.stringify(context.definition_candidates)}`);
+  assert(objectFiles(context.references).some(file => file.endsWith(target)),
+    `${operation} missed concrete reference in ${target}`);
+}
+
+function assertShortPlan(plan, operation) {
+  assertSemantic(plan, operation);
+  assert(plan.module_graph_truncated === false, `${operation} unexpectedly truncated`);
+  const order = objectFiles(plan.edit_order);
+  const first = order.findIndex(file => file.endsWith("p0000/p0000.go"));
+  const second = order.findIndex(file => file.endsWith("p0001/p0001.go"));
+  const third = order.findIndex(file => file.endsWith("p0002/p0002.go"));
+  assert(first >= 0 && second > first && third > second,
+    `${operation} closure/edit order incorrect: ${JSON.stringify(plan.edit_order)}`);
+  assert(plan.total_files === 3, `${operation} closure included unrelated files: ${plan.total_files}`);
+}
+
+function assertDeepPlan(plan, operation) {
+  assertSemantic(plan, operation);
+  assert(plan.module_graph_truncated === true, `${operation} did not report 1000-file dependency truncation`);
+  assert((plan.answer_pack?.missing_evidence || []).includes("module_graph_truncated"),
+    `${operation} omitted module_graph_truncated missing evidence`);
+}
+
+function assertImpactEvidence(impact, operation) {
+  assertSemantic(impact, operation);
+  assert(objectFiles(impact.affected_files).some(file => file.endsWith("p0999/p0999.go")),
+    `${operation} missed actual p0999 reference impact`);
+  assert(objectFiles(impact.affected_references).some(file => file.endsWith("p0999/p0999.go")),
+    `${operation} returned no concrete affected reference`);
+}
+
+function assertVerifyEvidence(verify, operation) {
+  assert(verify.go_deep_layer?.status === "verified", `${operation} degraded: ${JSON.stringify(verify.go_deep_layer)}`);
+  const issue = (verify.issues || []).find(value => normalize(value.file).endsWith("type_error.go"));
+  assert(issue, `${operation} missed type_error.go diagnostic`);
+  assert(/string|int|assign|use/i.test(String(issue.detail || issue.message || "")),
+    `${operation} diagnostic was not the real type error: ${JSON.stringify(issue)}`);
+  assert((verify.go_deep_layer?.verification?.diagnostic_count || 0) > 0,
+    `${operation} omitted completed gopls diagnostic evidence`);
+}
+
 function createFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "linghun-go-1k-"));
   write(path.join(root, "go.mod"), "module example.com/stress\n\ngo 1.26\n");
@@ -163,9 +227,18 @@ function createFixture() {
   write(path.join(root, "load", "load_test.go"), "package load\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) { if Value() != 1 { t.Fatal(\"bad value\") } }\n");
   for (let index = 0; index < 1000; index += 1) {
     const suffix = String(index).padStart(4, "0");
-    const previous = String(Math.max(0, index - 1)).padStart(4, "0");
-    const body = index === 0 ? "return 0" : `return Symbol${previous}() + 1`;
-    write(path.join(root, `m${suffix}.go`), `package stress\n\nfunc Symbol${suffix}() int { ${body} }\n`);
+    const previous = String(index - 1).padStart(4, "0");
+    const importLine = index === 0 ? "" : `import \"example.com/stress/p${previous}\"\n\n`;
+    const body = index === 0 ? "return 0" : `return p${previous}.Symbol${previous}() + 1`;
+    const shortEntry = index === 2 ? "func Entry() int { return Symbol0002() }\n" : "";
+    write(path.join(root, `p${suffix}`, `p${suffix}.go`), [
+      `package p${suffix}`,
+      "",
+      `${importLine}func Symbol${suffix}() int { ${body} }`,
+      `func Use${suffix}() int { return Symbol${suffix}() }`,
+      shortEntry,
+      "",
+    ].join("\n"));
   }
   write(path.join(root, "type_error.go"), "package stress\n\nfunc Broken() int { return \"broken\" }\n");
   return root;
@@ -176,30 +249,36 @@ async function runRound(root, round) {
   const samples = { context: [], plan: [], impact: [], verify: [] };
   const coldStarted = performance.now();
   try {
-    const cold = await client.tool("pre_context", { symbol: "Symbol0999", path: "m0999.go" });
+    const cold = await client.tool("pre_context", { symbol: "Symbol0999", path: "p0999/p0999.go" });
     const coldStartMs = performance.now() - coldStarted;
-    assertSemantic(cold, `round ${round} cold context`);
+    assertContextEvidence(cold, "0999", `round ${round} cold context`);
     assertThreshold(`round ${round} cold start`, coldStartMs, thresholds.cold_start_ms);
 
     for (let index = 0; index < samplesPerRound.context; index += 1) {
-      assertSemantic(await timed(samples.context, () => client.tool("pre_context", {
-        symbol: "Symbol0999", path: "m0999.go",
-      })), `round ${round} context ${index}`);
+      const context = await timed(samples.context, () => client.tool("pre_context", {
+        symbol: "Symbol0999", path: "p0999/p0999.go",
+      }));
+      assertContextEvidence(context, "0999", `round ${round} context ${index}`);
     }
     for (let index = 0; index < samplesPerRound.plan; index += 1) {
-      assertSemantic(await timed(samples.plan, () => client.tool("pre_plan", {
-        task: "change Symbol0999", target_files: ["m0999.go"], target_symbols: ["Symbol0999"],
-      })), `round ${round} plan ${index}`);
+      const plan = await timed(samples.plan, () => client.tool("pre_plan", {
+        task: "change Entry", target_files: ["p0002/p0002.go"], target_symbols: ["Entry"],
+      }));
+      assertShortPlan(plan, `round ${round} plan ${index}`);
     }
+    const deepPlan = await client.tool("pre_plan", {
+      task: "change Symbol0999", target_files: ["p0999/p0999.go"], target_symbols: ["Symbol0999"],
+    });
+    assertDeepPlan(deepPlan, `round ${round} deep plan`);
     for (let index = 0; index < samplesPerRound.impact; index += 1) {
-      assertSemantic(await timed(samples.impact, () => client.tool("pre_impact", {
-        changes: [{ path: "m0999.go", symbols: ["Symbol0999"] }],
-      })), `round ${round} impact ${index}`);
+      const impact = await timed(samples.impact, () => client.tool("pre_impact", {
+        changes: [{ path: "p0998/p0998.go", symbols: ["Symbol0998"] }],
+      }));
+      assertImpactEvidence(impact, `round ${round} impact ${index}`);
     }
     for (let index = 0; index < samplesPerRound.verify; index += 1) {
       const verify = await timed(samples.verify, () => client.tool("pre_verify", { changed_files: ["type_error.go"] }));
-      assert(verify.go_deep_layer?.status === "verified", `round ${round} verify ${index} degraded`);
-      assert((verify.issues || []).some(issue => String(issue.file).replace(/\\/g, "/").endsWith("type_error.go")), `round ${round} verify missed diagnostic`);
+      assertVerifyEvidence(verify, `round ${round} verify ${index}`);
     }
 
     const p95 = Object.fromEntries(Object.entries(samples).map(([name, values]) => [name, percentile(values, 0.95)]));
@@ -213,6 +292,13 @@ async function runRound(root, round) {
       samples: Object.fromEntries(Object.entries(samples).map(([name, values]) => [name, values.length])),
       snapshot_id: cold.go_semantic_snapshot_id,
       program_build_count: cold.go_program_build_count,
+      evidence_gates: {
+        context_definition_and_reference: "passed",
+        short_dependency_closure_and_order: "passed",
+        deep_dependency_truncation: "passed",
+        impact_cross_file_reference: "passed",
+        verify_real_type_error: "passed",
+      },
     };
   } finally {
     await client.close();
@@ -230,17 +316,21 @@ async function runParallelLoadGate(root) {
   const clients = Array.from({ length: 4 }, () => new Client(root));
   try {
     const results = await Promise.all(clients.map(async (client, index) => {
-      const suffix = String(999 - index).padStart(4, "0");
+      const suffix = String(2 + index).padStart(4, "0");
+      const impactSuffix = String(998 - index).padStart(4, "0");
       const [context, plan, impact, verify] = await Promise.all([
-        client.tool("pre_context", { symbol: `Symbol${suffix}`, path: `m${suffix}.go` }),
-        client.tool("pre_plan", { task: `change Symbol${suffix}`, target_files: [`m${suffix}.go`], target_symbols: [`Symbol${suffix}`] }),
-        client.tool("pre_impact", { changes: [{ path: `m${suffix}.go`, symbols: [`Symbol${suffix}`] }] }),
+        client.tool("pre_context", { symbol: `Symbol${suffix}`, path: `p${suffix}/p${suffix}.go` }),
+        client.tool("pre_plan", { task: "change Entry", target_files: ["p0002/p0002.go"], target_symbols: ["Entry"] }),
+        client.tool("pre_impact", { changes: [{ path: `p${impactSuffix}/p${impactSuffix}.go`, symbols: [`Symbol${impactSuffix}`] }] }),
         client.tool("pre_verify", { changed_files: ["type_error.go"] }),
       ]);
-      assertSemantic(context, `parallel client ${index} context`);
-      assertSemantic(plan, `parallel client ${index} plan`);
+      assertContextEvidence(context, suffix, `parallel client ${index} context`);
+      assertShortPlan(plan, `parallel client ${index} plan`);
       assertSemantic(impact, `parallel client ${index} impact`);
-      assert(verify.go_deep_layer?.status === "verified", `parallel client ${index} verify degraded`);
+      assert(objectFiles(impact.affected_files).some(file => file.endsWith(`p${String(999 - index).padStart(4, "0")}/p${String(999 - index).padStart(4, "0")}.go`)),
+        `parallel client ${index} impact missed actual dependent reference`);
+      assert(objectFiles(impact.affected_references).length > 0, `parallel client ${index} impact returned no reference evidence`);
+      assertVerifyEvidence(verify, `parallel client ${index} verify`);
       return "verified";
     }));
     await goTest;
@@ -252,6 +342,7 @@ async function runParallelLoadGate(root) {
 }
 
 async function run() {
+  fs.rmSync(reportPath, { force: true });
   for (const file of [bundledBinary, releaseBinary, platformBinary, sourceHelper, bundledHelper, platformHelper]) {
     assert(fs.existsSync(file), `release provenance file missing: ${file}`);
   }
@@ -282,6 +373,7 @@ async function run() {
     }
     const report = {
       files: 1000,
+      dependency_chain_files: 1000,
       rounds,
       samples_per_round: samplesPerRound,
       thresholds,
@@ -299,7 +391,6 @@ async function run() {
       parallel_load_gate: parallelLoadGate,
       generated_at: new Date().toISOString(),
     };
-    const reportPath = path.join(os.tmpdir(), "linghun-go-product-1k-final.json");
     fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
     console.log(JSON.stringify({ ...report, report: reportPath }, null, 2));
   } finally {

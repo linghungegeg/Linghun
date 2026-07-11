@@ -7,15 +7,13 @@ const { pathToFileURL, fileURLToPath } = require("url");
 const { spawn, spawnSync } = require("child_process");
 
 const REQUEST_TIMEOUT_MS = 120000;
-const FLYCHECK_TIMEOUT_MS = Number(process.env.LINGHUN_GOPLS_DIAGNOSTIC_TIMEOUT_MS || REQUEST_TIMEOUT_MS);
+const DIAGNOSTIC_TIMEOUT_MS = Number(
+  process.env.LINGHUN_GOPLS_DIAGNOSTIC_TIMEOUT_MS || REQUEST_TIMEOUT_MS,
+);
 const STDERR_LIMIT_BYTES = 8192;
 
 function normalize(value) {
   return value.replace(/\\/g, "/");
-}
-
-function normalizeUri(uri) {
-  return process.platform === "win32" ? uri.toLowerCase() : uri;
 }
 
 function relativeTo(root, file) {
@@ -109,18 +107,8 @@ class GoplsSession {
     this.nextId = 1;
     this.pending = new Map();
     this.documents = new Map();
-    this.diagnostics = new Map();
     this.buildCount = 0;
     this.snapshot = 0;
-    this.flycheckGeneration = 0;
-    this.flycheckCompletedGeneration = 0;
-    this.flycheckTokens = new Map();
-    this.flycheckWaiters = new Set();
-    this.flycheckIdleWaiters = new Set();
-    this.diagnosticRefreshGeneration = 0;
-    this.diagnosticRefreshWaiters = new Set();
-    this.serverHealth = "ok";
-    this.serverStatusMessage = null;
     this.stderr = Buffer.alloc(0);
     this.stderrTruncated = false;
     this.configStamp = this.readConfigStamp();
@@ -230,18 +218,14 @@ class GoplsSession {
       rootUri,
       workspaceFolders: [{ uri: rootUri, name: path.basename(this.root) }],
       capabilities: {
-        window: { workDoneProgress: true },
-        experimental: { serverStatusNotification: true },
         workspace: {
           symbol: { dynamicRegistration: false },
-          diagnostics: { refreshSupport: true },
         },
         textDocument: {
           definition: { dynamicRegistration: false },
           references: { dynamicRegistration: false },
           callHierarchy: { dynamicRegistration: false },
           diagnostic: { dynamicRegistration: false, relatedDocumentSupport: false },
-          publishDiagnostics: { relatedInformation: true },
         },
       },
       initializationOptions: {
@@ -261,8 +245,6 @@ class GoplsSession {
     this.child = null;
     this.buffer = Buffer.alloc(0);
     this.documents.clear();
-    this.diagnostics.clear();
-    this.rejectFlycheckWaiters("gopls stopped");
   }
 
   rejectPending(message) {
@@ -271,63 +253,29 @@ class GoplsSession {
       reject(new Error(message));
     }
     this.pending.clear();
-    this.rejectFlycheckWaiters(message);
-  }
-
-  rejectFlycheckWaiters(message) {
-    for (const waiter of this.flycheckWaiters) {
-      clearTimeout(waiter.timer);
-      waiter.reject(new Error(message));
-    }
-    this.flycheckWaiters.clear();
-    for (const waiter of this.flycheckIdleWaiters) {
-      clearTimeout(waiter.timer);
-      waiter.reject(new Error(message));
-    }
-    this.flycheckIdleWaiters.clear();
-    for (const waiter of this.diagnosticRefreshWaiters) {
-      clearTimeout(waiter.timer);
-      waiter.reject(new Error(message));
-    }
-    this.diagnosticRefreshWaiters.clear();
-  }
-
-  resolveFlycheckWaiters() {
-    for (const waiter of [...this.flycheckWaiters]) {
-      if (this.flycheckCompletedGeneration <= waiter.afterGeneration) continue;
-      clearTimeout(waiter.timer);
-      this.flycheckWaiters.delete(waiter);
-      waiter.resolve(this.flycheckCompletedGeneration);
-    }
   }
 
   onData(chunk) {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    while (true) {
-      const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) return;
-      const header = this.buffer.slice(0, headerEnd).toString("ascii");
-      const lengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
-      if (!lengthMatch) {
-        this.buffer = Buffer.alloc(0);
-        if (this.child && !this.child.killed) this.child.kill();
-        this.child = null;
-        this.rejectPending("invalid gopls LSP response header");
-        return;
-      }
-      const length = Number(lengthMatch[1]);
-      const bodyStart = headerEnd + 4;
-      if (this.buffer.length < bodyStart + length) return;
-      const body = this.buffer.slice(bodyStart, bodyStart + length).toString("utf8");
-      this.buffer = this.buffer.slice(bodyStart + length);
-      try {
+    try {
+      this.buffer = Buffer.concat([this.buffer, chunk]);
+      while (true) {
+        const headerEnd = this.buffer.indexOf("\r\n\r\n");
+        if (headerEnd < 0) return;
+        const header = this.buffer.slice(0, headerEnd).toString("ascii");
+        const lengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
+        if (!lengthMatch) throw new Error("invalid gopls LSP response header");
+        const length = Number(lengthMatch[1]);
+        const bodyStart = headerEnd + 4;
+        if (this.buffer.length < bodyStart + length) return;
+        const body = this.buffer.slice(bodyStart, bodyStart + length).toString("utf8");
+        this.buffer = this.buffer.slice(bodyStart + length);
         this.onMessage(JSON.parse(body));
-      } catch (error) {
-        if (this.child && !this.child.killed) this.child.kill();
-        this.child = null;
-        this.rejectPending(`invalid gopls LSP response: ${error.message}`);
-        return;
       }
+    } catch (error) {
+      this.buffer = Buffer.alloc(0);
+      if (this.child && !this.child.killed) this.child.kill();
+      this.child = null;
+      this.rejectPending(`invalid gopls LSP response: ${error.message}`);
     }
   }
 
@@ -345,64 +293,10 @@ class GoplsSession {
       else pending.resolve(message.result);
       return;
     }
-    if (message.method === "textDocument/publishDiagnostics" && message.params) {
-      const uri = normalizeUri(message.params.uri);
-      const document = [...this.documents.entries()]
-        .find(([documentUri]) => normalizeUri(documentUri) === uri);
-      if (message.params.version != null && document && message.params.version < document[1].version) {
-        return;
-      }
-      const diagnostics = message.params.diagnostics || [];
-      this.diagnostics.set(uri, diagnostics);
-      return;
-    }
-    if (message.method === "$/progress" && message.params) {
-      const token = String(message.params.token || "");
-      const kind = message.params.value && message.params.value.kind;
-      if (!token.startsWith("gopls/flycheck/")) return;
-      if (kind === "begin") {
-        if (this.flycheckTokens.has(token)) {
-          this.rejectFlycheckWaiters(`gopls flycheck protocol error: duplicate begin for ${token}`);
-          return;
-        }
-        this.flycheckGeneration += 1;
-        this.flycheckTokens.set(token, this.flycheckGeneration);
-      } else if (kind === "end") {
-        const generation = this.flycheckTokens.get(token);
-        if (generation != null) {
-          this.flycheckCompletedGeneration = Math.max(this.flycheckCompletedGeneration, generation);
-          this.flycheckTokens.delete(token);
-          this.resolveFlycheckWaiters();
-          if (this.flycheckTokens.size === 0) {
-            for (const waiter of this.flycheckIdleWaiters) {
-              clearTimeout(waiter.timer);
-              waiter.resolve();
-            }
-            this.flycheckIdleWaiters.clear();
-          }
-        }
-      }
-      return;
-    }
-    if (message.method === "experimental/serverStatus" && message.params) {
-      this.serverHealth = message.params.health || "ok";
-      this.serverStatusMessage = message.params.message || null;
-      return;
-    }
     if (message.id != null && message.method) {
       let result = null;
       if (message.method === "workspace/configuration") {
         result = (message.params && message.params.items || []).map(() => null);
-      } else if (message.method === "window/workDoneProgress/create") {
-        result = null;
-      } else if (message.method === "workspace/diagnostic/refresh") {
-        this.diagnosticRefreshGeneration += 1;
-        for (const waiter of [...this.diagnosticRefreshWaiters]) {
-          if (this.diagnosticRefreshGeneration <= waiter.afterGeneration) continue;
-          clearTimeout(waiter.timer);
-          this.diagnosticRefreshWaiters.delete(waiter);
-          waiter.resolve(this.diagnosticRefreshGeneration);
-        }
       }
       this.send({ jsonrpc: "2.0", id: message.id, result });
     }
@@ -430,10 +324,10 @@ class GoplsSession {
     });
   }
 
-  async semanticRequest(method, params) {
+  async semanticRequest(method, params, timeout = REQUEST_TIMEOUT_MS) {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        return await this.request(method, params);
+        return await this.request(method, params, timeout);
       } catch (error) {
         if (!/content modified/i.test(error.message) || attempt === 2) throw error;
         await new Promise(resolve => setTimeout(resolve, 50));
@@ -464,7 +358,6 @@ class GoplsSession {
       if (fs.existsSync(fileURLToPath(uri))) continue;
       this.notify("textDocument/didClose", { textDocument: { uri } });
       this.documents.delete(uri);
-      this.diagnostics.delete(normalizeUri(uri));
       this.snapshot += 1;
     }
   }
@@ -479,14 +372,12 @@ class GoplsSession {
     const previous = this.documents.get(uri);
     let synchronized = false;
     if (!previous) {
-      this.diagnostics.delete(normalizeUri(uri));
       this.notify("textDocument/didOpen", {
         textDocument: { uri, languageId: "go", version: 1, text },
       });
       this.documents.set(uri, { text, stamp, version: 1 });
       synchronized = true;
     } else if (previous.stamp !== stamp || previous.text !== text) {
-      this.diagnostics.delete(normalizeUri(uri));
       const version = previous.version + 1;
       this.notify("textDocument/didChange", {
         textDocument: { uri, version },
@@ -499,53 +390,14 @@ class GoplsSession {
     return { absolute, uri, text, synchronized };
   }
 
-  waitForFlycheckAfter(afterGeneration, timeout = REQUEST_TIMEOUT_MS) {
-    if (this.flycheckCompletedGeneration > afterGeneration) {
-      return Promise.resolve(this.flycheckCompletedGeneration);
-    }
-    return new Promise((resolve, reject) => {
-      const waiter = { afterGeneration, resolve, reject, timer: null };
-      waiter.timer = setTimeout(() => {
-        this.flycheckWaiters.delete(waiter);
-        reject(new Error("gopls flycheck completion timed out"));
-      }, timeout);
-      this.flycheckWaiters.add(waiter);
-    });
-  }
-
-  waitForFlycheckIdle(timeout = REQUEST_TIMEOUT_MS) {
-    if (this.flycheckTokens.size === 0) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const waiter = { resolve, reject, timer: null };
-      waiter.timer = setTimeout(() => {
-        this.flycheckIdleWaiters.delete(waiter);
-        reject(new Error("gopls flycheck did not become idle"));
-      }, timeout);
-      this.flycheckIdleWaiters.add(waiter);
-    });
-  }
-
-  waitForDiagnosticRefreshAfter(afterGeneration, timeout = REQUEST_TIMEOUT_MS) {
-    if (this.diagnosticRefreshGeneration > afterGeneration) {
-      return Promise.resolve(this.diagnosticRefreshGeneration);
-    }
-    return new Promise((resolve, reject) => {
-      const waiter = { afterGeneration, resolve, reject, timer: null };
-      waiter.timer = setTimeout(() => {
-        this.diagnosticRefreshWaiters.delete(waiter);
-        reject(new Error("gopls diagnostic refresh timed out"));
-      }, timeout);
-      this.diagnosticRefreshWaiters.add(waiter);
-    });
-  }
-
   async pullDiagnostics(uri) {
     const report = await this.semanticRequest("textDocument/diagnostic", {
       textDocument: { uri },
-    });
-    const pulled = report && Array.isArray(report.items) ? report.items : [];
-    if (pulled.length > 0) return pulled;
-    return this.diagnostics.get(normalizeUri(uri)) || pulled;
+    }, DIAGNOSTIC_TIMEOUT_MS);
+    if (!report || !Array.isArray(report.items)) {
+      throw new Error("gopls returned an incomplete textDocument/diagnostic report");
+    }
+    return report.items;
   }
 
   async definitions(uri, position) {
@@ -640,10 +492,10 @@ class GoplsSession {
     for (const file of normalizedFiles) {
       if (await this.openFile(file)) openedFiles += 1;
     }
-    if (normalizedFiles.length > 0 && openedFiles === 0) {
+    if (openedFiles === 0 && (normalizedFiles.length > 0 || this.workspaceFiles.size === 0)) {
       return {
         status: "partially_verified",
-        reason: "Go semantic evidence incomplete: rust_documents",
+        reason: "Go semantic evidence incomplete: go_documents",
         relations: Object.fromEntries(symbols.map(symbol => [symbol, {
           targets: [], names_by_file: {}, related_files: [], references: [], callers: [], callees: [],
           unresolved_module_specifiers: [], unresolved_relative_specifiers: [], external_module_specifiers: [],
@@ -653,7 +505,7 @@ class GoplsSession {
         program_build_count: this.buildCount,
         program_rebuilt: rebuilt,
         snapshot_id: String(this.snapshot),
-        verification: { coverage: [], missing: ["rust_documents"] },
+        verification: { coverage: [], missing: ["go_documents"] },
       };
     }
     const { dependencies, metadata } = await this.dependencies(normalizedFiles, importTokens);
@@ -788,6 +640,17 @@ class GoplsSession {
 
   async discover(terms) {
     const rebuilt = await this.ensureCurrent();
+    if (this.workspaceFiles.size === 0) {
+      return {
+        status: "partially_verified",
+        reason: "Go semantic evidence incomplete: go_documents",
+        candidates: [],
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: { coverage: [], missing: ["go_documents"] },
+      };
+    }
     const candidates = [];
     const seen = new Set();
     for (const term of terms.filter(Boolean)) {
@@ -919,14 +782,21 @@ let chain = Promise.resolve();
 rl.on("line", line => {
   chain = chain.then(async () => {
     const started = Date.now();
+    let request = {};
     try {
-      const result = await handle(JSON.parse(line));
+      request = JSON.parse(line);
+      const result = await handle(request);
       process.stdout.write(JSON.stringify({ ...result, elapsed_ms: Date.now() - started }) + "\n");
     } catch (error) {
+      const missing = request.op === "verify" ? "gopls_diagnostics" : "gopls_semantic_protocol";
       process.stdout.write(JSON.stringify({
         status: "partially_verified",
         reason: String(error && error.message ? error.message : error),
         issues: [],
+        relations: {},
+        module_dependencies: {},
+        candidates: [],
+        verification: { coverage: [], missing: [missing] },
         elapsed_ms: Date.now() - started,
       }) + "\n");
       if (session) {
