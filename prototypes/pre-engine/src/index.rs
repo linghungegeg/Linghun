@@ -144,7 +144,7 @@ impl Index {
     fn rebuild_defs_cache(&mut self) {
         self.defs_cache.clear();
         for entry in self.files.values().filter(|entry| {
-            !matches!(entry.lang, Lang::TypeScript | Lang::Tsx)
+            !matches!(entry.lang, Lang::TypeScript | Lang::Tsx | Lang::Python)
         }) {
             for d in symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang) {
                 self.defs_cache.insert(d.name, d.param_count);

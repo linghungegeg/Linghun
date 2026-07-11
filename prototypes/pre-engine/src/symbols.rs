@@ -22,6 +22,14 @@ pub struct Reference {
     pub line: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct PythonTokenPosition {
+    pub name: String,
+    pub line: usize,
+    pub character: usize,
+    pub specifier: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
     Function,
@@ -47,6 +55,97 @@ pub fn extract_references(tree: &Tree, source: &str, path: &Path, symbol: &str) 
     let root = tree.root_node();
     collect_references(root, source, path, symbol, &mut refs);
     refs
+}
+
+pub fn extract_python_symbol_positions(
+    tree: &Tree,
+    source: &str,
+    symbols: &HashSet<String>,
+) -> Vec<PythonTokenPosition> {
+    let mut positions = Vec::new();
+    collect_python_token_positions(
+        tree.root_node(),
+        source,
+        symbols,
+        None,
+        &mut positions,
+    );
+    positions
+}
+
+pub fn extract_python_import_tokens(tree: &Tree, source: &str) -> Vec<PythonTokenPosition> {
+    let mut positions = Vec::new();
+    collect_python_import_tokens(tree.root_node(), source, &mut positions);
+    positions
+}
+
+fn collect_python_import_tokens(
+    node: Node,
+    source: &str,
+    positions: &mut Vec<PythonTokenPosition>,
+) {
+    if matches!(node.kind(), "import_statement" | "import_from_statement") {
+        let symbols = HashSet::new();
+        collect_python_token_positions(
+            node,
+            source,
+            &symbols,
+            Some(node_text(node, source).trim().to_string()),
+            positions,
+        );
+        return;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_python_import_tokens(cursor.node(), source, positions);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
+fn collect_python_token_positions(
+    node: Node,
+    source: &str,
+    symbols: &HashSet<String>,
+    specifier: Option<String>,
+    positions: &mut Vec<PythonTokenPosition>,
+) {
+    if node.kind() == "identifier" {
+        let name = node_text(node, source);
+        if symbols.is_empty() || symbols.contains(name) {
+            positions.push(PythonTokenPosition {
+                name: name.to_string(),
+                line: node.start_position().row,
+                character: lsp_character(source, node.start_byte()),
+                specifier: specifier.clone(),
+            });
+        }
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_python_token_positions(
+                cursor.node(),
+                source,
+                symbols,
+                specifier.clone(),
+                positions,
+            );
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
+fn lsp_character(source: &str, byte_offset: usize) -> usize {
+    let line_start = source[..byte_offset]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
+    source[line_start..byte_offset].encode_utf16().count()
 }
 
 fn collect_definitions(node: Node, source: &str, path: &Path, lang: Lang, defs: &mut Vec<Definition>) {
@@ -1718,5 +1817,31 @@ mod tests {
                 definition.name == "caller" && definition.kind == expected_kind
             }));
         }
+    }
+
+    #[test]
+    fn extracts_python_lsp_token_positions_without_semantic_resolution() {
+        let source = "from shared import MessageBuilder as Builder\n变量 = Builder()\n";
+        let mut parser = Parser::new();
+        parser
+            .set_language(&Lang::Python.tree_sitter_language())
+            .expect("Python grammar must load");
+        let tree = parser.parse(source, None).expect("fixture must parse");
+        let symbols = HashSet::from(["Builder".to_string()]);
+
+        let positions = extract_python_symbol_positions(&tree, source, &symbols);
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].line, 0);
+        assert_eq!(positions[0].character, 37);
+        assert_eq!(positions[1].line, 1);
+        assert_eq!(positions[1].character, "变量 = ".encode_utf16().count());
+
+        let imports = extract_python_import_tokens(&tree, source);
+        assert!(imports.iter().any(|token| {
+            token.name == "Builder"
+                && token.line == 0
+                && token.specifier.as_deref()
+                    == Some("from shared import MessageBuilder as Builder")
+        }));
     }
 }

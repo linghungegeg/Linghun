@@ -33,6 +33,24 @@ pub struct DeepLayerResult {
 pub struct SymbolTarget {
     pub file: String,
     pub name: String,
+    #[serde(default)]
+    pub line: usize,
+    #[serde(default)]
+    pub character: usize,
+    #[serde(default)]
+    pub end_line: usize,
+    #[serde(default)]
+    pub end_character: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SemanticLocation {
+    pub file: String,
+    pub name: String,
+    pub line: usize,
+    pub character: usize,
+    pub end_line: usize,
+    pub end_character: usize,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -40,6 +58,12 @@ pub struct SymbolRelations {
     pub targets: Vec<SymbolTarget>,
     pub names_by_file: HashMap<String, Vec<String>>,
     pub related_files: Vec<String>,
+    #[serde(default)]
+    pub references: Vec<SemanticLocation>,
+    #[serde(default)]
+    pub callers: Vec<SemanticLocation>,
+    #[serde(default)]
+    pub callees: Vec<SemanticLocation>,
     pub unresolved_module_specifiers: Vec<String>,
     pub unresolved_relative_specifiers: Vec<String>,
     pub external_module_specifiers: Vec<String>,

@@ -344,7 +344,7 @@ fn ambiguous_definition_symbols(idx: &Index, target_symbols: &[String]) -> Vec<S
     let targets: HashSet<&str> = target_symbols.iter().map(String::as_str).collect();
     let mut counts: HashMap<String, usize> = HashMap::new();
     for entry in idx.files().filter(|entry| {
-        !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
+        !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python)
     }) {
         for definition in
             symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang)
@@ -399,10 +399,25 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     .filter(|entry| matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx))
                     .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str))
                     .collect();
+                let py_files: Vec<String> = idx
+                    .files()
+                    .filter(|entry| entry.lang == language::Lang::Python)
+                    .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str))
+                    .collect();
                 let structure_files = if requested_paths.is_empty() {
                     ts_files
                 } else {
-                    requested_paths.clone()
+                    requested_paths
+                        .iter()
+                        .filter(|path| {
+                            idx.files().any(|entry| {
+                                matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
+                                    && make_relative(&entry.path.to_string_lossy(), &root_str)
+                                        .eq_ignore_ascii_case(&make_relative(path, &root_str))
+                            })
+                        })
+                        .cloned()
+                        .collect()
                 };
                 let structure = ts_deep_layer::run_structure(
                     deep_layer,
@@ -411,11 +426,58 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     &[symbol.to_string()],
                     &preferred_files.iter().cloned().collect::<Vec<_>>(),
                 );
-                let ts_relations = structure.relations.get(symbol).cloned().unwrap_or_default();
+                let py_structure_files = if requested_paths.is_empty() {
+                    py_files
+                } else {
+                    requested_paths
+                        .iter()
+                        .filter(|path| {
+                            idx.files().any(|entry| {
+                                entry.lang == language::Lang::Python
+                                    && make_relative(&entry.path.to_string_lossy(), &root_str)
+                                        .eq_ignore_ascii_case(&make_relative(path, &root_str))
+                            })
+                        })
+                        .cloned()
+                        .collect()
+                };
+                let (py_symbol_positions, _) = python_lsp_inputs(
+                    idx,
+                    &root_str,
+                    &requested_paths,
+                    &[symbol.to_string()],
+                );
+                let (_, py_import_tokens) = python_lsp_inputs(
+                    idx,
+                    &root_str,
+                    &py_structure_files,
+                    &[],
+                );
+                let py_structure = if py_structure_files.is_empty() {
+                    py_deep_layer::disabled_structure(&[symbol.to_string()])
+                } else {
+                    py_deep_layer::run_structure(
+                        py_layer,
+                        &idx.root,
+                        &py_structure_files,
+                        &[symbol.to_string()],
+                        &py_symbol_positions,
+                        &py_import_tokens,
+                    )
+                };
+                let ts_relations = if structure_files.is_empty() {
+                    Default::default()
+                } else {
+                    structure.relations.get(symbol).cloned().unwrap_or_default()
+                };
+                let py_relations = py_structure.relations.get(symbol).cloned().unwrap_or_default();
                 let structure_verified = structure.status == "verified";
-                let structure_available = structure.status != "tool_missing";
+                let structure_available = !structure_files.is_empty() && structure.status != "tool_missing";
+                let py_structure_verified = py_structure.status == "verified";
+                let py_structure_available = matches!(py_structure.status, "verified" | "partially_verified");
                 let use_ts_program = structure_available;
                 idx.refresh_paths(&ts_relations.related_files);
+                idx.refresh_paths(&py_relations.related_files);
                 let mut definitions = Vec::new();
                 let mut references = Vec::new();
                 let mut callees = Vec::new();
@@ -426,6 +488,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     if requested_path.as_ref().is_some_and(|requested| {
                         !rel.eq_ignore_ascii_case(requested)
                             && !(use_ts_program && ts_relations.related_files.contains(&rel))
+                            && !(py_structure_available && py_relations.related_files.contains(&rel))
                     })
                     {
                         continue;
@@ -517,6 +580,54 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                         }
                         continue;
                     }
+                    if entry.lang == language::Lang::Python {
+                        if py_structure_available {
+                            for target in py_relations.targets.iter().filter(|target| target.file == rel) {
+                                definitions.extend(
+                                    symbols::extract_definitions(
+                                        &entry.tree,
+                                        &entry.source,
+                                        &entry.path,
+                                        entry.lang,
+                                    )
+                                    .into_iter()
+                                    .filter(|definition| {
+                                        definition.name == target.name
+                                            && definition.line == target.line
+                                    }),
+                                );
+                            }
+                            references.extend(py_relations.references.iter()
+                                .filter(|reference| reference.file == rel)
+                                .map(|reference| symbols::Reference {
+                                    name: reference.name.clone(),
+                                    qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(),
+                                    line: reference.line,
+                                }));
+                            callers.extend(py_relations.callers.iter()
+                                .filter(|caller| caller.file == rel)
+                                .map(|caller| symbols::Callee {
+                                    name: caller.name.clone(),
+                                    qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(),
+                                    line: caller.line,
+                                    is_member: false,
+                                    arg_count: 0,
+                                }));
+                            callees.extend(py_relations.callees.iter()
+                                .filter(|callee| callee.file == rel)
+                                .map(|callee| symbols::Callee {
+                                    name: callee.name.clone(),
+                                    qualified_name: None,
+                                    file: entry.path.to_string_lossy().to_string(),
+                                    line: callee.line,
+                                    is_member: false,
+                                    arg_count: 0,
+                                }));
+                        }
+                        continue;
+                    }
                     let defs = symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
                     for d in &defs {
                         if d.name == symbol {
@@ -575,7 +686,16 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     "signature": d.signature,
                 })).collect();
                 let unresolved_module_specifiers =
-                    ts_relations.unresolved_module_specifiers.clone();
+                    ts_relations.unresolved_module_specifiers.iter()
+                        .chain(&py_relations.unresolved_module_specifiers)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                let external_module_specifiers = ts_relations
+                    .external_module_specifiers
+                    .iter()
+                    .chain(&py_relations.external_module_specifiers)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let refs_json: Vec<Value> = references.iter().map(|r| json!({
                     "name": r.name,
                     "qualified_name": r.qualified_name,
@@ -632,9 +752,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 if !unresolved_module_specifiers.is_empty() {
                     missing_evidence.push("module_resolution");
                 }
-                if ts_relations.targets.is_empty()
-                    && !ts_relations.external_module_specifiers.is_empty()
-                {
+                if definitions.is_empty() && !external_module_specifiers.is_empty() {
                     missing_evidence.push("external_module_resolution");
                 }
                 if !ts_relations.blocked_module_specifiers.is_empty() {
@@ -657,8 +775,11 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 if index_consistency == "bounded_stale" {
                     missing_evidence.push("index_snapshot_staleness");
                 }
-                if !structure_verified {
+                if !structure_files.is_empty() && !structure_verified {
                     missing_evidence.push("typescript_program");
+                }
+                if !py_structure_verified && !py_structure_files.is_empty() {
+                    missing_evidence.push("pyright_program");
                 }
                 let confidence = if definitions.is_empty() {
                     "low"
@@ -670,12 +791,12 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     "low"
                 } else if !parse_errors.is_empty()
                     || !unresolved_module_specifiers.is_empty()
-                    || (ts_relations.targets.is_empty()
-                        && !ts_relations.external_module_specifiers.is_empty())
+                    || (definitions.is_empty() && !external_module_specifiers.is_empty())
                     || !ts_relations.dynamic_import_files.is_empty()
                     || ts_relations.graph_cycle
                     || index_consistency == "bounded_stale"
-                    || !structure_verified
+                    || (!structure_files.is_empty() && !structure_verified)
+                    || (!py_structure_files.is_empty() && !py_structure_verified)
                 {
                     "medium"
                 } else if callers.is_empty() && references.is_empty() {
@@ -714,20 +835,26 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     "parse_errors": parse_errors,
                     "unresolved_module_specifiers": unresolved_module_specifiers,
                     "unresolved_relative_specifiers": ts_relations.unresolved_relative_specifiers,
-                    "external_module_specifiers": ts_relations.external_module_specifiers,
+                    "external_module_specifiers": external_module_specifiers,
                     "blocked_module_specifiers": ts_relations.blocked_module_specifiers,
                     "dynamic_import_files": ts_relations.dynamic_import_files,
                     "module_graph_cycle": ts_relations.graph_cycle,
                     "module_graph_truncated": ts_relations.graph_truncated,
                     "index_consistency": index_consistency,
                     "max_staleness_ms": index::MAX_STALENESS_MS,
-                    "semantic_engine": "typescript_program",
+                    "semantic_engine": "language_semantic_programs",
                     "semantic_engine_status": structure.status,
                     "semantic_engine_reason": structure.reason,
                     "semantic_snapshot_id": structure.snapshot_id,
                     "program_build_count": structure.program_build_count,
                     "program_rebuilt": structure.program_rebuilt,
                     "semantic_elapsed_ms": structure.elapsed_ms,
+                    "python_semantic_engine_status": py_structure.status,
+                    "python_semantic_engine_reason": py_structure.reason,
+                    "python_semantic_snapshot_id": py_structure.snapshot_id,
+                    "python_program_build_count": py_structure.program_build_count,
+                    "python_program_rebuilt": py_structure.program_rebuilt,
+                    "python_semantic_elapsed_ms": py_structure.elapsed_ms,
                     "answer_pack": build_answer_pack(
                         "context",
                         confidence,
@@ -751,10 +878,10 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             }
         }
         "pre_impact" => {
-            handle_pre_impact(arguments, index, deep_layer)
+            handle_pre_impact(arguments, index, deep_layer, py_layer)
         }
         "pre_plan" => {
-            handle_pre_plan(arguments, index, deep_layer)
+            handle_pre_plan(arguments, index, deep_layer, py_layer)
         }
         "pre_verify" => {
             handle_pre_verify(arguments, index, deep_layer, py_layer, rust_layer, go_layer, java_layer, sql_layer, shell_layer, csharp_layer, php_layer, ruby_layer, kotlin_layer, dart_layer, swift_layer, cpp_layer)
@@ -785,6 +912,7 @@ fn handle_pre_impact(
     arguments: &Value,
     index: &mut Option<Index>,
     deep_layer: &mut Option<ts_deep_layer::DeepLayer>,
+    py_layer: &mut Option<py_deep_layer::PyDeepLayer>,
 ) -> Value {
     let changes = match arguments.get("changes").and_then(|c| c.as_array()) {
         Some(arr) => arr,
@@ -807,6 +935,7 @@ fn handle_pre_impact(
     let mut seed_symbols: Vec<String> = Vec::new();
     let mut seen_seed_symbols = HashSet::new();
     let mut ts_seed_symbols = HashSet::new();
+    let mut py_seed_symbols = HashSet::new();
     let mut non_ts_seed_symbols = HashSet::new();
     let mut seed_symbols_truncated = false;
     let mut changed_files: HashSet<String> = HashSet::new();
@@ -822,16 +951,21 @@ fn handle_pre_impact(
         if let Some(syms) = change.get("symbols").and_then(|s| s.as_array()) {
             for s in syms {
                 if let Some(name) = s.as_str() {
-                    let is_ts_path = change_path.as_ref().is_some_and(|path| {
-                        idx.files().any(|entry| {
-                            make_relative(&entry.path.to_string_lossy(), &root_str) == *path
-                                && matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
-                        })
+                    let seed_language = change_path.as_ref().and_then(|path| {
+                        idx.files()
+                            .find(|entry| make_relative(&entry.path.to_string_lossy(), &root_str) == *path)
+                            .map(|entry| entry.lang)
                     });
-                    if is_ts_path {
-                        ts_seed_symbols.insert(name.to_string());
-                    } else {
-                        non_ts_seed_symbols.insert(name.to_string());
+                    match seed_language {
+                        Some(language::Lang::TypeScript | language::Lang::Tsx) => {
+                            ts_seed_symbols.insert(name.to_string());
+                        }
+                        Some(language::Lang::Python) => {
+                            py_seed_symbols.insert(name.to_string());
+                        }
+                        _ => {
+                            non_ts_seed_symbols.insert(name.to_string());
+                        }
                     }
                     if seen_seed_symbols.insert(name.to_string()) {
                         if seed_symbols.len() < MAX_IMPACT_SEED_SYMBOLS {
@@ -853,6 +987,8 @@ fn handle_pre_impact(
                 for d in defs {
                     if matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx) {
                         ts_seed_symbols.insert(d.name.clone());
+                    } else if entry.lang == language::Lang::Python {
+                        py_seed_symbols.insert(d.name.clone());
                     } else {
                         non_ts_seed_symbols.insert(d.name.clone());
                     }
@@ -886,23 +1022,68 @@ fn handle_pre_impact(
     let structure_files = if change_paths.is_empty() {
         ts_files
     } else {
-        change_paths.clone()
+        change_paths
+            .iter()
+            .filter(|path| {
+                idx.files().any(|entry| {
+                    matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
+                        && make_relative(&entry.path.to_string_lossy(), &root_str)
+                            .eq_ignore_ascii_case(&make_relative(path, &root_str))
+                })
+            })
+            .cloned()
+            .collect()
     };
+    let ts_symbols_requested: Vec<String> = ts_seed_symbols.iter().cloned().collect();
     let structure = ts_deep_layer::run_structure(
         deep_layer,
         &idx.root,
         &structure_files,
-        &seed_symbols,
+        &ts_symbols_requested,
         &changed_files.iter().cloned().collect::<Vec<_>>(),
     );
+    let py_symbols_requested: Vec<String> = py_seed_symbols.iter().cloned().collect();
+    let py_change_files: Vec<String> = change_paths
+        .iter()
+        .filter(|path| {
+            idx.files().any(|entry| {
+                entry.lang == language::Lang::Python
+                    && make_relative(&entry.path.to_string_lossy(), &root_str)
+                        .eq_ignore_ascii_case(&make_relative(path, &root_str))
+            })
+        })
+        .cloned()
+        .collect();
+    let (py_symbol_positions, py_import_tokens) =
+        python_lsp_inputs(idx, &root_str, &py_change_files, &py_symbols_requested);
+    let py_structure = if py_change_files.is_empty() {
+        py_deep_layer::disabled_structure(&py_symbols_requested)
+    } else {
+        py_deep_layer::run_structure(
+            py_layer,
+            &idx.root,
+            &py_change_files,
+            &py_symbols_requested,
+            &py_symbol_positions,
+            &py_import_tokens,
+        )
+    };
     let ts_relations = structure.relations.clone();
+    let py_relations = py_structure.relations.clone();
     let structure_verified = structure.status == "verified";
     let structure_available = structure.status != "tool_missing";
+    let py_structure_verified = py_structure.status == "verified";
+    let py_structure_available = matches!(py_structure.status, "verified" | "partially_verified");
     let related_ts_files: Vec<String> = ts_relations
         .values()
         .flat_map(|relations| relations.related_files.iter().cloned())
         .collect();
     idx.refresh_paths(&related_ts_files);
+    let related_py_files: Vec<String> = py_relations
+        .values()
+        .flat_map(|relations| relations.related_files.iter().cloned())
+        .collect();
+    idx.refresh_paths(&related_py_files);
     let ts_symbols: HashSet<String> = ts_relations
         .iter()
         .filter_map(|(symbol, relations)| {
@@ -911,10 +1092,20 @@ fn handle_pre_impact(
                 .then_some(symbol.clone())
         })
         .collect();
+    let py_symbols: HashSet<String> = py_relations
+        .iter()
+        .filter_map(|(symbol, relations)| {
+            (relations.has_evidence()
+                || (py_structure_available && py_seed_symbols.contains(symbol)))
+                .then_some(symbol.clone())
+        })
+        .collect();
 
     for sym in &seed_symbols {
         visited.insert(sym.clone());
-        if !ts_symbols.contains(sym) || non_ts_seed_symbols.contains(sym) {
+        if (!ts_symbols.contains(sym) && !py_symbols.contains(sym))
+            || non_ts_seed_symbols.contains(sym)
+        {
             queue.push_back((sym.clone(), 0));
         }
     }
@@ -925,11 +1116,13 @@ fn handle_pre_impact(
         .collect();
     file_entries.sort_by(|left, right| left.0.cmp(right.0));
 
-    let mut relation_symbols: Vec<&String> = ts_relations.keys().collect();
-    relation_symbols.sort();
-    for symbol in relation_symbols {
-        let relations = &ts_relations[symbol];
-        if !ts_symbols.contains(symbol) || relations.targets.len() != 1 {
+    let mut relation_symbols: Vec<(&String, &ts_deep_layer::SymbolRelations)> = ts_relations
+        .iter()
+        .filter(|(symbol, _)| ts_symbols.contains(*symbol))
+        .collect();
+    relation_symbols.sort_by(|left, right| left.0.cmp(right.0));
+    for (symbol, relations) in relation_symbols {
+        if relations.targets.len() != 1 {
             continue;
         }
         affected_files.extend(relations.related_files.iter().cloned());
@@ -988,12 +1181,59 @@ fn handle_pre_impact(
             }
         }
     }
+    let mut python_relation_symbols: Vec<_> = py_relations
+        .iter()
+        .filter(|(symbol, _)| py_symbols.contains(*symbol))
+        .collect();
+    python_relation_symbols.sort_by(|left, right| left.0.cmp(right.0));
+    for (symbol, relations) in python_relation_symbols {
+        if relations.targets.len() != 1 {
+            continue;
+        }
+        affected_files.extend(relations.related_files.iter().cloned());
+        for reference in &relations.references {
+            let identity = (symbol.clone(), reference.file.clone(), reference.line, None);
+            if !changed_files.contains(&reference.file) {
+                has_cross_file_reference = true;
+            }
+            if seen_references.insert(identity) {
+                if affected_references.len() < MAX_AFFECTED_REFERENCES {
+                    affected_references.push(json!({
+                        "name": reference.name,
+                        "qualified_name": null,
+                        "is_member": false,
+                        "file": reference.file,
+                        "line": reference.line,
+                        "depth": 0,
+                    }));
+                } else {
+                    affected_references_truncated = true;
+                }
+            }
+        }
+        for caller in &relations.callers {
+            affected_files.insert(caller.file.clone());
+            if visited.insert(format!("{}:{}:{}", caller.file, caller.line, caller.name)) {
+                affected_functions.push(json!({
+                    "name": caller.name,
+                    "qualified_name": null,
+                    "is_member": false,
+                    "file": caller.file,
+                    "line": caller.line,
+                    "depth": 1,
+                }));
+            }
+        }
+    }
 
     while let Some((sym, depth)) = queue.pop_front() {
         for (path, tree, source, lang) in &file_entries {
             if structure_available
                 && matches!(lang, language::Lang::TypeScript | language::Lang::Tsx)
             {
+                continue;
+            }
+            if matches!(lang, language::Lang::Python) {
                 continue;
             }
             let references = symbols::extract_references(tree, source, path, &sym);
@@ -1055,12 +1295,22 @@ fn handle_pre_impact(
     let related_tests = find_related_tests(&changed_files, &affected_files, idx);
     let affected_files_sorted = sorted_hash_set_strings(&affected_files);
     let parse_errors = parse_errors_for_paths(idx, &affected_files, &root_str);
-    let unresolved_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
+    let mut unresolved_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
         &relations.unresolved_module_specifiers
     });
-    let external_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
+    unresolved_module_specifiers.extend(sorted_relation_values(&py_relations, |relations| {
+        &relations.unresolved_module_specifiers
+    }));
+    unresolved_module_specifiers.sort();
+    unresolved_module_specifiers.dedup();
+    let mut external_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
         &relations.external_module_specifiers
     });
+    external_module_specifiers.extend(sorted_relation_values(&py_relations, |relations| {
+        &relations.external_module_specifiers
+    }));
+    external_module_specifiers.sort();
+    external_module_specifiers.dedup();
     let blocked_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
         &relations.blocked_module_specifiers
     });
@@ -1071,7 +1321,7 @@ fn handle_pre_impact(
     let module_graph_truncated = ts_relations
         .values()
         .any(|relations| relations.graph_truncated);
-    let unresolved_external_modules = ts_relations.values().any(|relations| {
+    let unresolved_external_modules = ts_relations.values().chain(py_relations.values()).any(|relations| {
         relations.targets.is_empty() && !relations.external_module_specifiers.is_empty()
     });
     let mut ambiguous_symbols = ambiguous_definition_symbols(
@@ -1079,12 +1329,16 @@ fn handle_pre_impact(
         &seed_symbols
             .iter()
             .filter(|symbol| {
-                !ts_symbols.contains(*symbol) || non_ts_seed_symbols.contains(*symbol)
+                (!ts_symbols.contains(*symbol) && !py_symbols.contains(*symbol))
+                    || non_ts_seed_symbols.contains(*symbol)
             })
             .cloned()
             .collect::<Vec<_>>(),
     );
     ambiguous_symbols.extend(ts_relations.iter().filter_map(|(symbol, relations)| {
+        (relations.targets.len() > 1).then_some(symbol.clone())
+    }));
+    ambiguous_symbols.extend(py_relations.iter().filter_map(|(symbol, relations)| {
         (relations.targets.len() > 1).then_some(symbol.clone())
     }));
     ambiguous_symbols.sort();
@@ -1099,7 +1353,8 @@ fn handle_pre_impact(
         || !dynamic_import_files.is_empty()
         || module_graph_cycle
         || module_graph_truncated
-        || !structure_verified
+        || (!ts_seed_symbols.is_empty() && !structure_verified)
+        || (!py_seed_symbols.is_empty() && !py_structure_verified)
     {
         "medium"
     } else if affected_functions.is_empty() && !has_cross_file_reference {
@@ -1144,8 +1399,11 @@ fn handle_pre_impact(
     if module_graph_truncated {
         missing_evidence.push("module_graph_truncated");
     }
-    if !structure_verified {
+    if !ts_seed_symbols.is_empty() && !structure_verified {
         missing_evidence.push("typescript_program");
+    }
+    if !py_seed_symbols.is_empty() && !py_structure_verified {
+        missing_evidence.push("pyright_program");
     }
     let mut suggested_minimal_reads: Vec<Value> = affected_files_sorted
         .iter()
@@ -1178,13 +1436,19 @@ fn handle_pre_impact(
         "ambiguous_symbols": ambiguous_symbols,
         "index_consistency": "targeted",
         "max_staleness_ms": 0,
-        "semantic_engine": "typescript_program",
+        "semantic_engine": "language_semantic_programs",
         "semantic_engine_status": structure.status,
         "semantic_engine_reason": structure.reason,
         "semantic_snapshot_id": structure.snapshot_id,
         "program_build_count": structure.program_build_count,
         "program_rebuilt": structure.program_rebuilt,
         "semantic_elapsed_ms": structure.elapsed_ms,
+        "python_semantic_engine_status": py_structure.status,
+        "python_semantic_engine_reason": py_structure.reason,
+        "python_semantic_snapshot_id": py_structure.snapshot_id,
+        "python_program_build_count": py_structure.program_build_count,
+        "python_program_rebuilt": py_structure.program_rebuilt,
+        "python_semantic_elapsed_ms": py_structure.elapsed_ms,
         "truncated": {
             "seed_symbols": seed_symbols_truncated,
             "affected_references": affected_references_truncated,
@@ -1359,10 +1623,52 @@ fn make_relative(path: &str, root: &str) -> String {
     }
 }
 
+fn python_lsp_inputs(
+    idx: &Index,
+    root_str: &str,
+    files: &[String],
+    symbols: &[String],
+) -> (Vec<Value>, Vec<Value>) {
+    let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
+    let symbol_set: HashSet<String> = symbols.iter().cloned().collect();
+    let mut symbol_positions = Vec::new();
+    let mut import_tokens = Vec::new();
+    for entry in idx.files().filter(|entry| entry.lang == language::Lang::Python) {
+        let file = make_relative(&entry.path.to_string_lossy(), root_str);
+        if !file_set.contains(file.as_str()) {
+            continue;
+        }
+        if !symbol_set.is_empty() {
+            symbol_positions.extend(
+                symbols::extract_python_symbol_positions(&entry.tree, &entry.source, &symbol_set)
+                    .into_iter()
+                    .map(|position| json!({
+                        "file": file,
+                        "symbol": position.name,
+                        "line": position.line,
+                        "character": position.character,
+                    })),
+            );
+        }
+        import_tokens.extend(
+            symbols::extract_python_import_tokens(&entry.tree, &entry.source)
+                .into_iter()
+                .filter_map(|position| position.specifier.map(|specifier| json!({
+                    "file": file,
+                    "specifier": specifier,
+                    "line": position.line,
+                    "character": position.character,
+                }))),
+        );
+    }
+    (symbol_positions, import_tokens)
+}
+
 fn handle_pre_plan(
     arguments: &Value,
     index: &mut Option<Index>,
     deep_layer: &mut Option<ts_deep_layer::DeepLayer>,
+    py_layer: &mut Option<py_deep_layer::PyDeepLayer>,
 ) -> Value {
     let idx = match index.as_mut() {
         Some(i) => i,
@@ -1402,23 +1708,129 @@ fn handle_pre_plan(
     let structure_files = if target_files.is_empty() {
         ts_files
     } else {
-        target_files.clone()
+        target_files
+            .iter()
+            .filter(|file| {
+                idx.files().any(|entry| {
+                    matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
+                        && make_relative(&entry.path.to_string_lossy(), &root_str) == **file
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    let ts_symbols_requested = if target_files.is_empty() || !structure_files.is_empty() {
+        target_symbols.clone()
+    } else {
+        Vec::new()
     };
     let structure = ts_deep_layer::run_structure(
         deep_layer,
         &idx.root,
         &structure_files,
-        &target_symbols,
+        &ts_symbols_requested,
         &target_files,
     );
+    let mut py_structure_files: Vec<String> = if target_files.is_empty() {
+        idx.files()
+            .filter(|entry| entry.lang == language::Lang::Python)
+            .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str))
+            .collect()
+    } else {
+        target_files
+            .iter()
+            .filter(|file| {
+                idx.files().any(|entry| {
+                    entry.lang == language::Lang::Python
+                        && make_relative(&entry.path.to_string_lossy(), &root_str) == **file
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    let (py_symbol_positions, _) =
+        python_lsp_inputs(idx, &root_str, &target_files, &target_symbols);
+    let (_, py_import_tokens) =
+        python_lsp_inputs(idx, &root_str, &py_structure_files, &[]);
+    let mut py_structure = if py_structure_files.is_empty() {
+        py_deep_layer::disabled_structure(&target_symbols)
+    } else {
+        py_deep_layer::run_structure(
+            py_layer,
+            &idx.root,
+            &py_structure_files,
+            &target_symbols,
+            &py_symbol_positions,
+            &py_import_tokens,
+        )
+    };
+    for _ in 0..16 {
+        let mut expanded: HashSet<String> = py_structure_files.iter().cloned().collect();
+        expanded.extend(
+            py_structure
+                .module_dependencies
+                .values()
+                .flatten()
+                .cloned(),
+        );
+        expanded.extend(
+            py_structure
+                .relations
+                .values()
+                .flat_map(|relations| relations.related_files.iter().cloned()),
+        );
+        if expanded.len() == py_structure_files.len() {
+            break;
+        }
+        py_structure_files = expanded.into_iter().collect();
+        py_structure_files.sort();
+        idx.refresh_paths(&py_structure_files);
+        let (_, expanded_import_tokens) =
+            python_lsp_inputs(idx, &root_str, &py_structure_files, &[]);
+        py_structure = py_deep_layer::run_structure(
+            py_layer,
+            &idx.root,
+            &py_structure_files,
+            &target_symbols,
+            &py_symbol_positions,
+            &expanded_import_tokens,
+        );
+    }
+    let mut final_py_closure: HashSet<String> = py_structure_files.iter().cloned().collect();
+    final_py_closure.extend(
+        py_structure
+            .module_dependencies
+            .values()
+            .flatten()
+            .cloned(),
+    );
+    final_py_closure.extend(
+        py_structure
+            .relations
+            .values()
+            .flat_map(|relations| relations.related_files.iter().cloned()),
+    );
+    if final_py_closure.len() > py_structure_files.len() {
+        for relations in py_structure.relations.values_mut() {
+            relations.graph_truncated = true;
+        }
+    }
     let ts_relations = structure.relations.clone();
+    let py_relations = py_structure.relations.clone();
     let structure_verified = structure.status == "verified";
     let structure_available = structure.status != "tool_missing";
+    let py_structure_verified = py_structure.status == "verified";
+    let py_structure_available = matches!(py_structure.status, "verified" | "partially_verified");
     let related_ts_files: Vec<String> = ts_relations
         .values()
         .flat_map(|relations| relations.related_files.iter().cloned())
         .collect();
     idx.refresh_paths(&related_ts_files);
+    let related_py_files: Vec<String> = py_relations
+        .values()
+        .flat_map(|relations| relations.related_files.iter().cloned())
+        .collect();
+    idx.refresh_paths(&related_py_files);
     let ts_target_files: HashSet<String> = target_files
         .iter()
         .filter(|file| {
@@ -1429,12 +1841,17 @@ fn handle_pre_plan(
         })
         .cloned()
         .collect();
+    let py_target_files: HashSet<String> = target_files
+        .iter()
+        .filter(|file| py_structure_files.contains(file))
+        .cloned()
+        .collect();
     let non_ts_target_symbols: HashSet<String> = idx
         .files()
         .filter(|entry| {
             let rel = make_relative(&entry.path.to_string_lossy(), &root_str);
             target_files.contains(&rel)
-                && !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
+                && !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python)
         })
         .flat_map(|entry| {
             symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang)
@@ -1453,23 +1870,47 @@ fn handle_pre_plan(
                 .then_some(symbol.clone())
         })
         .collect();
-    let unresolved_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
+    let py_symbols: HashSet<String> = py_relations
+        .iter()
+        .filter_map(|(symbol, relations)| {
+            (relations.has_evidence()
+                || (py_structure_available
+                    && !py_target_files.is_empty()
+                    && !non_ts_target_symbols.contains(symbol)))
+                .then_some(symbol.clone())
+        })
+        .collect();
+    let mut unresolved_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
         &relations.unresolved_module_specifiers
     });
-    let external_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
+    unresolved_module_specifiers.extend(sorted_relation_values(&py_relations, |relations| {
+        &relations.unresolved_module_specifiers
+    }));
+    unresolved_module_specifiers.sort();
+    unresolved_module_specifiers.dedup();
+    let mut external_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
         &relations.external_module_specifiers
     });
+    external_module_specifiers.extend(sorted_relation_values(&py_relations, |relations| {
+        &relations.external_module_specifiers
+    }));
+    external_module_specifiers.sort();
+    external_module_specifiers.dedup();
     let blocked_module_specifiers = sorted_relation_values(&ts_relations, |relations| {
         &relations.blocked_module_specifiers
     });
     let dynamic_import_files = sorted_relation_values(&ts_relations, |relations| {
         &relations.dynamic_import_files
     });
-    let module_graph_cycle = ts_relations.values().any(|relations| relations.graph_cycle);
+    let module_graph_cycle = ts_relations
+        .values()
+        .chain(py_relations.values())
+        .any(|relations| relations.graph_cycle);
     let module_graph_truncated = ts_relations
         .values()
+        .chain(py_relations.values())
         .any(|relations| relations.graph_truncated);
-    let unresolved_external_modules = ts_relations.values().any(|relations| {
+    let unresolved_external_modules = ts_relations.values().chain(py_relations.values()).any(|relations| {
         relations.targets.is_empty() && !relations.external_module_specifiers.is_empty()
     });
     let mut ambiguous_symbols = ambiguous_definition_symbols(
@@ -1477,7 +1918,8 @@ fn handle_pre_plan(
         &target_symbols
             .iter()
             .filter(|symbol| {
-                !ts_symbols.contains(*symbol) || non_ts_target_symbols.contains(*symbol)
+                (!ts_symbols.contains(*symbol) && !py_symbols.contains(*symbol))
+                    || non_ts_target_symbols.contains(*symbol)
             })
             .cloned()
             .collect::<Vec<_>>(),
@@ -1485,14 +1927,31 @@ fn handle_pre_plan(
     ambiguous_symbols.extend(ts_relations.iter().filter_map(|(symbol, relations)| {
         (relations.targets.len() > 1).then_some(symbol.clone())
     }));
+    ambiguous_symbols.extend(py_relations.iter().filter_map(|(symbol, relations)| {
+        (relations.targets.len() > 1).then_some(symbol.clone())
+    }));
     ambiguous_symbols.sort();
     ambiguous_symbols.dedup();
 
     let mut scope_files: HashSet<String> = target_files.iter().cloned().collect();
     let mut target_definition_found = false;
+    if !py_target_files.is_empty() {
+        for (file, dependencies) in &py_structure.module_dependencies {
+            scope_files.insert(file.clone());
+            scope_files.extend(dependencies.iter().cloned());
+        }
+    }
 
     if !target_symbols.is_empty() {
         for relations in ts_relations.values() {
+            scope_files.extend(relations.related_files.iter().cloned());
+            if relations.targets.len() == 1 {
+                target_definition_found = true;
+            } else {
+                scope_files.extend(relations.targets.iter().map(|target| target.file.clone()));
+            }
+        }
+        for relations in py_relations.values() {
             scope_files.extend(relations.related_files.iter().cloned());
             if relations.targets.len() == 1 {
                 target_definition_found = true;
@@ -1507,17 +1966,22 @@ fn handle_pre_plan(
             {
                 continue;
             }
+            if entry.lang == language::Lang::Python {
+                continue;
+            }
             let defs = symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
             if defs.iter().any(|definition| {
                 target_symbols.contains(&definition.name)
-                    && (!ts_symbols.contains(&definition.name)
+                    && ((!ts_symbols.contains(&definition.name) && !py_symbols.contains(&definition.name))
                         || non_ts_target_symbols.contains(&definition.name))
             }) {
                 target_definition_found = true;
                 scope_files.insert(rel.clone());
             }
             for symbol in &target_symbols {
-                if ts_symbols.contains(symbol) && !non_ts_target_symbols.contains(symbol) {
+                if (ts_symbols.contains(symbol) || py_symbols.contains(symbol))
+                    && !non_ts_target_symbols.contains(symbol)
+                {
                     continue;
                 }
                 if !symbols::extract_references(&entry.tree, &entry.source, &entry.path, symbol).is_empty()
@@ -1531,7 +1995,7 @@ fn handle_pre_plan(
     let target_usage_found = !target_symbols.is_empty() && scope_files.len() > 1;
 
     if scope_files.is_empty() {
-        return handle_pre_plan_discovery(arguments, idx, &root_str);
+        return handle_pre_plan_discovery(arguments, idx, &root_str, py_layer);
     }
 
     let mut file_deps: HashMap<String, HashSet<String>> = structure
@@ -1549,13 +2013,24 @@ fn handle_pre_plan(
             )
         })
         .collect();
+    for (file, dependencies) in &py_structure.module_dependencies {
+        if !scope_files.contains(file) {
+            continue;
+        }
+        file_deps.entry(file.clone()).or_default().extend(
+            dependencies
+                .iter()
+                .filter(|dependency| scope_files.contains(*dependency))
+                .cloned(),
+        );
+    }
     for file in &scope_files {
         file_deps.entry(file.clone()).or_default();
     }
 
     let mut all_defs: HashMap<String, Vec<String>> = HashMap::new();
     for entry in idx.files().filter(|entry| {
-        !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
+        !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python)
     }) {
         let rel = make_relative(&entry.path.to_string_lossy(), &root_str);
         for definition in
@@ -1573,7 +2048,7 @@ fn handle_pre_plan(
         if !scope_files.contains(&rel) {
             continue;
         }
-        if matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx) {
+        if matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python) {
             continue;
         }
         let defs = symbols::extract_definitions(&entry.tree, &entry.source, &entry.path, entry.lang);
@@ -1619,7 +2094,8 @@ fn handle_pre_plan(
         || module_graph_truncated
         || !dependency_cycle_files.is_empty()
         || index_consistency == "bounded_stale"
-        || !structure_verified
+        || (!ts_target_files.is_empty() && !structure_verified)
+        || (!py_structure_files.is_empty() && !py_structure_verified)
     {
         "medium"
     } else if target_symbols.is_empty()
@@ -1666,8 +2142,11 @@ fn handle_pre_plan(
     if index_consistency == "bounded_stale" {
         missing_evidence.push("index_snapshot_staleness");
     }
-    if !structure_verified {
+    if !ts_target_files.is_empty() && !structure_verified {
         missing_evidence.push("typescript_program");
+    }
+    if !py_structure_files.is_empty() && !py_structure_verified {
+        missing_evidence.push("pyright_program");
     }
     let mut suggested_minimal_reads: Vec<Value> = candidate_order
         .iter()
@@ -1692,13 +2171,19 @@ fn handle_pre_plan(
         "related_tests": related_tests,
         "index_consistency": index_consistency,
         "max_staleness_ms": index::MAX_STALENESS_MS,
-        "semantic_engine": "typescript_program",
+        "semantic_engine": "language_semantic_programs",
         "semantic_engine_status": structure.status,
         "semantic_engine_reason": structure.reason,
         "semantic_snapshot_id": structure.snapshot_id,
         "program_build_count": structure.program_build_count,
         "program_rebuilt": structure.program_rebuilt,
         "semantic_elapsed_ms": structure.elapsed_ms,
+        "python_semantic_engine_status": py_structure.status,
+        "python_semantic_engine_reason": py_structure.reason,
+        "python_semantic_snapshot_id": py_structure.snapshot_id,
+        "python_program_build_count": py_structure.program_build_count,
+        "python_program_rebuilt": py_structure.program_rebuilt,
+        "python_semantic_elapsed_ms": py_structure.elapsed_ms,
         "answer_pack": build_answer_pack(
             "plan",
             confidence,
@@ -1719,17 +2204,60 @@ fn handle_pre_plan(
     tool_success("pre_plan", result)
 }
 
-fn handle_pre_plan_discovery(arguments: &Value, idx: &Index, root_str: &str) -> Value {
+fn handle_pre_plan_discovery(
+    arguments: &Value,
+    idx: &Index,
+    root_str: &str,
+    py_layer: &mut Option<py_deep_layer::PyDeepLayer>,
+) -> Value {
     let task = arguments.get("task").and_then(|s| s.as_str()).unwrap_or("");
     let task_terms = tokenize_identifier(task);
     let mut candidates: HashMap<String, PlanCandidate> = HashMap::new();
     let has_ts_files = idx
         .files()
         .any(|entry| matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx));
+    let has_python_files = idx.files().any(|entry| entry.lang == language::Lang::Python);
+    let py_discovery = if has_python_files {
+        let mut discovery_terms: Vec<String> = task_terms.iter().cloned().collect();
+        discovery_terms.sort();
+        py_deep_layer::run_discovery(py_layer, &idx.root, &discovery_terms)
+    } else {
+        py_deep_layer::PyDiscoveryResult {
+            candidates: vec![],
+            status: "disabled",
+            reason: Some("no Python files selected".to_string()),
+            program_build_count: 0,
+            program_rebuilt: false,
+            snapshot_id: "0".to_string(),
+            elapsed_ms: 0,
+        }
+    };
+    for candidate in &py_discovery.candidates {
+        let Some(name) = candidate.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(file) = candidate.get("file").and_then(Value::as_str) else {
+            continue;
+        };
+        let line = candidate.get("line").and_then(Value::as_u64).unwrap_or(1) as usize;
+        if !is_discovery_anchor_candidate(name, file) {
+            continue;
+        }
+        candidates.insert(
+            format!("Python:{file}:{line}:{name}"),
+            PlanCandidate::new(
+                name.to_string(),
+                file.to_string(),
+                line,
+                "PythonSymbol".to_string(),
+                relevance_score(task, &task_terms, name, file),
+            ),
+        );
+    }
     let file_entries: Vec<_> = idx
         .files()
         .filter(|entry| {
-            !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx)
+            !matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python)
         })
         .collect();
 
@@ -1812,9 +2340,10 @@ fn handle_pre_plan_discovery(arguments: &Value, idx: &Index, root_str: &str) -> 
             "tool": "pre_context",
             "arguments": {
                 "symbol": &c.name,
+                "path": &c.file,
                 "depth": 2
             },
-            "reason": "high centrality AST anchor",
+            "reason": "semantic discovery anchor",
         }))
         .collect();
 
@@ -1840,9 +2369,14 @@ fn handle_pre_plan_discovery(arguments: &Value, idx: &Index, root_str: &str) -> 
     if has_ts_files {
         missing_evidence.push("typescript_discovery_requires_targets");
     }
+    if has_python_files && py_discovery.status != "verified" {
+        missing_evidence.push("pyright_program");
+    }
     let confidence = if ranked.is_empty() {
         "low"
-    } else if !parse_errors.is_empty() {
+    } else if !parse_errors.is_empty()
+        || (has_python_files && py_discovery.status != "verified")
+    {
         "medium"
     } else if ranked.iter().any(|c| c.relevance > 0) {
         "high"
@@ -1858,6 +2392,12 @@ fn handle_pre_plan_discovery(arguments: &Value, idx: &Index, root_str: &str) -> 
         "parse_errors": parse_errors,
         "suggested_calls": suggested_calls,
         "related_tests": related_tests,
+        "python_semantic_engine_status": py_discovery.status,
+        "python_semantic_engine_reason": py_discovery.reason,
+        "python_semantic_snapshot_id": py_discovery.snapshot_id,
+        "python_program_build_count": py_discovery.program_build_count,
+        "python_program_rebuilt": py_discovery.program_rebuilt,
+        "python_semantic_elapsed_ms": py_discovery.elapsed_ms,
         "risk_areas": [
             "tool definition schema",
             "model tool dispatch",
@@ -2317,7 +2857,7 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         if !changed_files.contains(&rel) {
             continue;
         }
-        if matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx) {
+        if matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx | language::Lang::Python) {
             continue;
         }
         let imported = symbols::extract_imports(&entry.tree, &entry.source, entry.lang);
@@ -2418,18 +2958,26 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         issues.extend(result.issues);
     }
 
-    // Python Deep Layer: type-level checking via pyright subprocess
+    // Python Deep Layer: one persistent Pyright LSP snapshot for diagnostics and structure.
     let py_files = files_for_language(&grouped_files, "Python");
     let py_result = if py_files.is_empty() {
         py_deep_layer::PyDeepLayerResult {
             issues: vec![],
             status: "disabled",
             reason: Some("no Python files in changed_files".to_string()),
+            verification: json!({ "coverage": [], "missing": ["no_python_files"] }),
+            program_build_count: 0,
+            program_rebuilt: false,
+            snapshot_id: "0".to_string(),
             elapsed_ms: 0,
         }
     } else {
         py_deep_layer::run(py_layer, &idx.root, &py_files)
     };
+    let py_verification = py_result.verification.clone();
+    let py_program_build_count = py_result.program_build_count;
+    let py_program_rebuilt = py_result.program_rebuilt;
+    let py_snapshot_id = py_result.snapshot_id.clone();
     issues.extend(py_result.issues);
     let py_deep_layer_ms = py_result.elapsed_ms;
     let py_deep_layer_status = py_result.status;
@@ -2645,7 +3193,7 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         &[
             VerificationLayerResult { language: "TypeScript", files: &typescript_files, status: typescript_deep_layer_status, reason: typescript_deep_layer_reason.as_deref(), verification: Some(&typescript_verification) },
             VerificationLayerResult { language: "TSX", files: &tsx_files, status: tsx_deep_layer_status, reason: tsx_deep_layer_reason.as_deref(), verification: Some(&tsx_verification) },
-            VerificationLayerResult { language: "Python", files: &py_files, status: py_deep_layer_status, reason: py_deep_layer_reason.as_deref(), verification: None },
+            VerificationLayerResult { language: "Python", files: &py_files, status: py_deep_layer_status, reason: py_deep_layer_reason.as_deref(), verification: Some(&py_verification) },
             VerificationLayerResult { language: "Rust", files: &rs_files, status: rust_deep_layer_status, reason: rust_deep_layer_reason.as_deref(), verification: None },
             VerificationLayerResult { language: "Go", files: &go_files, status: go_deep_layer_status, reason: go_deep_layer_reason.as_deref(), verification: None },
             VerificationLayerResult { language: "Java", files: &java_files, status: java_deep_layer_status, reason: java_deep_layer_reason.as_deref(), verification: None },
@@ -2661,7 +3209,7 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         ],
     );
     let status = verification_result_status(!issues.is_empty(), &verification);
-    let result = json!({
+    let mut result = json!({
         "status": status,
         "verification": verification,
         "checked_files": changed_files.len(),
@@ -2669,7 +3217,7 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
         "refresh_ms": refresh_ms,
         "verify_ms": verify_ms,
         "deep_layer_ms": deep_layer_ms,
-        "semantic_engine": "typescript_program",
+        "semantic_engine": "language_semantic_programs",
         "semantic_snapshot_id": typescript_snapshot_id,
         "program_build_count": typescript_program_build_count,
         "program_rebuilt": typescript_program_rebuilt,
@@ -2740,6 +3288,10 @@ fn handle_pre_verify(arguments: &Value, index: &mut Option<Index>, deep_layer: &
             "reason": cpp_deep_layer_reason,
         },
     });
+    result["py_deep_layer"]["verification"] = py_verification;
+    result["py_deep_layer"]["semantic_snapshot_id"] = json!(py_snapshot_id);
+    result["py_deep_layer"]["program_build_count"] = json!(py_program_build_count);
+    result["py_deep_layer"]["program_rebuilt"] = json!(py_program_rebuilt);
 
     tool_success("pre_verify", result)
 }
@@ -2905,7 +3457,7 @@ mod tests {
         assert!(payload.pointer("/capability_summary/languages").is_none());
         assert_eq!(
             payload.pointer("/capability_summary/partial_languages"),
-            Some(&json!(["Python", "Rust", "Go", "Java"]))
+            Some(&json!(["Rust", "Go", "Java"]))
         );
     }
 
