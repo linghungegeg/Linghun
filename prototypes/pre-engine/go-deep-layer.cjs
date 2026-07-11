@@ -11,6 +11,7 @@ const DIAGNOSTIC_TIMEOUT_MS = Number(
   process.env.LINGHUN_GOPLS_DIAGNOSTIC_TIMEOUT_MS || REQUEST_TIMEOUT_MS,
 );
 const STDERR_LIMIT_BYTES = 8192;
+const GO_CONFIG_FILES = ["go.mod", "go.sum", "go.work", "go.work.sum"];
 
 function normalize(value) {
   return value.replace(/\\/g, "/");
@@ -111,12 +112,14 @@ class GoplsSession {
     this.snapshot = 0;
     this.stderr = Buffer.alloc(0);
     this.stderrTruncated = false;
-    this.configStamp = this.readConfigStamp();
-    this.workspaceFiles = this.readWorkspaceFiles();
+    this.configStamp = null;
+    this.configFiles = new Map();
+    this.workspaceFiles = new Map();
   }
 
-  readWorkspaceFiles() {
+  scanWorkspace() {
     const files = new Map();
+    const configs = new Map();
     const visit = directory => {
       for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
         if (entry.isDirectory()) {
@@ -125,18 +128,24 @@ class GoplsSession {
           }
           continue;
         }
-        if (!entry.name.endsWith(".go")) continue;
+        if (!entry.name.endsWith(".go") && !GO_CONFIG_FILES.includes(entry.name)) continue;
         const absolute = path.join(directory, entry.name);
         const stat = fs.statSync(absolute);
-        files.set(normalize(path.relative(this.root, absolute)), `${stat.mtimeMs}:${stat.size}`);
+        const relative = normalize(path.relative(this.root, absolute));
+        const stamp = `${stat.mtimeMs}:${stat.size}`;
+        if (entry.name.endsWith(".go")) files.set(relative, stamp);
+        else configs.set(relative, stamp);
       }
     };
     visit(this.root);
-    return files;
+    return { configStamp: this.configStampFor(configs), configs, files };
   }
 
-  syncWorkspaceFiles() {
-    const next = this.readWorkspaceFiles();
+  configStampFor(configs) {
+    return [...configs].map(([file, stamp]) => `${file}:${stamp}`).sort().join("|");
+  }
+
+  syncWorkspaceFiles(next) {
     const changes = [];
     for (const [file, stamp] of next) {
       const previous = this.workspaceFiles.get(file);
@@ -171,27 +180,8 @@ class GoplsSession {
     return `gopls exited code=${code == null ? "null" : code} signal=${signal || "null"}${suffix}`;
   }
 
-  readConfigStamp() {
-    const entries = [];
-    const visit = directory => {
-      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-        if (entry.isDirectory()) {
-          if (![".git", "node_modules", "target", "vendor"].includes(entry.name)) {
-            visit(path.join(directory, entry.name));
-          }
-          continue;
-        }
-        if (!["go.mod", "go.sum", "go.work", "go.work.sum"].includes(entry.name)) continue;
-        const absolute = path.join(directory, entry.name);
-        const stat = fs.statSync(absolute);
-        entries.push(`${normalize(path.relative(this.root, absolute))}:${stat.mtimeMs}:${stat.size}`);
-      }
-    };
-    visit(this.root);
-    return entries.sort().join("|");
-  }
-
-  async start() {
+  async start(workspace) {
+    const currentWorkspace = workspace || this.scanWorkspace();
     const child = spawn(this.executable, ["serve"], {
       cwd: this.root,
       stdio: ["pipe", "pipe", "pipe"],
@@ -231,13 +221,15 @@ class GoplsSession {
       initializationOptions: {
         analyses: { unusedparams: true, unusedwrite: true },
         diagnosticsDelay: "100ms",
+        diagnosticsTrigger: "Save",
       },
     });
     this.notify("initialized", {});
     this.buildCount += 1;
     await this.warmWorkspace();
-    this.configStamp = this.readConfigStamp();
-    this.workspaceFiles = this.readWorkspaceFiles();
+    this.configStamp = currentWorkspace.configStamp;
+    this.configFiles = currentWorkspace.configs;
+    this.workspaceFiles = currentWorkspace.files;
   }
 
   stop() {
@@ -339,16 +331,22 @@ class GoplsSession {
     await this.request("workspace/symbol", { query: "" });
   }
 
-  async ensureCurrent() {
-    const nextStamp = this.readConfigStamp();
-    if (this.child && nextStamp === this.configStamp) {
-      this.syncWorkspaceFiles();
+  async ensureCurrent(syncMode = "full") {
+    if (!this.child) {
+      await this.start(this.scanWorkspace());
+      this.snapshot += 1;
+      return true;
+    }
+    if (syncMode === "reuse") return false;
+    const workspace = this.scanWorkspace();
+    if (workspace.configStamp === this.configStamp) {
+      this.configFiles = workspace.configs;
+      this.syncWorkspaceFiles(workspace.files);
       this.closeDeletedDocuments();
       return false;
     }
-    if (this.child) this.stop();
-    this.configStamp = nextStamp;
-    await this.start();
+    this.stop();
+    await this.start(workspace);
     this.snapshot += 1;
     return true;
   }
@@ -485,9 +483,9 @@ class GoplsSession {
     return { dependencies, metadata };
   }
 
-  async analyze(files, symbols, symbolPositions, importTokens, allowWorkspaceSymbol) {
-    const rebuilt = await this.ensureCurrent();
+  async analyze(files, symbols, symbolPositions, importTokens, allowWorkspaceSymbol, syncMode, includeReferences, includeCallHierarchy) {
     const normalizedFiles = [...new Set(files.map(file => normalize(file)))];
+    const rebuilt = await this.ensureCurrent(syncMode);
     let openedFiles = 0;
     for (const file of normalizedFiles) {
       if (await this.openFile(file)) openedFiles += 1;
@@ -530,71 +528,81 @@ class GoplsSession {
           : targets.map(target => ({ uri: target.uri, position: target.position })))
         : [];
       for (const anchor of anchors) {
-        const found = await this.semanticRequest("textDocument/references", {
-          textDocument: { uri: anchor.uri },
-          position: anchor.position,
-          context: { includeDeclaration: true },
-        });
-        for (const reference of found || []) {
-          const uri = locationUri(reference);
-          const range = locationRange(reference);
-          if (!uri || !uri.startsWith("file:") || !range) continue;
-          let rel;
-          try {
-            rel = relativeTo(this.root, fileURLToPath(uri));
-          } catch {
-            rel = null;
-          }
-          if (rel == null) continue;
-          const document = await this.openFile(rel);
-          if (!document) continue;
-          const name = wordAt(document.text, range.start);
-          if (!name) continue;
-          const location = semanticLocation(this.root, reference, name);
-          if (!location) continue;
-          relatedFiles.add(rel);
-          if (!namesByFile[rel]) namesByFile[rel] = [];
-          if (!namesByFile[rel].includes(name)) namesByFile[rel].push(name);
-          const key = `${rel}:${location.line}:${location.character}:${location.end_line}:${location.end_character}`;
-          if (!referenceKeys.has(key)) {
-            referenceKeys.add(key);
-            references.push(location);
+        const [found, prepared] = await Promise.all([
+          includeReferences
+            ? this.semanticRequest("textDocument/references", {
+              textDocument: { uri: anchor.uri },
+              position: anchor.position,
+              context: { includeDeclaration: true },
+            })
+            : [],
+          includeCallHierarchy
+            ? this.semanticRequest("textDocument/prepareCallHierarchy", {
+              textDocument: { uri: anchor.uri },
+              position: anchor.position,
+            })
+            : [],
+        ]);
+        if (includeReferences) {
+          for (const reference of found || []) {
+            const uri = locationUri(reference);
+            const range = locationRange(reference);
+            if (!uri || !uri.startsWith("file:") || !range) continue;
+            let rel;
+            try {
+              rel = relativeTo(this.root, fileURLToPath(uri));
+            } catch {
+              rel = null;
+            }
+            if (rel == null) continue;
+            const document = await this.openFile(rel);
+            if (!document) continue;
+            const name = wordAt(document.text, range.start);
+            if (!name) continue;
+            const location = semanticLocation(this.root, reference, name);
+            if (!location) continue;
+            relatedFiles.add(rel);
+            if (!namesByFile[rel]) namesByFile[rel] = [];
+            if (!namesByFile[rel].includes(name)) namesByFile[rel].push(name);
+            const key = `${rel}:${location.line}:${location.character}:${location.end_line}:${location.end_character}`;
+            if (!referenceKeys.has(key)) {
+              referenceKeys.add(key);
+              references.push(location);
+            }
           }
         }
 
-        const prepared = await this.semanticRequest("textDocument/prepareCallHierarchy", {
-          textDocument: { uri: anchor.uri },
-          position: anchor.position,
-        });
-        for (const item of prepared || []) {
-          const incoming = await this.semanticRequest("callHierarchy/incomingCalls", { item });
-          for (const call of incoming || []) {
-            const location = semanticLocation(
-              this.root,
-              { uri: call.from.uri, range: call.from.selectionRange || call.from.range },
-              call.from.name,
-            );
-            if (!location) continue;
-            relatedFiles.add(location.file);
-            const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
-            if (!callerKeys.has(key)) {
-              callerKeys.add(key);
-              callers.push(location);
+        if (includeCallHierarchy) {
+          for (const item of prepared || []) {
+            const incoming = await this.semanticRequest("callHierarchy/incomingCalls", { item });
+            for (const call of incoming || []) {
+              const location = semanticLocation(
+                this.root,
+                { uri: call.from.uri, range: call.from.selectionRange || call.from.range },
+                call.from.name,
+              );
+              if (!location) continue;
+              relatedFiles.add(location.file);
+              const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
+              if (!callerKeys.has(key)) {
+                callerKeys.add(key);
+                callers.push(location);
+              }
             }
-          }
-          const outgoing = await this.semanticRequest("callHierarchy/outgoingCalls", { item });
-          for (const call of outgoing || []) {
-            const location = semanticLocation(
-              this.root,
-              { uri: call.to.uri, range: call.to.selectionRange || call.to.range },
-              call.to.name,
-            );
-            if (!location) continue;
-            relatedFiles.add(location.file);
-            const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
-            if (!calleeKeys.has(key)) {
-              calleeKeys.add(key);
-              callees.push(location);
+            const outgoing = await this.semanticRequest("callHierarchy/outgoingCalls", { item });
+            for (const call of outgoing || []) {
+              const location = semanticLocation(
+                this.root,
+                { uri: call.to.uri, range: call.to.selectionRange || call.to.range },
+                call.to.name,
+              );
+              if (!location) continue;
+              relatedFiles.add(location.file);
+              const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
+              if (!calleeKeys.has(key)) {
+                calleeKeys.add(key);
+                callees.push(location);
+              }
             }
           }
         }
@@ -632,7 +640,11 @@ class GoplsSession {
       program_rebuilt: rebuilt,
       snapshot_id: String(this.snapshot),
       verification: {
-        coverage: ["imports", "modules", "reexports", "symbol_identity", "aliases", "references", "call_hierarchy", "types"],
+        coverage: [
+          "imports", "modules", "reexports", "symbol_identity", "aliases", "types",
+          ...(includeReferences ? ["references"] : []),
+          ...(includeCallHierarchy ? ["call_hierarchy"] : []),
+        ],
         missing,
       },
     };
@@ -676,9 +688,10 @@ class GoplsSession {
   }
 
   async verify(files) {
+    const normalizedFiles = [...new Set(files.map(value => normalize(value)))];
     const rebuilt = await this.ensureCurrent();
     const documents = [];
-    for (const file of [...new Set(files.map(value => normalize(value)))]) {
+    for (const file of normalizedFiles) {
       const document = await this.openFile(file);
       if (document) documents.push(document);
     }
@@ -771,6 +784,9 @@ async function handle(request) {
       request.symbol_positions || [],
       request.import_tokens || [],
       request.allow_workspace_symbol === true,
+      request.sync_mode === "reuse" ? "reuse" : "full",
+      request.include_references !== false,
+      request.include_call_hierarchy !== false,
     );
   }
   if (request.op === "discover") return session.discover(request.terms || []);

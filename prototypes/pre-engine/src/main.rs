@@ -530,6 +530,9 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                         &go_symbol_positions,
                         &go_import_tokens,
                         requested_paths.is_empty(),
+                        "full",
+                        true,
+                        true,
                     )
                 };
                 let ts_relations = if structure_files.is_empty() {
@@ -1324,6 +1327,9 @@ fn handle_pre_impact(
             &go_symbols_requested,
             &go_symbol_positions,
             &go_import_tokens,
+            false,
+            "full",
+            true,
             false,
         )
     };
@@ -2339,18 +2345,22 @@ fn handle_pre_plan(
     let (go_symbol_positions, _) =
         go_lsp_inputs(idx, &root_str, &go_structure_files, &target_symbols);
     let (_, go_import_tokens) = go_lsp_inputs(idx, &root_str, &go_structure_files, &[]);
-    let mut go_structure =
-        if !has_go_files || (!target_files.is_empty() && go_structure_files.is_empty()) {
-            go_deep_layer::disabled_structure(&target_symbols)
+    let mut go_structure = if !has_go_files
+        || (!target_files.is_empty() && go_structure_files.is_empty())
+    {
+        go_deep_layer::disabled_structure(&target_symbols)
     } else {
-            go_deep_layer::run_structure(
-                go_layer,
-                &idx.root,
-                &go_structure_files,
-                &target_symbols,
-                &go_symbol_positions,
-                &go_import_tokens,
+        go_deep_layer::run_structure(
+            go_layer,
+            &idx.root,
+            &go_structure_files,
+            &target_symbols,
+            &go_symbol_positions,
+            &go_import_tokens,
             target_files.is_empty(),
+            "full",
+            false,
+            true,
         )
     };
     for _ in 0..15 {
@@ -2365,20 +2375,36 @@ fn handle_pre_plan(
         if expanded.len() == go_structure_files.len() {
             break;
         }
+        let current_files: HashSet<String> = go_structure_files.iter().cloned().collect();
+        let mut new_files: Vec<String> = expanded.difference(&current_files).cloned().collect();
+        new_files.sort();
         go_structure_files = expanded.into_iter().collect();
         go_structure_files.sort();
-        idx.refresh_paths(&go_structure_files);
-        let (expanded_symbol_positions, expanded_import_tokens) =
-            go_lsp_inputs(idx, &root_str, &go_structure_files, &target_symbols);
-        go_structure = go_deep_layer::run_structure(
+        idx.refresh_paths(&new_files);
+        let (_, expanded_import_tokens) = go_lsp_inputs(idx, &root_str, &new_files, &[]);
+        let expansion = go_deep_layer::run_structure(
             go_layer,
             &idx.root,
-            &go_structure_files,
-            &target_symbols,
-            &expanded_symbol_positions,
+            &new_files,
+            &[],
+            &[],
             &expanded_import_tokens,
             false,
+            "reuse",
+            false,
+            false,
         );
+        if go_structure.status == "verified" && expansion.status != "verified" {
+            go_structure.status = expansion.status;
+            go_structure.reason = expansion.reason;
+        }
+        go_structure.module_dependencies.extend(expansion.module_dependencies);
+        go_structure.program_build_count = go_structure.program_build_count.max(expansion.program_build_count);
+        go_structure.program_rebuilt |= expansion.program_rebuilt;
+        if expansion.snapshot_id != "0" {
+            go_structure.snapshot_id = expansion.snapshot_id;
+        }
+        go_structure.elapsed_ms += expansion.elapsed_ms;
     }
     let mut final_go_closure: HashSet<String> = go_structure_files.iter().cloned().collect();
     final_go_closure.extend(go_structure.module_dependencies.values().flatten().cloned());

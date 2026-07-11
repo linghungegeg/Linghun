@@ -170,6 +170,9 @@ impl GoDeepLayer {
         symbol_positions: &[Value],
         import_tokens: &[Value],
         allow_workspace_symbol: bool,
+        sync_mode: &str,
+        include_references: bool,
+        include_call_hierarchy: bool,
     ) -> Result<StructureResult, String> {
         let root = self.root.to_string_lossy().replace('\\', "/");
         let (response, elapsed_ms) = self.request(json!({
@@ -180,6 +183,9 @@ impl GoDeepLayer {
             "symbol_positions": symbol_positions,
             "import_tokens": import_tokens,
             "allow_workspace_symbol": allow_workspace_symbol,
+            "sync_mode": sync_mode,
+            "include_references": include_references,
+            "include_call_hierarchy": include_call_hierarchy,
         }))?;
         Ok(StructureResult {
             relations: serde_json::from_value(
@@ -295,6 +301,9 @@ pub fn run_structure(
     symbol_positions: &[Value],
     import_tokens: &[Value],
     allow_workspace_symbol: bool,
+    sync_mode: &str,
+    include_references: bool,
+    include_call_hierarchy: bool,
 ) -> StructureResult {
     let layer = match ensure_layer(deep, root) {
         Ok(layer) => layer,
@@ -306,6 +315,9 @@ pub fn run_structure(
         symbol_positions,
         import_tokens,
         allow_workspace_symbol,
+        sync_mode,
+        include_references,
+        include_call_hierarchy,
     ) {
         Ok(result) => result,
         Err(reason) => {
