@@ -148,10 +148,21 @@ function runCommand(command, args, options) {
     let stderr = "";
     child.stdout.on("data", chunk => { stdout += chunk.toString(); });
     child.stderr.on("data", chunk => { stderr += chunk.toString(); });
-    child.on("error", reject);
-    child.on("exit", code => code === 0
+    child.on("error", error => reject(new Error([
+      `command: ${command} ${args.join(" ")}`,
+      `spawn_error: ${error.message}`,
+      `stdout:\n${stdout || "<empty>"}`,
+      `stderr:\n${stderr || "<empty>"}`,
+    ].join("\n"))));
+    child.on("exit", (code, signal) => code === 0
       ? resolve({ stdout, stderr })
-      : reject(new Error(`${command} ${args.join(" ")} failed (${code})\n${stderr || stdout}`)));
+      : reject(new Error([
+        `command: ${command} ${args.join(" ")}`,
+        `exit_code: ${code == null ? "null" : code}`,
+        `signal: ${signal || "none"}`,
+        `stdout:\n${stdout || "<empty>"}`,
+        `stderr:\n${stderr || "<empty>"}`,
+      ].join("\n"))));
   });
 }
 
@@ -314,7 +325,9 @@ async function runParallelLoadGate(root) {
       clients.push(client);
       await client.ready;
     }
-    const cargoTest = runCommand("cargo", ["test", "--manifest-path", path.join(__dirname, "Cargo.toml")], {
+    const cargoTest = runCommand("cargo", [
+      "test", "--manifest-path", path.join(__dirname, "Cargo.toml"), "--", "--test-threads=1",
+    ], {
       cwd: path.resolve(__dirname, "..", ".."),
       env: process.env,
       windowsHide: true,
