@@ -30,6 +30,14 @@ pub struct PythonTokenPosition {
     pub specifier: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RustTokenPosition {
+    pub name: String,
+    pub line: usize,
+    pub character: usize,
+    pub specifier: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
     Function,
@@ -77,6 +85,63 @@ pub fn extract_python_import_tokens(tree: &Tree, source: &str) -> Vec<PythonToke
     let mut positions = Vec::new();
     collect_python_import_tokens(tree.root_node(), source, &mut positions);
     positions
+}
+
+pub fn extract_rust_symbol_positions(
+    tree: &Tree,
+    source: &str,
+    symbols: &HashSet<String>,
+) -> Vec<RustTokenPosition> {
+    let mut positions = Vec::new();
+    collect_rust_token_positions(tree.root_node(), source, symbols, None, &mut positions);
+    positions
+}
+
+pub fn extract_rust_import_tokens(tree: &Tree, source: &str) -> Vec<RustTokenPosition> {
+    let mut positions = Vec::new();
+    collect_rust_import_tokens(tree.root_node(), source, &mut positions);
+    positions
+}
+
+fn collect_rust_import_tokens(node: Node, source: &str, positions: &mut Vec<RustTokenPosition>) {
+    if matches!(node.kind(), "use_declaration" | "mod_item") {
+        collect_rust_token_positions(
+            node, source, &HashSet::new(), Some(node_text(node, source).trim().to_string()), positions,
+        );
+        return;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_rust_import_tokens(cursor.node(), source, positions);
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+}
+
+fn collect_rust_token_positions(
+    node: Node,
+    source: &str,
+    symbols: &HashSet<String>,
+    specifier: Option<String>,
+    positions: &mut Vec<RustTokenPosition>,
+) {
+    if matches!(node.kind(), "identifier" | "type_identifier" | "field_identifier") {
+        let name = node_text(node, source);
+        if symbols.is_empty() || symbols.contains(name) {
+            positions.push(RustTokenPosition {
+                name: name.to_string(), line: node.start_position().row,
+                character: lsp_character(source, node.start_byte()), specifier: specifier.clone(),
+            });
+        }
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_rust_token_positions(cursor.node(), source, symbols, specifier.clone(), positions);
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
 }
 
 fn collect_python_import_tokens(

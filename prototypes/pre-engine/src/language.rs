@@ -120,9 +120,9 @@ pub const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         plan: STRUCTURAL_SUPPORT,
         impact: STRUCTURAL_SUPPORT,
         verify: VerifySupport::ExternalEnhanced,
-        external_tools: &["rust-analyzer", "cargo"],
-        fallback: "ast_only",
-        current_status: CurrentStatus::Partial,
+        external_tools: &["rust-analyzer"],
+        fallback: "none",
+        current_status: CurrentStatus::ProductGrade,
         confidence: Confidence::Medium,
         missing: &["macro_expansion", "complete_trait_resolution", "crate_features"],
     },
@@ -324,6 +324,7 @@ mod tests {
     fn separates_ast_indexed_and_verify_only_languages() {
         let typescript = capability_for_name("TypeScript").unwrap();
         let tsx = capability_for_name("TSX").unwrap();
+        let rust = capability_for_name("Rust").unwrap();
         let csharp = capability_for_name("C#").unwrap();
 
         assert_eq!(typescript.support_tier, SupportTier::AstIndexed);
@@ -349,6 +350,9 @@ mod tests {
         ] {
             assert!(!tsx.missing.contains(&covered), "covered TSX evidence: {covered}");
         }
+        assert_eq!(rust.current_status, CurrentStatus::ProductGrade);
+        assert_eq!(rust.external_tools, &["rust-analyzer"]);
+        assert_eq!(rust.fallback, "none");
         assert_eq!(csharp.support_tier, SupportTier::VerifyOnly);
         assert_eq!(csharp.context, CapabilitySupport::NotSupported);
     }
@@ -359,7 +363,7 @@ mod tests {
             ("TypeScript", &["typescript"][..]),
             ("TSX", &["typescript"][..]),
             ("Python", &["pyright"][..]),
-            ("Rust", &["rust-analyzer", "cargo"][..]),
+            ("Rust", &["rust-analyzer"][..]),
             ("Go", &["gopls", "go"][..]),
             ("Java", &["jdtls", "javac"][..]),
             ("SQL", &["sqlfluff"][..]),
