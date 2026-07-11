@@ -139,7 +139,7 @@ async function run() {
   const results = [];
   const files = {
     "Cargo.toml": "[package]\nname = \"rust-product-smoke\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    "src/lib.rs": "pub mod shared;\npub mod reexport;\npub mod consumer;\npub mod duplicate;\npub mod duplicate2;\npub mod same_file;\npub mod unicode;\npub mod stale;\npub mod type_error;\n",
+    "src/lib.rs": "pub mod shared;\npub mod reexport;\npub mod consumer;\npub mod duplicate;\npub mod duplicate2;\npub mod same_file;\npub mod unicode;\npub mod astral;\npub mod astral_consumer;\npub mod inline_mod;\npub mod ordinary_identifier;\npub mod stale;\npub mod type_error;\n",
     "src/shared.rs": "pub struct MessageBuilder;\nimpl MessageBuilder {\n    pub fn build(&self) -> String { format_message() }\n}\npub fn format_message() -> String { \"ok\".to_string() }\n",
     "src/reexport.rs": "pub use crate::shared::MessageBuilder as Builder;\n",
     "src/consumer.rs": "use crate::reexport::Builder;\npub fn render() -> String {\n    let builder = Builder;\n    builder.build()\n}\n",
@@ -147,6 +147,10 @@ async function run() {
     "src/duplicate2.rs": "pub struct Builder;\npub struct RustCollision;\npub struct OnlyElsewhere;\n",
     "src/same_file.rs": "mod alpha { pub struct Local; }\nmod beta { pub struct Local; }\n",
     "src/unicode.rs": "pub fn 计算() -> &'static str { \"好\"; \"好\" }\r\n",
+    "src/astral.rs": "pub fn 𐐀target() -> usize { 7 }\r\n",
+    "src/astral_consumer.rs": "use crate::astral::𐐀target;\r\npub fn call_astral() -> usize { 𐐀target() }\r\n",
+    "src/inline_mod.rs": "pub mod nested {\n    pub fn entry() -> usize { ordinary_identifier() }\n    fn ordinary_identifier() -> usize { 1 }\n}\n",
+    "src/ordinary_identifier.rs": "pub fn ordinary_identifier() -> usize { 99 }\n",
     "src/stale.rs": "use crate::shared::MessageBuilder;\npub fn stale() -> MessageBuilder { MessageBuilder }\n",
     "src/type_error.rs": "pub fn broken() { let _value: i32 = \"bad\"; }\n",
     "mixed.ts": "export class Builder {}\n",
@@ -217,6 +221,20 @@ async function run() {
     });
     check(results, "Unicode identifiers and CRLF coordinates resolve",
       unicode.status === "verified" && unicode.relations["计算"].targets.length === 1);
+    const astralSymbol = "𐐀target";
+    const astralConsumer = files["src/astral_consumer.rs"];
+    const astral = await helper.query({
+      op: "analyze", root, files: ["src/astral_consumer.rs"], symbols: [astralSymbol],
+      symbol_positions: symbolPositions("src/astral_consumer.rs", astralConsumer, astralSymbol),
+      import_tokens: [],
+    });
+    const astralRelation = astral.relations[astralSymbol];
+    check(results, "non-BMP Rust identifier keeps UTF-16 definition and reference identity",
+      astral.status === "verified" && astralRelation.targets.length === 1
+        && astralRelation.targets[0].file === "src/astral.rs"
+        && astralRelation.targets[0].name === astralSymbol
+        && astralRelation.references.some(reference =>
+          reference.file === "src/astral_consumer.rs" && reference.name === astralSymbol));
 
     const firstVerify = await helper.query({ op: "verify", root, files: ["src/type_error.rs"] });
     check(results, "verify reports rust-analyzer diagnostics", firstVerify.status === "verified" && firstVerify.issues.length > 0,
@@ -337,7 +355,7 @@ async function run() {
     env: {
       ...process.env,
       LINGHUN_RUST_ANALYZER: process.platform === "win32"
-        ? path.join(process.env.SystemRoot, "System32", "where.exe")
+        ? path.join(process.env.SystemRoot, "System32", "find.exe")
         : "/bin/false",
     },
     stdio: ["pipe", "pipe", "inherit"],
@@ -345,7 +363,11 @@ async function run() {
   try {
     const protocolExit = await protocolHelper.query({ op: "verify", root, files: ["src/type_error.rs"] });
     check(results, "rust-analyzer protocol exit degrades without fallback",
-      protocolExit.status === "partially_verified" && protocolExit.status !== "tool_missing");
+      protocolExit.status === "partially_verified" && protocolExit.status !== "tool_missing"
+        && /code=/.test(protocolExit.reason || "") && /signal=/.test(protocolExit.reason || "")
+        && /stderr=/.test(protocolExit.reason || "")
+        && Buffer.byteLength(protocolExit.reason || "", "utf8") <= 8704,
+      protocolExit.reason || "missing exit reason");
   } finally {
     await protocolHelper.close();
   }
@@ -376,6 +398,13 @@ async function run() {
       check(results, "pre_context explicit Rust path cannot capture another file's same-name symbol",
         scopedMissingContext.rust_semantic_engine_status === "partially_verified"
           && scopedMissingContext.definition == null);
+      const astralContext = await client.callTool("pre_context", {
+        symbol: "𐐀target", path: "src/astral_consumer.rs",
+      });
+      check(results, "pre_context preserves non-BMP Rust references",
+        astralContext.definition?.file.replace(/\\/g, "/").endsWith("src/astral.rs")
+          && astralContext.references.some(reference =>
+            reference.file.replace(/\\/g, "/").endsWith("src/astral_consumer.rs")));
 
       const callContext = await client.callTool("pre_context", { symbol: "build", path: "src/shared.rs" });
       check(results, "pre_context exposes call hierarchy", callContext.callers.some(caller => caller.file.replace(/\\/g, "/").endsWith("src/consumer.rs")));
@@ -424,6 +453,20 @@ async function run() {
       check(results, "pre_plan explicit TypeScript target does not activate Rust workspace discovery",
         mixedPlan.rust_semantic_engine_status === "disabled"
           && mixedPlan.edit_order.every(step => !step.file.endsWith(".rs")));
+      const astralPlan = await client.callTool("pre_plan", {
+        task: "change astral target", target_files: ["src/astral_consumer.rs"],
+        target_symbols: ["𐐀target"],
+      });
+      check(results, "pre_plan preserves non-BMP Rust dependency identity",
+        astralPlan.rust_semantic_engine_status === "verified"
+          && astralPlan.edit_order.some(step => step.file === "src/astral.rs")
+          && astralPlan.edit_order.some(step => step.file === "src/astral_consumer.rs"));
+      const inlinePlan = await client.callTool("pre_plan", {
+        task: "change inline entry", target_files: ["src/inline_mod.rs"], target_symbols: ["entry"],
+      });
+      check(results, "inline mod body identifiers do not create dependency closure edges",
+        inlinePlan.rust_semantic_engine_status === "verified"
+          && inlinePlan.edit_order.every(step => step.file !== "src/ordinary_identifier.rs"));
       const truncatedPlan = await client.callTool("pre_plan", {
         task: "inspect deep dependency chain", target_files: ["src/chain00.rs"], target_symbols: [],
       });

@@ -104,10 +104,22 @@ pub fn extract_rust_import_tokens(tree: &Tree, source: &str) -> Vec<RustTokenPos
 }
 
 fn collect_rust_import_tokens(node: Node, source: &str, positions: &mut Vec<RustTokenPosition>) {
-    if matches!(node.kind(), "use_declaration" | "mod_item") {
+    if node.kind() == "use_declaration" {
         collect_rust_token_positions(
             node, source, &HashSet::new(), Some(node_text(node, source).trim().to_string()), positions,
         );
+        return;
+    }
+    if node.kind() == "mod_item" {
+        if node.child_by_field_name("body").is_none() {
+            if let Some(name) = node.child_by_field_name("name") {
+                collect_rust_token_positions(
+                    name, source, &HashSet::new(), Some(node_text(node, source).trim().to_string()), positions,
+                );
+            }
+        } else if let Some(body) = node.child_by_field_name("body") {
+            collect_rust_import_tokens(body, source, positions);
+        }
         return;
     }
     let mut cursor = node.walk();
@@ -1777,6 +1789,25 @@ mod tests {
         )
         .len()
             >= 2);
+    }
+
+    #[test]
+    fn rust_import_tokens_skip_inline_module_body_identifiers() {
+        let source = "mod external;\nmod inline {\n    use crate::shared::Thing;\n    fn body_identifier() { ordinary_identifier(); }\n}\n";
+        let tree = parse_fixture(Lang::Rust, source);
+        let tokens = extract_rust_import_tokens(&tree, source);
+        let names: HashSet<&str> = tokens.iter().map(|token| token.name.as_str()).collect();
+
+        for expected in ["external", "shared", "Thing"] {
+            assert!(names.contains(expected), "missing dependency token {expected}");
+        }
+        for body_name in ["inline", "body_identifier", "ordinary_identifier"] {
+            assert!(!names.contains(body_name), "inline module body leaked token {body_name}");
+        }
+        assert!(tokens.iter().all(|token| {
+            token.specifier.as_deref() == Some("mod external;")
+                || token.specifier.as_deref() == Some("use crate::shared::Thing;")
+        }));
     }
 
     #[test]

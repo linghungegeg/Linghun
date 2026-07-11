@@ -8,6 +8,7 @@ const { spawn, spawnSync } = require("child_process");
 
 const REQUEST_TIMEOUT_MS = 120000;
 const FLYCHECK_TIMEOUT_MS = Number(process.env.LINGHUN_RUST_FLYCHECK_TIMEOUT_MS || REQUEST_TIMEOUT_MS);
+const STDERR_LIMIT_BYTES = 8192;
 
 function normalize(value) {
   return value.replace(/\\/g, "/");
@@ -39,16 +40,29 @@ function findRustAnalyzer() {
 function wordAt(text, position) {
   const lines = text.split(/\r?\n/);
   const line = lines[position.line] || "";
-  const offset = Math.min(line.length, position.character);
+  let offset = Math.min(line.length, position.character);
+  if (offset > 0 && offset < line.length
+      && /[\uDC00-\uDFFF]/.test(line[offset]) && /[\uD800-\uDBFF]/.test(line[offset - 1])) {
+    offset -= 1;
+  }
   let start = offset;
   let end = offset;
-  const identifier = value => /^[\p{L}\p{N}_]$/u.test(value);
+  const identifier = value => /^[\p{ID_Continue}_]$/u.test(value);
   while (start > 0) {
-    const value = line[start - 1];
+    let previous = start - 1;
+    if (previous > 0 && /[\uDC00-\uDFFF]/.test(line[previous])
+        && /[\uD800-\uDBFF]/.test(line[previous - 1])) {
+      previous -= 1;
+    }
+    const value = line.slice(previous, start);
     if (!identifier(value)) break;
-    start -= 1;
+    start = previous;
   }
-  while (end < line.length && identifier(line[end])) end += 1;
+  while (end < line.length) {
+    const codePoint = String.fromCodePoint(line.codePointAt(end));
+    if (!identifier(codePoint)) break;
+    end += codePoint.length;
+  }
   return line.slice(start, end);
 }
 
@@ -111,7 +125,27 @@ class RustAnalyzerSession {
     this.diagnosticRefreshWaiters = new Set();
     this.serverHealth = "ok";
     this.serverStatusMessage = null;
+    this.stderr = Buffer.alloc(0);
+    this.stderrTruncated = false;
     this.configStamp = this.readConfigStamp();
+  }
+
+  appendStderr(chunk) {
+    const combined = Buffer.concat([this.stderr, Buffer.from(chunk)]);
+    if (combined.length > STDERR_LIMIT_BYTES) {
+      this.stderr = combined.subarray(combined.length - STDERR_LIMIT_BYTES);
+      this.stderrTruncated = true;
+    } else {
+      this.stderr = combined;
+    }
+  }
+
+  exitReason(code, signal) {
+    const stderr = this.stderr.toString("utf8").replace(/\s+/gu, " ").trim();
+    const suffix = stderr
+      ? ` stderr=${this.stderrTruncated ? "[truncated] " : ""}${stderr}`
+      : " stderr=<empty>";
+    return `rust-analyzer exited code=${code == null ? "null" : code} signal=${signal || "null"}${suffix}`;
   }
 
   readConfigStamp() {
@@ -133,15 +167,18 @@ class RustAnalyzerSession {
   async start() {
     const child = spawn(this.executable, [], {
       cwd: this.root,
-      stdio: ["pipe", "pipe", "ignore"],
+      stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
     this.child = child;
+    this.stderr = Buffer.alloc(0);
+    this.stderrTruncated = false;
     child.stdout.on("data", chunk => this.onData(chunk));
-    child.on("exit", () => {
+    child.stderr.on("data", chunk => this.appendStderr(chunk));
+    child.on("close", (code, signal) => {
       if (this.child !== child) return;
       this.child = null;
-      this.rejectPending("rust-analyzer closed");
+      this.rejectPending(this.exitReason(code, signal));
     });
     child.on("error", error => {
       if (this.child !== child) return;
