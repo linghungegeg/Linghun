@@ -135,9 +135,9 @@ pub const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         plan: STRUCTURAL_SUPPORT,
         impact: STRUCTURAL_SUPPORT,
         verify: VerifySupport::ExternalEnhanced,
-        external_tools: &["gopls", "go"],
-        fallback: "ast_only",
-        current_status: CurrentStatus::Partial,
+        external_tools: &["gopls"],
+        fallback: "none",
+        current_status: CurrentStatus::ProductGrade,
         confidence: Confidence::Medium,
         missing: &["complete_interface_resolution", "complete_module_resolution"],
     },
@@ -325,6 +325,7 @@ mod tests {
         let typescript = capability_for_name("TypeScript").unwrap();
         let tsx = capability_for_name("TSX").unwrap();
         let rust = capability_for_name("Rust").unwrap();
+        let go = capability_for_name("Go").unwrap();
         let csharp = capability_for_name("C#").unwrap();
 
         assert_eq!(typescript.support_tier, SupportTier::AstIndexed);
@@ -353,6 +354,9 @@ mod tests {
         assert_eq!(rust.current_status, CurrentStatus::ProductGrade);
         assert_eq!(rust.external_tools, &["rust-analyzer"]);
         assert_eq!(rust.fallback, "none");
+        assert_eq!(go.current_status, CurrentStatus::ProductGrade);
+        assert_eq!(go.external_tools, &["gopls"]);
+        assert_eq!(go.fallback, "none");
         assert_eq!(csharp.support_tier, SupportTier::VerifyOnly);
         assert_eq!(csharp.context, CapabilitySupport::NotSupported);
     }
@@ -364,7 +368,7 @@ mod tests {
             ("TSX", &["typescript"][..]),
             ("Python", &["pyright"][..]),
             ("Rust", &["rust-analyzer"][..]),
-            ("Go", &["gopls", "go"][..]),
+            ("Go", &["gopls"][..]),
             ("Java", &["jdtls", "javac"][..]),
             ("SQL", &["sqlfluff"][..]),
             ("Shell", &["shellcheck"][..]),

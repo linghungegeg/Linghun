@@ -1,427 +1,943 @@
 "use strict";
-const readline = require("readline");
-const path = require("path");
+
 const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+const { pathToFileURL, fileURLToPath } = require("url");
 const { spawn, spawnSync } = require("child_process");
 
-// --- LSP JSON-RPC framing ---
-let msgId = 0;
-function lspEncode(obj) {
-  const body = JSON.stringify(obj);
-  return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
-}
-function lspRequest(method, params) {
-  return lspEncode({ jsonrpc: "2.0", id: ++msgId, method, params });
-}
-function lspNotify(method, params) {
-  return lspEncode({ jsonrpc: "2.0", method, params });
+const REQUEST_TIMEOUT_MS = 120000;
+const FLYCHECK_TIMEOUT_MS = Number(process.env.LINGHUN_GOPLS_DIAGNOSTIC_TIMEOUT_MS || REQUEST_TIMEOUT_MS);
+const STDERR_LIMIT_BYTES = 8192;
+
+function normalize(value) {
+  return value.replace(/\\/g, "/");
 }
 
-function fileUri(p) {
-  const abs = path.resolve(p).replace(/\\/g, "/");
-  return abs.startsWith("/") ? `file://${abs}` : `file:///${abs}`;
+function normalizeUri(uri) {
+  return process.platform === "win32" ? uri.toLowerCase() : uri;
 }
 
-function normUri(uri) { return uri.toLowerCase(); }
+function relativeTo(root, file) {
+  return normalize(path.relative(root, file));
+}
 
-// --- gopls session state ---
-let goplsProc = null;
-let goplsRoot = null;
-let goplsReady = false;
-let goplsBuffer = "";
-let goplsExpectedLen = -1;
-let goplsInitResolve = null;
-let goplsInitReject = null;
-let goplsDiagnostics = new Map();
-let goplsDiagTimers = new Map();
-let goplsDiagWaiters = [];
-let openDocs = new Map();
-let goplsDocOpenTime = new Map();
-let goplsEmptyCount = new Map();
-let goplsWarmedUp = false;
-let goplsStartingPromise = null;
-
-const BOOTSTRAP_BUDGET_MS = 3000;
-const WARM_SETTLE_MS = 1500;
+function findGoSdk() {
+  const locator = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(locator, ["go"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  return result.status === 0;
+}
 
 function findGopls() {
-  const whichCmd = process.platform === "win32" ? "where.exe" : "which";
-  const r = spawnSync(whichCmd, ["gopls"], {
-    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+  if (process.env.LINGHUN_GOPLS) {
+    const configured = path.resolve(process.env.LINGHUN_GOPLS);
+    return fs.existsSync(configured) ? configured : null;
+  }
+  const locator = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(locator, ["gopls"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
   });
-  if (r.status === 0) {
-    const line = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean)[0];
-    return line || null;
+  if (result.status !== 0) return null;
+  return result.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean)[0] || null;
+}
+
+function wordAt(text, position) {
+  const lines = text.split(/\r?\n/);
+  const line = lines[position.line] || "";
+  let offset = Math.min(line.length, position.character);
+  if (offset > 0 && offset < line.length
+      && /[\uDC00-\uDFFF]/.test(line[offset]) && /[\uD800-\uDBFF]/.test(line[offset - 1])) {
+    offset -= 1;
   }
-  return null;
-}
-
-function killGopls() {
-  if (goplsProc) { try { goplsProc.kill(); } catch {} goplsProc = null; }
-  goplsReady = false;
-  goplsWarmedUp = false;
-  goplsStartingPromise = null;
-  goplsInitResolve = null;
-  goplsInitReject = null;
-  goplsDiagWaiters.forEach(w => w.resolve([]));
-  goplsDiagWaiters = [];
-  goplsDiagTimers.forEach(t => clearTimeout(t));
-  goplsDiagTimers.clear();
-  openDocs.clear();
-  goplsDocOpenTime.clear();
-  goplsEmptyCount.clear();
-}
-
-function onGoplsData(chunk) {
-  goplsBuffer += chunk.toString();
-  while (true) {
-    if (goplsExpectedLen === -1) {
-      const headerEnd = goplsBuffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) break;
-      const header = goplsBuffer.slice(0, headerEnd);
-      const m = header.match(/Content-Length:\s*(\d+)/i);
-      if (!m) { goplsBuffer = goplsBuffer.slice(headerEnd + 4); continue; }
-      goplsExpectedLen = parseInt(m[1], 10);
-      goplsBuffer = goplsBuffer.slice(headerEnd + 4);
+  let start = offset;
+  let end = offset;
+  const identifier = value => /^[\p{ID_Continue}_]$/u.test(value);
+  while (start > 0) {
+    let previous = start - 1;
+    if (previous > 0 && /[\uDC00-\uDFFF]/.test(line[previous])
+        && /[\uD800-\uDBFF]/.test(line[previous - 1])) {
+      previous -= 1;
     }
-    if (goplsBuffer.length < goplsExpectedLen) break;
-    const body = goplsBuffer.slice(0, goplsExpectedLen);
-    goplsBuffer = goplsBuffer.slice(goplsExpectedLen);
-    goplsExpectedLen = -1;
-    handleGoplsMessage(body);
+    const value = line.slice(previous, start);
+    if (!identifier(value)) break;
+    start = previous;
   }
+  while (end < line.length) {
+    const codePoint = String.fromCodePoint(line.codePointAt(end));
+    if (!identifier(codePoint)) break;
+    end += codePoint.length;
+  }
+  return line.slice(start, end);
 }
 
-function handleGoplsMessage(body) {
-  let msg;
-  try { msg = JSON.parse(body); } catch { return; }
+function locationUri(location) {
+  return location && (location.uri || location.targetUri) || null;
+}
 
-  if (msg.method && msg.id != null) {
-    goplsProc.stdin.write(lspEncode({ jsonrpc: "2.0", id: msg.id, result: null }));
-    return;
+function locationRange(location) {
+  return location && (location.range || location.targetSelectionRange || location.targetRange) || null;
+}
+
+function semanticLocation(root, location, name) {
+  const uri = locationUri(location);
+  const range = locationRange(location);
+  if (!uri || !uri.startsWith("file:") || !range) return null;
+  const file = relativeTo(root, fileURLToPath(uri));
+  if (file.startsWith("../") || path.isAbsolute(file)) return null;
+  return {
+    file,
+    name,
+    line: range.start.line + 1,
+    character: range.start.character,
+    end_line: range.end.line + 1,
+    end_character: range.end.character,
+  };
+}
+
+class GoplsSession {
+  constructor(root, executable) {
+    this.root = path.resolve(root);
+    this.executable = executable;
+    this.child = null;
+    this.buffer = Buffer.alloc(0);
+    this.nextId = 1;
+    this.pending = new Map();
+    this.documents = new Map();
+    this.diagnostics = new Map();
+    this.buildCount = 0;
+    this.snapshot = 0;
+    this.flycheckGeneration = 0;
+    this.flycheckCompletedGeneration = 0;
+    this.flycheckTokens = new Map();
+    this.flycheckWaiters = new Set();
+    this.flycheckIdleWaiters = new Set();
+    this.diagnosticRefreshGeneration = 0;
+    this.diagnosticRefreshWaiters = new Set();
+    this.serverHealth = "ok";
+    this.serverStatusMessage = null;
+    this.stderr = Buffer.alloc(0);
+    this.stderrTruncated = false;
+    this.configStamp = this.readConfigStamp();
+    this.workspaceFiles = this.readWorkspaceFiles();
   }
 
-  if (msg.id && msg.result !== undefined && goplsInitResolve && !goplsReady) {
-    goplsProc.stdin.write(lspNotify("initialized", {}));
-    goplsReady = true;
-    const resolve = goplsInitResolve;
-    goplsInitResolve = null;
-    goplsInitReject = null;
-    resolve();
-    return;
-  }
-
-  if (msg.method === "textDocument/publishDiagnostics" && msg.params) {
-    const { uri, diagnostics } = msg.params;
-    const uriKey = normUri(uri);
-    const issues = (diagnostics || [])
-      .filter(d => d.severity === 1)
-      .map(d => ({
-        file: uriToRel(uri),
-        line: (d.range && d.range.start) ? d.range.start.line + 1 : 1,
-        kind: "type_error",
-        detail: d.message || "unknown error",
-        source: "go-deep-layer",
-      }));
-    goplsDiagnostics.set(uriKey, issues);
-    if (goplsDiagTimers.has(uriKey)) clearTimeout(goplsDiagTimers.get(uriKey));
-    if (issues.length > 0) {
-      goplsWarmedUp = true;
-      goplsEmptyCount.set(uriKey, 0);
-      goplsDiagTimers.delete(uriKey);
-      goplsDiagWaiters = goplsDiagWaiters.filter(w => {
-        if (w.uri === uriKey) { w.resolve(issues); return false; }
-        return true;
-      });
-    } else if (goplsWarmedUp) {
-      const count = (goplsEmptyCount.get(uriKey) || 0) + 1;
-      goplsEmptyCount.set(uriKey, count);
-      if (count >= 2) {
-        goplsDiagTimers.delete(uriKey);
-        goplsDiagWaiters = goplsDiagWaiters.filter(w => {
-          if (w.uri === uriKey) { w.resolve([]); return false; }
-          return true;
-        });
-      } else {
-        const openedAt = goplsDocOpenTime.get(uriKey) || 0;
-        const elapsed = Date.now() - openedAt;
-        const remaining = Math.max(0, WARM_SETTLE_MS - elapsed);
-        goplsDiagTimers.set(uriKey, setTimeout(() => {
-          goplsDiagTimers.delete(uriKey);
-          const final = goplsDiagnostics.get(uriKey) || [];
-          goplsDiagWaiters = goplsDiagWaiters.filter(w => {
-            if (w.uri === uriKey) { w.resolve(final); return false; }
-            return true;
-          });
-        }, remaining));
+  readWorkspaceFiles() {
+    const files = new Map();
+    const visit = directory => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          if (![".git", "node_modules", "target", "vendor"].includes(entry.name)) {
+            visit(path.join(directory, entry.name));
+          }
+          continue;
+        }
+        if (!entry.name.endsWith(".go")) continue;
+        const absolute = path.join(directory, entry.name);
+        const stat = fs.statSync(absolute);
+        files.set(normalize(path.relative(this.root, absolute)), `${stat.mtimeMs}:${stat.size}`);
       }
+    };
+    visit(this.root);
+    return files;
+  }
+
+  syncWorkspaceFiles() {
+    const next = this.readWorkspaceFiles();
+    const changes = [];
+    for (const [file, stamp] of next) {
+      const previous = this.workspaceFiles.get(file);
+      if (previous == null) changes.push({ uri: pathToFileURL(path.join(this.root, file)).href, type: 1 });
+      else if (previous !== stamp) changes.push({ uri: pathToFileURL(path.join(this.root, file)).href, type: 2 });
+    }
+    for (const file of this.workspaceFiles.keys()) {
+      if (!next.has(file)) changes.push({ uri: pathToFileURL(path.join(this.root, file)).href, type: 3 });
+    }
+    this.workspaceFiles = next;
+    if (changes.length > 0) {
+      this.notify("workspace/didChangeWatchedFiles", { changes });
+      this.snapshot += 1;
     }
   }
-}
 
-function uriToRel(uri) {
-  const decoded = decodeURIComponent(uri.replace(/^file:\/\/\/?/, "").replace(/^([a-z]):/, (_, d) => d.toUpperCase() + ":"));
-  if (goplsRoot) {
-    let rel = path.relative(goplsRoot, decoded).replace(/\\/g, "/");
-    if (!rel.startsWith("..")) return rel;
-  }
-  return decoded.replace(/\\/g, "/");
-}
-
-function waitForDiag(uri, timeoutMs) {
-  const uriKey = normUri(uri);
-  return new Promise(resolve => {
-    if (goplsDiagnostics.has(uriKey) && !goplsDiagTimers.has(uriKey)) {
-      resolve(goplsDiagnostics.get(uriKey));
-      return;
+  appendStderr(chunk) {
+    const combined = Buffer.concat([this.stderr, Buffer.from(chunk)]);
+    if (combined.length > STDERR_LIMIT_BYTES) {
+      this.stderr = combined.subarray(combined.length - STDERR_LIMIT_BYTES);
+      this.stderrTruncated = true;
+    } else {
+      this.stderr = combined;
     }
-    const timer = setTimeout(() => {
-      goplsDiagWaiters = goplsDiagWaiters.filter(w => w.resolve !== resolve);
-      resolve(goplsDiagnostics.get(uriKey) || []);
-    }, timeoutMs);
-    goplsDiagWaiters.push({ uri: uriKey, resolve: issues => { clearTimeout(timer); resolve(issues); } });
-  });
-}
+  }
 
-function startGopls(root) {
-  return new Promise((resolve, reject) => {
-    const goplsPath = findGopls();
-    if (!goplsPath) { reject(new Error("gopls not found")); return; }
+  exitReason(code, signal) {
+    const stderr = this.stderr.toString("utf8").replace(/\s+/gu, " ").trim();
+    const suffix = stderr
+      ? ` stderr=${this.stderrTruncated ? "[truncated] " : ""}${stderr}`
+      : " stderr=<empty>";
+    return `gopls exited code=${code == null ? "null" : code} signal=${signal || "null"}${suffix}`;
+  }
 
-    goplsRoot = root;
-    goplsDiagnostics.clear();
-    openDocs.clear();
-    goplsWarmedUp = false;
-    goplsBuffer = "";
-    goplsExpectedLen = -1;
-    goplsReady = false;
+  readConfigStamp() {
+    const entries = [];
+    const visit = directory => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          if (![".git", "node_modules", "target", "vendor"].includes(entry.name)) {
+            visit(path.join(directory, entry.name));
+          }
+          continue;
+        }
+        if (!["go.mod", "go.sum", "go.work", "go.work.sum"].includes(entry.name)) continue;
+        const absolute = path.join(directory, entry.name);
+        const stat = fs.statSync(absolute);
+        entries.push(`${normalize(path.relative(this.root, absolute))}:${stat.mtimeMs}:${stat.size}`);
+      }
+    };
+    visit(this.root);
+    return entries.sort().join("|");
+  }
 
-    goplsProc = spawn(goplsPath, ["serve"], {
-      cwd: root,
+  async start() {
+    const child = spawn(this.executable, ["serve"], {
+      cwd: this.root,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-    goplsProc.on("error", e => { goplsProc = null; reject(e); });
-    goplsProc.on("exit", () => { goplsProc = null; goplsReady = false; });
-    goplsProc.stdout.on("data", chunk => onGoplsData(chunk));
-
-    goplsInitResolve = resolve;
-    goplsInitReject = reject;
-
-    goplsProc.stdin.write(lspRequest("initialize", {
+    this.child = child;
+    this.stderr = Buffer.alloc(0);
+    this.stderrTruncated = false;
+    child.stdout.on("data", chunk => this.onData(chunk));
+    child.stderr.on("data", chunk => this.appendStderr(chunk));
+    child.on("close", (code, signal) => {
+      if (this.child !== child) return;
+      this.child = null;
+      this.rejectPending(this.exitReason(code, signal));
+    });
+    child.on("error", error => {
+      if (this.child !== child) return;
+      this.child = null;
+      this.rejectPending(`gopls error: ${error.message}`);
+    });
+    const rootUri = pathToFileURL(this.root + path.sep).href;
+    await this.request("initialize", {
       processId: process.pid,
-      capabilities: { textDocument: { publishDiagnostics: { relatedInformation: false } } },
-      rootUri: fileUri(root),
-      workspaceFolders: [{ uri: fileUri(root), name: path.basename(root) }],
-    }));
-
-    setTimeout(() => {
-      if (!goplsReady) { killGopls(); reject(new Error("gopls init timeout (15s)")); }
-    }, 15000);
-  });
-}
-
-function eagerWarmUp(root) {
-  if (goplsStartingPromise) return goplsStartingPromise;
-  goplsStartingPromise = startGopls(root).then(() => {
-    const candidates = ["main.go", "type_error.go"];
-    for (const rel of candidates) {
-      const abs = path.join(root, rel);
-      if (fs.existsSync(abs)) {
-        sendDocOpen(abs, fileUri(abs));
-        break;
-      }
-    }
-  }).catch(() => {}).finally(() => { goplsStartingPromise = null; });
-  return goplsStartingPromise;
-}
-
-function sendDocOpen(absPath, uri) {
-  let text;
-  try { text = fs.readFileSync(absPath, "utf8"); } catch { return false; }
-  const version = (openDocs.get(uri) || 0) + 1;
-  openDocs.set(uri, version);
-  const uriKey = normUri(uri);
-  goplsDiagnostics.delete(uriKey);
-  goplsEmptyCount.set(uriKey, 0);
-  goplsDocOpenTime.set(uriKey, Date.now());
-
-  if (version === 1) {
-    goplsProc.stdin.write(lspNotify("textDocument/didOpen", {
-      textDocument: { uri, languageId: "go", version, text },
-    }));
-  } else {
-    goplsProc.stdin.write(lspNotify("textDocument/didChange", {
-      textDocument: { uri, version },
-      contentChanges: [{ text }],
-    }));
-  }
-  return true;
-}
-
-async function queryLsp(root, files) {
-  if (!goplsProc || !goplsReady || goplsRoot !== root) {
-    await startGopls(root);
-  }
-
-  const DIAG_TIMEOUT = 25000;
-  const uris = files.map(f => {
-    const abs = path.isAbsolute(f) ? f : path.join(root, f);
-    return { abs, uri: fileUri(abs) };
-  });
-
-  for (const { abs, uri } of uris) sendDocOpen(abs, uri);
-
-  const results = await Promise.all(uris.map(({ uri }) => waitForDiag(uri, DIAG_TIMEOUT)));
-  return results.flat();
-}
-
-// --- go build fallback ---
-let cachedGoPath = null;
-function findGo() {
-  if (cachedGoPath) return cachedGoPath;
-  const whichCmd = process.platform === "win32" ? "where.exe" : "which";
-  const r = spawnSync(whichCmd, ["go"], {
-    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
-  });
-  if (r.status === 0) {
-    const lines = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    const preferred = (process.platform === "win32" ? lines.find(l => l.endsWith(".exe")) : null) || lines[0];
-    if (preferred) { cachedGoPath = preferred; return preferred; }
-  }
-  return null;
-}
-
-function findGoMod(filePath, fallbackRoot) {
-  let dir = path.dirname(path.isAbsolute(filePath) ? filePath : path.resolve(fallbackRoot, filePath));
-  const root = path.parse(dir).root;
-  while (true) {
-    const candidate = path.join(dir, "go.mod");
-    if (fs.existsSync(candidate)) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir || dir === root) break;
-    dir = parent;
-  }
-  return null;
-}
-
-function runGoBuild(root, files) {
-  const goPath = findGo();
-  if (!goPath) return { error: "go not found" };
-
-  const modDir = files.length > 0 ? findGoMod(files[0], root) : null;
-  const cwd = modDir || root;
-
-  let result;
-  try {
-    result = spawnSync(goPath, ["build", "./..."], {
-      cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true, timeout: 30000,
+      rootUri,
+      workspaceFolders: [{ uri: rootUri, name: path.basename(this.root) }],
+      capabilities: {
+        window: { workDoneProgress: true },
+        experimental: { serverStatusNotification: true },
+        workspace: {
+          symbol: { dynamicRegistration: false },
+          diagnostics: { refreshSupport: true },
+        },
+        textDocument: {
+          definition: { dynamicRegistration: false },
+          references: { dynamicRegistration: false },
+          callHierarchy: { dynamicRegistration: false },
+          diagnostic: { dynamicRegistration: false, relatedDocumentSupport: false },
+          publishDiagnostics: { relatedInformation: true },
+        },
+      },
+      initializationOptions: {
+        analyses: { unusedparams: true, unusedwrite: true },
+        diagnosticsDelay: "100ms",
+      },
     });
-  } catch (e) { return { error: `go exec: ${e.message}` }; }
-  if (result.error) {
-    return { error: result.error.code === "ETIMEDOUT" ? "go build timeout" : result.error.message };
+    this.notify("initialized", {});
+    this.buildCount += 1;
+    await this.warmWorkspace();
+    this.configStamp = this.readConfigStamp();
+    this.workspaceFiles = this.readWorkspaceFiles();
   }
 
-  const targetFiles = files.map(f =>
-    path.relative(cwd, path.isAbsolute(f) ? f : path.resolve(root, f)).replace(/\\/g, "/")
-  );
-  const issues = [];
-  const output = (result.stderr || "") + "\n" + (result.stdout || "");
-  const lineRe = /^(.+?):(\d+):\d+:\s*(.+)$/gm;
-  let m;
-  while ((m = lineRe.exec(output)) !== null) {
-    const file = m[1].replace(/\\/g, "/").replace(/^\.\//, "");
-    const line = parseInt(m[2], 10);
-    const detail = m[3];
-    if (targetFiles.length === 0 || targetFiles.some(tf => file === tf || file.endsWith("/" + tf))) {
-      issues.push({ file, line, kind: "type_error", detail, source: "go-deep-layer" });
+  stop() {
+    if (this.child && !this.child.killed) this.child.kill();
+    this.child = null;
+    this.buffer = Buffer.alloc(0);
+    this.documents.clear();
+    this.diagnostics.clear();
+    this.rejectFlycheckWaiters("gopls stopped");
+  }
+
+  rejectPending(message) {
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(new Error(message));
+    }
+    this.pending.clear();
+    this.rejectFlycheckWaiters(message);
+  }
+
+  rejectFlycheckWaiters(message) {
+    for (const waiter of this.flycheckWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.flycheckWaiters.clear();
+    for (const waiter of this.flycheckIdleWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.flycheckIdleWaiters.clear();
+    for (const waiter of this.diagnosticRefreshWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.diagnosticRefreshWaiters.clear();
+  }
+
+  resolveFlycheckWaiters() {
+    for (const waiter of [...this.flycheckWaiters]) {
+      if (this.flycheckCompletedGeneration <= waiter.afterGeneration) continue;
+      clearTimeout(waiter.timer);
+      this.flycheckWaiters.delete(waiter);
+      waiter.resolve(this.flycheckCompletedGeneration);
     }
   }
-  return { issues };
+
+  onData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (true) {
+      const headerEnd = this.buffer.indexOf("\r\n\r\n");
+      if (headerEnd < 0) return;
+      const header = this.buffer.slice(0, headerEnd).toString("ascii");
+      const lengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
+      if (!lengthMatch) {
+        this.buffer = Buffer.alloc(0);
+        if (this.child && !this.child.killed) this.child.kill();
+        this.child = null;
+        this.rejectPending("invalid gopls LSP response header");
+        return;
+      }
+      const length = Number(lengthMatch[1]);
+      const bodyStart = headerEnd + 4;
+      if (this.buffer.length < bodyStart + length) return;
+      const body = this.buffer.slice(bodyStart, bodyStart + length).toString("utf8");
+      this.buffer = this.buffer.slice(bodyStart + length);
+      try {
+        this.onMessage(JSON.parse(body));
+      } catch (error) {
+        if (this.child && !this.child.killed) this.child.kill();
+        this.child = null;
+        this.rejectPending(`invalid gopls LSP response: ${error.message}`);
+        return;
+      }
+    }
+  }
+
+  onMessage(message) {
+    if (message.id != null && (message.result !== undefined || message.error)) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.pending.delete(message.id);
+      if (message.error) {
+        const error = new Error(message.error.message || "gopls LSP error");
+        error.code = message.error.code;
+        pending.reject(error);
+      }
+      else pending.resolve(message.result);
+      return;
+    }
+    if (message.method === "textDocument/publishDiagnostics" && message.params) {
+      const uri = normalizeUri(message.params.uri);
+      const document = [...this.documents.entries()]
+        .find(([documentUri]) => normalizeUri(documentUri) === uri);
+      if (message.params.version != null && document && message.params.version < document[1].version) {
+        return;
+      }
+      const diagnostics = message.params.diagnostics || [];
+      this.diagnostics.set(uri, diagnostics);
+      return;
+    }
+    if (message.method === "$/progress" && message.params) {
+      const token = String(message.params.token || "");
+      const kind = message.params.value && message.params.value.kind;
+      if (!token.startsWith("gopls/flycheck/")) return;
+      if (kind === "begin") {
+        if (this.flycheckTokens.has(token)) {
+          this.rejectFlycheckWaiters(`gopls flycheck protocol error: duplicate begin for ${token}`);
+          return;
+        }
+        this.flycheckGeneration += 1;
+        this.flycheckTokens.set(token, this.flycheckGeneration);
+      } else if (kind === "end") {
+        const generation = this.flycheckTokens.get(token);
+        if (generation != null) {
+          this.flycheckCompletedGeneration = Math.max(this.flycheckCompletedGeneration, generation);
+          this.flycheckTokens.delete(token);
+          this.resolveFlycheckWaiters();
+          if (this.flycheckTokens.size === 0) {
+            for (const waiter of this.flycheckIdleWaiters) {
+              clearTimeout(waiter.timer);
+              waiter.resolve();
+            }
+            this.flycheckIdleWaiters.clear();
+          }
+        }
+      }
+      return;
+    }
+    if (message.method === "experimental/serverStatus" && message.params) {
+      this.serverHealth = message.params.health || "ok";
+      this.serverStatusMessage = message.params.message || null;
+      return;
+    }
+    if (message.id != null && message.method) {
+      let result = null;
+      if (message.method === "workspace/configuration") {
+        result = (message.params && message.params.items || []).map(() => null);
+      } else if (message.method === "window/workDoneProgress/create") {
+        result = null;
+      } else if (message.method === "workspace/diagnostic/refresh") {
+        this.diagnosticRefreshGeneration += 1;
+        for (const waiter of [...this.diagnosticRefreshWaiters]) {
+          if (this.diagnosticRefreshGeneration <= waiter.afterGeneration) continue;
+          clearTimeout(waiter.timer);
+          this.diagnosticRefreshWaiters.delete(waiter);
+          waiter.resolve(this.diagnosticRefreshGeneration);
+        }
+      }
+      this.send({ jsonrpc: "2.0", id: message.id, result });
+    }
+  }
+
+  send(message) {
+    const body = Buffer.from(JSON.stringify(message), "utf8");
+    this.child.stdin.write(`Content-Length: ${body.length}\r\n\r\n`);
+    this.child.stdin.write(body);
+  }
+
+  notify(method, params) {
+    this.send({ jsonrpc: "2.0", method, params });
+  }
+
+  request(method, params, timeout = REQUEST_TIMEOUT_MS) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`gopls LSP ${method} timed out`));
+      }, timeout);
+      this.pending.set(id, { resolve, reject, timer });
+      this.send({ jsonrpc: "2.0", id, method, params });
+    });
+  }
+
+  async semanticRequest(method, params) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.request(method, params);
+      } catch (error) {
+        if (!/content modified/i.test(error.message) || attempt === 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+  }
+
+  async warmWorkspace() {
+    await this.request("workspace/symbol", { query: "" });
+  }
+
+  async ensureCurrent() {
+    const nextStamp = this.readConfigStamp();
+    if (this.child && nextStamp === this.configStamp) {
+      this.syncWorkspaceFiles();
+      this.closeDeletedDocuments();
+      return false;
+    }
+    if (this.child) this.stop();
+    this.configStamp = nextStamp;
+    await this.start();
+    this.snapshot += 1;
+    return true;
+  }
+
+  closeDeletedDocuments() {
+    for (const uri of [...this.documents.keys()]) {
+      if (fs.existsSync(fileURLToPath(uri))) continue;
+      this.notify("textDocument/didClose", { textDocument: { uri } });
+      this.documents.delete(uri);
+      this.diagnostics.delete(normalizeUri(uri));
+      this.snapshot += 1;
+    }
+  }
+
+  async openFile(file) {
+    const absolute = path.resolve(this.root, file);
+    if (!fs.existsSync(absolute)) return null;
+    const text = fs.readFileSync(absolute, "utf8");
+    const stat = fs.statSync(absolute);
+    const stamp = `${stat.mtimeMs}:${stat.size}`;
+    const uri = pathToFileURL(absolute).href;
+    const previous = this.documents.get(uri);
+    let synchronized = false;
+    if (!previous) {
+      this.diagnostics.delete(normalizeUri(uri));
+      this.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "go", version: 1, text },
+      });
+      this.documents.set(uri, { text, stamp, version: 1 });
+      synchronized = true;
+    } else if (previous.stamp !== stamp || previous.text !== text) {
+      this.diagnostics.delete(normalizeUri(uri));
+      const version = previous.version + 1;
+      this.notify("textDocument/didChange", {
+        textDocument: { uri, version },
+        contentChanges: [{ text }],
+      });
+      this.documents.set(uri, { text, stamp, version });
+      this.snapshot += 1;
+      synchronized = true;
+    }
+    return { absolute, uri, text, synchronized };
+  }
+
+  waitForFlycheckAfter(afterGeneration, timeout = REQUEST_TIMEOUT_MS) {
+    if (this.flycheckCompletedGeneration > afterGeneration) {
+      return Promise.resolve(this.flycheckCompletedGeneration);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { afterGeneration, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.flycheckWaiters.delete(waiter);
+        reject(new Error("gopls flycheck completion timed out"));
+      }, timeout);
+      this.flycheckWaiters.add(waiter);
+    });
+  }
+
+  waitForFlycheckIdle(timeout = REQUEST_TIMEOUT_MS) {
+    if (this.flycheckTokens.size === 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.flycheckIdleWaiters.delete(waiter);
+        reject(new Error("gopls flycheck did not become idle"));
+      }, timeout);
+      this.flycheckIdleWaiters.add(waiter);
+    });
+  }
+
+  waitForDiagnosticRefreshAfter(afterGeneration, timeout = REQUEST_TIMEOUT_MS) {
+    if (this.diagnosticRefreshGeneration > afterGeneration) {
+      return Promise.resolve(this.diagnosticRefreshGeneration);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { afterGeneration, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.diagnosticRefreshWaiters.delete(waiter);
+        reject(new Error("gopls diagnostic refresh timed out"));
+      }, timeout);
+      this.diagnosticRefreshWaiters.add(waiter);
+    });
+  }
+
+  async pullDiagnostics(uri) {
+    const report = await this.semanticRequest("textDocument/diagnostic", {
+      textDocument: { uri },
+    });
+    const pulled = report && Array.isArray(report.items) ? report.items : [];
+    if (pulled.length > 0) return pulled;
+    return this.diagnostics.get(normalizeUri(uri)) || pulled;
+  }
+
+  async definitions(uri, position) {
+    const result = await this.semanticRequest("textDocument/definition", {
+      textDocument: { uri },
+      position,
+    });
+    if (!result) return [];
+    return Array.isArray(result) ? result : [result];
+  }
+
+  async resolveTargets(symbol, positions, allowWorkspaceSymbol) {
+    const locations = [];
+    const origins = [];
+    for (const token of positions.filter(position => position.symbol === symbol)) {
+      const document = await this.openFile(token.file);
+      if (!document) continue;
+      const position = { line: token.line, character: token.character };
+      const definitions = await this.definitions(document.uri, position);
+      if (definitions.length > 0) origins.push({ uri: document.uri, position, symbol });
+      locations.push(...definitions);
+    }
+    if (allowWorkspaceSymbol && positions.filter(position => position.symbol === symbol).length === 0) {
+      const workspaceSymbols = await this.semanticRequest("workspace/symbol", { query: symbol });
+      for (const item of workspaceSymbols || []) {
+        if (item.name !== symbol || !item.location) continue;
+        locations.push(item.location);
+      }
+    }
+    const targets = [];
+    const seen = new Set();
+    for (const location of locations) {
+      const uri = locationUri(location);
+      const range = locationRange(location);
+      if (!uri || !uri.startsWith("file:") || !range) continue;
+      const rel = relativeTo(this.root, fileURLToPath(uri));
+      if (rel.startsWith("../") || path.isAbsolute(rel)) continue;
+      const document = await this.openFile(rel);
+      if (!document) continue;
+      const name = wordAt(document.text, range.start) || symbol;
+      const key = `${rel}:${range.start.line}:${range.start.character}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({
+        file: rel,
+        name,
+        uri,
+        position: range.start,
+        line: range.start.line + 1,
+        character: range.start.character,
+        end_line: range.end.line + 1,
+        end_character: range.end.character,
+      });
+    }
+    return { targets, origins };
+  }
+
+  async dependencies(files, importTokens) {
+    const dependencies = {};
+    const metadata = {};
+    for (const file of files) {
+      const document = await this.openFile(file);
+      if (!document) continue;
+      const deps = new Set();
+      const statements = new Map();
+      for (const token of importTokens.filter(item => normalize(item.file) === normalize(file))) {
+        if (!statements.has(token.specifier)) statements.set(token.specifier, false);
+        const definitions = await this.definitions(document.uri, {
+          line: token.line,
+          character: token.character,
+        });
+        for (const definition of definitions) {
+          const uri = locationUri(definition);
+          if (!uri || !uri.startsWith("file:")) continue;
+          statements.set(token.specifier, true);
+          const rel = relativeTo(this.root, fileURLToPath(uri));
+          if (!rel.startsWith("../") && !path.isAbsolute(rel) && rel !== file) deps.add(rel);
+        }
+      }
+      dependencies[file] = [...deps].sort();
+      metadata[file] = {
+        unresolved: [...statements].filter(([, resolved]) => !resolved).map(([specifier]) => specifier).sort(),
+      };
+    }
+    return { dependencies, metadata };
+  }
+
+  async analyze(files, symbols, symbolPositions, importTokens, allowWorkspaceSymbol) {
+    const rebuilt = await this.ensureCurrent();
+    const normalizedFiles = [...new Set(files.map(file => normalize(file)))];
+    let openedFiles = 0;
+    for (const file of normalizedFiles) {
+      if (await this.openFile(file)) openedFiles += 1;
+    }
+    if (normalizedFiles.length > 0 && openedFiles === 0) {
+      return {
+        status: "partially_verified",
+        reason: "Go semantic evidence incomplete: rust_documents",
+        relations: Object.fromEntries(symbols.map(symbol => [symbol, {
+          targets: [], names_by_file: {}, related_files: [], references: [], callers: [], callees: [],
+          unresolved_module_specifiers: [], unresolved_relative_specifiers: [], external_module_specifiers: [],
+          blocked_module_specifiers: [], dynamic_import_files: [], graph_cycle: false, graph_truncated: false,
+        }])),
+        module_dependencies: {},
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: { coverage: [], missing: ["rust_documents"] },
+      };
+    }
+    const { dependencies, metadata } = await this.dependencies(normalizedFiles, importTokens);
+    const relations = {};
+    let missingAnchor = false;
+    let ambiguousTarget = false;
+    for (const symbol of symbols) {
+      const { targets, origins } = await this.resolveTargets(symbol, symbolPositions, allowWorkspaceSymbol);
+      if (targets.length === 0) missingAnchor = true;
+      if (targets.length > 1) ambiguousTarget = true;
+      const namesByFile = {};
+      const relatedFiles = new Set();
+      const references = [];
+      const callers = [];
+      const callees = [];
+      const referenceKeys = new Set();
+      const callerKeys = new Set();
+      const calleeKeys = new Set();
+      const anchors = targets.length === 1
+        ? (origins.length > 0
+          ? origins
+          : targets.map(target => ({ uri: target.uri, position: target.position })))
+        : [];
+      for (const anchor of anchors) {
+        const found = await this.semanticRequest("textDocument/references", {
+          textDocument: { uri: anchor.uri },
+          position: anchor.position,
+          context: { includeDeclaration: true },
+        });
+        for (const reference of found || []) {
+          const uri = locationUri(reference);
+          const range = locationRange(reference);
+          if (!uri || !uri.startsWith("file:") || !range) continue;
+          let rel;
+          try {
+            rel = relativeTo(this.root, fileURLToPath(uri));
+          } catch {
+            rel = null;
+          }
+          if (rel == null) continue;
+          const document = await this.openFile(rel);
+          if (!document) continue;
+          const name = wordAt(document.text, range.start);
+          if (!name) continue;
+          const location = semanticLocation(this.root, reference, name);
+          if (!location) continue;
+          relatedFiles.add(rel);
+          if (!namesByFile[rel]) namesByFile[rel] = [];
+          if (!namesByFile[rel].includes(name)) namesByFile[rel].push(name);
+          const key = `${rel}:${location.line}:${location.character}:${location.end_line}:${location.end_character}`;
+          if (!referenceKeys.has(key)) {
+            referenceKeys.add(key);
+            references.push(location);
+          }
+        }
+
+        const prepared = await this.semanticRequest("textDocument/prepareCallHierarchy", {
+          textDocument: { uri: anchor.uri },
+          position: anchor.position,
+        });
+        for (const item of prepared || []) {
+          const incoming = await this.semanticRequest("callHierarchy/incomingCalls", { item });
+          for (const call of incoming || []) {
+            const location = semanticLocation(
+              this.root,
+              { uri: call.from.uri, range: call.from.selectionRange || call.from.range },
+              call.from.name,
+            );
+            if (!location) continue;
+            relatedFiles.add(location.file);
+            const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
+            if (!callerKeys.has(key)) {
+              callerKeys.add(key);
+              callers.push(location);
+            }
+          }
+          const outgoing = await this.semanticRequest("callHierarchy/outgoingCalls", { item });
+          for (const call of outgoing || []) {
+            const location = semanticLocation(
+              this.root,
+              { uri: call.to.uri, range: call.to.selectionRange || call.to.range },
+              call.to.name,
+            );
+            if (!location) continue;
+            relatedFiles.add(location.file);
+            const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
+            if (!calleeKeys.has(key)) {
+              calleeKeys.add(key);
+              callees.push(location);
+            }
+          }
+        }
+      }
+      if (targets.length === 1) relatedFiles.add(targets[0].file);
+      const unresolved = [...relatedFiles]
+        .flatMap(file => metadata[file] ? metadata[file].unresolved : []);
+      relations[symbol] = {
+        targets: targets.map(({ file, name, line, character, end_line, end_character }) => ({
+          file, name, line, character, end_line, end_character,
+        })),
+        names_by_file: namesByFile,
+        related_files: [...relatedFiles].sort(),
+        references,
+        callers,
+        callees,
+        unresolved_module_specifiers: [...new Set(unresolved)].sort(),
+        unresolved_relative_specifiers: [],
+        external_module_specifiers: [],
+        blocked_module_specifiers: [],
+        dynamic_import_files: [],
+        graph_cycle: false,
+        graph_truncated: false,
+      };
+    }
+    const missing = [];
+    if (missingAnchor) missing.push("symbol_anchor");
+    if (ambiguousTarget) missing.push("ambiguous_symbol_identity");
+    return {
+      status: missing.length ? "partially_verified" : "verified",
+      reason: missing.length ? `Go semantic evidence incomplete: ${missing.join(",")}` : null,
+      relations,
+      module_dependencies: dependencies,
+      program_build_count: this.buildCount,
+      program_rebuilt: rebuilt,
+      snapshot_id: String(this.snapshot),
+      verification: {
+        coverage: ["imports", "modules", "reexports", "symbol_identity", "aliases", "references", "call_hierarchy", "types"],
+        missing,
+      },
+    };
+  }
+
+  async discover(terms) {
+    const rebuilt = await this.ensureCurrent();
+    const candidates = [];
+    const seen = new Set();
+    for (const term of terms.filter(Boolean)) {
+      const symbols = await this.semanticRequest("workspace/symbol", { query: term });
+      for (const item of symbols || []) {
+        if (!item.location) continue;
+        const location = semanticLocation(this.root, item.location, item.name);
+        if (!location) continue;
+        const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({ ...location, kind: item.kind || 0 });
+      }
+    }
+    return {
+      status: "verified",
+      reason: null,
+      candidates,
+      program_build_count: this.buildCount,
+      program_rebuilt: rebuilt,
+      snapshot_id: String(this.snapshot),
+    };
+  }
+
+  async verify(files) {
+    const rebuilt = await this.ensureCurrent();
+    const documents = [];
+    for (const file of [...new Set(files.map(value => normalize(value)))]) {
+      const document = await this.openFile(file);
+      if (document) documents.push(document);
+    }
+    if (documents.length === 0) {
+      return {
+        status: "partially_verified",
+        reason: "gopls verify has no readable Go documents",
+        issues: [],
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: { coverage: [], missing: ["go_documents"] },
+      };
+    }
+    const issues = [];
+    let observedDiagnosticCount = 0;
+    for (const document of documents) {
+      let diagnostics;
+      try {
+        diagnostics = await this.pullDiagnostics(document.uri);
+      } catch (error) {
+        return {
+          status: "partially_verified",
+          reason: "gopls diagnostic protocol incomplete: " + error.message,
+          issues: [],
+          program_build_count: this.buildCount,
+          program_rebuilt: rebuilt,
+          snapshot_id: String(this.snapshot),
+          verification: { coverage: [], missing: ["gopls_diagnostics"] },
+        };
+      }
+      for (const diagnostic of diagnostics) {
+        observedDiagnosticCount += 1;
+        if (diagnostic.severity !== 1) continue;
+        issues.push({
+          file: relativeTo(this.root, document.absolute),
+          line: diagnostic.range.start.line + 1,
+          kind: "type_error",
+          detail: diagnostic.message || "unknown error",
+          source: "go-deep-layer",
+        });
+      }
+    }
+    return {
+      status: "verified",
+      reason: null,
+      issues,
+      program_build_count: this.buildCount,
+      program_rebuilt: rebuilt,
+      snapshot_id: String(this.snapshot),
+      verification: {
+        coverage: ["syntax", "types", "imports", "modules", "workspace"],
+        missing: [],
+        diagnostic_count: observedDiagnosticCount,
+      },
+    };
+  }
 }
 
-// --- Main request handler ---
-async function handleRequest(req) {
-  const root = req.root;
-  const files = req.files || [];
-  const t0 = Date.now();
+let session = null;
 
-  if (!goplsProc && !goplsStartingPromise) {
-    eagerWarmUp(root);
-  }
-
-  // Warm path
-  if (goplsWarmedUp && goplsProc && goplsReady && goplsRoot === root) {
-    try {
-      const tOpen = Date.now();
-      const issues = await queryLsp(root, files);
-      const tDone = Date.now();
-      return { issues, elapsed_ms: tDone - t0, timing: { open_ms: tOpen - t0, diag_ms: tDone - tOpen } };
-    } catch (lspErr) {
-      const goResult = runGoBuild(root, files);
-      if (!goResult.error) {
-        goResult.elapsed_ms = Date.now() - t0;
-        goResult.fallback = `lsp: ${lspErr.message}`;
-        return goResult;
-      }
-      return { issues: [], elapsed_ms: Date.now() - t0, error: `lsp: ${lspErr.message}; go: ${goResult.error}` };
+async function handle(request) {
+  const root = path.resolve(request.root);
+  if (!session || session.root !== root) {
+    if (session) session.stop();
+    const executable = findGopls();
+    const goSdkAvailable = findGoSdk();
+    if (!executable || !goSdkAvailable) {
+      return {
+        status: "tool_missing",
+        reason: !executable
+          ? "Go tool_missing: gopls not found; missing=gopls"
+          : "Go tool_missing: Go SDK not found; missing=go",
+        issues: [],
+        relations: {},
+        module_dependencies: {},
+        candidates: [],
+        verification: { coverage: [], missing: [!executable ? "gopls" : "go"] },
+        program_build_count: 0,
+        program_rebuilt: false,
+        snapshot_id: "0",
+      };
     }
+    session = new GoplsSession(root, executable);
   }
-
-  // Cold/bootstrap: race LSP vs go build
-  const lspPromise = (async () => {
-    try {
-      if (!goplsProc && !goplsStartingPromise) eagerWarmUp(root);
-      if (goplsStartingPromise) await goplsStartingPromise;
-      const issues = await queryLsp(root, files);
-      return { issues, elapsed_ms: Date.now() - t0 };
-    } catch {
-      return null;
-    }
-  })();
-
-  const goPromise = new Promise(resolve => {
-    setImmediate(() => {
-      const result = runGoBuild(root, files);
-      if (!result.error) {
-        result.elapsed_ms = Date.now() - t0;
-        result.bootstrap = true;
-        resolve(result);
-      } else {
-        resolve(null);
-      }
-    });
-  });
-
-  const budgetPromise = new Promise(resolve => {
-    setTimeout(() => resolve("timeout"), BOOTSTRAP_BUDGET_MS);
-  });
-
-  const race = await Promise.race([lspPromise, budgetPromise]);
-  if (race !== "timeout" && race !== null) return race;
-
-  const goResult = await goPromise;
-  if (goResult) return goResult;
-
-  const lspResult = await lspPromise;
-  if (lspResult) return lspResult;
-
-  return { issues: [], elapsed_ms: Date.now() - t0, error: "bootstrap: both gopls and go build failed" };
+  if (request.op === "analyze") {
+    return session.analyze(
+      request.files || [],
+      request.symbols || [],
+      request.symbol_positions || [],
+      request.import_tokens || [],
+      request.allow_workspace_symbol === true,
+    );
+  }
+  if (request.op === "discover") return session.discover(request.terms || []);
+  return session.verify(request.files || []);
 }
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
+let chain = Promise.resolve();
 rl.on("line", line => {
-  line = line.trim();
-  if (!line) return;
-  let req;
-  try { req = JSON.parse(line); } catch { return; }
-  handleRequest(req).then(resp => {
-    process.stdout.write(JSON.stringify(resp) + "\n");
-  }).catch(e => {
-    process.stdout.write(JSON.stringify({ error: String(e), elapsed_ms: 0 }) + "\n");
+  chain = chain.then(async () => {
+    const started = Date.now();
+    try {
+      const result = await handle(JSON.parse(line));
+      process.stdout.write(JSON.stringify({ ...result, elapsed_ms: Date.now() - started }) + "\n");
+    } catch (error) {
+      process.stdout.write(JSON.stringify({
+        status: "partially_verified",
+        reason: String(error && error.message ? error.message : error),
+        issues: [],
+        elapsed_ms: Date.now() - started,
+      }) + "\n");
+      if (session) {
+        session.stop();
+        session = null;
+      }
+    }
   });
 });
-rl.on("close", () => { killGopls(); });
-
-process.on("exit", killGopls);
+rl.on("close", () => {
+  chain.finally(() => {
+    if (session) session.stop();
+  });
+});
