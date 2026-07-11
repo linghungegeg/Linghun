@@ -38,6 +38,14 @@ pub struct RustTokenPosition {
     pub specifier: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct JavaTokenPosition {
+    pub name: String,
+    pub line: usize,
+    pub character: usize,
+    pub specifier: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
     Function,
@@ -101,6 +109,69 @@ pub fn extract_rust_import_tokens(tree: &Tree, source: &str) -> Vec<RustTokenPos
     let mut positions = Vec::new();
     collect_rust_import_tokens(tree.root_node(), source, &mut positions);
     positions
+}
+
+pub fn extract_java_symbol_positions(
+    tree: &Tree,
+    source: &str,
+    symbols: &HashSet<String>,
+) -> Vec<JavaTokenPosition> {
+    let mut positions = Vec::new();
+    collect_java_token_positions(tree.root_node(), source, symbols, None, &mut positions);
+    positions
+}
+
+pub fn extract_java_import_tokens(tree: &Tree, source: &str) -> Vec<JavaTokenPosition> {
+    let mut positions = Vec::new();
+    collect_java_import_tokens(tree.root_node(), source, &mut positions);
+    positions
+}
+
+fn collect_java_import_tokens(node: Node, source: &str, positions: &mut Vec<JavaTokenPosition>) {
+    if matches!(node.kind(), "import_declaration" | "package_declaration") {
+        collect_java_token_positions(
+            node,
+            source,
+            &HashSet::new(),
+            Some(node_text(node, source).trim().to_string()),
+            positions,
+        );
+        return;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_java_import_tokens(cursor.node(), source, positions);
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+}
+
+fn collect_java_token_positions(
+    node: Node,
+    source: &str,
+    symbols: &HashSet<String>,
+    specifier: Option<String>,
+    positions: &mut Vec<JavaTokenPosition>,
+) {
+    if matches!(node.kind(), "identifier" | "type_identifier") {
+        let name = node_text(node, source);
+        if symbols.is_empty() || symbols.contains(name) {
+            positions.push(JavaTokenPosition {
+                name: name.to_string(),
+                line: node.start_position().row,
+                character: lsp_character(source, node.start_byte()),
+                specifier: specifier.clone(),
+            });
+        }
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_java_token_positions(cursor.node(), source, symbols, specifier.clone(), positions);
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
 }
 
 fn collect_rust_import_tokens(node: Node, source: &str, positions: &mut Vec<RustTokenPosition>) {
@@ -1807,6 +1878,23 @@ mod tests {
         assert!(tokens.iter().all(|token| {
             token.specifier.as_deref() == Some("mod external;")
                 || token.specifier.as_deref() == Some("use crate::shared::Thing;")
+        }));
+    }
+
+    #[test]
+    fn extracts_java_lsp_coordinates_without_semantic_resolution() {
+        let source = "package 示例;\nimport 示例.服务;\nclass 前缀 { void 调用() { String 图标 = \"😀\"; 服务.执行(); } }\n";
+        let tree = parse_fixture(Lang::Java, source);
+        let symbols = HashSet::from(["执行".to_string()]);
+        let positions = extract_java_symbol_positions(&tree, source, &symbols);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].line, 2);
+        assert_eq!(positions[0].character, 44);
+
+        let imports = extract_java_import_tokens(&tree, source);
+        assert!(imports.iter().any(|position| {
+            position.name == "服务"
+                && position.specifier.as_deref() == Some("import 示例.服务;")
         }));
     }
 

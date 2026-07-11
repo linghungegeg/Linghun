@@ -9,6 +9,7 @@ const helper = spawn("node", [path.join(__dirname, "java-deep-layer.cjs")], {
 
 const root = path.join(__dirname, "fixtures", "smoke-java-android").replace(/\\/g, "/");
 const req = {
+  op: "verify",
   root,
   files: ["src/main/java/com/example/AndroidController.java"],
 };
@@ -30,7 +31,10 @@ helper.on("close", () => {
     return;
   }
   const result = JSON.parse(line);
-  const pass = result.status === "unavailable" && result.reason === "android_classpath_required" && (result.issues || []).length === 0;
+  const pass = result.status === "verified"
+    && result.reason == null
+    && result.verification?.missing?.length === 0
+    && (result.issues || []).every(issue => issue.source === "java-deep-layer");
   console.log("=== Java Android Deep Layer Smoke Test ===");
   console.log(`status=${result.status} reason=${result.reason || ""} issues=${(result.issues || []).length}`);
   if (!pass) {
