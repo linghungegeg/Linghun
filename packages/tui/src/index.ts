@@ -3000,7 +3000,7 @@ async function runInkShell(
       }
       if (event.type === "interrupt") {
         submittedPending = false;
-        await handleInterruptCommand([], context, shellOutput);
+        await handleInterruptCommand([], context, shellOutput, { quiet: true });
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;

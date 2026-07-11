@@ -912,6 +912,28 @@ describe("model-loop-runtime", () => {
       expect(verdict.status).toBe("passed");
     });
 
+    it("does not treat capability descriptions as completed file or command actions", () => {
+      for (const text of [
+        "我的能力包括读取和修改文件，执行命令和启动服务。",
+        "我可以创建和更新文件，也能执行命令、运行测试。",
+        "I can edit files, run commands, and start services.",
+      ]) {
+        const verdict = evaluateFinalAnswerClaims(text, []);
+        expect(verdict.status).toBe("passed");
+        expect(verdict.matchedClaims).toEqual([]);
+      }
+    });
+
+    it("still requires evidence for explicit completed actions inside a capability answer", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        "我的能力包括修改文件和执行命令；刚才我已经写入 report.md。",
+        [],
+      );
+
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("file_change_claim");
+    });
+
     it("matches parallel Write and Read claims to their own evidence targets", () => {
       const verdict = evaluateFinalAnswerClaims("已写入 report.md 并读取 package.json。", [
         makeEvidence({

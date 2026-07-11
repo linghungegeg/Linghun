@@ -408,7 +408,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
         input.providerFailure ||
         isRiskyVerificationStatus(input.lastVerificationStatus)
           ? 1
-          : 0) + countRecentFailureLearning(input.failureLearning),
+          : 0),
       events: [
         ...(input.lastToolFailure
           ? [
@@ -1089,12 +1089,6 @@ function hasHighRiskCompletionClaim(text: string): boolean {
   return /(?:\bPASS\b|\bpassed\b|\bverified\b|\btests?\s+pass(?:ed)?\b|\bfixed\b|\bcompleted\b|已完成|已修复|已验证|验证通过|测试通过|可以进入下一阶段|ready\s+for|可进入)/iu.test(
     text,
   );
-}
-
-function countRecentFailureLearning(state: FailureLearningState): number {
-  return state.records.filter(
-    (record) => record.status === "active" && record.projectScope === state.projectScope,
-  ).length;
 }
 
 function adjustTaskKindForUserState(

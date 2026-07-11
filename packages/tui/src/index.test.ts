@@ -29922,7 +29922,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
       "半截模型输出",
     );
 
-    await handleInterruptCommand([], context, output);
+    await handleInterruptCommand([], context, output, { quiet: true });
 
     expect(controller.signal.aborted).toBe(true);
     expect(context.activeAbortController).toBeUndefined();
@@ -29930,7 +29930,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
       "半截模型输出",
     );
-    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).toContain(
+    expect(blocks.map((block) => block.fullText ?? block.summary).join("\n")).not.toContain(
       "已请求中断",
     );
   });

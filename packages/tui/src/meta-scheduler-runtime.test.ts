@@ -1312,6 +1312,57 @@ describe("Meta scheduler runtime", () => {
         expect.arrayContaining([expect.stringContaining("provider 历史失败")]),
       );
     });
+
+    it("keeps unrelated historical failures as context without escalating chat verification", () => {
+      const failureLearning = baseFailureLearning();
+      failureLearning.records.push(
+        {
+          id: "p-fail-1",
+          createdAt: new Date(0).toISOString(),
+          lastSeen: new Date(0).toISOString(),
+          projectScope: failureLearning.projectScope,
+          sourceRef: "evidence:provider-1",
+          category: "provider_failure",
+          failureSummary: "provider rate limited",
+          rootCauseGuess: "rate limit",
+          inferred: true,
+          avoidNextTime: "use fallback",
+          severity: "high",
+          dedupeHash: "provider-hash-1",
+          count: 1,
+          status: "active",
+        },
+        {
+          id: "tool-fail-1",
+          createdAt: new Date(0).toISOString(),
+          lastSeen: new Date(0).toISOString(),
+          projectScope: failureLearning.projectScope,
+          sourceRef: "evidence:tool-1",
+          category: "tool_failure",
+          failureSummary: "previous command failed",
+          rootCauseGuess: "command error",
+          inferred: true,
+          avoidNextTime: "inspect the error first",
+          severity: "medium",
+          dedupeHash: "tool-hash-1",
+          count: 1,
+          status: "active",
+        },
+      );
+
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "你有什么能力",
+        failureLearning,
+        hasActiveProviderFailure: true,
+      });
+
+      expect(decision.policyDecision.taskKind).toBe("chat");
+      expect(decision.policyDecision.userState.kind).toBe("neutral");
+      expect(decision.policyDecision.contextPlan.includeFailureLearning).toBe(true);
+      expect(decision.policyDecision.executionPlan.requireVerification).toBe(false);
+      expect(decision.shouldRunFinalAnswerGate).toBe(false);
+    });
   });
 });
 

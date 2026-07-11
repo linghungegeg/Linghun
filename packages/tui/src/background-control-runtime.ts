@@ -447,6 +447,7 @@ export async function handleInterruptCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
+  options: { quiet?: boolean } = {},
 ): Promise<void> {
   const agentRef = args.join(" ").trim();
   if (agentRef) {
@@ -459,6 +460,7 @@ export async function handleInterruptCommand(
     return;
   }
   cancelAssistantStream(output);
+  if (options.quiet) return;
   writeLine(
     output,
     context.language === "en-US"

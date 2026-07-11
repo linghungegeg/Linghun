@@ -1460,6 +1460,7 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
           match[0] &&
           !isNegatedOrProspectiveClaim(
             claimText.slice(0, (match.index ?? 0) + match[0].length),
+            visible,
           )
         ) {
           claims.push({ kind, phrase: match[0].trim() });
@@ -1516,8 +1517,20 @@ function splitClaimClauses(text: string): string[] {
     .filter(Boolean);
 }
 
-function isNegatedOrProspectiveClaim(text: string): boolean {
-  return /(?:未|没有|尚未|失败|需要|建议|计划|将要|准备|不得|不能|not\b|did\s+not|didn't|failed|need\s+to|should|plan(?:ned)?\s+to|will\s+)/iu.test(
+function isNegatedOrProspectiveClaim(text: string, sourceText: string): boolean {
+  if (
+    /(?:未|没有|尚未|失败|需要|建议|计划|将要|准备|不得|不能|not\b|did\s+not|didn't|failed|need\s+to|should|plan(?:ned)?\s+to|will\s+)/iu.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  const capabilityDescription =
+    /(?:我(?:可以|能够|能)|我的能力|能力(?:包括|有)|支持的能力|I\s+can\b|I(?:'m|\s+am)\s+able\s+to\b|my\s+capabilit(?:y|ies)\b)/iu.test(
+      sourceText,
+    );
+  if (!capabilityDescription) return false;
+  return !/(?:已|已经|曾经|(?:修改|写入|创建|更新|删除|执行|安装|启动|停止|运行)了|successfully\b|(?:have|has)\s+(?:modified|written|created|updated|deleted|edited|run|executed|installed|started|stopped)\b|\b(?:ran|executed|installed|started|stopped|wrote|created|updated|deleted|edited)\b)/iu.test(
     text,
   );
 }
