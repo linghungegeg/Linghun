@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Node"
+  },
+  "include": ["*.ts"]
+}

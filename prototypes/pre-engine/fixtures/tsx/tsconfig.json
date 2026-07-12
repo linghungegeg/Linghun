@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["*"]
+    },
+    "jsx": "preserve",
+    "noEmit": true
+  },
+  "include": ["*.ts", "*.tsx"]
+}

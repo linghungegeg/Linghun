@@ -69,6 +69,9 @@ function runDotnetBuild(root, files) {
       });
     }
   }
+  if (r.status !== 0 && issues.length === 0) {
+    return { error: `dotnet build exited with status ${r.status}` };
+  }
   return { issues };
 }
 
@@ -170,7 +173,7 @@ async function handleRequest(req) {
   if (dotnetResult && dotnetResult.error) {
     return {
       issues: fallbackIssues,
-      status: fallbackIssues.length > 0 ? "syntax_error" : "clean",
+      status: "fallback_used",
       reason: "fallback",
       fallback: dotnetResult.error,
       elapsed_ms: Date.now() - t0,
@@ -179,8 +182,9 @@ async function handleRequest(req) {
 
   return {
     issues: fallbackIssues,
-    status: fallbackIssues.length > 0 ? "syntax_error" : "clean",
+    status: "fallback_used",
     reason: fallbackIssues.length > 0 ? "fallback" : "fallback_clean",
+    fallback: "dotnet_not_found",
     elapsed_ms: Date.now() - t0,
   };
 }

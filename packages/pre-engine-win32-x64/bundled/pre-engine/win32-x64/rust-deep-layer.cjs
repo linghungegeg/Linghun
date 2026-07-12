@@ -1,481 +1,977 @@
 "use strict";
-const readline = require("readline");
-const path = require("path");
+
 const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+const { pathToFileURL, fileURLToPath } = require("url");
 const { spawn, spawnSync } = require("child_process");
 
-// --- LSP JSON-RPC framing ---
-let msgId = 0;
-function lspEncode(obj) {
-  const body = JSON.stringify(obj);
-  return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
-}
-function lspRequest(method, params) {
-  return lspEncode({ jsonrpc: "2.0", id: ++msgId, method, params });
-}
-function lspNotify(method, params) {
-  return lspEncode({ jsonrpc: "2.0", method, params });
+const REQUEST_TIMEOUT_MS = 120000;
+const FLYCHECK_TIMEOUT_MS = Number(process.env.LINGHUN_RUST_FLYCHECK_TIMEOUT_MS || REQUEST_TIMEOUT_MS);
+const STDERR_LIMIT_BYTES = 8192;
+
+function normalize(value) {
+  return value.replace(/\\/g, "/");
 }
 
-function fileUri(p) {
-  const abs = path.resolve(p).replace(/\\/g, "/");
-  return abs.startsWith("/") ? `file://${abs}` : `file:///${abs}`;
+function normalizeUri(uri) {
+  return process.platform === "win32" ? uri.toLowerCase() : uri;
 }
 
-// Normalize URI for Map keying — rust-analyzer lowercases drive letters on Windows
-function normUri(uri) { return uri.toLowerCase(); }
-
-// --- rust-analyzer session state ---
-let raProc = null;
-let raRoot = null;
-let raReady = false;
-let raBuffer = "";
-let raExpectedLen = -1;
-let raInitResolve = null;
-let raInitReject = null;
-let raDiagnostics = new Map(); // normUri -> issue[]
-let raDiagTimers = new Map();  // normUri -> settle timer
-let raDiagWaiters = []; // { uri: normUri, resolve }
-let openDocs = new Map(); // uri -> version
-let raDocOpenTime = new Map(); // normUri -> timestamp when file was opened
-let raEmptyCount = new Map(); // normUri -> count of consecutive empty publishDiagnostics
-let raWarmedUp = false; // true after first non-empty diagnostic from this server instance
-let raStartingPromise = null; // non-null while startRustAnalyzer is in progress (eager warm)
-
-const BOOTSTRAP_BUDGET_MS = 3000; // max wait for LSP on cold first query before cargo fallback
-const WARM_SETTLE_MS = 1500; // max wait for empty diagnostics on warm server to confirm "clean"
+function relativeTo(root, file) {
+  return normalize(path.relative(root, file));
+}
 
 function findRustAnalyzer() {
-  const whichCmd = process.platform === "win32" ? "where.exe" : "which";
-  const r = spawnSync(whichCmd, ["rust-analyzer"], {
-    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+  if (process.env.LINGHUN_RUST_ANALYZER) {
+    const configured = path.resolve(process.env.LINGHUN_RUST_ANALYZER);
+    return fs.existsSync(configured) ? configured : null;
+  }
+  const locator = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(locator, ["rust-analyzer"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
   });
-  if (r.status === 0) {
-    const line = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean)[0];
-    return line || null;
+  if (result.status !== 0) return null;
+  return result.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean)[0] || null;
+}
+
+function wordAt(text, position) {
+  const lines = text.split(/\r?\n/);
+  const line = lines[position.line] || "";
+  let offset = Math.min(line.length, position.character);
+  if (offset > 0 && offset < line.length
+      && /[\uDC00-\uDFFF]/.test(line[offset]) && /[\uD800-\uDBFF]/.test(line[offset - 1])) {
+    offset -= 1;
+  }
+  let start = offset;
+  let end = offset;
+  const identifier = value => /^[\p{ID_Continue}_]$/u.test(value);
+  while (start > 0) {
+    let previous = start - 1;
+    if (previous > 0 && /[\uDC00-\uDFFF]/.test(line[previous])
+        && /[\uD800-\uDBFF]/.test(line[previous - 1])) {
+      previous -= 1;
+    }
+    const value = line.slice(previous, start);
+    if (!identifier(value)) break;
+    start = previous;
+  }
+  while (end < line.length) {
+    const codePoint = String.fromCodePoint(line.codePointAt(end));
+    if (!identifier(codePoint)) break;
+    end += codePoint.length;
+  }
+  return line.slice(start, end);
+}
+
+function locationUri(location) {
+  return location && (location.uri || location.targetUri) || null;
+}
+
+function locationRange(location) {
+  return location && (location.range || location.targetSelectionRange || location.targetRange) || null;
+}
+
+function semanticLocation(root, location, name) {
+  const uri = locationUri(location);
+  const range = locationRange(location);
+  if (!uri || !uri.startsWith("file:") || !range) return null;
+  const file = relativeTo(root, fileURLToPath(uri));
+  if (file.startsWith("../") || path.isAbsolute(file)) return null;
+  return {
+    file,
+    name,
+    line: range.start.line + 1,
+    character: range.start.character,
+    end_line: range.end.line + 1,
+    end_character: range.end.character,
+  };
+}
+
+function firstAnchorPosition(text) {
+  const lines = text.split(/\r?\n/);
+  const pattern = /\b(?:fn|struct|enum|trait|mod|type|const|static)\s+([\p{L}_][\p{L}\p{N}_]*)/u;
+  for (let line = 0; line < lines.length; line += 1) {
+    const match = pattern.exec(lines[line]);
+    if (!match) continue;
+    return {
+      name: match[1],
+      position: { line, character: match.index + match[0].lastIndexOf(match[1]) },
+    };
   }
   return null;
 }
 
-function killRa() {
-  if (raProc) { try { raProc.kill(); } catch {} raProc = null; }
-  raReady = false;
-  raWarmedUp = false;
-  raStartingPromise = null;
-  raInitResolve = null;
-  raInitReject = null;
-  raDiagWaiters.forEach(w => w.resolve([]));
-  raDiagWaiters = [];
-  raDiagTimers.forEach(t => clearTimeout(t));
-  raDiagTimers.clear();
-  openDocs.clear();
-  raDocOpenTime.clear();
-  raEmptyCount.clear();
-}
+class RustAnalyzerSession {
+  constructor(root, executable) {
+    this.root = path.resolve(root);
+    this.executable = executable;
+    this.child = null;
+    this.buffer = Buffer.alloc(0);
+    this.nextId = 1;
+    this.pending = new Map();
+    this.documents = new Map();
+    this.diagnostics = new Map();
+    this.buildCount = 0;
+    this.snapshot = 0;
+    this.flycheckGeneration = 0;
+    this.flycheckCompletedGeneration = 0;
+    this.flycheckTokens = new Map();
+    this.flycheckWaiters = new Set();
+    this.flycheckIdleWaiters = new Set();
+    this.diagnosticRefreshGeneration = 0;
+    this.diagnosticRefreshWaiters = new Set();
+    this.serverHealth = "ok";
+    this.serverStatusMessage = null;
+    this.stderr = Buffer.alloc(0);
+    this.stderrTruncated = false;
+    this.configStamp = this.readConfigStamp();
+  }
 
-// LSP message parser (Content-Length framing)
-function onRaData(chunk) {
-  raBuffer += chunk.toString();
-  while (true) {
-    if (raExpectedLen === -1) {
-      const headerEnd = raBuffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) break;
-      const header = raBuffer.slice(0, headerEnd);
-      const m = header.match(/Content-Length:\s*(\d+)/i);
-      if (!m) { raBuffer = raBuffer.slice(headerEnd + 4); continue; }
-      raExpectedLen = parseInt(m[1], 10);
-      raBuffer = raBuffer.slice(headerEnd + 4);
+  appendStderr(chunk) {
+    const combined = Buffer.concat([this.stderr, Buffer.from(chunk)]);
+    if (combined.length > STDERR_LIMIT_BYTES) {
+      this.stderr = combined.subarray(combined.length - STDERR_LIMIT_BYTES);
+      this.stderrTruncated = true;
+    } else {
+      this.stderr = combined;
     }
-    if (raBuffer.length < raExpectedLen) break;
-    const body = raBuffer.slice(0, raExpectedLen);
-    raBuffer = raBuffer.slice(raExpectedLen);
-    raExpectedLen = -1;
-    handleRaMessage(body);
-  }
-}
-
-function handleRaMessage(body) {
-  let msg;
-  try { msg = JSON.parse(body); } catch { return; }
-
-  // Server-initiated requests need an ACK or LSP session hangs
-  if (msg.method && msg.id != null) {
-    raProc.stdin.write(lspEncode({ jsonrpc: "2.0", id: msg.id, result: null }));
-    return;
   }
 
-  // Initialize response (must check msg.result exists to distinguish from notifications)
-  if (msg.id && msg.result !== undefined && raInitResolve && !raReady) {
-    raProc.stdin.write(lspNotify("initialized", {}));
-    raReady = true;
-    const resolve = raInitResolve;
-    raInitResolve = null;
-    raInitReject = null;
-    resolve();
-    return;
+  exitReason(code, signal) {
+    const stderr = this.stderr.toString("utf8").replace(/\s+/gu, " ").trim();
+    const suffix = stderr
+      ? ` stderr=${this.stderrTruncated ? "[truncated] " : ""}${stderr}`
+      : " stderr=<empty>";
+    return `rust-analyzer exited code=${code == null ? "null" : code} signal=${signal || "null"}${suffix}`;
   }
 
-  // publishDiagnostics notification
-  if (msg.method === "textDocument/publishDiagnostics" && msg.params) {
-    const { uri, diagnostics } = msg.params;
-    const uriKey = normUri(uri);
-    const issues = (diagnostics || [])
-      .filter(d => d.severity === 1) // 1 = Error
-      .map(d => ({
-        file: uriToRel(uri),
-        line: (d.range && d.range.start) ? d.range.start.line + 1 : 1,
-        kind: "type_error",
-        detail: d.message || "unknown error",
-        source: "rust-deep-layer",
-      }));
-    raDiagnostics.set(uriKey, issues);
-    if (raDiagTimers.has(uriKey)) clearTimeout(raDiagTimers.get(uriKey));
-    if (issues.length > 0) {
-      // Non-empty: errors are definitive, resolve waiters immediately
-      raWarmedUp = true;
-      raEmptyCount.set(uriKey, 0);
-      raDiagTimers.delete(uriKey);
-      raDiagWaiters = raDiagWaiters.filter(w => {
-        if (w.uri === uriKey) { w.resolve(issues); return false; }
-        return true;
-      });
-    } else if (raWarmedUp) {
-      // Warm server + empty diagnostics: track consecutive empties
-      const count = (raEmptyCount.get(uriKey) || 0) + 1;
-      raEmptyCount.set(uriKey, count);
-      // 2+ consecutive empties = confirmed clean, resolve immediately
-      if (count >= 2) {
-        raDiagTimers.delete(uriKey);
-        raDiagWaiters = raDiagWaiters.filter(w => {
-          if (w.uri === uriKey) { w.resolve([]); return false; }
-          return true;
-        });
-      } else {
-        // First empty: settle with reduced timeout
-        const openedAt = raDocOpenTime.get(uriKey) || 0;
-        const elapsed = Date.now() - openedAt;
-        const remaining = Math.max(0, WARM_SETTLE_MS - elapsed);
-        raDiagTimers.set(uriKey, setTimeout(() => {
-          raDiagTimers.delete(uriKey);
-          const final = raDiagnostics.get(uriKey) || [];
-          raDiagWaiters = raDiagWaiters.filter(w => {
-            if (w.uri === uriKey) { w.resolve(final); return false; }
-            return true;
-          });
-        }, remaining));
-      }
-    }
-    // Cold server + empty diagnostics: do NOT accept early.
-    // Let waitForDiag's DIAG_TIMEOUT be the backstop — real errors will
-    // arrive later and resolve immediately via the non-empty branch above.
+  readConfigStamp() {
+    const files = [
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-project.json",
+      path.join(".cargo", "config.toml"),
+      path.join(".cargo", "config"),
+    ];
+    return files.map(file => {
+      const absolute = path.join(this.root, file);
+      if (!fs.existsSync(absolute)) return `${normalize(file)}:missing`;
+      const stat = fs.statSync(absolute);
+      return `${normalize(file)}:${stat.mtimeMs}:${stat.size}`;
+    }).join("|");
   }
-}
 
-function uriToRel(uri) {
-  // file:///abs/path -> relative to raRoot
-  const decoded = decodeURIComponent(uri.replace(/^file:\/\/\/?/, "").replace(/^([a-z]):/, (_, d) => d.toUpperCase() + ":"));
-  if (raRoot) {
-    let rel = path.relative(raRoot, decoded).replace(/\\/g, "/");
-    if (!rel.startsWith("..")) return rel;
-  }
-  return decoded.replace(/\\/g, "/");
-}
-
-function waitForDiag(uri, timeoutMs) {
-  const uriKey = normUri(uri);
-  return new Promise(resolve => {
-    // Return immediately if we have settled diagnostics (no pending debounce)
-    if (raDiagnostics.has(uriKey) && !raDiagTimers.has(uriKey)) {
-      resolve(raDiagnostics.get(uriKey));
-      return;
-    }
-    const timer = setTimeout(() => {
-      raDiagWaiters = raDiagWaiters.filter(w => w.resolve !== resolve);
-      resolve(raDiagnostics.get(uriKey) || []);
-    }, timeoutMs);
-    raDiagWaiters.push({ uri: uriKey, resolve: issues => { clearTimeout(timer); resolve(issues); } });
-  });
-}
-
-function startRustAnalyzer(root) {
-  return new Promise((resolve, reject) => {
-    const raPath = findRustAnalyzer();
-    if (!raPath) { reject(new Error("rust-analyzer not found")); return; }
-
-    raRoot = root;
-    raDiagnostics.clear();
-    openDocs.clear();
-    raWarmedUp = false;
-    raBuffer = "";
-    raExpectedLen = -1;
-    raReady = false;
-
-    raProc = spawn(raPath, [], {
-      cwd: root,
+  async start() {
+    const child = spawn(this.executable, [], {
+      cwd: this.root,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-    raProc.on("error", e => { raProc = null; reject(e); });
-    raProc.on("exit", () => { raProc = null; raReady = false; });
-    raProc.stdout.on("data", chunk => onRaData(chunk));
-
-    raInitResolve = resolve;
-    raInitReject = reject;
-
-    raProc.stdin.write(lspRequest("initialize", {
+    this.child = child;
+    this.stderr = Buffer.alloc(0);
+    this.stderrTruncated = false;
+    child.stdout.on("data", chunk => this.onData(chunk));
+    child.stderr.on("data", chunk => this.appendStderr(chunk));
+    child.on("close", (code, signal) => {
+      if (this.child !== child) return;
+      this.child = null;
+      this.rejectPending(this.exitReason(code, signal));
+    });
+    child.on("error", error => {
+      if (this.child !== child) return;
+      this.child = null;
+      this.rejectPending(`rust-analyzer error: ${error.message}`);
+    });
+    const rootUri = pathToFileURL(this.root + path.sep).href;
+    await this.request("initialize", {
       processId: process.pid,
-      capabilities: { textDocument: { publishDiagnostics: { relatedInformation: false } } },
-      rootUri: fileUri(root),
-      workspaceFolders: [{ uri: fileUri(root), name: path.basename(root) }],
+      rootUri,
+      workspaceFolders: [{ uri: rootUri, name: path.basename(this.root) }],
+      capabilities: {
+        window: { workDoneProgress: true },
+        experimental: { serverStatusNotification: true },
+        workspace: {
+          symbol: { dynamicRegistration: false },
+          diagnostics: { refreshSupport: true },
+        },
+        textDocument: {
+          definition: { dynamicRegistration: false },
+          references: { dynamicRegistration: false },
+          callHierarchy: { dynamicRegistration: false },
+          diagnostic: { dynamicRegistration: false, relatedDocumentSupport: false },
+          publishDiagnostics: { relatedInformation: true },
+        },
+      },
       initializationOptions: {
         checkOnSave: false,
         diagnostics: { enable: true },
         cargo: { buildScripts: { enable: false } },
         procMacro: { enable: false },
       },
-    }));
-
-    setTimeout(() => {
-      if (!raReady) { killRa(); reject(new Error("rust-analyzer init timeout (15s)")); }
-    }, 15000);
-  });
-}
-
-// Eagerly start rust-analyzer for a root without blocking. Triggers workspace
-// loading by opening lib.rs or main.rs so subsequent queries hit a warm server.
-function eagerWarmUp(root) {
-  if (raStartingPromise) return raStartingPromise;
-  raStartingPromise = startRustAnalyzer(root).then(() => {
-    // Open a sentinel file to trigger workspace loading
-    const candidates = ["src/lib.rs", "src/main.rs"];
-    for (const rel of candidates) {
-      const abs = path.join(root, rel);
-      if (fs.existsSync(abs)) {
-        sendDocOpen(abs, fileUri(abs));
-        break;
-      }
-    }
-  }).catch(() => {}).finally(() => { raStartingPromise = null; });
-  return raStartingPromise;
-}
-
-// Send didOpen (or didChange if already open) to force re-read from disk
-function sendDocOpen(absPath, uri) {
-  let text;
-  try { text = fs.readFileSync(absPath, "utf8"); } catch { return false; }
-  const version = (openDocs.get(uri) || 0) + 1;
-  openDocs.set(uri, version);
-  const uriKey = normUri(uri);
-  raDiagnostics.delete(uriKey); // invalidate stale cache
-  raEmptyCount.set(uriKey, 0); // reset consecutive empty counter
-  raDocOpenTime.set(uriKey, Date.now());
-
-  if (version === 1) {
-    raProc.stdin.write(lspNotify("textDocument/didOpen", {
-      textDocument: { uri, languageId: "rust", version, text },
-    }));
-  } else {
-    raProc.stdin.write(lspNotify("textDocument/didChange", {
-      textDocument: { uri, version },
-      contentChanges: [{ text }],
-    }));
-  }
-  return true;
-}
-
-// Main LSP-based query: returns { issues, elapsed_ms } or throws
-async function queryLsp(root, files) {
-  if (!raProc || !raReady || raRoot !== root) {
-    await startRustAnalyzer(root);
-  }
-
-  const DIAG_TIMEOUT = 25000;
-  const uris = files.map(f => {
-    const abs = path.isAbsolute(f) ? f : path.join(root, f);
-    return { abs, uri: fileUri(abs) };
-  });
-
-  // open / refresh each file
-  for (const { abs, uri } of uris) sendDocOpen(abs, uri);
-
-  // wait for diagnostics for each URI
-  const results = await Promise.all(uris.map(({ uri }) => waitForDiag(uri, DIAG_TIMEOUT)));
-  const issues = results.flat();
-  return issues;
-}
-
-// --- cargo-check fallback (unchanged from Phase 6-C) ---
-let cachedCargoPath = null;
-function findCargo() {
-  if (cachedCargoPath) return cachedCargoPath;
-  const whichCmd = process.platform === "win32" ? "where.exe" : "which";
-  const r = spawnSync(whichCmd, ["cargo"], {
-    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
-  });
-  if (r.status === 0) {
-    const lines = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    const preferred = (process.platform === "win32" ? lines.find(l => l.endsWith(".exe")) : null) || lines[0];
-    if (preferred) { cachedCargoPath = preferred; return preferred; }
-  }
-  return null;
-}
-
-// Walk up from a file path to find the nearest Cargo.toml
-function findManifest(filePath, fallbackRoot) {
-  let dir = path.dirname(path.isAbsolute(filePath) ? filePath : path.resolve(fallbackRoot, filePath));
-  const root = path.parse(dir).root;
-  while (true) {
-    const candidate = path.join(dir, "Cargo.toml");
-    if (fs.existsSync(candidate)) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir || dir === root) break;
-    dir = parent;
-  }
-  return null;
-}
-
-function runCargoCheck(root, files) {
-  const cargoPath = findCargo();
-  if (!cargoPath) return { error: "cargo not found" };
-
-  // Find nearest Cargo.toml from the first changed file
-  const manifest = files.length > 0 ? findManifest(files[0], root) : null;
-  const args = manifest
-    ? ["check", "--manifest-path", manifest, "--message-format=json"]
-    : ["check", "--message-format=json"];
-  const cwd = manifest ? path.dirname(manifest) : root;
-
-  let result;
-  try {
-    result = spawnSync(cargoPath, args, {
-      cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true, timeout: 30000,
     });
-  } catch (e) { return { error: `cargo exec: ${e.message}` }; }
-  if (result.error) {
-    return { error: result.error.code === "ETIMEDOUT" ? "cargo check timeout" : result.error.message };
+    this.notify("initialized", {});
+    this.buildCount += 1;
+    await this.warmWorkspace();
+    this.configStamp = this.readConfigStamp();
   }
-  const manifestRoot = manifest ? path.dirname(manifest) : root;
-  const targetFiles = files.map(f =>
-    path.relative(manifestRoot, path.isAbsolute(f) ? f : path.resolve(root, f)).replace(/\\/g, "/")
-  );
-  const issues = [];
-  for (const line of (result.stdout || "").split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let msg;
-    try { msg = JSON.parse(line); } catch { continue; }
-    if (msg.reason !== "compiler-message") continue;
-    const diag = msg.message;
-    if (!diag || diag.level !== "error") continue;
-    const spans = diag.spans || [];
-    const span = spans.find(s => s.is_primary) || spans[0];
-    if (!span) continue;
-    const rel = (span.file_name || "").replace(/\\/g, "/");
-    if (!targetFiles.includes(rel)) continue;
-    issues.push({ file: rel, line: span.line_start || 1, kind: "type_error", detail: diag.message || "unknown", source: "rust-deep-layer" });
+
+  stop() {
+    if (this.child && !this.child.killed) this.child.kill();
+    this.child = null;
+    this.buffer = Buffer.alloc(0);
+    this.documents.clear();
+    this.diagnostics.clear();
+    this.rejectFlycheckWaiters("rust-analyzer stopped");
   }
-  return { issues };
+
+  rejectPending(message) {
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(new Error(message));
+    }
+    this.pending.clear();
+    this.rejectFlycheckWaiters(message);
+  }
+
+  rejectFlycheckWaiters(message) {
+    for (const waiter of this.flycheckWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.flycheckWaiters.clear();
+    for (const waiter of this.flycheckIdleWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.flycheckIdleWaiters.clear();
+    for (const waiter of this.diagnosticRefreshWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(message));
+    }
+    this.diagnosticRefreshWaiters.clear();
+  }
+
+  resolveFlycheckWaiters() {
+    for (const waiter of [...this.flycheckWaiters]) {
+      if (this.flycheckCompletedGeneration <= waiter.afterGeneration) continue;
+      clearTimeout(waiter.timer);
+      this.flycheckWaiters.delete(waiter);
+      waiter.resolve(this.flycheckCompletedGeneration);
+    }
+  }
+
+  onData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (true) {
+      const headerEnd = this.buffer.indexOf("\r\n\r\n");
+      if (headerEnd < 0) return;
+      const header = this.buffer.slice(0, headerEnd).toString("ascii");
+      const lengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
+      if (!lengthMatch) {
+        this.buffer = Buffer.alloc(0);
+        if (this.child && !this.child.killed) this.child.kill();
+        this.child = null;
+        this.rejectPending("invalid rust-analyzer LSP response header");
+        return;
+      }
+      const length = Number(lengthMatch[1]);
+      const bodyStart = headerEnd + 4;
+      if (this.buffer.length < bodyStart + length) return;
+      const body = this.buffer.slice(bodyStart, bodyStart + length).toString("utf8");
+      this.buffer = this.buffer.slice(bodyStart + length);
+      try {
+        this.onMessage(JSON.parse(body));
+      } catch (error) {
+        if (this.child && !this.child.killed) this.child.kill();
+        this.child = null;
+        this.rejectPending(`invalid rust-analyzer LSP response: ${error.message}`);
+        return;
+      }
+    }
+  }
+
+  onMessage(message) {
+    if (message.id != null && (message.result !== undefined || message.error)) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.pending.delete(message.id);
+      if (message.error) {
+        const error = new Error(message.error.message || "rust-analyzer LSP error");
+        error.code = message.error.code;
+        pending.reject(error);
+      }
+      else pending.resolve(message.result);
+      return;
+    }
+    if (message.method === "textDocument/publishDiagnostics" && message.params) {
+      const uri = normalizeUri(message.params.uri);
+      const document = [...this.documents.entries()]
+        .find(([documentUri]) => normalizeUri(documentUri) === uri);
+      if (message.params.version != null && document && message.params.version < document[1].version) {
+        return;
+      }
+      const diagnostics = message.params.diagnostics || [];
+      this.diagnostics.set(uri, diagnostics);
+      return;
+    }
+    if (message.method === "$/progress" && message.params) {
+      const token = String(message.params.token || "");
+      const kind = message.params.value && message.params.value.kind;
+      if (!token.startsWith("rust-analyzer/flycheck/")) return;
+      if (kind === "begin") {
+        if (this.flycheckTokens.has(token)) {
+          this.rejectFlycheckWaiters(`rust-analyzer flycheck protocol error: duplicate begin for ${token}`);
+          return;
+        }
+        this.flycheckGeneration += 1;
+        this.flycheckTokens.set(token, this.flycheckGeneration);
+      } else if (kind === "end") {
+        const generation = this.flycheckTokens.get(token);
+        if (generation != null) {
+          this.flycheckCompletedGeneration = Math.max(this.flycheckCompletedGeneration, generation);
+          this.flycheckTokens.delete(token);
+          this.resolveFlycheckWaiters();
+          if (this.flycheckTokens.size === 0) {
+            for (const waiter of this.flycheckIdleWaiters) {
+              clearTimeout(waiter.timer);
+              waiter.resolve();
+            }
+            this.flycheckIdleWaiters.clear();
+          }
+        }
+      }
+      return;
+    }
+    if (message.method === "experimental/serverStatus" && message.params) {
+      this.serverHealth = message.params.health || "ok";
+      this.serverStatusMessage = message.params.message || null;
+      return;
+    }
+    if (message.id != null && message.method) {
+      let result = null;
+      if (message.method === "workspace/configuration") {
+        result = (message.params && message.params.items || []).map(() => null);
+      } else if (message.method === "window/workDoneProgress/create") {
+        result = null;
+      } else if (message.method === "workspace/diagnostic/refresh") {
+        this.diagnosticRefreshGeneration += 1;
+        for (const waiter of [...this.diagnosticRefreshWaiters]) {
+          if (this.diagnosticRefreshGeneration <= waiter.afterGeneration) continue;
+          clearTimeout(waiter.timer);
+          this.diagnosticRefreshWaiters.delete(waiter);
+          waiter.resolve(this.diagnosticRefreshGeneration);
+        }
+      }
+      this.send({ jsonrpc: "2.0", id: message.id, result });
+    }
+  }
+
+  send(message) {
+    const body = Buffer.from(JSON.stringify(message), "utf8");
+    this.child.stdin.write(`Content-Length: ${body.length}\r\n\r\n`);
+    this.child.stdin.write(body);
+  }
+
+  notify(method, params) {
+    this.send({ jsonrpc: "2.0", method, params });
+  }
+
+  request(method, params, timeout = REQUEST_TIMEOUT_MS) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`rust-analyzer LSP ${method} timed out`));
+      }, timeout);
+      this.pending.set(id, { resolve, reject, timer });
+      this.send({ jsonrpc: "2.0", id, method, params });
+    });
+  }
+
+  async semanticRequest(method, params) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.request(method, params);
+      } catch (error) {
+        if (!/content modified/i.test(error.message) || attempt === 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+  }
+
+  async warmWorkspace() {
+    for (const file of ["src/lib.rs", "src/main.rs"]) {
+      const document = await this.openFile(file);
+      if (!document) continue;
+      const anchor = firstAnchorPosition(document.text);
+      if (!anchor) return;
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        const hover = await this.semanticRequest("textDocument/hover", {
+          textDocument: { uri: document.uri },
+          position: anchor.position,
+        });
+        if (hover) {
+          const symbols = await this.semanticRequest("workspace/symbol", { query: anchor.name });
+          if ((symbols || []).length > 0) return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return;
+    }
+  }
+
+  async ensureCurrent() {
+    const nextStamp = this.readConfigStamp();
+    if (this.child && nextStamp === this.configStamp) {
+      this.closeDeletedDocuments();
+      return false;
+    }
+    if (this.child) this.stop();
+    this.configStamp = nextStamp;
+    await this.start();
+    this.snapshot += 1;
+    return true;
+  }
+
+  closeDeletedDocuments() {
+    for (const uri of [...this.documents.keys()]) {
+      if (fs.existsSync(fileURLToPath(uri))) continue;
+      this.notify("textDocument/didClose", { textDocument: { uri } });
+      this.documents.delete(uri);
+      this.diagnostics.delete(normalizeUri(uri));
+      this.snapshot += 1;
+    }
+  }
+
+  async openFile(file) {
+    const absolute = path.resolve(this.root, file);
+    if (!fs.existsSync(absolute)) return null;
+    const text = fs.readFileSync(absolute, "utf8");
+    const stat = fs.statSync(absolute);
+    const stamp = `${stat.mtimeMs}:${stat.size}`;
+    const uri = pathToFileURL(absolute).href;
+    const previous = this.documents.get(uri);
+    let synchronized = false;
+    if (!previous) {
+      this.diagnostics.delete(normalizeUri(uri));
+      this.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "rust", version: 1, text },
+      });
+      this.documents.set(uri, { text, stamp, version: 1 });
+      synchronized = true;
+    } else if (previous.stamp !== stamp || previous.text !== text) {
+      this.diagnostics.delete(normalizeUri(uri));
+      const version = previous.version + 1;
+      this.notify("textDocument/didChange", {
+        textDocument: { uri, version },
+        contentChanges: [{ text }],
+      });
+      this.documents.set(uri, { text, stamp, version });
+      this.snapshot += 1;
+      synchronized = true;
+    }
+    return { absolute, uri, text, synchronized };
+  }
+
+  waitForFlycheckAfter(afterGeneration, timeout = REQUEST_TIMEOUT_MS) {
+    if (this.flycheckCompletedGeneration > afterGeneration) {
+      return Promise.resolve(this.flycheckCompletedGeneration);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { afterGeneration, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.flycheckWaiters.delete(waiter);
+        reject(new Error("rust-analyzer flycheck completion timed out"));
+      }, timeout);
+      this.flycheckWaiters.add(waiter);
+    });
+  }
+
+  waitForFlycheckIdle(timeout = REQUEST_TIMEOUT_MS) {
+    if (this.flycheckTokens.size === 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.flycheckIdleWaiters.delete(waiter);
+        reject(new Error("rust-analyzer flycheck did not become idle"));
+      }, timeout);
+      this.flycheckIdleWaiters.add(waiter);
+    });
+  }
+
+  waitForDiagnosticRefreshAfter(afterGeneration, timeout = REQUEST_TIMEOUT_MS) {
+    if (this.diagnosticRefreshGeneration > afterGeneration) {
+      return Promise.resolve(this.diagnosticRefreshGeneration);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { afterGeneration, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.diagnosticRefreshWaiters.delete(waiter);
+        reject(new Error("rust-analyzer diagnostic refresh timed out"));
+      }, timeout);
+      this.diagnosticRefreshWaiters.add(waiter);
+    });
+  }
+
+  async pullDiagnostics(uri) {
+    const report = await this.semanticRequest("textDocument/diagnostic", {
+      textDocument: { uri },
+    });
+    const pulled = report && Array.isArray(report.items) ? report.items : [];
+    if (pulled.length > 0) return pulled;
+    return this.diagnostics.get(normalizeUri(uri)) || pulled;
+  }
+
+  async definitions(uri, position) {
+    const result = await this.semanticRequest("textDocument/definition", {
+      textDocument: { uri },
+      position,
+    });
+    if (!result) return [];
+    return Array.isArray(result) ? result : [result];
+  }
+
+  async resolveTargets(symbol, positions, allowWorkspaceSymbol) {
+    const locations = [];
+    const origins = [];
+    for (const token of positions.filter(position => position.symbol === symbol)) {
+      const document = await this.openFile(token.file);
+      if (!document) continue;
+      const position = { line: token.line, character: token.character };
+      const definitions = await this.definitions(document.uri, position);
+      if (definitions.length > 0) origins.push({ uri: document.uri, position, symbol });
+      locations.push(...definitions);
+    }
+    if (allowWorkspaceSymbol && positions.filter(position => position.symbol === symbol).length === 0) {
+      const workspaceSymbols = await this.semanticRequest("workspace/symbol", { query: symbol });
+      for (const item of workspaceSymbols || []) {
+        if (item.name !== symbol || !item.location) continue;
+        locations.push(item.location);
+      }
+    }
+    const targets = [];
+    const seen = new Set();
+    for (const location of locations) {
+      const uri = locationUri(location);
+      const range = locationRange(location);
+      if (!uri || !uri.startsWith("file:") || !range) continue;
+      const rel = relativeTo(this.root, fileURLToPath(uri));
+      if (rel.startsWith("../") || path.isAbsolute(rel)) continue;
+      const document = await this.openFile(rel);
+      if (!document) continue;
+      const name = wordAt(document.text, range.start) || symbol;
+      const key = `${rel}:${range.start.line}:${range.start.character}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({
+        file: rel,
+        name,
+        uri,
+        position: range.start,
+        line: range.start.line + 1,
+        character: range.start.character,
+        end_line: range.end.line + 1,
+        end_character: range.end.character,
+      });
+    }
+    return { targets, origins };
+  }
+
+  async dependencies(files, importTokens) {
+    const dependencies = {};
+    const metadata = {};
+    for (const file of files) {
+      const document = await this.openFile(file);
+      if (!document) continue;
+      const deps = new Set();
+      const statements = new Map();
+      for (const token of importTokens.filter(item => normalize(item.file) === normalize(file))) {
+        if (!statements.has(token.specifier)) statements.set(token.specifier, false);
+        const definitions = await this.definitions(document.uri, {
+          line: token.line,
+          character: token.character,
+        });
+        for (const definition of definitions) {
+          const uri = locationUri(definition);
+          if (!uri || !uri.startsWith("file:")) continue;
+          statements.set(token.specifier, true);
+          const rel = relativeTo(this.root, fileURLToPath(uri));
+          if (!rel.startsWith("../") && !path.isAbsolute(rel) && rel !== file) deps.add(rel);
+        }
+      }
+      dependencies[file] = [...deps].sort();
+      metadata[file] = {
+        unresolved: [...statements].filter(([, resolved]) => !resolved).map(([specifier]) => specifier).sort(),
+      };
+    }
+    return { dependencies, metadata };
+  }
+
+  async analyze(files, symbols, symbolPositions, importTokens, allowWorkspaceSymbol) {
+    const rebuilt = await this.ensureCurrent();
+    const normalizedFiles = [...new Set(files.map(file => normalize(file)))];
+    let openedFiles = 0;
+    for (const file of normalizedFiles) {
+      if (await this.openFile(file)) openedFiles += 1;
+    }
+    if (normalizedFiles.length > 0 && openedFiles === 0) {
+      return {
+        status: "partially_verified",
+        reason: "Rust semantic evidence incomplete: rust_documents",
+        relations: Object.fromEntries(symbols.map(symbol => [symbol, {
+          targets: [], names_by_file: {}, related_files: [], references: [], callers: [], callees: [],
+          unresolved_module_specifiers: [], unresolved_relative_specifiers: [], external_module_specifiers: [],
+          blocked_module_specifiers: [], dynamic_import_files: [], graph_cycle: false, graph_truncated: false,
+        }])),
+        module_dependencies: {},
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: { coverage: [], missing: ["rust_documents"] },
+      };
+    }
+    const { dependencies, metadata } = await this.dependencies(normalizedFiles, importTokens);
+    const relations = {};
+    let missingAnchor = false;
+    let ambiguousTarget = false;
+    for (const symbol of symbols) {
+      const { targets, origins } = await this.resolveTargets(symbol, symbolPositions, allowWorkspaceSymbol);
+      if (targets.length === 0) missingAnchor = true;
+      if (targets.length > 1) ambiguousTarget = true;
+      const namesByFile = {};
+      const relatedFiles = new Set();
+      const references = [];
+      const callers = [];
+      const callees = [];
+      const referenceKeys = new Set();
+      const callerKeys = new Set();
+      const calleeKeys = new Set();
+      const anchors = targets.length === 1
+        ? [...targets.map(target => ({ uri: target.uri, position: target.position })), ...origins]
+        : [];
+      for (const origin of targets.length === 1 ? origins : []) {
+        const location = semanticLocation(this.root, {
+          uri: origin.uri,
+          range: {
+            start: origin.position,
+            end: { line: origin.position.line, character: origin.position.character + symbol.length },
+          },
+        }, symbol);
+        if (!location) continue;
+        relatedFiles.add(location.file);
+        if (!namesByFile[location.file]) namesByFile[location.file] = [];
+        if (!namesByFile[location.file].includes(symbol)) namesByFile[location.file].push(symbol);
+        const key = `${location.file}:${location.line}:${location.character}:${location.end_line}:${location.end_character}`;
+        if (!referenceKeys.has(key)) {
+          referenceKeys.add(key);
+          references.push(location);
+        }
+      }
+      for (const anchor of anchors) {
+        const found = await this.semanticRequest("textDocument/references", {
+          textDocument: { uri: anchor.uri },
+          position: anchor.position,
+          context: { includeDeclaration: true },
+        });
+        for (const reference of found || []) {
+          const uri = locationUri(reference);
+          const range = locationRange(reference);
+          if (!uri || !uri.startsWith("file:") || !range) continue;
+          const rel = relativeTo(this.root, fileURLToPath(uri));
+          if (rel.startsWith("../") || path.isAbsolute(rel)) continue;
+          const document = await this.openFile(rel);
+          if (!document) continue;
+          const name = wordAt(document.text, range.start);
+          if (!name) continue;
+          const location = semanticLocation(this.root, reference, name);
+          if (!location) continue;
+          relatedFiles.add(rel);
+          if (!namesByFile[rel]) namesByFile[rel] = [];
+          if (!namesByFile[rel].includes(name)) namesByFile[rel].push(name);
+          const key = `${rel}:${location.line}:${location.character}:${location.end_line}:${location.end_character}`;
+          if (!referenceKeys.has(key)) {
+            referenceKeys.add(key);
+            references.push(location);
+          }
+        }
+
+        const prepared = await this.semanticRequest("textDocument/prepareCallHierarchy", {
+          textDocument: { uri: anchor.uri },
+          position: anchor.position,
+        });
+        for (const item of prepared || []) {
+          const incoming = await this.semanticRequest("callHierarchy/incomingCalls", { item });
+          for (const call of incoming || []) {
+            const location = semanticLocation(
+              this.root,
+              { uri: call.from.uri, range: call.from.selectionRange || call.from.range },
+              call.from.name,
+            );
+            if (!location) continue;
+            relatedFiles.add(location.file);
+            const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
+            if (!callerKeys.has(key)) {
+              callerKeys.add(key);
+              callers.push(location);
+            }
+          }
+          const outgoing = await this.semanticRequest("callHierarchy/outgoingCalls", { item });
+          for (const call of outgoing || []) {
+            const location = semanticLocation(
+              this.root,
+              { uri: call.to.uri, range: call.to.selectionRange || call.to.range },
+              call.to.name,
+            );
+            if (!location) continue;
+            relatedFiles.add(location.file);
+            const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
+            if (!calleeKeys.has(key)) {
+              calleeKeys.add(key);
+              callees.push(location);
+            }
+          }
+        }
+      }
+      if (targets.length === 1) relatedFiles.add(targets[0].file);
+      const unresolved = [...relatedFiles]
+        .flatMap(file => metadata[file] ? metadata[file].unresolved : []);
+      relations[symbol] = {
+        targets: targets.map(({ file, name, line, character, end_line, end_character }) => ({
+          file, name, line, character, end_line, end_character,
+        })),
+        names_by_file: namesByFile,
+        related_files: [...relatedFiles].sort(),
+        references,
+        callers,
+        callees,
+        unresolved_module_specifiers: [...new Set(unresolved)].sort(),
+        unresolved_relative_specifiers: [],
+        external_module_specifiers: [],
+        blocked_module_specifiers: [],
+        dynamic_import_files: [],
+        graph_cycle: false,
+        graph_truncated: false,
+      };
+    }
+    const missing = [];
+    if (missingAnchor) missing.push("symbol_anchor");
+    if (ambiguousTarget) missing.push("ambiguous_symbol_identity");
+    return {
+      status: missing.length ? "partially_verified" : "verified",
+      reason: missing.length ? `Rust semantic evidence incomplete: ${missing.join(",")}` : null,
+      relations,
+      module_dependencies: dependencies,
+      program_build_count: this.buildCount,
+      program_rebuilt: rebuilt,
+      snapshot_id: String(this.snapshot),
+      verification: {
+        coverage: ["imports", "modules", "reexports", "symbol_identity", "aliases", "references", "call_hierarchy", "types"],
+        missing,
+      },
+    };
+  }
+
+  async discover(terms) {
+    const rebuilt = await this.ensureCurrent();
+    const candidates = [];
+    const seen = new Set();
+    for (const term of terms.filter(Boolean)) {
+      const symbols = await this.semanticRequest("workspace/symbol", { query: term });
+      for (const item of symbols || []) {
+        if (!item.location) continue;
+        const location = semanticLocation(this.root, item.location, item.name);
+        if (!location) continue;
+        const key = `${location.file}:${location.line}:${location.character}:${location.name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({ ...location, kind: item.kind || 0 });
+      }
+    }
+    return {
+      status: "verified",
+      reason: null,
+      candidates,
+      program_build_count: this.buildCount,
+      program_rebuilt: rebuilt,
+      snapshot_id: String(this.snapshot),
+    };
+  }
+
+  async verify(files) {
+    const rebuilt = await this.ensureCurrent();
+    const documents = [];
+    for (const file of [...new Set(files.map(value => normalize(value)))]) {
+      const document = await this.openFile(file);
+      if (document) documents.push(document);
+    }
+    if (documents.length === 0) {
+      return {
+        status: "partially_verified",
+        reason: "rust-analyzer verify has no readable Rust documents",
+        issues: [],
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: {
+          coverage: [],
+          missing: ["rust_documents"],
+        },
+      };
+    }
+    const issues = [];
+    const issueKeys = new Set();
+    let observedDiagnosticCount = 0;
+    for (const document of documents) {
+      const tracked = this.documents.get(document.uri);
+      const version = tracked.version + 1;
+      this.notify("textDocument/didChange", {
+        textDocument: { uri: document.uri, version },
+        contentChanges: [{ text: document.text }],
+      });
+      this.documents.set(document.uri, { ...tracked, version });
+    }
+    try {
+      await this.waitForFlycheckIdle(FLYCHECK_TIMEOUT_MS);
+      this.notify("textDocument/didSave", {
+        textDocument: { uri: documents[0].uri },
+        text: documents[0].text,
+      });
+      for (const document of documents) this.diagnostics.delete(normalizeUri(document.uri));
+      this.notify("rust-analyzer/clearFlycheck", null);
+      const flycheckGeneration = this.flycheckGeneration;
+      const diagnosticRefreshGeneration = this.diagnosticRefreshGeneration;
+      this.notify("rust-analyzer/runFlycheck", {
+        textDocument: { uri: documents[0].uri },
+      });
+      await this.waitForFlycheckAfter(flycheckGeneration, FLYCHECK_TIMEOUT_MS);
+      await this.waitForDiagnosticRefreshAfter(diagnosticRefreshGeneration, FLYCHECK_TIMEOUT_MS);
+      this.configStamp = this.readConfigStamp();
+    } catch (error) {
+      return {
+        status: "partially_verified",
+        reason: error.message,
+        issues: [],
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: {
+          coverage: ["syntax", "types", "imports", "modules", "crate_resolution"],
+          missing: ["rust_analyzer_flycheck_completion"],
+        },
+      };
+    }
+    if (this.serverHealth !== "ok") {
+      return {
+        status: "partially_verified",
+        reason: this.serverStatusMessage || `rust-analyzer server health: ${this.serverHealth}`,
+        issues: [],
+        program_build_count: this.buildCount,
+        program_rebuilt: rebuilt,
+        snapshot_id: String(this.snapshot),
+        verification: {
+          coverage: ["syntax", "types", "imports", "modules", "crate_resolution"],
+          missing: ["rust_analyzer_server_health"],
+        },
+      };
+    }
+    for (const document of documents) {
+      const diagnostics = await this.pullDiagnostics(document.uri);
+      for (const diagnostic of diagnostics) {
+        observedDiagnosticCount += 1;
+        if (diagnostic.severity !== 1) continue;
+        const key = `${relativeTo(this.root, document.absolute)}:${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.code || diagnostic.message}`;
+        if (issueKeys.has(key)) continue;
+        issueKeys.add(key);
+        issues.push({
+          file: relativeTo(this.root, document.absolute),
+          line: diagnostic.range.start.line + 1,
+          kind: "type_error",
+          detail: diagnostic.message || "unknown error",
+          source: "rust-deep-layer",
+        });
+      }
+    }
+    return {
+      status: "verified",
+      reason: null,
+      issues,
+      program_build_count: this.buildCount,
+      program_rebuilt: rebuilt,
+      snapshot_id: String(this.snapshot),
+      verification: {
+        coverage: ["syntax", "types", "imports", "modules", "crate_resolution"],
+        missing: [],
+        diagnostic_count: observedDiagnosticCount,
+      },
+    };
+  }
 }
 
-// --- Main request handler ---
-// Primary path: rust-analyzer LSP (rich diagnostics, warm incremental).
-// Fallback: cargo check when LSP unavailable, init fails, or times out.
-// Bootstrap: first query on cold server uses a short budget — if LSP can't
-// deliver in time, falls back to cargo-check while LSP continues warming.
-async function handleRequest(req) {
-  const root = req.root;
-  const files = req.files || [];
-  const t0 = Date.now();
+let session = null;
 
-  // If server not started yet, kick off eager warm-up for next time
-  if (!raProc && !raStartingPromise) {
-    eagerWarmUp(root);
-  }
-
-  // Warm path: LSP is ready and has proven it works
-  if (raWarmedUp && raProc && raReady && raRoot === root) {
-    try {
-      const tOpen = Date.now();
-      const issues = await queryLsp(root, files);
-      const tDone = Date.now();
-      return { issues, elapsed_ms: tDone - t0, timing: { open_ms: tOpen - t0, diag_ms: tDone - tOpen } };
-    } catch (lspErr) {
-      const cargoResult = runCargoCheck(root, files);
-      if (!cargoResult.error) {
-        cargoResult.elapsed_ms = Date.now() - t0;
-        cargoResult.fallback = `lsp: ${lspErr.message}`;
-        return cargoResult;
-      }
-      return { issues: [], elapsed_ms: Date.now() - t0, error: `lsp: ${lspErr.message}; cargo: ${cargoResult.error}` };
+async function handle(request) {
+  const root = path.resolve(request.root);
+  if (!session || session.root !== root) {
+    if (session) session.stop();
+    const executable = findRustAnalyzer();
+    if (!executable) {
+      return {
+        status: "tool_missing",
+        reason: "Rust tool_missing: rust-analyzer not found; missing=rust-analyzer",
+        issues: [],
+        relations: {},
+        module_dependencies: {},
+        candidates: [],
+        verification: { coverage: [], missing: ["rust-analyzer"] },
+        program_build_count: 0,
+        program_rebuilt: false,
+        snapshot_id: "0",
+      };
     }
+    session = new RustAnalyzerSession(root, executable);
   }
-
-  // Cold/bootstrap path: race LSP against cargo-check truly in parallel.
-  // LSP continues warming in background regardless of who wins.
-  const lspPromise = (async () => {
-    try {
-      const tInit = Date.now();
-      // Don't block on raStartingPromise — let it run concurrently with cargo
-      if (!raProc && !raStartingPromise) eagerWarmUp(root);
-      if (raStartingPromise) await raStartingPromise;
-      const tOpen = Date.now();
-      const issues = await queryLsp(root, files);
-      const tDone = Date.now();
-      return { issues, elapsed_ms: tDone - t0, timing: { init_ms: tOpen - tInit, open_ms: tOpen - t0, diag_ms: tDone - tOpen } };
-    } catch (e) {
-      return null; // LSP failed
-    }
-  })();
-
-  // Start cargo-check immediately in parallel (sync but on a separate "lane")
-  const cargoPromise = new Promise(resolve => {
-    setImmediate(() => {
-      const tCargo = Date.now();
-      const result = runCargoCheck(root, files);
-      if (!result.error) {
-        result.elapsed_ms = Date.now() - t0;
-        result.bootstrap = true;
-        result.timing = { cargo_ms: Date.now() - tCargo };
-        resolve(result);
-      } else {
-        resolve(null); // cargo failed
-      }
-    });
-  });
-
-  const budgetPromise = new Promise(resolve => {
-    setTimeout(() => resolve("timeout"), BOOTSTRAP_BUDGET_MS);
-  });
-
-  // Race: LSP wins if it delivers before budget, otherwise cargo wins immediately
-  const race = await Promise.race([lspPromise, budgetPromise]);
-  if (race !== "timeout" && race !== null) {
-    return race; // LSP delivered within budget
+  if (request.op === "analyze") {
+    return session.analyze(
+      request.files || [],
+      request.symbols || [],
+      request.symbol_positions || [],
+      request.import_tokens || [],
+      request.allow_workspace_symbol === true,
+    );
   }
-
-  // Budget expired — take cargo result (already running in parallel)
-  const cargoResult = await cargoPromise;
-  if (cargoResult) return cargoResult;
-
-  // Cargo also failed — wait for LSP result (it's still running)
-  const lspResult = await lspPromise;
-  if (lspResult) return lspResult;
-
-  return { issues: [], elapsed_ms: Date.now() - t0, error: "bootstrap: both LSP and cargo failed" };
+  if (request.op === "discover") return session.discover(request.terms || []);
+  return session.verify(request.files || []);
 }
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
+let chain = Promise.resolve();
 rl.on("line", line => {
-  line = line.trim();
-  if (!line) return;
-  let req;
-  try { req = JSON.parse(line); } catch { return; }
-  handleRequest(req).then(resp => {
-    process.stdout.write(JSON.stringify(resp) + "\n");
-  }).catch(e => {
-    process.stdout.write(JSON.stringify({ error: String(e), elapsed_ms: 0 }) + "\n");
+  chain = chain.then(async () => {
+    const started = Date.now();
+    try {
+      const result = await handle(JSON.parse(line));
+      process.stdout.write(JSON.stringify({ ...result, elapsed_ms: Date.now() - started }) + "\n");
+    } catch (error) {
+      process.stdout.write(JSON.stringify({
+        status: "partially_verified",
+        reason: String(error && error.message ? error.message : error),
+        issues: [],
+        elapsed_ms: Date.now() - started,
+      }) + "\n");
+      if (session) {
+        session.stop();
+        session = null;
+      }
+    }
   });
 });
-rl.on("close", () => { killRa(); });
-
-process.on("exit", killRa);
+rl.on("close", () => {
+  chain.finally(() => {
+    if (session) session.stop();
+  });
+});

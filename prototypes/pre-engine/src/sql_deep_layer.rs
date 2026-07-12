@@ -19,6 +19,16 @@ pub struct SqlDeepLayerResult {
     pub elapsed_ms: u128,
 }
 
+fn normalize_status(status: &str) -> &'static str {
+    match status {
+        "clean" | "sql_error" => "active",
+        "fallback" | "fallback_used" => "fallback_used",
+        "unavailable" | "tool_missing" => "tool_missing",
+        "error" => "error",
+        _ => "error",
+    }
+}
+
 fn find_script(root: &Path) -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let candidate = exe.parent()?.join("sql-deep-layer.cjs");
@@ -112,18 +122,13 @@ pub fn run(layer: &mut Option<SqlDeepLayer>, root: &Path, files: &[String]) -> S
                 .unwrap_or("active");
             let reason = val.get("reason")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(|s| s.to_string())
+                .or_else(|| val.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()));
             let fallback = val.get("fallback")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
-            let final_status = if status_str == "unavailable" {
-                "unavailable"
-            } else if fallback.is_some() {
-                "fallback"
-            } else {
-                "active"
-            };
+            let final_status = normalize_status(status_str);
 
             SqlDeepLayerResult {
                 issues,
@@ -141,5 +146,20 @@ pub fn run(layer: &mut Option<SqlDeepLayer>, root: &Path, files: &[String]) -> S
                 elapsed_ms: start.elapsed().as_millis(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_status;
+
+    #[test]
+    fn normalizes_only_explicit_sql_success_as_active() {
+        assert_eq!(normalize_status("clean"), "active");
+        assert_eq!(normalize_status("sql_error"), "active");
+        assert_eq!(normalize_status("fallback_used"), "fallback_used");
+        assert_eq!(normalize_status("tool_missing"), "tool_missing");
+        assert_eq!(normalize_status("error"), "error");
+        assert_eq!(normalize_status("unknown"), "error");
     }
 }
