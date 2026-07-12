@@ -7,23 +7,50 @@ This page records product updates that directly affect user experience. For the 
 - The desktop app is coming soon.
 - A specially trained random full-modal model (optional install) is coming with the desktop app. It connects through the foundation's built-in App Bridge and does not require any other software. With the current foundation + index + pre-check engine, a 10-minute task can be shortened to 3-5 minutes, making the workflow faster and steadier.
 
-## July 12, 2026: Product-grade Pre-check Engine Convergence
+## July 12, 2026: Mainline and Product-grade Pre-check Convergence
 
-This release changes the pre-check engine from “many languages are registered” to “only product-grade languages are advertised.” The model now sees and invokes only five mature paths: TypeScript/TSX, Python, Rust, Go, and Java. SQL, Shell, C#, PHP, Ruby, Kotlin, Dart, Swift, and C/C++ remain in development but are excluded from model capability declarations and cannot start their helpers through `pre_verify`. Uncovered files return `not_covered` quickly. Missing official semantic tools return explicit `tool_missing` or degraded states instead of presenting generic AST or heuristic output as complete verification.
+This release is not only about the pre-check engine. It converges the long-task, cache, provider, request-lifecycle, agent/workflow, MCP/Web/memory, terminal-visible, and anti-hallucination evidence work that entered main after the last July 8/9 npm release, then synchronizes every affected public package back to npm. The goal remains one coherent runtime: faster and steadier work in real projects, with reliable recovery, interruption, verification, and no competing state machines or unverified capabilities fighting each other.
 
-### How It Works
+### Long Tasks, Compact, and Cache
 
-- The existing product-grade status in the language capability table is the single switch for both model-visible capabilities and runtime dispatch. No second allowlist, registry, wrapper, or intermediate mechanism was added.
-- TypeScript/TSX, Python, Rust, Go, and Java use the same `pre_context`, `pre_plan`, `pre_impact`, and `pre_verify` contract while preserving real semantic evidence, missing-tool state, and truncation boundaries.
-- The Windows platform package ships the pre-check binary and the wiring helpers for all five languages. TypeScript and Pyright are suitable for a later lightweight bundled semantic-runtime stage; Rust, Go, and Java continue to reuse official project toolchains so the main package does not grow by several gigabytes.
-- Other languages remain hidden until demand justifies a product-grade optional language pack or an official external-tool bridge that passes the same acceptance gates.
+- Large-session resume prefers the latest usable compact boundary and uses bounded tail loading for oversized transcripts, reducing memory and wait pressure during recovery.
+- Deep compact, compact preflight, restore projection, prompt-cache lifecycle, and context-window boundaries were tightened so task, evidence, and state remain continuous across compression.
+- Read, ReadSnippets, and SourcePack can reuse unchanged windows, while tool-result budgeting deduplicates large results and trims persisted previews to reduce repeated reads and model-context churn.
+- Cache footer, usage diagnostics, and terminal-local state now follow the request lifecycle instead of maintaining conflicting views of cache hits, compact activity, and task progress.
 
-### Verification and User Experience
+### Providers, Stream Recovery, and Request Lifecycle
 
-- All 59 Rust tests passed. TypeScript/TSX, Rust, Go, and Java each passed product gates on 1,000-file fixtures, while Python passed its complete product smoke suite.
-- All five language smokes passed while running concurrently. A single pre-check process also handled a mixed five-language workspace across three full restarts and two verification passes per restart, keeping all five mature languages `verified` while SQL remained `not_covered`.
-- Eight concurrent clients completed 400 mixed calls against immature languages with no capability leak, helper startup, deadlock, or hang; all related processes were gone after the gates completed.
-- Users still receive results after evidence alignment and anti-hallucination cleanup: mature languages provide real semantic evidence, while uncovered or missing-tool cases remain explicit and are never presented as verified correctness.
+- Native Gemini and Grok provider configuration, routing, and unified runtime contracts were added together with native hosted search. Ambiguous model names can now use explicit `provider:model` selection.
+- Provider first-byte waiting, stream activity, circuit-breaker recovery, and prompt-cache lifecycle were hardened to reduce apparent hangs before the first chunk, during interrupted streams, or after recovery.
+- Foreground requests own isolated turn and abort boundaries so cancellation, retry, resume, background jobs, and final commits no longer compete for one activity state.
+- WebSearch and WebFetch now report connecting, receiving, and processing phases, honor caller cancellation, distinguish timeout and abort failures, and cap response sizes.
+
+### Agents, Workflows, Permissions, and Verification
+
+- Agent forks support full-context mode, while session forks, handoff, queued input, background jobs, and remote transport have clearer ownership and recovery boundaries.
+- Agent/job/workflow progress, verification ownership, and final completion state share one observable path so one task cannot accidentally consume another task's verification.
+- Readonly workflows, permission approval, Git operations, process guards, and user-action constraints were tightened. Recoverable failures no longer stop work too early, while unauthorized or evidence-free operations remain blocked.
+- Verification lifecycle is isolated by request and task scope, preventing historical failures or natural-language constraints from falsely downgrading current completed work.
+
+### MCP, Memory, and the Terminal-visible Layer
+
+- MCP stdio cleanup, SSE liveness, index/pre-check daemons, and startup recovery were hardened so abnormal exits do not leave stale connections or state behind.
+- Memory extraction, tombstones, persistence, and worktree-shared project roots were converged, allowing worktrees from the same Git project to share project memory without losing provenance or deletion boundaries.
+- Streaming Markdown, code blocks, structured diffs, composer chips, folded cursors, panel recovery, task footers, and tool-progress presentation were stabilized for long output that remains readable, scrollable, copyable, and interruptible.
+- Model-visible tool results are smaller, while evidence, error categories, truncation ranges, and expandable details remain available for auditing.
+
+### Anti-hallucination Evidence and Product-grade Pre-check
+
+- Compact, tool budgets, request recovery, and the final-answer gate now share the same structured evidence boundary. Historical failures, degraded states, and constraint wording are evaluated by scope instead of keyword-only blocking.
+- The pre-check engine exposes only five product-grade paths—TypeScript/TSX, Python, Rust, Go, and Java—through the same `pre_context`, `pre_plan`, `pre_impact`, and `pre_verify` contract, without a second allowlist or semantic mechanism.
+- The Windows pre-check package now carries TypeScript `5.9.3` and Pyright `1.1.410`. Explicit project versions win; otherwise Linghun uses its fixed compatible runtime. Rust, Go, and Java continue to reuse official toolchains so the main package does not grow by several gigabytes.
+- SQL, Shell, C#, PHP, Ruby, Kotlin, Dart, Swift, and C/C++ remain hidden until product-grade. Uncovered files return `not_covered` quickly, while missing official tools return explicit `tool_missing` or degraded states instead of generic AST output presented as complete verification.
+
+### Verification, Publishing, and User Experience
+
+- All 59 pre-check Rust tests passed. TypeScript/TSX, Rust, Go, and Java each passed 1,000-file product gates, Python passed its complete product smoke, and the five-language concurrent, mixed-workspace restart, and 400-call immature-language isolation gates all passed.
+- The npm audit found real post-release changes in `config`, `core`, `providers`, `tools`, `tui`, the Windows pre-check package, and the CLI, so each receives a patch release. Unchanged `shared`, `ink-runtime`, codebase-memory, native-runner, and non-Windows pre-check packages are not republished.
+- Users still receive results only after real tools, evidence alignment, and anti-hallucination cleanup: long tasks recover more reliably, provider and tool state is clearer, mature languages work out of the box, and uncovered or unverified work is never presented as correct.
 
 ## July 7, 2026: Heavy Update After Deep Real-world Development
 

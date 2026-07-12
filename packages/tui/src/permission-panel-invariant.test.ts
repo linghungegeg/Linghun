@@ -58,7 +58,7 @@ describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
 
   it("D.14D-R2: model GitStablePointCreate default ask path sets pendingLocalApproval before performStablePoint", () => {
     const pendingIdx = gitDispatchSrc.indexOf('kind: "git_stable_point"');
-    const performIdx = gitDispatchSrc.indexOf("const result = await performStablePoint(context");
+    const performIdx = gitDispatchSrc.indexOf("const result = await performStablePoint(");
     expect(pendingIdx).toBeGreaterThan(0);
     expect(performIdx).toBeGreaterThan(pendingIdx);
     expect(gitDispatchSrc).toContain('context.permissionMode === "plan"');

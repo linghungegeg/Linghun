@@ -1,11 +1,15 @@
 {
   "name": "@linghun/pre-engine-win32-x64",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "license": "Apache-2.0",
   "os": ["win32"],
   "cpu": ["x64"],
   "files": ["bundled"],
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "pyright": "1.1.410",
+    "typescript": "5.9.3"
   }
 }

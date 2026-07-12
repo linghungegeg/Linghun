@@ -17,12 +17,16 @@ function relativeTo(root, file) {
 }
 
 function findExecutable(root, name) {
-  const candidates = [
-    path.join(root, "node_modules", ".bin", name),
-    path.join(root, "node_modules", ".bin", `${name}.cmd`),
-  ];
+  const executableNames = process.platform === "win32" ? [`${name}.cmd`, name] : [name, `${name}.cmd`];
+  const candidates = executableNames.map(executableName =>
+    path.join(root, "node_modules", ".bin", executableName));
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
+  }
+  if (name === "pyright-langserver") {
+    try {
+      return require.resolve("pyright/langserver.index.js");
+    } catch {}
   }
   const locator = process.platform === "win32" ? "where.exe" : "which";
   const result = spawnSync(locator, [name], {
@@ -36,6 +40,9 @@ function findExecutable(root, name) {
 }
 
 function spawnExecutable(executable, args, options) {
+  if (executable.toLowerCase().endsWith(".js")) {
+    return spawn(process.execPath, [executable, ...args], options);
+  }
   if (process.platform === "win32" && executable.toLowerCase().endsWith(".cmd")) {
     return spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", executable, ...args], options);
   }

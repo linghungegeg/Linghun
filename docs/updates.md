@@ -7,23 +7,50 @@
 - 桌面端即将上线。
 - 特定训练的随机全模态模型（可选安装）即将随桌面端一起发布，通过底座自带的 App Bridge 进行链接，无需安装其他软件。在当前底座 + 索引 + 预检引擎下，10 分钟的任务能缩短至 3-5 分钟，更快、更稳。
 
-## 2026-07-12 产品级预检引擎收口
+## 2026-07-12 主链与产品级预检整体收口
 
-这次更新把预检引擎从“登记了多种语言”收口为“只声明已经达到产品级验收的语言”。模型当前只会看到并调用 TypeScript/TSX、Python、Rust、Go、Java 五条成熟链路；SQL、Shell、C#、PHP、Ruby、Kotlin、Dart、Swift、C/C++ 等未成熟语言继续保留研发代码，但不会进入模型能力声明，也不会在 `pre_verify` 中启动对应 helper。未覆盖文件会快速返回 `not_covered`，缺少官方语义工具时会明确返回 `tool_missing` 或降级状态，不会用通用 AST 或启发式结果冒充完整验证。
+这次更新不是只有预检引擎。它收口了 7 月 8/9 日最后一轮 npm 发布之后进入主链的长任务、缓存、Provider、请求生命周期、agent/workflow、MCP/Web/memory、终端可见层和反幻觉证据链，并把对应公共包重新同步到 npm。目标仍然是同一件事：模型在真实项目里工作得更快、更稳，能恢复、能中断、能验证，也不会因为多套状态或未经验证的能力互相打架。
 
-### 怎么实现
+### 长任务、compact 与缓存
 
-- 使用现有语言能力表中的产品级状态作为唯一开关，同时控制模型可见能力和运行时分发，不新增第二套白名单、注册表或中间机制。
-- TypeScript/TSX、Python、Rust、Go、Java统一走 `pre_context`、`pre_plan`、`pre_impact`、`pre_verify` 四段协议，并保留真实语义证据、缺失工具和截断边界。
-- 预检二进制及五种语言的接线 helper 随 Windows 平台包发布；TypeScript/Pyright 适合后续作为轻量官方语义运行时随包，Rust、Go、Java继续复用用户项目的官方工具链，避免主包膨胀为数 GB。
-- 其余语言保持隐藏，后续按真实需求通过可选语言包或官方外部工具桥接完成同级验收后再开放。
+- 大会话恢复会优先从最近可用的 compact 边界读取，并对超大 transcript 使用有界尾部加载，减少长会话恢复时的内存和等待压力。
+- deep compact、compact preflight、恢复投影、prompt cache 生命周期和上下文窗口边界继续收紧，让压缩前后保留的任务、证据和状态更连续。
+- Read/ReadSnippets/SourcePack 能复用未变化的读取窗口，工具结果预算会去重并限制持久化预览，减少重复读文件和大结果反复进入模型上下文。
+- cache footer、usage 诊断和终端本地状态统一到请求生命周期，缓存命中、compact和任务进度不再各自维护互相冲突的显示状态。
 
-### 验证与用户体验
+### Provider、流恢复与请求生命周期
 
-- 完整 Rust 单测 59/59 通过；TypeScript/TSX、Rust、Go、Java分别通过 1000 文件产品压测，Python通过完整产品 smoke。
-- 五语言同时运行的并发 smoke 全部通过；单个预检进程处理五语言混合仓库时连续重启 3 次，每轮两次验证均保持五语言 `verified`，未成熟 SQL始终为 `not_covered`。
-- 8 个并发客户端对未成熟语言执行 400 次混合调用，没有能力泄漏、helper误启动、假死或卡死；所有相关进程在门禁结束后归零。
-- 用户层面仍然看到经过证据对齐和反幻觉清洗的结果；成熟语言获得真实语义证据，未覆盖或缺工具的情况明确说明，不会把“没有验证”包装成“已经正确”。
+- 新增 Gemini 与 Grok 原生 Provider 配置、路由和统一运行契约，并补充 native hosted search；同名模型存在多个 Provider 时支持 `provider:model` 明确选择。
+- Provider 首字节等待、流式活动、熔断恢复和 prompt cache 生命周期进一步加固，减少首包未到、流中断或恢复后残留旧预览造成的假死感。
+- 前台请求拥有独立 turn 和 abort 边界，取消、重试、恢复、后台任务及最终提交不会再竞争同一份活动状态。
+- WebSearch/WebFetch 增加连接、接收、处理阶段进度，支持调用方中断、超时分类和响应大小上限，用户能分清“正在接收”“已中断”和“真正失败”。
+
+### Agent、workflow、权限与验证
+
+- agent fork 支持完整上下文模式，会话 fork、handoff、队列输入、后台任务和远程 transport 的所有权与恢复边界更加明确。
+- agent/job/workflow 的进度、验证所有者和最终完成状态进入同一条可观察链路，避免一个任务的验证结果被另一个任务误用。
+- readonly workflow、权限批准、Git 操作、process guard和用户动作约束继续收口；可恢复失败不会过早卡死，真正越权或缺证据的操作仍会被拦截。
+- verification 生命周期按请求和任务作用域隔离，历史失败信号和自然语言约束不会再轻易把当前已完成工作误判为失败。
+
+### MCP、memory 与终端可见层
+
+- MCP stdio清理、SSE liveness、索引/预检 daemon和启动恢复路径继续加固，异常退出后不残留旧连接或错误状态。
+- memory 提取、删除标记、持久化和 worktree共享根目录完成收口，同一 Git 项目的不同 worktree能复用项目记忆，同时保留来源与删除边界。
+- 流式 Markdown、代码块、结构化 diff、Composer chip、折叠光标、面板恢复、任务底栏和工具进度显示继续稳定，长输出更容易读、滚动、复制和中断。
+- 模型可见的工具结果更紧凑，但证据、错误类别、截断范围和可展开详情仍被保留，减少 token 噪音而不牺牲可审计性。
+
+### 反幻觉证据链与产品级预检
+
+- compact、工具预算、请求恢复和最终回答闸门共享同一份结构化证据边界；历史失败、降级状态和约束措辞按作用域判断，不再仅凭关键词制造误拦截。
+- 预检引擎只向模型开放 TypeScript/TSX、Python、Rust、Go、Java 五条达到产品级验收的链路，统一使用 `pre_context`、`pre_plan`、`pre_impact`、`pre_verify`，没有新增第二套白名单或语义机制。
+- Windows预检包固定携带 TypeScript `5.9.3` 与 Pyright `1.1.410`：项目明确安装的版本优先，否则自动使用 Linghun兼容版；Rust、Go、Java继续复用官方工具链，避免主包膨胀为数 GB。
+- SQL、Shell、C#、PHP、Ruby、Kotlin、Dart、Swift、C/C++ 等未成熟语言保持隐藏；未覆盖文件快速返回 `not_covered`，缺少官方工具时明确返回 `tool_missing` 或降级状态，不用通用 AST冒充完整验证。
+
+### 验证、发包与用户体验
+
+- 预检完整 Rust 单测 59/59 通过；TypeScript/TSX、Rust、Go、Java分别通过 1000 文件产品压测，Python通过完整产品 smoke；五语言并发、混合仓库连续重启和 400 次未成熟语言隔离调用均通过。
+- npm审计确认 `config`、`core`、`providers`、`tools`、`tui`、Windows预检包和 CLI在上次发布后存在实际变更并需要补丁发布；未变化的 `shared`、`ink-runtime`、codebase-memory、native runner和非 Windows预检包不重复发包。
+- 用户最终看到的仍是经过真实工具、证据对齐和反幻觉清洗后的结果：长任务更容易连续推进和恢复，Provider与工具状态更清楚，成熟语言开箱可用，未覆盖或未验证的部分不会被包装成正确结论。
 
 ## 2026-07-07 深度真实开发后的重度更新
 

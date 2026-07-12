@@ -12,3 +12,8 @@ provider.env
 .linghun/provider.env
 !.linghun/.gitkeep
 .codebase-memory/
+PRE_ENGINE_DAEMON_DEFERRED_ISSUE.md
+UNIVERSAL_PLUG_DESIGN_REVIEW.md
+docs/audit/artifacts/performance-gate-baseline-raw.json
+docs/audit/performance-windows-stability-hardening-gate-baseline.md
+prototypes/pre-engine/PRE-ENGINE-ROADMAP.md
