@@ -109,11 +109,32 @@ importers:
 
   packages/native-runner-win32-x64: {}
 
-  packages/pre-engine-darwin-arm64: {}
+  packages/pre-engine-darwin-arm64:
+    dependencies:
+      pyright:
+        specifier: 1.1.410
+        version: 1.1.410
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
-  packages/pre-engine-darwin-x64: {}
+  packages/pre-engine-darwin-x64:
+    dependencies:
+      pyright:
+        specifier: 1.1.410
+        version: 1.1.410
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
-  packages/pre-engine-linux-x64: {}
+  packages/pre-engine-linux-x64:
+    dependencies:
+      pyright:
+        specifier: 1.1.410
+        version: 1.1.410
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
   packages/pre-engine-win32-x64:
     dependencies:

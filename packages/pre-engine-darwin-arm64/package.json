@@ -1,11 +1,15 @@
 {
   "name": "@linghun/pre-engine-darwin-arm64",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "Apache-2.0",
   "os": ["darwin"],
   "cpu": ["arm64"],
   "files": ["bundled"],
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "pyright": "1.1.410",
+    "typescript": "5.9.3"
   }
 }
