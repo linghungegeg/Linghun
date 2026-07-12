@@ -2373,7 +2373,12 @@ function createReasoningPayload(level: string | undefined): { reasoning?: { effo
 
 function normalizeOpenAiReasoningEffort(level: string): string {
   const normalized = level.trim().toLowerCase();
-  if (normalized === "low" || normalized === "medium" || normalized === "high") {
+  if (
+    normalized === "low" ||
+    normalized === "medium" ||
+    normalized === "high" ||
+    normalized === "max"
+  ) {
     return normalized;
   }
   return level;

@@ -407,6 +407,24 @@ describe("OpenAI compatible provider", () => {
     expect(request.reasoning).toEqual({ effort: "high" });
   });
 
+  it("sends max reasoning effort to Responses gateways", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.6-sol",
+      endpointProfile: "responses",
+      reasoningLevel: "Max",
+    });
+
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    expect(request.reasoning).toEqual({ effort: "max" });
+  });
+
   it("can disable parallel tool calls for Responses compatibility retries without dropping reasoning", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",

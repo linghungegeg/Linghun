@@ -339,7 +339,7 @@ export type ProviderEnvSetup = {
   baseUrl: string;
   apiKey: string;
   model: string;
-  reasoningLevel?: "Low" | "Medium" | "High";
+  reasoningLevel?: "Low" | "Medium" | "High" | "Max";
   endpointProfile?: EndpointProfile;
   includeUsage?: boolean;
   auxModel?: string;
@@ -541,7 +541,7 @@ LINGHUN_OPENAI_INCLUDE_USAGE=false
 # LINGHUN_GROK_API_KEY=
 # LINGHUN_GROK_MODEL=grok-4.20-reasoning
 
-# Supported reasoning levels: Low, Medium, High.
+# Supported reasoning levels: Low, Medium, High, Max.
 LINGHUN_INFERENCE_LEVEL=High
 # Optional: leave empty to let helper roles follow the main model.
 LINGHUN_AUX_MODEL=
@@ -1134,13 +1134,14 @@ function validateProviderModel(value: string): void {
   }
 }
 
-function normalizeReasoningLevel(value: string): "Low" | "Medium" | "High" {
+function normalizeReasoningLevel(value: string): "Low" | "Medium" | "High" | "Max" {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return "Medium";
   if (normalized === "low") return "Low";
   if (normalized === "medium") return "Medium";
   if (normalized === "high") return "High";
-  throw new Error("推理等级可选 Low / Medium / High，默认 Medium。");
+  if (normalized === "max") return "Max";
+  throw new Error("推理等级可选 Low / Medium / High / Max，默认 Medium。");
 }
 
 function formatProviderEnv(setup: ProviderEnvSetup): string {

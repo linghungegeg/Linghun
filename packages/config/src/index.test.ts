@@ -611,6 +611,20 @@ describe("config directories", () => {
     expect(config.providers["openai-compatible"]?.includeUsage).toBe(true);
   });
 
+  it("loads max inference level from env", async () => {
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://api.example.com/v1");
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "responses");
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "Max");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.6-sol");
+    vi.resetModules();
+    const { loadConfig: envLoadConfig } = await import("./index.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    const config = await envLoadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("Max");
+  });
+
   it("loads deepseek endpoint profile from env", async () => {
     vi.stubEnv("LINGHUN_DEEPSEEK_BASE_URL", "https://api.deepseek.com");
     vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", "sk-deepseek-secret");
