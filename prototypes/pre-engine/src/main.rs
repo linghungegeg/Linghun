@@ -212,20 +212,26 @@ fn tool_definitions() -> Vec<Value> {
 }
 
 fn language_capability_summary(tool_name: &str) -> Value {
-    let supported_languages: Vec<&str> = language::LANGUAGE_CAPABILITIES
+    let languages: Vec<&language::LanguageCapability> = language::LANGUAGE_CAPABILITIES
         .iter()
         .filter(|capability| capability_supports_tool(capability, tool_name))
+        .collect();
+    let supported_languages: Vec<&str> = languages
+        .iter()
         .map(|capability| capability.language)
         .collect();
 
     json!({
         "tool": tool_name,
         "supported_languages": supported_languages,
-        "languages": language::LANGUAGE_CAPABILITIES,
+        "languages": languages,
     })
 }
 
 fn capability_supports_tool(capability: &language::LanguageCapability, tool_name: &str) -> bool {
+    if capability.current_status != language::CurrentStatus::ProductGrade {
+        return false;
+    }
     match tool_name {
         "pre_context" => capability.context == language::CapabilitySupport::Supported,
         "pre_plan" => capability.plan == language::CapabilitySupport::Supported,
@@ -3832,6 +3838,9 @@ fn group_changed_files_by_language(
     let mut grouped = HashMap::new();
     for file in changed_files {
         if let Some(capability) = language::capability_for_path(file) {
+            if !capability_supports_tool(capability, "pre_verify") {
+                continue;
+            }
             grouped
                 .entry(capability.language)
                 .or_insert_with(Vec::new)
@@ -4797,8 +4806,9 @@ mod tests {
 
     #[test]
     fn tool_definitions_expose_structural_boundaries() {
-        let context = tool_definitions()
-            .into_iter()
+        let tools = tool_definitions();
+        let context = tools
+            .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("pre_context"))
             .unwrap();
         let supported = context
@@ -4806,9 +4816,33 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
 
-        assert!(supported.contains(&json!("TypeScript")));
-        assert!(supported.contains(&json!("TSX")));
-        assert!(!supported.contains(&json!("C#")));
+        assert_eq!(
+            supported,
+            &vec![
+                json!("TypeScript"),
+                json!("TSX"),
+                json!("Python"),
+                json!("Rust"),
+                json!("Go"),
+                json!("Java"),
+            ]
+        );
+
+        let verify = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("pre_verify"))
+            .unwrap();
+        assert_eq!(
+            verify.pointer("/language_capabilities/supported_languages"),
+            Some(&json!(["TypeScript", "TSX", "Python", "Rust", "Go", "Java"]))
+        );
+        assert_eq!(
+            verify
+                .pointer("/language_capabilities/languages")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(6)
+        );
     }
 
     #[test]
@@ -5188,7 +5222,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_grouping_is_case_insensitive_and_preserves_unknown_files() {
+    fn registry_grouping_only_dispatches_product_grade_languages() {
         let changed_files = vec![
             "src/component.TSX".to_string(),
             "src/types.MTS".to_string(),
@@ -5199,21 +5233,22 @@ mod tests {
 
         assert_eq!(grouped.get("TSX"), Some(&vec!["src/component.TSX".to_string()]));
         assert_eq!(grouped.get("TypeScript"), Some(&vec!["src/types.MTS".to_string()]));
-        assert_eq!(grouped.get("SQL"), Some(&vec!["db/query.SQL".to_string()]));
+        assert!(!grouped.contains_key("SQL"));
 
         let tsx_files = files_for_language(&grouped, "TSX");
         let typescript_files = files_for_language(&grouped, "TypeScript");
-        let sql_files = files_for_language(&grouped, "SQL");
         let summary = build_verification_summary(
             &changed_files,
             &[
                 VerificationLayerResult { language: "TSX", files: &tsx_files, status: "verified", reason: None, verification: None },
                 VerificationLayerResult { language: "TypeScript", files: &typescript_files, status: "verified", reason: None, verification: None },
-                VerificationLayerResult { language: "SQL", files: &sql_files, status: "verified", reason: None, verification: None },
             ],
         );
         assert_eq!(summary.get("status"), Some(&json!("partially_verified")));
-        assert_eq!(summary.get("not_covered_files"), Some(&json!(["README.md"])));
+        assert_eq!(
+            summary.get("not_covered_files"),
+            Some(&json!(["db/query.SQL", "README.md"]))
+        );
     }
 
     #[test]

@@ -702,7 +702,7 @@ function validatePayload(toolName, payload, fixture) {
   if (!payload || typeof payload !== "object") {
     throw new Error(`${toolName} returned an invalid payload`);
   }
-  if (payload.semantic_engine !== "typescript_program" || payload.semantic_engine_status !== "verified") {
+  if (payload.semantic_engine !== "language_semantic_programs" || payload.semantic_engine_status !== "verified") {
     throw new Error(
       `${toolName} did not use a verified TypeScript Program snapshot: `
       + `${payload.semantic_engine || "none"}/${payload.semantic_engine_status || "none"}`,

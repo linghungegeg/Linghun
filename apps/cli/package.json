@@ -1,6 +1,6 @@
 {
   "name": "@linghun/cli",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -23,7 +23,7 @@
     "@linghun/codebase-memory-linux-x64": "0.1.0",
     "@linghun/codebase-memory-win32-x64": "0.1.0",
     "@linghun/native-runner-win32-x64": "0.1.0",
-    "@linghun/pre-engine-win32-x64": "0.1.1",
+    "@linghun/pre-engine-win32-x64": "0.1.2",
     "@linghun/pre-engine-linux-x64": "0.1.0",
     "@linghun/pre-engine-darwin-arm64": "0.1.0",
     "@linghun/pre-engine-darwin-x64": "0.1.0"

@@ -7,6 +7,24 @@ This page records product updates that directly affect user experience. For the 
 - The desktop app is coming soon.
 - A specially trained random full-modal model (optional install) is coming with the desktop app. It connects through the foundation's built-in App Bridge and does not require any other software. With the current foundation + index + pre-check engine, a 10-minute task can be shortened to 3-5 minutes, making the workflow faster and steadier.
 
+## July 12, 2026: Product-grade Pre-check Engine Convergence
+
+This release changes the pre-check engine from “many languages are registered” to “only product-grade languages are advertised.” The model now sees and invokes only five mature paths: TypeScript/TSX, Python, Rust, Go, and Java. SQL, Shell, C#, PHP, Ruby, Kotlin, Dart, Swift, and C/C++ remain in development but are excluded from model capability declarations and cannot start their helpers through `pre_verify`. Uncovered files return `not_covered` quickly. Missing official semantic tools return explicit `tool_missing` or degraded states instead of presenting generic AST or heuristic output as complete verification.
+
+### How It Works
+
+- The existing product-grade status in the language capability table is the single switch for both model-visible capabilities and runtime dispatch. No second allowlist, registry, wrapper, or intermediate mechanism was added.
+- TypeScript/TSX, Python, Rust, Go, and Java use the same `pre_context`, `pre_plan`, `pre_impact`, and `pre_verify` contract while preserving real semantic evidence, missing-tool state, and truncation boundaries.
+- The Windows platform package ships the pre-check binary and the wiring helpers for all five languages. TypeScript and Pyright are suitable for a later lightweight bundled semantic-runtime stage; Rust, Go, and Java continue to reuse official project toolchains so the main package does not grow by several gigabytes.
+- Other languages remain hidden until demand justifies a product-grade optional language pack or an official external-tool bridge that passes the same acceptance gates.
+
+### Verification and User Experience
+
+- All 59 Rust tests passed. TypeScript/TSX, Rust, Go, and Java each passed product gates on 1,000-file fixtures, while Python passed its complete product smoke suite.
+- All five language smokes passed while running concurrently. A single pre-check process also handled a mixed five-language workspace across three full restarts and two verification passes per restart, keeping all five mature languages `verified` while SQL remained `not_covered`.
+- Eight concurrent clients completed 400 mixed calls against immature languages with no capability leak, helper startup, deadlock, or hang; all related processes were gone after the gates completed.
+- Users still receive results after evidence alignment and anti-hallucination cleanup: mature languages provide real semantic evidence, while uncovered or missing-tool cases remain explicit and are never presented as verified correctness.
+
 ## July 7, 2026: Heavy Update After Deep Real-world Development
 
 This is a heavy update after deep real-world development: anti-hallucination now fits more tightly with the foundations, output is smoother, faster, and steadier, and cache hit rate has increased sharply to 96%+ without becoming dumb. The focus is not a pile of isolated features. It tightens the parts of long development runs that most often need to work together: deep compact, cache boundaries, the command surface, provider watchdogs, final-answer gates, evidence state, and task progress display.
