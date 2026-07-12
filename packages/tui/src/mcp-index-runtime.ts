@@ -571,6 +571,7 @@ const PRE_ENGINE_COMMAND = "linghun-pre-engine";
 const PRE_ENGINE_INITIALIZE_TIMEOUT_MS = 30_000;
 const PRE_ENGINE_CALL_TIMEOUT_MS = 100_000_000;
 const PRE_ENGINE_IDLE_TIMEOUT_MS = 30_000;
+const PRE_ENGINE_STDERR_LIMIT = 4_096;
 
 type PreEngineCallResult = {
   ok: boolean;
@@ -579,12 +580,20 @@ type PreEngineCallResult = {
   data?: unknown;
 };
 
+type PreEngineProcessDiagnostics = {
+  stderr: string;
+  stdinError?: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+};
+
 class PreEngineDaemon {
   private proc: ReturnType<typeof spawn> | null = null;
   private queue: Promise<void> = Promise.resolve();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private msgId = 1;
   private pendingCalls = 0;
+  private readonly processDiagnostics = new WeakMap<ReturnType<typeof spawn>, PreEngineProcessDiagnostics>();
 
   constructor(
     private readonly binary: string,
@@ -636,9 +645,24 @@ class PreEngineDaemon {
   private _ensureProc(signal?: AbortSignal): Promise<ReturnType<typeof spawn>> {
     if (this.proc) return Promise.resolve(this.proc);
     const proc = spawn(this.binary, [], { cwd: this.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const diagnostics: PreEngineProcessDiagnostics = {
+      stderr: "",
+      exitCode: null,
+      signal: null,
+    };
+    this.processDiagnostics.set(proc, diagnostics);
     this.proc = proc;
-    proc.stderr?.resume();
-    proc.once("exit", () => {
+    proc.stderr?.on("data", (chunk: Buffer | string) => {
+      diagnostics.stderr = `${diagnostics.stderr}${chunk.toString()}`.slice(-PRE_ENGINE_STDERR_LIMIT);
+    });
+    proc.stdin?.on("error", (error: Error) => {
+      diagnostics.stdinError = error.message;
+      if (this.proc === proc) this.proc = null;
+      if (!proc.killed) proc.kill();
+    });
+    proc.once("exit", (exitCode, signal) => {
+      diagnostics.exitCode = exitCode;
+      diagnostics.signal = signal;
       if (this.proc === proc) this.proc = null;
     });
     return new Promise((resolve, reject) => {
@@ -667,8 +691,9 @@ class PreEngineDaemon {
         }
         resolve(proc);
       };
-      const onError = (error: Error) => finish(error);
-      const onExit = () => finish(new Error("pre-engine process exited during initialize"));
+      const onError = (error: Error) => finish(new Error(this._formatProcessFailure(proc, error.message)));
+      const onExit = () =>
+        finish(new Error(this._formatProcessFailure(proc, "pre-engine process exited during initialize")));
       const onAbort = () => finish(new Error("pre-engine request aborted"));
       const onData = (chunk: Buffer | string) => {
         buf += chunk.toString();
@@ -755,10 +780,19 @@ class PreEngineDaemon {
             resolve(result);
           };
           const onError = (error: Error) => {
-            finish({ ok: false, summary: error.message || "pre-engine process error" }, true);
+            finish(
+              {
+                ok: false,
+                summary: this._formatProcessFailure(proc, error.message || "pre-engine process error"),
+              },
+              true,
+            );
           };
           const onExit = () => {
-            finish({ ok: false, summary: "pre-engine process exited unexpectedly" });
+            finish({
+              ok: false,
+              summary: this._formatProcessFailure(proc, "pre-engine process exited unexpectedly"),
+            });
           };
           const onAbort = () => {
             finish({ ok: false, summary: "pre-engine request aborted", errorCode: "ABORTED" }, true);
@@ -836,6 +870,19 @@ class PreEngineDaemon {
     if (!this.idleTimer) return;
     clearTimeout(this.idleTimer);
     this.idleTimer = null;
+  }
+
+  private _formatProcessFailure(proc: ReturnType<typeof spawn>, summary: string): string {
+    const diagnostics = this.processDiagnostics.get(proc);
+    if (!diagnostics) return summary;
+    const details = [
+      `code=${diagnostics.exitCode ?? "null"}`,
+      `signal=${diagnostics.signal ?? "null"}`,
+    ];
+    if (diagnostics.stdinError) details.push(`stdin=${diagnostics.stdinError}`);
+    const stderr = diagnostics.stderr.trim().replace(/\s+/g, " ");
+    if (stderr) details.push(`stderr=${stderr}`);
+    return `${summary}; ${details.join("; ")}`;
   }
 
   private _scheduleIdleIfUnused(): void {

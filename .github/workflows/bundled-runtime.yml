@@ -72,16 +72,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --manifest-path prototypes/pre-engine/Cargo.toml
+      - name: Install Linux musl target
+        if: matrix.platform_arch == 'linux-x64'
+        shell: bash
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build Linux static binary
+        if: matrix.platform_arch == 'linux-x64'
+        run: cargo build --release --target x86_64-unknown-linux-musl --manifest-path prototypes/pre-engine/Cargo.toml
+      - name: Build native binary
+        if: matrix.platform_arch != 'linux-x64'
+        run: cargo build --release --manifest-path prototypes/pre-engine/Cargo.toml
       - shell: bash
         run: |
           mkdir -p "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp prototypes/pre-engine/target/release/linghun-pre-engine.exe "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+          elif [[ "${{ matrix.platform_arch }}" == "linux-x64" ]]; then
+            cp prototypes/pre-engine/target/x86_64-unknown-linux-musl/release/linghun-pre-engine "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
           else
             cp prototypes/pre-engine/target/release/linghun-pre-engine "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+          fi
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
           fi
+      - name: Verify Linux compatibility and protocol
+        if: matrix.platform_arch == 'linux-x64'
+        shell: bash
+        run: |
+          binary="$PWD/runtime-artifacts/pre-engine/linux-x64/linghun-pre-engine"
+          if ldd "$binary" 2>&1 | grep -q 'GLIBC_'; then
+            echo "Linux pre-engine must not require glibc symbols" >&2
+            exit 1
+          fi
+          cat > /tmp/pre-engine-smoke.jsonl <<'EOF'
+          {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"rootUri":"/workspace"}}
+          {"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+          {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+          {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pre_context","arguments":{"symbol":"shared","path":"python/shared.py","depth":2}}}
+          EOF
+          for image in debian:11-slim debian:12-slim alexgshaw/build-cython-ext:20251031; do
+            output="$(docker run --rm -i --network none \
+              -v "$binary:/runtime/linghun-pre-engine:ro" \
+              -v "$PWD/prototypes/pre-engine/fixtures/structural-languages:/workspace:ro" \
+              "$image" /runtime/linghun-pre-engine < /tmp/pre-engine-smoke.jsonl)"
+            grep -q '"id":1' <<<"$output"
+            grep -q '"id":2' <<<"$output"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: pre-engine-${{ matrix.platform_arch }}

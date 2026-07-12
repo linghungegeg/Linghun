@@ -13,14 +13,14 @@ vi.mock("node:child_process", async (importOriginal) => ({
 
 class FakePreEngineProcess extends EventEmitter {
   readonly stdout = new EventEmitter();
-  readonly stderr = { resume: vi.fn() };
-  readonly stdin = { write: vi.fn(this.write.bind(this)) };
+  readonly stderr = Object.assign(new EventEmitter(), { resume: vi.fn() });
+  readonly stdin = Object.assign(new EventEmitter(), { write: vi.fn(this.write.bind(this)) });
   killed = false;
   callId?: number;
 
   constructor(
-    private readonly initialize: "reply" | "error" | "hang" = "reply",
-    private readonly call: "reply" | "hang" = "reply",
+    private readonly initialize: "reply" | "error" | "hang" | "exit" = "reply",
+    private readonly call: "reply" | "hang" | "epipe" = "reply",
   ) {
     super();
   }
@@ -49,7 +49,7 @@ class FakePreEngineProcess extends EventEmitter {
     callback?: (error?: Error | null) => void,
   ): boolean {
     const message = JSON.parse(chunk) as { id?: number; method?: string };
-    callback?.();
+    if (message.method !== "tools/call" || this.call !== "epipe") callback?.();
     if (message.method === "initialize" && this.initialize === "reply") {
       queueMicrotask(() => this.stdout.emit("data", `${JSON.stringify({ id: 0, result: {} })}\n`));
     }
@@ -61,9 +61,20 @@ class FakePreEngineProcess extends EventEmitter {
         ),
       );
     }
+    if (message.method === "initialize" && this.initialize === "exit") {
+      queueMicrotask(() => {
+        this.stderr.emit("data", "libc.so.6: version `GLIBC_2.39' not found\n");
+        this.emit("exit", 127, null);
+      });
+    }
     if (message.method === "tools/call") {
       this.callId = message.id;
       if (this.call === "reply") queueMicrotask(() => this.respondToCall());
+      if (this.call === "epipe") {
+        const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+        callback?.(error);
+        queueMicrotask(() => this.stdin.emit("error", error));
+      }
     }
     return true;
   }
@@ -155,6 +166,35 @@ describe("PreEngineDaemon lifecycle", () => {
       summary: "initialize rejected",
     });
     expect(rejected.killed).toBe(true);
+    await expect(daemon.call("pre_context", { symbol: "second" })).resolves.toMatchObject({ ok: true });
+  });
+
+  it("reports bounded stderr and exit status when the binary cannot initialize", async () => {
+    const incompatible = new FakePreEngineProcess("exit", "hang");
+    vi.mocked(spawn).mockReturnValueOnce(incompatible as never);
+    const daemon = __testCreatePreEngineDaemon("pre-engine", "F:/repo");
+
+    const result = await daemon.call("pre_context", { symbol: "first" });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.summary).toContain("pre-engine process exited during initialize");
+    expect(result.summary).toContain("code=127");
+    expect(result.summary).toContain("GLIBC_2.39");
+  });
+
+  it("contains stdin EPIPE and lets the next call restart the daemon", async () => {
+    const broken = new FakePreEngineProcess("reply", "epipe");
+    const healthy = new FakePreEngineProcess("reply", "reply");
+    vi.mocked(spawn)
+      .mockReturnValueOnce(broken as never)
+      .mockReturnValueOnce(healthy as never);
+    const daemon = __testCreatePreEngineDaemon("pre-engine", "F:/repo");
+
+    const result = await daemon.call("pre_context", { symbol: "first" });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.summary).toContain("write EPIPE");
+    expect(broken.killed).toBe(true);
     await expect(daemon.call("pre_context", { symbol: "second" })).resolves.toMatchObject({ ok: true });
   });
 
