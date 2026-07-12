@@ -47,6 +47,19 @@ function anyClauseMatches(clauses: string[], pattern: RegExp): boolean {
   return clauses.some((clause) => pattern.test(clause));
 }
 
+function isExplicitConstraintDirective(clause: string): boolean {
+  if (
+    /(?:关键词|正则|语义|解析|识别|判断|误触|误判|硬门控|硬限制|门控|约束机制|约束规则|这句话|这个说法|文案)|(?:regex|semantic|parser|parsing|wording|hard\s+(?:gate|constraint)|constraint\s+(?:parser|rule))/iu.test(
+      clause,
+    )
+  ) {
+    return false;
+  }
+  return /^(?:(?:请|麻烦|本次|这次|当前(?:请求|任务)?|这个任务|该任务|我要求|用户要求|先|然后|再|也|并且|同时|但(?:是)?)\s*)*(?:只读|只\s*(?:看|检查|分析|审计|定位)|只允许|不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许)|^(?:(?:please|for\s+this\s+(?:request|task)|then|also|but)\s+)*(?:read[-\s]?only|audit\s+only|diagnose\s+only|inspect\s+only|do\s+not|don't|dont|no\s|cannot|can't|cant|not\s+allowed|may\s+not|must\s+not|without\s|answer\s+without|use\s+no)/iu.test(
+    clause,
+  );
+}
+
 function hasPhasedReadThenWriteIntent(text: string): boolean {
   const readIntent =
     /(?:先\s*)?(?:只读|只\s*(?:看|检查|分析|审计|定位))|(?:read[-\s]?only|audit\s+only|diagnose\s+only|inspect\s+(?:only|first)|first\s+(?:inspect|audit|diagnose|read))/iu;
@@ -174,39 +187,43 @@ export function parseUserActionConstraints(text: string | undefined): UserAction
   const normalized = text.trim();
   if (!normalized) return { ...EMPTY_CONSTRAINTS };
   const clauses = splitConstraintClauses(normalized);
+  const constraintClauses =
+    /[?？]\s*$/u.test(normalized) && clauses.length === 1
+      ? []
+      : clauses.filter(isExplicitConstraintDirective);
   const explicitWriteException = hasExplicitWriteException(normalized);
   const explicitToolException = hasExplicitToolException(normalized);
 
   const forbidAllTools =
     !explicitToolException &&
     (anyClauseMatches(
-      clauses,
+      constraintClauses,
       /(?:不要|别|不准|禁止)\s*(?:再)?(?:用|使用|调用|执行)\s*(?:任何|所有|全部|一切)工具/iu,
     ) ||
-      anyClauseMatches(clauses, /(?:禁止|不准)\s*(?:任何|所有|全部|一切)工具/iu) ||
+      anyClauseMatches(constraintClauses, /(?:禁止|不准)\s*(?:任何|所有|全部|一切)工具/iu) ||
       anyClauseMatches(
-        clauses,
+        constraintClauses,
         /^(?:请)?(?:不要|别|不准|禁止)\s*(?:再)?(?:用|使用|调用|执行)工具(?:了)?(?:\s*只回答)?$/iu,
       ) ||
       anyClauseMatches(
-        clauses,
+        constraintClauses,
         /(?:do\s+not|don't|dont|no)\s+(?:use|call|run|execute)\s+(?:(?:any|all|every|the)\s+)?tools/iu,
       ) ||
-      anyClauseMatches(clauses, /^no\s+(?:tools|tool\s+use)$/iu) ||
-      anyClauseMatches(clauses, /^(?:answer\s+)?without\s+(?:using\s+)?tools$/iu) ||
-      anyClauseMatches(clauses, /^use\s+no\s+tools$/iu));
+      anyClauseMatches(constraintClauses, /^no\s+(?:tools|tool\s+use)$/iu) ||
+      anyClauseMatches(constraintClauses, /^(?:answer\s+)?without\s+(?:using\s+)?tools$/iu) ||
+      anyClauseMatches(constraintClauses, /^use\s+no\s+tools$/iu));
 
   const readonlyOnly =
     !explicitWriteException &&
     anyClauseMatches(
-      clauses,
+      constraintClauses,
       /(?:只读|只(?:看|检查|分析|审计|定位)|read[-\s]?only|audit\s+only|diagnose\s+only)/iu,
     );
 
   const forbidWrite =
     !explicitWriteException &&
     (readonlyOnly ||
-      clauses.some(
+      constraintClauses.some(
         (clause) =>
           !isTargetScopedWriteBan(clause) &&
           (/(?:不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许).{0,12}(?:改|修改|写|写入|编辑|创建|删除|动文件|改文件)/iu.test(
@@ -227,7 +244,7 @@ export function parseUserActionConstraints(text: string | undefined): UserAction
             )),
       ));
 
-  const forbidTests = clauses.some(
+  const forbidTests = constraintClauses.some(
     (clause) =>
       !/(?:smoke|冒烟)/iu.test(clause) &&
       (/(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:单元测试|测试|test)/iu.test(clause) ||
@@ -235,26 +252,26 @@ export function parseUserActionConstraints(text: string | undefined): UserAction
   );
 
   const forbidBuild =
-    anyClauseMatches(clauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:build|构建|打包)/iu) ||
-    anyClauseMatches(clauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?build/iu);
+    anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:build|构建|打包)/iu) ||
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?build/iu);
 
   const forbidLint =
-    anyClauseMatches(clauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:lint|检查格式)/iu) ||
-    anyClauseMatches(clauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?lint/iu);
+    anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:lint|检查格式)/iu) ||
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?lint/iu);
 
   const forbidTypecheck =
-    anyClauseMatches(clauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:type[-\s]?check|类型检查)/iu) ||
-    anyClauseMatches(clauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?type[-\s]?check/iu);
+    anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:type[-\s]?check|类型检查)/iu) ||
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?type[-\s]?check/iu);
 
   const forbidSmoke =
-    anyClauseMatches(clauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:smoke|冒烟测试|冒烟)/iu) ||
-    anyClauseMatches(clauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?smoke(?:\s+tests?)?/iu);
+    anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:smoke|冒烟测试|冒烟)/iu) ||
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?smoke(?:\s+tests?)?/iu);
 
   const forbidShell =
     forbidAllTools ||
-    anyClauseMatches(clauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:执行|运行|跑)\s*(?:任何|所有|全部)?\s*(?:终端|shell)?\s*命令|用\s*Bash|用\s*shell|bash|shell|终端命令)/iu) ||
-    anyClauseMatches(clauses, /(?:do\s+not|don't|dont|no)\s+(?:run|execute|use)\s+(?:(?:any|all|the)\s+)?(?:commands?|bash|shell)/iu) ||
-    anyClauseMatches(clauses, /^no\s+shell(?:\s+commands?)?$/iu);
+    anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:执行|运行|跑)\s*(?:任何|所有|全部)?\s*(?:终端|shell)?\s*命令|用\s*Bash|用\s*shell|bash|shell|终端命令)/iu) ||
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run|execute|use)\s+(?:(?:any|all|the)\s+)?(?:commands?|bash|shell)/iu) ||
+    anyClauseMatches(constraintClauses, /^no\s+shell(?:\s+commands?)?$/iu);
 
   return {
     readonlyOnly,

@@ -70,6 +70,30 @@ describe("user-action-constraints", () => {
   });
 
   it.each([
+    "普通问答里提到不要修改文件，为什么会触发硬门控",
+    "不要修改文件这句话是关键词正则还是语义判断",
+    "只读审计是不是会被当成整轮硬限制",
+    "为什么不要 build 会阻止验证",
+    "不要修改文件吗？",
+    "do not edit files is this parsed by regex or semantic intent",
+    'Does "do not run tests" trigger a hard gate?',
+    '"no tools" is a constraint wording example',
+    "do not edit files?",
+  ])("does not turn constraint questions or wording discussions into hard runtime state: %s", (text) => {
+    const constraints = parseUserActionConstraints(text);
+
+    expect(Object.values(constraints).every((value) => value === false)).toBe(true);
+  });
+
+  it("still applies a separate explicit directive after a constraint question", () => {
+    const constraints = parseUserActionConstraints(
+      "为什么只读会误触？这次不要修改文件",
+    );
+
+    expect(constraints.forbidWrite).toBe(true);
+  });
+
+  it.each([
     "只读审计，不要修改文件",
     "只读审计，不要修复",
     "先检查清楚，但不要写入或编辑文件",
