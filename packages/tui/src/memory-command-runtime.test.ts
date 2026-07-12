@@ -1,19 +1,23 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
-import { defaultConfig } from "@linghun/config";
+import { defaultConfig, resolveStoragePaths } from "@linghun/config";
+import { SessionStore } from "@linghun/core";
 import { describe, expect, it, vi } from "vitest";
+import { isHandoffPacket } from "./handoff-session-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
   configureMemoryCommandRuntime,
   executeMemoryMutation,
+  handleMemoryCommand,
   resumeSessionWithHandoff,
   runAutoLearningOnTurnEnd,
 } from "./memory-command-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
+import { writeMemoryLearningMode } from "./tui-memory-runtime.js";
 import { createCacheState } from "./tui-state-runtime.js";
 import type { MemoryCandidate } from "./tui-data-types.js";
 
@@ -46,9 +50,16 @@ describe("memory-command-runtime", () => {
       },
       mcp: { enabled: false, servers: [], tools: [] },
       memory: makeContext(directory, makeMemory()).memory,
-      tools: { todos: [], changedFiles: [] },
-      evidence: [],
-      checkpoints: [],
+      tools: {
+        todos: [{ id: "old-todo", content: "old", status: "in_progress" }],
+        changedFiles: ["old.ts"],
+        readSnapshots: { "old-session\0old.ts": { hash: "old", size: 3 } },
+      },
+      evidence: [{ id: "old-evidence" }],
+      checkpoints: [{ id: "old-checkpoint" }],
+      lastVerification: { id: "old-verification", status: "pass", commands: [] },
+      pendingLocalApproval: { kind: "model_tool" },
+      currentRequestTurnId: "old-request",
       index: createIndexState(config),
       permissionMode: "default",
       solutionCompleteness: createSolutionCompletenessStatus(),
@@ -57,6 +68,11 @@ describe("memory-command-runtime", () => {
           session: { id: "target-session", model: "target-model" },
           transcript: [],
         }),
+        create: async () => ({
+          id: "child-session",
+          model: "target-model",
+        }),
+        appendEvent: async () => undefined,
       },
     } as unknown as TuiContext;
     context.cache.deepCompact = { id: "old-deep" } as never;
@@ -70,7 +86,7 @@ describe("memory-command-runtime", () => {
 
     await resumeSessionWithHandoff("target-session", context, output, "resume");
 
-    expect(context.sessionId).toBe("target-session");
+    expect(context.sessionId).toBe("child-session");
     expect(context.model).toBe("target-model");
     expect(context.deepCompactInFlight).toBeUndefined();
     expect(context.cache.deepCompact).toBeUndefined();
@@ -79,7 +95,283 @@ describe("memory-command-runtime", () => {
     expect(context.cache.postCompactRestoreLatch).toBeUndefined();
     expect(context.cache.postCompactCacheWarmup).toBeUndefined();
     expect(context.cache.lastCacheSafePrefix).toBeUndefined();
+    expect(context.tools.todos).toEqual([]);
+    expect(context.tools.changedFiles).toEqual([]);
+    expect(context.tools.readSnapshots).toEqual({});
+    expect(context.evidence).toEqual([]);
+    expect(context.checkpoints).toEqual([]);
+    expect(context.lastVerification).toBeUndefined();
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(context.currentRequestTurnId).toBeUndefined();
     expect(output.text).toContain("target-session");
+    expect(output.text).toContain("child-session");
+  });
+
+  it("keeps the current session state unchanged when child creation fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-resume-create-fail-"));
+    const config = structuredClone(defaultConfig);
+    const oldTools = {
+      workspaceRoot: directory,
+      todos: [{ id: "old-todo", content: "old", status: "in_progress" }],
+      changedFiles: ["old.ts"],
+      readSnapshots: { "old-session\0old.ts": { hash: "old", size: 3 } },
+    } as unknown as TuiContext["tools"];
+    const oldApproval = { kind: "model_tool" } as unknown as NonNullable<
+      TuiContext["pendingLocalApproval"]
+    >;
+    const context = {
+      projectPath: directory,
+      config,
+      sessionId: "current-session",
+      sessionStoreVerifiedId: "current-session",
+      model: "old-model",
+      cache: createCacheState(directory, "old-model", [], config),
+      mcp: { enabled: false, servers: [], tools: [] },
+      memory: makeContext(directory, makeMemory()).memory,
+      tools: oldTools,
+      evidence: [],
+      checkpoints: [],
+      index: createIndexState(config),
+      permissionMode: "default",
+      solutionCompleteness: createSolutionCompletenessStatus(),
+      pendingLocalApproval: oldApproval,
+      currentRequestTurnId: "current-request",
+      store: {
+        resume: async () => ({
+          session: { id: "target-session", model: "target-model" },
+          transcript: [],
+        }),
+        create: async () => {
+          throw new Error("create failed");
+        },
+      },
+    } as unknown as TuiContext;
+    configureMemoryDeps();
+    const output = new MockWritable();
+
+    await resumeSessionWithHandoff("target-session", context, output, "resume");
+
+    expect(context.sessionId).toBe("current-session");
+    expect(context.sessionStoreVerifiedId).toBe("current-session");
+    expect(context.model).toBe("old-model");
+    expect(context.tools).toBe(oldTools);
+    expect(context.pendingLocalApproval).toBe(oldApproval);
+    expect(context.currentRequestTurnId).toBe("current-request");
+    expect(output.text).toContain("create failed");
+  });
+
+  it("deletes the candidate child when handoff append fails and keeps later events on the current session", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-resume-append-fail-"));
+    const config = structuredClone(defaultConfig);
+    const deletedSessionIds: string[] = [];
+    const appendedSessionIds: string[] = [];
+    const context = {
+      projectPath: directory,
+      config,
+      sessionId: "current-session",
+      sessionStoreVerifiedId: "current-session",
+      model: "old-model",
+      cache: createCacheState(directory, "old-model", [], config),
+      mcp: { enabled: false, servers: [], tools: [] },
+      memory: makeContext(directory, makeMemory()).memory,
+      tools: { todos: [], changedFiles: [], readSnapshots: {} },
+      evidence: [],
+      checkpoints: [],
+      index: createIndexState(config),
+      permissionMode: "default",
+      solutionCompleteness: createSolutionCompletenessStatus(),
+      store: {
+        resume: async () => ({
+          session: { id: "target-session", model: "target-model" },
+          transcript: [],
+        }),
+        create: async () => ({ id: "child-session", model: "target-model" }),
+        delete: async (sessionId: string) => {
+          deletedSessionIds.push(sessionId);
+        },
+        appendEvent: async (sessionId: string) => {
+          if (sessionId === "child-session") throw new Error("handoff append failed");
+          appendedSessionIds.push(sessionId);
+        },
+      },
+    } as unknown as TuiContext;
+    configureMemoryDeps();
+    const output = new MockWritable();
+
+    await resumeSessionWithHandoff("target-session", context, output, "resume");
+
+    expect(deletedSessionIds).toEqual(["child-session"]);
+    expect(context.sessionId).toBe("current-session");
+    expect(context.sessionStoreVerifiedId).toBe("current-session");
+    expect(context.model).toBe("old-model");
+    expect(output.text).toContain("handoff append failed");
+
+    await context.store.appendEvent(context.sessionId ?? "missing", {
+      type: "user_message",
+      id: "next-user",
+      text: "next event",
+      createdAt: new Date().toISOString(),
+    });
+    expect(appendedSessionIds).toEqual(["current-session"]);
+  });
+
+  it("removes the candidate child and partial memory artifacts when handoff file persistence fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-resume-handoff-fail-"));
+    const config = structuredClone(defaultConfig);
+    config.storage = {
+      projectData: { scope: "project" },
+      userData: { scope: "project" },
+      sessions: { scope: "project" },
+      memory: {
+        project: { scope: "project" },
+        user: { scope: "project" },
+        session: { scope: "project" },
+      },
+      index: { scope: "project" },
+      logs: { scope: "project" },
+      jobs: { scope: "project" },
+      cache: { scope: "project" },
+    };
+    const childMemoryDir = join(
+      resolveStoragePaths(config, directory).memorySession,
+      "child-session",
+    );
+    await mkdir(join(childMemoryDir, "runtime-ledger.jsonl"), { recursive: true });
+    const deletedSessionIds: string[] = [];
+    let appendCalled = false;
+    const context = {
+      projectPath: directory,
+      config,
+      sessionId: "current-session",
+      sessionStoreVerifiedId: "current-session",
+      model: "old-model",
+      cache: createCacheState(directory, "old-model", [], config),
+      mcp: { enabled: false, servers: [], tools: [] },
+      memory: makeContext(directory, makeMemory()).memory,
+      tools: { todos: [], changedFiles: [], readSnapshots: {} },
+      evidence: [],
+      checkpoints: [],
+      index: createIndexState(config),
+      permissionMode: "default",
+      solutionCompleteness: createSolutionCompletenessStatus(),
+      store: {
+        resume: async () => ({
+          session: { id: "target-session", model: "target-model" },
+          transcript: [],
+        }),
+        create: async () => ({ id: "child-session", model: "target-model" }),
+        delete: async (sessionId: string) => {
+          deletedSessionIds.push(sessionId);
+        },
+        appendEvent: async () => {
+          appendCalled = true;
+        },
+      },
+    } as unknown as TuiContext;
+    configureMemoryDeps();
+
+    await resumeSessionWithHandoff("target-session", context, new MockWritable(), "resume");
+
+    expect(deletedSessionIds).toEqual(["child-session"]);
+    expect(appendCalled).toBe(false);
+    expect(context.sessionId).toBe("current-session");
+    await expect(stat(childMemoryDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("resumes one source into isolated child sessions without writing the source transcript", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-memory-resume-child-"));
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-memory-resume-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath });
+    const source = await store.create({ model: "target-model" });
+    await store.appendEvent(source.id, {
+      type: "user_message",
+      id: "source-user",
+      text: "source-only history",
+      createdAt: new Date(0).toISOString(),
+    });
+    const sourceBefore = await readFile(source.transcriptPath, "utf8");
+    const config = structuredClone(defaultConfig);
+    config.storage = {
+      projectData: { scope: "project" },
+      userData: { scope: "project" },
+      sessions: { scope: "project" },
+      memory: {
+        project: { scope: "project" },
+        user: { scope: "project" },
+        session: { scope: "project" },
+      },
+      index: { scope: "project" },
+      logs: { scope: "project" },
+      jobs: { scope: "project" },
+      cache: { scope: "project" },
+    };
+    const createContext = () => ({
+      projectPath,
+      config,
+      model: "old-model",
+      cache: createCacheState(projectPath, "old-model", [], config),
+      mcp: { enabled: false, servers: [], tools: [] },
+      memory: makeContext(projectPath, makeMemory()).memory,
+      tools: { todos: [], changedFiles: [] },
+      evidence: [],
+      checkpoints: [],
+      index: createIndexState(config),
+      permissionMode: "default",
+      solutionCompleteness: createSolutionCompletenessStatus(),
+      store,
+    }) as unknown as TuiContext;
+    configureMemoryDeps();
+    const first = createContext();
+    const second = createContext();
+
+    await Promise.all([
+      resumeSessionWithHandoff(source.id, first, new MockWritable(), "resume"),
+      resumeSessionWithHandoff(source.id, second, new MockWritable(), "resume"),
+    ]);
+
+    expect(first.sessionId).not.toBe(source.id);
+    expect(second.sessionId).not.toBe(source.id);
+    expect(first.sessionId).not.toBe(second.sessionId);
+    expect(await readFile(source.transcriptPath, "utf8")).toBe(sourceBefore);
+    for (const childId of [first.sessionId, second.sessionId]) {
+      const child = await store.resume(childId ?? "missing");
+      expect(child.transcript.some((event) => event.type === "handoff_packet")).toBe(true);
+      expect(child.transcript.some((event) => event.type === "user_message")).toBe(false);
+    }
+
+    const firstChildId = first.sessionId ?? "missing";
+    await store.appendEvent(firstChildId, {
+      type: "todo_update",
+      items: [{ id: "fresh-todo", content: "continue fresh child work", status: "in_progress" }],
+      createdAt: new Date(1).toISOString(),
+    });
+    await store.appendEvent(firstChildId, {
+      type: "evidence_record",
+      id: "fresh-child-evidence",
+      kind: "file_read",
+      summary: "fresh child evidence",
+      source: "src/fresh-child.ts",
+      supportsClaims: ["code_fact"],
+      createdAt: new Date(2).toISOString(),
+    });
+    const third = createContext();
+    await resumeSessionWithHandoff(firstChildId, third, new MockWritable(), "resume");
+
+    const grandchild = await store.resume(third.sessionId ?? "missing");
+    const freshPacketEvent = [...grandchild.transcript]
+      .reverse()
+      .find((event) => event.type === "handoff_packet");
+    expect(freshPacketEvent?.type).toBe("handoff_packet");
+    if (freshPacketEvent?.type !== "handoff_packet" || !isHandoffPacket(freshPacketEvent.packet)) {
+      throw new Error("missing fresh handoff");
+    }
+    const freshPacket = freshPacketEvent.packet;
+    expect(freshPacket.parentSessionId).toBe(firstChildId);
+    expect(freshPacket.goal).toBe("continue fresh child work");
+    expect(freshPacket.evidenceRefs).toContainEqual(
+      expect.objectContaining({ id: "fresh-child-evidence" }),
+    );
+    expect(freshPacket.id).not.toBe(first.memory.lastHandoff?.id);
   });
 
   it("fails closed for unknown memory mutation actions", async () => {
@@ -88,6 +380,30 @@ describe("memory-command-runtime", () => {
         action: "future-action",
       } as never),
     ).rejects.toThrow(/未知 memory mutation action/);
+  });
+
+  it("invalidates the old runtime owner across learning off then on", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-mode-owner-"));
+    const context = makeContext(directory, makeMemory());
+    context.memory.learningMode = "active";
+    context.memoryAutoLearningRuntime = {
+      latestRequestTurnId: "old-learning-owner",
+      inFlight: Promise.resolve(),
+      trailing: {
+        userText: "old trailing",
+        requestTurnId: "old-trailing-owner",
+        sessionId: "session-memory-test",
+        signal: new AbortController().signal,
+      },
+    };
+    configureMemoryDeps();
+
+    await handleMemoryCommand(["learn", "off"], context, new MockWritable());
+    await handleMemoryCommand(["learn", "on"], context, new MockWritable());
+
+    expect(context.memory.learningMode).toBe("active");
+    expect(context.memoryAutoLearningRuntime.latestRequestTurnId).toBeUndefined();
+    expect(context.memoryAutoLearningRuntime.trailing).toBeUndefined();
   });
 
   it("persists a tombstone before deleting a project memory", async () => {
@@ -262,6 +578,12 @@ describe("memory-command-runtime", () => {
         };
         yield {
           type: "message_stop" as const,
+          id: "cross-window-off-stop",
+          chunkCount: 1,
+          hadUsage: false,
+        };
+        yield {
+          type: "message_stop" as const,
           id: "memory-delete-audit-stop",
           chunkCount: 1,
           hadUsage: false,
@@ -337,7 +659,136 @@ describe("memory-command-runtime", () => {
     expect(result.acceptedDeleted).toBe(1);
     expect(context.memory.accepted).toEqual([]);
     expect(systemEvents).toContainEqual(expect.stringContaining("action=deleted"));
-    expect(evidenceEvents).toEqual(["auto_deleted"]);
+    expect(evidenceEvents).toEqual([]);
+  });
+
+  it("drops a cross-window learning-off result before persistence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-cross-window-off-"));
+    const transcript: unknown[] = [];
+    const context = makeContext(directory, makeMemory(), transcript);
+    context.memory.accepted = [];
+    context.memory.learningMode = "active";
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const classifierStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    context.modelGateway = {
+      stream: async function* () {
+        started();
+        await gate;
+        yield {
+          type: "assistant_text_delta" as const,
+          id: "cross-window-off",
+          text: JSON.stringify({
+            action: "create",
+            taxonomy: "user",
+            summary: "User preference: concise Chinese answers",
+            turnKind: "preference",
+            stability: "stable",
+          }),
+        };
+        yield {
+          type: "message_stop" as const,
+          id: "memory-fact-ledger-stop",
+          chunkCount: 1,
+          hadUsage: false,
+        };
+      },
+    } as unknown as TuiContext["modelGateway"];
+    configureMemoryDeps();
+    const pending = runAutoLearningOnTurnEnd(context, "请记住：我偏好简短中文回答。", {
+      requestTurnId: "turn-memory-test",
+      sessionId: "session-memory-test",
+      signal: new AbortController().signal,
+      isCurrent: () => true,
+    });
+    await classifierStarted;
+
+    const otherWindow = makeContext(directory, makeMemory());
+    otherWindow.memory.learningMode = "off";
+    await writeMemoryLearningMode(otherWindow);
+    release();
+    const result = await pending;
+
+    expect(result.modelCalled).toBe(true);
+    expect(result.skippedReason).toContain("learning_mode");
+    expect(context.memory.learningMode).toBe("off");
+    expect(context.memory.accepted).toEqual([]);
+    expect(context.evidence).toEqual([]);
+    expect(transcript).toEqual([]);
+  });
+
+  it("records classifier failure as model-called degradation without memory evidence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-classifier-failure-"));
+    const context = makeContext(directory, makeMemory());
+    context.memory.accepted = [];
+    context.memory.learningMode = "active";
+    context.modelGateway = {
+      stream: async function* () {
+        yield { type: "error" as const, error: new Error("classifier unavailable") };
+      },
+    } as unknown as TuiContext["modelGateway"];
+    configureMemoryDeps();
+
+    const result = await runAutoLearningOnTurnEnd(context, "请记住：我偏好简短中文回答。", {
+      requestTurnId: "turn-memory-test",
+      sessionId: "session-memory-test",
+      signal: new AbortController().signal,
+      isCurrent: () => true,
+    });
+
+    expect(result.modelCalled).toBe(true);
+    expect(result.skippedReason).toContain("semantic_classifier_unavailable");
+    expect(context.memory.accepted).toEqual([]);
+    expect(context.evidence).toEqual([]);
+  });
+
+  it("keeps owner-guarded memory_accepted as the sole fact ledger without PASS evidence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "linghun-memory-fact-ledger-"));
+    const transcript: unknown[] = [];
+    const context = makeContext(directory, makeMemory(), transcript);
+    context.memory.accepted = [];
+    context.memory.learningMode = "active";
+    context.modelGateway = {
+      stream: async function* () {
+        yield {
+          type: "assistant_text_delta" as const,
+          id: "memory-fact-ledger",
+          text: JSON.stringify({
+            action: "create",
+            taxonomy: "user",
+            summary: "User preference: concise Chinese answers",
+            turnKind: "preference",
+            stability: "stable",
+          }),
+        };
+        yield {
+          type: "message_stop" as const,
+          id: "memory-fact-ledger-stop",
+          chunkCount: 1,
+          hadUsage: false,
+        };
+      },
+    } as unknown as TuiContext["modelGateway"];
+    const evidenceEvents: string[] = [];
+    configureMemoryDeps({ systemEvents: [], evidenceEvents });
+
+    const result = await runAutoLearningOnTurnEnd(context, "请记住：我偏好简短中文回答。", {
+      requestTurnId: "turn-memory-test",
+      sessionId: "session-memory-test",
+      signal: new AbortController().signal,
+      isCurrent: () => true,
+    });
+
+    expect(result.acceptedCreated).toBe(1);
+    expect(result.modelCalled).toBe(true);
+    expect(transcript).toContainEqual(expect.objectContaining({ type: "memory_accepted" }));
+    expect(evidenceEvents).toEqual([]);
+    expect(context.evidence).toEqual([]);
   });
 
   it("retries the semantic classifier through the shared provider lifecycle", async () => {
@@ -388,7 +839,7 @@ describe("memory-command-runtime", () => {
         sessionId: "session-memory-test",
         signal: new AbortController().signal,
       });
-      await Promise.resolve();
+      await vi.waitFor(() => expect(attempts).toBe(1));
       await vi.advanceTimersByTimeAsync(700);
       const result = await pending;
 
@@ -429,11 +880,24 @@ function configureMemoryDeps(recording?: {
   });
 }
 
-function makeContext(directory: string, memory: MemoryCandidate): TuiContext {
+function makeContext(
+  directory: string,
+  memory: MemoryCandidate,
+  transcript: unknown[] = [],
+): TuiContext {
   return {
     projectPath: directory,
     currentRequestTurnId: "turn-memory-test",
+    sessionId: "session-memory-test",
+    config: defaultConfig,
+    model: defaultConfig.defaultModel,
     providerBreaker: createProviderCircuitBreakerState(),
+    evidence: [],
+    store: {
+      appendEvent: async (_sessionId: string, event: unknown, commitGuard?: () => boolean) => {
+        if (!commitGuard || commitGuard()) transcript.push(event);
+      },
+    },
     memory: {
       projectDir: directory,
       userDir: directory,

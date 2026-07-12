@@ -28,6 +28,7 @@ export async function runCommandCapture(
   args: string[],
   cwd: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{
   exitCode: number;
   stdout: string;
@@ -35,15 +36,58 @@ export async function runCommandCapture(
   summary: string;
   errorCode?: string;
 }> {
+  if (signal?.aborted) {
+    return {
+      exitCode: 130,
+      stdout: "",
+      stderr: "",
+      summary: `命令已取消：${redactedPath(command)}`,
+      errorCode: "ABORTED",
+    };
+  }
   return new Promise((resolvePromise) => {
     let child: ChildProcess;
     const guard = createProcessGuard();
+    let aborted = false;
+    let abortSettleTimer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (result: {
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+      summary: string;
+      errorCode?: string;
+    }) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (abortSettleTimer) clearTimeout(abortSettleTimer);
+      signal?.removeEventListener("abort", onAbort);
+      resolvePromise(result);
+    };
+    const abortedResult = (confirmed: boolean) => ({
+      exitCode: 130,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+      summary: `命令已取消：${redactedPath(command)}`,
+      errorCode: confirmed ? "ABORTED" : "ABORTED_UNCONFIRMED",
+    });
+    const onAbort = () => {
+      if (aborted || settled) return;
+      aborted = true;
+      guard.requestStop(true);
+      abortSettleTimer = setTimeout(() => settle(abortedResult(false)), 2_000);
+      abortSettleTimer.unref();
+    };
     try {
       child = spawn(command, args, { cwd, shell: false, windowsHide: true });
       guard.track(child, { label: `command:${command}` });
     } catch (error) {
       const nodeError = error as NodeJS.ErrnoException;
-      resolvePromise({
+      settle({
         exitCode: 127,
         stdout: "",
         stderr: "",
@@ -52,25 +96,24 @@ export async function runCommandCapture(
       });
       return;
     }
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       guard.requestStop(false);
       setTimeout(() => {
         guard.requestStop(true);
       }, 1_000).unref();
-      resolvePromise({
+      settle({
         exitCode: 124,
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
         summary: `命令超时：${redactedPath(command)}`,
       });
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
-      resolvePromise({
+      settle({
         exitCode: 127,
         stdout: "",
         stderr: "",
@@ -79,10 +122,13 @@ export async function runCommandCapture(
       });
     });
     child.on("close", (exitCode) => {
-      clearTimeout(timer);
+      if (aborted) {
+        settle(abortedResult(true));
+        return;
+      }
       const out = Buffer.concat(stdout).toString("utf8");
       const err = Buffer.concat(stderr).toString("utf8");
-      resolvePromise({
+      settle({
         exitCode: exitCode ?? 1,
         stdout: out,
         stderr: err,

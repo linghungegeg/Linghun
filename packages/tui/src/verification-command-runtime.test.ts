@@ -13,6 +13,7 @@ import { executeLinghunControlToolUse } from "./model-tool-runtime.js";
 import { handleVerifyCommand } from "./slash-command-runtime.js";
 import { createMemoryState } from "./tui-state-runtime.js";
 import { createEvidenceBackedMemoryCandidates } from "./tui-memory-runtime.js";
+import { parseUserActionConstraints } from "./user-action-constraints.js";
 import { runWorkflowVerificationStep } from "./workflow-command-runtime.js";
 import type { VerificationReport, VerificationStepKind } from "./tui-data-types.js";
 import {
@@ -355,6 +356,142 @@ describe("verification-command-runtime", () => {
     expect(report.status).toBe("partial");
     expect(report.commands).toEqual([]);
     expect(report.unverified).toContain("verification plan contained no executable steps");
+  });
+
+  it("filters only forbidden verification kinds at the runner execution boundary", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-kind-filter-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const report = await runVerificationPlan(
+      [
+        {
+          kind: "test",
+          command: `node -e "require('fs').writeFileSync('test-ran.txt','ok')"`,
+          reason: "allowed test",
+        },
+        {
+          kind: "build",
+          command: `node -e "require('fs').writeFileSync('build-ran.txt','bad')"`,
+          reason: "forbidden build",
+        },
+      ],
+      context,
+      "session-kind-filter",
+      new MockWritable(),
+      async () => {},
+      { userActionConstraints: parseUserActionConstraints("不要 build") },
+    );
+
+    expect(report.status).toBe("partial");
+    expect(report.commands.map((command) => command.kind)).toEqual(["test"]);
+    expect(await readdir(projectPath)).toContain("test-ran.txt");
+    expect(await readdir(projectPath)).not.toContain("build-ran.txt");
+    expect(report.unverified.join(" ")).toContain("build skipped");
+  });
+
+  it("returns PARTIAL without spawning when every verification kind is filtered", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-all-filtered-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const report = await runVerificationPlan(
+      [
+        {
+          kind: "smoke",
+          command: `node -e "require('fs').writeFileSync('smoke-ran.txt','bad')"`,
+          reason: "forbidden smoke",
+        },
+      ],
+      context,
+      "session-all-filtered",
+      new MockWritable(),
+      async () => {},
+      { userActionConstraints: parseUserActionConstraints("不要 smoke") },
+    );
+
+    expect(report).toMatchObject({ status: "partial", commands: [] });
+    expect(await readdir(projectPath)).not.toContain("smoke-ran.txt");
+  });
+
+  it.each([
+    ["default", "partial", false],
+    ["plan", "partial", false],
+    ["auto-review", "pass", true],
+    ["full-access", "pass", true],
+  ] as const)(
+    "uses the existing Bash permission decision for model-side verification in %s mode",
+    async (permissionMode, expectedStatus, shouldRun) => {
+      const projectPath = await mkdtemp(join(tmpdir(), `linghun-verify-permission-${permissionMode}-`));
+      await writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { test: "node -e \"require('fs').writeFileSync('ran.txt','ok')\"" } }),
+        "utf8",
+      );
+      await writeFile(join(projectPath, "package-lock.json"), "", "utf8");
+      const context = await createRunnableVerificationContext(projectPath);
+      const plan = (await createVerificationPlan(projectPath, "default")).filter(
+        (step) => step.kind === "test",
+      );
+      const report = await runVerificationPlan(
+        plan,
+        context,
+        `session-permission-${permissionMode}`,
+        new MockWritable(),
+        async () => {},
+        { permissionMode },
+      );
+
+      expect(report.status).toBe(expectedStatus);
+      expect((await readdir(projectPath)).includes("ran.txt")).toBe(shouldRun);
+      if (!shouldRun) {
+        expect(report.commands).toEqual([]);
+        expect(report.unverified.join(" ")).toContain("Bash permission");
+      }
+    },
+  );
+
+  it("does not let model RunVerification bypass default Bash permission", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-model-permission-"));
+    await writeFile(
+      join(projectPath, "package.json"),
+      JSON.stringify({ scripts: { test: "node -e \"require('fs').writeFileSync('ran.txt','bad')\"" } }),
+      "utf8",
+    );
+    await writeFile(join(projectPath, "package-lock.json"), "", "utf8");
+    const context = await createRunnableVerificationContext(projectPath);
+    context.permissionMode = "default";
+    context.currentRequestTurnId = "request-model-permission";
+
+    const result = await executeLinghunControlToolUse(
+      { id: "verify-model-permission", name: "RunVerification", input: { level: "test" } },
+      context,
+      "session-model-permission",
+      new MockWritable(),
+      { requestTurnId: "request-model-permission" } as never,
+    );
+
+    expect(result).toMatchObject({ ok: false, data: { status: "partial", commands: [] } });
+    expect(result.text).toContain("Bash");
+    expect(await readdir(projectPath)).not.toContain("ran.txt");
+    expect(context.activeVerificationAbortControllers?.size ?? 0).toBe(0);
+    expect(context.lastVerification?.status).toBe("partial");
+  });
+
+  it("propagates workflow invocation constraints into the runner without widening them", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-workflow-constraints-"));
+    await writeFile(
+      join(projectPath, "package.json"),
+      JSON.stringify({ scripts: { build: "node -e \"require('fs').writeFileSync('built.txt','bad')\"" } }),
+      "utf8",
+    );
+    await writeFile(join(projectPath, "package-lock.json"), "", "utf8");
+    const context = await createRunnableVerificationContext(projectPath);
+    const report = await runWorkflowVerificationStep("build", context, new MockWritable(), {
+      ownerSessionId: "session-workflow-constraints",
+      permissionMode: "full-access",
+      userActionConstraints: parseUserActionConstraints("不要 build，但可以 typecheck"),
+    });
+
+    expect(report).toMatchObject({ status: "partial", commands: [] });
+    expect(report.unverified.join(" ")).toContain("build skipped");
+    expect(await readdir(projectPath)).not.toContain("built.txt");
   });
 
   it("writes verification logs under LINGHUN_DATA_DIR when isolated", async () => {
@@ -1081,6 +1218,33 @@ describe("verification-command-runtime", () => {
     expect(context.activeVerificationAbortControllers?.has(report.id)).toBe(false);
   });
 
+  it("does not replace the authoritative verification run when pre-registration meta persistence fails", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-meta-failure-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    context.latestVerificationRunId = "existing-run";
+    context.latestVerificationRunIds = new Map([["session:session-meta-failure", "existing-run"]]);
+    context.store = {
+      appendEvent: vi.fn(async () => {
+        throw new Error("meta persist failed");
+      }),
+    } as unknown as TuiContext["store"];
+
+    await expect(
+      runVerificationPlan(
+        [{ kind: "test", command: 'node -e "console.log(\'unused\')"', reason: "meta failure" }],
+        context,
+        "session-meta-failure",
+        new MockWritable(),
+        async () => {},
+      ),
+    ).rejects.toThrow("meta persist failed");
+
+    expect(context.latestVerificationRunId).toBe("existing-run");
+    expect(context.latestVerificationRunIds.get("session:session-meta-failure")).toBe("existing-run");
+    expect(context.backgroundTasks).toHaveLength(0);
+    expect(context.activeVerificationAbortControllers?.size ?? 0).toBe(0);
+  });
+
   it("persists the downgraded terminal task when verification_end fails once", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-end-retry-"));
     const context = await createRunnableVerificationContext(projectPath);
@@ -1232,6 +1396,68 @@ describe("verification-command-runtime", () => {
     expect(olderReport.status).toBe("stale");
     expect(isCurrentVerificationReport(context, olderReport)).toBe(false);
   }, 30_000);
+
+  it("keeps concurrent workflows under one request independently authoritative", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-workflow-owner-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const sharedRequest = {
+      ownerSessionId: "session-workflow-owner",
+      requestTurnId: "request-workflow-owner",
+    };
+    const workflowA = runVerificationPlan(
+      [
+        {
+          kind: "test",
+          command: 'node -e "setTimeout(()=>console.log(\'workflow-a\'), 300)"',
+          reason: "workflow a",
+        },
+      ],
+      context,
+      "session-workflow-owner",
+      new MockWritable(),
+      async () => {},
+      { ...sharedRequest, workflowRunId: "workflow-a" },
+    );
+    await waitFor(() => context.activeVerificationAbortControllers?.size === 1);
+    const workflowB = await runVerificationPlan(
+      [{ kind: "test", command: 'node -e "console.log(\'workflow-b\')"', reason: "workflow b" }],
+      context,
+      "session-workflow-owner",
+      new MockWritable(),
+      async () => {},
+      { ...sharedRequest, workflowRunId: "workflow-b" },
+    );
+    const workflowAReport = await workflowA;
+
+    expect(workflowAReport.status).toBe("pass");
+    expect(workflowB.status).toBe("pass");
+    expect(workflowAReport.scope?.ownerKey).toBe(
+      "workflow:session-workflow-owner:workflow-a",
+    );
+    expect(workflowB.scope?.ownerKey).toBe("workflow:session-workflow-owner:workflow-b");
+    expect(isCurrentVerificationReport(context, workflowAReport)).toBe(true);
+    expect(isCurrentVerificationReport(context, workflowB)).toBe(true);
+  }, 30_000);
+
+  it("uses agent identity ahead of workflow and request identity", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-agent-owner-"));
+    const context = await createRunnableVerificationContext(projectPath);
+    const report = await runVerificationPlan(
+      [],
+      context,
+      "session-agent-owner",
+      new MockWritable(),
+      async () => {},
+      {
+        ownerAgentId: "agent-owner",
+        workflowRunId: "workflow-owner",
+        requestTurnId: "request-owner",
+      },
+    );
+
+    expect(report.scope?.ownerKey).toBe("agent:session-agent-owner:agent-owner");
+    expect(isCurrentVerificationReport(context, report)).toBe(true);
+  });
 
   it("runs workflow verification only in its owned cwd snapshot", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-workflow-main-"));
@@ -1533,6 +1759,9 @@ async function createVerificationRunContext(mode: "degrade" | "stop"): Promise<T
     backgroundTasks: [],
     backgroundAbortControllers: new Map(),
     evidence: [],
+    permissionMode: "full-access",
+    permissions: { rules: [], recentDenied: [] },
+    tools: { workspaceRoot: projectPath, changedFiles: [], todos: [] },
     cache: createCacheState(projectPath),
     hooks: await createHookState(defaultConfig, projectPath),
     store: {
@@ -1564,6 +1793,9 @@ async function createRunnableVerificationContext(projectPath: string): Promise<T
     backgroundTasks: [],
     backgroundAbortControllers: new Map(),
     evidence: [],
+    permissionMode: "full-access",
+    permissions: { rules: [], recentDenied: [] },
+    tools: { workspaceRoot: projectPath, changedFiles: [], todos: [] },
     cache: createCacheState(projectPath),
     hooks: await createHookState(defaultConfig, projectPath),
     store: {

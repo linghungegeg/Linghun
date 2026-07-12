@@ -415,6 +415,33 @@ describe("Ink TTY interaction smoke", () => {
     await shell.waitUntilRenderFlush();
     expect(events).toContainEqual({ type: "permission-action", actionId: "deny" });
 
+    view = {
+      ...view,
+      permission: {
+        toolName: "Write",
+        reason: "default 模式需要确认",
+        risk: "medium",
+        scope: ["report.md"],
+        hint: "选择权限动作",
+        actions: [
+          { id: "allow_once", label: "允许本次", shortcut: "y" },
+          { id: "deny", label: "拒绝", shortcut: "n" },
+          { id: "cancel", label: "取消" },
+        ],
+      },
+    };
+    shell.rerender();
+    await shell.waitUntilRenderFlush();
+    const beforePermissionCancel = events.length;
+    input.write("\x1b");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await shell.waitUntilRenderFlush();
+    expect(events.slice(beforePermissionCancel)).toContainEqual({
+      type: "permission-action",
+      actionId: "cancel",
+    });
+    expect(events.slice(beforePermissionCancel)).not.toContainEqual({ type: "escape" });
+
     shell.unmount();
   });
 

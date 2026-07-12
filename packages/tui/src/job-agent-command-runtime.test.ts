@@ -13,7 +13,7 @@ import {
 } from "./job-agent-command-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import { formatAgentRunToolResultData } from "./model-tool-runtime.js";
-import { formatAgentSummary } from "./tui-agent-job-runtime.js";
+import { formatAgentSummary, getAgentPermissionMode } from "./tui-agent-job-runtime.js";
 import type { AgentRun, EvidenceRecord } from "./tui-data-types.js";
 
 function makeAgent(overrides: Partial<AgentRun> = {}): AgentRun {
@@ -48,6 +48,13 @@ function makeAgent(overrides: Partial<AgentRun> = {}): AgentRun {
 }
 
 describe("agent terminal status and full report consumption", () => {
+  it("keeps verifier agents on the invocation permission mode", () => {
+    expect(getAgentPermissionMode("verifier", "full-access")).toBe("full-access");
+    expect(getAgentPermissionMode("verifier", "auto-review")).toBe("auto-review");
+    expect(getAgentPermissionMode("verifier", "plan")).toBe("plan");
+    expect(getAgentPermissionMode("explorer", "full-access")).toBe("plan");
+  });
+
   it("formats idle completed agents using lastTerminalStatus instead of plain idle", () => {
     const line = formatAgentSummary(makeAgent(), {} as never);
 

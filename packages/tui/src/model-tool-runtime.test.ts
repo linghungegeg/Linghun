@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { mkdtemp, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Writable } from "node:stream";
 import {
   builtInTools,
@@ -10,6 +13,8 @@ import {
 } from "@linghun/tools";
 
 import { createModelToolDefinitions } from "./model-loop-runtime.js";
+import { createFailureLearningState } from "./failure-learning-runtime.js";
+import { withMemoryDirectoryLock } from "./memory-extraction-runtime.js";
 import {
   __testBuildForkArgsFromStartAgentInput,
   __testBuildPreEngineFallbackRequiredResult,
@@ -44,13 +49,19 @@ class WebToolOutput extends Writable {
   }
 }
 
-function createWebToolTestContext(events: unknown[]): TuiContext {
+function createWebToolTestContext(events: unknown[], projectPath = process.cwd()): TuiContext {
   return {
-    tools: createToolContext(process.cwd()),
+    projectPath,
+    sessionId: "session-web",
+    tools: createToolContext(projectPath),
     currentRequestTurnId: "turn-web",
     store: {
-      appendEvent: async (_sessionId: string, event: unknown) => {
-        events.push(event);
+      appendEvent: async (
+        _sessionId: string,
+        event: unknown,
+        commitGuard?: () => boolean,
+      ) => {
+        if (!commitGuard || commitGuard()) events.push(event);
       },
     },
     language: "zh-CN",
@@ -91,7 +102,9 @@ describe("model-tool-runtime Web terminal output", () => {
       data: { isError: true, aborted: false, timedOut: true },
     })) as typeof originalCall;
     const events: unknown[] = [];
-    const context = createWebToolTestContext(events);
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-web-failure-"));
+    const context = createWebToolTestContext(events, projectPath);
+    context.failureLearning = createFailureLearningState(projectPath);
     const output = new WebToolOutput();
     const controller = new AbortController();
 
@@ -119,10 +132,14 @@ describe("model-tool-runtime Web terminal output", () => {
 
   it("keeps successful Web output on the normal output path", async () => {
     const originalCall = builtInTools.WebSearch.call;
-    builtInTools.WebSearch.call = (async () => ({
-      text: "result",
-      data: { isError: false, searches: 1, count: 1 },
-    })) as typeof originalCall;
+    let observedSignal: AbortSignal | undefined;
+    builtInTools.WebSearch.call = (async (_input, toolContext) => {
+      observedSignal = toolContext.abortSignal;
+      return {
+        text: "result",
+        data: { isError: false, searches: 1, count: 1 },
+      };
+    }) as typeof originalCall;
     const context = createWebToolTestContext([]);
     const output = new WebToolOutput();
     const controller = new AbortController();
@@ -140,8 +157,121 @@ describe("model-tool-runtime Web terminal output", () => {
       );
 
       expect(result.ok).toBe(true);
+      expect(observedSignal).toBe(controller.signal);
       expect(output.errors).toEqual([]);
       expect(output.text).toContain("执行 1 次搜索");
+    } finally {
+      builtInTools.WebSearch.call = originalCall;
+    }
+  });
+
+  it("keeps new-owner evidence when a stale request reuses the same tool use id", async () => {
+    const originalCall = builtInTools.WebSearch.call;
+    builtInTools.WebSearch.call = (async () => ({
+      text: "old owner result",
+      data: { isError: false, searches: 1, count: 1 },
+    })) as typeof originalCall;
+    const events: unknown[] = [];
+    const context = createWebToolTestContext(events);
+    const output = new WebToolOutput();
+    const controller = new AbortController();
+    const originalAppendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (sessionId, event, commitGuard) => {
+      if (
+        (event as { type?: string }).type === "tool_result" &&
+        context.currentRequestTurnId === "turn-web"
+      ) {
+        context.currentRequestTurnId = "turn-next";
+        context.evidence.push({
+          id: "new-owner-evidence",
+          kind: "web_source",
+          summary: "new owner result",
+          source: "WebSearch",
+          supportsClaims: ["web_source"],
+          toolUseId: "shared-tool-id",
+          ownerScope: {
+            ownerSessionId: "session-web",
+            requestTurnId: "turn-next",
+            cwd: context.projectPath,
+          },
+          createdAt: new Date().toISOString(),
+        });
+      }
+      await originalAppendEvent(sessionId, event, commitGuard);
+    };
+
+    try {
+      const result = await executeApprovedModelToolUse(
+        { id: "shared-tool-id", name: "WebSearch", input: { query: "old owner" } },
+        "WebSearch",
+        context,
+        "session-web",
+        output,
+        undefined,
+        undefined,
+        { requestTurnId: "turn-web", signal: controller.signal },
+      );
+
+      expect(result).toMatchObject({ ok: false, text: expect.stringContaining("stale") });
+      expect(context.evidence).toEqual([
+        expect.objectContaining({
+          id: "new-owner-evidence",
+          toolUseId: "shared-tool-id",
+          ownerScope: expect.objectContaining({ requestTurnId: "turn-next" }),
+        }),
+      ]);
+      expect(output.text).not.toContain("执行 1 次搜索");
+      expect(output.text).not.toContain("old owner result");
+      expect(output.errors).toEqual([]);
+    } finally {
+      builtInTools.WebSearch.call = originalCall;
+    }
+  });
+
+  it("drops failure learning and visible output when owner changes while its lock is pending", async () => {
+    const originalCall = builtInTools.WebSearch.call;
+    builtInTools.WebSearch.call = (async () => ({
+      text: "old owner timed out",
+      data: { isError: true, aborted: false, timedOut: true },
+    })) as typeof originalCall;
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-web-stale-learning-"));
+    const events: unknown[] = [];
+    const context = createWebToolTestContext(events, projectPath);
+    context.failureLearning = createFailureLearningState(projectPath);
+    const output = new WebToolOutput();
+    const controller = new AbortController();
+    let pending: ReturnType<typeof executeApprovedModelToolUse> | undefined;
+
+    try {
+      await withMemoryDirectoryLock(context.failureLearning.directory, async () => {
+        pending = executeApprovedModelToolUse(
+          { id: "stale-failure", name: "WebSearch", input: { query: "old owner" } },
+          "WebSearch",
+          context,
+          "session-web",
+          output,
+          undefined,
+          undefined,
+          { requestTurnId: "turn-web", signal: controller.signal },
+        );
+        await vi.waitFor(() => {
+          expect(events.some((event) => (event as { type?: string }).type === "tool_result"))
+            .toBe(true);
+        });
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        context.currentRequestTurnId = "turn-next";
+      });
+
+      const result = await pending!;
+      const files = await readdir(context.failureLearning.directory);
+      expect(result).toMatchObject({ ok: false, text: expect.stringContaining("stale") });
+      expect(files.filter((file) => file.endsWith(".json"))).toEqual([]);
+      expect(context.failureLearning.records).toEqual([]);
+      expect(context.lastToolFailure).toBeUndefined();
+      expect(JSON.stringify(events)).not.toContain("policy_tool_feedback");
+      expect(output.text).not.toContain("已超时");
+      expect(output.text).not.toContain("old owner timed out");
+      expect(output.errors).toEqual([]);
     } finally {
       builtInTools.WebSearch.call = originalCall;
     }

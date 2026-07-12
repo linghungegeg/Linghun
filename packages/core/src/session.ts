@@ -346,6 +346,243 @@ export type TranscriptEvent =
   | { type: "session_import"; source: string; summary: string; createdAt: string }
   | { type: "session_end"; sessionId: string; createdAt: string };
 
+export type UsableDeepCompactPacket = Record<string, unknown> & {
+  kind: "deep";
+  scope: "full transcript semantic compact";
+  id: string;
+  summary: string;
+  preservedEvidenceRefs: string[];
+  preservedFiles: string[];
+  narrativeSummary?: string;
+  userMessagesVerbatim?: string[];
+  toolResultSummaries?: string[];
+  codeSnippets?: string[];
+  activeAgentsWorkflows: string[];
+  needsAttentionAgentsWorkflows?: string[];
+  staleResumableAgentsWorkflows?: string[];
+  pendingItems: string[];
+  decisions: string[];
+  risks: string[];
+  createdAt: string;
+  model: string;
+  provider: string;
+  trigger: "manual" | "request" | "continuation" | "final" | "agent-child" | "workflow";
+  transcriptEventCount: number;
+};
+
+export type UsableCompactProjection = Record<string, unknown> & {
+  summary: string;
+  restoreContext?: Record<string, unknown>;
+};
+
+export type HydratableCompactProjection = UsableCompactProjection & {
+  boundaryId: string;
+  createdAt: string;
+  pressureRatio: number;
+  preCompactChars: number;
+  postCompactChars: number;
+  discardedRange: string;
+  toolPairingSafe: boolean;
+  risks: string[];
+  evidenceRefs: string[];
+};
+
+export type UsableTranscriptCompactBoundary =
+  | { kind: "deep"; packet: UsableDeepCompactPacket }
+  | {
+      kind: "projection";
+      projection: UsableCompactProjection;
+      hydrationProjection?: HydratableCompactProjection;
+    };
+
+const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
+
+export function isUsableDeepCompactPacket(value: unknown): value is UsableDeepCompactPacket {
+  if (!isRecord(value)) return false;
+  const packet = value;
+  return (
+    packet.kind === "deep" &&
+    packet.scope === "full transcript semantic compact" &&
+    typeof packet.id === "string" &&
+    typeof packet.summary === "string" &&
+    isStringArray(packet.preservedEvidenceRefs) &&
+    isStringArray(packet.preservedFiles) &&
+    (packet.narrativeSummary === undefined || typeof packet.narrativeSummary === "string") &&
+    (packet.userMessagesVerbatim === undefined || isStringArray(packet.userMessagesVerbatim)) &&
+    (packet.toolResultSummaries === undefined || isStringArray(packet.toolResultSummaries)) &&
+    (packet.codeSnippets === undefined || isStringArray(packet.codeSnippets)) &&
+    isStringArray(packet.activeAgentsWorkflows) &&
+    (packet.needsAttentionAgentsWorkflows === undefined ||
+      isStringArray(packet.needsAttentionAgentsWorkflows)) &&
+    (packet.staleResumableAgentsWorkflows === undefined ||
+      isStringArray(packet.staleResumableAgentsWorkflows)) &&
+    isStringArray(packet.pendingItems) &&
+    isStringArray(packet.decisions) &&
+    isStringArray(packet.risks) &&
+    typeof packet.createdAt === "string" &&
+    typeof packet.model === "string" &&
+    typeof packet.provider === "string" &&
+    isDeepCompactTrigger(packet.trigger) &&
+    typeof packet.transcriptEventCount === "number"
+  );
+}
+
+function isHydratableCompactProjection(value: unknown): value is HydratableCompactProjection {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.boundaryId === "string" &&
+    typeof value.createdAt === "string" &&
+    typeof value.summary === "string" &&
+    (value.windowId === undefined || typeof value.windowId === "string") &&
+    (value.replacementKind === undefined || value.replacementKind === "provider-visible") &&
+    (value.replacedMessageCount === undefined || typeof value.replacedMessageCount === "number") &&
+    (value.replacementMessageCount === undefined ||
+      typeof value.replacementMessageCount === "number") &&
+    (value.terminalVisibleBeforeCount === undefined ||
+      typeof value.terminalVisibleBeforeCount === "number") &&
+    (value.terminalVisibleAfterCount === undefined ||
+      typeof value.terminalVisibleAfterCount === "number") &&
+    typeof value.pressureRatio === "number" &&
+    typeof value.preCompactChars === "number" &&
+    typeof value.postCompactChars === "number" &&
+    (value.postCompactTargetChars === undefined ||
+      typeof value.postCompactTargetChars === "number") &&
+    (value.retriggerGuard === undefined || isCompactRetriggerGuard(value.retriggerGuard)) &&
+    (value.savingsRatio === undefined || typeof value.savingsRatio === "number") &&
+    (value.acceptance === undefined || isCompactAcceptanceSnapshot(value.acceptance)) &&
+    (value.progress === undefined || isCompactProgressSnapshot(value.progress)) &&
+    (value.restoreContext === undefined || isCompactRestoreContext(value.restoreContext)) &&
+    typeof value.discardedRange === "string" &&
+    typeof value.toolPairingSafe === "boolean" &&
+    isStringArray(value.risks) &&
+    isStringArray(value.evidenceRefs)
+  );
+}
+
+export function parseUsableTranscriptCompactBoundary(
+  event: TranscriptEvent | undefined,
+): UsableTranscriptCompactBoundary | undefined {
+  if (event?.type === "deep_compact_packet") {
+    return isUsableDeepCompactPacket(event.packet)
+      ? { kind: "deep", packet: event.packet }
+      : undefined;
+  }
+  if (
+    event?.type !== "system_event" ||
+    !event.message.startsWith(COMPACT_PROJECTION_EVENT_PREFIX)
+  ) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(
+      event.message.slice(COMPACT_PROJECTION_EVENT_PREFIX.length),
+    );
+    if (!isRecord(parsed) || typeof parsed.summary !== "string") return undefined;
+    const { restoreContext, ...projectionFields } = parsed;
+    const projection: UsableCompactProjection = {
+      ...projectionFields,
+      summary: parsed.summary,
+      ...(isRecord(restoreContext) ? { restoreContext } : {}),
+    };
+    return {
+      kind: "projection",
+      projection,
+      ...(isHydratableCompactProjection(parsed) ? { hydrationProjection: parsed } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isDeepCompactTrigger(value: unknown): boolean {
+  return (
+    value === "manual" ||
+    value === "request" ||
+    value === "continuation" ||
+    value === "final" ||
+    value === "agent-child" ||
+    value === "workflow"
+  );
+}
+
+function isCompactRetriggerGuard(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.baselineChars === "number" &&
+    typeof value.tailGrowthThreshold === "number"
+  );
+}
+
+function isCompactAcceptanceSnapshot(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value.budget === "hit" || value.budget === "miss") &&
+    (value.replacementProjection === "active" ||
+      value.replacementProjection === "missing" ||
+      value.replacementProjection === "disabled") &&
+    (value.terminalVisibleProjection === "reduced" ||
+      value.terminalVisibleProjection === "not-reduced" ||
+      value.terminalVisibleProjection === "unknown") &&
+    (value.uiNotice === "quiet-success" || value.uiNotice === "needs-attention") &&
+    (value.rollback === "available" ||
+      value.rollback === "active" ||
+      value.rollback === "legacy-compact-behavior-available") &&
+    (value.featureFlags === undefined || isCompactFeatureFlagSnapshot(value.featureFlags))
+  );
+}
+
+function isCompactFeatureFlagSnapshot(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.replacementProjection === "boolean" &&
+    typeof value.terminalVisibleProjection === "boolean" &&
+    typeof value.retainedBudget === "boolean"
+  );
+}
+
+function isCompactProgressSnapshot(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.status === "complete" &&
+    isStringArray(value.stages) &&
+    typeof value.preCompactChars === "number" &&
+    typeof value.postCompactChars === "number" &&
+    (value.targetChars === undefined || typeof value.targetChars === "number") &&
+    (value.savingsRatio === undefined || typeof value.savingsRatio === "number")
+  );
+}
+
+function isCompactRestoreContext(value: unknown): value is Record<string, unknown> {
+  return (
+    isRecord(value) &&
+    typeof value.goal === "string" &&
+    typeof value.currentTask === "string" &&
+    typeof value.phaseStatus === "string" &&
+    isStringArray(value.userConstraints) &&
+    isStringArray(value.keyFiles) &&
+    isStringArray(value.changedFiles) &&
+    isStringArray(value.evidenceRefs) &&
+    isStringArray(value.activeAgentsWorkflows) &&
+    isStringArray(value.needsAttentionAgentsWorkflows) &&
+    isStringArray(value.staleResumableAgentsWorkflows) &&
+    isStringArray(value.pendingItems) &&
+    isStringArray(value.decisions) &&
+    isStringArray(value.risks) &&
+    typeof value.indexStatus === "string" &&
+    typeof value.cacheFreshness === "string" &&
+    typeof value.memoryStatus === "string" &&
+    typeof value.verificationRequirement === "string"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
 export type SessionListItem = Pick<
   Session,
   "id" | "projectName" | "projectPath" | "createdAt" | "updatedAt" | "summary" | "transcriptPath"

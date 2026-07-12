@@ -71,6 +71,7 @@ import {
   __testCreateShellBlockOutput,
   __testCreateTuiRuntimeContext,
   __testCreateVerificationLevelForReadiness,
+  __testClaimAndPersistAllowAlwaysApproval,
   __testFormatStartAgentDidNotStartMessage,
   __testGetCurrentWorkflowStepRequest,
   __testParseRunWorkflowToolInput,
@@ -152,7 +153,11 @@ import {
   resumeDurableJob,
   runDurableJobLiteTick,
 } from "./job-agent-command-runtime.js";
-import { runWorkflowVerificationStep } from "./workflow-command-runtime.js";
+import {
+  hydrateWorkflowRuns,
+  runRegistryWorkflow,
+  runWorkflowVerificationStep,
+} from "./workflow-command-runtime.js";
 import {
   getDurableJobStatePath,
   listDurableJobs as listDurableJobsFromRuntime,
@@ -188,7 +193,7 @@ import {
 } from "./terminal-readiness-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
 import { findAgent, rememberBackgroundTask } from "./tui-agent-job-runtime.js";
-import type { AgentRun } from "./tui-data-types.js";
+import type { AgentRun, WorkflowRunState } from "./tui-data-types.js";
 import { formatRoleUsageLines } from "./usage-stats-presenter.js";
 import { type WorkflowPlan, normalizeWorkflowPlan } from "./workflow-plan-schema.js";
 
@@ -208,6 +213,14 @@ function formatFooterIndexLabel(language: "zh-CN" | "en-US", status: string): st
 
 function readSrc(relativePath: string): Promise<string> {
   return readFile(srcPath(relativePath), "utf8");
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 class MemoryOutput extends Writable {
@@ -1976,6 +1989,62 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(0);
     expect(seen).toContain("assistant_text_delta");
   });
+
+  it.each([
+    ["false", (): boolean => false, false],
+    [
+      "true-to-false race",
+      (() => {
+        let checks = 0;
+        return (): boolean => ++checks === 1;
+      })(),
+      false,
+    ],
+    ["true", (): boolean => true, true],
+  ] as const)(
+    "calls onEvent only after a %s commit guard is accepted",
+    async (_label, commitGuard, expected) => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-headless-onevent-guard-"));
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const context = await createTestContext(project, store, session, createTestModelConfig());
+      const seen: string[] = [];
+
+      const exitCode = await runHeadlessTask({
+        prompt: "test",
+        projectPath: project,
+        stdout: new MemoryOutput(),
+        stderr: new MemoryOutput(),
+        __testContext: context,
+        __testStore: store,
+        __testSkipHydration: true,
+        onEvent: (event) => {
+          if ("id" in event && event.id === "guarded-event") seen.push(event.id);
+        },
+        __testSendMessage: async () => {
+          await store.appendEvent(
+            session.id,
+            {
+              type: "assistant_text_delta",
+              id: "guarded-event",
+              text: "guarded",
+              createdAt: new Date().toISOString(),
+            },
+            commitGuard,
+          );
+        },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(seen.includes("guarded-event")).toBe(expected);
+      const { transcript } = await store.resume(session.id);
+      expect(
+        transcript.some(
+          (event) => event.type === "assistant_text_delta" && event.id === "guarded-event",
+        ),
+      ).toBe(expected);
+    },
+  );
 
   it("isolates onEvent callback errors from engine event writes", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-onevent-throw-"));
@@ -6132,6 +6201,68 @@ describe("Phase 06 TUI slash commands", () => {
     expect([...(context.toolResultBudgetState?.replacements.values() ?? [])][0]?.record.artifact.preview).toBe("preview text");
   });
 
+  it("hydrates only structurally usable compact boundaries on resume", () => {
+    const context = {
+      sessionId: "session-compact-resume",
+      projectPath: join(tmpdir(), "linghun-compact-resume"),
+      memory: { candidates: [], accepted: [], rejected: [], disabled: [], retired: [] },
+      tools: { todos: [] },
+      evidence: [],
+      cache: { compacted: false, compactBoundaries: [] },
+    } as unknown as TuiContext;
+    const projection = {
+      boundaryId: "projection-resume",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      summary: "resume projection",
+      pressureRatio: 0.9,
+      preCompactChars: 10_000,
+      postCompactChars: 2_000,
+      discardedRange: "events 1-20",
+      toolPairingSafe: true,
+      risks: [],
+      evidenceRefs: [],
+    };
+    const deepPacket = {
+      kind: "deep",
+      scope: "full transcript semantic compact",
+      id: "deep-resume",
+      summary: "resume deep packet",
+      preservedEvidenceRefs: [],
+      preservedFiles: [],
+      activeAgentsWorkflows: [],
+      pendingItems: [],
+      decisions: [],
+      risks: [],
+      createdAt: "2026-07-12T00:00:00.000Z",
+      model: "test-model",
+      provider: "test-provider",
+      trigger: "manual",
+      transcriptEventCount: 20,
+    };
+
+    hydrateResumeContext(context, [
+      { type: "deep_compact_packet", packet: deepPacket, createdAt: deepPacket.createdAt },
+      {
+        type: "deep_compact_packet",
+        packet: { id: "malformed-later-packet" },
+        createdAt: "2026-07-12T00:00:01.000Z",
+      },
+      {
+        type: "system_event",
+        id: "projection-resume-event",
+        level: "info",
+        message: `compact_projection:${JSON.stringify(projection)}`,
+        createdAt: projection.createdAt,
+      },
+    ]);
+
+    expect(context.cache.deepCompact?.id).toBe("deep-resume");
+    expect(context.cache.compactProjection?.boundaryId).toBe("projection-resume");
+    expect(context.cache.compactBoundaries.map((boundary) => boundary.id)).toEqual([
+      "projection-resume",
+    ]);
+  });
+
   it("refreshes current memory state before resume and restores only the latest session-scoped record", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-resume-memory-state-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -7527,15 +7658,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
     expect(repeatedPrompt).not.toContain("SYSTEMIC_GAP_WARNING");
     expect(repeatedPrompt).not.toContain("最近同类权限拒绝反复出现");
-    expect(context.solutionCompleteness).toMatchObject({
-      triggerReason: "repeated_denial",
-      classificationRequired: false,
-      classification: "unknown",
-      impactAreas: [],
-      severity: "unknown",
-      requiredBeforeAction: false,
-    });
-    expect(context.solutionCompleteness.evidenceRefs).toContain("permission_denial:Bash:plan");
+    expect(context.solutionCompleteness).toEqual(createSolutionCompletenessStatus());
 
     await handleSlashCommand("/branch solution gate", context, output);
     const resumed = await store.resume(context.sessionId ?? "missing");
@@ -9334,10 +9457,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(plan.ok).toBe(true);
     if (!plan.ok) throw new Error("invalid workflow plan");
 
-    await __testRunWorkflowStepsWithPlan("first active workflow", plan.plan, context, output, {
+    const firstRun = await __testRunWorkflowStepsWithPlan("first active workflow", plan.plan, context, output, {
       __testRunId: "workflow-multi-first",
     });
-    await __testRunWorkflowStepsWithPlan("second active workflow", plan.plan, context, output, {
+    const secondRun = await __testRunWorkflowStepsWithPlan("second active workflow", plan.plan, context, output, {
       __testRunId: "workflow-multi-second",
     });
     await handleSlashCommand("/workflows status", context, output);
@@ -9347,9 +9470,74 @@ describe("Phase 06 TUI slash commands", () => {
       "workflow-multi-first",
     ]);
     expect(context.workflows.activeRun?.id).toBe("workflow-multi-second");
+    expect(firstRun?.id).toBe("workflow-multi-first");
+    expect(secondRun?.id).toBe("workflow-multi-second");
     expect(output.text).toContain("workflow-multi-first");
     expect(output.text).toContain("workflow-multi-second");
   });
+
+  it("keeps 1000 workflow return owners stable while activeRun changes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-return-pressure-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    const plan = normalizeWorkflowPlan({
+      id: "wf-return-pressure",
+      title: "return pressure",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: context.permissionMode,
+      currentPhaseId: "phase-pressure",
+      phases: [
+        {
+          id: "phase-pressure",
+          title: "Pressure",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "test" },
+          slices: [
+            {
+              id: "pressure-details",
+              title: "pressure details",
+              role: "worker",
+              status: "queued",
+              references: [],
+              targetRuntime: {
+                kind: "details",
+                view: "evidence",
+                mutating: false,
+              },
+            },
+          ],
+        },
+      ],
+      stopConditions: [],
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid pressure workflow plan");
+    const pressurePlan = {
+      ...plan.plan,
+      phases: plan.plan.phases.map((phase) => ({ ...phase, slices: [] })),
+    } as typeof plan.plan;
+
+    for (let index = 0; index < 1_000; index += 1) {
+      const runId = `workflow-return-${index}`;
+      const run = await __testRunWorkflowStepsWithPlan(
+        `return owner ${index}`,
+        pressurePlan,
+        context,
+        output,
+        { __testRunId: runId },
+      );
+      expect(run?.id).toBe(runId);
+      expect(context.workflows.activeRun?.id).toBe(runId);
+      if (index > 0) {
+        expect(context.workflows.activeRuns?.find((item) => item.id === `workflow-return-${index - 1}`)?.id).toBe(
+          `workflow-return-${index - 1}`,
+        );
+      }
+    }
+  }, 60_000);
 
   it("parses RunWorkflow multi-agent fields for auditable workflow input", () => {
     const parsed = __testParseRunWorkflowToolInput({
@@ -9882,6 +10070,360 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
+  it("discards an agent registration when its invoking owner expires at agent_start", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-start-owner-race-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const context = await createTestContext(project, store, session, config);
+    const output = new MemoryOutput();
+    let current = true;
+    const originalAppendEvent = store.appendEvent.bind(store);
+    vi.spyOn(store, "appendEvent").mockImplementation(async (sessionId, event, commitGuard) => {
+      if (event.type === "agent_start") current = false;
+      return originalAppendEvent(sessionId, event, commitGuard);
+    });
+
+    const agent = await handleForkCommand(
+      ["worker", "owner race", "--background"],
+      context,
+      output,
+      { commitGuard: () => current, invokingRequestTurnId: "request-owner-race" },
+    );
+
+    expect(agent).toBeUndefined();
+    expect(context.agents).toEqual([]);
+    expect(context.backgroundTasks.some((task) => task.kind === "agent")).toBe(false);
+    expect(
+      (await store.resume(session.id)).transcript.some((event) => event.type === "agent_start"),
+    ).toBe(false);
+  });
+
+  it("removes a newly created agent worktree and child session when its owner aborts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-worktree-owner-abort-"));
+    expect(spawnSync("git", ["init"], { cwd: project }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "test@example.invalid"], { cwd: project }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Linghun Test"], { cwd: project }).status).toBe(0);
+    expect(spawnSync("git", ["config", "commit.gpgsign", "false"], { cwd: project }).status).toBe(0);
+    await writeFile(join(project, "tracked.txt"), "tracked", "utf8");
+    expect(spawnSync("git", ["add", "tracked.txt"], { cwd: project }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "test fixture"], { cwd: project }).status).toBe(0);
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const context = await createTestContext(project, store, session, config);
+    const controller = new AbortController();
+    let childSessionId: string | undefined;
+    const originalCreate = store.create.bind(store);
+    vi.spyOn(store, "create").mockImplementation(async (input) => {
+      const child = await originalCreate(input);
+      if (input?.summary?.startsWith("agent:")) {
+        childSessionId = child.id;
+        controller.abort("owner expired after child create");
+      }
+      return child;
+    });
+
+    const agent = await handleForkCommand(
+      [
+        "worker",
+        "cancel worktree start",
+        "--background",
+        "--isolation",
+        "worktree",
+        "--name",
+        "owner-abort-cleanup",
+      ],
+      context,
+      new MemoryOutput(),
+      { ownerSignal: controller.signal, commitGuard: () => !controller.signal.aborted },
+    );
+
+    expect(agent).toBeUndefined();
+    expect(childSessionId).toBeDefined();
+    await expect(store.resume(childSessionId ?? "missing")).rejects.toThrow();
+    expect(context.agents).toEqual([]);
+    expect(context.backgroundTasks.some((task) => task.kind === "agent")).toBe(false);
+    expect(context.backgroundAbortControllers?.size ?? 0).toBe(0);
+    const worktreeList = spawnSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: project,
+      encoding: "utf8",
+    });
+    expect(worktreeList.status).toBe(0);
+    expect(worktreeList.stdout).not.toContain("owner-abort-cleanup");
+  });
+
+  it("ignores a foreign foreground controller and cleans workflow-owned startup after cancellation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-agent-owner-cancel-"));
+    expect(spawnSync("git", ["init"], { cwd: project }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "test@example.invalid"], { cwd: project }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Linghun Test"], { cwd: project }).status).toBe(0);
+    expect(spawnSync("git", ["config", "commit.gpgsign", "false"], { cwd: project }).status).toBe(0);
+    await writeFile(join(project, "tracked.txt"), "tracked", "utf8");
+    expect(spawnSync("git", ["add", "tracked.txt"], { cwd: project }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "test fixture"], { cwd: project }).status).toBe(0);
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const context = await createTestContext(
+      project,
+      store,
+      session,
+      createOpenAiRegistryAgentConfig("route-model"),
+    );
+    const workflowRun: WorkflowRunState = {
+      id: "workflow-owned-startup",
+      ownerSessionId: session.id,
+      cwd: project,
+      permissionMode: "full-access",
+      goal: "workflow owner cleanup",
+      planId: "workflow-owner-plan",
+      status: "running",
+      steps: [],
+      startedAt: new Date().toISOString(),
+      result: "partial",
+    };
+    context.workflows.activeRuns = [workflowRun];
+    context.workflows.activeRun = workflowRun;
+    const foreignController = new AbortController();
+    foreignController.abort("unrelated foreground request");
+    context.activeAbortController = foreignController;
+    let childSessionId: string | undefined;
+    const originalCreate = store.create.bind(store);
+    vi.spyOn(store, "create").mockImplementation(async (input) => {
+      const child = await originalCreate(input);
+      if (input?.summary?.startsWith("agent:")) {
+        childSessionId = child.id;
+        workflowRun.status = "cancelled";
+      }
+      return child;
+    });
+
+    const agent = await handleForkCommand(
+      [
+        "worker",
+        "cancel workflow worktree start",
+        "--background",
+        "--isolation",
+        "worktree",
+        "--name",
+        "workflow-owner-cancel-cleanup",
+      ],
+      context,
+      new MemoryOutput(),
+      { workflowRunId: workflowRun.id, ownerSessionId: session.id },
+    );
+
+    expect(agent).toBeUndefined();
+    expect(childSessionId).toBeDefined();
+    await expect(store.resume(childSessionId ?? "missing")).rejects.toThrow();
+    expect(context.agents).toEqual([]);
+    expect(context.backgroundTasks.some((task) => task.kind === "agent")).toBe(false);
+    expect(context.backgroundAbortControllers?.size ?? 0).toBe(0);
+    expect(context.activeAbortController).toBe(foreignController);
+    const worktreeList = spawnSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: project,
+      encoding: "utf8",
+    });
+    expect(worktreeList.status).toBe(0);
+    expect(worktreeList.stdout).not.toContain("workflow-owner-cancel-cleanup");
+  });
+
+  it("discards a workflow registration when its invoking owner expires at workflow_start", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-start-owner-race-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    const output = new MemoryOutput();
+    const plan = normalizeWorkflowPlan({
+      id: "wf-owner-race",
+      title: "owner race",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: context.permissionMode,
+      currentPhaseId: "phase-owner-race",
+      phases: [
+        {
+          id: "phase-owner-race",
+          title: "Owner race",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "test" },
+          slices: [
+            {
+              id: "details-owner-race",
+              title: "details",
+              role: "worker",
+              status: "queued",
+              references: [],
+              targetRuntime: { kind: "details", view: "evidence", mutating: false },
+            },
+          ],
+        },
+      ],
+      stopConditions: [],
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid owner race workflow plan");
+    let current = true;
+    const originalAppendEvent = store.appendEvent.bind(store);
+    vi.spyOn(store, "appendEvent").mockImplementation(async (sessionId, event, commitGuard) => {
+      if (event.type === "workflow_start") current = false;
+      return originalAppendEvent(sessionId, event, commitGuard);
+    });
+
+    const run = await __testRunWorkflowStepsWithPlan(
+      "workflow owner race",
+      plan.plan,
+      context,
+      output,
+      { __testRunId: "workflow-owner-race", commitGuard: () => current },
+    );
+
+    expect(run).toBeUndefined();
+    expect(context.workflows.activeRuns ?? []).toEqual([]);
+    expect(context.backgroundTasks.some((task) => task.id === "workflow-owner-race")).toBe(false);
+    expect(
+      (await store.resume(session.id)).transcript.some((event) => event.type === "workflow_start"),
+    ).toBe(false);
+  });
+
+  it("drops an agent tool_result when cancellation wins inside the transcript append", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-tool-append-cancel-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const parent = await store.create({ model: "route-model" });
+    const child = await store.create({ model: "route-model" });
+    const context = await createTestContext(
+      project,
+      store,
+      parent,
+      createOpenAiRegistryAgentConfig("route-model"),
+    );
+    const startedAt = new Date().toISOString();
+    const agent: AgentRun = {
+      id: "agent-append-cancel",
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: parent.id,
+      task: "append cancel",
+      model: "route-model",
+      permissionMode: "default",
+      status: "running",
+      transcriptPath: child.transcriptPath,
+      transcriptSessionId: child.id,
+      mailbox: [],
+      summary: "agent running",
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    };
+    const controller = new AbortController();
+    const originalAppendEvent = store.appendEvent.bind(store);
+    vi.spyOn(store, "appendEvent").mockImplementation(async (sessionId, event, commitGuard) => {
+      if (event.type === "tool_result") controller.abort();
+      return originalAppendEvent(sessionId, event, commitGuard);
+    });
+    const { __testExecuteAgentToolCall } = await import("./job-agent-command-runtime.js");
+
+    await __testExecuteAgentToolCall(
+      agent,
+      { id: "unknown-tool-use", name: "UnknownAgentTool", input: {} },
+      context,
+      parent.id,
+      new MemoryOutput(),
+      controller.signal,
+    );
+
+    expect(
+      (await store.resume(child.id)).transcript.some((event) => event.type === "tool_result"),
+    ).toBe(false);
+  });
+
+  it.each(["agent_end", "final_background_update"] as const)(
+    "clears the exact agent controller when %s persistence throws",
+    async (failurePoint) => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-agent-finalize-cleanup-"));
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const parent = await store.create({ model: "route-model" });
+      const child = await store.create({ model: "route-model" });
+      const config = createOpenAiRegistryAgentConfig("route-model");
+      const context = await createTestContext(project, store, parent, config);
+      context.modelGateway = createModelGateway(config);
+      const startedAt = new Date().toISOString();
+      const agent: AgentRun = {
+        id: `agent-finalize-${failurePoint}`,
+        type: "worker",
+        role: "executor",
+        provider: "openai-compatible",
+        parentSessionId: parent.id,
+        task: "finalize cleanup",
+        model: "route-model",
+        permissionMode: "full-access",
+        status: "running",
+        transcriptPath: child.transcriptPath,
+        transcriptSessionId: child.id,
+        mailbox: [],
+        summary: "agent running",
+        contextSummary: "agent context",
+        cost: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          estimatedCny: 0,
+        },
+        startedAt,
+        updatedAt: startedAt,
+      };
+      const background = createBackgroundTaskFixture("agent", {
+        id: agent.id,
+        title: "Agent finalize cleanup",
+      });
+      const controller = new AbortController();
+      context.agents = [agent];
+      context.backgroundTasks = [background];
+      context.backgroundAbortControllers = new Map([[agent.id, controller]]);
+      context.agentToolContexts = new Map([[agent.id, createToolContext(project)]]);
+      let backgroundUpdates = 0;
+      const originalAppendEvent = store.appendEvent.bind(store);
+      vi.spyOn(store, "appendEvent").mockImplementation(async (sessionId, event, commitGuard) => {
+        if (event.type === "agent_end" && failurePoint === "agent_end") {
+          throw new Error("agent_end persistence failed");
+        }
+        if (event.type === "background_task_update") {
+          backgroundUpdates += 1;
+          if (failurePoint === "final_background_update" && backgroundUpdates === 2) {
+            throw new Error("final background persistence failed");
+          }
+        }
+        return originalAppendEvent(sessionId, event, commitGuard);
+      });
+      mockOpenAiTextFetch("agent finalized");
+      const { completeAgent } = await import("./job-agent-command-runtime.js");
+
+      await expect(completeAgent(agent, background, context, new MemoryOutput())).rejects.toThrow(
+        "persistence failed",
+      );
+
+      expect(context.backgroundAbortControllers?.has(agent.id)).toBe(false);
+      expect(context.agentToolContexts?.has(agent.id)).toBe(false);
+      expect(agent.status).not.toBe("running");
+      expect(background.status).not.toBe("running");
+    },
+  );
+
   it("executes slice-architecture-review with boundary-check evidence instead of proposal-only state", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-workflow-arch-review-"));
     await mkdir(join(project, "packages", "tui", "src"), { recursive: true });
@@ -10230,7 +10772,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
-  it("hydrates durable workflow run state into /background and /workflows status after restart", async () => {
+  it("keeps foreign workflow state untouched and only hydrates the matching session owner", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-workflow-hydrate-"));
     const config: LinghunConfig = {
       ...defaultConfig,
@@ -10268,18 +10810,44 @@ describe("Phase 06 TUI slash commands", () => {
     persisted.status = "running";
     if (persisted.steps?.[0]) persisted.steps[0].status = "running";
     await writeFile(statePath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+    if (context.workflows.activeRun) {
+      context.workflows.activeRun.status = "running";
+      if (context.workflows.activeRun.steps[0]) {
+        context.workflows.activeRun.steps[0].status = "running";
+      }
+    }
+    await hydrateWorkflowRuns(context);
+    expect(context.workflows.activeRun?.status).toBe("running");
+    expect(
+      (JSON.parse(await readFile(statePath, "utf8")) as { status?: string }).status,
+    ).toBe("running");
 
-    const freshSession = await store.create({ model: "deepseek-v4-flash" });
-    const freshContext = await createTestContext(project, store, freshSession, config);
-    const freshOutput = new MemoryOutput();
-    await handleSlashCommand("/background", freshContext, freshOutput);
-    await handleSlashCommand("/workflows status", freshContext, freshOutput);
+    const foreignSession = await store.create({ model: "deepseek-v4-flash" });
+    const foreignContext = await createTestContext(project, store, foreignSession, config);
+    const foreignOutput = new MemoryOutput();
+    for (let batch = 0; batch < 10; batch += 1) {
+      await Promise.all(
+        Array.from({ length: 100 }, () => hydrateWorkflowRuns(foreignContext)),
+      );
+    }
+    await handleSlashCommand("/background", foreignContext, foreignOutput);
+    await handleSlashCommand("/workflows status", foreignContext, foreignOutput);
 
-    expect(freshContext.backgroundTasks).toContainEqual(
+    expect(foreignContext.backgroundTasks.some((task) => task.id === runId)).toBe(false);
+    expect(foreignContext.workflows.activeRun).toBeUndefined();
+    const untouched = JSON.parse(await readFile(statePath, "utf8")) as { status?: string };
+    expect(untouched.status).toBe("running");
+
+    const resumedContext = await createTestContext(project, store, session, config);
+    const resumedOutput = new MemoryOutput();
+    await handleSlashCommand("/background", resumedContext, resumedOutput);
+    await handleSlashCommand("/workflows status", resumedContext, resumedOutput);
+
+    expect(resumedContext.backgroundTasks).toContainEqual(
       expect.objectContaining({ id: runId, result: "partial" }),
     );
-    expect(freshContext.workflows.activeRun?.id).toBe(runId);
-    expect(freshContext.workflows.activeRun).toMatchObject({
+    expect(resumedContext.workflows.activeRun?.id).toBe(runId);
+    expect(resumedContext.workflows.activeRun).toMatchObject({
       status: "stale",
       cwd: project,
       changedFiles: ["workflow-restart.txt"],
@@ -10292,8 +10860,8 @@ describe("Phase 06 TUI slash commands", () => {
       cwd: project,
       changedFiles: ["workflow-restart.txt"],
     });
-    expect(freshOutput.text).toContain(`Workflow ${runId}`);
-    expect(freshOutput.text).not.toContain("result=pass");
+    expect(resumedOutput.text).toContain(`Workflow ${runId}`);
+    expect(resumedOutput.text).not.toContain("result=pass");
   });
 
   it("executes and persists nested /job workflow steps, but keeps real blocked child jobs non-PASS", async () => {
@@ -10502,6 +11070,7 @@ describe("Phase 06 TUI slash commands", () => {
       role: "verifier",
       provider: "openai-compatible",
       parentSessionId: session.id,
+      invokingRequestTurnId: "request-verifier-parent",
       task: "verify workflow without hard blocking",
       model: session.model,
       permissionMode: "full-access",
@@ -10536,6 +11105,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(agent.status).toBe("idle");
     expect(agent.lastTerminalStatus).toBeUndefined();
     expect(background).toMatchObject({ status: "completed", result: "partial" });
+    expect(context.lastVerification?.scope).toMatchObject({
+      ownerAgentId: agent.id,
+      requestTurnId: "request-verifier-parent",
+    });
     expect(__testIsResumableVerifierAgent(agent)).toBe(true);
     expect(context.evidence.flatMap((item) => item.supportsClaims)).not.toContain(
       "verification_passed",
@@ -13626,7 +14199,7 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
   });
 
-  it("repeated raw tool_use text stops with a short message and no tool_result evidence", async () => {
+  it("repeated raw tool_use text commits a partial terminal without tool_result evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -13657,6 +14230,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests).toHaveLength(2);
+    expect(output.text).toContain("部分完成");
     expect(output.text).toContain("没有执行任何非结构化工具请求");
     expect(output.text).not.toContain("tool_use");
     expect(output.text).not.toContain("工具 Write 已完成");
@@ -13666,9 +14240,11 @@ describe("Phase 06 TUI slash commands", () => {
       projectPath: project,
     }).list();
     const transcript = await readFile(sessions[0]?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain('"type":"assistant_text_delta"');
+    expect(transcript).toContain("部分完成");
     expect(transcript).not.toContain('"type":"tool_result"');
     expect(transcript).not.toContain('"name":"Write"');
-  });
+  }, 15_000);
 
   it("raw tool_use_error text is treated as protocol leakage, not as a tool-limit failure", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -26779,6 +27355,183 @@ describe("D.13E Step 2 — addAllowRule helper", () => {
       expect(result.message).toContain("已添加权限规则");
     }
   });
+
+  it("keeps a newer approval when allow-always persistence succeeds", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-allow-always-success-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const oldApproval = {
+      kind: "model_tool_use" as const,
+      toolName: "Write" as const,
+      toolCall: { id: "old-allow", name: "Write", input: { path: "old.txt", content: "old" } },
+      sessionId: session.id,
+    };
+    const newerApproval = {
+      kind: "break_cache_mutation" as const,
+      sessionId: session.id,
+      action: "off" as const,
+    };
+    context.pendingLocalApproval = oldApproval;
+
+    const outcome = await __testClaimAndPersistAllowAlwaysApproval(
+      oldApproval,
+      context,
+      undefined,
+      new MemoryOutput(),
+      async (_ctx, toolName, risk) => {
+        expect(context.pendingLocalApproval).toBeUndefined();
+        context.pendingLocalApproval = newerApproval;
+        return {
+          kind: "added",
+          rule: { id: "rule-success", effect: "allow", toolName, risk },
+          message: "added",
+        };
+      },
+    );
+
+    expect(outcome.result.kind).toBe("added");
+    expect(outcome.restored).toBe(false);
+    expect(context.pendingLocalApproval).toBe(newerApproval);
+  });
+
+  it("keeps 1000 allow-always and cancel interleavings single-terminal", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-allow-always-pressure-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    let lateCancelClaims = 0;
+
+    for (let index = 0; index < 1_000; index += 1) {
+      const approval = {
+        kind: "model_tool_use" as const,
+        toolName: "Write" as const,
+        toolCall: {
+          id: `allow-pressure-${index}`,
+          name: "Write",
+          input: { path: `pressure-${index}.txt`, content: "no" },
+        },
+        sessionId: session.id,
+      };
+      const persistenceStarted = deferred<void>();
+      const releasePersistence = deferred<void>();
+      context.pendingLocalApproval = approval;
+      const pending = __testClaimAndPersistAllowAlwaysApproval(
+        approval,
+        context,
+        undefined,
+        new MemoryOutput(),
+        async (_ctx, toolName, risk) => {
+          persistenceStarted.resolve();
+          await releasePersistence.promise;
+          return {
+            kind: "added",
+            rule: { id: `rule-${index}`, effect: "allow", toolName, risk },
+            message: "added",
+          };
+        },
+      );
+      await persistenceStarted.promise;
+      const cancelCandidate = context.pendingLocalApproval;
+      if (cancelCandidate) {
+        lateCancelClaims += 1;
+        context.pendingLocalApproval = undefined;
+      }
+      releasePersistence.resolve();
+      const outcome = await pending;
+
+      expect(outcome.result.kind).toBe("added");
+      expect(outcome.restored).toBe(false);
+      expect(context.pendingLocalApproval).toBeUndefined();
+    }
+
+    expect(lateCancelClaims).toBe(0);
+  });
+
+  it("restores a claimed approval after persistence failure only while the slot is empty", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-allow-always-restore-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const approval = {
+      kind: "model_tool_use" as const,
+      toolName: "Write" as const,
+      toolCall: {
+        id: "restore-allow",
+        name: "Write",
+        input: { path: "restore.txt", content: "restore" },
+      },
+      sessionId: session.id,
+    };
+    context.pendingLocalApproval = approval;
+
+    const outcome = await __testClaimAndPersistAllowAlwaysApproval(
+      approval,
+      context,
+      undefined,
+      new MemoryOutput(),
+      async () => ({
+        kind: "save_failed",
+        error: new Error("delayed persistence failed"),
+        message: "failed",
+      }),
+    );
+
+    expect(outcome.result.kind).toBe("save_failed");
+    expect(outcome.restored).toBe(true);
+    expect(context.pendingLocalApproval).toBe(approval);
+  });
+
+  it("terminalizes a failed claimed approval without replacing a newer approval", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-allow-always-superseded-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const oldApproval = {
+      kind: "model_tool_use" as const,
+      toolName: "Write" as const,
+      toolCall: {
+        id: "superseded-allow",
+        name: "Write",
+        input: { path: "superseded.txt", content: "old" },
+      },
+      sessionId: session.id,
+    };
+    const newerApproval = {
+      kind: "break_cache_mutation" as const,
+      sessionId: session.id,
+      action: "off" as const,
+    };
+    context.pendingLocalApproval = oldApproval;
+
+    const outcome = await __testClaimAndPersistAllowAlwaysApproval(
+      oldApproval,
+      context,
+      undefined,
+      new MemoryOutput(),
+      async () => {
+        expect(context.pendingLocalApproval).toBeUndefined();
+        context.pendingLocalApproval = newerApproval;
+        return {
+          kind: "save_failed",
+          error: new Error("delayed persistence failed"),
+          message: "failed",
+        };
+      },
+    );
+
+    expect(outcome.result.kind).toBe("save_failed");
+    expect(outcome.restored).toBe(false);
+    expect(context.pendingLocalApproval).toBe(newerApproval);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" &&
+          event.message.includes("allow_always_save_failed_superseded"),
+      ),
+    ).toBe(true);
+  });
 });
 
 // ─── D.13E Step 2 修正 #4 — /permissions add allow 路径覆盖 ────────────────
@@ -29074,6 +29827,15 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
     const output = new MemoryOutput();
+    context.modelGateway = createJsonDecisionGateway([
+      {
+        action: "create",
+        taxonomy: "user",
+        summary: "User preference: use pnpm instead of npm",
+        turnKind: "preference",
+        stability: "stable",
+      },
+    ]) as unknown as typeof context.modelGateway;
     const gateway = {
       stream: vi.fn(async function* () {
         yield { type: "assistant_text_delta", text: "已记住。" } as const;
@@ -29082,6 +29844,9 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     } as unknown as Parameters<typeof __testSendMessage>[2];
 
     await __testSendMessage("请记住：我偏好用 pnpm 而不是 npm。", context, gateway, output);
+    while (context.memoryAutoLearningRuntime?.inFlight) {
+      await context.memoryAutoLearningRuntime.inFlight;
+    }
 
     expect(context.memory.candidates).toHaveLength(0);
     expect(context.memory.accepted[0]?.status).toBe("accepted");
@@ -32151,7 +32916,7 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     expect(failureRuntimeSrc).toContain("export function buildFailureLearningSummaryForPrompt");
   });
 
-  it("D.14B: meta-scheduler receives lastToolFailure from captureFailureLearning and lastProviderFailure from provider path", async () => {
+  it("D.14B: historical tool failure stays in failure learning while provider failure reaches the scheduler", async () => {
     const runtimeSrc = await readSrc("model-stream-runtime.ts");
     const evidenceSrc = await readSrc("evidence-runtime.ts");
     // captureFailureLearning sets lastToolFailure for category === "tool_failure".
@@ -32165,12 +32930,12 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     expect(captureFn).toContain("lastToolFailure");
     expect(captureFn).toContain('"tool_failure"');
 
-    // evaluateMetaScheduler receives both lastToolFailure and lastProviderFailure from context.
+    // Historical tool failure is not a current scheduler control input; provider failure is current runtime state.
     const metaCall = runtimeSrc.slice(
       runtimeSrc.indexOf("const metaSchedulerDecision = evaluateMetaScheduler({"),
       runtimeSrc.indexOf("context.lastMetaSchedulerFailureLearningRequired ="),
     );
-    expect(metaCall).toContain("lastToolFailure");
+    expect(metaCall).not.toContain("lastToolFailure");
     expect(metaCall).toContain("lastProviderFailure");
 
     // Provider failure tracking: lastProviderFailure is set in the provider error handler.
@@ -32282,7 +33047,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(failures).toHaveLength(0);
   });
 
-  it("D.14C: verifier agent verification evidence is visible to the parent final gate", async () => {
+  it("D.14C: verifier agent evidence reaches the parent without granting synthetic PASS", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -32296,8 +33061,9 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
       context.evidence.some(
         (event) =>
           event.kind === "test_result" &&
-          event.supportsClaims.includes("verification_self_check_passed") &&
-          !event.supportsClaims.includes("verification_passed"),
+          event.supportsClaims.includes("verification:partial") &&
+          !event.supportsClaims.includes("verification_passed") &&
+          !event.supportsClaims.includes("verification_self_check_passed"),
       ),
     ).toBe(true);
     const parentTranscript = (await store.resume(session.id)).transcript;
@@ -32306,8 +33072,9 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
         (event) =>
           event.type === "evidence_record" &&
           event.kind === "test_result" &&
-          event.supportsClaims.includes("verification_self_check_passed") &&
-          !event.supportsClaims.includes("verification_passed"),
+          event.supportsClaims.includes("verification:partial") &&
+          !event.supportsClaims.includes("verification_passed") &&
+          !event.supportsClaims.includes("verification_self_check_passed"),
       ),
     ).toBe(true);
   });
@@ -32451,7 +33218,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(notRequired.satisfied).toBe(true);
   });
 
-  it("D.14C: captureFailureLearning sets lastToolFailure for meta-scheduler", async () => {
+  it("D.14C: captureFailureLearning records lastToolFailure for contract bookkeeping", async () => {
     const runtimeSrc = await readSrc("evidence-runtime.ts");
     const fn = runtimeSrc.slice(
       runtimeSrc.indexOf("export async function captureFailureLearning"),
@@ -32464,18 +33231,82 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(fn).toContain("lastMetaSchedulerFailureLearningFulfilled");
   });
 
-  it("D.14C: evaluateMetaScheduler receives lastToolFailure and lastProviderFailure from context", async () => {
+  it("D.14C: evaluateMetaScheduler excludes historical tool failure and receives provider failure", async () => {
     const runtimeSrc = await readSrc("model-stream-runtime.ts");
     const metaBlock = runtimeSrc.slice(
       runtimeSrc.indexOf("const metaSchedulerDecision = evaluateMetaScheduler({"),
       runtimeSrc.indexOf("context.lastMetaSchedulerFailureLearningRequired ="),
     );
-    expect(metaBlock).toContain("lastToolFailure");
+    expect(metaBlock).not.toContain("lastToolFailure");
     expect(metaBlock).toContain("lastProviderFailure");
   });
 });
 
 describe("Phase 7.5-B AW1: registry workflow write step behavioral tests", () => {
+  it("keeps a background registry workflow on its own owner across a new foreground controller", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-registry-workflow-owner-"));
+    await mkdir(join(project, ".linghun", "workflows"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "workflows", "owner-test.json"),
+      JSON.stringify({
+        id: "owner-test",
+        name: "Owner Test",
+        description: "Keep workflow ownership stable.",
+        runInBackground: true,
+        steps: [
+          { id: "details-first", action: "details" },
+          { id: "agent-second", action: "agent", role: "worker", task: "finish owner test" },
+        ],
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    context.permissionMode = "full-access";
+    const { loadWorkflowRegistry } = await import("./agent-workflow-registry.js");
+    const registry = await loadWorkflowRegistry(project);
+    const workflow = registry.items[0];
+    expect(workflow).toBeDefined();
+    if (!workflow) throw new Error("missing registry workflow fixture");
+    const foreignController = new AbortController();
+    foreignController.abort("new foreground request aborted");
+    let replacedForeground = false;
+    const originalAppendEvent = store.appendEvent.bind(store);
+    vi.spyOn(store, "appendEvent").mockImplementation(async (sessionId, event, commitGuard) => {
+      if (
+        !replacedForeground &&
+        event.type === "background_task_update" &&
+        event.task.progress?.completed === 1
+      ) {
+        replacedForeground = true;
+        context.activeAbortController = foreignController;
+      }
+      return originalAppendEvent(sessionId, event, commitGuard);
+    });
+    mockOpenAiTextFetch("registry agent completed");
+
+    const run = await runRegistryWorkflow(
+      workflow,
+      "background owner rollover",
+      true,
+      context,
+      new MemoryOutput(),
+      { ownerSessionId: session.id, permissionMode: "full-access" },
+    );
+    expect(run).toBeDefined();
+    await waitForTestCondition(() => run?.status !== "running");
+
+    expect(replacedForeground).toBe(true);
+    expect(context.activeAbortController).toBe(foreignController);
+    expect(run?.status).toBe("completed");
+    expect(context.agents).toContainEqual(
+      expect.objectContaining({ status: "idle", lastTerminalStatus: "completed" }),
+    );
+  });
+
   it("parser correctly loads path and content fields from a workflow step definition", async () => {
     const { loadWorkflowRegistry } = await import("./agent-workflow-registry.js");
     const project = await mkdtemp(join(tmpdir(), "linghun-aw1-parser-"));
@@ -32951,6 +33782,59 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     expect(context.activeAbortController).toBe(currentTurnController);
     expect(jobs[0]?.pauseReason ?? "").not.toContain("已有前台模型请求正在运行");
     expect(jobs[0]?.status).not.toBe("sleeping");
+  });
+
+  it("keeps nested workflow owner cancellation visible without restoring over a new controller", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-owner-abort-"));
+    const config: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    context.permissionMode = "full-access";
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    const ownerController = new AbortController();
+    const replacementController = new AbortController();
+    context.activeAbortController = ownerController;
+    const requests = mockOpenAiDelayedTextFetch("nested child done", 250);
+    const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("full-access"));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid plan");
+
+    const phaseId = plan.plan.phases[0]?.id ?? "";
+    const run = __testRunWorkflowStepsWithPlan(
+      "nested job owner cancellation",
+      plan.plan,
+      context,
+      new MemoryOutput(),
+      {
+        confirmedPhaseStopPoints: [phaseId],
+        ignoreForegroundModelGuard: true,
+      },
+    );
+    await waitForTestCondition(() => requests.length > 0);
+    expect(context.activeAbortController).toBe(ownerController);
+    ownerController.abort("esc");
+    context.activeAbortController = replacementController;
+    await run;
+
+    const jobs = await listDurableJobsFromRuntime({
+      config,
+      projectPath: project,
+      language: "zh-CN",
+    });
+    expect(context.activeAbortController).toBe(replacementController);
+    expect(jobs[0]?.status).toBe("cancelled");
+    expect(
+      context.backgroundTasks
+        .filter((task) => task.kind === "agent" || task.kind === "job")
+        .every((task) => task.status !== "running"),
+    ).toBe(true);
   });
 });
 

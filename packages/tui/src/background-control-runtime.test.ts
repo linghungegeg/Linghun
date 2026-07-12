@@ -9,6 +9,7 @@ import { hydrateResumeContext } from "./handoff-session-runtime.js";
 import {
   executeApprovedModelToolUse,
   executeDeferredDispatchToolUse,
+  executeModelToolUse,
 } from "./model-tool-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 
@@ -115,6 +116,72 @@ async function runDelayedReadIsolationIteration(iteration: number): Promise<void
 }
 
 describe("foreground delayed tool ownership", () => {
+  it("rejects stale SearchExtraTools before discovery, evidence, or transcript mutation", async () => {
+    const events: unknown[] = [];
+    const context = makeContext(events);
+    context.currentRequestTurnId = "turn-b";
+    context.discoveredDeferredToolNames = new Set(["existing-tool"]);
+    const controller = new AbortController();
+    controller.abort("old turn");
+
+    const result = await executeDeferredDispatchToolUse(
+      { id: "stale-search", name: "SearchExtraTools", input: { query: "repo" } },
+      context,
+      "session-stale-search",
+      new MemoryOutput(),
+      {
+        messages: [],
+        provider: "test",
+        model: "test",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        requestTurnId: "turn-a",
+        abortSignal: controller.signal,
+      },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      text: "cancelled: stale deferred tool result discarded",
+    });
+    expect([...context.discoveredDeferredToolNames]).toEqual(["existing-tool"]);
+    expect(context.evidence).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it.each([
+    ["CommandProposal", { command: "/status" }],
+    ["IndexStatusInspect", {}],
+    ["GitStatusInspect", {}],
+  ])("rejects stale %s before side-path execution", async (name, input) => {
+    const events: unknown[] = [];
+    const context = makeContext(events);
+    context.currentRequestTurnId = "turn-b";
+    const controller = new AbortController();
+    controller.abort("old turn");
+
+    const result = await executeModelToolUse(
+      { id: `stale-${name}`, name, input },
+      context,
+      "session-stale-side-path",
+      new MemoryOutput(),
+      {
+        messages: [],
+        provider: "test",
+        model: "test",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        requestTurnId: "turn-a",
+        abortSignal: controller.signal,
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("stale");
+    expect(context.evidence).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
   it("drops an interrupted tool result that resolves after a newer turn starts", async () => {
     await runDelayedReadIsolationIteration(1);
   });

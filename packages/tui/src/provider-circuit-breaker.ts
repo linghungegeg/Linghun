@@ -44,6 +44,7 @@ const PROVIDER_STREAM_EVENT_IDLE_MS = readPositiveIntEnv(
   "LINGHUN_PROVIDER_STREAM_EVENT_IDLE_MS",
   60_000,
 );
+const PROVIDER_STREAM_CLEANUP_TIMEOUT_MS = 500;
 
 /** Recoverable error codes that trigger the breaker and consume retry budget. */
 const RECOVERABLE_CODES = new Set([
@@ -643,8 +644,22 @@ export async function* withProviderRetry(
         }
       } finally {
         signal?.removeEventListener("abort", forwardAbort);
-        if (!streamCompleted && !streamController.signal.aborted) {
-          await iterator.return?.(undefined);
+        if (!streamCompleted) {
+          if (!streamController.signal.aborted) {
+            streamController.abort("provider stream cleanup");
+          }
+          let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+          const cleanup = Promise.resolve()
+            .then(() => iterator.return?.(undefined))
+            .then(() => undefined)
+            .catch(() => undefined);
+          await Promise.race([
+            cleanup,
+            new Promise<void>((resolve) => {
+              cleanupTimer = setTimeout(resolve, PROVIDER_STREAM_CLEANUP_TIMEOUT_MS);
+            }),
+          ]);
+          if (cleanupTimer) clearTimeout(cleanupTimer);
         }
       }
     } catch (error) {

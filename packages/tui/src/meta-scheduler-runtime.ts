@@ -138,7 +138,6 @@ export type MetaSchedulerInput = {
   activeWorkflowStatus?: "running" | "blocked" | "stale" | "paused";
   backgroundTasks: BackgroundTaskState[];
   workflow?: ActiveWorkflowRun;
-  lastToolFailure?: { toolName: string; summary: string };
   providerFailure?: { provider: string; model: string; code?: string; message: string };
   providerCooldownBlocked?: boolean;
   engineeringProfile?: EngineeringTaskProfile;
@@ -404,20 +403,10 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     evaluateUserStateSignal({
       userText: input.userText,
       repeatedFailureCount:
-        (input.lastToolFailure ||
-        input.providerFailure ||
-        isRiskyVerificationStatus(input.lastVerificationStatus)
+        (input.providerFailure || isRiskyVerificationStatus(input.lastVerificationStatus)
           ? 1
           : 0),
       events: [
-        ...(input.lastToolFailure
-          ? [
-              {
-                kind: "tool_failure" as const,
-                summary: `${input.lastToolFailure.toolName}: ${input.lastToolFailure.summary}`,
-              },
-            ]
-          : []),
         ...(input.providerFailure
           ? [
               {
@@ -447,7 +436,6 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   const userStateDecision = input.userStateDecision ?? userStateSignal;
   const highRiskClaim =
     typeof input.assistantText === "string" && hasHighRiskCompletionClaim(input.assistantText);
-  const toolFailure = Boolean(input.lastToolFailure);
   const providerFailure = Boolean(input.providerFailure);
   const blockedRuntime = hasActiveBlockedWorkflow(input.workflow);
   const pressure = computeContextPressure(
@@ -502,7 +490,6 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     taskKind,
     expectedMutating,
     blockedRuntime,
-    toolFailure,
     providerFailure,
     providerCooldownBlocked: Boolean(input.providerCooldownBlocked || input.routeProviderCooldown),
   });
@@ -511,7 +498,6 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     : taskKind === "workflow" || taskKind === "agent"
       ? "planner"
       : undefined;
-  const recentDeniedCount = input.recentDeniedCount ?? 0;
   const providerPlan = input.providerCooldownBlocked
     ? "cooldownBlocked"
     : providerFailure
@@ -523,7 +509,6 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     inferEngineeringFailureCategory({
       providerFailure,
       lastVerificationStatus: input.lastVerificationStatus,
-      lastToolFailure: input.lastToolFailure,
     });
   const finalBoundaryHint = formatEngineeringFailureBoundaryHint({
     profile: engineeringProfile,
@@ -550,7 +535,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   let adjustedShouldCompact = pressure.shouldCompact;
   let adjustedRequireVerification = requireVerification;
   let adjustedRequireFinalGate = highRiskClaim || userStateDecision.verificationPlan.forbidEarlyPass;
-  let adjustedShouldUseRetryGuard = toolFailure || providerFailure;
+  let adjustedShouldUseRetryGuard = providerFailure;
   let adjustedVerificationStrength = userStateDecision.verificationPlan.strength;
 
   if (trustScore < 30 && userStateDecision.kind === "neutral") {
@@ -569,7 +554,6 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
 
   if (consecutiveSuccesses >= 5 && trustScore > 70) {
     adjustedVerificationStrength = "focused";
-    adjustedRequireFinalGate = false;
     internalEvents.push("meta_scheduler:continuity_verification_downgrade");
   }
 
@@ -596,9 +580,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     );
     internalEvents.push("meta_scheduler:final_answer_gate_required");
   }
-  if (toolFailure || providerFailure) {
+  if (providerFailure) {
     directives.push(
-      "Tool/provider failures must be captured as failure learning or an explicit degraded state; do not claim completion from a failed turn.",
+      "Provider failures must be captured as failure learning or an explicit degraded state; do not claim completion from a failed turn.",
     );
     internalEvents.push("meta_scheduler:failure_learning_required");
   }
@@ -638,7 +622,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     userStateDecision: adjustedUserStateDecision,
   });
   directives.push(formatVerificationRouteDirective(verificationRoute));
-  directives.push(formatUserStateDirective(adjustedUserStateDecision));
+  if (adjustedUserStateDecision.kind !== "neutral") {
+    directives.push(formatUserStateDirective(adjustedUserStateDecision));
+  }
   appendUserStateInternalEvents(internalEvents, adjustedUserStateDecision);
 
   const policyDecision = createPolicyDecision({
@@ -648,7 +634,6 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       blockedRuntime,
       expectedMutating: finalExpectedMutating,
       providerFailure,
-      toolFailure,
       pressure: pressure.shouldCompact,
       userStateDecision: adjustedUserStateDecision,
     }),
@@ -665,7 +650,6 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     requireExplicitGate: finalExpectedMutating || blockedRuntime || Boolean(input.pendingApproval),
     providerPlan,
     blockedRuntime,
-    toolFailure,
     providerFailure,
     surfaceWindowsSafeHint,
     userState: adjustedUserStateDecision,
@@ -674,13 +658,12 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     engineeringSignal,
     permissionSignal: {
       permissionMode: input.permissionMode ?? "default",
-      recentDenied: recentDeniedCount > 0,
-      recentDeniedCount,
+      recentDenied: false,
+      recentDeniedCount: 0,
       expectedMutating: finalExpectedMutating,
       requireExplicitGate:
         finalExpectedMutating ||
         blockedRuntime ||
-        recentDeniedCount > 0 ||
         Boolean(input.pendingApproval),
       pendingApproval: Boolean(input.pendingApproval),
     },
@@ -747,7 +730,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     shouldCompactBeforeProvider: adjustedShouldCompact,
     shouldStopForBlockedRuntime: blockedRuntime,
     shouldUseRetryGuard: adjustedShouldUseRetryGuard,
-    shouldCaptureFailureLearning: toolFailure || providerFailure,
+    shouldCaptureFailureLearning: providerFailure,
   });
 
   return {
@@ -758,7 +741,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     shouldPreferVerifier:
       (highRiskClaim || adjustedUserStateDecision.verificationPlan.strength === "release") &&
       evidenceFreshness !== "fresh",
-    shouldCaptureFailureLearning: toolFailure || providerFailure,
+    shouldCaptureFailureLearning: providerFailure,
     shouldUseRetryGuard: adjustedShouldUseRetryGuard,
     shouldCompactBeforeProvider: adjustedShouldCompact,
     shouldStopForBlockedRuntime: blockedRuntime,
@@ -981,19 +964,38 @@ function computeSuggestedMaxTodoRounds(taskKind: PolicyDecision["taskKind"]): nu
 }
 
 export function formatMetaSchedulerDirective(decision: MetaSchedulerDecision): string {
+  const policy = decision.policyDecision;
+  const orchestrationBoundary = [
+    decision.orchestrationPlan.hardStops.length > 0
+      ? `hard-stops ${decision.orchestrationPlan.hardStops.join(",")}`
+      : undefined,
+    decision.orchestrationPlan.degradationPath.length > 0
+      ? `degrade ${decision.orchestrationPlan.degradationPath.join(",")}`
+      : undefined,
+  ].filter((item): item is string => Boolean(item));
+  const engineeringSignal = policy.engineeringSignal;
+  const engineeringFailure = engineeringSignal.failureCategory ?? "none";
+  const engineeringBoundary = engineeringSignal.finalBoundaryHint ?? "normal";
+  const includeEngineeringSignal =
+    engineeringSignal.profile !== "generic" ||
+    engineeringFailure !== "none" ||
+    engineeringBoundary !== "normal";
   return [
     "MetaSchedulerForModel:",
     ...decision.directives.map((item) => `- ${item}`),
-    `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; budget ${decision.suggestedMaxTodoRounds} rounds; agent-max-turns ${decision.suggestedMaxAgentChildTurns}; agent-tool-rounds ${decision.suggestedMaxAgentToolRounds}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}; capability ${decision.policyDecision.capabilitySignal.active ? "candidate" : "none"}.`,
-    `- Orchestration plan: action ${decision.orchestrationPlan.primaryAction}; steps ${decision.orchestrationPlan.steps.map((step) => `${step.id}:${step.executor}:${step.mode}`).join(" > ")}; hard-stops ${decision.orchestrationPlan.hardStops.join(",") || "none"}; degrade ${decision.orchestrationPlan.degradationPath.join(",") || "none"}.`,
-    `- EngineeringTaskProfile: profile=${decision.policyDecision.engineeringSignal.profile}; strategy=${decision.policyDecision.engineeringSignal.strategyHint}; failure=${decision.policyDecision.engineeringSignal.failureCategory ?? "none"}; final-boundary=${decision.policyDecision.engineeringSignal.finalBoundaryHint ?? "normal"}.`,
-    ...(decision.policyDecision.platformSignal.windowsSafeHint
+    `- Route: task ${policy.taskKind}; risk ${policy.riskLevel}; action ${decision.orchestrationPlan.primaryAction}; provider ${policy.providerPlan}; source-first ${policy.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${policy.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${policy.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${policy.userState.kind}; capability ${policy.capabilitySignal.active ? "candidate" : "none"}; budget ${decision.suggestedMaxTodoRounds}; agent-max-turns ${decision.suggestedMaxAgentChildTurns}; agent-tool-rounds ${decision.suggestedMaxAgentToolRounds}.`,
+    ...(orchestrationBoundary.length > 0
+      ? [`- Orchestration boundary: ${orchestrationBoundary.join("; ")}.`]
+      : []),
+    ...(includeEngineeringSignal
+      ? [`- EngineeringTaskProfile: profile=${engineeringSignal.profile}; strategy=${engineeringSignal.strategyHint}; failure=${engineeringFailure}; final-boundary=${engineeringBoundary}.`]
+      : []),
+    ...(policy.platformSignal.windowsSafeHint
       ? ["- Windows shell boundary: do not use shell apply_patch, heredoc, cat redirects, or tee redirects for file writes; use Edit/MultiEdit/Write structured tools instead."]
       : []),
-    ...(decision.policyDecision.executionPlan.preferAgent || decision.policyDecision.executionPlan.preferWorkflow
+    ...(policy.executionPlan.preferAgent || policy.executionPlan.preferWorkflow
       ? ["- Action: this is an agent/workflow-classified task. Delegate execution via StartAgent or RunWorkflow tools. Do not serial-Todo-plan every step yourself; use the extended planning budget to set up delegation, then call the tool."]
       : []),
-    "- Keep RuntimeStatusForModel, UserStateDecision, capabilitySignal, capabilityPlan, CapabilityExecutionRequest, CapabilityExecutionResult, raw capability payload, interactionPlan, verificationPlan, notificationPlan, confidence, gateId, raw evidence, raw tool_result, and internal scheduler labels out of the user-visible final answer.",
   ].join("\n");
 }
 
@@ -1395,13 +1397,12 @@ function shouldSurfaceWindowsSafeHint(input: {
   taskKind: PolicyDecision["taskKind"];
   expectedMutating: boolean;
   blockedRuntime: boolean;
-  toolFailure: boolean;
   providerFailure: boolean;
   providerCooldownBlocked: boolean;
 }): boolean {
   if (input.expectedMutating || input.taskKind === "verification") return true;
   if (input.taskKind === "workflow" || input.taskKind === "agent") return true;
-  if (input.blockedRuntime || input.toolFailure || input.providerFailure) return true;
+  if (input.blockedRuntime || input.providerFailure) return true;
   if (input.providerCooldownBlocked) return true;
   return /(?:\bbash\b|\bshell\b|\bcmd\b|powershell|pwsh|terminal|命令行|终端|命令|路径|执行(?:命令|脚本|测试|验证)|运行(?:命令|脚本|测试|验证)|\bpath\b|\bcommand\b|\bexecute\b|\bpnpm\b|\bnpm\b|\bnpx\b|\bnode\b|\bpython\b|\bgit\b|\brun\b\s+(?:test|build|lint|script|command|shell|bash|pnpm|npm|npx|node|python|git))/iu.test(
     input.userText,
@@ -1437,7 +1438,6 @@ function classifyRiskLevel(input: {
   blockedRuntime: boolean;
   expectedMutating: boolean;
   providerFailure: boolean;
-  toolFailure: boolean;
   pressure: boolean;
   userStateDecision: UserStateDecision;
 }): PolicyDecision["riskLevel"] {
@@ -1448,7 +1448,7 @@ function classifyRiskLevel(input: {
   ) {
     return "high";
   }
-  if (input.expectedMutating || input.providerFailure || input.toolFailure || input.pressure) {
+  if (input.expectedMutating || input.providerFailure || input.pressure) {
     return "medium";
   }
   if (
@@ -1572,9 +1572,6 @@ function collectNoPassReasons(input: {
   if (input.runtimeSignal.completedWithoutFreshVerification) {
     reasons.push("completed_without_fresh_verification");
   }
-  if (input.failureSignal.activeCount > 0) {
-    reasons.push("active_failure_learning");
-  }
   if (input.resourceCapPressure) {
     reasons.push("resource_guard_pressure");
   }
@@ -1644,13 +1641,9 @@ function isRiskyVerificationStatus(status: MetaSchedulerInput["lastVerificationS
 function inferEngineeringFailureCategory(input: {
   providerFailure: boolean;
   lastVerificationStatus?: MetaSchedulerInput["lastVerificationStatus"];
-  lastToolFailure?: MetaSchedulerInput["lastToolFailure"];
 }): EngineeringFailureCategory | undefined {
   if (input.providerFailure) return "provider_error";
   if (input.lastVerificationStatus === "timeout") return "test_timeout";
-  if (input.lastToolFailure && /missing artifact|missing required artifact|no such file|not found/iu.test(input.lastToolFailure.summary)) {
-    return "missing_artifact";
-  }
   return undefined;
 }
 
@@ -1837,7 +1830,6 @@ function createPolicyDecision(input: {
   requireExplicitGate: boolean;
   providerPlan: PolicyDecision["providerPlan"];
   blockedRuntime: boolean;
-  toolFailure: boolean;
   providerFailure: boolean;
   surfaceWindowsSafeHint: boolean;
   userStatePersistence: number;
@@ -2022,7 +2014,7 @@ function createPolicyDecision(input: {
       },
     });
   }
-  if (input.includeFailureLearning || input.toolFailure || input.providerFailure) {
+  if (input.includeFailureLearning || input.providerFailure) {
     hints.push({
       id: "failure-learning",
       severity: input.riskLevel === "high" ? "warning" : "info",

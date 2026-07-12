@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { formatDiagnosticError, isNodeErrorWithCode } from "@linghun/shared";
 import { type JsonlDiagnostic, appendJsonl, readJsonl, readJsonlTail } from "./jsonl.js";
@@ -11,6 +11,7 @@ import {
   type TranscriptEvent,
   createEmptyCacheSummary,
   createEmptyCostSummary,
+  parseUsableTranscriptCompactBoundary,
 } from "./session.js";
 
 // D.13O — sessionId 在写入 / 读取路径前必须做静态校验。
@@ -21,6 +22,8 @@ import {
 // 错误信息保守、可操作；不写到 fs。
 const MAX_SESSION_ID_LENGTH = 128;
 const SESSION_ID_INVALID_CHAR = /[\\/\t\r\n :*?"<>|%]/u;
+const RESUME_FULL_TRANSCRIPT_MAX_BYTES = 4 * 1024 * 1024;
+const RESUME_TRANSCRIPT_TAIL_EVENTS = 10_000;
 
 export function assertValidSessionId(sessionId: unknown): asserts sessionId is string {
   if (typeof sessionId !== "string" || sessionId.length === 0) {
@@ -148,7 +151,33 @@ export class SessionStore {
       throw new Error(`未找到会话：${sessionId}`);
     }
 
-    const transcript = await readJsonl<TranscriptEvent>(session.transcriptPath);
+    const transcriptSize = await stat(session.transcriptPath)
+      .then((value) => value.size)
+      .catch((error) => {
+        if (isNodeErrorWithCode(error, "ENOENT")) return 0;
+        throw error;
+      });
+    const transcript = transcriptSize <= RESUME_FULL_TRANSCRIPT_MAX_BYTES
+      ? await readJsonl<TranscriptEvent>(session.transcriptPath)
+      : await readJsonlTail<TranscriptEvent>(session.transcriptPath, {
+          limit: RESUME_TRANSCRIPT_TAIL_EVENTS,
+          stopPredicate: (event) => parseUsableTranscriptCompactBoundary(event) !== undefined,
+        });
+    if (transcriptSize > RESUME_FULL_TRANSCRIPT_MAX_BYTES) {
+      const first = transcript.records[0];
+      const loadedFromCompactBoundary =
+        parseUsableTranscriptCompactBoundary(first) !== undefined;
+      const omittedWithoutBoundary =
+        transcript.records.length >= RESUME_TRANSCRIPT_TAIL_EVENTS && first?.type !== "session_start";
+      if (loadedFromCompactBoundary || omittedWithoutBoundary) {
+        transcript.diagnostics.unshift({
+          line: 0,
+          message: loadedFromCompactBoundary
+            ? "partial transcript: large session resumed from the latest usable compact boundary"
+            : `partial transcript: large session resumed from the last ${RESUME_TRANSCRIPT_TAIL_EVENTS} events; no usable compact boundary was found in the bounded tail`,
+        });
+      }
+    }
     return {
       session,
       transcript: transcript.records,

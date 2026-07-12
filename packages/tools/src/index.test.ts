@@ -28,6 +28,24 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function responseFromChunks(
+  chunks: Uint8Array[],
+  headers: Record<string, string> = {},
+): Response {
+  let index = 0;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks[index];
+        index += 1;
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+    }),
+    { headers: { "content-type": "text/html", ...headers } },
+  );
+}
+
 describe("Phase 05 core tools", () => {
   it("Phase D createTool adds fail-closed defaults and CoreTool methods", () => {
     const permission: ToolPermissionSpec = {
@@ -128,11 +146,9 @@ describe("Phase 05 core tools", () => {
 
     await runTool("WebSearch", { query: "linghun" }, searchContext);
 
-    expect(searchProgress.map((event) => event.phase)).toEqual([
-      "connecting",
-      "receiving",
-      "processing",
-    ]);
+    expect(searchProgress[0]?.phase).toBe("connecting");
+    expect(searchProgress.some((event) => event.phase === "receiving")).toBe(true);
+    expect(searchProgress.at(-1)?.phase).toBe("processing");
     expect(searchProgress.at(-1)).toMatchObject({
       toolName: "WebSearch",
       transport: "https",
@@ -202,16 +218,22 @@ describe("Phase 05 core tools", () => {
         return {
           ok: true,
           status: 200,
-          text: () =>
-            new Promise<string>((_resolvePromise, rejectPromise) => {
-              readerStartedResolve?.();
-              signal.addEventListener(
-                "abort",
-                () => rejectPromise(new DOMException("aborted", "AbortError")),
-                { once: true },
-              );
+          headers: new Headers({ "content-type": "text/html" }),
+          body: {
+            getReader: () => ({
+              read: () =>
+                new Promise<never>((_resolvePromise, rejectPromise) => {
+                  readerStartedResolve?.();
+                  signal.addEventListener(
+                    "abort",
+                    () => rejectPromise(new DOMException("aborted", "AbortError")),
+                    { once: true },
+                  );
+                }),
+              cancel: vi.fn(),
             }),
-        } as Response;
+          },
+        } as unknown as Response;
       }),
     );
 
@@ -226,6 +248,94 @@ describe("Phase 05 core tools", () => {
       aborted: false,
       timedOut: true,
     });
+  });
+
+  it("reads WebSearch bodies without content-length and with malformed content-length", async () => {
+    const html =
+      '<li class="b_algo"><h2><a href="https://example.com">Example</a></h2><p>Result</p></li>';
+    for (const contentLength of [undefined, "not-a-number"]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          responseFromChunks(
+            [new TextEncoder().encode(html)],
+            contentLength ? { "content-length": contentLength } : undefined,
+          )),
+      );
+
+      const result = await runTool("WebSearch", { query: "linghun" }, createToolContext());
+      expect(result.output.data).toMatchObject({ count: 1 });
+    }
+  });
+
+  it("cancels and rejects declared or streamed WebSearch bodies above 5 MiB", async () => {
+    const declaredCancel = vi.fn(async () => undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-length": String(6 * 1024 * 1024) }),
+        body: { getReader: () => ({ read: vi.fn(), cancel: declaredCancel }) },
+      }) as unknown as Response),
+    );
+    const declared = await runTool("WebSearch", { query: "linghun" }, createToolContext());
+    expect(declared.output.data).toMatchObject({
+      isError: true,
+      errorCode: "RESPONSE_TOO_LARGE",
+    });
+    expect(declaredCancel).toHaveBeenCalledOnce();
+
+    const streamedCancel = vi.fn(async () => undefined);
+    const chunks = [
+      new Uint8Array(3 * 1024 * 1024),
+      new Uint8Array(3 * 1024 * 1024),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-length": "1" }),
+        body: {
+          getReader: () => ({
+            read: async () =>
+              chunks.length > 0 ? { done: false, value: chunks.shift() } : { done: true },
+            cancel: streamedCancel,
+          }),
+        },
+      }) as unknown as Response),
+    );
+    const streamed = await runTool("WebSearch", { query: "linghun" }, createToolContext());
+    expect(streamed.output.data).toMatchObject({
+      isError: true,
+      errorCode: "RESPONSE_TOO_LARGE",
+    });
+    expect(streamedCancel).toHaveBeenCalledOnce();
+  });
+
+  it("parses a valid WebSearch page split across 1,000 deterministic random chunks", async () => {
+    const html = `${"<!--padding-->".repeat(2_000)}<li class="b_algo"><h2><a href="https://example.com">Example</a></h2><p>Result</p></li>`;
+    const bytes = new TextEncoder().encode(html);
+    const chunks: Uint8Array[] = [];
+    let offset = 0;
+    let seed = 0x5eed;
+    for (let remainingChunks = 1_000; remainingChunks > 0; remainingChunks -= 1) {
+      seed = (seed * 1_664_525 + 1_013_904_223) >>> 0;
+      const remainingBytes = bytes.byteLength - offset;
+      const minTail = remainingChunks - 1;
+      const maxSize = remainingBytes - minTail;
+      const size =
+        remainingChunks === 1 ? remainingBytes : 1 + (seed % Math.max(1, maxSize));
+      chunks.push(bytes.slice(offset, offset + size));
+      offset += size;
+    }
+    expect(chunks).toHaveLength(1_000);
+    vi.stubGlobal("fetch", vi.fn(async () => responseFromChunks(chunks)));
+
+    const result = await runTool("WebSearch", { query: "linghun" }, createToolContext());
+
+    expect(result.output.data).toMatchObject({ count: 1 });
   });
 
   it("keeps the WebFetch timeout active while reading a slow body", async () => {

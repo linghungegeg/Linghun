@@ -21,7 +21,6 @@ import {
   createToolFallbackRecoveryReminder,
   createToolFailureRecoveryFingerprint,
   createPreFallbackHardCutSkippedToolResult,
-  createToolBatchFailFastSkippedResult,
   createToolExecutionBatches,
   continueModelAfterToolResults,
   evaluateAggregatedFinalAnswerGate,
@@ -29,6 +28,7 @@ import {
   isPreEngineToolCall,
   isRealFallbackToolProgress,
   isToolBatchFailure,
+  modelStreamAutoLearningTestHooks,
   isToolBatchFallbackRequired,
   planFinalGateEvidenceGapAction,
   recordInterruptedForegroundTurn,
@@ -37,12 +37,19 @@ import {
   shouldRetryHighReasoningToolsEmptyResponse,
   updateToolFailureRecoveryState,
 } from "./model-stream-runtime.js";
-import { createFailureLearningState } from "./failure-learning-runtime.js";
+import {
+  commitFailureLearningInput,
+  createFailureLearningState,
+  loadFailureRecords,
+  setFailureRecordStatus,
+  writeFailureRecord,
+} from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import { createShellBlockOutputForTest } from "./tui-output-surface.js";
+import { writeMemoryLearningMode } from "./tui-memory-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
 import {
   createCacheState,
@@ -53,6 +60,45 @@ import {
 
 function withClaims(text: string, claims: Array<{ kind: string; phrase: string }>): string {
   return `${text}\nLinghunFinalAnswerClaims: ${JSON.stringify({ claims })}`;
+}
+
+function makeCompactRestoreContext(overrides: Record<string, unknown> = {}) {
+  return {
+    goal: "continue",
+    currentTask: "current task",
+    phaseStatus: "in_progress",
+    userConstraints: [],
+    keyFiles: [],
+    changedFiles: [],
+    evidenceRefs: [],
+    activeAgentsWorkflows: [],
+    needsAttentionAgentsWorkflows: [],
+    staleResumableAgentsWorkflows: [],
+    pendingItems: [],
+    decisions: [],
+    risks: [],
+    indexStatus: "ready",
+    cacheFreshness: "fresh",
+    memoryStatus: "none",
+    verificationRequirement: "verify with evidence",
+    ...overrides,
+  };
+}
+
+function makeCompactProjection(summary: string, overrides: Record<string, unknown> = {}) {
+  return {
+    boundaryId: "compact-boundary-test",
+    createdAt: "2026-07-12T00:00:00.000Z",
+    summary,
+    pressureRatio: 0.9,
+    preCompactChars: 10_000,
+    postCompactChars: 2_000,
+    discardedRange: "events 1-20",
+    toolPairingSafe: true,
+    risks: [],
+    evidenceRefs: [],
+    ...overrides,
+  };
 }
 
 function makeGateContext() {
@@ -117,6 +163,320 @@ describe("continuation abort ownership", () => {
     );
 
     expect(providerStarted).toBe(false);
+  });
+});
+
+describe("runtime-local auto-learning drain", () => {
+  it("returns immediately while a classifier is pending", async () => {
+    const { context } = await makeSendMessageContext();
+    isolateAutoLearningMemory(context);
+    context.memory.learningMode = "active";
+    await writeMemoryLearningMode(context);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const classifierStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    context.modelGateway = {
+      stream: async function* () {
+        started();
+        await gate;
+        yield {
+          type: "assistant_text_delta" as const,
+          id: "memory-slow",
+          text: JSON.stringify({ action: "no-op", reason: "test" }),
+        };
+        yield { type: "message_stop" as const, id: "memory-slow-stop", chunkCount: 1, hadUsage: false };
+      },
+    } as unknown as ModelGateway;
+    const controller = new AbortController();
+
+    const startedAt = performance.now();
+    modelStreamAutoLearningTestHooks.enqueueAutoLearningAfterSuccessfulTurn(
+      context,
+      "请记住：我偏好简短中文回答。",
+      { requestTurnId: "learning-slow", sessionId: context.sessionId!, signal: controller.signal },
+    );
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    await classifierStarted;
+    release();
+    while (context.memoryAutoLearningRuntime?.inFlight) {
+      await context.memoryAutoLearningRuntime.inFlight;
+    }
+  });
+
+  it("resolves sendMessage with final output while the turn-end classifier is still pending", async () => {
+    const { context } = await makeSendMessageContext();
+    isolateAutoLearningMemory(context);
+    context.memory.learningMode = "active";
+    await writeMemoryLearningMode(context);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const classifierStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    context.modelGateway = {
+      stream: async function* () {
+        started();
+        await gate;
+        yield {
+          type: "assistant_text_delta" as const,
+          id: "memory-after-final",
+          text: JSON.stringify({ action: "no-op", reason: "test" }),
+        };
+        yield {
+          type: "message_stop" as const,
+          id: "memory-after-final-stop",
+          chunkCount: 1,
+          hadUsage: false,
+        };
+      },
+    } as unknown as ModelGateway;
+    const mainGateway = {
+      stream: async function* () {
+        yield { type: "assistant_text_delta" as const, id: "main-final", text: "这是普通回答。" };
+        yield { type: "message_stop" as const, id: "main-final-stop", chunkCount: 1, hadUsage: false };
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+    const output = new MemoryOutput();
+    let finalCommitted!: () => void;
+    const finalAssistantCommitted = new Promise<void>((resolve) => {
+      finalCommitted = resolve;
+    });
+    const appendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (sessionId, event, commitGuard) => {
+      await appendEvent(sessionId, event, commitGuard);
+      if (event.type === "assistant_text_delta" && event.text === "这是普通回答。") finalCommitted();
+    };
+    const sending = __testSendMessage("请记住：我偏好简短中文回答。", context, mainGateway, output);
+    await finalAssistantCommitted;
+    const finalCommittedAt = performance.now();
+    const completedWithin100Ms = await Promise.race([
+      sending.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+
+    expect(completedWithin100Ms).toBe(true);
+    expect(performance.now() - finalCommittedAt).toBeLessThan(100);
+    expect(output.text).toContain("这是普通回答");
+    await classifierStarted;
+    release();
+    while (context.memoryAutoLearningRuntime?.inFlight) {
+      await context.memoryAutoLearningRuntime.inFlight;
+    }
+  });
+
+  it("keeps one in-flight and only the latest trailing turn across 1,000 owners", async () => {
+    const { context } = await makeSendMessageContext();
+    isolateAutoLearningMemory(context);
+    context.memory.learningMode = "active";
+    await writeMemoryLearningMode(context);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const classifierStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    const requestContextIds: Array<string | undefined> = [];
+    context.modelGateway = {
+      stream: async function* (_providerId: string, request: { requestContextId?: string }) {
+        calls += 1;
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        requestContextIds.push(request.requestContextId);
+        try {
+          if (calls === 1) {
+            started();
+            await gate;
+          }
+          yield {
+            type: "assistant_text_delta" as const,
+            id: `memory-${calls}`,
+            text: JSON.stringify({ action: "no-op", reason: "test" }),
+          };
+          yield {
+            type: "message_stop" as const,
+            id: `memory-stop-${calls}`,
+            chunkCount: 1,
+            hadUsage: false,
+          };
+        } finally {
+          active -= 1;
+        }
+      },
+    } as unknown as ModelGateway;
+
+    modelStreamAutoLearningTestHooks.enqueueAutoLearningAfterSuccessfulTurn(
+      context,
+      "first stable memory turn",
+      { requestTurnId: "learning-0", sessionId: context.sessionId!, signal: new AbortController().signal },
+    );
+    await classifierStarted;
+    const singleDrain = context.memoryAutoLearningRuntime?.inFlight;
+    for (let index = 1; index < 1_000; index += 1) {
+      modelStreamAutoLearningTestHooks.enqueueAutoLearningAfterSuccessfulTurn(
+        context,
+        `stable memory turn ${index}`,
+        {
+          requestTurnId: `learning-${index}`,
+          sessionId: context.sessionId!,
+          signal: new AbortController().signal,
+        },
+      );
+      expect(context.memoryAutoLearningRuntime?.inFlight).toBe(singleDrain);
+    }
+    expect(context.memoryAutoLearningRuntime?.trailing?.requestTurnId).toBe("learning-999");
+    release();
+    while (context.memoryAutoLearningRuntime?.inFlight) {
+      await context.memoryAutoLearningRuntime.inFlight;
+    }
+
+    expect(calls).toBe(2);
+    expect(maxActive).toBe(1);
+    expect(requestContextIds).toEqual(["learning-0", "learning-999"]);
+    expect(context.memoryAutoLearningRuntime?.trailing).toBeUndefined();
+  });
+
+  it("drains an item enqueued immediately after the previous in-flight completes", async () => {
+    const { context } = await makeSendMessageContext();
+    isolateAutoLearningMemory(context);
+    context.memory.learningMode = "active";
+    await writeMemoryLearningMode(context);
+    let calls = 0;
+    context.modelGateway = {
+      stream: async function* () {
+        calls += 1;
+        yield {
+          type: "assistant_text_delta" as const,
+          id: `memory-boundary-${calls}`,
+          text: JSON.stringify({ action: "no-op", reason: "test" }),
+        };
+        yield {
+          type: "message_stop" as const,
+          id: `memory-boundary-stop-${calls}`,
+          chunkCount: 1,
+          hadUsage: false,
+        };
+      },
+    } as unknown as ModelGateway;
+    modelStreamAutoLearningTestHooks.enqueueAutoLearningAfterSuccessfulTurn(
+      context,
+      "first boundary turn",
+      { requestTurnId: "boundary-1", sessionId: context.sessionId!, signal: new AbortController().signal },
+    );
+    const first = context.memoryAutoLearningRuntime?.inFlight;
+    first?.then(() => {
+      modelStreamAutoLearningTestHooks.enqueueAutoLearningAfterSuccessfulTurn(
+        context,
+        "latest boundary turn",
+        { requestTurnId: "boundary-2", sessionId: context.sessionId!, signal: new AbortController().signal },
+      );
+    });
+    await first;
+    while (context.memoryAutoLearningRuntime?.inFlight) {
+      await context.memoryAutoLearningRuntime.inFlight;
+    }
+    expect(calls).toBe(2);
+  });
+
+  it("does not revive an old in-flight owner after learning off then on", async () => {
+    const { context, events } = await makeSendMessageContext();
+    isolateAutoLearningMemory(context);
+    context.memory.learningMode = "active";
+    await writeMemoryLearningMode(context);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const classifierStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    context.modelGateway = {
+      stream: async function* () {
+        started();
+        await gate;
+        yield {
+          type: "assistant_text_delta" as const,
+          id: "old-owner-after-mode-toggle",
+          text: JSON.stringify({
+            action: "create",
+            taxonomy: "user",
+            summary: "User preference: stale owner must not commit",
+            turnKind: "preference",
+            stability: "stable",
+          }),
+        };
+      },
+    } as unknown as ModelGateway;
+    modelStreamAutoLearningTestHooks.enqueueAutoLearningAfterSuccessfulTurn(
+      context,
+      "remember stale owner",
+      { requestTurnId: "mode-old", sessionId: context.sessionId!, signal: new AbortController().signal },
+    );
+    await classifierStarted;
+
+    context.memory.learningMode = "off";
+    context.memoryAutoLearningRuntime!.latestRequestTurnId = undefined;
+    context.memoryAutoLearningRuntime!.trailing = undefined;
+    context.memory.learningMode = "active";
+    await writeMemoryLearningMode(context);
+    release();
+    while (context.memoryAutoLearningRuntime?.inFlight) {
+      await context.memoryAutoLearningRuntime.inFlight;
+    }
+
+    expect(context.memory.accepted).toEqual([]);
+    expect(context.evidence).toEqual([]);
+    expect(events.some((event) => (event as { type?: string }).type === "memory_accepted")).toBe(false);
+    expect(events.some((event) => (event as { type?: string }).type === "evidence_record")).toBe(false);
+  });
+
+  it("keeps the last real learning run when an owned background drain throws", async () => {
+    const { context } = await makeSendMessageContext();
+    isolateAutoLearningMemory(context);
+    context.memory.learningMode = "active";
+    await writeMemoryLearningMode(context);
+    const previousRun = {
+      trigger: "manual" as const,
+      candidatesCreated: 0,
+      modelCalled: true,
+      skippedReason: "previous-real-run",
+      createdAt: new Date(0).toISOString(),
+    };
+    context.memory.lastLearningRun = previousRun;
+    Object.defineProperty(context, "modelGateway", {
+      configurable: true,
+      get() {
+        throw new Error("classifier setup failed");
+      },
+    });
+
+    modelStreamAutoLearningTestHooks.enqueueAutoLearningAfterSuccessfulTurn(
+      context,
+      "background failure turn",
+      { requestTurnId: "failure-owner", sessionId: context.sessionId!, signal: new AbortController().signal },
+    );
+    while (context.memoryAutoLearningRuntime?.inFlight) {
+      await context.memoryAutoLearningRuntime.inFlight;
+    }
+
+    expect(context.memory.lastLearningRun).toBe(previousRun);
+    expect(context.memory.learningModeDiagnostic).toContain("classifier setup failed");
   });
 });
 
@@ -265,6 +625,52 @@ async function makeSendMessageContext() {
   } as unknown as TuiContext;
   return { context, events };
 }
+
+function isolateAutoLearningMemory(context: TuiContext): void {
+  context.memory.userDir = join(context.projectPath, ".test-user-memory");
+  context.memory.projectDir = join(context.projectPath, ".test-project-memory");
+  context.memory.sessionDir = join(context.projectPath, ".test-session-memory");
+  context.memory.accepted = [];
+  context.memory.candidates = [];
+  context.memory.disabled = [];
+}
+
+describe("cross-window failure-learning refresh", () => {
+  it("loads a new failure before the prompt and drops it after another window resolves it", async () => {
+    const { context } = await makeSendMessageContext();
+    context.memory.learningMode = "off";
+    const writer = createFailureLearningState(context.projectPath, defaultConfig);
+    const committed = await commitFailureLearningInput(writer, {
+      category: "tool_failure",
+      failureSummary: "focused verifier failed",
+      rootCauseGuess: "synthetic cross-window failure",
+      avoidNextTime: "run the focused verifier before reporting success",
+      sourceRef: "test:cross-window",
+      relatedTarget: "RunVerification",
+    });
+    expect(committed.status).toBe("committed");
+    const requests: unknown[] = [];
+    const gateway = {
+      stream: async function* (_providerId: string, request: unknown) {
+        requests.push(request);
+        yield { type: "assistant_text_delta" as const, id: "answer", text: "已检查。" };
+        yield { type: "message_stop" as const, chunkCount: 1, hadUsage: false };
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("检查当前失败风险", context, gateway, new MemoryOutput());
+    expect(JSON.stringify(requests.at(-1))).toContain("run the focused verifier");
+
+    const [record] = await loadFailureRecords(writer);
+    setFailureRecordStatus(record, "resolved");
+    await writeFailureRecord(writer, { ...record, status: "resolved" });
+    await __testSendMessage("再次检查当前失败风险", context, gateway, new MemoryOutput());
+    expect(JSON.stringify(requests.at(-1))).not.toContain("run the focused verifier");
+  });
+});
 
 describe("model message prompt cache layout", () => {
   it("grows provider messages as an append-only prefix across turns", async () => {
@@ -528,6 +934,149 @@ describe("model message prompt cache layout", () => {
     expect(events.some((event) => (event as { type?: string }).type === "user_message")).toBe(false);
   });
 
+  it("does not carry historical tool or verification failures into a new request", async () => {
+    const { context } = await makeSendMessageContext();
+    context.turnContinuity = {
+      consecutiveFailures: 2,
+      consecutiveSuccesses: 0,
+      dominantTaskKind: "edit",
+      taskDomainSwitched: false,
+      lastUserStateKind: "neutral",
+      userStatePersistence: 1,
+      totalTurns: 2,
+      messageLengthTrend: "stable",
+      trustScore: 50,
+    };
+    context.lastToolFailure = { toolName: "Bash", summary: "old command failed" };
+    context.lastVerification = {
+      id: "verification-old",
+      status: "fail",
+      commands: [],
+      summary: "old verification failed",
+      unverified: [],
+      risk: [],
+      startedAt: new Date(0).toISOString(),
+      endedAt: new Date(0).toISOString(),
+      durationMs: 1,
+      nextAction: "retry",
+      scope: {
+        ownerKey: `request:${context.sessionId}:request-old`,
+        cwd: context.projectPath,
+        changedFiles: [],
+        ownerSessionId: context.sessionId ?? "session-missing",
+        requestTurnId: "request-old",
+      },
+    };
+    context.evidence = [
+      makeEvidence({
+        id: "verification-evidence-old",
+        kind: "test_result",
+        supportsClaims: ["verification_passed", "test_passed"],
+        ownerScope: {
+          ownerSessionId: context.sessionId,
+          requestTurnId: "request-old",
+          cwd: context.projectPath,
+        },
+        data: {
+          verificationScope: {
+            ownerKey: `request:${context.sessionId}:request-old`,
+            cwd: context.projectPath,
+            changedFiles: [],
+            ownerSessionId: context.sessionId,
+            requestTurnId: "request-old",
+          },
+        },
+      }),
+    ];
+    const gateway = {
+      async *stream() {
+        yield { type: "assistant_text_delta", text: "这是当前修改说明。" } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("修改 meta-scheduler-runtime.ts 的问题", context, gateway, new MemoryOutput());
+
+    expect(context.turnContinuity.consecutiveFailures).toBe(0);
+    expect(context.lastMetaSchedulerDecision?.policyDecision.taskKind).toBe("edit");
+    expect(context.lastMetaSchedulerDecision?.policyDecision.verificationSignal.lastStatus).toBeUndefined();
+    expect(
+      context.lastMetaSchedulerDecision?.policyDecision.verificationSignal.route.evidenceFreshness,
+    ).toBe("missing");
+  });
+
+  it.each([
+    "不要 build，只运行 focused test",
+    "别修改 vendor 目录",
+    "停止自动发布但继续审计",
+    "重新说明当前调用链",
+    "这不对外开放，只做本地验证",
+    "你的回答不对外公开",
+    "你理解错误码后继续",
+    "上次判断不对称矩阵需要覆盖",
+    "check the wrong path fallback",
+  ])("does not treat an ordinary constraint as assistant correction: %s", async (userText) => {
+    const { context } = await makeSendMessageContext();
+    context.turnContinuity = {
+      consecutiveFailures: 0,
+      consecutiveSuccesses: 0,
+      dominantTaskKind: null,
+      taskDomainSwitched: false,
+      lastUserStateKind: "neutral",
+      userStatePersistence: 1,
+      totalTurns: 0,
+      messageLengthTrend: "stable",
+      trustScore: 50,
+    };
+    const gateway = {
+      async *stream() {
+        yield { type: "assistant_text_delta", text: "这是当前说明。" } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage(userText, context, gateway, new MemoryOutput());
+
+    expect(context.turnContinuity.trustScore).toBe(51);
+  });
+
+  it.each(["不对，你误解了上一轮结论。", "You misunderstood what I asked."])(
+    "recognizes an explicit correction: %s",
+    async (userText) => {
+      const { context } = await makeSendMessageContext();
+      context.turnContinuity = {
+        consecutiveFailures: 0,
+        consecutiveSuccesses: 0,
+        dominantTaskKind: null,
+        taskDomainSwitched: false,
+        lastUserStateKind: "neutral",
+        userStatePersistence: 1,
+        totalTurns: 0,
+        messageLengthTrend: "stable",
+        trustScore: 50,
+      };
+      const gateway = {
+        async *stream() {
+          yield { type: "assistant_text_delta", text: "这是更正后的说明。" } as const;
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+
+      await __testSendMessage(userText, context, gateway, new MemoryOutput());
+
+      expect(context.turnContinuity.trustScore).toBe(42);
+    },
+  );
+
   it("drops a final assistant event when the main owner changes inside queued append", async () => {
     const { context, events } = await makeSendMessageContext();
     const store = context.store as SessionStore;
@@ -738,6 +1287,312 @@ describe("model message prompt cache layout", () => {
     expect(JSON.stringify(events)).toContain("early tool content");
   }, 30_000);
 
+  it("starts every complete readonly tool_use before message_stop and keeps result order", async () => {
+    const { context, events } = await makeSendMessageContext();
+    await writeFile(join(context.projectPath, "early-a.txt"), "early A", "utf8");
+    await writeFile(join(context.projectPath, "early-b.txt"), "early B", "utf8");
+    let releaseMessageStop!: () => void;
+    const messageStopGate = new Promise<void>((resolve) => {
+      releaseMessageStop = resolve;
+    });
+    let secondToolYielded!: () => void;
+    const secondToolSeen = new Promise<void>((resolve) => {
+      secondToolYielded = resolve;
+    });
+    let attempts = 0;
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        if (attempts === 1) {
+          yield {
+            type: "tool_use",
+            id: "tool-early-a",
+            name: "Read",
+            input: { path: "early-a.txt" },
+          } as const;
+          yield {
+            type: "tool_use",
+            id: "tool-early-b",
+            name: "Read",
+            input: { path: "early-b.txt" },
+          } as const;
+          secondToolYielded();
+          await messageStopGate;
+          yield {
+            type: "usage",
+            usage: { inputTokens: 120, outputTokens: 12, totalTokens: 132 },
+          } as const;
+          yield {
+            type: "message_stop",
+            id: "stop-multi-tool",
+            chunkCount: 4,
+            hadUsage: true,
+            finishReason: "tool_use",
+          } as const;
+          return;
+        }
+        yield { type: "assistant_text_delta", id: "final", text: "两份读取完成。" } as const;
+        yield {
+          type: "message_stop",
+          id: "stop-final",
+          chunkCount: 2,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    const running = __testSendMessage("读取两份文件", context, gateway, new MemoryOutput());
+    await secondToolSeen;
+    await vi.waitFor(() => {
+      expect(
+        events.filter((event) => (event as { type?: string }).type === "tool_call_start"),
+      ).toHaveLength(2);
+    });
+    expect(attempts).toBe(1);
+
+    releaseMessageStop();
+    await running;
+
+    const serialized = JSON.stringify(events);
+    expect(serialized).toContain("early A");
+    expect(serialized).toContain("early B");
+    expect(serialized.indexOf("tool-early-a")).toBeLessThan(serialized.indexOf("tool-early-b"));
+    expect(events.filter((event) => (event as { type?: string }).type === "usage")).toHaveLength(1);
+  }, 30_000);
+
+  it("executes an independent fourth tool after three failures and returns an evidence-backed partial", async () => {
+    const { context, events } = await makeSendMessageContext();
+    let attempts = 0;
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        if (attempts === 1) {
+          for (let index = 1; index <= 4; index += 1) {
+            yield {
+              type: "tool_use",
+              id: `tool-missing-${index}`,
+              name: "Read",
+              input: { path: `missing-${index}.txt` },
+            } as const;
+          }
+          yield {
+            type: "message_stop",
+            id: "stop-failed-batch",
+            chunkCount: 4,
+            hadUsage: false,
+            finishReason: "tool_use",
+          } as const;
+          return;
+        }
+        yield {
+          type: "assistant_text_delta",
+          id: `failure-summary-${attempts}`,
+          text: "读取仍未恢复。",
+        } as const;
+        yield {
+          type: "message_stop",
+          id: `stop-failure-summary-${attempts}`,
+          chunkCount: 1,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("读取四个不存在的文件", context, gateway, new MemoryOutput());
+
+    expect(
+      events.filter((event) => (event as { type?: string }).type === "tool_call_start"),
+    ).toHaveLength(4);
+    expect(JSON.stringify(events)).not.toContain("tool_batch_fail_fast");
+    const final = events
+      .filter(
+        (event): event is { type: string; text?: string } =>
+          (event as { type?: string }).type === "assistant_text_delta",
+      )
+      .at(-1);
+    expect(final?.text).toContain("部分完成");
+    expect(final?.text).toContain("已有 4 条记录");
+    expect(final?.text).not.toContain("重新发起请求");
+  }, 30_000);
+
+  it("commits repeated raw tool protocol as an evidence-backed partial without fake tool results", async () => {
+    const { context, events } = await makeSendMessageContext();
+    let attempts = 0;
+    const rawProtocol =
+      '<tool_use id="toolu_raw" name="Write"><input>{"path":"report.md","content":"fake"}</input></tool_use>';
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        yield { type: "assistant_text_delta", id: `raw-${attempts}`, text: rawProtocol } as const;
+        yield {
+          type: "message_stop",
+          id: `raw-stop-${attempts}`,
+          chunkCount: 1,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("写入 report.md", context, gateway, new MemoryOutput());
+
+    const serialized = JSON.stringify(events);
+    const final = events
+      .filter(
+        (event): event is { type: string; text?: string } =>
+          (event as { type?: string }).type === "assistant_text_delta",
+      )
+      .at(-1);
+    expect(attempts).toBe(2);
+    expect(final?.text).toContain("部分完成");
+    expect(final?.text).toContain("没有执行任何非结构化工具请求");
+    expect(serialized).not.toContain('"type":"tool_result"');
+    expect(serialized).not.toContain(rawProtocol);
+  }, 30_000);
+
+  it("commits repeated continuation raw tool protocol through the same partial final gate", async () => {
+    const { context, events } = await makeSendMessageContext();
+    let attempts = 0;
+    const rawProtocol =
+      '{"type":"tool_use","id":"toolu_cont_raw","name":"Write","input":{"path":"report.md","content":"fake"}}';
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        yield {
+          type: "assistant_text_delta",
+          id: `cont-raw-${attempts}`,
+          text: rawProtocol,
+        } as const;
+        yield {
+          type: "message_stop",
+          id: `cont-raw-stop-${attempts}`,
+          chunkCount: 1,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await continueModelAfterToolResults(
+      {
+        messages: [{ role: "user", content: "继续写入 report.md" }],
+        provider: "deepseek",
+        model: "deepseek-chat",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+      context,
+      gateway,
+      new MemoryOutput(),
+    );
+
+    const serialized = JSON.stringify(events);
+    const final = events
+      .filter(
+        (event): event is { type: string; text?: string } =>
+          (event as { type?: string }).type === "assistant_text_delta",
+      )
+      .at(-1);
+    expect(attempts).toBe(2);
+    expect(final?.text).toContain("部分完成");
+    expect(final?.text).toContain("没有执行任何非结构化工具请求");
+    expect(serialized).not.toContain('"type":"tool_result"');
+    expect(serialized).not.toContain(rawProtocol);
+  }, 30_000);
+
+  it("clears an owned pending tool approval when the provider fails before message_stop", async () => {
+    const { context } = await makeSendMessageContext();
+    let releaseProviderError!: () => void;
+    const providerErrorGate = new Promise<void>((resolve) => {
+      releaseProviderError = resolve;
+    });
+    const gateway = {
+      async *stream() {
+        yield {
+          type: "tool_use",
+          id: "tool-approval-provider-error",
+          name: "Write",
+          input: { path: "approval.txt", content: "not written" },
+        } as const;
+        await providerErrorGate;
+        yield {
+          type: "error",
+          error: new LinghunError({
+            code: "PROVIDER_STREAM_ERROR",
+            message: "stream failed after approval request",
+            recoverable: true,
+          }),
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    const running = __testSendMessage("写入 approval.txt", context, gateway, new MemoryOutput());
+    await vi.waitFor(() => {
+      expect(context.pendingLocalApproval).toMatchObject({ kind: "model_tool_use" });
+    });
+    releaseProviderError();
+    await running;
+
+    expect(context.pendingLocalApproval).toBeUndefined();
+  }, 30_000);
+
+  it("clears an owned pending tool approval when ESC aborts the request", async () => {
+    const { context } = await makeSendMessageContext();
+    const controller = new AbortController();
+    const gateway = {
+      async *stream(_providerId: string, _request: unknown, signal: AbortSignal) {
+        yield {
+          type: "tool_use",
+          id: "tool-approval-abort",
+          name: "Write",
+          input: { path: "approval-abort.txt", content: "not written" },
+        } as const;
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) {
+            resolve();
+            return;
+          }
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    const running = __testSendMessage(
+      "写入 approval-abort.txt",
+      context,
+      gateway,
+      new MemoryOutput(),
+      controller,
+    );
+    await vi.waitFor(() => {
+      expect(context.pendingLocalApproval).toMatchObject({ kind: "model_tool_use" });
+    });
+    controller.abort("ESC");
+    await running;
+
+    expect(context.pendingLocalApproval).toBeUndefined();
+  }, 30_000);
+
   it("records an empty provider stream as a structured resumable failure", async () => {
     const { context, events } = await makeSendMessageContext();
     const blocks: Array<Record<string, unknown>> = [];
@@ -832,22 +1687,29 @@ describe("model message prompt cache layout", () => {
     expect(blocks.some((block) => block.failureDomain === "provider")).toBe(false);
   }, 30_000);
 
-  it("keeps session-latched system diagnostics before append-only transcript history", async () => {
+  it("keeps volatile current-turn context after the compact and transcript cache prefix", async () => {
+    const compactBoundary = {
+      type: "system_event" as const,
+      level: "info" as const,
+      message: `compact_projection:${JSON.stringify(
+        makeCompactProjection("stable compact summary"),
+      )}`,
+    };
+    let events = [
+      compactBoundary,
+      { type: "user_message" as const, text: "previous user" },
+      { type: "assistant_text_delta" as const, text: "previous assistant" },
+    ];
     const context = {
       model: "test-model",
       cache: { history: [] },
       store: {
-        readRecentTranscriptEvents: async () => ({
-          events: [
-            { type: "user_message", text: "previous user" },
-            { type: "assistant_text_delta", text: "previous assistant" },
-          ],
-        }),
+        readRecentTranscriptEvents: async () => ({ events }),
         appendEvent: async () => undefined,
       },
     };
 
-    const messages = await __testBuildModelMessagesWithRecentContext(
+    const first = await __testBuildModelMessagesWithRecentContext(
       context as never,
       "session-cache-layout",
       [{ content: "stable system", promptCache: "cacheable" }],
@@ -860,18 +1722,54 @@ describe("model message prompt cache layout", () => {
         reasoningSent: false,
         reasoningStatus: "off",
       },
-      [{ content: "volatile diagnostics", promptCache: "volatile" }],
+      [{ content: "volatile diagnostics one", promptCache: "volatile" }],
     );
 
-    expect(messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+    expect(first.map((message) => `${message.role}:${message.content}`)).toEqual([
       "system:stable system",
-      "system:volatile diagnostics",
+      "user:Context compact projection\nstable compact summary",
       "user:previous user",
       "assistant:previous assistant",
+      "user:Current-turn internal context (not user-authored; do not quote it to the user):\nvolatile diagnostics one",
       "user:current user",
     ]);
-    expect(messages[0]).toMatchObject({ promptCache: "cacheable" });
-    expect(messages[1]).toMatchObject({ promptCache: "volatile" });
+    expect(first[0]).toMatchObject({ promptCache: "cacheable" });
+    expect(first.at(-2)).toMatchObject({ promptCache: "volatile" });
+
+    events = [
+      compactBoundary,
+      { type: "user_message", text: "previous user" },
+      { type: "assistant_text_delta", text: "previous assistant" },
+      { type: "user_message", text: "current user" },
+      { type: "assistant_text_delta", text: "current assistant" },
+    ];
+    const second = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-cache-layout",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "next user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+      [{ content: "volatile diagnostics two", promptCache: "volatile" }],
+    );
+    const firstVolatileIndex = first.findIndex(
+      (message) => "promptCache" in message && message.promptCache === "volatile",
+    );
+    const secondVolatileIndex = second.findIndex(
+      (message) => "promptCache" in message && message.promptCache === "volatile",
+    );
+
+    expect(firstVolatileIndex).toBeGreaterThan(1);
+    expect(secondVolatileIndex).toBeGreaterThan(firstVolatileIndex);
+    expect(second.slice(0, firstVolatileIndex)).toEqual(first.slice(0, firstVolatileIndex));
+    expect(second.at(-2)?.content).toContain("volatile diagnostics two");
+    expect(second.at(-1)).toMatchObject({ role: "user", content: "next user" });
   });
 
   it("exhausts multiple runtime fallbacks once without cycling", async () => {
@@ -965,11 +1863,10 @@ describe("model message prompt cache layout", () => {
   }, 30_000);
 
   it("cuts model history at the latest compact projection boundary", async () => {
-    const projection = {
+    const projection = makeCompactProjection("STABLE_COMPACT_SUMMARY", {
       boundaryId: "compact-boundary-test",
-      summary: "STABLE_COMPACT_SUMMARY",
-      restoreContext: { currentTask: "continue after compact" },
-    };
+      restoreContext: makeCompactRestoreContext({ currentTask: "continue after compact" }),
+    });
     const context = {
       model: "test-model",
       cache: { history: [] },
@@ -1021,11 +1918,12 @@ describe("model message prompt cache layout", () => {
   });
 
   it("stops the reverse transcript scan at the latest compact boundary", async () => {
-    const projection = {
+    const projection = makeCompactProjection("STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL", {
       boundaryId: "compact-boundary-outside-tail",
-      summary: "STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL",
-      restoreContext: { currentTask: "continue beyond the bounded tail" },
-    };
+      restoreContext: makeCompactRestoreContext({
+        currentTask: "continue beyond the bounded tail",
+      }),
+    });
     const boundary = {
       type: "system_event",
       level: "info",
@@ -1083,7 +1981,9 @@ describe("model message prompt cache layout", () => {
     const validBoundary = {
       type: "system_event",
       level: "info",
-      message: 'compact_projection:{"summary":"VALID_COMPACT_SUMMARY"}',
+      message: `compact_projection:${JSON.stringify(
+        makeCompactProjection("VALID_COMPACT_SUMMARY"),
+      )}`,
     };
     const events = [
       { type: "user_message", text: "RAW_BEFORE_VALID" },
@@ -1141,20 +2041,17 @@ describe("model message prompt cache layout", () => {
   });
 
   it("keeps persisted compact memory constraints immutable across later memory changes", async () => {
-    const projection = {
+    const projection = makeCompactProjection(
+      "Linghun compact summary\nuser constraints OLD_DELETED_MEMORY",
+      {
       boundaryId: "compact-memory-boundary",
-      summary: "Linghun compact summary\nuser constraints OLD_DELETED_MEMORY",
       postCompactTargetChars: 160_000,
-      restoreContext: {
-        goal: "continue",
-        currentTask: "current task",
-        phaseStatus: "in_progress",
+      restoreContext: makeCompactRestoreContext({
         userConstraints: ["OLD_DELETED_MEMORY"],
-        keyFiles: [],
         memoryStatus: "1 accepted memories",
-        verificationRequirement: "verify with evidence",
+      }),
       },
-    };
+    );
     const context = {
       model: "test-model",
       cache: { history: [] },
@@ -1677,7 +2574,7 @@ describe("responses prompt cache key", () => {
   });
 });
 
-describe("tool batch fail-fast helpers", () => {
+describe("tool batch execution helpers", () => {
   it("separates failed tool results from required pre-analysis fallbacks", () => {
     const fallbackResult = {
       ok: true,
@@ -1754,19 +2651,6 @@ describe("tool batch fail-fast helpers", () => {
     expect(repeated).toContain("下一轮回复必须至少调用一个真实工作区工具");
   });
 
-  it("creates skipped tool result with the original tool call id handled by caller", () => {
-    const skipped = createToolBatchFailFastSkippedResult(
-      { id: "call-4", name: "Read", input: { file_path: "x.ts" } },
-      "Read failed",
-    );
-
-    expect(skipped).toMatchObject({
-      ok: false,
-      tool: "Read",
-      data: { skipped: true, reason: "tool_batch_fail_fast", lastFailure: "Read failed" },
-    });
-  });
-
   it("groups only bounded readonly tools into parallel execution batches", () => {
     const calls = [
       { id: "call-read", name: "Read", input: { path: "packages/tui/src/a.ts" } },
@@ -1788,13 +2672,13 @@ describe("tool batch fail-fast helpers", () => {
   it("does not turn meta-scheduler tool ask into an empty local approval wait", async () => {
     const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
     const shortCircuitStart = source.indexOf("if (orchestration.shouldStop || orchestration.shouldAsk)");
-    const shortCircuitEnd = source.indexOf("for (const batch of batches)", shortCircuitStart);
+    const shortCircuitEnd = source.indexOf("const first = toolCalls[processedCount++]!", shortCircuitStart);
     const shortCircuit = source.slice(shortCircuitStart, shortCircuitEnd);
 
     expect(shortCircuit).toContain("createMetaOrchestrationSkippedToolResult");
-    expect(shortCircuit).toContain("pendingApproval: false");
     expect(shortCircuit).not.toContain("pendingApproval: orchestration.shouldAsk");
     expect(shortCircuit).not.toContain("context.pendingLocalApproval");
+    expect(source).not.toContain("tool_batch_fail_fast");
   });
 
   it("keeps sensitive or outside Read calls out of parallel readonly batches", () => {
@@ -1805,7 +2689,7 @@ describe("tool batch fail-fast helpers", () => {
     expect(canRunToolCallInParallelReadonlyBatch({ name: "Bash", input: { command: "pwd" } })).toBe(false);
   });
 
-  it("caps readonly parallel batches below the fail-fast threshold", () => {
+  it("keeps readonly parallel batches bounded without a batch failure cutoff", () => {
     const calls = [
       { id: "call-read", name: "Read", input: { path: "packages/tui/src/a.ts" } },
       { id: "call-grep", name: "Grep", input: { pattern: "x", path: "packages/tui/src" } },
@@ -2433,11 +3317,45 @@ describe("final answer gate aggregation", () => {
     Object.assign(context, {
       config: defaultConfig,
       providerBreaker: createProviderCircuitBreakerState(),
+      currentRequestTurnId: "request-current-preflight",
       evidence: [
         makeEvidence({
           kind: "command_output",
-          summary: "focused tests passed",
+          summary: "current focused tests passed",
           supportsClaims: ["test_passed"],
+          ownerScope: {
+            ownerSessionId: "session-final-gate-dispatch",
+            requestTurnId: "request-current-preflight",
+            cwd: projectPath,
+          },
+          data: {
+            verificationScope: {
+              ownerKey: "request:session-final-gate-dispatch:request-current-preflight",
+              ownerSessionId: "session-final-gate-dispatch",
+              requestTurnId: "request-current-preflight",
+              cwd: projectPath,
+              changedFiles: [],
+            },
+          },
+        }),
+        makeEvidence({
+          kind: "command_output",
+          summary: "stale full tests passed",
+          supportsClaims: ["test_passed"],
+          ownerScope: {
+            ownerSessionId: "session-final-gate-dispatch",
+            requestTurnId: "request-stale-preflight",
+            cwd: projectPath,
+          },
+          data: {
+            verificationScope: {
+              ownerKey: "request:session-final-gate-dispatch:request-stale-preflight",
+              ownerSessionId: "session-final-gate-dispatch",
+              requestTurnId: "request-stale-preflight",
+              cwd: projectPath,
+              changedFiles: [],
+            },
+          },
         }),
       ],
       cache: { history: [], deepCompact: undefined },
@@ -2473,7 +3391,53 @@ describe("final answer gate aggregation", () => {
     expect(finalText).toContain("验证通过");
     expect(JSON.stringify(calls.requests[0]?.messages ?? [])).toContain("最终回答证据前置检查");
     expect(JSON.stringify(calls.requests[0]?.messages ?? [])).toContain("已有 1 条记录");
+    expect(JSON.stringify(calls.requests[0]?.messages ?? [])).not.toContain("已有 2 条记录");
     expect((context as { requestActivityPhase?: string }).requestActivityPhase).toBeUndefined();
+  });
+
+  it("downgrades raw protocol from the no-tool final stream through the existing partial gate", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-no-tool-raw-protocol-"));
+    const { context, events } = makeDispatcherContext(projectPath);
+    Object.assign(context, {
+      config: defaultConfig,
+      providerBreaker: createProviderCircuitBreakerState(),
+      cache: { history: [], deepCompact: undefined },
+    });
+    const blocks: Array<{ id: string; fullText?: string; summary?: string }> = [];
+    const output = createShellBlockOutputForTest(context, blocks as never);
+    const calls = { count: 0 };
+    const rawProtocol =
+      '<tool_use id="toolu_final_raw" name="Write"><input>{"path":"report.md","content":"fake"}</input></tool_use>';
+
+    const finalText = await __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "请给最终结论" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+      context,
+      gatewayByTurn(
+        [
+          [
+            { type: "assistant_text_delta", text: rawProtocol },
+            { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+          ],
+        ],
+        calls,
+      ),
+      "session-no-tool-raw-protocol",
+      output,
+      new AbortController().signal,
+    );
+
+    expect(calls.count).toBe(1);
+    expect(finalText).toContain("部分完成");
+    expect(finalText).toContain("没有执行任何非结构化工具请求");
+    expect(finalText).not.toContain(rawProtocol);
+    expect(JSON.stringify(blocks)).toContain("部分完成");
+    expect(JSON.stringify(events)).not.toContain('"type":"tool_result"');
   });
 
   it("no-tool final deterministically downgrades unsupported completion claims", async () => {

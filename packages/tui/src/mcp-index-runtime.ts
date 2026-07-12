@@ -54,7 +54,11 @@ import {
   runMcpStdioToolCall,
   runMcpStdioToolList,
 } from "./mcp-stdio-runtime.js";
-import { runMcpSseToolCall, type McpRuntimeProgress } from "./mcp-sse-runtime.js";
+import {
+  MCP_TRANSPORT_LIMITS,
+  runMcpSseToolCall,
+  type McpRuntimeProgress,
+} from "./mcp-sse-runtime.js";
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import { formatMcpTools } from "./remote-mcp-presenter.js";
 import {
@@ -112,6 +116,7 @@ export type McpIndexRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     task: BackgroundTaskState,
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   rememberEvidence: (context: TuiContext, evidence: EvidenceRecord) => void;
   resolveCodebaseMemoryPackageRoot?: (packageName: string) => string | undefined;
@@ -121,6 +126,7 @@ export type McpIndexRuntimeDeps = {
     args: Record<string, unknown>,
     cwd: string,
     binary: string,
+    signal?: AbortSignal,
   ) => Promise<{ ok: boolean; summary: string; data?: unknown }>;
 };
 
@@ -346,6 +352,7 @@ export async function handleIndexCommand(
 
 export async function resolveCodebaseMemoryBinary(
   context: TuiContext,
+  signal?: AbortSignal,
 ): Promise<CodebaseMemoryResolution> {
   const configured = context.config.mcp.servers["codebase-memory"];
   const configuredCommand = configured?.command?.trim();
@@ -353,11 +360,11 @@ export async function resolveCodebaseMemoryBinary(
   const envCommand = process.env[CODEBASE_MEMORY_ENV]?.trim();
   if (envCommand) {
     const spec = await codebaseMemoryCommandSpec(envCommand, []);
-    return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath);
+    return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath, signal);
   }
   if (configuredCommand && configuredCommand !== CODEBASE_MEMORY_COMMAND) {
     const spec = await codebaseMemoryCommandSpec(configuredCommand, configuredArgs);
-    return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath);
+    return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath, signal);
   }
 
   const bundled = await findBundledCodebaseMemoryBinary();
@@ -368,6 +375,7 @@ export async function resolveCodebaseMemoryBinary(
       "bundled",
       context,
       bundled.detailPath,
+      signal,
     );
   }
 
@@ -379,6 +387,7 @@ export async function resolveCodebaseMemoryBinary(
       "managed",
       context,
       managed.detailPath,
+      signal,
     );
   }
 
@@ -390,10 +399,18 @@ export async function resolveCodebaseMemoryBinary(
       "path",
       context,
       pathBinary.detailPath,
+      signal,
     );
   }
 
-  const pathProbe = await probeCodebaseMemoryBinary(CODEBASE_MEMORY_COMMAND, [], "path", context);
+  const pathProbe = await probeCodebaseMemoryBinary(
+    CODEBASE_MEMORY_COMMAND,
+    [],
+    "path",
+    context,
+    undefined,
+    signal,
+  );
   if (pathProbe.status === "missing") {
     return { ...pathProbe, source: "missing" };
   }
@@ -551,132 +568,313 @@ export function getCodebaseMemoryPlatformArch(): string {
 }
 
 const PRE_ENGINE_COMMAND = "linghun-pre-engine";
+const PRE_ENGINE_INITIALIZE_TIMEOUT_MS = 30_000;
+const PRE_ENGINE_CALL_TIMEOUT_MS = 100_000_000;
+const PRE_ENGINE_IDLE_TIMEOUT_MS = 30_000;
+
+type PreEngineCallResult = {
+  ok: boolean;
+  summary: string;
+  errorCode?: string;
+  data?: unknown;
+};
 
 class PreEngineDaemon {
   private proc: ReturnType<typeof spawn> | null = null;
   private queue: Promise<void> = Promise.resolve();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private msgId = 1;
+  private pendingCalls = 0;
 
   constructor(
     private readonly binary: string,
     private readonly cwd: string,
+    private readonly onIdle: () => void,
+    private readonly maxFrameBytes = MCP_TRANSPORT_LIMITS.maxFrameBytes,
   ) {}
 
   call(
     toolName: string,
     args: Record<string, unknown>,
-  ): Promise<{ ok: boolean; summary: string; errorCode?: string; data?: unknown }> {
-    return new Promise((resolve, reject) => {
-      this.queue = this.queue
-        .then(() => this._doCall(toolName, args).then(resolve, reject))
-        .catch(() => {});
+    signal?: AbortSignal,
+  ): Promise<PreEngineCallResult> {
+    if (signal?.aborted) {
+      return Promise.resolve({
+        ok: false,
+        summary: "pre-engine request aborted",
+        errorCode: "ABORTED",
+      });
+    }
+    this.pendingCalls += 1;
+    this._clearIdle();
+    const operation = this.queue.then(async () => {
+      try {
+        if (signal?.aborted) {
+          return { ok: false, summary: "pre-engine request aborted", errorCode: "ABORTED" };
+        }
+        return await this._doCall(toolName, args, signal);
+      } finally {
+        this.pendingCalls -= 1;
+        this._scheduleIdleIfUnused();
+      }
+    });
+    this.queue = operation.then(() => undefined, () => undefined);
+    if (!signal) return operation;
+    return new Promise((resolve) => {
+      const onAbort = () => {
+        resolve({ ok: false, summary: "pre-engine request aborted", errorCode: "ABORTED" });
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      void operation.then((result) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      });
     });
   }
 
-  private _ensureProc(): Promise<ReturnType<typeof spawn>> {
+  private _ensureProc(signal?: AbortSignal): Promise<ReturnType<typeof spawn>> {
     if (this.proc) return Promise.resolve(this.proc);
     const proc = spawn(this.binary, [], { cwd: this.cwd, stdio: ["pipe", "pipe", "pipe"] });
     this.proc = proc;
-    proc.on("exit", () => { if (this.proc === proc) this.proc = null; });
-    return new Promise((resolve) => {
+    proc.stderr?.resume();
+    proc.once("exit", () => {
+      if (this.proc === proc) this.proc = null;
+    });
+    return new Promise((resolve, reject) => {
       let buf = "";
+      let settled = false;
+      const timeout = setTimeout(
+        () => finish(new Error("pre-engine initialize timed out")),
+        PRE_ENGINE_INITIALIZE_TIMEOUT_MS,
+      );
+      const cleanup = () => {
+        clearTimeout(timeout);
+        proc.stdout?.off("data", onData);
+        proc.off("error", onError);
+        proc.off("exit", onExit);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) {
+          if (this.proc === proc) this.proc = null;
+          if (!proc.killed) proc.kill();
+          reject(error);
+          return;
+        }
+        resolve(proc);
+      };
+      const onError = (error: Error) => finish(error);
+      const onExit = () => finish(new Error("pre-engine process exited during initialize"));
+      const onAbort = () => finish(new Error("pre-engine request aborted"));
       const onData = (chunk: Buffer | string) => {
         buf += chunk.toString();
         const lines = buf.split("\n");
         buf = lines.pop() ?? "";
+        if (Buffer.byteLength(buf, "utf8") > this.maxFrameBytes) {
+          finish(new Error("pre-engine initialize frame too large"));
+          return;
+        }
         for (const line of lines) {
           if (!line.trim()) continue;
+          if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) {
+            finish(new Error("pre-engine initialize frame too large"));
+            return;
+          }
           try {
             const msg = JSON.parse(line);
             if (msg.id === 0) {
-              proc.stdout!.off("data", onData);
-              proc.stdin!.write(
+              if (msg.error) {
+                finish(new Error(msg.error.message ?? String(msg.error)));
+                return;
+              }
+              if (!proc.stdin) {
+                finish(new Error("pre-engine stdin unavailable"));
+                return;
+              }
+              proc.stdin.write(
                 JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n",
+                (error) => finish(error ?? undefined),
               );
-              resolve(proc);
             }
           } catch {}
         }
       };
-      proc.stdout!.on("data", onData);
-      proc.stdin!.write(
+      proc.stdout?.on("data", onData);
+      proc.once("error", onError);
+      proc.once("exit", onExit);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      if (!proc.stdin) {
+        finish(new Error("pre-engine stdin unavailable"));
+        return;
+      }
+      proc.stdin.write(
         JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { rootUri: this.cwd } }) + "\n",
+        (error) => error && finish(error),
       );
     });
   }
 
-  private _doCall(
+  private async _doCall(
     toolName: string,
     args: Record<string, unknown>,
-  ): Promise<{ ok: boolean; summary: string; data?: unknown }> {
-    this._resetIdle();
-    return this._ensureProc().then(
-      (proc) =>
-        new Promise((resolve) => {
+    signal?: AbortSignal,
+  ): Promise<PreEngineCallResult> {
+    try {
+      const proc = await this._ensureProc(signal);
+      return await new Promise((resolve) => {
           const id = this.msgId++;
           let buf = "";
+          let settled = false;
+          const timeout = setTimeout(
+            () => finish({ ok: false, summary: "pre-engine tool call timed out", errorCode: "TIMEOUT" }, true),
+            PRE_ENGINE_CALL_TIMEOUT_MS,
+          );
           const cleanup = () => {
-            proc.stdout!.off("data", onData);
+            clearTimeout(timeout);
+            proc.stdout?.off("data", onData);
+            proc.off("error", onError);
             proc.off("exit", onExit);
+            signal?.removeEventListener("abort", onAbort);
+          };
+          const finish = (result: PreEngineCallResult, stopProcess = false) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            if (stopProcess) {
+              if (this.proc === proc) this.proc = null;
+              if (!proc.killed) proc.kill();
+            }
+            resolve(result);
+          };
+          const onError = (error: Error) => {
+            finish({ ok: false, summary: error.message || "pre-engine process error" }, true);
           };
           const onExit = () => {
-            cleanup();
-            resolve({ ok: false, summary: "pre-engine process exited unexpectedly" });
+            finish({ ok: false, summary: "pre-engine process exited unexpectedly" });
+          };
+          const onAbort = () => {
+            finish({ ok: false, summary: "pre-engine request aborted", errorCode: "ABORTED" }, true);
           };
           const onData = (chunk: Buffer | string) => {
             buf += chunk.toString();
             const lines = buf.split("\n");
             buf = lines.pop() ?? "";
+            if (Buffer.byteLength(buf, "utf8") > this.maxFrameBytes) {
+              finish({
+                ok: false,
+                summary: "pre-engine response frame too large",
+                errorCode: "FRAME_TOO_LARGE",
+              }, true);
+              return;
+            }
             for (const line of lines) {
               if (!line.trim()) continue;
+              if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) {
+                finish({
+                  ok: false,
+                  summary: "pre-engine response frame too large",
+                  errorCode: "FRAME_TOO_LARGE",
+                }, true);
+                return;
+              }
               try {
                 const msg = JSON.parse(line);
                 if (msg.id === id) {
-                  cleanup();
                   if (msg.error) {
-                    resolve({ ok: false, summary: msg.error.message ?? String(msg.error) });
+                    finish({ ok: false, summary: msg.error.message ?? String(msg.error) });
                   } else {
                     const content = msg.result?.content;
                     const text = Array.isArray(content)
                       ? content.map((c: { text?: string }) => c.text ?? "").join("")
                       : "";
-                    resolve({ ok: true, summary: text, data: msg.result });
+                    finish({ ok: true, summary: text, data: msg.result });
                   }
                 }
               } catch {}
             }
           };
-          proc.stdout!.on("data", onData);
-          proc.on("exit", onExit);
-          proc.stdin!.write(
+          proc.stdout?.on("data", onData);
+          proc.once("error", onError);
+          proc.once("exit", onExit);
+          signal?.addEventListener("abort", onAbort, { once: true });
+          if (signal?.aborted) {
+            onAbort();
+            return;
+          }
+          if (!proc.stdin) {
+            onError(new Error("pre-engine stdin unavailable"));
+            return;
+          }
+          proc.stdin.write(
             JSON.stringify({
               jsonrpc: "2.0",
               id,
               method: "tools/call",
               params: { name: toolName, arguments: args },
             }) + "\n",
+            (error) => error && onError(error),
           );
-        }),
-    );
+        });
+    } catch (error) {
+      return {
+        ok: false,
+        summary: error instanceof Error ? error.message : String(error),
+        errorCode: signal?.aborted ? "ABORTED" : undefined,
+      };
+    }
   }
 
-  private _resetIdle() {
-    if (this.idleTimer) clearTimeout(this.idleTimer);
+  private _clearIdle(): void {
+    if (!this.idleTimer) return;
+    clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  private _scheduleIdleIfUnused(): void {
+    if (this.pendingCalls !== 0 || this.idleTimer) return;
     this.idleTimer = setTimeout(() => {
+      if (this.pendingCalls !== 0) return;
       this.proc?.kill();
       this.proc = null;
-    }, 30_000);
+      this.idleTimer = null;
+      this.onIdle();
+    }, PRE_ENGINE_IDLE_TIMEOUT_MS);
   }
+}
+
+export function __testCreatePreEngineDaemon(
+  binary: string,
+  cwd: string,
+  maxFrameBytes?: number,
+): Pick<PreEngineDaemon, "call"> {
+  return new PreEngineDaemon(binary, cwd, () => undefined, maxFrameBytes);
+}
+
+export function __testGetOrCreatePreEngineDaemon(
+  binary: string,
+  cwd: string,
+  runtimeOwnerId: string,
+): Pick<PreEngineDaemon, "call"> {
+  return getOrCreatePreEngineDaemon(binary, cwd, runtimeOwnerId);
 }
 
 const _preEngineDaemons = new Map<string, PreEngineDaemon>();
 
-function getOrCreatePreEngineDaemon(binary: string, cwd: string): PreEngineDaemon {
-  const key = `${binary}\0${cwd}`;
+function getOrCreatePreEngineDaemon(binary: string, cwd: string, runtimeOwnerId: string): PreEngineDaemon {
+  const key = `${runtimeOwnerId}\0${binary}\0${cwd}`;
   let d = _preEngineDaemons.get(key);
   if (!d) {
-    d = new PreEngineDaemon(binary, cwd);
+    d = new PreEngineDaemon(binary, cwd, () => {
+      if (_preEngineDaemons.get(key) === d) _preEngineDaemons.delete(key);
+    });
     _preEngineDaemons.set(key, d);
   }
   return d;
@@ -865,12 +1063,14 @@ export async function probeCodebaseMemoryBinary(
   source: Exclude<CodebaseMemoryBinarySource, "missing">,
   context: TuiContext,
   detailPath = command,
+  signal?: AbortSignal,
 ): Promise<CodebaseMemoryResolution> {
   const result = await runCommandCapture(
     command,
     [...args, "--version"],
     context.projectPath,
     5_000,
+    signal,
   );
   if (result.errorCode === "ENOENT") {
     return {
@@ -945,9 +1145,10 @@ export function rememberCodebaseMemoryResolution(
 
 export async function getCodebaseMemoryResolution(
   context: TuiContext,
+  signal?: AbortSignal,
 ): Promise<CodebaseMemoryResolution> {
-  const resolution = await resolveCodebaseMemoryBinary(context);
-  rememberCodebaseMemoryResolution(context, resolution);
+  const resolution = await resolveCodebaseMemoryBinary(context, signal);
+  if (!signal?.aborted) rememberCodebaseMemoryResolution(context, resolution);
   return resolution;
 }
 
@@ -1184,7 +1385,12 @@ export async function removeMcpServer(id: string, context: TuiContext): Promise<
   return `已移除 MCP server：${id}；已有普通聊天和本地工具不受影响。`;
 }
 
-export async function refreshIndexStatus(context: TuiContext, fresh = false): Promise<void> {
+export async function refreshIndexStatus(
+  context: TuiContext,
+  fresh = false,
+  options: { signal?: AbortSignal } = {},
+): Promise<void> {
+  if (options.signal?.aborted) return;
   if (!context.index.enabled) {
     context.index.status = "disabled";
     context.index.artifactStatus = "disabled";
@@ -1197,7 +1403,9 @@ export async function refreshIndexStatus(context: TuiContext, fresh = false): Pr
   }
 
   await refreshLocalIndexArtifactState(context);
-  const resolution = await getCodebaseMemoryResolution(context);
+  if (options.signal?.aborted) return;
+  const resolution = await getCodebaseMemoryResolution(context, options.signal);
+  if (options.signal?.aborted) return;
   if (resolution.status !== "ready") {
     context.index.status =
       context.index.artifactStatus === "ready"
@@ -1218,7 +1426,15 @@ export async function refreshIndexStatus(context: TuiContext, fresh = false): Pr
     return;
   }
 
-  const projects = await runCodebaseMemoryCli(context, "list_projects", {}, context.projectPath);
+  const projects = await runCodebaseMemoryCli(
+    context,
+    "list_projects",
+    {},
+    context.projectPath,
+    30_000,
+    options.signal,
+  );
+  if (options.signal?.aborted) return;
   if (!projects.ok) {
     context.index.status = projects.errorCode === "ENOENT" ? "missing" : "error";
     context.index.artifactStatus = projects.errorCode === "ENOENT" ? "missing" : "corrupt";
@@ -1232,6 +1448,7 @@ export async function refreshIndexStatus(context: TuiContext, fresh = false): Pr
   const project = findCurrentIndexProject(projects.data, context.projectPath);
   if (!project) {
     await refreshLocalIndexArtifactState(context);
+    if (options.signal?.aborted) return;
     context.index.status =
       context.index.artifactStatus === "ready"
         ? "unknown-project"
@@ -1261,7 +1478,10 @@ export async function refreshIndexStatus(context: TuiContext, fresh = false): Pr
     "index_status",
     { project: project.name },
     context.projectPath,
+    30_000,
+    options.signal,
   );
+  if (options.signal?.aborted) return;
   if (!status.ok) {
     context.index.status = "error";
     context.index.artifactStatus = "corrupt";
@@ -1284,7 +1504,7 @@ export async function refreshIndexStatus(context: TuiContext, fresh = false): Pr
   context.index.safetyRiskyFiles = undefined;
   context.index.safetyAction = undefined;
   if (fresh) {
-    await refreshIndexStaleHint(context, project.name);
+    await refreshIndexStaleHint(context, project.name, options.signal);
   }
 }
 
@@ -1307,6 +1527,7 @@ export async function refreshLocalIndexArtifactState(context: TuiContext): Promi
 export async function refreshIndexStaleHint(
   context: TuiContext,
   projectName: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const changes = await runCodebaseMemoryCli(
     context,
@@ -1314,7 +1535,9 @@ export async function refreshIndexStaleHint(
     { project: projectName },
     context.projectPath,
     15_000,
+    signal,
   );
+  if (signal?.aborted) return;
   if (!changes.ok) {
     context.index.staleHint = `detect_changes 不可用：${changes.summary}。/index status 仍按 index_status 展示；不会自动刷新。`;
     return;
@@ -1342,36 +1565,48 @@ export async function runIndexRepository(
   actionLabel: "init fast" | "refresh",
   force: boolean,
   output: Writable,
-  options: { guardAlreadyChecked?: boolean } = {},
+  options: {
+    guardAlreadyChecked?: boolean;
+    signal?: AbortSignal;
+    commitGuard?: () => boolean;
+  } = {},
 ): Promise<void> {
+  const ownerIsCurrent = () =>
+    options.signal?.aborted !== true && (options.commitGuard?.() ?? true);
+  if (!ownerIsCurrent()) return;
   if (!options.guardAlreadyChecked) {
     const guard = deps().checkBackgroundStartGuard(context, "index", true);
     if (guard) {
+      if (!ownerIsCurrent()) return;
       context.index.status = "error";
       context.index.error = guard;
       writeLine(output, guard);
       return;
     }
   }
-  const prepared = await prepareIndexIgnoreBeforeRepository(context, actionLabel, force, output);
+  const prepared = await prepareIndexIgnoreBeforeRepository(
+    context,
+    actionLabel,
+    force,
+    output,
+    ownerIsCurrent,
+  );
   if (!prepared.ok) {
     return;
   }
+  if (!ownerIsCurrent()) return;
   const safety = prepared.safety;
   const indexRiskFiles = !force && safety.riskyFiles.length > 0 ? safety.riskyFiles : [];
-  context.index.safetyWarning = undefined;
-  context.index.safetyRiskyFiles = safety.riskyFiles.length > 0 ? safety.riskyFiles : undefined;
-  context.index.safetyAction = safety.riskyFiles.length > 0 ? actionLabel : undefined;
-  context.index.error = undefined;
-  context.index.status = "indexing";
   if (indexRiskFiles.length > 0) {
     await recordIndexEvidence(
       context,
       `index-risk:${actionLabel}`,
       formatIndexAutoSkipDetails(safety, actionLabel, context.language),
       indexRiskFiles.map((file) => `index_risk_file:${file.path}`),
+      ownerIsCurrent,
     );
   }
+  if (!ownerIsCurrent()) return;
   const now = new Date().toISOString();
   const task: BackgroundTaskState = {
     id: `index-${randomUUID().slice(0, 8)}`,
@@ -1389,10 +1624,33 @@ export async function runIndexRepository(
     nextAction: "等待完成，或用 /interrupt 标记取消后检查 /index status。",
   };
   const sessionId = await deps().ensureSession(context);
+  if (!ownerIsCurrent()) return;
+  const terminalizeCancelledTask = async (exitConfirmed = true) => {
+    const cancelledAt = new Date().toISOString();
+    task.status = "cancelled";
+    task.result = "cancelled";
+    task.currentStep = "index cancelled";
+    task.updatedAt = cancelledAt;
+    task.lastOutputAt = cancelledAt;
+    task.progress = { completed: 1, total: 1, label: "index" };
+    task.cancelState = exitConfirmed ? "confirmed_exited" : "abort_signal_sent";
+    task.confirmedExitedAt = exitConfirmed ? cancelledAt : undefined;
+    task.userVisibleSummary = "Index cancelled: stale request owner.";
+    task.nextAction = "Run index refresh again from the current request if it is still needed.";
+    await deps().appendBackgroundTaskEvent(context, sessionId, task);
+  };
   deps().rememberBackgroundTask(context, task);
-  await deps().appendBackgroundTaskEvent(context, sessionId, task);
+  await deps().appendBackgroundTaskEvent(context, sessionId, task, ownerIsCurrent);
+  if (!ownerIsCurrent()) {
+    await terminalizeCancelledTask();
+    return;
+  }
+  const stagedIndexContext = {
+    ...context,
+    index: { ...context.index },
+  } as TuiContext;
   const result = await runCodebaseMemoryCli(
-    context,
+    stagedIndexContext,
     "index_repository",
     {
       repo_path: context.projectPath,
@@ -1401,12 +1659,20 @@ export async function runIndexRepository(
     },
     context.projectPath,
     INDEX_REPOSITORY_TIMEOUT_MS,
+    options.signal,
   );
+  if (!ownerIsCurrent()) {
+    await terminalizeCancelledTask(
+      !("errorCode" in result && result.errorCode === "ABORTED_UNCONFIRMED"),
+    );
+    return;
+  }
   const endedAt = new Date().toISOString();
   task.updatedAt = endedAt;
   task.lastOutputAt = endedAt;
   task.hasOutput = Boolean(result.ok || result.summary);
   if (!result.ok) {
+    Object.assign(context.index, stagedIndexContext.index);
     context.index.status = result.errorCode === "ENOENT" ? "missing" : "error";
     context.index.error = `${result.summary}。请确认索引运行时可用，修复后重试。`;
     task.status = result.summary.includes("命令超时") ? "timeout" : "failed";
@@ -1415,11 +1681,17 @@ export async function runIndexRepository(
     task.progress = { completed: 1, total: 1, label: "index" };
     task.userVisibleSummary = `Index ${task.status}: ${context.index.error}`;
     task.nextAction = "查看 /index status，修复 runtime/artifact 后重试；不得声称索引刷新成功。";
-    await deps().appendBackgroundTaskEvent(context, sessionId, task);
+    await deps().appendBackgroundTaskEvent(context, sessionId, task, ownerIsCurrent);
+    if (!ownerIsCurrent()) return;
     writeLine(output, `Index: ${context.index.status}. ${context.index.error}`);
     return;
   }
-  await refreshIndexStatus(context);
+  await refreshIndexStatus(stagedIndexContext, false, { signal: options.signal });
+  if (!ownerIsCurrent()) {
+    await terminalizeCancelledTask();
+    return;
+  }
+  Object.assign(context.index, stagedIndexContext.index);
   // P1 — index_repository 已成功（result.ok），但紧随的 refreshIndexStatus
   // 可能因 list_projects/index_status 读回延迟未能确认 ready/stale。这里不用
   // stale 冒充真实过期，而记录更精确的终态：刷新完成但读回/新鲜度待确认。
@@ -1446,7 +1718,11 @@ export async function runIndexRepository(
   task.progress = { completed: 1, total: 1, label: "index" };
   task.userVisibleSummary = `Index ${actionLabel} completed: ${context.index.status}`;
   task.nextAction = "用 /index status 查看详情；需要新鲜度检查时用 /index status --fresh。";
-  await deps().appendBackgroundTaskEvent(context, sessionId, task);
+  await deps().appendBackgroundTaskEvent(context, sessionId, task, ownerIsCurrent);
+  if (!ownerIsCurrent()) {
+    await terminalizeCancelledTask();
+    return;
+  }
   if (indexRiskFiles.length > 0) {
     const detailsText = formatIndexAutoSkipDetails(safety, actionLabel, context.language);
     context.index.safetyWarning = formatIndexAutoSkipPrimary(
@@ -1462,6 +1738,7 @@ export async function runIndexRepository(
       `index-risk-result:${actionLabel}`,
       detailsText,
       indexRiskFiles.map((file) => `index_risk_file:${file.path}`),
+      ownerIsCurrent,
     );
     context.lastFullOutput = detailsText;
     writeLine(output, context.index.safetyWarning);
@@ -1474,8 +1751,10 @@ async function prepareIndexIgnoreBeforeRepository(
   actionLabel: "init fast" | "refresh",
   force: boolean,
   output: Writable,
+  ownerIsCurrent: () => boolean = () => true,
 ): Promise<{ ok: true; safety: IndexSafetyResult } | { ok: false }> {
   let latestSafety = await scanIndexSafety(context.projectPath);
+  if (!ownerIsCurrent()) return { ok: false };
   if (force || latestSafety.riskyFiles.length === 0) {
     return { ok: true, safety: latestSafety };
   }
@@ -1483,10 +1762,13 @@ async function prepareIndexIgnoreBeforeRepository(
   let wroteIgnore = false;
   for (let pass = 0; pass < INDEX_IGNORE_PREFLIGHT_MAX_PASSES; pass += 1) {
     const plan = await createIndexSafetyRepairPlan(context.projectPath, latestSafety.riskyFiles);
+    if (!ownerIsCurrent()) return { ok: false };
     if (plan.missingEntries.length === 0) {
       return { ok: true, safety: latestSafety };
     }
+    if (!ownerIsCurrent()) return { ok: false };
     await writeFile(join(context.projectPath, plan.path), plan.content, "utf8");
+    if (!ownerIsCurrent()) return { ok: false };
     wroteIgnore = true;
     await recordIndexEvidence(
       context,
@@ -1498,7 +1780,9 @@ async function prepareIndexIgnoreBeforeRepository(
         `ignore_file:${plan.path}`,
         ...plan.missingEntries.map((entry) => `ignored_before_index:${entry}`),
       ],
+      ownerIsCurrent,
     );
+    if (!ownerIsCurrent()) return { ok: false };
     writeLine(
       output,
       context.language === "en-US"
@@ -1507,6 +1791,7 @@ async function prepareIndexIgnoreBeforeRepository(
     );
 
     latestSafety = await scanIndexSafety(context.projectPath);
+    if (!ownerIsCurrent()) return { ok: false };
     if (latestSafety.riskyFiles.length === 0) {
       break;
     }
@@ -1596,13 +1881,16 @@ export async function recordIndexEvidence(
   query: string,
   summary: string,
   supportsClaims: string[] = [],
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   const supportsIndexCodeFact = isSupportiveIndexEvidence(context, query, summary);
   const isSupplementalEvidence = supportsClaims.length > 0;
   if (!supportsIndexCodeFact && !isSupplementalEvidence) {
     return;
   }
   const sessionId = await deps().ensureSession(context);
+  if (commitGuard && !commitGuard()) return;
   const evidence: EvidenceRecord = {
     id: randomUUID(),
     kind: "index_query",
@@ -1616,8 +1904,12 @@ export async function recordIndexEvidence(
     ],
     createdAt: new Date().toISOString(),
   };
-  deps().rememberEvidence(context, evidence);
-  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  await context.store.appendEvent(
+    sessionId,
+    { type: "evidence_record", ...evidence },
+    commitGuard,
+  );
+  if (!commitGuard || commitGuard()) deps().rememberEvidence(context, evidence);
 }
 
 export function isSupportiveIndexEvidence(
@@ -1645,12 +1937,19 @@ export async function runCodebaseMemoryCli(
   input: Record<string, unknown>,
   cwd: string,
   timeoutMs = 30_000,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; data: unknown } | { ok: false; summary: string; errorCode?: string }> {
+  if (signal?.aborted) {
+    return { ok: false, summary: "codebase-memory command cancelled", errorCode: "ABORTED" };
+  }
   const guard = validateCodebaseMemoryToolExecution(tool, input);
   if (!guard.ok) {
     return { ok: false, summary: guard.summary };
   }
-  const resolution = await getCodebaseMemoryResolution(context);
+  const resolution = await getCodebaseMemoryResolution(context, signal);
+  if (signal?.aborted) {
+    return { ok: false, summary: "codebase-memory command cancelled", errorCode: "ABORTED" };
+  }
   if (resolution.status !== "ready") {
     return { ok: false, summary: resolution.summary, errorCode: resolution.status };
   }
@@ -1659,6 +1958,7 @@ export async function runCodebaseMemoryCli(
     [...resolution.args, "cli", tool, JSON.stringify(input)],
     cwd,
     timeoutMs,
+    signal,
   );
   if (result.exitCode !== 0) {
     return { ok: false, summary: result.summary, errorCode: result.errorCode };
@@ -1681,8 +1981,15 @@ export async function deleteCodebaseMemoryProjectIndex(
   project: string,
   cwd: string,
   timeoutMs = 30_000,
+  signal?: AbortSignal,
 ): Promise<{ ok: true } | { ok: false; summary: string; errorCode?: string }> {
-  const resolution = await getCodebaseMemoryResolution(context);
+  if (signal?.aborted) {
+    return { ok: false, summary: "codebase-memory command cancelled", errorCode: "ABORTED" };
+  }
+  const resolution = await getCodebaseMemoryResolution(context, signal);
+  if (signal?.aborted) {
+    return { ok: false, summary: "codebase-memory command cancelled", errorCode: "ABORTED" };
+  }
   if (resolution.status !== "ready") {
     return { ok: false, summary: resolution.summary, errorCode: resolution.status };
   }
@@ -1691,6 +1998,7 @@ export async function deleteCodebaseMemoryProjectIndex(
     [...resolution.args, "cli", "delete_project", JSON.stringify({ project })],
     cwd,
     timeoutMs,
+    signal,
   );
   if (result.exitCode !== 0) {
     const jsonLine = [...result.stdout.trim().split(/\r?\n/)]
@@ -1863,6 +2171,9 @@ export async function executeExtraTool(
     };
   }
   if (target.kind === "pre-engine") {
+    if (options.signal?.aborted) {
+      return { ok: false, text: "ExecuteExtraTool(pre-engine) cancelled: request aborted." };
+    }
     const binary = await (runtimeDeps?.resolvePreEngineBinary ?? resolvePreEngineBinary)();
     if (!binary) {
       return {
@@ -1876,12 +2187,20 @@ export async function executeExtraTool(
         },
       };
     }
+    context.runtimeOwnerId ??= randomUUID();
     const result = await (
       runtimeDeps?.callPreEngineTool
-        ? runtimeDeps.callPreEngineTool(target.name, params as Record<string, unknown>, context.projectPath, binary)
-        : getOrCreatePreEngineDaemon(binary, context.projectPath).call(
+        ? runtimeDeps.callPreEngineTool(
             target.name,
             params as Record<string, unknown>,
+            context.projectPath,
+            binary,
+            options.signal,
+          )
+        : getOrCreatePreEngineDaemon(binary, context.projectPath, context.runtimeOwnerId).call(
+            target.name,
+            params as Record<string, unknown>,
+            options.signal,
           )
     );
     if (!result.ok) {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants, accessSync } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
@@ -45,10 +45,10 @@ import type { TuiContext } from "./tui-context-runtime.js";
 import { WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT } from "./tui-context-runtime.js";
 import {
   currentRequestUserActionConstraints,
-  forbidsVerificationEvidence,
   type UserActionConstraints,
 } from "./user-action-constraints.js";
 import type {
+  AgentRun,
   BackgroundTaskState,
   DurableJobState,
   EngineeringSignalSnapshot,
@@ -100,6 +100,7 @@ export type WorkflowCommandRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     task: BackgroundTaskState,
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   recordVerificationEvidence: (
     context: TuiContext,
@@ -158,8 +159,9 @@ function appendBackgroundTaskEvent(
   context: TuiContext,
   sessionId: string,
   task: BackgroundTaskState,
+  commitGuard?: () => boolean,
 ): Promise<void> {
-  return getWorkflowDeps().appendBackgroundTaskEvent(context, sessionId, task);
+  return getWorkflowDeps().appendBackgroundTaskEvent(context, sessionId, task, commitGuard);
 }
 
 function recordVerificationEvidence(
@@ -573,7 +575,12 @@ async function persistWorkflowRunState(
 }
 
 export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
+  if (!context.sessionId) return;
   const root = getWorkflowRunsRoot(context);
+  const ownedInMemoryRuns = getWorkflowRuns(context).filter(
+    (run) => run.ownerSessionId === context.sessionId,
+  );
+  const inMemoryById = new Map(ownedInMemoryRuns.map((run) => [run.id, run]));
   const entries = await readdir(root, { withFileTypes: true }).catch(async (error) => {
     if (!isNodeErrorWithCode(error, "ENOENT")) {
       await appendWorkflowHydrateWarning(
@@ -584,14 +591,24 @@ export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
     return [];
   });
   const candidates: WorkflowRunCandidate[] = [];
+  const loadedIds = new Set<string>();
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const state = await readWorkflowRunState(context, join(root, entry.name, "state.json"));
     if (
       !state ||
+      state.ownerSessionId !== context.sessionId ||
       resolve(resolve(context.projectPath), state.projectPath).toLowerCase() !==
         resolve(context.projectPath).toLowerCase()
     ) {
+      continue;
+    }
+    const inMemoryRun = inMemoryById.get(state.id);
+    if (inMemoryRun) {
+      const background = createWorkflowBackgroundProjection(state.backgroundTask, inMemoryRun);
+      upsertWorkflowBackgroundTask(context, background);
+      candidates.push({ run: inMemoryRun, state, background });
+      loadedIds.add(inMemoryRun.id);
       continue;
     }
     const run = recoverWorkflowRunState(state);
@@ -604,14 +621,16 @@ export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
       await persistWorkflowRunState(context, run, background);
     }
     candidates.push({ run, state, background });
+    loadedIds.add(run.id);
   }
-  if (candidates.length > 0) {
-    context.workflows.activeRuns = candidates
+  context.workflows.activeRuns = [
+    ...candidates
       .slice()
       .sort((a, b) => new Date(b.state.updatedAt).getTime() - new Date(a.state.updatedAt).getTime())
-      .map((candidate) => candidate.run);
-    syncSelectedWorkflowRun(context);
-  }
+      .map((candidate) => candidate.run),
+    ...ownedInMemoryRuns.filter((run) => !loadedIds.has(run.id)),
+  ];
+  syncSelectedWorkflowRun(context);
 }
 
 const ACTIVE_RUN_PREFERRED_STATUSES = new Set(["running", "blocked"]);
@@ -911,7 +930,7 @@ export async function runWorkflowSteps(
   context: TuiContext,
   output: Writable,
   options: RunWorkflowExecutionOptions = {},
-): Promise<void> {
+): Promise<WorkflowRunState | undefined> {
   if (options.commitGuard && !options.commitGuard()) return;
   await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
     stepId: "workflow-dispatch",
@@ -995,14 +1014,15 @@ export async function runWorkflowSteps(
     });
     return;
   }
-  await runWorkflowPlanSteps(goal, preview.plan, context, output, options);
-  if (options.commitGuard && !options.commitGuard()) return;
+  const run = await runWorkflowPlanSteps(goal, preview.plan, context, output, options);
+  if (options.commitGuard && !options.commitGuard()) return run;
   await recordMetaOrchestrationRuntimeEvent(context, context.sessionId, {
     stepId: "workflow-dispatch",
     executor: "workflow-runtime",
     status: "completed",
     summary: `workflow plan completed; phases=${preview.plan.phases.length}; currentPhase=${phase.id}`,
   });
+  return run;
 }
 
 type RunWorkflowExecutionOptions = {
@@ -1019,6 +1039,7 @@ type RunWorkflowExecutionOptions = {
   invokingRequestTurnId?: string;
   userActionConstraints?: NonNullable<ReturnType<typeof currentRequestUserActionConstraints>>;
   commitGuard?: () => boolean;
+  ownerSignal?: AbortSignal;
 };
 
 type WorkflowBatchItem = {
@@ -1032,8 +1053,8 @@ export async function __testRunWorkflowStepsWithPlan(
   context: TuiContext,
   output: Writable,
   options: RunWorkflowExecutionOptions = {},
-): Promise<void> {
-  await runWorkflowPlanSteps(goal, plan, context, output, options);
+): Promise<WorkflowRunState | undefined> {
+  return runWorkflowPlanSteps(goal, plan, context, output, options);
 }
 
 export function __testGetCurrentWorkflowStepRequest(
@@ -1052,7 +1073,8 @@ async function runWorkflowPlanSteps(
   context: TuiContext,
   output: Writable,
   options: RunWorkflowExecutionOptions = {},
-): Promise<void> {
+): Promise<WorkflowRunState | undefined> {
+  options.ownerSignal ??= context.activeAbortController?.signal;
   const phase = plan.phases.find((item) => item.id === plan.currentPhaseId) ?? plan.phases[0];
   if (!phase) {
     writeLine(output, "工作流运行失败：计划没有可执行 phase。");
@@ -1062,7 +1084,7 @@ async function runWorkflowPlanSteps(
   const confirmedPhaseStopPoints = Array.from(
     new Set([...(options.confirmedPhaseStopPoints ?? []), phase.id]),
   );
-  const sessionId = await ensureSession(context);
+  const sessionId = options.ownerSessionId ?? (await ensureSession(context));
   if (options.commitGuard && !options.commitGuard()) return;
   const runId = options.__testRunId ?? `workflow-${randomUUID().slice(0, 8)}`;
   const startedAt = new Date().toISOString();
@@ -1112,7 +1134,7 @@ async function runWorkflowPlanSteps(
     : currentRequestUserActionConstraints(context);
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
-    ownerSessionId: options.ownerSessionId ?? sessionId,
+    ownerSessionId: sessionId,
     cwd: context.projectPath,
     changedFiles: getRequestScopedVerificationChangedFiles(context),
     permissionMode: options.permissionMode ?? plan.permissionMode,
@@ -1130,23 +1152,44 @@ async function runWorkflowPlanSteps(
     multiAgent: options.multiAgent === true,
   });
   rememberBackgroundTask(context, workflowTask);
+  const discardStaleStart = async (): Promise<boolean> => {
+    if (!options.commitGuard || options.commitGuard()) return false;
+    context.workflows.activeRuns = (context.workflows.activeRuns ?? []).filter(
+      (run) => run.id !== workflowRun.id,
+    );
+    context.backgroundTasks = context.backgroundTasks.filter((task) => task.id !== workflowTask.id);
+    syncSelectedWorkflowRun(context);
+    await rm(dirname(getWorkflowRunStatePath(context, workflowRun.id)), {
+      recursive: true,
+      force: true,
+    }).catch(() => undefined);
+    return true;
+  };
+  if (await discardStaleStart()) return;
   await persistWorkflowRunState(context, workflowRun, workflowTask);
-  await context.store.appendEvent(sessionId, {
-    type: "workflow_start",
-    workflow: {
-      id: runId,
-      goal,
-      planId: plan.id,
-      steps: stepStates,
-      multiAgent: options.multiAgent === true,
-      agents: options.agents,
-      runningCap: getWorkflowRunningCap(plan, options, phase.id),
-      teamName: options.teamName,
-      contextMode: options.contextMode,
+  if (await discardStaleStart()) return;
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "workflow_start",
+      workflow: {
+        id: runId,
+        goal,
+        planId: plan.id,
+        steps: stepStates,
+        multiAgent: options.multiAgent === true,
+        agents: options.agents,
+        runningCap: getWorkflowRunningCap(plan, options, phase.id),
+        teamName: options.teamName,
+        contextMode: options.contextMode,
+      },
+      createdAt: startedAt,
     },
-    createdAt: startedAt,
-  });
-  await appendBackgroundTaskEvent(context, sessionId, workflowTask);
+    options.commitGuard,
+  );
+  if (await discardStaleStart()) return;
+  await appendBackgroundTaskEvent(context, sessionId, workflowTask, options.commitGuard);
+  if (await discardStaleStart()) return;
   writeLine(
     output,
     formatWorkflowStartPrimary({
@@ -1163,8 +1206,9 @@ async function runWorkflowPlanSteps(
     ...options,
     confirmedPhaseStopPoints: workflowRun.confirmedPhaseStopPoints ?? [],
   };
+  if (await discardStaleStart()) return;
   while (stepStates.some((step) => step.status === "queued")) {
-    if (isWorkflowRunTerminal(context, runId, workflowTask)) return;
+    if (isWorkflowRunTerminal(context, runId, workflowTask)) return workflowRun;
     const batch = selectRunnableWorkflowBatch(plan, phase.id, stepStates, gateOptions);
     if (batch.length === 0) {
       const blocked = stepStates.find((step) => step.status === "queued");
@@ -1180,7 +1224,7 @@ async function runWorkflowPlanSteps(
         blocked.endedAt = new Date().toISOString();
       }
       await finishWorkflowRun(runId, "blocked", summary, context, sessionId, workflowTask);
-      return;
+      return workflowRun;
     }
     batchIndex += 1;
     const stepStartedAt = new Date().toISOString();
@@ -1223,7 +1267,7 @@ async function runWorkflowPlanSteps(
         ),
       })),
     );
-    if (isWorkflowRunTerminal(context, runId, workflowTask)) return;
+    if (isWorkflowRunTerminal(context, runId, workflowTask)) return workflowRun;
     const stepEndedAt = new Date().toISOString();
     for (const item of results) {
       item.step.status = item.result.status;
@@ -1267,7 +1311,7 @@ async function runWorkflowPlanSteps(
         sessionId,
         workflowTask,
       );
-      return;
+      return workflowRun;
     }
   }
 
@@ -1285,6 +1329,7 @@ async function runWorkflowPlanSteps(
       ? "Workflow completed with PARTIAL result; no evidence that verification passed was generated. Use /workflows status for details."
       : "workflow 已完成，结果仍为 PARTIAL；未生成验证已通过的证据。可用 /workflows status 查看详情。",
   );
+  return workflowRun;
 }
 
 function isWorkflowRunTerminal(
@@ -1362,9 +1407,10 @@ export async function runRegistryAgentWorkflow(
   context: TuiContext,
   output: Writable,
   options: RunWorkflowExecutionOptions = {},
-): Promise<void> {
+): Promise<AgentRun | undefined> {
+  options.ownerSignal ??= context.activeAbortController?.signal;
   const task = goal || agent.description;
-  await handleForkCommand(
+  return handleForkCommand(
     [agent.id, task, ...(runInBackground ? ["--background"] : [])],
     context,
     output,
@@ -1378,6 +1424,7 @@ export async function runRegistryAgentWorkflow(
         ? { userActionConstraints: options.userActionConstraints }
         : {}),
       ...(options.commitGuard ? { commitGuard: options.commitGuard } : {}),
+      ...(options.ownerSignal ? { ownerSignal: options.ownerSignal } : {}),
     },
   );
 }
@@ -1389,9 +1436,10 @@ export async function runRegistryWorkflow(
   context: TuiContext,
   output: Writable,
   options: RunWorkflowExecutionOptions = {},
-): Promise<void> {
+): Promise<WorkflowRunState | undefined> {
+  options.ownerSignal ??= context.activeAbortController?.signal;
   if (options.commitGuard && !options.commitGuard()) return;
-  const sessionId = await ensureSession(context);
+  const sessionId = options.ownerSessionId ?? (await ensureSession(context));
   if (options.commitGuard && !options.commitGuard()) return;
   const orchestrationAction = resolveMetaOrchestrationAction(context, "workflow-dispatch");
   const policy = resolveWorkflowDispatchRuntimePolicy(orchestrationAction);
@@ -1479,7 +1527,7 @@ export async function runRegistryWorkflow(
     : currentRequestUserActionConstraints(context);
   const workflowRun = upsertWorkflowRun(context, {
     id: runId,
-    ownerSessionId: options.ownerSessionId ?? sessionId,
+    ownerSessionId: sessionId,
     cwd: context.projectPath,
     changedFiles: getRequestScopedVerificationChangedFiles(context),
     permissionMode: options.permissionMode ?? context.permissionMode,
@@ -1496,18 +1544,39 @@ export async function runRegistryWorkflow(
     confirmedPhaseStopPoints: [workflow.id],
   });
   rememberBackgroundTask(context, task);
+  const discardStaleStart = async (): Promise<boolean> => {
+    if (!options.commitGuard || options.commitGuard()) return false;
+    context.workflows.activeRuns = (context.workflows.activeRuns ?? []).filter(
+      (run) => run.id !== workflowRun.id,
+    );
+    context.backgroundTasks = context.backgroundTasks.filter((item) => item.id !== task.id);
+    syncSelectedWorkflowRun(context);
+    await rm(dirname(getWorkflowRunStatePath(context, workflowRun.id)), {
+      recursive: true,
+      force: true,
+    }).catch(() => undefined);
+    return true;
+  };
+  if (await discardStaleStart()) return;
   await persistWorkflowRunState(context, workflowRun, task);
-  await context.store.appendEvent(sessionId, {
-    type: "workflow_start",
-    workflow: {
-      id: runId,
-      goal: goal || workflow.description,
-      planId: workflow.id,
-      steps: stepStates,
+  if (await discardStaleStart()) return;
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "workflow_start",
+      workflow: {
+        id: runId,
+        goal: goal || workflow.description,
+        planId: workflow.id,
+        steps: stepStates,
+      },
+      createdAt: startedAt,
     },
-    createdAt: startedAt,
-  });
-  await appendBackgroundTaskEvent(context, sessionId, task);
+    options.commitGuard,
+  );
+  if (await discardStaleStart()) return;
+  await appendBackgroundTaskEvent(context, sessionId, task, options.commitGuard);
+  if (await discardStaleStart()) return;
   writeLine(
     output,
     formatWorkflowStartPrimary({
@@ -1524,6 +1593,7 @@ export async function runRegistryWorkflow(
         ? "Workflow is running in the background. Use /background for details."
         : "workflow 正在后台运行。可用 /background 查看详情。",
     );
+    if (await discardStaleStart()) return;
     setTimeout(() => {
       void executeRegistryWorkflowRun(
         workflow,
@@ -1546,9 +1616,10 @@ export async function runRegistryWorkflow(
         );
       });
     }, 0);
-    return;
+    return workflowRun;
   }
 
+  if (await discardStaleStart()) return;
   await executeRegistryWorkflowRun(
     workflow,
     goal,
@@ -1559,6 +1630,7 @@ export async function runRegistryWorkflow(
     sessionId,
     output,
   );
+  return workflowRun;
 }
 
 async function executeRegistryWorkflowRun(
@@ -1743,13 +1815,16 @@ async function executeRegistryWorkflowStep(
         ),
         evidenceRefs: agentEvidenceRefs,
       };
-    } else if (step.action === "verification") {
+    }
+    if (step.action === "verification") {
       handledKnownAction = true;
       const report = await runWorkflowVerificationStep(step.level ?? "focused", context, output, {
         ownerSessionId: run?.ownerSessionId,
         workflowRunId: run?.id,
         cwd: run?.cwd,
         changedFiles: run?.changedFiles,
+        permissionMode: run?.permissionMode ?? context.permissionMode,
+        userActionConstraints: run?.userActionConstraints,
         ownerSignal: run?.id
           ? context.backgroundAbortControllers?.get(run.id)?.signal
           : undefined,
@@ -1764,7 +1839,7 @@ async function executeRegistryWorkflowStep(
             `verification ${report.status}: ${report.summary}`,
             context.language,
           ),
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
         };
       }
     } else if (step.action === "details") {
@@ -1857,7 +1932,7 @@ async function executeRegistryWorkflowStep(
     return {
       status: "failed",
       summary: formatWorkflowStepSummary(step.id, "failed", message, context.language),
-      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
     };
   }
   if (handledKnownAction) {
@@ -1871,7 +1946,7 @@ async function executeRegistryWorkflowStep(
           : `registry 操作已完成：${step.action}`,
         context.language,
       ),
-      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
     };
   }
   return {
@@ -1884,7 +1959,7 @@ async function executeRegistryWorkflowStep(
         : `未知 registry 操作：${step.action}`,
       context.language,
     ),
-    evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+    evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
   };
 }
 
@@ -2001,7 +2076,7 @@ async function executeWorkflowStep(
   const req = request.request;
   try {
     if (request.sliceId === "slice-architecture-review") {
-      return await executeWorkflowArchitectureReviewStep(request, context);
+      return await executeWorkflowArchitectureReviewStep(request, context, workflowRunId);
     }
     if (req.mainChain === "fork") {
       const activeWorkflowAgents =
@@ -2024,7 +2099,7 @@ async function executeWorkflowStep(
         return {
           status: "blocked",
           summary,
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
         };
       }
       const agent = await handleForkCommand(
@@ -2044,6 +2119,7 @@ async function executeWorkflowStep(
             ? { invokingRequestTurnId: run.invokingRequestTurnId }
             : {}),
           userActionConstraints: run?.userActionConstraints,
+          ownerSignal: options.ownerSignal,
         },
       );
       const agentTask = agent
@@ -2157,12 +2233,10 @@ async function executeWorkflowStep(
         ),
         evidenceRefs: agentEvidenceRefs,
       };
-    } else if (req.mainChain === "verification") {
-      const constraints = run?.userActionConstraints;
-      const verificationBlockedByUser =
-        constraints !== undefined && forbidsVerificationEvidence(constraints);
+    }
+    if (req.mainChain === "verification") {
       const report = await runWorkflowVerificationStep(
-        verificationBlockedByUser ? "plan-only" : req.level,
+        req.level,
         context,
         output,
         {
@@ -2170,6 +2244,8 @@ async function executeWorkflowStep(
           workflowRunId: run?.id,
           cwd: run?.cwd,
           changedFiles: run?.changedFiles,
+          permissionMode: run?.permissionMode ?? context.permissionMode,
+          userActionConstraints: run?.userActionConstraints,
           ownerSignal: run?.id
             ? context.backgroundAbortControllers?.get(run.id)?.signal
             : undefined,
@@ -2187,7 +2263,7 @@ async function executeWorkflowStep(
         return {
           status,
           summary,
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
         };
       }
     } else if (req.mainChain === "details") {
@@ -2236,6 +2312,7 @@ async function executeWorkflowStep(
             permissionMode: run?.permissionMode,
             invokingRequestTurnId: run?.invokingRequestTurnId,
             userActionConstraints: run?.userActionConstraints,
+            ownerSignal: options.ownerSignal,
           },
         );
       } else {
@@ -2249,6 +2326,7 @@ async function executeWorkflowStep(
             permissionMode: run?.permissionMode,
             invokingRequestTurnId: run?.invokingRequestTurnId,
             userActionConstraints: run?.userActionConstraints,
+            ownerSignal: options.ownerSignal,
           },
         );
       }
@@ -2262,7 +2340,7 @@ async function executeWorkflowStep(
             `job ${req.action} completed; see output above`,
             context.language,
           ),
-          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
         };
       }
       const jobs = await listDurableJobs(context);
@@ -2297,7 +2375,7 @@ async function executeWorkflowStep(
           status: nestedStatus,
           summary,
           evidenceRefs: mergeWorkflowEvidenceRefs(
-            newWorkflowEvidenceRefs(beforeEvidence, context),
+            newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
             job.evidenceRefs.map((item) => item.id),
           ),
         };
@@ -2311,7 +2389,7 @@ async function executeWorkflowStep(
           context.language,
         ),
         evidenceRefs: mergeWorkflowEvidenceRefs(
-          newWorkflowEvidenceRefs(beforeEvidence, context),
+          newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
           job.evidenceRefs.map((item) => item.id),
         ),
       };
@@ -2332,7 +2410,7 @@ async function executeWorkflowStep(
     return {
       status: "failed",
       summary,
-      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
     };
   }
   return {
@@ -2345,7 +2423,7 @@ async function executeWorkflowStep(
         : `已通过 ${req.mainChain} 完成`,
       context.language,
     ),
-    evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+    evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context, workflowRunId),
   };
 }
 
@@ -2372,6 +2450,7 @@ function formatWorkflowDetailsSlashCommand(
 async function executeWorkflowArchitectureReviewStep(
   request: WorkflowBridgeRequestProposal,
   context: TuiContext,
+  workflowRunId?: string,
 ): Promise<{
   status: WorkflowStepTerminalStatus;
   summary: string;
@@ -2386,7 +2465,7 @@ async function executeWorkflowArchitectureReviewStep(
       "workflow-architecture-review:no-files",
       ["architecture_boundary_check", "workflow_slice_architecture_review", "partial_evidence"],
     );
-    evidence.ownerScope = workflowEvidenceOwnerScope(context);
+    evidence.ownerScope = workflowEvidenceOwnerScope(context, workflowRunId);
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendSystemEvent(
@@ -2426,7 +2505,7 @@ async function executeWorkflowArchitectureReviewStep(
       "workflow-architecture-review:unreadable",
       ["architecture_boundary_check", "workflow_slice_architecture_review", "partial_evidence"],
     );
-    evidence.ownerScope = workflowEvidenceOwnerScope(context);
+    evidence.ownerScope = workflowEvidenceOwnerScope(context, workflowRunId);
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendSystemEvent(
@@ -2461,7 +2540,7 @@ async function executeWorkflowArchitectureReviewStep(
       ...riskKinds.map((kind) => `architecture_risk:${kind}`),
     ],
   );
-  evidence.ownerScope = workflowEvidenceOwnerScope(context);
+  evidence.ownerScope = workflowEvidenceOwnerScope(context, workflowRunId);
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
   await appendSystemEvent(
@@ -2737,6 +2816,8 @@ export async function runWorkflowVerificationStep(
     workflowRunId?: string;
     cwd?: string;
     changedFiles?: string[];
+    permissionMode?: WorkflowRunState["permissionMode"];
+    userActionConstraints?: WorkflowRunState["userActionConstraints"];
   } = {},
 ): Promise<VerificationReport> {
   const sessionId = options.ownerSessionId ?? (await ensureSession(context));
@@ -2844,6 +2925,8 @@ export async function runWorkflowVerificationStep(
         changedFiles,
         level,
         commitGuard: ownerStillValid,
+        permissionMode: options.permissionMode,
+        userActionConstraints: options.userActionConstraints,
       },
     );
   } finally {
@@ -2885,6 +2968,7 @@ async function runNestedWorkflowJobCommand(
     permissionMode?: WorkflowRunState["permissionMode"];
     invokingRequestTurnId?: string;
     userActionConstraints?: WorkflowRunState["userActionConstraints"];
+    ownerSignal?: AbortSignal;
   } = {},
 ): Promise<void> {
   const workflowTaskIndex = context.backgroundTasks.findIndex(
@@ -2893,28 +2977,15 @@ async function runNestedWorkflowJobCommand(
       task.id === options.workflowRunId &&
       task.status === "running",
   );
-  const activeAbortController =
-    options.ignoreForegroundModelGuard === true ? context.activeAbortController : undefined;
-  if (activeAbortController) {
-    context.activeAbortController = undefined;
-  }
+  const ownerSignal = options.ownerSignal ?? context.activeAbortController?.signal;
   if (workflowTaskIndex < 0) {
-    try {
-      await handleJobCommand(args, context, output, options);
-      return;
-    } finally {
-      if (activeAbortController && context.activeAbortController === undefined) {
-        context.activeAbortController = activeAbortController;
-      }
-    }
+    await handleJobCommand(args, context, output, { ...options, ownerSignal });
+    return;
   }
   const [workflowTask] = context.backgroundTasks.splice(workflowTaskIndex, 1);
   try {
-    await handleJobCommand(args, context, output, options);
+    await handleJobCommand(args, context, output, { ...options, ownerSignal });
   } finally {
-    if (activeAbortController && context.activeAbortController === undefined) {
-      context.activeAbortController = activeAbortController;
-    }
     if (workflowTask && !context.backgroundTasks.some((task) => task.id === workflowTask.id)) {
       rememberBackgroundTask(context, workflowTask);
     }
@@ -3042,9 +3113,19 @@ function workflowRuntimeKind(request: WorkflowBridgeRequestProposal): WorkflowSt
   return "agent";
 }
 
-function newWorkflowEvidenceRefs(before: string[], context: TuiContext): string[] {
+function newWorkflowEvidenceRefs(
+  before: string[],
+  context: TuiContext,
+  workflowRunId?: string,
+): string[] {
   const seen = new Set(before);
-  return context.evidence.map((item) => item.id).filter((id) => !seen.has(id));
+  return context.evidence
+    .filter(
+      (item) =>
+        !seen.has(item.id) &&
+        (!workflowRunId || item.ownerScope?.workflowRunId === workflowRunId),
+    )
+    .map((item) => item.id);
 }
 
 function workflowAgentEvidenceRefs(
@@ -3090,17 +3171,27 @@ async function recordWorkflowPlanPreviewEvidence(
   );
 }
 
-function workflowEvidenceOwnerScope(context: TuiContext): NonNullable<EvidenceRecord["ownerScope"]> {
-  const run = context.workflows.activeRun;
+function workflowEvidenceOwnerScope(
+  context: TuiContext,
+  workflowRunId?: string,
+): NonNullable<EvidenceRecord["ownerScope"]> {
+  const run = workflowRunId ? getWorkflowRun(context, workflowRunId) : undefined;
   return {
-    ...(context.sessionId ? { ownerSessionId: context.sessionId } : {}),
-    ...(run?.invokingRequestTurnId ?? context.currentRequestTurnId
-      ? { requestTurnId: run?.invokingRequestTurnId ?? context.currentRequestTurnId }
+    ...(run?.ownerSessionId ?? context.sessionId
+      ? { ownerSessionId: run?.ownerSessionId ?? context.sessionId }
       : {}),
-    ...(run?.id ? { workflowRunId: run.id } : {}),
+    ...(run?.invokingRequestTurnId ?? (!workflowRunId ? context.currentRequestTurnId : undefined)
+      ? {
+          requestTurnId:
+            run?.invokingRequestTurnId ?? (!workflowRunId ? context.currentRequestTurnId : undefined),
+        }
+      : {}),
+    ...(workflowRunId ? { workflowRunId } : {}),
     cwd: run?.cwd ?? context.projectPath,
   };
 }
+
+export const __testNewWorkflowEvidenceRefs = newWorkflowEvidenceRefs;
 
 function summarizeWorkflowCacheFreshness(freshness: CacheFreshness): string {
   const changed =

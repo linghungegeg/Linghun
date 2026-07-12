@@ -15,7 +15,6 @@ import {
 } from "./workflow-task-surface.js";
 import {
   forbidsVerificationEvidence,
-  hasReadOnlyUserConstraint,
   parseUserActionConstraints,
 } from "./user-action-constraints.js";
 
@@ -242,10 +241,7 @@ function buildSlicesForGoal(
   const lang = options.language ?? "zh-CN";
   const constraints = parseUserActionConstraints(goal);
   const readonlyAuditGoal = isReadonlyAuditGoal(goal);
-  const verificationAdviceOnly =
-    readonlyAuditGoal ||
-    hasReadOnlyUserConstraint(constraints) ||
-    forbidsVerificationEvidence(constraints);
+  const verificationAdviceOnly = forbidsVerificationEvidence(constraints);
   const multiSliceGoal =
     options.multiAgent ||
     (options.requestedAgents ?? 0) > 1 ||

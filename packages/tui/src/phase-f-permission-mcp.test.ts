@@ -182,6 +182,50 @@ describe("Phase F MCP duplicate, schema, and SSE coverage", () => {
     expect(listCalls).toBe(1);
   });
 
+  it("isolates same-URL tools/list caches across 100 runtime configs for 1,000 calls", async () => {
+    let listCalls = 0;
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as {
+          id: number;
+          method: string;
+          params?: { name?: string };
+        };
+        if (body.method === "tools/list") {
+          const toolName = `runtime-tool-${listCalls}`;
+          listCalls += 1;
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [{ name: toolName }] } }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        callCount += 1;
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: body.params?.name } }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+
+    for (let runtimeIndex = 0; runtimeIndex < 100; runtimeIndex += 1) {
+      const server = {
+        command: "",
+        transport: "sse" as const,
+        url: "https://example.com/shared-runtime-url",
+      };
+      for (let callIndex = 0; callIndex < 10; callIndex += 1) {
+        await expect(
+          runMcpSseToolCall(server, `runtime-tool-${runtimeIndex}`, {}),
+        ).resolves.toMatchObject({ ok: true });
+      }
+    }
+
+    expect(listCalls).toBe(100);
+    expect(callCount).toBe(1_000);
+  });
+
   it("starts the SSE tool-list TTL after a slow successful response", async () => {
     let now = 1_000;
     let listCalls = 0;

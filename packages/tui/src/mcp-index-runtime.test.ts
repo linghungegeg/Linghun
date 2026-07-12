@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { describe, expect, test, vi } from "vitest";
+import { access, chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
@@ -402,6 +402,76 @@ describe("mcp-index-runtime", () => {
     expect(context.index.error).toContain("resource/concurrency cap");
     expect(output.text).toContain("index 后台任务已达到上限");
   });
+
+  test("runIndexRepository aborts the owned process without committing stale index state", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-index-owner-abort-"));
+    const mockPath = join(projectPath, "codebase-memory-abort.cjs");
+    const startedPath = join(projectPath, "index-started.txt");
+    const latePath = join(projectPath, "late-index-side-effect.txt");
+    await writeFile(
+      mockPath,
+      `if (process.argv.includes("--version")) {
+  console.log("codebase-memory-mcp mock 0.0.0");
+  process.exit(0);
+}
+const tool = process.argv[3];
+if (tool === "index_repository") {
+  require("node:fs").writeFileSync(${JSON.stringify(startedPath)}, "started");
+  setTimeout(() => {
+    require("node:fs").writeFileSync(${JSON.stringify(latePath)}, "late");
+    console.log(JSON.stringify({ ok: true }));
+  }, 1000);
+} else {
+  console.log(JSON.stringify({ ok: true }));
+}
+`,
+      "utf8",
+    );
+    const context = {
+      ...createIndexContext(projectPath, mockPath),
+      language: "zh-CN",
+      backgroundTasks: [] as Array<{ status?: string }>,
+      evidence: [],
+      store: { appendEvent: async () => undefined },
+    };
+    const initialIndex = structuredClone(context.index);
+    const taskUpdates: Array<{ status?: string }> = [];
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-owner-abort",
+      rememberBackgroundTask: (_context, task) => context.backgroundTasks.push(task as never),
+      appendBackgroundTaskEvent: async (_context, _sessionId, task) => {
+        taskUpdates.push({ status: task.status });
+      },
+      rememberEvidence: () => undefined,
+    });
+    const controller = new AbortController();
+    const output = { text: "", write(chunk: string) { this.text += chunk; return true; } };
+    const running = runIndexRepository(
+      context as never,
+      "fast",
+      "refresh",
+      false,
+      output as never,
+      {
+        guardAlreadyChecked: true,
+        signal: controller.signal,
+        commitGuard: () => !controller.signal.aborted,
+      },
+    );
+    await vi.waitFor(() => expect(access(startedPath)).resolves.toBeUndefined());
+    controller.abort("stale request owner");
+
+    await running;
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+    expect(context.index).toEqual(initialIndex);
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(taskUpdates.at(-1)?.status).toBe("cancelled");
+    await expect(access(latePath)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 10_000);
 
   test("refreshIndexStatus keeps artifact-backed unknown-project distinct from missing", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-index-unmatched-"));

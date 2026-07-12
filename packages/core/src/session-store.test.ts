@@ -1,9 +1,28 @@
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SessionStore, assertValidSessionId } from "./session-store.js";
+import {
+  isUsableDeepCompactPacket,
+  parseUsableTranscriptCompactBoundary,
+} from "./session.js";
+
+function makeUsableCompactProjection(summary: string) {
+  return {
+    boundaryId: "compact-boundary",
+    createdAt: new Date(1).toISOString(),
+    summary,
+    pressureRatio: 0.9,
+    preCompactChars: 10_000,
+    postCompactChars: 2_000,
+    discardedRange: "events 1-20",
+    toolPairingSafe: true,
+    risks: [],
+    evidenceRefs: [],
+  };
+}
 
 describe("SessionStore", () => {
   it("creates sessions with unique ids and lists the current project", async () => {
@@ -458,6 +477,128 @@ describe("SessionStore", () => {
 
     expect(updated.id).toBe(session.id);
     expect(resumed.session.summary).toBe("已发送 3 条消息");
+  });
+
+  it("loads a large transcript from its latest usable projection past malformed boundaries", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+    await appendFile(
+      session.transcriptPath,
+      `${JSON.stringify({
+        type: "system_event",
+        id: "large-old-event",
+        level: "info",
+        message: "x".repeat(4 * 1024 * 1024),
+        createdAt: new Date(0).toISOString(),
+      })}\n${JSON.stringify({
+        type: "system_event",
+        id: "compact-boundary",
+        level: "info",
+        message: `compact_projection:${JSON.stringify(
+          makeUsableCompactProjection("LATEST_VALID_COMPACT"),
+        )}`,
+        createdAt: new Date(1).toISOString(),
+      })}\n${JSON.stringify({
+        type: "deep_compact_packet",
+        packet: { id: "malformed-newer-boundary" },
+        createdAt: new Date(2).toISOString(),
+      })}\n${JSON.stringify({
+        type: "user_message",
+        id: "recent-user",
+        text: "recent history",
+        createdAt: new Date(3).toISOString(),
+      })}\n`,
+      "utf8",
+    );
+
+    const resumed = await store.resume(session.id);
+
+    expect(resumed.transcript.map((event) => event.type)).toEqual([
+      "system_event",
+      "deep_compact_packet",
+      "user_message",
+    ]);
+    expect(JSON.stringify(resumed.transcript)).toContain("LATEST_VALID_COMPACT");
+    expect(JSON.stringify(resumed.transcript)).not.toContain("large-old-event");
+    expect(resumed.diagnostics).toContainEqual({
+      line: 0,
+      message: expect.stringContaining("partial transcript"),
+    });
+  });
+
+  it("accepts only structurally complete deep compact packets", () => {
+    expect(isUsableDeepCompactPacket({ id: "incomplete" })).toBe(false);
+    expect(
+      isUsableDeepCompactPacket({
+        kind: "deep",
+        scope: "full transcript semantic compact",
+        id: "deep-boundary",
+        summary: "valid deep compact",
+        preservedEvidenceRefs: [],
+        preservedFiles: [],
+        activeAgentsWorkflows: [],
+        pendingItems: [],
+        decisions: [],
+        risks: [],
+        createdAt: new Date(0).toISOString(),
+        model: "test-model",
+        provider: "test-provider",
+        trigger: "manual",
+        transcriptEventCount: 20,
+      }),
+    ).toBe(true);
+    expect(
+      isUsableDeepCompactPacket({
+        kind: "deep",
+        scope: "full transcript semantic compact",
+        id: "deep-boundary",
+        summary: "invalid arrays",
+        preservedEvidenceRefs: [42],
+        preservedFiles: [],
+        activeAgentsWorkflows: [],
+        pendingItems: [],
+        decisions: [],
+        risks: [],
+        createdAt: new Date(0).toISOString(),
+        model: "test-model",
+        provider: "test-provider",
+        trigger: "manual",
+        transcriptEventCount: 20,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps summary-only compact boundaries compatible and marks complete projections hydratable", () => {
+    const validEvent = {
+      type: "system_event",
+      id: "projection",
+      level: "info",
+      message: `compact_projection:${JSON.stringify(makeUsableCompactProjection("valid"))}`,
+      createdAt: new Date(1).toISOString(),
+    } as const;
+
+    expect(parseUsableTranscriptCompactBoundary(validEvent)).toMatchObject({
+      kind: "projection",
+      projection: { boundaryId: "compact-boundary", summary: "valid" },
+      hydrationProjection: { boundaryId: "compact-boundary", summary: "valid" },
+    });
+    expect(
+      parseUsableTranscriptCompactBoundary({
+        ...validEvent,
+        message: 'compact_projection:{"summary":"incomplete"}',
+      }),
+    ).toEqual({
+      kind: "projection",
+      projection: { summary: "incomplete" },
+    });
+    expect(
+      parseUsableTranscriptCompactBoundary({
+        ...validEvent,
+        message: "compact_projection:{broken",
+      }),
+    ).toBeUndefined();
   });
 
   it("records a warning when metadata cannot be parsed", async () => {

@@ -43,6 +43,7 @@ import {
   summarizeWorktreeRemovePlan,
 } from "./git-tool-runtime.js";
 import type { PendingModelContinuation, TuiContext } from "./index.js";
+import { scopeEvidenceToContext } from "./evidence-runtime.js";
 import type { CheckpointState, EvidenceRecord } from "./tui-data-types.js";
 
 /** Extract a short target hint from git tool input (branch name, message, etc.) */
@@ -98,9 +99,12 @@ export type GitToolDispatchDeps = {
     output: Writable,
     context: TuiContext,
     phase: "tool_running",
-    values: { toolName?: string; toolTarget?: string },
+    values: { toolName?: string; toolTarget?: string; toolUseId?: string; requestTurnId?: string },
   ) => void;
-  clearRequestActivity: (context: TuiContext) => void;
+  clearRequestActivity: (
+    context: TuiContext,
+    owner?: { kind: "foreground"; requestTurnId: string },
+  ) => void;
   writeLine: (output: Writable, text: string) => void;
   formatError: (error: unknown, language: TuiContext["language"]) => string;
   appendSystemEvent: (
@@ -108,6 +112,7 @@ export type GitToolDispatchDeps = {
     sessionId: string,
     message: string,
     level: "info" | "warning",
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   createEvidenceRecord: (
     kind: EvidenceRecord["kind"],
@@ -122,12 +127,16 @@ export type GitToolDispatchDeps = {
     name: ToolName,
     output: ToolOutput,
     input?: unknown,
+    commitGuard?: () => boolean,
+    toolUseId?: string,
   ) => Promise<EvidenceRecord | null>;
   recordToolFailureEvidence: (
     context: TuiContext,
     sessionId: string,
     name: ToolName,
     summary: string,
+    commitGuard?: () => boolean,
+    toolUseId?: string,
   ) => Promise<EvidenceRecord>;
   appendDeferredToolResultEvent: (
     context: TuiContext,
@@ -137,6 +146,7 @@ export type GitToolDispatchDeps = {
     content: unknown,
     isError: boolean,
     evidenceId?: string,
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   createSingleToolCallContinuation: (
     continuation: PendingModelContinuation,
@@ -157,6 +167,8 @@ async function recordGitOperationEvidence(
   operation: string,
   summary: string,
   extraClaims: string[],
+  commitGuard?: () => boolean,
+  toolUseId?: string,
 ): Promise<EvidenceRecord> {
   const evidence = deps.createEvidenceRecord(
     "command_output",
@@ -164,11 +176,19 @@ async function recordGitOperationEvidence(
     `git-operation:${operation}`,
     ["git_operation", operation, ...extraClaims],
   );
+  if (toolUseId) evidence.toolUseId = toolUseId;
+  scopeEvidenceToContext(context, evidence, { ownerSessionId: sessionId });
+  if (commitGuard && !commitGuard()) return evidence;
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "evidence_record",
+      ...evidence,
+    },
+    commitGuard,
+  );
+  if (commitGuard && !commitGuard()) return evidence;
   deps.rememberEvidence(context, evidence);
-  await context.store.appendEvent(sessionId, {
-    type: "evidence_record",
-    ...evidence,
-  });
   return evidence;
 }
 
@@ -179,12 +199,24 @@ export async function appendGitOperationEvent(
   sessionId: string,
   fields: Record<string, unknown>,
   level: "info" | "warning",
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   const safe = Object.entries(fields)
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
     .join("; ");
-  await deps.appendSystemEvent(context, sessionId, safe, level);
+  await deps.appendSystemEvent(context, sessionId, safe, level, commitGuard);
+}
+
+function continuationCommitGuard(
+  context: TuiContext,
+  continuation?: PendingModelContinuation,
+): (() => boolean) | undefined {
+  if (!continuation?.requestTurnId && !continuation?.abortSignal) return undefined;
+  return () =>
+    continuation.abortSignal?.aborted !== true &&
+    (!continuation.requestTurnId || context.currentRequestTurnId === continuation.requestTurnId);
 }
 
 // 在 git 稳定点前创建 Linghun snapshot checkpoint 作为本地安全垫（非 git repo 也用它）。
@@ -193,8 +225,11 @@ async function createSnapshotStablePoint(
   context: TuiContext,
   sessionId: string,
   reason: string,
+  commitGuard?: () => boolean,
 ): Promise<CheckpointState> {
+  if (commitGuard && !commitGuard()) throw new Error("stale git tool owner");
   const status = await readGitStatus(context.projectPath);
+  if (commitGuard && !commitGuard()) throw new Error("stale git tool owner");
   const changedFiles =
     status.kind === "ok"
       ? [...status.staged, ...status.unstaged, ...status.untracked].slice(0, 50)
@@ -209,6 +244,7 @@ async function createSnapshotStablePoint(
     files: [],
   };
   for (const file of changedFiles) {
+    if (commitGuard && !commitGuard()) throw new Error("stale git tool owner");
     const target = deps.resolvePath(context.projectPath, file);
     try {
       checkpoint.files.push({
@@ -225,10 +261,11 @@ async function createSnapshotStablePoint(
       checkpoint.files.push({ path: file, existed: false });
     }
   }
-  context.checkpoints.unshift(checkpoint);
-  context.checkpoints = context.checkpoints.slice(0, deps.maxCheckpoints);
-  await context.store.appendEvent(sessionId, {
-    type: "checkpoint_created",
+  if (commitGuard && !commitGuard()) throw new Error("stale git tool owner");
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "checkpoint_created",
       checkpoint: {
         id: checkpoint.id,
         sessionId: checkpoint.sessionId,
@@ -241,7 +278,12 @@ async function createSnapshotStablePoint(
           "git stable checkpoint payload is kept in-memory only to avoid persisting broad dirty-file contents",
       },
       createdAt: checkpoint.createdAt,
-    });
+    },
+    commitGuard,
+  );
+  if (commitGuard && !commitGuard()) throw new Error("stale git tool owner");
+  context.checkpoints.unshift(checkpoint);
+  context.checkpoints = context.checkpoints.slice(0, deps.maxCheckpoints);
   return checkpoint;
 }
 
@@ -253,20 +295,48 @@ export async function executeGitToolUse(
   deps: GitToolDispatchDeps,
   continuation?: PendingModelContinuation,
 ): Promise<GitToolResult> {
-  deps.startRequestActivity(output, context, "tool_running", { toolName: toolCall.name, toolTarget: extractGitToolTarget(toolCall.input) });
-  await context.store.appendEvent(sessionId, {
-    type: "tool_call_start",
-    id: toolCall.id,
-    name: toolCall.name as unknown as ToolName,
-    input: toolCall.input,
-    createdAt: new Date().toISOString(),
+  const commitGuard = continuationCommitGuard(context, continuation);
+  const activityOwner = continuation?.requestTurnId
+    ? { kind: "foreground" as const, requestTurnId: continuation.requestTurnId }
+    : undefined;
+  const clearActivity = () => {
+    if (context.requestActivityToolUseId === toolCall.id) {
+      deps.clearRequestActivity(context, activityOwner);
+    }
+  };
+  const staleResult = (): GitToolResult => {
+    clearActivity();
+    return {
+      ok: false,
+      tool: toolCall.name,
+      text: "cancelled: stale git tool result discarded",
+    };
+  };
+  if (commitGuard && !commitGuard()) return staleResult();
+  deps.startRequestActivity(output, context, "tool_running", {
+    toolName: toolCall.name,
+    toolTarget: extractGitToolTarget(toolCall.input),
+    toolUseId: toolCall.id,
+    ...(continuation?.requestTurnId ? { requestTurnId: continuation.requestTurnId } : {}),
   });
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "tool_call_start",
+      id: toolCall.id,
+      name: toolCall.name as unknown as ToolName,
+      input: toolCall.input,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (commitGuard && !commitGuard()) return staleResult();
   try {
     if (toolCall.name === GIT_STATUS_INSPECT) {
-      return await runGitStatusInspectTool(toolCall, context, sessionId, output, deps);
+      return await runGitStatusInspectTool(toolCall, context, sessionId, output, deps, commitGuard);
     }
     if (toolCall.name === GIT_ROLLBACK_EXPLAIN) {
-      return await runGitRollbackExplainTool(toolCall, context, sessionId, output, deps);
+      return await runGitRollbackExplainTool(toolCall, context, sessionId, output, deps, commitGuard);
     }
     if (toolCall.name === GIT_STABLE_POINT_CREATE) {
       return await runStablePointTool(
@@ -277,22 +347,43 @@ export async function executeGitToolUse(
         deps,
         parseStablePointInput(toolCall.input),
         continuation,
+        commitGuard,
       );
     }
     if (toolCall.name === MANAGED_WORKTREE_CREATE) {
-      return await runWorktreeCreateTool(toolCall, context, sessionId, output, deps);
+      return await runWorktreeCreateTool(
+        toolCall,
+        context,
+        sessionId,
+        output,
+        deps,
+        commitGuard,
+        continuation?.abortSignal,
+      );
     }
     // ManagedWorktreeRemove
-    return await runWorktreeRemoveTool(toolCall, context, sessionId, output, deps, continuation);
+    return await runWorktreeRemoveTool(
+      toolCall,
+      context,
+      sessionId,
+      output,
+      deps,
+      continuation,
+      commitGuard,
+    );
   } catch (error) {
-    deps.clearRequestActivity(context);
+    if (commitGuard && !commitGuard()) return staleResult();
+    clearActivity();
     const text = deps.formatError(error, context.language);
     const evidence = await deps.recordToolFailureEvidence(
       context,
       sessionId,
       "Read",
       `${toolCall.name}: ${text}`,
+      commitGuard,
+      toolCall.id,
     );
+    if (commitGuard && !commitGuard()) return staleResult();
     await deps.appendDeferredToolResultEvent(
       context,
       sessionId,
@@ -301,7 +392,9 @@ export async function executeGitToolUse(
       text,
       true,
       evidence.id,
+      commitGuard,
     );
+    if (commitGuard && !commitGuard()) return staleResult();
     return { ok: false, tool: toolCall.name, text, evidenceId: evidence.id };
   }
 }
@@ -312,7 +405,11 @@ async function runGitRollbackExplainTool(
   sessionId: string,
   output: Writable,
   deps: GitToolDispatchDeps,
+  commitGuard?: () => boolean,
 ): Promise<GitToolResult> {
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   const isEn = context.language === "en-US";
   const text = isEn
     ? "Git rollback boundary: Linghun can restore in-memory snapshot checkpoints with /rewind restore, but this tool does not execute git revert/reset/checkout and does not move HEAD. For a real git rollback, inspect /git status first, then run an explicit shell/git command after choosing revert vs reset."
@@ -327,9 +424,10 @@ async function runGitRollbackExplainTool(
   const evidence = await deps.recordToolEvidence(context, sessionId, "Read", {
     text: `GitRollbackExplain: ${text}`,
     data,
-  } as ToolOutput, {
-    query: "GitRollbackExplain",
-  });
+  } as ToolOutput, { query: "GitRollbackExplain" }, commitGuard, toolCall.id);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   await deps.appendDeferredToolResultEvent(
     context,
     sessionId,
@@ -338,8 +436,12 @@ async function runGitRollbackExplainTool(
     { text, data },
     false,
     evidence?.id,
+    commitGuard,
   );
-  deps.clearRequestActivity(context);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
+  if (context.requestActivityToolUseId === toolCall.id) deps.clearRequestActivity(context);
   deps.writeLine(output, text);
   return { ok: true, tool: toolCall.name, text, data, evidenceId: evidence?.id };
 }
@@ -350,10 +452,23 @@ async function runGitStatusInspectTool(
   sessionId: string,
   output: Writable,
   deps: GitToolDispatchDeps,
+  commitGuard?: () => boolean,
 ): Promise<GitToolResult> {
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   const status = await readGitStatus(context.projectPath);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   const worktrees = await readWorktreeList(context.projectPath);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   const worktreeContext = await computeWorktreeContext(context.projectPath);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   const summary =
     status.kind === "ok"
       ? `branch ${status.branch ?? "(detached)"}; changed ${status.changedCount}; untracked ${status.untrackedCount}; head ${status.headShort ?? "?"}`
@@ -379,7 +494,10 @@ async function runGitStatusInspectTool(
   const evidence = await deps.recordToolEvidence(context, sessionId, "Read", {
     text: `GitStatusInspect: ${summary}`,
     data,
-  } as ToolOutput);
+  } as ToolOutput, undefined, commitGuard, toolCall.id);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   await deps.appendDeferredToolResultEvent(
     context,
     sessionId,
@@ -388,8 +506,12 @@ async function runGitStatusInspectTool(
     { text: summary, data },
     false,
     evidence?.id,
+    commitGuard,
   );
-  deps.clearRequestActivity(context);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
+  if (context.requestActivityToolUseId === toolCall.id) deps.clearRequestActivity(context);
   deps.writeLine(
     output,
     context.language === "en-US" ? `Git status: ${summary}` : `Git 状态：${summary}`,
@@ -405,12 +527,16 @@ async function runStablePointTool(
   deps: GitToolDispatchDeps,
   input: { message?: string; includeUntracked?: boolean },
   continuation?: PendingModelContinuation,
+  commitGuard?: () => boolean,
 ): Promise<GitToolResult> {
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   // D.14D-R2 P1-1/R2 fix — 模型工具创建 stable point 是 safety-gain 写仓库状态：
   // default 先确认，plan 直接拒绝，auto-review/full-access 直接执行。slash
   // /git stable create 是显式用户动作，不经此模型工具路径，确认语义不受影响。
   if (context.permissionMode === "plan") {
-    deps.clearRequestActivity(context);
+    if (context.requestActivityToolUseId === toolCall.id) deps.clearRequestActivity(context);
     const text =
       context.language === "en-US"
         ? "stable point was NOT created because Plan mode is read-only."
@@ -420,6 +546,8 @@ async function runStablePointTool(
       sessionId,
       "Read",
       `GitStablePointCreate denied: ${text}`,
+      commitGuard,
+      toolCall.id,
     );
     await appendGitOperationEvent(
       deps,
@@ -433,6 +561,7 @@ async function runStablePointTool(
         result: "plan_read_only",
       },
       "warning",
+      commitGuard,
     );
     await deps.appendDeferredToolResultEvent(
       context,
@@ -442,12 +571,16 @@ async function runStablePointTool(
       { text, ok: false, outcome: "plan_read_only" },
       true,
       evidence.id,
+      commitGuard,
     );
     deps.writeLine(output, text);
     return { ok: false, tool: toolCall.name, text, evidenceId: evidence.id };
   }
   if (context.permissionMode === "default") {
-    deps.clearRequestActivity(context);
+    if (commitGuard && !commitGuard()) {
+      return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+    }
+    if (context.requestActivityToolUseId === toolCall.id) deps.clearRequestActivity(context);
     context.pendingLocalApproval = {
       kind: "git_stable_point",
       sessionId,
@@ -474,14 +607,26 @@ async function runStablePointTool(
         result: "pending_confirmation",
       },
       "info",
+      commitGuard,
     );
     if (!context.isInkSession) {
       deps.writeLine(output, summaryText);
     }
     return { ok: false, tool: toolCall.name, text: summaryText, pendingApproval: true };
   }
-  const result = await performStablePoint(context, sessionId, input, deps);
-  deps.clearRequestActivity(context);
+  const result = await performStablePoint(
+    context,
+    sessionId,
+    input,
+    deps,
+    commitGuard,
+    toolCall.id,
+    continuation?.abortSignal,
+  );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
+  if (context.requestActivityToolUseId === toolCall.id) deps.clearRequestActivity(context);
   await deps.appendDeferredToolResultEvent(
     context,
     sessionId,
@@ -490,7 +635,11 @@ async function runStablePointTool(
     { text: result.text, ok: result.ok },
     !result.ok,
     result.evidenceId,
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   deps.writeLine(output, result.text);
   return { ok: result.ok, tool: toolCall.name, text: result.text, evidenceId: result.evidenceId };
 }
@@ -502,7 +651,13 @@ export async function performStablePoint(
   sessionId: string,
   input: { message?: string; includeUntracked?: boolean },
   deps: GitToolDispatchDeps,
+  commitGuard?: () => boolean,
+  toolUseId?: string,
+  abortSignal?: AbortSignal,
 ): Promise<StablePointRunResult> {
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, text: "cancelled: stale git tool result discarded", outcome: "snapshot_only" };
+  }
   // message 校验：缺失时用安全默认；非空则校验长度/控制字符。
   let message = input.message?.trim() ?? "";
   if (message === "") {
@@ -516,12 +671,24 @@ export async function performStablePoint(
   }
 
   // 本地安全垫：稳定点前先 snapshot。
-  await createSnapshotStablePoint(deps, context, sessionId, `before stable point: ${message}`);
+  await createSnapshotStablePoint(
+    deps,
+    context,
+    sessionId,
+    `before stable point: ${message}`,
+    commitGuard,
+  );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, text: "cancelled: stale git tool result discarded", outcome: "snapshot_only" };
+  }
 
   const outcome = await createGitStablePoint(context.projectPath, {
     message,
     includeUntracked: input.includeUntracked,
-  });
+  }, undefined, abortSignal);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, text: "cancelled: stale git tool result discarded", outcome: "snapshot_only" };
+  }
   const { ok, text } = summarizeStablePointOutcome(outcome, context.language);
 
   if (outcome.kind === "git_commit") {
@@ -532,6 +699,8 @@ export async function performStablePoint(
       "stable_point_created",
       `kind git commit; sha ${outcome.sha}; branch ${outcome.branch ?? "-"}; changed ${outcome.changedCount}`,
       ["stable_point_created"],
+      commitGuard,
+      toolUseId,
     );
     await appendGitOperationEvent(
       deps,
@@ -551,6 +720,7 @@ export async function performStablePoint(
         result: "ok",
       },
       "info",
+      commitGuard,
     );
     return { ok, text, evidenceId: evidence.id, outcome };
   }
@@ -568,6 +738,7 @@ export async function performStablePoint(
         result: "skipped",
       },
       "info",
+      commitGuard,
     );
     return { ok, text, outcome };
   }
@@ -583,6 +754,8 @@ export async function performStablePoint(
       "stable_point_created",
       `kind snapshot; reason ${reason}`,
       ["stable_point_created"],
+      commitGuard,
+      toolUseId,
     );
     await appendGitOperationEvent(
       deps,
@@ -596,6 +769,7 @@ export async function performStablePoint(
         result: "ok",
       },
       "info",
+      commitGuard,
     );
     return { ok, text, evidenceId: evidence.id, outcome };
   }
@@ -613,6 +787,7 @@ export async function performStablePoint(
       result: "failed",
     },
     "warning",
+    commitGuard,
   );
   return { ok, text, outcome };
 }
@@ -623,6 +798,8 @@ async function runWorktreeCreateTool(
   sessionId: string,
   output: Writable,
   deps: GitToolDispatchDeps,
+  commitGuard?: () => boolean,
+  abortSignal?: AbortSignal,
 ): Promise<GitToolResult> {
   const input = parseWorktreeCreateInput(toolCall.input);
   const result = await performWorktreeCreate(
@@ -630,8 +807,14 @@ async function runWorktreeCreateTool(
     sessionId,
     { name: input.name ?? "", branch: input.branch, fromRef: input.fromRef },
     deps,
+    commitGuard,
+    toolCall.id,
+    abortSignal,
   );
-  deps.clearRequestActivity(context);
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
+  if (context.requestActivityToolUseId === toolCall.id) deps.clearRequestActivity(context);
   await deps.appendDeferredToolResultEvent(
     context,
     sessionId,
@@ -640,7 +823,11 @@ async function runWorktreeCreateTool(
     { text: result.text, ok: result.ok },
     !result.ok,
     result.evidenceId,
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   deps.writeLine(output, result.text);
   return { ok: result.ok, tool: toolCall.name, text: result.text, evidenceId: result.evidenceId };
 }
@@ -651,8 +838,27 @@ export async function performWorktreeCreate(
   sessionId: string,
   input: { name: string; branch?: string; fromRef?: string },
   deps: GitToolDispatchDeps,
+  commitGuard?: () => boolean,
+  toolUseId?: string,
+  abortSignal?: AbortSignal,
 ): Promise<WorktreeCreateRunResult> {
-  const outcome = await createManagedWorktree(context.projectPath, input);
+  if (commitGuard && !commitGuard()) {
+    return {
+      ok: false,
+      text: "cancelled: stale git tool result discarded",
+      outcome: { kind: "failed", reason: "stale git tool owner" },
+    };
+  }
+  const outcome = await createManagedWorktree(
+    context.projectPath,
+    input,
+    undefined,
+    undefined,
+    abortSignal,
+  );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, text: "cancelled: stale git tool result discarded", outcome };
+  }
   const { ok, text } = summarizeWorktreeCreateOutcome(outcome, context.language);
   if (outcome.kind === "created") {
     const evidence = await recordGitOperationEvidence(
@@ -662,6 +868,8 @@ export async function performWorktreeCreate(
       "worktree_created",
       `name ${outcome.name}; branch ${outcome.branch ?? "-"}; from ${outcome.fromRef}`,
       ["worktree_created"],
+      commitGuard,
+      toolUseId,
     );
     await appendGitOperationEvent(
       deps,
@@ -680,6 +888,7 @@ export async function performWorktreeCreate(
         result: "ok",
       },
       "info",
+      commitGuard,
     );
     return { ok, text, evidenceId: evidence.id, outcome };
   }
@@ -691,6 +900,8 @@ export async function performWorktreeCreate(
       "worktree_resumed",
       `name ${outcome.name}; branch ${outcome.branch ?? "-"}`,
       ["worktree_resumed"],
+      commitGuard,
+      toolUseId,
     );
     await appendGitOperationEvent(
       deps,
@@ -705,6 +916,7 @@ export async function performWorktreeCreate(
         result: "exists",
       },
       "info",
+      commitGuard,
     );
     return { ok, text, evidenceId: evidence.id, outcome };
   }
@@ -721,6 +933,7 @@ export async function performWorktreeCreate(
       result: "failed",
     },
     "warning",
+    commitGuard,
   );
   return { ok, text, outcome };
 }
@@ -732,14 +945,21 @@ async function runWorktreeRemoveTool(
   output: Writable,
   deps: GitToolDispatchDeps,
   continuation?: PendingModelContinuation,
+  commitGuard?: () => boolean,
 ): Promise<GitToolResult> {
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   const input = parseWorktreeRemoveInput(toolCall.input);
   const plan = await planManagedWorktreeRemove(context.projectPath, {
     name: input.name ?? "",
     force: input.force,
   });
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   const summary = summarizeWorktreeRemovePlan(plan, context.language);
-  deps.clearRequestActivity(context);
+  if (context.requestActivityToolUseId === toolCall.id) deps.clearRequestActivity(context);
 
   if (
     summary.needsConfirmation &&
@@ -753,7 +973,13 @@ async function runWorktreeRemoveTool(
       plan.path,
       plan.kind === "dirty_force",
       deps,
+      commitGuard,
+      toolCall.id,
+      continuation?.abortSignal,
     );
+    if (commitGuard && !commitGuard()) {
+      return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+    }
     deps.writeLine(output, result.text);
     return {
       ok: result.ok,
@@ -765,6 +991,9 @@ async function runWorktreeRemoveTool(
 
   if (summary.needsConfirmation && (plan.kind === "clean" || plan.kind === "dirty_force")) {
     // 进入轻/强确认；本工具本轮返回 pendingApproval，结果由 yes/no 后的 execute 回灌。
+    if (commitGuard && !commitGuard()) {
+      return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+    }
     context.pendingLocalApproval = {
       kind: "git_worktree_remove",
       sessionId,
@@ -790,7 +1019,11 @@ async function runWorktreeRemoveTool(
         result: "pending_confirmation",
       },
       "info",
+      commitGuard,
     );
+    if (commitGuard && !commitGuard()) {
+      return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+    }
     deps.writeLine(output, summary.text);
     return { ok: false, tool: toolCall.name, text: summary.text, pendingApproval: true };
   }
@@ -809,13 +1042,19 @@ async function runWorktreeRemoveTool(
         result: "denied",
       },
       "warning",
+      commitGuard,
     );
+    if (commitGuard && !commitGuard()) {
+      return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+    }
   }
   const evidence = await deps.recordToolFailureEvidence(
     context,
     sessionId,
     "Read",
     `ManagedWorktreeRemove: ${summary.text}`,
+    commitGuard,
+    toolCall.id,
   );
   await deps.appendDeferredToolResultEvent(
     context,
@@ -825,7 +1064,11 @@ async function runWorktreeRemoveTool(
     summary.text,
     true,
     evidence.id,
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+  }
   deps.writeLine(output, summary.text);
   return { ok: false, tool: toolCall.name, text: summary.text, evidenceId: evidence.id };
 }
@@ -838,8 +1081,27 @@ export async function performWorktreeRemoveExecute(
   path: string,
   force: boolean,
   deps: GitToolDispatchDeps,
+  commitGuard?: () => boolean,
+  toolUseId?: string,
+  abortSignal?: AbortSignal,
 ): Promise<WorktreeRemoveExecuteResult> {
-  const result = await executeManagedWorktreeRemove(context.projectPath, path, force);
+  if (commitGuard && !commitGuard()) {
+    return {
+      ok: false,
+      text: "cancelled: stale git tool result discarded",
+      result: { kind: "failed", reason: "stale git tool owner" },
+    };
+  }
+  const result = await executeManagedWorktreeRemove(
+    context.projectPath,
+    path,
+    force,
+    undefined,
+    abortSignal,
+  );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, text: "cancelled: stale git tool result discarded", result };
+  }
   if (result.kind === "removed") {
     const evidence = await recordGitOperationEvidence(
       deps,
@@ -848,6 +1110,8 @@ export async function performWorktreeRemoveExecute(
       "worktree_removed",
       `name ${name}; force ${force}`,
       ["worktree_removed"],
+      commitGuard,
+      toolUseId,
     );
     await appendGitOperationEvent(
       deps,
@@ -862,6 +1126,7 @@ export async function performWorktreeRemoveExecute(
         result: "ok",
       },
       "info",
+      commitGuard,
     );
     const text =
       context.language === "en-US"
@@ -882,7 +1147,11 @@ export async function performWorktreeRemoveExecute(
       result: "failed",
     },
     "warning",
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) {
+    return { ok: false, text: "cancelled: stale git tool result discarded", result };
+  }
   const text =
     context.language === "en-US"
       ? `Worktree removal failed; nothing removed: ${result.reason}`
@@ -933,6 +1202,8 @@ export async function resolveWorktreeRemoveApprove(
   output: Writable,
   deps: WorktreeRemoveResolveDeps,
 ): Promise<void> {
+  const commitGuard = continuationCommitGuard(context, approval.continuation);
+  if (commitGuard && !commitGuard()) return;
   const result = await performWorktreeRemoveExecute(
     context,
     approval.sessionId,
@@ -940,7 +1211,11 @@ export async function resolveWorktreeRemoveApprove(
     approval.path,
     approval.force,
     deps,
+    commitGuard,
+    approval.toolCall?.id,
+    approval.continuation?.abortSignal,
   );
+  if (commitGuard && !commitGuard()) return;
   deps.writeLine(output, result.text);
   if (approval.continuation && approval.toolCall) {
     approval.continuation.messages.push({
@@ -966,12 +1241,16 @@ export async function resolveWorktreeRemoveDeny(
   cancelled: boolean,
   deps: WorktreeRemoveResolveDeps,
 ): Promise<void> {
+  const commitGuard = continuationCommitGuard(context, approval.continuation);
+  if (commitGuard && !commitGuard()) return;
   const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
   const evidence = await deps.recordToolFailureEvidence(
     context,
     approval.sessionId,
     "Read",
     `${outcomeText}: ManagedWorktreeRemove ${approval.name}`,
+    commitGuard,
+    approval.toolCall?.id,
   );
   await appendGitOperationEvent(
     deps,
@@ -985,7 +1264,9 @@ export async function resolveWorktreeRemoveDeny(
       result: cancelled ? "cancelled" : "denied",
     },
     "warning",
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) return;
   const deniedText =
     context.language === "en-US"
       ? `Worktree removal ${cancelled ? "cancelled" : "denied"}; "${approval.name}" was not removed.`
@@ -1016,12 +1297,18 @@ export async function resolveStablePointApprove(
   output: Writable,
   deps: WorktreeRemoveResolveDeps,
 ): Promise<void> {
+  const commitGuard = continuationCommitGuard(context, approval.continuation);
+  if (commitGuard && !commitGuard()) return;
   const result = await performStablePoint(
     context,
     approval.sessionId,
     { message: approval.message, includeUntracked: approval.includeUntracked },
     deps,
+    commitGuard,
+    approval.toolCall.id,
+    approval.continuation?.abortSignal,
   );
+  if (commitGuard && !commitGuard()) return;
   await deps.appendDeferredToolResultEvent(
     context,
     approval.sessionId,
@@ -1030,7 +1317,9 @@ export async function resolveStablePointApprove(
     { text: result.text, ok: result.ok },
     !result.ok,
     result.evidenceId,
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) return;
   deps.writeLine(output, result.text);
   if (approval.continuation) {
     approval.continuation.messages.push({
@@ -1058,12 +1347,16 @@ export async function resolveStablePointDeny(
   cancelled: boolean,
   deps: WorktreeRemoveResolveDeps,
 ): Promise<void> {
+  const commitGuard = continuationCommitGuard(context, approval.continuation);
+  if (commitGuard && !commitGuard()) return;
   const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
   const evidence = await deps.recordToolFailureEvidence(
     context,
     approval.sessionId,
     "Read",
     `${outcomeText}: GitStablePointCreate`,
+    commitGuard,
+    approval.toolCall.id,
   );
   await appendGitOperationEvent(
     deps,
@@ -1076,7 +1369,9 @@ export async function resolveStablePointDeny(
       result: cancelled ? "cancelled" : "denied",
     },
     "warning",
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) return;
   const deniedText =
     context.language === "en-US"
       ? `Stable point ${cancelled ? "cancelled" : "denied"}; no commit or snapshot was created. The stable point was NOT created.`

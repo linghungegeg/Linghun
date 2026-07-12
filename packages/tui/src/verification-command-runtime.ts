@@ -4,7 +4,7 @@ import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
-import type { Language } from "@linghun/shared";
+import type { Language, PermissionMode } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
 import {
@@ -15,6 +15,7 @@ import { createProcessGuard } from "./process-guard.js";
 import { LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS } from "./runtime-budget.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
 import { rememberBackgroundTask } from "./tui-agent-job-runtime.js";
+import { decidePermission } from "./tui-permission-runtime.js";
 import type {
   BackgroundTaskState,
   VerificationCommandResult,
@@ -25,6 +26,10 @@ import type {
   VerificationScope,
 } from "./tui-data-types.js";
 import { isRecord } from "./tui-state-runtime.js";
+import {
+  type UserActionConstraints,
+  verificationStepConstraintReason,
+} from "./user-action-constraints.js";
 
 export async function createVerificationPlan(
   projectPath: string,
@@ -490,9 +495,9 @@ function createVerificationOwnerKey(
     requestTurnId?: string;
   },
 ): string {
-  if (options.requestTurnId) return `request:${sessionId}:${options.requestTurnId}`;
   if (options.ownerAgentId) return `agent:${sessionId}:${options.ownerAgentId}`;
   if (options.workflowRunId) return `workflow:${sessionId}:${options.workflowRunId}`;
+  if (options.requestTurnId) return `request:${sessionId}:${options.requestTurnId}`;
   return `session:${sessionId}`;
 }
 
@@ -518,6 +523,8 @@ export async function runVerificationPlan(
     heartbeatIntervalMs?: number;
     staleAfterMs?: number;
     commitGuard?: () => boolean;
+    permissionMode?: PermissionMode;
+    userActionConstraints?: UserActionConstraints;
   } = {},
 ): Promise<VerificationReport> {
   const runId = randomUUID();
@@ -534,9 +541,6 @@ export async function runVerificationPlan(
     ...(options.requestTurnId ? { requestTurnId: options.requestTurnId } : {}),
     ...(options.level ? { level: options.level } : {}),
   };
-  context.latestVerificationRunId = runId;
-  context.latestVerificationRunIds ??= new Map();
-  context.latestVerificationRunIds.set(ownerKey, runId);
   const startedAt = new Date().toISOString();
   const orchestration = resolveMetaOrchestrationAction(context, "verification");
   await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
@@ -562,15 +566,82 @@ export async function runVerificationPlan(
       level: "warning",
     });
     writeLine(output, report.summary);
+    context.latestVerificationRunId = runId;
+    context.latestVerificationRunIds ??= new Map();
+    context.latestVerificationRunIds.set(ownerKey, runId);
     return report;
   }
-  const effectivePlan = plan;
+  const skippedByUserConstraint = plan.flatMap((step) => {
+    const reason = verificationStepConstraintReason(options.userActionConstraints, step.kind);
+    return reason ? [{ step, reason }] : [];
+  });
+  const effectivePlan = plan.filter(
+    (step) => verificationStepConstraintReason(options.userActionConstraints, step.kind) === undefined,
+  );
+  if (options.permissionMode) {
+    for (const step of effectivePlan) {
+      const permission = await decidePermission(
+        "Bash",
+        { command: step.command },
+        context,
+        sessionId,
+        {
+          permissionMode: options.permissionMode,
+          userActionConstraints: options.userActionConstraints,
+        },
+      );
+      if (options.commitGuard?.() === false || options.ownerSignal?.aborted === true) {
+        const endedAt = new Date().toISOString();
+        context.latestVerificationRunId = runId;
+        context.latestVerificationRunIds ??= new Map();
+        context.latestVerificationRunIds.set(ownerKey, runId);
+        return {
+          id: runId,
+          status: "stale",
+          summary: "STALE：验证命令在权限检查期间失去 owner，未生成 PASS 证据。",
+          commands: [],
+          unverified: [`${step.kind}: owner changed before Bash permission commit`],
+          risk: ["Verification permission result was discarded before command execution."],
+          startedAt,
+          endedAt,
+          durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+          nextAction: "确认当前请求 owner 后重新发起验证。",
+          scope,
+        };
+      }
+      if (permission.decision !== "allow") {
+        const endedAt = new Date().toISOString();
+        context.latestVerificationRunId = runId;
+        context.latestVerificationRunIds ??= new Map();
+        context.latestVerificationRunIds.set(ownerKey, runId);
+        return {
+          id: runId,
+          status: "partial",
+          summary: `PARTIAL：验证命令需要 Bash 权限（${permission.decision}），未执行且未生成 PASS 证据。`,
+          commands: [],
+          unverified: [`${step.kind}: Bash permission ${permission.decision}: ${permission.reason}`],
+          risk: ["Verification command did not pass the existing Bash permission boundary."],
+          startedAt,
+          endedAt,
+          durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+          nextAction:
+            permission.decision === "ask"
+              ? "通过现有 Bash 权限确认后重新运行验证，或显式使用 /verify。"
+              : "解除当前 Bash 权限或用户约束后重新运行验证。",
+          scope,
+        };
+      }
+    }
+  }
   const skippedByDegrade = 0;
   const logRoot = join(
     resolveStoragePaths(context.config, context.projectPath).logs,
     "verification",
   );
   await mkdir(logRoot, { recursive: true });
+  context.latestVerificationRunId = runId;
+  context.latestVerificationRunIds ??= new Map();
+  context.latestVerificationRunIds.set(ownerKey, runId);
   const controller = new AbortController();
   context.activeVerificationAbortControllers ??= new Map();
   context.activeVerificationAbortControllers.set(runId, controller);
@@ -604,15 +675,22 @@ export async function runVerificationPlan(
   const results: VerificationCommandResult[] = [];
   const unverified: string[] = [
     ...new Set(effectivePlan.map((step) => step.coverageGap).filter((gap): gap is string => Boolean(gap))),
+    ...skippedByUserConstraint.map(
+      ({ step, reason }) => `${step.kind} skipped by current user constraint: ${reason}`,
+    ),
     ...(effectivePlan.length === 0 ? ["verification plan contained no executable steps"] : []),
     ...(skippedByDegrade > 0
       ? [`meta orchestration degrade skipped ${skippedByDegrade} verification step(s): ${orchestration.reason}`]
       : []),
   ];
-  const risk: string[] =
-    skippedByDegrade > 0
+  const risk: string[] = [
+    ...(skippedByUserConstraint.length > 0
+      ? ["Verification steps filtered by the current user request cannot support a full PASS."]
+      : []),
+    ...(skippedByDegrade > 0
       ? ["Verification was degraded by meta orchestration; do not claim full verification PASS."]
-      : [];
+      : []),
+  ];
   let report: VerificationReport | undefined;
   try {
     await context.store.appendEvent(sessionId, {
@@ -631,8 +709,8 @@ export async function runVerificationPlan(
 
     for (const [index, step] of effectivePlan.entries()) {
       const stepStarted = Date.now();
-      task.currentStep = `${step.kind} ${index + 1}/${plan.length}`;
-      task.progress = { completed: index, total: plan.length, label: step.kind };
+      task.currentStep = `${step.kind} ${index + 1}/${effectivePlan.length}`;
+      task.progress = { completed: index, total: effectivePlan.length, label: step.kind };
       task.updatedAt = new Date().toISOString();
       await appendBackgroundTaskEvent(context, sessionId, task);
       writeLine(output, `验证步骤：${task.currentStep} · ${step.command}`);

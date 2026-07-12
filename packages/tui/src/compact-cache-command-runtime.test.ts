@@ -1,6 +1,7 @@
 import { defaultConfig } from "@linghun/config";
 import { describe, expect, it } from "vitest";
 import {
+  appendUsageEvents,
   markContextUsageStale,
   recordConfirmedContextUsage,
   shouldForceCompactFromConfirmedUsage,
@@ -46,6 +47,39 @@ function makeContext(provider: "deepseek" | "openai-compatible" = "deepseek"): T
 }
 
 describe("context usage ledger", () => {
+  it("writes one lightweight usage event per turn without duplicate cache_update payloads", async () => {
+    const context = makeContext();
+    const events: Array<{ type: string }> = [];
+    context.store = {
+      appendEvent: async (_sessionId: string, event: { type: string }) => {
+        events.push(event);
+      },
+    } as unknown as TuiContext["store"];
+    const stats = {
+      turn: 1,
+      timestamp: 1,
+      hitRate: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWriteTokensSource: "zero_reported",
+      inputTokens: 1,
+      outputTokens: 1,
+      model: "test",
+      provider: "test",
+      endpoint: "/v1/messages",
+      source: "api_usage",
+      compacted: false,
+      freshness: {},
+    } as Parameters<typeof appendUsageEvents>[2];
+
+    for (let turn = 0; turn < 1_000; turn += 1) {
+      await appendUsageEvents(context, "session", { ...stats, turn });
+    }
+
+    expect(events).toHaveLength(1_000);
+    expect(events.every((event) => event.type === "usage")).toBe(true);
+  });
+
   it("records provider-confirmed context usage and clears stale state", () => {
     const context = makeContext();
     context.cache.contextUsage = {

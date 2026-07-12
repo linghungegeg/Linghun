@@ -77,13 +77,10 @@ describe("D.14H-E workflow planner entry", () => {
       const verify = slices.find((slice) => slice.id === "slice-verify");
       expect(verify?.dependsOnSliceIds).toEqual(["slice-architecture-review"]);
       expect(verify?.targetRuntime).toMatchObject({
-        kind: "details",
-        view: "evidence",
+        kind: "verification",
+        level: "typecheck",
         mutating: false,
       });
-      expect(
-        result.bridgeResult.requests.some((request) => request.request?.mainChain === "verification"),
-      ).toBe(false);
     }
 
     const fixResult = generateWorkflowPlanPreview(goal({ goal: "请修复 workflow blocked 问题" }));
@@ -128,7 +125,7 @@ describe("D.14H-E workflow planner entry", () => {
     expect(result.surface.summaryText).toBeDefined();
   });
 
-  it("honors user constraints that forbid executable verification", () => {
+  it("keeps specific verification constraints for the runner's step-kind boundary", () => {
     const result = generateWorkflowPlanPreview(
       goal({ goal: "帮我修复这个问题，但不要跑测试和 typecheck" }),
     );
@@ -137,10 +134,20 @@ describe("D.14H-E workflow planner entry", () => {
     const slices = result.plan.phases[0].slices;
     expect(slices.some((slice) => slice.id === "slice-implement")).toBe(true);
     expect(slices.find((slice) => slice.id === "slice-verify")?.targetRuntime).toMatchObject({
-      kind: "details",
-      view: "evidence",
+      kind: "verification",
+      level: "typecheck",
       mutating: false,
     });
+  });
+
+  it("uses advice-only verification only when the request forbids all commands", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({ goal: "帮我修复这个问题，但不要执行任何命令" }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.phases[0].slices.find((slice) => slice.id === "slice-verify")?.targetRuntime)
+      .toMatchObject({ kind: "details", view: "evidence", mutating: false });
     expect(
       result.bridgeResult.requests.some((request) => request.request?.mainChain === "verification"),
     ).toBe(false);

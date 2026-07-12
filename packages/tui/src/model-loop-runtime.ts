@@ -2002,7 +2002,7 @@ export function hasArchitectureEvidenceForClaims(
 // \u5f53\u539f\u6587\u585e\u8fdb prompt\uff0c\u4f9d\u8d56 RuntimeIdentityRule \u8f6f\u7ea6\u675f\u8ba9\u6a21\u578b\u4e0d\u8981\u6cc4\u6f0f\u3002
 // \u62c6\u6210 internalForLog / externalForPrompt\uff1a
 // - externalForPrompt \u53ea\u542b\u6a21\u578b\u56de\u7b54\u81ea\u7136\u8bed\u8a00\u65f6\u786e\u5b9e\u9700\u8981\u7684\u5b57\u6bb5\uff08model name\u3001permission mode\u3001
-//   index/cache \u6982\u89c8\u3001\u6269\u5c55\u5de5\u5177\u662f\u5426\u542f\u7528\u3001memory \u6982\u89c8\uff09\u3002
+//   index \u6982\u89c8\u3001\u6269\u5c55\u5de5\u5177\u662f\u5426\u542f\u7528\u3001memory \u6982\u89c8\uff09\u3002
 // - \u4e0d\u542b provider / baseUrl / endpointProfile / \u8def\u7531\u4fe1\u606f\u3002
 // - \u7528\u6237\u95ee provider/route/doctor \u65f6\u4ecd\u53ef\u901a\u8fc7 /model doctor\u3001/model route doctor \u66b4\u9732\u5b8c\u6574\u4fe1\u606f\u3002
 
@@ -2014,7 +2014,6 @@ export type RuntimeStatusForPrompt = {
     autoAccept: boolean;
   };
   index: { status: string; projectName: string | null; changedFiles: number | null };
-  cache: { latestHitRate: number | null; changedKeys: string[] };
   model: { name: string };
   permissionMode: string;
   extensions: {
@@ -2035,7 +2034,6 @@ export function projectRuntimeStatusForPrompt(
       : "unknown";
   const memory = (r.memory ?? {}) as Record<string, unknown>;
   const index = (r.index ?? {}) as Record<string, unknown>;
-  const cache = (r.cache ?? {}) as Record<string, unknown>;
   const extensions = (r.extensions ?? {}) as Record<string, unknown>;
   const skills = (extensions.skills ?? {}) as Record<string, unknown>;
   const plugins = (extensions.plugins ?? {}) as Record<string, unknown>;
@@ -2052,13 +2050,6 @@ export function projectRuntimeStatusForPrompt(
       status: typeof index.status === "string" ? index.status : "unknown",
       projectName: typeof index.projectName === "string" ? index.projectName : null,
       changedFiles: typeof index.changedFiles === "number" ? (index.changedFiles as number) : null,
-    },
-    cache: {
-      latestHitRate:
-        typeof cache.latestHitRate === "number" ? (cache.latestHitRate as number) : null,
-      changedKeys: Array.isArray(cache.changedKeys)
-        ? (cache.changedKeys as string[]).filter((k) => typeof k === "string")
-        : [],
     },
     model: { name: typeof model === "string" ? model : "unknown" },
     permissionMode: typeof r.permissionMode === "string" ? r.permissionMode : "default",

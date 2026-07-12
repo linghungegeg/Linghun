@@ -11,10 +11,13 @@ import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { evidenceMatchesRequestOwner } from "./evidence-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
+import { configureMcpIndexRuntime } from "./mcp-index-runtime.js";
 import { rememberCacheSafePrefix } from "./cache-policy-runtime.js";
 import {
+  __testExecuteAgentToolCall,
   configureJobAgentCommandRuntime,
   cancelAgent,
+  cancelAgentByRef,
   denyAgentToolUse,
   executeApprovedAgentToolUse,
   markRunningAgentsStaleForInterrupt,
@@ -78,6 +81,7 @@ import type {
 import {
   __testExecuteRegistryWorkflowStep,
   __testExecuteWorkflowStep,
+  __testNewWorkflowEvidenceRefs,
 } from "./workflow-command-runtime.js";
 
 type TestStreamEvent =
@@ -466,6 +470,7 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
 
   it("records passed RunVerification claims for final-answer evidence", async () => {
     const context = await createTestContext();
+    context.permissionMode = "full-access";
     await writeFile(
       join(context.projectPath, "package.json"),
       JSON.stringify({ scripts: { test: "node -e \"console.log('test pass')\"" } }),
@@ -527,6 +532,66 @@ describe("Phase E model stream and tool dispatch main-chain coverage", () => {
 });
 
 describe("Phase E agent, slash, workflow, permission, and natural intent coverage", () => {
+  it("drops a late direct pre-engine result after its request owner changes", async () => {
+    const context = await createTestContext([]);
+    const sessionId = context.sessionId!;
+    const controller = new AbortController();
+    const started = deferred<void>();
+    const lateResult = deferred<{ ok: boolean; summary: string; data?: unknown }>();
+    let receivedSignal: AbortSignal | undefined;
+    context.currentRequestTurnId = "pre-owner-old";
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => sessionId,
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary: async () => "mock-pre-engine",
+      callPreEngineTool: async (_name, _args, _cwd, _binary, signal) => {
+        receivedSignal = signal;
+        started.resolve();
+        return lateResult.promise;
+      },
+    });
+
+    const pending = executeModelToolUse(
+      call("pre_context", { symbol: "staleSymbol" }),
+      context,
+      sessionId,
+      new MemoryOutput(),
+      {
+        requestTurnId: "pre-owner-old",
+        abortSignal: controller.signal,
+        messages: [],
+      } as never,
+    );
+    await started.promise;
+    context.currentRequestTurnId = "pre-owner-new";
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "pre-owner-new" };
+    context.requestActivityToolUseId = "new-tool";
+    controller.abort();
+    lateResult.resolve({
+      ok: true,
+      summary: "late",
+      data: { candidate_files: ["src/stale.ts"] },
+    });
+    const result = await pending;
+
+    expect(receivedSignal).toBe(controller.signal);
+    expect(result).toMatchObject({
+      ok: false,
+      text: "cancelled: stale pre-engine tool result discarded",
+    });
+    expect(context.evidence).toEqual([]);
+    expect(context.requestActivityToolUseId).toBe("new-tool");
+    expect(context.tools.sourcePackCandidates).toBeUndefined();
+    const transcript = (await context.store.resume(sessionId)).transcript;
+    expect(transcript.some((event) => event.type === "tool_result")).toBe(false);
+    expect(transcript.some((event) => event.type === "evidence_record")).toBe(false);
+  });
+
   it("drops a permission decision when its continuation owner changes while deciding", async () => {
     const context = await createTestContext([]);
     const sessionId = context.sessionId!;
@@ -1000,6 +1065,246 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     }
   });
 
+  it.each(["permission_gate", "permission_request", "permission_result"] as const)(
+    "does not create a late agent approval when cancelled during %s persistence",
+    async (gate) => {
+      const context = await createTestContext([], undefined, true);
+      const child = await context.store.create({ model: context.model });
+      const agent = createAgentRun(context, {
+        id: `agent-permission-race-${gate}`,
+        type: "worker",
+        role: "executor",
+        allowedTools: ["Write"],
+        transcriptPath: child.transcriptPath,
+        transcriptSessionId: child.id,
+      });
+      context.agents.push(agent);
+      rememberBackgroundTask(context, createAgentBackgroundTask(agent, context));
+      const controller = registerBackgroundAbortController(context, agent.id);
+      const reachedGate = deferred<void>();
+      const releaseGate = deferred<void>();
+      const originalAppend = context.store.appendEvent.bind(context.store);
+      let blocked = false;
+      const appendSpy = vi
+        .spyOn(context.store, "appendEvent")
+        .mockImplementation(async (sessionId, event, commitGuard) => {
+          const matches = gate === "permission_gate"
+            ? event.type === "system_event" &&
+              event.message.includes("meta_orchestration:permission-gate") &&
+              event.message.includes("status=consumed")
+            : event.type === gate;
+          if (!blocked && matches) {
+            blocked = true;
+            reachedGate.resolve();
+            await releaseGate.promise;
+          }
+          return originalAppend(sessionId, event, commitGuard);
+        });
+      const toolCall = call("Write", {
+        path: `${gate}.txt`,
+        content: "must not be written",
+      });
+
+      try {
+        const pending = __testExecuteAgentToolCall(
+          agent,
+          toolCall,
+          context,
+          context.sessionId!,
+          new MemoryOutput(),
+          controller.signal,
+        );
+        await reachedGate.promise;
+        await cancelAgent(agent, context, new MemoryOutput());
+        releaseGate.resolve();
+        const result = await pending;
+
+        expect(result).toMatchObject({ ok: false, text: "Agent tool call cancelled." });
+        expect(agent.status).toBe("cancelled");
+        expect(context.pendingLocalApproval).toBeUndefined();
+        await expect(readFile(join(context.projectPath, `${gate}.txt`), "utf8")).rejects.toThrow();
+        const transcript = (await context.store.resume(child.id)).transcript;
+        expect(
+          transcript.some(
+            (event) =>
+              event.type === "system_event" && event.message.includes("agent_permission_pending"),
+          ),
+        ).toBe(false);
+      } finally {
+        releaseGate.resolve();
+        appendSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each(["background_event", "agent_persist"] as const)(
+    "terminalizes an agent cancelled while its pending approval waits on %s",
+    async (gate) => {
+      const context = await createTestContext([], undefined, true);
+      const child = await context.store.create({ model: context.model });
+      const agent = createAgentRun(context, {
+        id: `agent-pending-race-${gate}`,
+        type: "worker",
+        role: "executor",
+        allowedTools: ["Write"],
+        transcriptPath: child.transcriptPath,
+        transcriptSessionId: child.id,
+      });
+      context.agents.push(agent);
+      rememberBackgroundTask(context, createAgentBackgroundTask(agent, context));
+      const controller = registerBackgroundAbortController(context, agent.id);
+      const reachedGate = deferred<void>();
+      const releaseGate = deferred<void>();
+      const waitAtGate = async (): Promise<void> => {
+        reachedGate.resolve();
+        await releaseGate.promise;
+      };
+
+      const pending = __testExecuteAgentToolCall(
+        agent,
+        call("Write", { path: `${gate}.txt`, content: "must not be written" }),
+        context,
+        context.sessionId!,
+        new MemoryOutput(),
+        controller.signal,
+        gate === "background_event"
+          ? { appendBackgroundTaskEvent: waitAtGate }
+          : { persistAgentRun: waitAtGate },
+      );
+      await reachedGate.promise;
+      expect(context.pendingLocalApproval).toMatchObject({
+        kind: "agent_tool_use",
+        agentId: agent.id,
+      });
+      const cancelled = await cancelAgentByRef(agent.id, context, new MemoryOutput());
+      releaseGate.resolve();
+      const result = await pending;
+
+      expect(cancelled).toBe(agent);
+      expect(result).toMatchObject({ ok: false, text: "Agent tool call cancelled." });
+      expect(agent.status).toBe("cancelled");
+      expect(context.pendingLocalApproval).toBeUndefined();
+      await expect(readFile(join(context.projectPath, `${gate}.txt`), "utf8")).rejects.toThrow();
+      const transcript = (await context.store.resume(child.id)).transcript;
+      expect(
+        transcript.some(
+          (event) =>
+            event.type === "system_event" && event.message.includes("agent_permission_pending"),
+        ),
+      ).toBe(false);
+      const toolResults = transcript.filter((event) => event.type === "tool_result");
+      expect(toolResults).toHaveLength(1);
+      expect(JSON.stringify(toolResults[0])).toContain("was NOT executed");
+    },
+  );
+
+  it("keeps an ordinary blocked agent non-cancellable without an owned approval", async () => {
+    const context = await createTestContext([]);
+    const agent = createAgentRun(context, {
+      id: "agent-blocked-without-approval",
+      status: "blocked",
+      activityStatus: "blocked",
+    });
+    context.agents.push(agent);
+
+    const cancelled = await cancelAgentByRef(agent.id, context, new MemoryOutput());
+
+    expect(cancelled).toBeUndefined();
+    expect(agent.status).toBe("blocked");
+  });
+
+  it("keeps 1000 cancelled agent owners from crossing the permission event barrier", async () => {
+    const context = await createTestContext([]);
+    const releaseGate = deferred<void>();
+    const allReached = deferred<void>();
+    const controllers: AbortController[] = [];
+    const agents: AgentRun[] = [];
+    let permissionRequests = 0;
+    let toolExecutions = 0;
+    const appendSpy = vi
+      .spyOn(context.store, "appendEvent")
+      .mockImplementation(async (_sessionId, event) => {
+        if (event.type === "permission_request") {
+          permissionRequests += 1;
+          if (permissionRequests === 1_000) allReached.resolve();
+          await releaseGate.promise;
+        }
+      });
+    const originalWrite = builtInTools.Write.call;
+    builtInTools.Write.call = (async () => {
+      toolExecutions += 1;
+      return { text: "unexpected execution" };
+    }) as typeof originalWrite;
+
+    try {
+      const runs = Array.from({ length: 1_000 }, (_, index) => {
+        const agent = createAgentRun(context, {
+          id: `agent-pressure-${index}`,
+          type: "worker",
+          role: "executor",
+          allowedTools: ["Write"],
+          permissionMode: "full-access",
+        });
+        const controller = new AbortController();
+        agents.push(agent);
+        controllers.push(controller);
+        return __testExecuteAgentToolCall(
+          agent,
+          {
+            id: `pressure-tool-${index}`,
+            name: "Write",
+            input: { path: `pressure-${index}.txt`, content: "no" },
+          },
+          context,
+          context.sessionId!,
+          new MemoryOutput(),
+          controller.signal,
+        );
+      });
+      await allReached.promise;
+      for (let index = 0; index < agents.length; index += 1) {
+        agents[index]!.status = "cancelled";
+        controllers[index]!.abort();
+      }
+      releaseGate.resolve();
+      const results = await Promise.all(runs);
+
+      expect(permissionRequests).toBe(1_000);
+      expect(results).toHaveLength(1_000);
+      expect(results.every((result) => result.text === "Agent tool call cancelled.")).toBe(true);
+      expect(toolExecutions).toBe(0);
+      expect(context.pendingLocalApproval).toBeUndefined();
+    } finally {
+      releaseGate.resolve();
+      builtInTools.Write.call = originalWrite;
+      appendSpy.mockRestore();
+    }
+  });
+
+  it("does not revive a cancelled agent while recording permission denial", async () => {
+    const context = await createTestContext([]);
+    const agent = createAgentRun(context, {
+      id: "agent-deny-cancelled",
+      status: "cancelled",
+      activityStatus: "cancelled",
+      summary: "cancelled owner remains terminal",
+    });
+    context.agents.push(agent);
+
+    await denyAgentToolUse(
+      agent,
+      call("Write", { path: "never.txt", content: "no" }),
+      "Write",
+      context,
+      context.sessionId!,
+      "permission cancelled by user",
+    );
+
+    expect(agent.status).toBe("cancelled");
+    expect(agent.activityStatus).toBe("cancelled");
+    expect(agent.summary).toBe("cancelled owner remains terminal");
+  });
+
   it("clears agent tool contexts on stale and permission-denied terminals", async () => {
     const context = await createTestContext([]);
     const childA = await context.store.create({ model: context.model });
@@ -1143,6 +1448,18 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
         if (request.requestContextId) requestContextIds.push(request.requestContextId);
       },
     );
+    context.lastMetaSchedulerDecision = {
+      orchestrationPlan: {
+        steps: [
+          {
+            id: "provider-retry",
+            executor: "provider-runtime",
+            mode: "stop",
+            reason: "unrelated foreground retry stop",
+          },
+        ],
+      },
+    } as TuiContext["lastMetaSchedulerDecision"];
 
     const result = await runModelBackedAgent(
       createAgentRun(context, { id: "agent-request-context" }),
@@ -1499,6 +1816,25 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     context.currentRequestTurnId = "foreground-new";
     context.currentUserActionConstraintsRequestTurnId = "foreground-new";
     context.currentUserActionConstraints = parseUserActionConstraints("只读，不要写文件");
+    context.lastMetaSchedulerDecision = {
+      policyDecision: {
+        engineeringSignal: {
+          profile: "binary_or_artifact",
+          strategyHint: "unrelated foreground signal",
+          artifactTargets: ["foreground.bin"],
+        },
+      },
+      orchestrationPlan: {
+        steps: [
+          {
+            id: "agent-dispatch",
+            executor: "agent-runtime",
+            mode: "stop",
+            reason: "unrelated foreground stop",
+          },
+        ],
+      },
+    } as TuiContext["lastMetaSchedulerDecision"];
     context.workflows.activeRun = {
       id: "wf-owned-fork",
       goal: "implement",
@@ -1533,7 +1869,75 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(agent?.permissionMode).toBe("full-access");
     expect(agent?.invokingRequestTurnId).toBe("foreground-old");
     expect(agent?.userActionConstraints).toBeUndefined();
+    expect(agent?.engineeringSignal).toBeUndefined();
+    expect(context.backgroundTasks.find((task) => task.id === agent?.id)?.workflowRunId).toBe(
+      "wf-owned-fork",
+    );
   }, 60_000);
+
+  it("returns the created registry AgentRun instead of a mutable active workflow", async () => {
+    const context = await createTestContext();
+    context.permissionMode = "full-access";
+    context.workflows.activeRun = {
+      id: "workflow-unrelated",
+      ownerSessionId: context.sessionId,
+      goal: "unrelated",
+      planId: "unrelated",
+      status: "running",
+      result: "partial",
+      steps: [],
+      startedAt: new Date().toISOString(),
+    };
+    context.agentRegistry.agents.push({
+      id: "registry-reviewer",
+      name: "registry-reviewer",
+      description: "review",
+      prompt: "Review the task",
+      path: "registry-reviewer.md",
+    });
+
+    const result = await executeLinghunControlToolUse(
+      call(RUN_WORKFLOW_TOOL_NAME, {
+        workflowId: "agent:registry-reviewer",
+        goal: "inspect owner",
+        runInBackground: true,
+      }),
+      context,
+      context.sessionId ?? "session",
+      new MemoryOutput(),
+    );
+    const data = result.data as { agentId?: string; workflowId?: string; status?: string };
+
+    expect(result.ok).toBe(true);
+    expect(data.agentId).toMatch(/^agent-/u);
+    expect(data.workflowId).toBeUndefined();
+    expect(context.backgroundTasks.find((task) => task.id === data.agentId)?.workflowRunId).toBeUndefined();
+  });
+
+  it("filters 1000 interleaved workflow evidence transitions by explicit owner", async () => {
+    const context = await createTestContext();
+    context.evidence = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `evidence-${index}`,
+      kind: "command_output" as const,
+      source: `workflow:${index % 2 === 0 ? "workflow-a" : "workflow-b"}`,
+      summary: `evidence ${index}`,
+      supportsClaims: [],
+      ownerScope: {
+        ownerSessionId: context.sessionId,
+        workflowRunId: index % 2 === 0 ? "workflow-a" : "workflow-b",
+        cwd: context.projectPath,
+      },
+      createdAt: new Date().toISOString(),
+    }));
+
+    const refsA = __testNewWorkflowEvidenceRefs([], context, "workflow-a");
+    const refsB = __testNewWorkflowEvidenceRefs([], context, "workflow-b");
+
+    expect(refsA).toHaveLength(500);
+    expect(refsB).toHaveLength(500);
+    expect(refsA.every((id) => Number(id.slice("evidence-".length)) % 2 === 0)).toBe(true);
+    expect(refsB.every((id) => Number(id.slice("evidence-".length)) % 2 === 1)).toBe(true);
+  });
 
   it("cancelling an agent terminalizes only its pending tool approval", async () => {
     const context = await createTestContext();
@@ -2118,6 +2522,7 @@ function rewriteApprovalSession(
 async function createTestContext(
   agentEvents?: TestStreamEvent[] | TestStreamEvent[][],
   onAgentRequest?: (request: ModelRequest) => void,
+  bridgeAgentApprovals = false,
 ): Promise<TuiContext> {
   const projectPath = await mkdtemp(join(tmpdir(), "linghun-phase-e-main-"));
   await mkdir(resolve(projectPath, ".linghun"), { recursive: true });
@@ -2207,7 +2612,26 @@ async function createTestContext(
       blocked: false,
       messages: messages as ModelMessage[],
     }),
-    createAgentToolApproval: () => false,
+    createAgentToolApproval: ({
+      context: approvalContext,
+      agent,
+      toolCall,
+      toolName,
+      parentSessionId,
+      permission,
+    }) => {
+      if (!bridgeAgentApprovals || approvalContext.pendingLocalApproval) return false;
+      approvalContext.pendingLocalApproval = {
+        kind: "agent_tool_use",
+        agentId: agent.id,
+        agentTranscriptSessionId: agent.transcriptSessionId,
+        toolCall,
+        toolName,
+        sessionId: parentSessionId,
+        verdict: permission.verdict,
+      };
+      return true;
+    },
   });
   return context;
 }

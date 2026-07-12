@@ -10,7 +10,6 @@ import { showCommandPanel } from "./command-panel-runtime.js";
 import { buildFailureLearningPanel } from "./failure-learning-presenter.js";
 import {
   findFailureRecord,
-  setFailureRecordStatus,
   writeFailureRecord,
 } from "./failure-learning-runtime.js";
 import type { TuiContext } from "./index.js";
@@ -59,8 +58,7 @@ async function updateStatus(
     );
     return;
   }
-  setFailureRecordStatus(record, status);
-  await writeFailureRecord(context.failureLearning, record);
+  await writeFailureRecord(context.failureLearning, { ...record, status });
   const sessionId = await deps().ensureSession(context);
   await deps().appendSystemEvent(
     context,

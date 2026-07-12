@@ -28,13 +28,15 @@ import {
 } from "@linghun/config";
 import { builtInTools } from "@linghun/tools";
 import { createCacheFreshness } from "./cache-freshness.js";
-import { loadPersistentMemorySnapshot } from "./memory-extraction-runtime.js";
+import {
+  loadPersistentMemorySnapshot,
+  readPersistentMemoryLearningState,
+} from "./memory-extraction-runtime.js";
 import { loadMemoryRulesFile, parseMemoryRuleFrontmatter } from "./memory-rules-runtime.js";
 import {
   createEmptyMemoryTombstoneIndex,
 } from "./memory-tombstone-runtime.js";
 import { createReplBridgeState } from "./remote-repl-bridge-runtime.js";
-import { MEMORY_LEARNING_STATE_FILE } from "./runtime-utils.js";
 import { formatError, truncateDisplay } from "./startup-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import type {
@@ -329,7 +331,7 @@ export async function createMemoryState(
     disabled: records.filter((item) => item.status === "disabled"),
     retired: records.filter((item) => item.status === "retired"),
     tombstones,
-    ...((await loadMemoryLearningMode(paths)) ?? {
+    ...((await readPersistentMemoryLearningState(paths.memoryUser)) ?? {
       learningMode: "active" as const,
       learningModeSource: "default" as const,
     }),
@@ -349,7 +351,7 @@ export async function refreshPersistentMemoryState(
   const [projectMemory, userMemory, learningMode] = await Promise.all([
     loadPersistentMemorySnapshot(paths.memoryProject, "project"),
     loadPersistentMemorySnapshot(paths.memoryUser, "user"),
-    loadMemoryLearningMode(paths),
+    readPersistentMemoryLearningState(paths.memoryUser),
   ]);
   if (commitGuard && !commitGuard()) return "stale";
   const updatedAtById = { ...projectMemory.updatedAtById, ...userMemory.updatedAtById };
@@ -422,39 +424,6 @@ export function summarizeProjectRules(content: string): string {
     .join(" ")
     .replace(/\s+/g, " ");
   return truncateDisplay(normalized || "empty", PROJECT_RULES_SUMMARY_WIDTH);
-}
-
-async function loadMemoryLearningMode(
-  paths: ReturnType<typeof resolveStoragePaths>,
-): Promise<{
-  learningMode: MemoryState["learningMode"];
-  learningModeSource: "persisted";
-  learningModeDiagnostic?: string;
-} | null> {
-  let raw: string;
-  try {
-    raw = await readFile(join(paths.memoryUser, MEMORY_LEARNING_STATE_FILE), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    return {
-      learningMode: "off",
-      learningModeSource: "persisted",
-      learningModeDiagnostic: "learning-state unreadable; auto-learning fail-closed off",
-    };
-  }
-  try {
-    const value = JSON.parse(raw) as unknown;
-    if (isRecord(value) && (value.learningMode === "active" || value.learningMode === "off")) {
-      return { learningMode: value.learningMode, learningModeSource: "persisted" };
-    }
-  } catch {
-    // handled by the fail-closed result below
-  }
-  return {
-    learningMode: "off",
-    learningModeSource: "persisted",
-    learningModeDiagnostic: "learning-state invalid; auto-learning fail-closed off",
-  };
 }
 
 export function normalizeMemoryStatus(item: MemoryCandidate): MemoryStatus {

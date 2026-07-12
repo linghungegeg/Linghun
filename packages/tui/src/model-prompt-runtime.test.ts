@@ -1,7 +1,9 @@
+import { OpenAiCompatibleProvider } from "@linghun/providers";
 import { describe, expect, it } from "vitest";
 import type { TuiContext } from "./index.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import {
+  collectSolutionCompletenessEvidenceRefs,
   createModelSystemPromptSegments,
   sanitizeMainScreenLeakage,
 } from "./model-prompt-runtime.js";
@@ -49,6 +51,35 @@ function createPromptTestContext(overrides: Partial<TuiContext> = {}): TuiContex
 }
 
 describe("D.14D sanitizeMainScreenLeakage", () => {
+  it("uses only the owner-scoped evidence supplied by the request runtime", () => {
+    const context = createPromptTestContext();
+    const currentEvidence = {
+      ...context.evidence[0]!,
+      id: "current-evidence",
+      summary: "current owner evidence",
+    };
+    context.evidence.unshift({
+      ...context.evidence[0]!,
+      id: "stale-evidence",
+      summary: "stale owner evidence",
+    });
+
+    const segments = createModelSystemPromptSegments(
+      "继续当前请求",
+      context,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { evidence: [currentEvidence] },
+    );
+
+    expect(segments.dynamic).toContain("current owner evidence");
+    expect(segments.dynamic).not.toContain("stale owner evidence");
+  });
+
   it("keeps dynamic runtime context out of the stable system prompt segment", () => {
     const context = createPromptTestContext();
     const segments = createModelSystemPromptSegments(
@@ -76,6 +107,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(segments.dynamic).toContain("GitStatus=clean");
     expect(segments.dynamic).toContain("MetaSchedulerForModel=dynamic scheduler note");
     expect(context.cache.lastPromptSections?.sections.map((section) => section.name)).toContain("runtime_status");
+    expect(context.cache.lastPromptSections?.dynamicChars).toBeLessThan(2_800);
 
     for (const token of [
       "RuntimeStatusForModel=",
@@ -122,7 +154,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(context.cache.lastPromptSections?.largestSection).toBeTruthy();
   });
 
-  it("session-latches runtime sections inside the cacheable prompt boundary", () => {
+  it("keeps only session-static sections inside the cacheable prompt boundary", () => {
     const context = createPromptTestContext({
       memory: {
         ...createPromptTestContext().memory,
@@ -154,15 +186,84 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(segments.cacheable.map((segment) => segment.content).join("\n")).not.toContain(
       "ControlledMemorySummary=",
     );
-    expect(segments.cacheable.map((segment) => segment.content).join("\n")).toContain(
+    expect(segments.cacheable).toEqual([
+      { content: segments.stable, promptCache: "cacheable" },
+      { content: expect.stringContaining("MemoryBoundary="), promptCache: "cacheable" },
+    ]);
+    expect(segments.cacheable.map((segment) => segment.content).join("\n")).not.toContain(
       "FailureLearningSummary=",
     );
-    expect(segments.cacheable.map((segment) => segment.content).join("\n")).toContain(
+    expect(segments.cacheable.map((segment) => segment.content).join("\n")).not.toContain(
       "RuntimeStatusForModel=",
     );
     expect(segments.volatile.map((segment) => segment.content).join("\n")).toContain(
       "ControlledMemorySummary=",
     );
+    expect(segments.volatile.map((segment) => segment.content).join("\n")).toContain(
+      "FailureLearningSummary=",
+    );
+    expect(segments.volatile.map((segment) => segment.content).join("\n")).toContain(
+      "RuntimeStatusForModel=",
+    );
+  });
+
+  it("keeps historical permission denials out of the current prompt gate", () => {
+    const context = createPromptTestContext({
+      permissions: {
+        recentDenied: Array.from({ length: 3 }, (_, index) => ({
+          id: `denial-${index}`,
+          toolName: "Bash",
+          mode: "default",
+          reason: "historical denial",
+          createdAt: new Date(0).toISOString(),
+        })),
+      },
+      solutionCompleteness: {
+        ...createSolutionCompletenessStatus(),
+        triggerReason: "repeated_denial",
+        evidenceRefs: ["permission_denial:Bash:default"],
+      },
+    } as Partial<TuiContext>);
+
+    const segments = createModelSystemPromptSegments("继续当前说明", context, {});
+
+    expect(context.solutionCompleteness).toEqual(createSolutionCompletenessStatus());
+    expect(collectSolutionCompletenessEvidenceRefs(context)).toEqual(["ev-1"]);
+    expect(segments.dynamic).not.toContain("repeated_denial");
+    expect(segments.dynamic).not.toContain("permission_denial:Bash:default");
+  });
+
+  it("projects only evidence selected for the current request owner", () => {
+    const context = createPromptTestContext({
+      evidence: [
+        ...createPromptTestContext().evidence,
+        {
+          id: "ev-old-owner",
+          kind: "command_output",
+          source: "old-request",
+          summary: "stale owner verification passed",
+          supportsClaims: ["test_claim"],
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+      ],
+    });
+    const currentEvidence = context.evidence[0];
+    if (!currentEvidence) throw new Error("current evidence fixture missing");
+
+    const segments = createModelSystemPromptSegments(
+      "继续",
+      context,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { evidence: [currentEvidence] },
+    );
+
+    expect(segments.dynamic).toContain("focused verification passed");
+    expect(segments.dynamic).not.toContain("stale owner verification passed");
   });
 
   it("keeps memory fresh across requests within the same compact boundary", () => {
@@ -246,7 +347,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(meta?.truncated).toBe(true);
   });
 
-  it("keeps system prompt bytes stable until the compact boundary changes", () => {
+  it("keeps the static cache prefix stable while request sections refresh every turn", () => {
     const context = createPromptTestContext();
     const first = createModelSystemPromptSegments(
       "继续",
@@ -264,12 +365,17 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
       undefined,
       undefined,
       undefined,
-      "MetaSchedulerForModel=second",
+      "MetaSchedulerForModel=second-with-new-current-state",
     );
 
     expect(second.cacheable).toEqual(first.cacheable);
-    expect(second.volatile).toEqual(first.volatile);
-    expect(second.dynamic).toBe(first.dynamic);
+    expect(second.volatile).not.toEqual(first.volatile);
+    expect(second.dynamic).toContain("MetaSchedulerForModel=second-with-new-current-state");
+    expect(second.dynamic).not.toContain("MetaSchedulerForModel=first");
+    expect(
+      context.cache.lastPromptSections?.sections.find((section) => section.name === "meta_scheduler")
+        ?.chars,
+    ).toBeGreaterThan("MetaSchedulerForModel=first".length);
 
     context.cache.compactProjection = { boundaryId: "compact-1" } as never;
     const afterCompact = createModelSystemPromptSegments(
@@ -284,7 +390,115 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
 
     expect(afterCompact.dynamic).toContain("MetaSchedulerForModel=after-compact");
     expect(afterCompact.dynamic).not.toBe(first.dynamic);
-    expect(afterCompact.cacheable).not.toEqual(first.cacheable);
+    expect(afterCompact.cacheable).toEqual(first.cacheable);
+  });
+
+  it("refreshes the static latch when the response language changes", () => {
+    const context = createPromptTestContext();
+    const chinese = createModelSystemPromptSegments("继续", context, {});
+
+    context.language = "en-US";
+    const english = createModelSystemPromptSegments("continue", context, {});
+
+    expect(chinese.stable).toContain("你是 Linghun");
+    expect(english.stable).toContain("You are Linghun");
+    expect(english.cacheable).not.toEqual(chinese.cacheable);
+    expect(context.cache.systemPromptLatch?.compactBoundaryKey).toContain("en-US");
+  });
+
+  it("keeps cache markers stable through 1,000 request-state transitions", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "fake-cache-provider",
+      type: "openai-compatible",
+      baseUrl: "https://cache.invalid/v1",
+      apiKey: "test-only",
+      model: "claude-test",
+      endpointProfile: "anthropic_messages",
+    });
+    let transitions = 0;
+
+    for (let contextIndex = 0; contextIndex < 100; contextIndex += 1) {
+      const projectPath = `F:\\synthetic-project-${contextIndex}`;
+      const context = createPromptTestContext({
+        projectPath,
+        cache: createCacheState(projectPath, "gpt-test"),
+      });
+      let stableCacheSegment = "";
+
+      for (let stateIndex = 0; stateIndex < 10; stateIndex += 1) {
+        const marker = `context-${contextIndex}-state-${stateIndex}`;
+        const modelName = `model-${marker}`;
+        const permissionMode = `permission-${marker}`;
+        const evidenceSummary = `evidence-${marker}`;
+        context.evidence = [
+          {
+            id: `ev-${marker}`,
+            kind: "command_output",
+            source: "prompt-cache-stress",
+            summary: evidenceSummary,
+            supportsClaims: ["test_claim"],
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ];
+        const segments = createModelSystemPromptSegments(
+          marker,
+          context,
+          {
+            model: { name: modelName },
+            permissionMode,
+            cache: { latestHitRate: stateIndex / 10, changedKeys: [marker] },
+          },
+          undefined,
+          undefined,
+          undefined,
+          `MetaSchedulerForModel=${marker}`,
+        );
+        const currentCacheSegment = segments.cacheable.map((segment) => segment.content).join("\n");
+        if (stateIndex === 0) stableCacheSegment = currentCacheSegment;
+
+        expect(currentCacheSegment).toBe(stableCacheSegment);
+        expect(segments.cacheable).toEqual([
+          { content: segments.stable, promptCache: "cacheable" },
+          { content: expect.stringContaining("MemoryBoundary="), promptCache: "cacheable" },
+        ]);
+        expect(segments.volatile.every((segment) => segment.promptCache === "volatile")).toBe(true);
+        expect(segments.dynamic).toContain(`MetaSchedulerForModel=${marker}`);
+        expect(segments.dynamic.split(`"name":"${modelName}"`)).toHaveLength(2);
+        expect(segments.dynamic.split(`"permissionMode":"${permissionMode}"`)).toHaveLength(2);
+        expect(segments.dynamic.split(`"summary":"${evidenceSummary}"`)).toHaveLength(2);
+        expect(segments.dynamic).not.toContain("latestHitRate");
+        expect(segments.dynamic).not.toContain("changedKeys");
+        if (stateIndex > 0) {
+          const previousMarker = `context-${contextIndex}-state-${stateIndex - 1}`;
+          expect(segments.dynamic).not.toContain(`model-${previousMarker}`);
+          expect(segments.dynamic).not.toContain(`permission-${previousMarker}`);
+          expect(segments.dynamic).not.toContain(`evidence-${previousMarker}`);
+        }
+
+        if (contextIndex === 0 && stateIndex === 9) {
+          const body = provider.createAnthropicMessagesRequest({
+            messages: [
+              ...segments.cacheable.map((segment) => ({ role: "system" as const, ...segment })),
+              ...segments.volatile.map((segment) => ({ role: "system" as const, ...segment })),
+              { role: "user" as const, content: marker },
+            ],
+            promptCacheEnabled: true,
+          });
+          const blocks = body.system as Array<{
+            text: string;
+            cache_control?: { type: "ephemeral" };
+          }>;
+          expect(blocks[0]?.text).toBe(segments.stable);
+          expect(blocks[0]?.cache_control).toBeUndefined();
+          expect(blocks[1]?.text).toContain("MemoryBoundary=");
+          expect(blocks[1]?.cache_control).toEqual({ type: "ephemeral" });
+          expect(blocks.slice(2).every((block) => block.cache_control === undefined)).toBe(true);
+        }
+        transitions += 1;
+      }
+    }
+
+    expect(transitions).toBe(1_000);
   });
 
   it("returns text unchanged when no internal tokens are present", () => {

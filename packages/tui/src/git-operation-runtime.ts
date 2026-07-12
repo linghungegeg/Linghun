@@ -295,8 +295,10 @@ export async function createGitStablePoint(
   cwd: string,
   options: { message: string; includeUntracked?: boolean },
   runner: GitRunner = defaultMutatingRunner,
+  abortSignal?: AbortSignal,
 ): Promise<StablePointOutcome> {
-  const status: GitStatus = await readGitStatus(cwd, runner);
+  const runGit: GitRunner = (gitCwd, args) => runner(gitCwd, args, abortSignal);
+  const status: GitStatus = await readGitStatus(cwd, runGit);
   if (status.kind === "not_a_git_repo") {
     return { kind: "not_a_git_repo" };
   }
@@ -334,19 +336,25 @@ export async function createGitStablePoint(
   }
 
   // git 操作以 repo toplevel 为 cwd，使 porcelain 相对路径正确解析。
-  const toplevelResult = await runner(cwd, ["rev-parse", "--show-toplevel"]);
+  const toplevelResult = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
   const repoRoot =
     toplevelResult.ok && toplevelResult.stdout.trim() ? toplevelResult.stdout.trim() : cwd;
 
-  const addResult = await runner(repoRoot, ["add", "--", ...toCommit]);
+  const addResult = await runGit(repoRoot, ["add", "--", ...toCommit]);
   if (!addResult.ok) {
     return { kind: "failed", reason: addResult.stderr || "git add 失败" };
   }
-  const commitResult = await runner(repoRoot, ["commit", "-m", options.message, "--", ...toCommit]);
+  const commitResult = await runGit(repoRoot, [
+    "commit",
+    "-m",
+    options.message,
+    "--",
+    ...toCommit,
+  ]);
   if (!commitResult.ok) {
     return { kind: "failed", reason: commitResult.stderr || "git commit 失败" };
   }
-  const headResult = await runner(repoRoot, ["log", "-1", "--format=%h\t%s"]);
+  const headResult = await runGit(repoRoot, ["log", "-1", "--format=%h\t%s"]);
   let sha = "";
   let subject = options.message;
   if (headResult.ok) {
@@ -430,7 +438,9 @@ export async function createManagedWorktree(
   options: { name: string; branch?: string; fromRef?: string },
   runner: GitRunner = defaultMutatingRunner,
   now: Date = new Date(),
+  abortSignal?: AbortSignal,
 ): Promise<WorktreeCreateOutcome> {
+  const runGit: GitRunner = (gitCwd, args) => runner(gitCwd, args, abortSignal);
   const nameCheck = validateWorktreeName(options.name);
   if (!nameCheck.ok) {
     return { kind: "invalid", reason: nameCheck.reason };
@@ -452,7 +462,7 @@ export async function createManagedWorktree(
     fromRef = refCheck.ref;
   }
 
-  const rootResult = await resolveRepoRoot(cwd, runner);
+  const rootResult = await resolveRepoRoot(cwd, runGit);
   if (!rootResult.ok) {
     return rootResult.outcome;
   }
@@ -461,7 +471,7 @@ export async function createManagedWorktree(
   const targetPath = managedWorktreePath(repoRoot, nameCheck.slug);
 
   // 已存在的 worktree？同 managed path → resume，不覆盖、不重复创建。
-  const list = await readWorktreeList(cwd, runner);
+  const list = await readWorktreeList(cwd, runGit);
   if (list.kind === "git_unavailable") {
     return { kind: "git_unavailable", reason: list.error };
   }
@@ -481,24 +491,27 @@ export async function createManagedWorktree(
     }
   }
 
+  if (abortSignal?.aborted) {
+    return { kind: "failed", reason: "git worktree add 已取消" };
+  }
   await mkdir(managedRoot, { recursive: true });
 
   const addArgs = branch
     ? ["worktree", "add", "-b", branch, targetPath, fromRef]
     : ["worktree", "add", targetPath, fromRef];
-  const addResult = await runner(repoRoot, addArgs);
+  const addResult = await runGit(repoRoot, addArgs);
   if (!addResult.ok) {
     return { kind: "failed", reason: addResult.stderr || "git worktree add 失败" };
   }
 
   let head: string | null = null;
-  const headResult = await runner(targetPath, ["rev-parse", "--short", "HEAD"]);
+  const headResult = await runGit(targetPath, ["rev-parse", "--short", "HEAD"]);
   if (headResult.ok && headResult.stdout.trim()) {
     head = headResult.stdout.trim();
   }
   let resolvedBranch: string | null = branch ?? null;
   if (!resolvedBranch) {
-    const branchResult = await runner(targetPath, ["branch", "--show-current"]);
+    const branchResult = await runGit(targetPath, ["branch", "--show-current"]);
     if (branchResult.ok && branchResult.stdout.trim()) {
       resolvedBranch = branchResult.stdout.trim();
     }
@@ -616,11 +629,13 @@ export async function executeManagedWorktreeRemove(
   path: string,
   force: boolean,
   runner: GitRunner = defaultMutatingRunner,
+  abortSignal?: AbortSignal,
 ): Promise<WorktreeRemoveResult> {
-  const rootResult = await resolveRepoRoot(cwd, runner);
+  const runGit: GitRunner = (gitCwd, args) => runner(gitCwd, args, abortSignal);
+  const rootResult = await resolveRepoRoot(cwd, runGit);
   const repoRoot = rootResult.ok ? rootResult.repoRoot : cwd;
   const args = force ? ["worktree", "remove", "--force", path] : ["worktree", "remove", path];
-  const result = await runner(repoRoot, args);
+  const result = await runGit(repoRoot, args);
   if (!result.ok) {
     return { kind: "failed", reason: result.stderr || "git worktree remove 失败" };
   }

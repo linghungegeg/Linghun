@@ -10,7 +10,6 @@ import {
   projectRuntimeStatusForPrompt,
 } from "./model-loop-runtime.js";
 import { createModelCapabilitySummary } from "./natural-command-bridge.js";
-import { hasRepeatedPermissionDenial } from "./permission-continuation-runtime.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import { formatControlledMemoryForModel } from "./tui-memory-runtime.js";
 const MEMORY_PROMPT_TOP_K = 3;
@@ -94,7 +93,7 @@ export function createModelSystemPromptSegments(
   failureLearningSummary?: { count: number; text: string } | null,
   metaSchedulerDirective?: string,
   gitStatusSummary?: string,
-  options: { latch?: boolean } = {},
+  options: { latch?: boolean; evidence?: TuiContext["evidence"] } = {},
 ): ModelSystemPromptSegments {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
@@ -103,31 +102,23 @@ export function createModelSystemPromptSegments(
     context.preEngineFallbackPreference?.active === true &&
     context.preEngineFallbackPreference.projectPath === context.projectPath;
   const deferredSnapshot = snapshotDeferredTools(context);
-  const deferredReminder = preEngineFallbackPreferenceActive
-    ? undefined
-    : formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
   const preEngineToolNames = preEngineFallbackPreferenceActive
     ? []
     : registerPreEngineDeferredToolsForRuntime(context, deferredSnapshot);
+  const deferredReminder = preEngineFallbackPreferenceActive
+    ? undefined
+    : preEngineToolNames.length > 0
+      ? "Discover non-builtin tools with SearchExtraTools, then invoke them with ExecuteExtraTool."
+      : formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
   const preEngineRepositoryTools = {
-    discovered: true,
     tools: preEngineToolNames,
     invocation: preEngineFallbackPreferenceActive
       ? "These pre-engine tools are still available, but this repository previously returned fallback_required; use real workspace tools first and call pre-engine only as a secondary check after real-tool evidence."
       : "These pre-engine tools are first-class readonly model tools; call them directly when useful. ExecuteExtraTool remains available for deferred-tool dispatch.",
-    indexCoordination: preEngineFallbackPreferenceActive
-      ? "Repository pre-analysis fallback is active for this project. For repository code understanding, start with real workspace tools such as ReadSnippets, SourcePack, Grep, Glob, Bash, Diff, or RunVerification; use codebase-memory index tools when useful; do not lead with pre-engine unless real-tool evidence shows it is needed."
-      : "If codebase-memory index is ready, use index-backed tools for broad repository discovery first, then pre-engine for AST precision; if the index is missing or stale, use pre-engine as the fast repository-analysis entry.",
-    useFor: [
-      "repository code understanding",
-      "impact analysis",
-      "edit planning",
-      "quick verification",
-    ],
   };
   const repositoryAnalysisWorkflow = preEngineFallbackPreferenceActive
-    ? "RepositoryAnalysisWorkflow=This repository has an active pre-engine fallback preference from an earlier fallback_required result. Before repository code claims or edits, use real workspace tools first: ReadSnippets/Read for known files, SourcePack/Grep/Glob for discovery, Bash/Diff/RunVerification for verification. Pre-engine tools remain available only as a secondary precision aid after real-tool evidence, not as the first repository-analysis step."
-    : "RepositoryAnalysisWorkflow=Before broad Grep/Read exploration for repository analysis work, get structured evidence first: use codebase-memory index tools when ready, then pre-engine for AST precision. If the task names a concrete function, class, method, command, or file-level anchor, call pre_context on that anchor first; use pre_plan first only when no concrete anchor is known. When a pre-engine result includes answer_pack with high/medium confidence and little missing_evidence, use it as the primary evidence map; suggested_minimal_reads are line-window hints, so prefer ReadSnippets for those ranges and avoid broad Grep/full-file Read unless explicit evidence is missing.";
+    ? "RepositoryAnalysisWorkflow=Pre-engine fallback is active. Use real workspace tools first (ReadSnippets/Read, SourcePack/Grep/Glob, Bash/Diff/RunVerification); use pre-engine only as a secondary precision check after real-tool evidence."
+    : "RepositoryAnalysisWorkflow=Use index tools for broad discovery when ready, then pre-engine for AST precision; otherwise start with pre-engine. For a named symbol or file anchor call pre_context; use pre_plan only when no anchor is known. Treat a high/medium-confidence answer_pack as the evidence map and read only suggested ranges unless evidence is missing.";
   const preEngineToolsLine =
     preEngineToolNames.length > 0
       ? `\nPreEngineRepositoryTools=${JSON.stringify(preEngineRepositoryTools)}\n${repositoryAnalysisWorkflow}`
@@ -145,6 +136,9 @@ export function createModelSystemPromptSegments(
   const metaSchedulerLine = metaSchedulerDirective ?? "";
   const gitStatusLine = gitStatusSummary ? `GitStatus=${gitStatusSummary}` : "";
   const agentCompletionLine = formatAgentCompletionMainChainContext(context);
+  const solutionCompletenessLine = context.solutionCompleteness.triggered
+    ? JSON.stringify(context.solutionCompleteness)
+    : '{"triggered":false}';
   let memorySummary: string;
   if (context.lastMetaSchedulerDecision?.policyDecision.contextPlan?.includeMemory === false) {
     memorySummary = "(memory skipped per scheduler policy)";
@@ -178,7 +172,7 @@ export function createModelSystemPromptSegments(
     {
       name: "runtime_status",
       text: `RuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}`,
-      volatile: false,
+      volatile: true,
     },
     { name: "memory", text: `ControlledMemorySummary=${memorySummary}`, volatile: true },
     {
@@ -186,19 +180,23 @@ export function createModelSystemPromptSegments(
       text: `MemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; autoExtractionRuntime; dedicatedMemoryDir; manualLearnCandidateOnly; noSecretsOrFullDumps`,
       volatile: false,
     },
-    { name: "evidence", text: `EvidenceSummary=${createEvidenceSummaryForModel(context)}`, volatile: false },
+    {
+      name: "evidence",
+      text: `EvidenceSummary=${createEvidenceSummaryForModel(context, options.evidence)}`,
+      volatile: true,
+    },
     {
       name: "solution_completeness",
-      text: `SolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}`,
-      volatile: false,
+      text: `SolutionCompleteness=${solutionCompletenessLine}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}`,
+      volatile: true,
     },
-    { name: "architecture", text: architectureDirective ?? "", volatile: false },
-    { name: "deferred_tools", text: deferredReminder ? `DeferredToolsReminder=${deferredReminder}` : "", volatile: false },
-    { name: "worktree", text: worktreeContextLine.trim(), volatile: false },
-    { name: "git_status", text: gitStatusLine, volatile: false },
-    { name: "agent_completion", text: agentCompletionLine, volatile: false },
-    { name: "failure_learning", text: failureLearningLine.trim(), volatile: false },
-    { name: "meta_scheduler", text: metaSchedulerLine, volatile: false },
+    { name: "architecture", text: architectureDirective ?? "", volatile: true },
+    { name: "deferred_tools", text: deferredReminder ? `DeferredToolsReminder=${deferredReminder}` : "", volatile: true },
+    { name: "worktree", text: worktreeContextLine.trim(), volatile: true },
+    { name: "git_status", text: gitStatusLine, volatile: true },
+    { name: "agent_completion", text: agentCompletionLine, volatile: true },
+    { name: "failure_learning", text: failureLearningLine.trim(), volatile: true },
+    { name: "meta_scheduler", text: metaSchedulerLine, volatile: true },
   ]);
   const dynamic = dynamicSections.map((section) => section.text).join("\n");
   const cacheableSections = dynamicSections.filter((section) => !section.volatile);
@@ -219,6 +217,7 @@ export function createModelSystemPromptSegments(
     return { stable, dynamic, cacheable, volatile };
   }
   const compactBoundaryKey = [
+    context.language,
     context.cache.deepCompact?.id ?? "no-deep-compact",
     context.cache.compactProjection?.boundaryId ?? "no-compact-projection",
   ].join(":");
@@ -229,8 +228,8 @@ export function createModelSystemPromptSegments(
       dynamic: cacheableSections.map((section) => section.text).join("\n"),
       cacheable: cacheable.map((segment) => segment.content),
     };
-    context.cache.lastPromptSections = createPromptSectionSnapshot(stable, dynamicSections);
   }
+  context.cache.lastPromptSections = createPromptSectionSnapshot(stable, dynamicSections);
   const latched = context.cache.systemPromptLatch;
   return {
     stable: latched.stable,
@@ -286,9 +285,12 @@ function createPromptSectionSnapshot(stable: string, sections: PromptSection[]) 
   };
 }
 
-export function createEvidenceSummaryForModel(context: TuiContext): string {
+export function createEvidenceSummaryForModel(
+  context: TuiContext,
+  evidence: TuiContext["evidence"] = context.evidence,
+): string {
   return JSON.stringify(
-    context.evidence.slice(0, 5).map((item) => ({
+    evidence.slice(0, 5).map((item) => ({
       id: item.id,
       kind: item.kind,
       source: item.source,
@@ -305,28 +307,14 @@ export function createEvidenceSummaryForModel(context: TuiContext): string {
 
 export function updateSolutionCompletenessGate(text: string, context: TuiContext): string {
   void text;
-  const repeatedDenial = hasRepeatedPermissionDenial(context.permissions.recentDenied);
-  if (repeatedDenial) {
-    context.solutionCompleteness = {
-      ...createSolutionCompletenessStatus(),
-      triggerReason: "repeated_denial",
-      evidenceRefs: collectSolutionCompletenessEvidenceRefs(context),
-      nextRequiredOutput:
-        "最近同类权限拒绝已记录；普通任务继续走 model/tool loop，必要时给短 hint 或让用户查看 /permissions recent。",
-    };
-  }
-  if (!repeatedDenial) {
+  if (context.solutionCompleteness.triggerReason === "repeated_denial") {
     context.solutionCompleteness = createSolutionCompletenessStatus();
   }
   return "";
 }
 
 export function collectSolutionCompletenessEvidenceRefs(context: TuiContext): string[] {
-  const evidence = context.evidence.slice(0, 3).map((item) => item.id);
-  const denied = context.permissions.recentDenied
-    .slice(0, 3)
-    .map((item) => `permission_denial:${item.toolName}:${item.mode}`);
-  return [...evidence, ...denied];
+  return context.evidence.slice(0, 3).map((item) => item.id);
 }
 
 // D.14D — 内部 system-prompt 字段标签。这些是注入给模型的运行时上下文键，

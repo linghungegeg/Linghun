@@ -18,11 +18,16 @@
 // 业务逻辑全在本模块；index.ts 只做薄接线（在已判定失败的站点搭车记录一行）。
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { join } from "node:path";
 import { type LinghunConfig, resolveStoragePaths } from "@linghun/config";
 import { stableHash } from "./cache-freshness.js";
+import {
+  atomicWriteMemoryFile,
+  recoverMemoryReplacementArtifacts,
+  withMemoryDirectoryLock,
+} from "./memory-extraction-runtime.js";
 import { formatError } from "./startup-runtime.js";
 import type {
   FailureLearningCategory,
@@ -130,6 +135,10 @@ export type FailureLearningInput = {
   severity?: FailureLearningSeverity;
 };
 
+export type FailureLearningCommitResult =
+  | { status: "committed"; record: FailureLearningRecord; records: FailureLearningRecord[] }
+  | { status: "stale" };
+
 export function createFailureLearningState(
   projectPath: string,
   config?: LinghunConfig,
@@ -206,19 +215,130 @@ export function mergeFailureRecord(
   return { record: candidate, isNew: true };
 }
 
+export async function commitFailureLearningInput(
+  state: FailureLearningState,
+  input: FailureLearningInput,
+  commitGuard?: () => boolean,
+): Promise<FailureLearningCommitResult> {
+  if (commitGuard && !commitGuard()) return { status: "stale" };
+  const candidate = buildFailureRecord(state, input);
+  try {
+    return await withMemoryDirectoryLock(state.directory, async (lockToken) => {
+      await recoverMemoryReplacementArtifacts(state.directory);
+      const records = await loadFailureRecordsUnlocked(state);
+      if (commitGuard && !commitGuard()) return { status: "stale" };
+
+      const matching = records
+        .filter((record) => record.dedupeHash === candidate.dedupeHash)
+        .sort(
+          (left, right) =>
+            left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+        );
+      const canonical = matching[0];
+      const canonicalUpdatedAt = canonical?.status === "resolved"
+        ? await stat(join(state.directory, `${canonical.id}.json`))
+            .then((value) => value.mtimeMs)
+            .catch((error) => {
+              if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+              throw error;
+            })
+        : 0;
+      const resolvedAfterCaptureStarted =
+        canonical?.status === "resolved" &&
+        canonicalUpdatedAt >= Date.parse(candidate.createdAt);
+      const record = canonical
+        ? {
+            ...canonical,
+            lastSeen: candidate.lastSeen,
+            sourceRef: candidate.sourceRef,
+            failureSummary: candidate.failureSummary,
+            rootCauseGuess: candidate.rootCauseGuess,
+            avoidNextTime: candidate.avoidNextTime,
+            ...(candidate.relatedTarget ? { relatedTarget: candidate.relatedTarget } : {}),
+            severity: candidate.severity,
+            count: canonical.count + 1,
+            status:
+              canonical.status === "resolved" && !resolvedAfterCaptureStarted
+                ? ("active" as const)
+                : canonical.status,
+          }
+        : candidate;
+      if (commitGuard && !commitGuard()) return { status: "stale" };
+      const committed = await atomicWriteMemoryFile(
+        join(state.directory, `${record.id}.json`),
+        `${JSON.stringify(record, null, 2)}\n`,
+        lockToken,
+        commitGuard,
+      );
+      if (!committed) return { status: "stale" };
+      const committedRecords = coalesceFailureRecords([
+        ...records.filter((item) => item.id !== record.id),
+        record,
+      ]);
+      if (!commitGuard || commitGuard()) state.records = committedRecords;
+      return {
+        status: "committed",
+        record:
+          committedRecords.find((item) => item.dedupeHash === record.dedupeHash) ?? record,
+        records: committedRecords,
+      };
+    });
+  } catch (error) {
+    recordFailureLearningDegradedWarning(
+      state,
+      `write_failed directory=${state.directory} reason=${formatError(error)}`,
+    );
+    throw error;
+  }
+}
+
 // 持久化：一条记录一个 <id>.json（模仿 memory 存储范式）。Windows 路径经 node:path join 兼容。
 export async function writeFailureRecord(
   state: FailureLearningState,
   record: FailureLearningRecord,
 ): Promise<void> {
+  let previousStatus: FailureLearningStatus | undefined;
   try {
-    await mkdir(state.directory, { recursive: true });
-    await writeFile(
-      join(state.directory, `${record.id}.json`),
-      `${JSON.stringify(record, null, 2)}\n`,
-      "utf8",
-    );
+    await withMemoryDirectoryLock(state.directory, async (lockToken) => {
+      await recoverMemoryReplacementArtifacts(state.directory);
+      const persisted = await loadFailureRecordsUnlocked(state);
+      const matching = persisted
+        .filter((item) => item.dedupeHash === record.dedupeHash)
+        .sort(
+          (left, right) =>
+            left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+        );
+      const latest = matching[0] ?? persisted.find((item) => item.id === record.id);
+      previousStatus = latest?.status;
+      const logicalCount = coalesceFailureRecords(matching)[0]?.count ?? 0;
+      const incomingCountDelta = Math.max(0, record.count - logicalCount);
+      const next = latest
+        ? incomingCountDelta > 0
+          ? {
+              ...record,
+              id: latest.id,
+              createdAt: latest.createdAt,
+              count: latest.count + incomingCountDelta,
+            }
+          : { ...latest, status: record.status }
+        : record;
+      await atomicWriteMemoryFile(
+        join(state.directory, `${next.id}.json`),
+        `${JSON.stringify(next, null, 2)}\n`,
+        lockToken,
+      );
+      const committedRecords = coalesceFailureRecords([
+        ...persisted.filter((item) => item.id !== next.id),
+        next,
+      ]);
+      state.records = committedRecords;
+    });
   } catch (error) {
+    if (previousStatus) {
+      record.status = previousStatus;
+      const local = state.records.find((item) => item.dedupeHash === record.dedupeHash);
+      if (local) local.status = previousStatus;
+    }
     recordFailureLearningDegradedWarning(
       state,
       `write_failed directory=${state.directory} id=${record.id} reason=${formatError(error)}`,
@@ -266,34 +386,85 @@ function parseFailureRecord(value: unknown): FailureLearningRecord | null {
   };
 }
 
-export async function loadFailureRecords(
-  state: FailureLearningState,
-): Promise<FailureLearningRecord[]> {
+async function loadFailureRecordsUnlocked(state: FailureLearningState): Promise<FailureLearningRecord[]> {
   let files: string[];
   try {
     files = await readdir(state.directory);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      recordFailureLearningDegradedWarning(
-        state,
-        `read_failed directory=${state.directory} reason=${formatError(error)}`,
-      );
-    }
-    return [];
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    recordFailureLearningDegradedWarning(
+      state,
+      `read_failed directory=${state.directory} reason=${formatError(error)}`,
+    );
+    throw error;
   }
   const records: FailureLearningRecord[] = [];
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
+    let content: string;
     try {
-      const parsed = parseFailureRecord(
-        JSON.parse(await readFile(join(state.directory, file), "utf8")),
+      content = await readFile(join(state.directory, file), "utf8");
+    } catch (error) {
+      recordFailureLearningDegradedWarning(
+        state,
+        `read_failed directory=${state.directory} file=${file} reason=${formatError(error)}`,
       );
+      throw error;
+    }
+    try {
+      const parsed = parseFailureRecord(JSON.parse(content));
       if (parsed) records.push(parsed);
     } catch {
       // 坏文件跳过，不打断加载。
     }
   }
-  return records.sort((a, b) => b.lastSeen.localeCompare(a.lastSeen)).slice(0, MAX_FAILURE_RECORDS);
+  return records;
+}
+
+function coalesceFailureRecords(records: FailureLearningRecord[]): FailureLearningRecord[] {
+  const groups = new Map<string, FailureLearningRecord[]>();
+  for (const record of records) {
+    const matching = groups.get(record.dedupeHash);
+    if (matching) matching.push(record);
+    else groups.set(record.dedupeHash, [record]);
+  }
+  return [...groups.values()]
+    .map((matching) => {
+      matching.sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+      );
+      const canonical = matching[0];
+      const latest = matching.reduce((current, item) =>
+        item.lastSeen > current.lastSeen ? item : current,
+      );
+      return {
+        ...latest,
+        id: canonical.id,
+        createdAt: canonical.createdAt,
+        status: canonical.status,
+        count: matching.reduce((total, item) => total + item.count, 0),
+      };
+    })
+    .sort((left, right) => right.lastSeen.localeCompare(left.lastSeen))
+    .slice(0, MAX_FAILURE_RECORDS);
+}
+
+export async function loadFailureRecords(
+  state: FailureLearningState,
+): Promise<FailureLearningRecord[]> {
+  try {
+    return await withMemoryDirectoryLock(state.directory, async () => {
+      await recoverMemoryReplacementArtifacts(state.directory);
+      return coalesceFailureRecords(await loadFailureRecordsUnlocked(state));
+    });
+  } catch (error) {
+    recordFailureLearningDegradedWarning(
+      state,
+      `read_failed directory=${state.directory} reason=${formatError(error)}`,
+    );
+    return [...state.records];
+  }
 }
 
 export function recordFailureLearningDegradedWarning(

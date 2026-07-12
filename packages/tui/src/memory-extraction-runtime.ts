@@ -8,7 +8,7 @@ import {
   parseMemoryOrigin,
 } from "./memory-tombstone-runtime.js";
 import { MEMORY_LEARNING_STATE_FILE } from "./runtime-utils.js";
-import { truncateDisplay } from "./startup-runtime.js";
+import { formatError, truncateDisplay } from "./startup-runtime.js";
 import type {
   MemoryCandidate,
   MemoryScope,
@@ -25,6 +25,7 @@ const MEMORY_WRITE_LOCK_OWNER_FILE = "owner.json";
 const MEMORY_WRITE_LOCK_STALE_MS = 30_000;
 const MEMORY_WRITE_LOCK_DEADLINE_MS = 60_000;
 const MEMORY_WRITE_LOCK_HEARTBEAT_MS = 5_000;
+const MEMORY_WRITE_LOCK_CLEANUP_BATCH_SIZE = 32;
 
 export const MEMORY_TAXONOMY: readonly MemoryTaxonomy[] = [
   "user",
@@ -116,12 +117,14 @@ export type PersistentMemoryMutation =
       next: MemoryCandidate;
       expected?: MemoryCandidate;
       commitGuard?: () => boolean;
+      learningStateDirectory?: string;
     }
   | {
       action: "delete";
       expected: MemoryCandidate;
       deletion: { sessionId: string; requestTurnId?: string };
       commitGuard?: () => boolean;
+      learningStateDirectory?: string;
     };
 
 export type MemoryExtractionApplyResult = {
@@ -275,13 +278,33 @@ export async function writePersistentMemoryLearningState(
   });
 }
 
+export async function readPersistentMemoryLearningState(memoryDir: string): Promise<{
+  learningMode: "active" | "off";
+  learningModeSource: "persisted";
+  learningModeDiagnostic?: string;
+} | null> {
+  try {
+    return await withMemoryDirectoryLock(memoryDir, async () => {
+      await recoverMemoryReplacementArtifacts(memoryDir);
+      return readPersistentMemoryLearningStateLocked(memoryDir);
+    });
+  } catch (error) {
+    return {
+      learningMode: "off",
+      learningModeSource: "persisted",
+      learningModeDiagnostic: `learning-state unreadable; auto-learning fail-closed off: ${formatError(error)}`,
+    };
+  }
+}
+
 export async function commitPersistentMemoryMutation(
   memoryDir: string,
   scope: Exclude<MemoryScope, "session">,
   mutation: PersistentMemoryMutation,
 ): Promise<PersistentMemoryCommitResult> {
-  return withMemoryDirectoryLock(memoryDir, async (lockToken) => {
-    if (mutation.commitGuard && !mutation.commitGuard()) {
+  let learningModeAllowsCommit = true;
+  const commit = async (lockToken: string): Promise<PersistentMemoryCommitResult> => {
+    if (!learningModeAllowsCommit || (mutation.commitGuard && !mutation.commitGuard())) {
       const snapshot = await loadPersistentMemoryRecords(memoryDir, scope);
       return {
         status: "stale",
@@ -318,11 +341,15 @@ export async function commitPersistentMemoryMutation(
         return { status: "conflict", records: before.records, tombstones: before.tombstones, updatedAtById: before.updatedAtById };
       }
       await assertMemoryLockOwned(memoryDir, lockToken);
-      await atomicWriteMemoryFile(
+      const committed = await atomicWriteMemoryFile(
         join(memoryDir, `${mutation.next.id}.json`),
         `${JSON.stringify(mutation.next, null, 2)}\n`,
         lockToken,
+        mutation.commitGuard,
       );
+      if (!committed) {
+        return { status: "stale", records: before.records, tombstones: before.tombstones, updatedAtById: before.updatedAtById };
+      }
       committedMemory = mutation.next;
     } else {
       await assertMemoryLockOwned(memoryDir, lockToken);
@@ -357,7 +384,47 @@ export async function commitPersistentMemoryMutation(
       updatedAtById: after.updatedAtById,
       ...(warnings.length > 0 ? { warnings } : {}),
     };
+  };
+  const learningStateDirectory = mutation.learningStateDirectory;
+  if (!learningStateDirectory) {
+    return withMemoryDirectoryLock(memoryDir, commit);
+  }
+  return withMemoryDirectoryLock(learningStateDirectory, async (learningLockToken) => {
+    await recoverMemoryReplacementArtifacts(learningStateDirectory);
+    const learningState = await readPersistentMemoryLearningStateLocked(learningStateDirectory);
+    learningModeAllowsCommit = !learningState || learningState.learningMode === "active";
+    if (learningStateDirectory === memoryDir) {
+      return commit(learningLockToken);
+    }
+    return withMemoryDirectoryLock(memoryDir, commit);
   });
+}
+
+async function readPersistentMemoryLearningStateLocked(memoryDir: string): Promise<{
+  learningMode: "active" | "off";
+  learningModeSource: "persisted";
+  learningModeDiagnostic?: string;
+} | null> {
+  let raw: string;
+  try {
+    raw = await readFile(join(memoryDir, MEMORY_LEARNING_STATE_FILE), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const value = JSON.parse(raw) as { learningMode?: unknown };
+    if (value.learningMode === "active" || value.learningMode === "off") {
+      return { learningMode: value.learningMode, learningModeSource: "persisted" };
+    }
+  } catch {
+    // handled by the fail-closed result below
+  }
+  return {
+    learningMode: "off",
+    learningModeSource: "persisted",
+    learningModeDiagnostic: "learning-state invalid; auto-learning fail-closed off",
+  };
 }
 
 async function loadPersistentMemoryRecords(
@@ -535,19 +602,23 @@ async function rebuildAutoMemoryFiles(
   await writeManifest(memoryDir, manifest.sort((left, right) => left.topic.localeCompare(right.topic)), lockToken);
 }
 
-async function atomicWriteMemoryFile(
+export async function atomicWriteMemoryFile(
   path: string,
   content: string,
   lockToken: string,
-): Promise<void> {
+  commitGuard?: () => boolean,
+): Promise<boolean> {
   const stagingPath = `${path}.tmp-${lockToken}-${randomUUID()}`;
   const backupPath = `${path}.bak-${lockToken}`;
   await writeFile(stagingPath, content, "utf8");
   try {
+    if (commitGuard && !commitGuard()) return false;
     await rename(stagingPath, path);
+    return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "EEXIST" && code !== "EPERM") throw error;
+    if (commitGuard && !commitGuard()) return false;
     let backedUp = false;
     try {
       await rename(path, backupPath);
@@ -556,8 +627,13 @@ async function atomicWriteMemoryFile(
       if ((backupError as NodeJS.ErrnoException).code !== "ENOENT") throw backupError;
     }
     try {
+      if (commitGuard && !commitGuard()) {
+        if (backedUp) await rename(backupPath, path);
+        return false;
+      }
       await rename(stagingPath, path);
       if (backedUp) await rm(backupPath, { force: true });
+      return true;
     } catch (replaceError) {
       if (backedUp) await rename(backupPath, path).catch(() => undefined);
       throw replaceError;
@@ -567,9 +643,15 @@ async function atomicWriteMemoryFile(
   }
 }
 
-async function recoverMemoryReplacementArtifacts(memoryDir: string): Promise<void> {
+export async function recoverMemoryReplacementArtifacts(memoryDir: string): Promise<void> {
   for (const directory of [memoryDir, join(memoryDir, MEMORY_TOPICS_DIR)]) {
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       const backupIndex = entry.name.indexOf(".bak-");
@@ -593,15 +675,29 @@ type MemoryLockOwner = {
   heartbeatAt: number;
 };
 
-async function withMemoryDirectoryLock<T>(
+export async function withMemoryDirectoryLock<T>(
   memoryDir: string,
   run: (lockToken: string) => Promise<T>,
 ): Promise<T> {
   await mkdir(memoryDir, { recursive: true });
   const lockPath = join(memoryDir, MEMORY_WRITE_LOCK_DIR);
+  const preparePrefix = `${MEMORY_WRITE_LOCK_DIR}.prepare-`;
+  const stalePreparations = (await readdir(memoryDir, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(preparePrefix))
+    .map((entry) => join(memoryDir, entry.name));
+  for (
+    let offset = 0;
+    offset < stalePreparations.length;
+    offset += MEMORY_WRITE_LOCK_CLEANUP_BATCH_SIZE
+  ) {
+    await Promise.all(
+      stalePreparations
+        .slice(offset, offset + MEMORY_WRITE_LOCK_CLEANUP_BATCH_SIZE)
+        .map((path) => quarantineStaleMemoryLock(path)),
+    );
+  }
   const ownerPath = join(lockPath, MEMORY_WRITE_LOCK_OWNER_FILE);
   const token = randomUUID();
-  const preparePath = `${lockPath}.prepare-${token}`;
   const deadline = Date.now() + MEMORY_WRITE_LOCK_DEADLINE_MS;
   const owner: MemoryLockOwner = {
     token,
@@ -609,35 +705,33 @@ async function withMemoryDirectoryLock<T>(
     createdAt: Date.now(),
     heartbeatAt: Date.now(),
   };
+  let acquired = false;
   try {
-    await mkdir(preparePath);
-    const preparedOwnerPath = join(preparePath, MEMORY_WRITE_LOCK_OWNER_FILE);
-    const ownerTempPath = `${preparedOwnerPath}.tmp-${token}`;
-    await writeFile(ownerTempPath, JSON.stringify(owner), "utf8");
-    try {
-      await rename(ownerTempPath, preparedOwnerPath);
-    } finally {
-      await rm(ownerTempPath, { force: true }).catch(() => undefined);
-    }
     let delayMs = 10;
     while (true) {
-      if (await stat(lockPath).then(() => true).catch(() => false)) {
+      try {
+        await mkdir(lockPath);
+        acquired = true;
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         if (await quarantineStaleMemoryLock(lockPath)) continue;
         if (Date.now() >= deadline) throw new Error(`memory write lock timeout: ${memoryDir}`);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         delayMs = Math.min(50, delayMs * 2);
-        continue;
-      }
-      try {
-        await rename(preparePath, lockPath);
-        break;
-      } catch (error) {
-        const lockExists = await stat(lockPath).then(() => true).catch(() => false);
-        if (!lockExists) throw error;
       }
     }
+    const ownerTempPath = `${ownerPath}.tmp-${token}`;
+    await writeFile(ownerTempPath, JSON.stringify(owner), "utf8");
+    try {
+      await rename(ownerTempPath, ownerPath);
+    } finally {
+      await rm(ownerTempPath, { force: true }).catch(() => undefined);
+    }
   } catch (error) {
-    await rm(preparePath, { recursive: true, force: true }).catch(() => undefined);
+    if (acquired) {
+      await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+    }
     throw error;
   }
   const heartbeat = setInterval(() => {
@@ -662,7 +756,16 @@ async function releaseMemoryDirectoryLock(
   const releasePath = `${lockPath}.release-${token}`;
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const current = await readMemoryLockOwner(ownerPath);
-    if (current?.token !== token) return;
+    if (!current) {
+      try {
+        await stat(lockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      continue;
+    }
+    if (current.token !== token) return;
     try {
       await rename(lockPath, releasePath);
       await rm(releasePath, { recursive: true, force: true });

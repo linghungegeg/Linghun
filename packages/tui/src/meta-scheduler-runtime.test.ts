@@ -65,7 +65,10 @@ describe("Meta scheduler runtime", () => {
     expect(decision.orchestrationPlan.steps.map((step) => step.id)).toEqual(
       expect.arrayContaining(["verification", "final-answer-gate"]),
     );
-    expect(formatMetaSchedulerDirective(decision)).toContain("final-answer-gate");
+    const directive = formatMetaSchedulerDirective(decision);
+    expect(directive).toContain("final-answer-gate");
+    expect(directive).not.toContain("steps inspect-runtime:");
+    expect(directive).not.toContain("raw capability payload");
   });
 
   it("does not treat user questions about completion as assistant high-risk claims", () => {
@@ -78,12 +81,15 @@ describe("Meta scheduler runtime", () => {
     expect(decision.shouldPreferVerifier).toBe(false);
     expect(decision.policyDecision.riskLevel).toBe("low");
     expect(decision.policyDecision.executionPlan.requireFinalGate).toBe(false);
+    const directive = formatMetaSchedulerDirective(decision);
+    expect(directive).not.toContain("EngineeringTaskProfile");
+    expect(directive).not.toContain("UserStateDecision");
   });
 
-  it("does not let tool failures become fake completion", () => {
+  it("does not let provider failures become fake completion", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
-      lastToolFailure: { toolName: "Bash", summary: "exit code 1" },
+      providerFailure: { provider: "test", model: "test", message: "upstream failed" },
     });
 
     expect(decision.shouldCaptureFailureLearning).toBe(true);
@@ -91,6 +97,15 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.contextPlan.includeFailureLearning).toBe(false);
     expect(decision.policyDecision.hints.some((hint) => hint.id === "failure-learning")).toBe(true);
     expect(decision.directives.join("\n")).toContain("failed turn");
+  });
+
+  it("has no ownerless last-tool-failure scheduler input", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "packages/tui/src/meta-scheduler-runtime.ts"),
+      "utf8",
+    );
+
+    expect(source).not.toContain("lastToolFailure");
   });
 
   it("routes oversized context through compact/artifact before provider pressure gets raw objects", () => {
@@ -135,7 +150,7 @@ describe("Meta scheduler runtime", () => {
     );
   });
 
-  it("marks mutating edit requests as explicit-gate and verification policy", () => {
+  it("marks mutating edit requests as explicit-gate and ignores historical denials", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
       permissionMode: "default",
@@ -149,8 +164,8 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.permissionPlan.requireExplicitGate).toBe(true);
     expect(decision.policyDecision.permissionSignal).toMatchObject({
       permissionMode: "default",
-      recentDenied: true,
-      recentDeniedCount: 1,
+      recentDenied: false,
+      recentDeniedCount: 0,
       expectedMutating: true,
       requireExplicitGate: true,
       pendingApproval: false,
@@ -169,6 +184,24 @@ describe("Meta scheduler runtime", () => {
         expect.objectContaining({ id: "verification", executor: "verification-runtime", mode: "run" }),
       ]),
     );
+  });
+
+  it("does not turn historical denials into a current permission gate", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "explain the architecture",
+      recentDeniedCount: 100,
+    });
+
+    expect(decision.policyDecision.permissionSignal).toMatchObject({
+      recentDenied: false,
+      recentDeniedCount: 0,
+      expectedMutating: false,
+      requireExplicitGate: false,
+    });
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).not.toContain("permission-risk");
+    expect(decision.orchestrationPlan.steps.map((step) => step.id)).not.toContain("permission-gate");
+    expect(decision.orchestrationPlan.primaryAction).not.toBe("ask_permission");
   });
 
   it("routes explicit external app capability mentions without stealing workflow or agent routes", () => {
@@ -759,9 +792,95 @@ describe("Meta scheduler runtime", () => {
         "agent:completed_not_pass",
         "workflow:completed_not_pass",
         "completed_without_fresh_verification",
-        "active_failure_learning",
       ]),
     );
+  });
+
+  it("keeps active failure learning as context without vetoing fresh current evidence", () => {
+    const nowMs = Date.now();
+    const failureLearning = baseFailureLearning();
+    failureLearning.records.push({
+      id: "historical-failure",
+      createdAt: new Date(nowMs - 60_000).toISOString(),
+      lastSeen: new Date(nowMs - 60_000).toISOString(),
+      projectScope: failureLearning.projectScope,
+      sourceRef: "evidence:old",
+      category: "verification_failure",
+      failureSummary: "old focused test failed",
+      rootCauseGuess: "old state",
+      inferred: true,
+      avoidNextTime: "verify current facts",
+      severity: "high",
+      dedupeHash: "historical",
+      count: 1,
+      status: "active",
+    });
+
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "verify the current change",
+      nowMs,
+      evidence: [makeEvidence({ createdAt: new Date(nowMs).toISOString() })],
+      failureLearning,
+    });
+
+    expect(decision.policyDecision.contextPlan.includeFailureLearning).toBe(true);
+    expect(decision.policyDecision.failureSignal.activeCount).toBe(1);
+    expect(decision.policyDecision.verificationSignal.route.noPassReasons).not.toContain(
+      "active_failure_learning",
+    );
+  });
+
+  it("keeps the final gate while successful continuity only focuses verification", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      assistantText: "All fixed. PASS.",
+      consecutiveSuccesses: 10,
+      trustScore: 100,
+    });
+
+    expect(decision.policyDecision.verificationSignal.recommendedLevel).toBe("focused");
+    expect(decision.policyDecision.executionPlan.requireFinalGate).toBe(true);
+    expect(decision.shouldRunFinalAnswerGate).toBe(true);
+    expect(decision.orchestrationPlan.steps.map((step) => step.id)).toContain("final-answer-gate");
+  });
+
+  it("keeps 1,000 historical-signal transitions advisory without weakening claim gates", () => {
+    const failureLearning = baseFailureLearning();
+    failureLearning.records.push({
+      id: "pressure-history",
+      createdAt: new Date(0).toISOString(),
+      lastSeen: new Date(0).toISOString(),
+      projectScope: failureLearning.projectScope,
+      sourceRef: "evidence:old",
+      category: "tool_failure",
+      failureSummary: "old failure",
+      rootCauseGuess: "old state",
+      inferred: true,
+      avoidNextTime: "use current evidence",
+      severity: "medium",
+      dedupeHash: "pressure-history",
+      count: 1,
+      status: "active",
+    });
+
+    for (let iteration = 0; iteration < 1_000; iteration += 1) {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        assistantText: "All fixed. PASS.",
+        failureLearning,
+        recentDeniedCount: iteration + 1,
+        consecutiveSuccesses: iteration + 5,
+        trustScore: 100,
+      });
+
+      expect(decision.policyDecision.permissionSignal.recentDeniedCount).toBe(0);
+      expect(decision.policyDecision.verificationSignal.route.noPassReasons).not.toContain(
+        "active_failure_learning",
+      );
+      expect(decision.policyDecision.executionPlan.requireFinalGate).toBe(true);
+      expect(decision.policyDecision.verificationSignal.recommendedLevel).toBe("focused");
+    }
   });
 
   it("keeps completed lifecycle states conservative until fresh verification evidence exists", () => {
@@ -1151,10 +1270,10 @@ describe("Meta scheduler runtime", () => {
     });
 
     it("satisfied when capture was required and new records added", () => {
-      const decision = evaluateMetaScheduler({
-        ...baseInput(),
-        lastToolFailure: { toolName: "Bash", summary: "exit code 1" },
-      });
+      const decision = {
+        ...evaluateMetaScheduler(baseInput()),
+        shouldCaptureFailureLearning: true,
+      };
       const result = verifyFailureLearningContract({
         decision,
         preTurnRecordCount: 0,
@@ -1165,10 +1284,10 @@ describe("Meta scheduler runtime", () => {
     });
 
     it("unsatisfied when capture was required but no new records added", () => {
-      const decision = evaluateMetaScheduler({
-        ...baseInput(),
-        lastToolFailure: { toolName: "Bash", summary: "exit code 1" },
-      });
+      const decision = {
+        ...evaluateMetaScheduler(baseInput()),
+        shouldCaptureFailureLearning: true,
+      };
       const result = verifyFailureLearningContract({
         decision,
         preTurnRecordCount: 2,

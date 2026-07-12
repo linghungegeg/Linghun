@@ -690,11 +690,6 @@ export function Composer({
       // D.13Q-UX Real Smoke Fix v2 — E. 全部走结构化 permission-action 事件，
       // 不再把 yes / allow_once / allow_always_tool / no 这类内部 id 当成 text
       // 通过 submit 文本路径回灌（避免被 handleNaturalInput 当用户正常发言）。
-      // cancel 仍上抛 escape 关闭面板（与既有交互链兼容）。
-      if (id === "cancel") {
-        emitInput({ type: "escape" });
-        return;
-      }
       emitInput({ type: "permission-action", actionId: id });
     },
     [emitInput],

@@ -8880,6 +8880,22 @@ describe("D.13Q-UX Real Smoke Fix v2 — E. permission-action 结构化事件", 
     // submitPermissionAction 派 permission-action 事件
     expect(composerSource).toMatch(/type:\s*"permission-action"\s*,\s*actionId:\s*id/);
   });
+
+  it("claims allow_always approval before persistence and never clears a newer approval", async () => {
+    const fs = await import("node:fs");
+    const indexSource = fs.readFileSync(join(SRC_ROOT, "index.ts"), "utf8");
+    const helper = indexSource.slice(
+      indexSource.indexOf("async function claimAndPersistAllowAlwaysApproval"),
+      indexSource.indexOf("export const __testClaimAndPersistAllowAlwaysApproval"),
+    );
+    const claimIndex = helper.indexOf("context.pendingLocalApproval = undefined");
+    const persistIndex = helper.indexOf("await persistRule");
+
+    expect(claimIndex).toBeGreaterThan(0);
+    expect(claimIndex).toBeLessThan(persistIndex);
+    expect(helper).toContain("if (!context.pendingLocalApproval)");
+    expect(helper).toContain("allow_always_save_failed_superseded");
+  });
 });
 
 // ─── D.13Q-UX Real Smoke Fix v3 ──────────────────────────────────────────────

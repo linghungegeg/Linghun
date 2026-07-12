@@ -105,7 +105,11 @@ export function parseMemoryCandidateArgs(args: string[]): {
 export async function writeMemoryRecord(
   candidate: MemoryCandidate,
   context: TuiContext,
-  options: { expected?: MemoryCandidate; commitGuard?: () => boolean } = {},
+  options: {
+    expected?: MemoryCandidate;
+    commitGuard?: () => boolean;
+    requireActiveLearning?: boolean;
+  } = {},
 ): Promise<PersistentMemoryCommitResult | undefined> {
   if (candidate.scope === "session") {
     return undefined;
@@ -116,6 +120,13 @@ export async function writeMemoryRecord(
     next: candidate,
     expected: options.expected,
     commitGuard: options.commitGuard,
+    ...(options.requireActiveLearning
+      ? {
+          learningStateDirectory:
+            context.memory.userDir ||
+            resolveStoragePaths(context.config, context.projectPath).memoryUser,
+        }
+      : {}),
   });
 }
 
@@ -141,7 +152,12 @@ export async function writeMemoryLearningMode(context: TuiContext): Promise<void
 export async function removeMemoryRecord(
   candidate: MemoryCandidate,
   context: TuiContext,
-  options: { sessionId: string; requestTurnId?: string; commitGuard?: () => boolean },
+  options: {
+    sessionId: string;
+    requestTurnId?: string;
+    commitGuard?: () => boolean;
+    requireActiveLearning?: boolean;
+  },
 ): Promise<PersistentMemoryCommitResult | undefined> {
   if (candidate.scope === "session") {
     return undefined;
@@ -155,6 +171,13 @@ export async function removeMemoryRecord(
       requestTurnId: options.requestTurnId,
     },
     commitGuard: options.commitGuard,
+    ...(options.requireActiveLearning
+      ? {
+          learningStateDirectory:
+            context.memory.userDir ||
+            resolveStoragePaths(context.config, context.projectPath).memoryUser,
+        }
+      : {}),
   });
 }
 

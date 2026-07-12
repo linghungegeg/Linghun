@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import type { TranscriptEvent } from "@linghun/core";
+import {
+  parseUsableTranscriptCompactBoundary,
+  type TranscriptEvent,
+} from "@linghun/core";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
-import { isDeepCompactPacket } from "./deep-compact-runtime.js";
 import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
 import { isMemoryTombstoned, parseMemoryOrigin } from "./memory-tombstone-runtime.js";
 import { recordHandoffInRuntimeLedger } from "./runtime-storage.js";
 import type {
-  CompactProjection,
+  DeepCompactPacket,
   HandoffPacket,
   MemoryCandidate,
   VerificationReport,
@@ -23,7 +25,6 @@ import {
   type ToolResultBudgetRecord,
 } from "./tool-result-budget.js";
 
-const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
 type PersistedEvidenceEvent = Extract<TranscriptEvent, { type: "evidence_record" }> & {
   fullOutputPath?: string;
   outputPath?: string;
@@ -93,40 +94,35 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   }
   restoreSessionAcceptedMemory(context, transcript);
   restorePendingMemoryCandidates(context, transcript);
-  const deepCompact = [...transcript]
+  const deepCompactBoundary = [...transcript]
     .reverse()
-    .find(
-      (event) => event.type === "deep_compact_packet" && isDeepCompactPacket(event.packet),
-    );
-  if (deepCompact?.type === "deep_compact_packet" && isDeepCompactPacket(deepCompact.packet)) {
+    .map(parseUsableTranscriptCompactBoundary)
+    .find((boundary) => boundary?.kind === "deep");
+  if (deepCompactBoundary?.kind === "deep") {
     context.cache.compacted = true;
-    context.cache.deepCompact = deepCompact.packet;
+    context.cache.deepCompact = deepCompactBoundary.packet as DeepCompactPacket;
   }
-  const compactEvent = [...transcript]
+  const compactBoundary = [...transcript]
     .reverse()
-    .find(
-      (event) =>
-        event.type === "system_event" && event.message.startsWith(COMPACT_PROJECTION_EVENT_PREFIX),
-    );
-  if (compactEvent?.type === "system_event") {
-    const projection = parseCompactProjectionEvent(compactEvent.message);
-    if (projection) {
-      context.cache.compacted = true;
-      context.cache.compactProjection = projection;
-      if (
-        !context.cache.compactBoundaries.some((boundary) => boundary.id === projection.boundaryId)
-      ) {
-        context.cache.compactBoundaries.push({
-          id: projection.boundaryId,
-          kind: "micro",
-          createdAt: projection.createdAt,
-          preCompactTokenEstimate: Math.ceil(projection.preCompactChars / 4),
-          postCompactTokenEstimate: Math.ceil(projection.postCompactChars / 4),
-          compactedToolResultIds: [],
-          preservedEvidenceRefs: projection.restoreContext?.evidenceRefs ?? projection.evidenceRefs,
-          preservedFiles: projection.restoreContext?.keyFiles ?? [],
-        });
-      }
+    .map(parseUsableTranscriptCompactBoundary)
+    .find((boundary) => boundary?.kind === "projection");
+  if (compactBoundary?.kind === "projection" && compactBoundary.hydrationProjection) {
+    const projection = compactBoundary.hydrationProjection as NonNullable<
+      TuiContext["cache"]["compactProjection"]
+    >;
+    context.cache.compacted = true;
+    context.cache.compactProjection = projection;
+    if (!context.cache.compactBoundaries.some((boundary) => boundary.id === projection.boundaryId)) {
+      context.cache.compactBoundaries.push({
+        id: projection.boundaryId,
+        kind: "micro",
+        createdAt: projection.createdAt,
+        preCompactTokenEstimate: Math.ceil(projection.preCompactChars / 4),
+        postCompactTokenEstimate: Math.ceil(projection.postCompactChars / 4),
+        compactedToolResultIds: [],
+        preservedEvidenceRefs: projection.restoreContext?.evidenceRefs ?? projection.evidenceRefs,
+        preservedFiles: projection.restoreContext?.keyFiles ?? [],
+      });
     }
   }
 }
@@ -606,131 +602,11 @@ function parseResumeAcceptedMemory(value: unknown): MemoryCandidate | undefined 
   };
 }
 
-function parseCompactProjectionEvent(message: string): CompactProjection | undefined {
-  try {
-    const parsed = JSON.parse(message.slice(COMPACT_PROJECTION_EVENT_PREFIX.length));
-    if (!isCompactProjection(parsed)) {
-      return undefined;
-    }
-    return parsed;
-  } catch {
-    return undefined;
-  }
-}
-
-function isCompactProjection(value: unknown): value is CompactProjection {
-  return (
-    isRecord(value) &&
-    typeof value.boundaryId === "string" &&
-    typeof value.createdAt === "string" &&
-    typeof value.summary === "string" &&
-    (value.windowId === undefined || typeof value.windowId === "string") &&
-    (value.replacementKind === undefined || value.replacementKind === "provider-visible") &&
-    (value.replacedMessageCount === undefined || typeof value.replacedMessageCount === "number") &&
-    (value.replacementMessageCount === undefined ||
-      typeof value.replacementMessageCount === "number") &&
-    (value.terminalVisibleBeforeCount === undefined ||
-      typeof value.terminalVisibleBeforeCount === "number") &&
-    (value.terminalVisibleAfterCount === undefined ||
-      typeof value.terminalVisibleAfterCount === "number") &&
-    typeof value.pressureRatio === "number" &&
-    typeof value.preCompactChars === "number" &&
-    typeof value.postCompactChars === "number" &&
-    (value.postCompactTargetChars === undefined ||
-      typeof value.postCompactTargetChars === "number") &&
-    (value.retriggerGuard === undefined ||
-      (isRecord(value.retriggerGuard) &&
-        typeof value.retriggerGuard.baselineChars === "number" &&
-        typeof value.retriggerGuard.tailGrowthThreshold === "number")) &&
-    (value.savingsRatio === undefined || typeof value.savingsRatio === "number") &&
-    (value.acceptance === undefined || isCompactAcceptanceSnapshot(value.acceptance)) &&
-    (value.progress === undefined || isCompactProgressSnapshot(value.progress)) &&
-    (value.restoreContext === undefined || isCompactRestoreContext(value.restoreContext)) &&
-    typeof value.discardedRange === "string" &&
-    typeof value.toolPairingSafe === "boolean" &&
-    Array.isArray(value.risks) &&
-    Array.isArray(value.evidenceRefs)
-  );
-}
-
-function isCompactAcceptanceSnapshot(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    (value.budget === "hit" || value.budget === "miss") &&
-    (value.replacementProjection === "active" ||
-      value.replacementProjection === "missing" ||
-      value.replacementProjection === "disabled") &&
-    (value.terminalVisibleProjection === "reduced" ||
-      value.terminalVisibleProjection === "not-reduced" ||
-      value.terminalVisibleProjection === "unknown") &&
-    (value.uiNotice === "quiet-success" || value.uiNotice === "needs-attention") &&
-    (value.rollback === "available" ||
-      value.rollback === "active" ||
-      value.rollback === "legacy-compact-behavior-available") &&
-    (value.featureFlags === undefined || isCompactFeatureFlagSnapshot(value.featureFlags))
-  );
-}
-
-function isCompactFeatureFlagSnapshot(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.replacementProjection === "boolean" &&
-    typeof value.terminalVisibleProjection === "boolean" &&
-    typeof value.retainedBudget === "boolean"
-  );
-}
-
-function isCompactProgressSnapshot(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    value.status === "complete" &&
-    stringArray(value.stages) &&
-    typeof value.preCompactChars === "number" &&
-    typeof value.postCompactChars === "number" &&
-    (value.targetChars === undefined || typeof value.targetChars === "number") &&
-    (value.savingsRatio === undefined || typeof value.savingsRatio === "number")
-  );
-}
-
-function isCompactRestoreContext(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.goal === "string" &&
-    typeof value.currentTask === "string" &&
-    typeof value.phaseStatus === "string" &&
-    stringArray(value.userConstraints) &&
-    stringArray(value.keyFiles) &&
-    stringArray(value.changedFiles) &&
-    stringArray(value.evidenceRefs) &&
-    stringArray(value.activeAgentsWorkflows) &&
-    stringArray(value.needsAttentionAgentsWorkflows) &&
-    stringArray(value.staleResumableAgentsWorkflows) &&
-    stringArray(value.pendingItems) &&
-    stringArray(value.decisions) &&
-    stringArray(value.risks) &&
-    typeof value.indexStatus === "string" &&
-    typeof value.cacheFreshness === "string" &&
-    typeof value.memoryStatus === "string" &&
-    typeof value.verificationRequirement === "string"
-  );
-}
-
-function stringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
 export async function loadOrCreateHandoffPacket(
   context: TuiContext,
   parentSessionId?: string,
   sessionId = context.sessionId ?? "uncreated",
 ): Promise<HandoffPacket> {
-  if (context.memory.lastHandoff) {
-    const packet = sanitizeHandoffPacket(context.memory.lastHandoff);
-    packet.solutionCompleteness = context.solutionCompleteness;
-    context.memory.lastHandoff = packet;
-    await writeHandoffPacket(context, packet);
-    return packet;
-  }
   const packet = createHandoffPacket(context, [], parentSessionId, sessionId);
   context.memory.lastHandoff = packet;
   await writeHandoffPacket(context, packet);

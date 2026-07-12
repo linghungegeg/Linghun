@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { buildFailureLearningPanel } from "./failure-learning-presenter.js";
 import {
   buildFailureLearningSummaryForPrompt,
   buildFailureRecord,
+  commitFailureLearningInput,
   createFailureLearningState,
   failureDedupeHash,
   getFailureLearningDirectory,
@@ -19,6 +20,10 @@ import {
   writeFailureRecord,
 } from "./failure-learning-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
+import {
+  atomicWriteMemoryFile,
+  withMemoryDirectoryLock,
+} from "./memory-extraction-runtime.js";
 
 const tempDirs: string[] = [];
 
@@ -215,6 +220,29 @@ describe("D.14B Failure Learning — persistence (Windows-compatible paths)", ()
     expect(reloaded[0].inferred).toBe(true);
   });
 
+  it("preserves the public merge then write flow without losing its count update", async () => {
+    const project = await makeProject();
+    const state = createFailureLearningState(project);
+    const first = mergeFailureRecord(
+      state,
+      input({ failureSummary: "Bash exited non-zero at line 42" }),
+    );
+    await writeFailureRecord(state, first.record);
+    const second = mergeFailureRecord(
+      state,
+      input({ failureSummary: "Bash exited non-zero at line 99", sourceRef: "evidence:second" }),
+    );
+    await writeFailureRecord(state, second.record);
+
+    const [persisted] = await loadFailureRecords(state);
+    expect(persisted).toMatchObject({
+      id: first.record.id,
+      count: 2,
+      failureSummary: "Bash exited non-zero at line 99",
+      sourceRef: "evidence:second",
+    });
+  });
+
   it("persisted file never contains secret/baseUrl/absolute path", async () => {
     const project = await makeProject();
     const state = createFailureLearningState(project);
@@ -247,6 +275,23 @@ describe("D.14B Failure Learning — persistence (Windows-compatible paths)", ()
     expect(reloaded.length).toBe(1);
   });
 
+  it("fails closed on unreadable record I/O instead of treating the directory as empty", async () => {
+    const project = await makeProject();
+    const state = createFailureLearningState(project);
+    const initial = await commitFailureLearningInput(state, input());
+    if (initial.status !== "committed") throw new Error("expected initial failure commit");
+    await mkdir(join(state.directory, "locked.json"));
+
+    await expect(commitFailureLearningInput(state, input())).rejects.toThrow();
+    const persisted = JSON.parse(
+      await readFile(join(state.directory, `${initial.record.id}.json`), "utf8"),
+    ) as { count: number };
+    expect(persisted.count).toBe(1);
+    expect(await loadFailureRecords(state)).toEqual(state.records);
+    expect(state.records[0].count).toBe(1);
+    expect((await readdir(state.directory)).filter((file) => file.endsWith(".json"))).toHaveLength(2);
+  });
+
   it("records degraded warning when persistence write fails and /failures can display it", async () => {
     const project = await makeProject();
     const state = createFailureLearningState(project);
@@ -262,6 +307,170 @@ describe("D.14B Failure Learning — persistence (Windows-compatible paths)", ()
     expect(panel.summary?.join("\n")).toContain("降级");
     expect(panel.detailsText).toContain("降级警告");
     expect(panel.detailsText).toContain("write_failed");
+  });
+
+  it("serializes two 1,000-write windows and keeps mixed dedupe counts exact", async () => {
+    const project = await makeProject();
+    const states = [createFailureLearningState(project), createFailureLearningState(project)];
+    await Promise.all(
+      states.map(async (state) => {
+        for (let index = 0; index < 1_000; index += 1) {
+          const result = await commitFailureLearningInput(
+            state,
+            input(
+              index % 2 === 0
+                ? { failureSummary: "Bash exited non-zero at line 42" }
+                : {
+                    category: "provider_failure",
+                    failureSummary: "provider returned gateway error 502",
+                    relatedTarget: "provider",
+                  },
+            ),
+          );
+          expect(result.status).toBe("committed");
+        }
+      }),
+    );
+
+    const records = await loadFailureRecords(states[0]);
+    expect(records).toHaveLength(2);
+    expect(records.map((record) => record.count).sort((left, right) => left - right)).toEqual([
+      1_000, 1_000,
+    ]);
+    expect((await readdir(states[0].directory)).filter((file) => file.endsWith(".json"))).toHaveLength(2);
+  }, 60_000);
+
+  it("checks commitGuard at the atomic replacement boundary and leaves no disk artifact", async () => {
+    const project = await makeProject();
+    const state = createFailureLearningState(project);
+    await withMemoryDirectoryLock(state.directory, async (lockToken) => {
+      const committed = await atomicWriteMemoryFile(
+        join(state.directory, "guarded.json"),
+        "guarded\n",
+        lockToken,
+        () => false,
+      );
+      expect(committed).toBe(false);
+    });
+
+    const files = await readdir(state.directory);
+    expect(files.filter((file) => file.endsWith(".json"))).toEqual([]);
+    expect(files.some((file) => file.includes(".tmp-") || file.includes(".bak-"))).toBe(false);
+  });
+
+  it("recovers a backup-only replacement artifact before the public startup load", async () => {
+    const project = await makeProject();
+    const state = createFailureLearningState(project);
+    const record = buildFailureRecord(state, input());
+    await mkdir(state.directory, { recursive: true });
+    await writeFile(
+      join(state.directory, `${record.id}.json.bak-crashed-writer`),
+      `${JSON.stringify(record, null, 2)}\n`,
+      "utf8",
+    );
+
+    const records = await loadFailureRecords(state);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ id: record.id, count: 1 });
+    expect(await readdir(state.directory)).toEqual([`${record.id}.json`]);
+  });
+
+  it.each(["resolved", "ignored"] as const)(
+    "merges a stale %s writer into the latest disk record without replacing its fields",
+    async (status) => {
+    const project = await makeProject();
+    const staleWindow = createFailureLearningState(project);
+    const activeWindow = createFailureLearningState(project);
+    await commitFailureLearningInput(
+      activeWindow,
+      input({ failureSummary: "Bash exited non-zero at line 42", sourceRef: "evidence:first" }),
+    );
+    staleWindow.records = await loadFailureRecords(staleWindow);
+    await commitFailureLearningInput(
+      activeWindow,
+      input({ failureSummary: "Bash exited non-zero at line 99", sourceRef: "evidence:latest" }),
+    );
+
+    const staleRecord = staleWindow.records[0];
+    setFailureRecordStatus(staleRecord, status);
+    await writeFailureRecord(staleWindow, staleRecord);
+
+    const [persisted] = await loadFailureRecords(activeWindow);
+    expect(persisted).toMatchObject({
+      count: 2,
+      failureSummary: "Bash exited non-zero at line 99",
+      sourceRef: "evidence:latest",
+      status,
+    });
+    },
+  );
+
+  it("keeps status unchanged when a copied status update cannot acquire persistence", async () => {
+    const project = await makeProject();
+    const state = createFailureLearningState(project);
+    const committed = await commitFailureLearningInput(state, input());
+    expect(committed.status).toBe("committed");
+    const active = state.records[0];
+    const blockedPath = join(project, "blocked-status-path");
+    await writeFile(blockedPath, "blocked", "utf8");
+    state.directory = blockedPath;
+
+    await expect(writeFailureRecord(state, { ...active, status: "resolved" })).rejects.toThrow();
+    expect(active.status).toBe("active");
+    expect(state.records[0].status).toBe("active");
+  });
+
+  it("uses id as a stable canonical tie-break for same-timestamp legacy duplicates", async () => {
+    const project = await makeProject();
+    const state = createFailureLearningState(project);
+    const now = new Date("2026-07-12T01:00:00.000Z");
+    const first = { ...buildFailureRecord(state, input(), now), count: 2, status: "resolved" as const };
+    const second = { ...buildFailureRecord(state, input(), now), count: 3, status: "ignored" as const };
+    await mkdir(state.directory, { recursive: true });
+    await writeFile(join(state.directory, `${second.id}.json`), `${JSON.stringify(second)}\n`, "utf8");
+    await writeFile(join(state.directory, `${first.id}.json`), `${JSON.stringify(first)}\n`, "utf8");
+
+    const expectedCanonical = [first, second].sort((left, right) => left.id.localeCompare(right.id))[0];
+    const [loaded] = await loadFailureRecords(state);
+    expect(loaded).toMatchObject({
+      id: expectedCanonical.id,
+      count: 5,
+      status: expectedCanonical.status,
+    });
+    const next = await commitFailureLearningInput(state, input());
+    if (next.status !== "committed") throw new Error("expected committed tie-break update");
+    expect(next.record).toMatchObject({ id: expectedCanonical.id, count: 6 });
+    expect((await readdir(state.directory)).filter((file) => file.endsWith(".json"))).toHaveLength(2);
+  });
+
+  it("keeps resolve after capture start, but reactivates a failure captured after resolve", async () => {
+    const project = await makeProject();
+    const state = createFailureLearningState(project);
+    const initial = await commitFailureLearningInput(state, input());
+    if (initial.status !== "committed") throw new Error("expected initial failure commit");
+    let pendingCapture: Promise<Awaited<ReturnType<typeof commitFailureLearningInput>>>;
+
+    await withMemoryDirectoryLock(state.directory, async (lockToken) => {
+      pendingCapture = commitFailureLearningInput(state, input());
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await atomicWriteMemoryFile(
+        join(state.directory, `${initial.record.id}.json`),
+        `${JSON.stringify({ ...initial.record, status: "resolved" }, null, 2)}\n`,
+        lockToken,
+      );
+    });
+    const capturedBeforeResolve = await pendingCapture!;
+    if (capturedBeforeResolve.status !== "committed") {
+      throw new Error("expected capture started before resolve to commit");
+    }
+    expect(capturedBeforeResolve.record.status).toBe("resolved");
+
+    const [resolved] = await loadFailureRecords(state);
+    expect(resolved.status).toBe("resolved");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const reactivated = await commitFailureLearningInput(state, input());
+    if (reactivated.status !== "committed") throw new Error("expected failure reactivation");
+    expect(reactivated.record.status).toBe("active");
   });
 });
 

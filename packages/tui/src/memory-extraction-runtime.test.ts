@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
@@ -8,6 +8,8 @@ import {
   commitPersistentMemoryMutation,
   decideMemoryExtraction,
   loadPersistentMemorySnapshot,
+  readPersistentMemoryLearningState,
+  withMemoryDirectoryLock,
   writePersistentMemoryLearningState,
 } from "./memory-extraction-runtime.js";
 import { createControlledMemoryInjection } from "./tui-memory-runtime.js";
@@ -46,6 +48,37 @@ describe("memory extraction runtime", () => {
     const topic = await readFile(join(dir, "topics", `${applied.memory?.topic}.md`), "utf8");
     expect(topic).toContain("taxonomy: user");
     expect(topic).toContain("focused tests");
+  });
+
+  it("keeps authoritative JSON committed when derived memory files cannot rebuild", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "linghun-memory-derived-failure-"));
+    const memory = makeMemory({
+      id: "memory-derived-failure",
+      taxonomy: "user",
+      scope: "user",
+      topic: "user-derived-failure",
+      summary: "User preference: keep authoritative JSON after derived rebuild failure.",
+    });
+    const blockedTopicPath = join(dir, "topics", `${memory.topic}.md`);
+    await mkdir(blockedTopicPath, { recursive: true });
+    await writeFile(join(blockedTopicPath, "sentinel"), "blocks derived topic replacement", "utf8");
+
+    const result = await commitPersistentMemoryMutation(dir, "user", {
+      action: "upsert",
+      next: memory,
+    });
+
+    expect(result.status).toBe("committed");
+    expect(result.warnings).toEqual([
+      expect.stringContaining("memory derived index rebuild failed"),
+    ]);
+    expect(JSON.parse(await readFile(join(dir, `${memory.id}.json`), "utf8"))).toMatchObject({
+      id: memory.id,
+      status: "accepted",
+    });
+    await expect(loadPersistentMemorySnapshot(dir, "user")).resolves.toMatchObject({
+      records: [expect.objectContaining({ id: memory.id })],
+    });
   });
 
   it("updates the same topic instead of creating duplicates", () => {
@@ -287,6 +320,23 @@ describe("memory extraction runtime", () => {
     expect(rootEntries.some((entry) => entry.includes(".tmp-") || entry.includes(".bak-"))).toBe(false);
   }, 30_000);
 
+  it("drops an upsert whose owner expires after staging but before rename", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "linghun-memory-staged-stale-"));
+    let guardCalls = 0;
+
+    const result = await commitPersistentMemoryMutation(dir, "user", {
+      action: "upsert",
+      next: makeMemory({ id: "memory-staged-stale", topic: "user-staged-stale" }),
+      commitGuard: () => ++guardCalls < 3,
+    });
+
+    expect(result.status).toBe("stale");
+    expect(result.records).toEqual([]);
+    const entries = await readdir(dir);
+    expect(entries.filter((entry) => entry.endsWith(".json"))).toEqual([]);
+    expect(entries.some((entry) => entry.includes(".tmp-") || entry.includes(".bak-"))).toBe(false);
+  });
+
   it("does not let a stale writer recreate a tombstoned logical topic", async () => {
     const dir = await mkdtemp(join(tmpdir(), "linghun-memory-tombstoned-topic-"));
     const memory = makeMemory({ id: "memory-deleted", topic: "user-deleted-topic" });
@@ -394,6 +444,74 @@ describe("memory extraction runtime", () => {
     expect((await readdir(dir)).some((entry) => entry.startsWith(".write.lock"))).toBe(false);
   }, 30_000);
 
+  it("uses one fail-closed learning-state reader for persisted and recovered state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "linghun-memory-learning-read-"));
+    const target = join(dir, "learning-state.json");
+    expect(await readPersistentMemoryLearningState(dir)).toBeNull();
+
+    await writePersistentMemoryLearningState(dir, `${JSON.stringify({ learningMode: "active" })}\n`);
+    expect(await readPersistentMemoryLearningState(dir)).toEqual({
+      learningMode: "active",
+      learningModeSource: "persisted",
+    });
+    await writePersistentMemoryLearningState(dir, `${JSON.stringify({ learningMode: "off" })}\n`);
+    expect(await readPersistentMemoryLearningState(dir)).toEqual({
+      learningMode: "off",
+      learningModeSource: "persisted",
+    });
+
+    await writeFile(target, "{broken", "utf8");
+    expect(await readPersistentMemoryLearningState(dir)).toMatchObject({
+      learningMode: "off",
+      learningModeSource: "persisted",
+      learningModeDiagnostic: "learning-state invalid; auto-learning fail-closed off",
+    });
+
+    await rm(target, { force: true });
+    const backup = `${target}.bak-crashed-writer`;
+    await writeFile(backup, `${JSON.stringify({ learningMode: "active" })}\n`, "utf8");
+    expect(await readPersistentMemoryLearningState(dir)).toEqual({
+      learningMode: "active",
+      learningModeSource: "persisted",
+    });
+    await expect(readFile(backup, "utf8")).rejects.toThrow();
+  });
+
+  it("checks persisted learning-off under the same lock order as the final mutation", async () => {
+    const userDir = await mkdtemp(join(tmpdir(), "linghun-memory-learning-user-"));
+    const projectDir = await mkdtemp(join(tmpdir(), "linghun-memory-learning-project-"));
+    const memory = makeMemory({
+      id: "learning-off-race",
+      scope: "project",
+      taxonomy: "project",
+      topic: "project-learning-off-race",
+    });
+    await writePersistentMemoryLearningState(
+      userDir,
+      `${JSON.stringify({ learningMode: "off" })}\n`,
+    );
+
+    const stale = await commitPersistentMemoryMutation(projectDir, "project", {
+      action: "upsert",
+      next: memory,
+      learningStateDirectory: userDir,
+    });
+
+    expect(stale.status).toBe("stale");
+    await expect(readFile(join(projectDir, `${memory.id}.json`), "utf8")).rejects.toThrow();
+
+    await writePersistentMemoryLearningState(
+      userDir,
+      `${JSON.stringify({ learningMode: "active" })}\n`,
+    );
+    const committed = await commitPersistentMemoryMutation(projectDir, "project", {
+      action: "upsert",
+      next: memory,
+      learningStateDirectory: userDir,
+    });
+    expect(committed.status).toBe("committed");
+  });
+
   it("recovers a backup-only record during a read-only snapshot refresh", async () => {
     const dir = await mkdtemp(join(tmpdir(), "linghun-memory-read-recovery-"));
     const memory = makeMemory({ id: "memory-crash-recovery" });
@@ -405,6 +523,27 @@ describe("memory extraction runtime", () => {
     expect(snapshot.records).toContainEqual(memory);
     expect(JSON.parse(await readFile(target, "utf8"))).toMatchObject({ id: memory.id });
     await expect(readFile(backup, "utf8")).rejects.toThrow();
+  });
+
+  it("retries lock release when owner metadata is transiently unavailable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "linghun-memory-release-owner-"));
+    const lockPath = join(dir, ".write.lock");
+    const ownerPath = join(lockPath, "owner.json");
+    const movedOwnerPath = join(lockPath, "owner.json.transient");
+    let restoreOwner: Promise<void> | undefined;
+
+    await withMemoryDirectoryLock(dir, async () => {
+      await rename(ownerPath, movedOwnerPath);
+      restoreOwner = new Promise((resolve, reject) => {
+        setTimeout(() => {
+          void rename(movedOwnerPath, ownerPath).then(resolve, reject);
+        }, 50);
+      });
+    });
+    await restoreOwner;
+
+    expect(await readdir(dir)).not.toContain(".write.lock");
+    await expect(withMemoryDirectoryLock(dir, async () => "acquired")).resolves.toBe("acquired");
   });
 
   it("reclaims an old ownerless lock during a read-only snapshot refresh", async () => {
@@ -422,7 +561,72 @@ describe("memory extraction runtime", () => {
     expect((await readdir(dir)).some((entry) => entry.startsWith(".write.lock"))).toBe(false);
   });
 
-  it("does not overwrite a newer live lock while a prepared acquisition waits", async () => {
+  it("reclaims a stale prepare lock owned by a dead process before acquisition", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "linghun-memory-dead-prepare-"));
+    const preparePath = join(dir, ".write.lock.prepare-dead-owner");
+    await mkdir(preparePath);
+    const staleAt = Date.now() - 60_000;
+    await writeFile(
+      join(preparePath, "owner.json"),
+      JSON.stringify({
+        token: "dead-owner",
+        pid: 2_147_483_647,
+        createdAt: staleAt,
+        heartbeatAt: staleAt,
+      }),
+      "utf8",
+    );
+    const staleDate = new Date(staleAt);
+    await utimes(preparePath, staleDate, staleDate);
+
+    await expect(withMemoryDirectoryLock(dir, async () => "acquired")).resolves.toBe("acquired");
+
+    expect((await readdir(dir)).some((entry) => entry.startsWith(".write.lock"))).toBe(false);
+  });
+
+  it("preserves active and newly-created prepare locks", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "linghun-memory-live-prepare-"));
+    const activePreparePath = join(dir, ".write.lock.prepare-active-owner");
+    const newPreparePath = join(dir, ".write.lock.prepare-new-ownerless");
+    await mkdir(activePreparePath);
+    await mkdir(newPreparePath);
+    const staleAt = Date.now() - 60_000;
+    await writeFile(
+      join(activePreparePath, "owner.json"),
+      JSON.stringify({
+        token: "active-owner",
+        pid: process.pid,
+        createdAt: staleAt,
+        heartbeatAt: staleAt,
+      }),
+      "utf8",
+    );
+    const staleDate = new Date(staleAt);
+    await utimes(activePreparePath, staleDate, staleDate);
+
+    await expect(withMemoryDirectoryLock(dir, async () => "acquired")).resolves.toBe("acquired");
+
+    const entries = await readdir(dir);
+    expect(entries).toContain(".write.lock.prepare-active-owner");
+    expect(entries).toContain(".write.lock.prepare-new-ownerless");
+  });
+
+  it("cleans 1,000 stale prepare locks before the next lock succeeds", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "linghun-memory-prepare-pressure-"));
+    const staleDate = new Date(Date.now() - 60_000);
+    const preparePaths = Array.from(
+      { length: 1_000 },
+      (_, index) => join(dir, `.write.lock.prepare-stale-${index}`),
+    );
+    await Promise.all(preparePaths.map((path) => mkdir(path)));
+    await Promise.all(preparePaths.map((path) => utimes(path, staleDate, staleDate)));
+
+    await expect(withMemoryDirectoryLock(dir, async () => "acquired")).resolves.toBe("acquired");
+
+    expect((await readdir(dir)).some((entry) => entry.startsWith(".write.lock"))).toBe(false);
+  }, 30_000);
+
+  it("does not overwrite a newer live lock while an atomic acquisition waits", async () => {
     const dir = await mkdtemp(join(tmpdir(), "linghun-memory-prepared-lock-"));
     const memory = makeMemory({ id: "memory-prepared-lock" });
     await writeFile(join(dir, `${memory.id}.json`), `${JSON.stringify(memory)}\n`, "utf8");
@@ -439,22 +643,19 @@ describe("memory extraction runtime", () => {
       "utf8",
     );
 
-    const pendingSnapshot = loadPersistentMemorySnapshot(dir, "user");
-    let prepared = false;
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      prepared = (await readdir(dir)).some((entry) => entry.startsWith(".write.lock.prepare-"));
-      if (prepared) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    let settled = false;
+    const pendingSnapshot = loadPersistentMemorySnapshot(dir, "user").finally(() => {
+      settled = true;
+    });
     await new Promise((resolve) => setTimeout(resolve, 100));
     const currentOwner = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")) as {
       token: string;
     };
+    expect(settled).toBe(false);
+    expect(currentOwner.token).toBe("newer-live-owner");
     await rm(lockPath, { recursive: true, force: true });
     const snapshot = await pendingSnapshot;
 
-    expect(prepared).toBe(true);
-    expect(currentOwner.token).toBe("newer-live-owner");
     expect(snapshot.records).toContainEqual(memory);
     expect((await readdir(dir)).some((entry) => entry.startsWith(".write.lock"))).toBe(false);
   });

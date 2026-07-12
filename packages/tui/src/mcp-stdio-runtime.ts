@@ -58,6 +58,8 @@ type McpStdioToolListResult = {
 
 const MCP_STDIO_CONNECTION_TIMEOUT_MS = 15_000;
 const MCP_STDIO_TOOL_CALL_TIMEOUT_MS = 100_000_000;
+const MCP_STDIO_FORCE_STOP_GRACE_MS = 500;
+const MCP_STDIO_LIVENESS_HEARTBEAT_MS = 30_000;
 
 const MCP_STDIO_PROTOCOL_VERSION = "2025-06-18";
 
@@ -147,6 +149,7 @@ export async function createMcpStdioRunner<T>(
     const limits = options.limits ?? MCP_TRANSPORT_LIMITS;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let hardTimer: ReturnType<typeof setTimeout> | undefined;
+    let livenessTimer: ReturnType<typeof setTimeout> | undefined;
     let abortFromCaller: (() => void) | undefined;
     type Pending = {
       resolve: (value: unknown) => void;
@@ -159,11 +162,23 @@ export async function createMcpStdioRunner<T>(
       settled = true;
       if (idleTimer) clearTimeout(idleTimer);
       if (hardTimer) clearTimeout(hardTimer);
+      if (livenessTimer) clearTimeout(livenessTimer);
       if (abortFromCaller) options.signal?.removeEventListener("abort", abortFromCaller);
       try {
         guard.requestStop(false);
       } catch {
         // ignore
+      }
+      if (guard.activeSnapshot().length > 0) {
+        const forceStopTimer = setTimeout(() => {
+          if (guard.activeSnapshot().length === 0) return;
+          try {
+            guard.requestStop(true);
+          } catch {
+            // ignore
+          }
+        }, MCP_STDIO_FORCE_STOP_GRACE_MS);
+        forceStopTimer.unref?.();
       }
       if (!result.ok) {
         const error = new McpStdioStructuredError(result.summary, result.errorCode);
@@ -182,6 +197,19 @@ export async function createMcpStdioRunner<T>(
           errorCode: "ETIMEDOUT",
         });
       }, options.idleTimeoutMs ?? options.timeoutMs);
+    };
+    const armLivenessHeartbeat = (): void => {
+      if (livenessTimer) clearTimeout(livenessTimer);
+      if (settled || !options.onProgress) return;
+      livenessTimer = setTimeout(() => {
+        options.onProgress?.({ phase: "waiting", transport: "stdio" });
+        armLivenessHeartbeat();
+      }, MCP_STDIO_LIVENESS_HEARTBEAT_MS);
+      livenessTimer.unref?.();
+    };
+    const reportProgress = (progress: McpRuntimeProgress): void => {
+      options.onProgress?.(progress);
+      armLivenessHeartbeat();
     };
 
     let stderrText = "";
@@ -209,6 +237,7 @@ export async function createMcpStdioRunner<T>(
     }
     options.signal?.addEventListener("abort", abortFromCaller, { once: true });
     armInactivityTimeout();
+    armLivenessHeartbeat();
     hardTimer = setTimeout(() => {
       settle({
         ok: false,
@@ -250,7 +279,7 @@ export async function createMcpStdioRunner<T>(
         const message = JSON.stringify({ jsonrpc: "2.0", id, method, params: params2 });
         try {
           stdin.write(`${message}\n`);
-          options.onProgress?.({ phase: "waiting", transport: "stdio" });
+          reportProgress({ phase: "waiting", transport: "stdio" });
         } catch (error) {
           if (requestTimer) clearTimeout(requestTimer);
           pending.delete(id);
@@ -323,7 +352,7 @@ export async function createMcpStdioRunner<T>(
           if (obj.jsonrpc === "2.0" && (responseHandler || isProgress)) {
             armInactivityTimeout();
             receivedBytes += Buffer.byteLength(line, "utf8");
-            options.onProgress?.({
+            reportProgress({
               phase: "receiving",
               transport: "stdio",
               receivedBytes,

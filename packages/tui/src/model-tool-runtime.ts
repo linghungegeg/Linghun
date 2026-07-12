@@ -398,11 +398,14 @@ export async function executeModelToolUse(
     return executeDeferredDispatchToolUse(toolCall, context, sessionId, output, continuation);
   }
   if (isPreEngineToolName(toolCall.name)) {
-    return executePreEngineToolUse(toolCall, context, sessionId, output);
+    return executePreEngineToolUse(toolCall, context, sessionId, output, continuation);
   }
   // D.14G — 结构化 Git 能力不走 builtInTools / runTool / 四档 permission；由
   // git-tool-dispatch-runtime 真实执行（status 只读；create safe-create；remove 走确认）。
   if (isGitToolName(toolCall.name)) {
+    const gitCommitGuard = () =>
+      continuation?.abortSignal?.aborted !== true &&
+      (!continuation?.requestTurnId || context.currentRequestTurnId === continuation.requestTurnId);
     const gitResult = await executeGitToolUse(
       toolCall,
       context,
@@ -411,6 +414,9 @@ export async function executeModelToolUse(
       gitToolDispatchDeps,
       continuation,
     );
+    if (!gitCommitGuard()) {
+      return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
+    }
     // D.14B — git 操作真实失败转 failure learning。pendingApproval（等待用户确认）
     // 不是失败，不记录；只有 runtime 真正失败/拒绝（ok=false 且非 pending）才记。
     if (!gitResult.ok && !gitResult.pendingApproval) {
@@ -425,7 +431,7 @@ export async function executeModelToolUse(
           : `tool:${toolCall.name}`,
         relatedTarget: toolCall.name,
         severity: "medium",
-      });
+      }, gitCommitGuard);
     }
     return gitResult;
   }
@@ -892,6 +898,7 @@ export async function executeApprovedModelToolUse(
     clearToolRequestActivity();
   };
   let completedToolOutput: ToolOutput | undefined;
+  let ownedEvidenceId: string | undefined;
   const dropStaleToolResult = async (
     kind: "result" | "error",
   ): Promise<{ ok: false; tool: string; text: string }> => {
@@ -921,7 +928,9 @@ export async function executeApprovedModelToolUse(
       await appendBackgroundTaskEvent(context, sessionId, task);
     }
     cleanupFinishedTool();
-    context.evidence = context.evidence.filter((item) => item.toolUseId !== toolCall.id);
+    if (ownedEvidenceId) {
+      context.evidence = context.evidence.filter((item) => item.id !== ownedEvidenceId);
+    }
     await appendSystemEvent(
       context,
       sessionId,
@@ -1005,8 +1014,9 @@ export async function executeApprovedModelToolUse(
             result.output,
             evidenceInput,
             () => !requestIsStale(),
-            toolCall.id,
-          );
+             toolCall.id,
+           );
+    ownedEvidenceId = evidence?.id;
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
@@ -1074,13 +1084,17 @@ export async function executeApprovedModelToolUse(
         sourceRef: evidence?.id ? `evidence:${evidence.id}` : `tool:${toolName}`,
         relatedTarget: toolName,
         severity: "medium",
-      });
+      }, () => !requestIsStale());
       await appendPolicyToolFeedback(
         context,
         sessionId,
         `tool failure: tool ${toolName}; evidence ${evidence?.id ?? "none"}`,
         "warning",
+        () => !requestIsStale(),
       );
+    }
+    if (requestIsStale()) {
+      return dropStaleToolResult("result");
     }
     const bgStarted = !!(result.output.data as { backgroundTaskId?: string } | undefined)?.backgroundTaskId;
     if (!bgStarted) {
@@ -1158,6 +1172,7 @@ export async function executeApprovedModelToolUse(
       () => !requestIsStale(),
       toolCall.id,
     );
+    ownedEvidenceId = evidence.id;
     if (requestIsStale()) {
       return dropStaleToolResult("error");
     }
@@ -1182,13 +1197,17 @@ export async function executeApprovedModelToolUse(
       sourceRef: `evidence:${evidence.id}`,
       relatedTarget: toolName,
       severity: "medium",
-    });
+    }, () => !requestIsStale());
     await appendPolicyToolFeedback(
       context,
       sessionId,
       `tool failure: tool ${toolName}; evidence ${evidence.id}`,
       "warning",
+      () => !requestIsStale(),
     );
+    if (requestIsStale()) {
+      return dropStaleToolResult("error");
+    }
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
 }
@@ -1230,8 +1249,15 @@ export async function executeDeferredDispatchToolUse(
   const requestIsStale = () =>
     requestSignal?.aborted === true ||
     Boolean(requestTurnId && context.currentRequestTurnId !== requestTurnId);
+  const commitGuard = () => !requestIsStale();
+  let ownedEvidenceId: string | undefined;
   const dropStaleResult = () => {
-    context.evidence = context.evidence.filter((item) => item.toolUseId !== toolCall.id);
+    if (ownedEvidenceId) {
+      context.evidence = context.evidence.filter((item) => item.id !== ownedEvidenceId);
+    }
+    if (context.requestActivityToolUseId === toolCall.id) {
+      clearRequestActivity(context, activityOwner);
+    }
     return {
       ok: false,
       tool: dispatchName,
@@ -1239,6 +1265,7 @@ export async function executeDeferredDispatchToolUse(
     };
   };
   const initialToolTarget = extractToolTarget(dispatchName, toolCall.input);
+  if (requestIsStale()) return dropStaleResult();
   startRequestActivity(output, context, "tool_running", {
     toolName: dispatchName,
     toolTarget: initialToolTarget,
@@ -1271,13 +1298,17 @@ export async function executeDeferredDispatchToolUse(
       details.join(" · ");
     context.shellRerender?.();
   };
-  await context.store.appendEvent(sessionId, {
-    type: "tool_call_start",
-    id: toolCall.id,
-    name: dispatchName,
-    input: toolCall.input,
-    createdAt: new Date().toISOString(),
-  });
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "tool_call_start",
+      id: toolCall.id,
+      name: dispatchName,
+      input: toolCall.input,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
   if (requestIsStale()) return dropStaleResult();
   try {
     const input = (
@@ -1294,7 +1325,11 @@ export async function executeDeferredDispatchToolUse(
           sessionId,
           "Read",
           `${dispatchName}: ${text}`,
+          commitGuard,
+          toolCall.id,
         );
+        ownedEvidenceId = evidence.id;
+        if (requestIsStale()) return dropStaleResult();
         await appendDeferredToolResultEvent(
           context,
           sessionId,
@@ -1303,15 +1338,20 @@ export async function executeDeferredDispatchToolUse(
           text,
           true,
           evidence.id,
+          commitGuard,
         );
-        clearRequestActivity(context, activityOwner);
+        if (requestIsStale()) return dropStaleResult();
+        clearDeferredActivity();
         return { ok: false, tool: dispatchName, text, evidenceId: evidence.id };
       }
       const result = executeSearchExtraTools(queryRaw, context);
+      if (requestIsStale()) return dropStaleResult();
       const evidence = await recordToolEvidence(context, sessionId, "Read", {
         text: result.text,
         data: result.data,
-      } as ToolOutput);
+      } as ToolOutput, undefined, commitGuard, toolCall.id);
+      ownedEvidenceId = evidence?.id;
+      if (requestIsStale()) return dropStaleResult();
       await appendDeferredToolResultEvent(
         context,
         sessionId,
@@ -1320,8 +1360,10 @@ export async function executeDeferredDispatchToolUse(
         { text: result.text, data: result.data },
         false,
         evidence?.id,
+        commitGuard,
       );
-      clearRequestActivity(context, activityOwner);
+      if (requestIsStale()) return dropStaleResult();
+      clearDeferredActivity();
       // D.13V-C — 主屏只显示降噪后的产品文案；raw text 已经写入 tool_result store，
       // doctor / details / Ctrl+O 仍可看到。
       writeLine(
@@ -1357,8 +1399,11 @@ export async function executeDeferredDispatchToolUse(
           dispatchName,
           text,
           true,
+          undefined,
+          commitGuard,
         );
-        clearRequestActivity(context, activityOwner);
+        if (requestIsStale()) return dropStaleResult();
+        clearDeferredActivity();
         return { ok: false, tool: dispatchName, text };
       }
       const structuredTool = executableCommandProposalTool(command);
@@ -1374,8 +1419,11 @@ export async function executeDeferredDispatchToolUse(
           dispatchName,
           text,
           true,
+          undefined,
+          commitGuard,
         );
-        clearRequestActivity(context, activityOwner);
+        if (requestIsStale()) return dropStaleResult();
+        clearDeferredActivity();
         return { ok: false, tool: dispatchName, text };
       }
       const text =
@@ -1389,8 +1437,11 @@ export async function executeDeferredDispatchToolUse(
         dispatchName,
         { command, reason },
         false,
+        undefined,
+        commitGuard,
       );
-      clearRequestActivity(context, activityOwner);
+      if (requestIsStale()) return dropStaleResult();
+      clearDeferredActivity();
       writeLine(output, text);
       return { ok: true, tool: dispatchName, text, data: { command, reason } };
     }
@@ -1411,20 +1462,23 @@ export async function executeDeferredDispatchToolUse(
         getCodebaseMemoryToolRisk(requestedToolName) === "readonly",
     });
     if (deferredVerdict.decision === "auto_allow_readonly") {
-      await appendSystemEvent(
+        await appendSystemEvent(
         context,
         sessionId,
-        `permission auto allow readonly: tool ExecuteExtraTool; target ${deferredVerdict.redactedSummary}; semantic ${deferredVerdict.semantic}; reason ${deferredVerdict.reason}`,
-        "info",
-      );
+          `permission auto allow readonly: tool ExecuteExtraTool; target ${deferredVerdict.redactedSummary}; semantic ${deferredVerdict.semantic}; reason ${deferredVerdict.reason}`,
+          "info",
+          commitGuard,
+        );
     } else {
-      await appendSystemEvent(
+        await appendSystemEvent(
         context,
         sessionId,
-        `permission policy require: tool ExecuteExtraTool; target ${deferredVerdict.redactedSummary}; semantic ${deferredVerdict.semantic}; reason ${deferredVerdict.reason}`,
-        "info",
-      );
-    }
+          `permission policy require: tool ExecuteExtraTool; target ${deferredVerdict.redactedSummary}; semantic ${deferredVerdict.semantic}; reason ${deferredVerdict.reason}`,
+          "info",
+          commitGuard,
+        );
+      }
+    if (requestIsStale()) return dropStaleResult();
     const result = await executeExtraTool(
       { tool_name: input.tool_name, params: input.params },
       context,
@@ -1441,6 +1495,7 @@ export async function executeDeferredDispatchToolUse(
         () => !requestIsStale(),
         toolCall.id,
       );
+      ownedEvidenceId = evidence.id;
       if (requestIsStale()) return dropStaleResult();
       await appendDeferredToolResultEvent(
         context,
@@ -1464,13 +1519,14 @@ export async function executeDeferredDispatchToolUse(
       );
       return { ok: false, tool: dispatchName, text: result.text, evidenceId: evidence.id };
     }
-    rememberSourcePackCandidatesFromToolData(context, input.tool_name, result.data);
     if (requestIsStale()) return dropStaleResult();
     const evidence = await recordToolEvidence(context, sessionId, "Read", {
       text: result.text,
       data: result.data,
     } as ToolOutput, undefined, () => !requestIsStale(), toolCall.id);
+    ownedEvidenceId = evidence?.id;
     if (requestIsStale()) return dropStaleResult();
+    rememberSourcePackCandidatesFromToolData(context, input.tool_name, result.data);
     await appendDeferredToolResultEvent(
       context,
       sessionId,
@@ -1510,6 +1566,7 @@ export async function executeDeferredDispatchToolUse(
       () => !requestIsStale(),
       toolCall.id,
     );
+    ownedEvidenceId = evidence.id;
     if (requestIsStale()) return dropStaleResult();
     await appendDeferredToolResultEvent(
       context,
@@ -1531,6 +1588,7 @@ export async function executePreEngineToolUse(
   context: TuiContext,
   sessionId: string,
   output: Writable,
+  continuation?: PendingModelContinuation,
 ): Promise<{
   ok: boolean;
   tool: string;
@@ -1539,31 +1597,74 @@ export async function executePreEngineToolUse(
   evidenceId?: string;
 }> {
   const toolName = toolCall.name;
+  const requestTurnId = continuation?.requestTurnId;
+  const requestSignal = continuation?.abortSignal ?? context.tools.abortSignal;
+  const activityOwner = requestTurnId
+    ? { kind: "foreground" as const, requestTurnId }
+    : undefined;
+  const requestIsStale = () =>
+    requestSignal?.aborted === true ||
+    Boolean(requestTurnId && context.currentRequestTurnId !== requestTurnId);
+  const commitGuard = () => !requestIsStale();
+  let ownedEvidenceId: string | undefined;
+  const clearPreEngineActivity = (): void => {
+    if (context.requestActivityToolUseId === toolCall.id) {
+      clearRequestActivity(context, activityOwner);
+    }
+  };
+  const dropStaleResult = () => {
+    if (ownedEvidenceId) {
+      context.evidence = context.evidence.filter((item) => item.id !== ownedEvidenceId);
+    }
+    clearPreEngineActivity();
+    return {
+      ok: false as const,
+      tool: toolName,
+      text: "cancelled: stale pre-engine tool result discarded",
+    };
+  };
+  if (requestIsStale()) return dropStaleResult();
   startRequestActivity(output, context, "tool_running", {
     toolName,
     toolTarget: extractToolTarget(toolName, toolCall.input),
+    toolUseId: toolCall.id,
+    ...(requestTurnId ? { requestTurnId } : {}),
   });
-  await context.store.appendEvent(sessionId, {
-    type: "tool_call_start",
-    id: toolCall.id,
-    name: toolName,
-    input: toolCall.input,
-    createdAt: new Date().toISOString(),
-  });
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "tool_call_start",
+      id: toolCall.id,
+      name: toolName,
+      input: toolCall.input,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (requestIsStale()) return dropStaleResult();
   try {
     context.discoveredDeferredToolNames.add(toolName);
     const params =
       toolCall.input && typeof toolCall.input === "object" && !Array.isArray(toolCall.input)
         ? (toolCall.input as Record<string, unknown>)
         : {};
-    const result = await executeExtraTool({ tool_name: toolName, params }, context);
+    const result = await executeExtraTool(
+      { tool_name: toolName, params },
+      context,
+      { signal: requestSignal },
+    );
+    if (requestIsStale()) return dropStaleResult();
     if (!result.ok) {
       const evidence = await recordToolFailureEvidence(
         context,
         sessionId,
         "Read",
         `${toolName}: ${result.text}`,
+        commitGuard,
+        toolCall.id,
       );
+      ownedEvidenceId = evidence.id;
+      if (requestIsStale()) return dropStaleResult();
       await appendDeferredToolResultEvent(
         context,
         sessionId,
@@ -1572,8 +1673,10 @@ export async function executePreEngineToolUse(
         result.text,
         true,
         evidence.id,
+        commitGuard,
       );
-      clearRequestActivity(context);
+      if (requestIsStale()) return dropStaleResult();
+      clearPreEngineActivity();
       writeLine(output, formatPreEnginePrimaryText(toolName, false, context, toolCall.input));
       return { ok: false, tool: toolName, text: result.text, evidenceId: evidence.id };
     }
@@ -1582,7 +1685,9 @@ export async function executePreEngineToolUse(
       const evidence = await recordToolEvidence(context, sessionId, "Read", {
         text: fallbackResult.text,
         data: fallbackResult.data,
-      } as ToolOutput);
+      } as ToolOutput, undefined, commitGuard, toolCall.id);
+      ownedEvidenceId = evidence?.id;
+      if (requestIsStale()) return dropStaleResult();
       await appendDeferredToolResultEvent(
         context,
         sessionId,
@@ -1591,8 +1696,10 @@ export async function executePreEngineToolUse(
         fallbackResult,
         false,
         evidence?.id,
+        commitGuard,
       );
-      clearRequestActivity(context);
+      if (requestIsStale()) return dropStaleResult();
+      clearPreEngineActivity();
       writeLine(output, formatPreEngineDegradedPrimaryText(context));
       return {
         ok: true,
@@ -1602,11 +1709,12 @@ export async function executePreEngineToolUse(
         evidenceId: evidence?.id,
       };
     }
-    rememberSourcePackCandidatesFromToolData(context, toolName, result.data);
     const evidence = await recordToolEvidence(context, sessionId, "Read", {
       text: result.text,
       data: result.data,
-    } as ToolOutput);
+    } as ToolOutput, undefined, commitGuard, toolCall.id);
+    ownedEvidenceId = evidence?.id;
+    if (requestIsStale()) return dropStaleResult();
     await appendDeferredToolResultEvent(
       context,
       sessionId,
@@ -1615,8 +1723,11 @@ export async function executePreEngineToolUse(
       { text: result.text, data: result.data },
       false,
       evidence?.id,
+      commitGuard,
     );
-    clearRequestActivity(context);
+    if (requestIsStale()) return dropStaleResult();
+    rememberSourcePackCandidatesFromToolData(context, toolName, result.data);
+    clearPreEngineActivity();
     writeLine(output, formatPreEnginePrimaryText(toolName, true, context, toolCall.input));
     return {
       ok: true,
@@ -1626,14 +1737,19 @@ export async function executePreEngineToolUse(
       evidenceId: evidence?.id,
     };
   } catch (error) {
-    clearRequestActivity(context);
+    if (requestIsStale()) return dropStaleResult();
+    clearPreEngineActivity();
     const text = formatError(error, context.language);
     const evidence = await recordToolFailureEvidence(
       context,
       sessionId,
       "Read",
       `${toolName}: ${text}`,
+      commitGuard,
+      toolCall.id,
     );
+    ownedEvidenceId = evidence.id;
+    if (requestIsStale()) return dropStaleResult();
     await appendDeferredToolResultEvent(
       context,
       sessionId,
@@ -1642,7 +1758,9 @@ export async function executePreEngineToolUse(
       text,
       true,
       evidence.id,
+      commitGuard,
     );
+    if (requestIsStale()) return dropStaleResult();
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
 }
@@ -1783,7 +1901,7 @@ export async function executeLinghunControlToolUse(
     text: "cancelled: stale control tool request discarded",
   });
   if (requestIsStale()) return staleControlResult();
-  const invocationPermissionMode = context.permissionMode;
+  const invocationPermissionMode = context.permissionMode ?? "default";
   const invocationUserActionConstraints = currentRequestUserActionConstraints(context)
     ? { ...currentRequestUserActionConstraints(context)! }
     : undefined;
@@ -1925,6 +2043,7 @@ export async function executeLinghunControlToolUse(
       const input = parseRunWorkflowToolInput(toolCall.input);
       if (!input.ok) return await finishFailure(input.text);
       if (requestIsStale()) return staleControlResult();
+      let run: WorkflowRunState | undefined;
       const workflowOptions = {
         ownerSessionId: sessionId,
         permissionMode: invocationPermissionMode,
@@ -1960,7 +2079,7 @@ export async function executeLinghunControlToolUse(
         }
         const workflowGoal = input.goal ?? (input.inputs ? JSON.stringify(input.inputs) : "");
         if (registry) {
-          await runRegistryWorkflow(
+          run = await runRegistryWorkflow(
             registry,
             workflowGoal,
             input.runInBackground,
@@ -1969,7 +2088,7 @@ export async function executeLinghunControlToolUse(
             workflowOptions,
           );
         } else if (registryAgent) {
-          await runRegistryAgentWorkflow(
+          const agent = await runRegistryAgentWorkflow(
             registryAgent,
             workflowGoal,
             input.runInBackground,
@@ -1977,16 +2096,23 @@ export async function executeLinghunControlToolUse(
             createSilentOutput(),
             workflowOptions,
           );
+          if (requestIsStale()) return staleControlResult();
+          return await finishResult(
+            agent
+              ? `Registry agent ${agent.status}: ${agent.summary}`
+              : "Registry agent runtime did not start.",
+            !agent,
+            formatAgentRunToolResultData(agent),
+          );
         }
       } else {
-        await runWorkflowSteps(input.goal ?? "", context, createSilentOutput(), {
+        run = await runWorkflowSteps(input.goal ?? "", context, createSilentOutput(), {
           ...input,
           ignoreForegroundModelGuard: true,
           ...workflowOptions,
         });
       }
       if (requestIsStale()) return staleControlResult();
-      const run = context.workflows.activeRun;
       const ok =
         run?.status === "completed" || (input.runInBackground && run?.status === "running");
       const currentStep = selectWorkflowCurrentStepForToolResult(run);
@@ -2041,6 +2167,8 @@ export async function executeLinghunControlToolUse(
           ownerSignal: requestSignal,
           requestTurnId,
           publishResult: false,
+          permissionMode: invocationPermissionMode,
+          userActionConstraints: invocationUserActionConstraints,
         },
       );
       if (requestIsStale()) {
@@ -2326,9 +2454,7 @@ function formatStartAgentDidNotStartMessage(
   input: Extract<ReturnType<typeof parseStartAgentToolInput>, { ok: true }>,
   context: TuiContext,
 ): string {
-  const workflowTaskId =
-    context.workflows.activeRun?.status === "running" ? context.workflows.activeRun.id : undefined;
-  const guard = checkBackgroundStartGuard(context, "agent", true, workflowTaskId);
+  const guard = checkBackgroundStartGuard(context, "agent", true);
   const route = resolveRoleRoute(context, getAgentRole(input.role), "StartAgent");
   const hints = [
     guard ? `resource=${guard}` : undefined,
@@ -2946,21 +3072,55 @@ export async function executeIndexToolUse(
 }> {
   const name = toolCall.name;
   const dispatchName = resultToolName ?? name;
+  const requestTurnId = continuation?.requestTurnId;
+  const requestSignal = continuation?.abortSignal;
+  const commitGuard = () =>
+    requestSignal?.aborted !== true &&
+    (!requestTurnId || context.currentRequestTurnId === requestTurnId);
+  const staleResult = () => {
+    if (context.requestActivityToolUseId === toolCall.id) {
+      clearRequestActivity(
+        context,
+        requestTurnId ? { kind: "foreground" as const, requestTurnId } : undefined,
+      );
+    }
+    return {
+      ok: false as const,
+      tool: name,
+      text: "cancelled: stale index tool result discarded",
+    };
+  };
+  if (!commitGuard()) return staleResult();
   if (appendToolStart) {
-    await context.store.appendEvent(sessionId, {
-      type: "tool_call_start",
-      id: toolCall.id,
-      name,
-      input: toolCall.input,
-      createdAt: new Date().toISOString(),
-    });
+    await context.store.appendEvent(
+      sessionId,
+      {
+        type: "tool_call_start",
+        id: toolCall.id,
+        name,
+        input: toolCall.input,
+        createdAt: new Date().toISOString(),
+      },
+      commitGuard,
+    );
   }
+  if (!commitGuard()) return staleResult();
 
   if (name === INDEX_STATUS_INSPECT) {
     // 只读：刷新状态读取（不重建），返回摘要。明确标注"仅检查，未刷新"。
-    startRequestActivity(output, context, "tool_running", { toolName: name });
+    startRequestActivity(output, context, "tool_running", {
+      toolName: name,
+      toolUseId: toolCall.id,
+      ...(requestTurnId ? { requestTurnId } : {}),
+    });
     await refreshIndexStatus(context);
-    clearRequestActivity(context);
+    if (!commitGuard()) return staleResult();
+    if (context.requestActivityToolUseId === toolCall.id) {
+      clearRequestActivity(
+        context,
+        requestTurnId ? { kind: "foreground", requestTurnId } : undefined,
+      );
+    }
     const text = summarizeIndexStatusInspect(
       context.index.status,
       context.index.projectName,
@@ -2974,8 +3134,16 @@ export async function executeIndexToolUse(
       "index-operation:inspect",
       ["index_operation", "index_status_inspect"],
     );
+    evidence.toolUseId = toolCall.id;
+    scopeEvidenceToContext(context, evidence, { ownerSessionId: sessionId });
+    if (!commitGuard()) return staleResult();
+    await context.store.appendEvent(
+      sessionId,
+      { type: "evidence_record", ...evidence },
+      commitGuard,
+    );
+    if (!commitGuard()) return staleResult();
     rememberEvidence(context, evidence);
-    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendDeferredToolResultEvent(
       context,
       sessionId,
@@ -2984,7 +3152,9 @@ export async function executeIndexToolUse(
       { text },
       false,
       evidence.id,
+      commitGuard,
     );
+    if (!commitGuard()) return staleResult();
     writeLine(output, text);
     return { ok: true, tool: name, text, evidenceId: evidence.id };
   }
@@ -3001,26 +3171,47 @@ export async function executeIndexToolUse(
     context,
     sessionId,
   );
-  await context.store.appendEvent(sessionId, {
-    type: "permission_request",
-    request: { ...permission.request, toolName: name as unknown as ToolName },
-    createdAt: new Date().toISOString(),
-  });
-  await context.store.appendEvent(sessionId, {
-    type: "permission_result",
-    requestId: permission.request.id,
-    decision: permission.decision,
-    reason: permission.reason,
-    createdAt: new Date().toISOString(),
-  });
+  if (!commitGuard()) return staleResult();
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "permission_request",
+      request: { ...permission.request, toolName: name as unknown as ToolName },
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (!commitGuard()) return staleResult();
+  await context.store.appendEvent(
+    sessionId,
+    {
+      type: "permission_result",
+      requestId: permission.request.id,
+      decision: permission.decision,
+      reason: permission.reason,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (!commitGuard()) return staleResult();
   if (context.permissionMode === "auto-review" && permission.decision === "ask") {
     await appendSystemEvent(
       context,
       sessionId,
       `index_${action}_auto_review_allowed: ordinary workspace index write uses existing permission pipeline; dangerous shell/network/install/delete remain gated`,
       "info",
+      commitGuard,
     );
-    return executeApprovedIndexToolUse(toolCall, action, parsed.force, context, sessionId, output);
+    if (!commitGuard()) return staleResult();
+    return executeApprovedIndexToolUse(
+      toolCall,
+      action,
+      parsed.force,
+      context,
+      sessionId,
+      output,
+      continuation,
+    );
   }
   if (permission.decision === "deny") {
     clearRequestActivity(context);
@@ -3036,6 +3227,8 @@ export async function executeIndexToolUse(
       sessionId,
       "Write",
       `index ${action} ${text}`,
+      commitGuard,
+      toolCall.id,
     );
     await appendDeferredToolResultEvent(
       context,
@@ -3045,11 +3238,13 @@ export async function executeIndexToolUse(
       text,
       true,
       evidence.id,
+      commitGuard,
     );
     return { ok: false, tool: name, text, evidenceId: evidence.id };
   }
   if (permission.decision === "ask") {
     clearRequestActivity(context);
+    if (!commitGuard()) return staleResult();
     context.pendingLocalApproval = {
       kind: "index_tool",
       indexAction: action,
@@ -3075,6 +3270,7 @@ export async function executeIndexToolUse(
     context,
     sessionId,
     output,
+    continuation,
   );
 }
 
@@ -3086,6 +3282,7 @@ export async function executeApprovedIndexToolUse(
   context: TuiContext,
   sessionId: string,
   output: Writable,
+  continuation?: PendingModelContinuation,
 ): Promise<{
   ok: boolean;
   tool: string;
@@ -3094,6 +3291,24 @@ export async function executeApprovedIndexToolUse(
   evidenceId?: string;
 }> {
   const name = toolCall.name;
+  const requestTurnId = continuation?.requestTurnId;
+  const commitGuard = () =>
+    continuation?.abortSignal?.aborted !== true &&
+    (!requestTurnId || context.currentRequestTurnId === requestTurnId);
+  const staleResult = () => {
+    if (context.requestActivityToolUseId === toolCall.id) {
+      clearRequestActivity(
+        context,
+        requestTurnId ? { kind: "foreground" as const, requestTurnId } : undefined,
+      );
+    }
+    return {
+      ok: false as const,
+      tool: name,
+      text: "cancelled: stale index tool result discarded",
+    };
+  };
+  if (!commitGuard()) return staleResult();
   const evidenceToolName =
     name === INDEX_OPERATION_TOOL_NAME
       ? INDEX_OPERATION_TOOL_NAME
@@ -3108,6 +3323,8 @@ export async function executeApprovedIndexToolUse(
         sessionId,
         "Write",
         `index ${action} resource guard: ${guard}`,
+        commitGuard,
+        toolCall.id,
       );
       await appendDeferredToolResultEvent(
         context,
@@ -3117,27 +3334,46 @@ export async function executeApprovedIndexToolUse(
         guard,
         true,
         evidence.id,
+        commitGuard,
       );
       writeLine(output, guard);
       return { ok: false, tool: name, text: guard, evidenceId: evidence.id };
     }
   }
   if (!context.isInkSession) {
-    startRequestActivity(output, context, "tool_running", { toolName: name });
+    startRequestActivity(output, context, "tool_running", {
+      toolName: name,
+      toolUseId: toolCall.id,
+      ...(requestTurnId ? { requestTurnId } : {}),
+    });
   }
+  if (!commitGuard()) return staleResult();
   if (action === "repair") {
     // 复用 /index repair 续跑：追加 ignore 条目后刷新（内部已有 writeLine 摘要）。
-    await runIndexSafetyRepair(context, output);
+    await runIndexSafetyRepair(context, output, {
+      signal: continuation?.abortSignal,
+      commitGuard,
+    });
   } else if (action === "init fast") {
     await runIndexRepository(context, "fast", "init fast", Boolean(force), output, {
       guardAlreadyChecked: true,
+      signal: continuation?.abortSignal,
+      commitGuard,
     });
   } else {
     await runIndexRepository(context, context.config.index.mode, "refresh", Boolean(force), output, {
       guardAlreadyChecked: true,
+      signal: continuation?.abortSignal,
+      commitGuard,
     });
   }
-  clearRequestActivity(context);
+  if (!commitGuard()) return staleResult();
+  if (context.requestActivityToolUseId === toolCall.id) {
+    clearRequestActivity(
+      context,
+      requestTurnId ? { kind: "foreground", requestTurnId } : undefined,
+    );
+  }
   const ok = context.index.status === "ready" || context.index.status === "stale";
   const text = ok
     ? summarizeIndexRefreshOutcome(
@@ -3163,8 +3399,16 @@ export async function executeApprovedIndexToolUse(
       `index-operation:${action}`,
       ["index_operation", `index_${action.replace(" ", "_")}`],
     );
+    evidence.toolUseId = toolCall.id;
+    scopeEvidenceToContext(context, evidence, { ownerSessionId: sessionId });
+    if (!commitGuard()) return staleResult();
+    await context.store.appendEvent(
+      sessionId,
+      { type: "evidence_record", ...evidence },
+      commitGuard,
+    );
+    if (!commitGuard()) return staleResult();
     rememberEvidence(context, evidence);
-    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendDeferredToolResultEvent(
       context,
       sessionId,
@@ -3173,6 +3417,7 @@ export async function executeApprovedIndexToolUse(
       { text },
       false,
       evidence.id,
+      commitGuard,
     );
     if (!context.isInkSession) {
       writeLine(output, primaryText);
@@ -3186,6 +3431,8 @@ export async function executeApprovedIndexToolUse(
     sessionId,
     "Write",
     `index ${action}: ${text}`,
+    commitGuard,
+    toolCall.id,
   );
   await appendDeferredToolResultEvent(
     context,
@@ -3195,6 +3442,7 @@ export async function executeApprovedIndexToolUse(
     text,
     true,
     evidence.id,
+    commitGuard,
   );
   if (!context.isInkSession) {
     writeLine(output, text);
@@ -4055,6 +4303,7 @@ function installToolProgressHandler(
   const toolContext = new Proxy(context.tools, {
     get(target, property, receiver) {
       if (property === "onProgress") return handler;
+      if (property === "abortSignal" && requestOwner && !task) return requestOwner.signal;
       if (property === "onBackgroundBashStart" && task) {
         return (taskId: string) => {
           context.backgroundBashTaskMap ??= new Map();

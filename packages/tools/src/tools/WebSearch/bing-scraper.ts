@@ -3,6 +3,7 @@ import type { ToolOutput } from "../../index.js";
 const BING_URL = "https://cn.bing.com/search";
 const TIMEOUT_MS = 20_000;
 const MAX_RESULTS_DEFAULT = 8;
+const MAX_RESPONSE_SIZE = 5 * 1024 * 1024;
 
 export type WebSearchInput = {
   query: string;
@@ -22,7 +23,13 @@ type BingScrapeResult =
   | {
       ok: false;
       error: string;
-      errorCode: "INVALID_INPUT" | "HTTP_ERROR" | "ABORTED" | "TIMEOUT" | "REQUEST_ERROR";
+      errorCode:
+        | "INVALID_INPUT"
+        | "HTTP_ERROR"
+        | "ABORTED"
+        | "TIMEOUT"
+        | "REQUEST_ERROR"
+        | "RESPONSE_TOO_LARGE";
       status?: number;
       aborted: boolean;
       timedOut: boolean;
@@ -95,18 +102,59 @@ export async function bingSearch(
       };
     }
 
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return {
+        ok: false,
+        error: "无法读取 Bing 响应内容",
+        errorCode: "REQUEST_ERROR",
+        aborted: false,
+        timedOut: false,
+      };
+    }
     const contentLength = Number(response.headers?.get("content-length"));
-    onProgress?.({
-      phase: "receiving",
-      transport: "https",
-      ...(Number.isFinite(contentLength) ? { receivedBytes: contentLength } : {}),
-    });
-    const html = await response.text();
+    if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_SIZE) {
+      void reader.cancel().catch(() => undefined);
+      return {
+        ok: false,
+        error: `Bing 响应超过 ${MAX_RESPONSE_SIZE} bytes 上限`,
+        errorCode: "RESPONSE_TOO_LARGE",
+        aborted: false,
+        timedOut: false,
+      };
+    }
+    const decoder = new TextDecoder("utf-8", { fatal: false });
+    let html = "";
+    let receivedBytes = 0;
+    onProgress?.({ phase: "receiving", transport: "https", receivedBytes });
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        receivedBytes += value.byteLength;
+        onProgress?.({ phase: "receiving", transport: "https", receivedBytes });
+        if (receivedBytes > MAX_RESPONSE_SIZE) {
+          void reader.cancel().catch(() => undefined);
+          return {
+            ok: false,
+            error: `Bing 响应超过 ${MAX_RESPONSE_SIZE} bytes 上限`,
+            errorCode: "RESPONSE_TOO_LARGE",
+            aborted: false,
+            timedOut: false,
+          };
+        }
+        html += decoder.decode(value, { stream: true });
+      }
+      html += decoder.decode();
+    } catch (error) {
+      void reader.cancel().catch(() => undefined);
+      throw error;
+    }
     const results = parseBingHtml(html, count);
     onProgress?.({
       phase: "processing",
       transport: "https",
-      receivedBytes: new TextEncoder().encode(html).byteLength,
+      receivedBytes,
       itemCount: results.length,
     });
     return { ok: true, results };

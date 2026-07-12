@@ -1,16 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Writable } from "node:stream";
-import type { TranscriptEvent } from "@linghun/core";
+import { resolveStoragePaths } from "@linghun/config";
 import type { ModelRequest } from "@linghun/providers";
 import { TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
+import { createToolContext } from "@linghun/tools";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import {
   createHandoffPacket,
   formatResumePacket,
   hydrateResumeContext,
   validateHandoffPacket,
+  writeHandoffPacket,
 } from "./handoff-session-runtime.js";
 import { bindSessionRuntimeStorage } from "./session-runtime-storage.js";
 import type { TuiContext } from "./index.js";
@@ -18,6 +20,7 @@ import {
   applyMemoryExtractionDecision,
   decideMemoryExtraction,
   findUnsavableReason,
+  readPersistentMemoryLearningState,
   topicForSummary,
   type MemoryExtractionDecision,
   type PersistentMemoryCommitResult,
@@ -66,6 +69,7 @@ export type MemoryCommandRuntimeDeps = {
     sessionId: string,
     message: string,
     level: "info" | "warning",
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   ensureSession: (context: TuiContext) => Promise<string>;
   requestMemoryMutationApproval: (
@@ -95,6 +99,7 @@ export type MemoryLearningTurnOwner = {
   requestTurnId: string;
   sessionId: string;
   signal: AbortSignal;
+  isCurrent?: () => boolean;
 };
 
 let runtimeDeps: MemoryCommandRuntimeDeps | undefined;
@@ -108,10 +113,6 @@ function deps(): MemoryCommandRuntimeDeps {
     throw new Error("memory-command-runtime deps not configured");
   }
   return runtimeDeps;
-}
-
-function isSessionEnded(transcript: TranscriptEvent[]): boolean {
-  return transcript.at(-1)?.type === "session_end";
 }
 
 /**
@@ -233,6 +234,10 @@ export async function handleMemoryCommand(
     }
     if (subAction === "off") {
       context.memory.learningMode = "off";
+      if (context.memoryAutoLearningRuntime) {
+        context.memoryAutoLearningRuntime.latestRequestTurnId = undefined;
+        context.memoryAutoLearningRuntime.trailing = undefined;
+      }
       await writeMemoryLearningMode(context);
       const sessionId = await deps().ensureSession(context);
       await deps().appendSystemEvent(context, sessionId, "memory learning mode off", "info");
@@ -413,29 +418,92 @@ export async function resumeSessionWithHandoff(
   output: Writable,
   source: "resume" | "sessions resume",
 ): Promise<void> {
+  let candidateChildId: string | undefined;
+  let candidateMemorySessionDir: string | undefined;
   try {
     const resumed = await context.store.resume(sessionId);
-    context.memory = await createMemoryState(context.config, context.projectPath);
-    context.deepCompactInFlight = undefined;
-    context.cache = createCacheState(
+    const sourceSessionId = resumed.session.id;
+    const tools = createToolContext(context.projectPath);
+    tools.logRoot = context.tools.logRoot;
+    tools.isHeadlessBench = context.tools.isHeadlessBench;
+    tools.onBackgroundBashStart = context.tools.onBackgroundBashStart;
+    tools.onBackgroundBashComplete = context.tools.onBackgroundBashComplete;
+    tools.trackChildProcess = context.tools.trackChildProcess;
+    const resumedContext = {
+      ...context,
+      memory: await createMemoryState(context.config, context.projectPath),
+      deepCompactInFlight: undefined,
+      cache: createCacheState(
       context.projectPath,
       resumed.session.model,
       context.mcp.tools,
       context.config,
+      ),
+      sessionId: sourceSessionId,
+      sessionStoreVerifiedId: sourceSessionId,
+      model: resumed.session.model,
+      tools,
+      evidence: [],
+      checkpoints: [],
+      lastVerification: undefined,
+      latestVerificationRunId: undefined,
+      latestVerificationRunIds: new Map<string, string>(),
+      toolResultBudgetState: undefined,
+      currentRequestTurnId: undefined,
+      currentRequestChangedFiles: undefined,
+      currentRequestMentionedFiles: undefined,
+      currentRequestUserMessageId: undefined,
+      currentUserActionConstraints: undefined,
+      currentUserActionConstraintsRequestTurnId: undefined,
+      activeAbortController: undefined,
+      foregroundAbortPendingUntilMs: undefined,
+      pendingNaturalCommand: undefined,
+      pendingLocalApproval: undefined,
+      pendingAutopilot: undefined,
+      pendingModelSetup: undefined,
+      pendingPromptCommand: undefined,
+      requestActivity: undefined,
+      requestActivityOwner: undefined,
+      requestActivityPhase: undefined,
+      requestActivityToolName: undefined,
+      requestActivityToolUseId: undefined,
+      requestActivityToolLines: undefined,
+      requestActivityToolBytes: undefined,
+      recentlyMentionedFiles: [],
+    } satisfies TuiContext;
+    bindSessionRuntimeStorage(resumedContext, sourceSessionId);
+    hydrateResumeContext(resumedContext, resumed.transcript);
+    const child = await context.store.create({
+      model: resumed.session.model,
+      summary: resumed.session.summary,
+    });
+    candidateChildId = child.id;
+    resumedContext.sessionId = child.id;
+    resumedContext.sessionStoreVerifiedId = child.id;
+    bindSessionRuntimeStorage(resumedContext, child.id);
+    candidateMemorySessionDir = resumedContext.memory.sessionDir;
+    resumedContext.sessionEnded = false;
+    const packet = createHandoffPacket(
+      resumedContext,
+      resumed.transcript,
+      sourceSessionId,
+      child.id,
     );
-    context.sessionId = resumed.session.id;
-    context.sessionStoreVerifiedId = resumed.session.id;
-    bindSessionRuntimeStorage(context, resumed.session.id);
-    context.sessionEnded = isSessionEnded(resumed.transcript);
-    context.model = resumed.session.model;
-    context.evidence = [];
-    context.toolResultBudgetState = undefined;
-    hydrateResumeContext(context, resumed.transcript);
+    resumedContext.memory.lastHandoff = packet;
+    await writeHandoffPacket(resumedContext, packet);
+    await context.store.appendEvent(child.id, {
+      type: "handoff_packet",
+      packet,
+      createdAt: new Date().toISOString(),
+    });
+    if (context.requestActivity?.slowTimer) clearTimeout(context.requestActivity.slowTimer);
+    Object.assign(context, resumedContext);
+    candidateChildId = undefined;
+    candidateMemorySessionDir = undefined;
     deps().refreshCacheFreshness(context);
-    const packet = context.memory.lastHandoff ?? createHandoffPacket(context, resumed.transcript);
     const missing = validateHandoffPacket(packet);
     context.memory.lastResumeReadonly = missing.length > 0;
-    writeLine(output, `已恢复会话：${resumed.session.id}`);
+    writeLine(output, `已恢复会话：${sourceSessionId} → 新会话：${child.id}`);
     writeLine(output, `恢复方式：${source}；不会把完整 transcript 塞回上下文。`);
     writeLine(output, formatResumePacket(packet, missing, context));
     if (context.index.status === "stale" || context.index.status === "missing") {
@@ -446,7 +514,25 @@ export async function resumeSessionWithHandoff(
     }
     deps().writeStatus(output, context);
   } catch (error) {
+    let cleanupError: unknown;
+    if (candidateChildId) {
+      try {
+        await context.store.delete(candidateChildId);
+      } catch (cause) {
+        cleanupError = cause;
+      }
+    }
+    if (candidateMemorySessionDir) {
+      try {
+        await rm(candidateMemorySessionDir, { recursive: true, force: true });
+      } catch (cause) {
+        cleanupError ??= cause;
+      }
+    }
     writeErrorLine(output, formatError(error));
+    if (cleanupError) {
+      writeErrorLine(output, `resume child cleanup failed: ${formatError(cleanupError)}`);
+    }
   }
 }
 
@@ -459,13 +545,30 @@ async function appendMemoryLifecycleEvent(
   sessionId: string,
   action: string,
   memory: MemoryCandidate,
+  commitGuard?: () => boolean,
 ): Promise<void> {
-  await deps().appendSystemEvent(
+  await appendMemorySystemEvent(
     context,
     sessionId,
     `memory_lifecycle action=${action} id=${memory.id} scope=${memory.scope} status=${memory.status} source=${memory.source}`,
     action === "deleted" ? "warning" : "info",
+    commitGuard,
   );
+}
+
+async function appendMemorySystemEvent(
+  context: TuiContext,
+  sessionId: string,
+  message: string,
+  level: "info" | "warning",
+  commitGuard?: () => boolean,
+): Promise<void> {
+  if (!commitGuard) {
+    await deps().appendSystemEvent(context, sessionId, message, level);
+    return;
+  }
+  if (!commitGuard()) return;
+  await deps().appendSystemEvent(context, sessionId, message, level, commitGuard);
 }
 
 function applyPersistentMemoryCommit(
@@ -697,6 +800,9 @@ export async function runAutoLearningOnTurnEnd(
   if (!isMemoryLearningOwnerCurrent(context, owner)) {
     return createSkippedMemoryLearningRun("stale_request_owner");
   }
+  if (owner && !(await refreshPersistedLearningModeForAutoLearning(context))) {
+    return createSkippedMemoryLearningRun("learning_mode=off");
+  }
 
   const deterministicDecision = decideMemoryExtraction({
     recentMessages: [userInput],
@@ -704,23 +810,23 @@ export async function runAutoLearningOnTurnEnd(
     disabled: context.memory.disabled,
     candidates: context.memory.candidates,
   });
-  const semanticDecision = await decideMemoryExtractionWithSemanticClassifier(
+  const semantic = await decideMemoryExtractionWithSemanticClassifier(
     context,
     userInput,
     owner,
   );
   if (!isMemoryLearningOwnerCurrent(context, owner)) {
-    return createSkippedMemoryLearningRun("stale_request_owner");
+    return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
   }
   const decision =
-    semanticDecision ??
+    semantic.decision ??
     (owner && deterministicDecision.action !== "no-op"
       ? { action: "no-op" as const, reason: "semantic_classifier_unavailable" }
       : deterministicDecision);
 
   if (decision.action === "create" || decision.action === "update") {
     if (!isMemoryLearningOwnerCurrent(context, owner)) {
-      return createSkippedMemoryLearningRun("stale_request_owner");
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
     }
     const existing = context.memory.accepted.find((item) => item.id === decision.id);
     const applied = await applyMemoryExtractionDecision({
@@ -730,126 +836,199 @@ export async function runAutoLearningOnTurnEnd(
     if (!applied.memory) {
       throw new Error("memory extraction returned no accepted memory");
     }
+    if (
+      owner &&
+      (!(await refreshPersistedLearningModeForAutoLearning(context)) ||
+        !isMemoryLearningOwnerCurrent(context, owner))
+    ) {
+      return createSkippedMemoryLearningRun("stale_request_owner_or_learning_mode", semantic.modelCalled);
+    }
     const commit = await writeMemoryRecord(applied.memory, context, {
       expected: existing,
       commitGuard: owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined,
+      requireActiveLearning: Boolean(owner),
     });
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
     if (!memoryCommitAccepted(context, applied.memory, commit)) {
-      return createSkippedMemoryLearningRun(`memory_extraction:${commit?.status ?? "stale"}`);
+      return createSkippedMemoryLearningRun(
+        `memory_extraction:${commit?.status ?? "stale"}`,
+        semantic.modelCalled,
+      );
     }
     const committedMemory = commit?.memory ?? applied.memory;
     const sessionId = owner?.sessionId ?? (await deps().ensureSession(context));
-    await context.store.appendEvent(sessionId, {
-      type: "memory_accepted",
-      memory: committedMemory,
-      createdAt: new Date().toISOString(),
-    });
-    await appendMemoryLifecycleEvent(context, sessionId, `auto_${decision.action}`, committedMemory);
-    await deps().recordMemoryMutationEvidence(
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
+    await context.store.appendEvent(
+      sessionId,
+      {
+        type: "memory_accepted",
+        memory: committedMemory,
+        createdAt: new Date().toISOString(),
+      },
+      owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined,
+    );
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
+    const commitGuard = owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined;
+    await appendMemoryLifecycleEvent(
       context,
       sessionId,
       `auto_${decision.action}`,
       committedMemory,
+      commitGuard,
     );
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
     const run: MemoryLearningRun = {
       trigger: "evidence",
       candidatesCreated: 0,
       acceptedCreated: decision.action === "create" ? 1 : 0,
       acceptedUpdated: decision.action === "update" ? 1 : 0,
-      modelCalled: false,
+      modelCalled: semantic.modelCalled,
       createdAt: new Date().toISOString(),
     };
-    context.memory.lastLearningRun = run;
-    await deps().appendSystemEvent(
+    await appendMemorySystemEvent(
       context,
       sessionId,
       `auto_memory_extraction action=${decision.action} taxonomy=${decision.taxonomy} topic=${decision.topic}`,
       "info",
+      commitGuard,
     );
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
+    context.memory.lastLearningRun = run;
     deps().refreshCacheFreshness(context);
     return run;
   }
 
   if (decision.action === "delete") {
     if (!isMemoryLearningOwnerCurrent(context, owner)) {
-      return createSkippedMemoryLearningRun("stale_request_owner");
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
     }
     const existing = context.memory.accepted.find((item) => item.id === decision.id);
     if (!existing) {
       return {
         trigger: "manual",
         candidatesCreated: 0,
-        modelCalled: false,
+        modelCalled: semantic.modelCalled,
         skippedReason: "memory_extraction:memory_forget_target_not_found",
         createdAt: new Date().toISOString(),
       };
     }
     const sessionId = owner?.sessionId ?? (await deps().ensureSession(context));
+    if (
+      owner &&
+      (!(await refreshPersistedLearningModeForAutoLearning(context)) ||
+        !isMemoryLearningOwnerCurrent(context, owner))
+    ) {
+      return createSkippedMemoryLearningRun("stale_request_owner_or_learning_mode", semantic.modelCalled);
+    }
     const commit = await removeMemoryRecord(existing, context, {
       sessionId,
       requestTurnId: owner?.requestTurnId,
       commitGuard: owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined,
+      requireActiveLearning: Boolean(owner),
     });
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
     if (!memoryCommitAccepted(context, existing, commit)) {
-      return createSkippedMemoryLearningRun(`memory_extraction:${commit?.status ?? "stale"}`);
+      return createSkippedMemoryLearningRun(
+        `memory_extraction:${commit?.status ?? "stale"}`,
+        semantic.modelCalled,
+      );
     }
     if (existing.scope === "session") removeMemoryFromState(context.memory, existing.id);
-    await appendMemoryLifecycleEvent(context, sessionId, "deleted", existing);
-    await deps().recordMemoryMutationEvidence(context, sessionId, "auto_deleted", existing);
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
+    const commitGuard = owner ? () => isMemoryLearningOwnerCurrent(context, owner) : undefined;
+    await appendMemoryLifecycleEvent(
+      context,
+      sessionId,
+      "deleted",
+      existing,
+      commitGuard,
+    );
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
     const run: MemoryLearningRun = {
       trigger: "evidence",
       candidatesCreated: 0,
       acceptedDeleted: 1,
-      modelCalled: false,
+      modelCalled: semantic.modelCalled,
       createdAt: new Date().toISOString(),
     };
-    context.memory.lastLearningRun = run;
-    await deps().appendSystemEvent(
+    await appendMemorySystemEvent(
       context,
       sessionId,
       `auto_memory_extraction action=delete taxonomy=${decision.taxonomy} topic=${decision.topic}`,
       "info",
+      commitGuard,
     );
+    if (!isMemoryLearningOwnerCurrent(context, owner)) {
+      return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+    }
+    context.memory.lastLearningRun = run;
     deps().refreshCacheFreshness(context);
     return run;
   }
 
-  return {
+  const run: MemoryLearningRun = {
     trigger: "manual",
     candidatesCreated: 0,
-    modelCalled: false,
+    modelCalled: semantic.modelCalled,
     skippedReason:
       decision.action === "no-op"
         ? `memory_extraction:${decision.reason}${decision.blockedBy ? `:${decision.blockedBy}` : ""}`
         : "no_learnable_content",
     createdAt: new Date().toISOString(),
   };
+  if (!isMemoryLearningOwnerCurrent(context, owner)) {
+    return createSkippedMemoryLearningRun("stale_request_owner", semantic.modelCalled);
+  }
+  context.memory.lastLearningRun = run;
+  return run;
 }
 
 async function decideMemoryExtractionWithSemanticClassifier(
   context: TuiContext,
   userInput: string,
   owner?: MemoryLearningTurnOwner,
-): Promise<MemoryExtractionDecision | undefined> {
-  if (!context.modelGateway) return undefined;
-  if (userInput.trim().length < 8 || userInput.length > 2400) return undefined;
+): Promise<{ decision?: MemoryExtractionDecision; modelCalled: boolean }> {
+  if (!context.modelGateway) return { modelCalled: false };
+  if (userInput.trim().length < 8 || userInput.length > 2400) return { modelCalled: false };
+  if (!isMemoryLearningOwnerCurrent(context, owner)) return { modelCalled: false };
   const prompt = buildSemanticMemoryClassifierPrompt(context, userInput);
-  const text = await streamSemanticMemoryJson(
+  const classified = await streamSemanticMemoryJson(
     context,
     "You are Linghun's memory extraction classifier. Return exactly one compact JSON object and no prose.",
     prompt,
     500,
     owner,
   );
-  if (!text) return undefined;
-  const decision = parseSemanticMemoryDecision(text, context, userInput);
-  if (!decision || decision.action === "no-op") return decision;
-  if (!isMemoryLearningOwnerCurrent(context, owner)) return undefined;
+  if (!classified.text) return { modelCalled: classified.modelCalled };
+  const decision = parseSemanticMemoryDecision(classified.text, context, userInput);
+  if (!decision || decision.action === "no-op") {
+    return { ...(decision ? { decision } : {}), modelCalled: true };
+  }
+  if (!isMemoryLearningOwnerCurrent(context, owner)) return { modelCalled: true };
   const vetoed = await shouldVetoMemoryWriteForCurrentTurn(context, userInput, decision, owner);
   if (vetoed === true) {
-    return { action: "no-op", reason: "semantic_current_turn_memory_control" };
+    return {
+      decision: { action: "no-op", reason: "semantic_current_turn_memory_control" },
+      modelCalled: true,
+    };
   }
-  return decision;
+  return { decision, modelCalled: true };
 }
 
 async function streamSemanticMemoryJson(
@@ -858,8 +1037,9 @@ async function streamSemanticMemoryJson(
   prompt: string,
   maxOutputTokens: number,
   owner?: MemoryLearningTurnOwner,
-): Promise<string | undefined> {
-  if (!context.modelGateway) return undefined;
+): Promise<{ text?: string; modelCalled: boolean }> {
+  if (!context.modelGateway) return { modelCalled: false };
+  if (!isMemoryLearningOwnerCurrent(context, owner)) return { modelCalled: false };
   const runtime = getSelectedModelRuntime(context);
   const controller = new AbortController();
   const abortForOwner = (): void => controller.abort(owner?.signal.reason);
@@ -869,6 +1049,7 @@ async function streamSemanticMemoryJson(
     owner?.signal.addEventListener("abort", abortForOwner, { once: true });
   }
   const timeout = setTimeout(() => controller.abort(), 20_000);
+  let modelCalled = false;
   try {
     let text = "";
     const request: ModelRequest = {
@@ -887,6 +1068,7 @@ async function streamSemanticMemoryJson(
         { role: "user", content: prompt },
       ],
     };
+    modelCalled = true;
     for await (const event of withProviderRetry(
       context.modelGateway,
       context.providerBreaker,
@@ -900,13 +1082,18 @@ async function streamSemanticMemoryJson(
         },
       },
     )) {
-      if (controller.signal.aborted) return undefined;
+      if (controller.signal.aborted) return { modelCalled };
+      if (owner?.signal.aborted) {
+        controller.abort();
+        continue;
+      }
+      if (!isMemoryLearningOwnerCurrent(context, owner)) continue;
       if (event.type === "assistant_text_delta") text += event.text;
-      if (event.type === "error") return undefined;
+      if (event.type === "error") return { modelCalled };
     }
-    return controller.signal.aborted ? undefined : text;
+    return controller.signal.aborted ? { modelCalled } : { text, modelCalled };
   } catch {
-    return undefined;
+    return { modelCalled };
   } finally {
     clearTimeout(timeout);
     owner?.signal.removeEventListener("abort", abortForOwner);
@@ -984,14 +1171,14 @@ async function shouldVetoMemoryWriteForCurrentTurn(
     },
     latestUserMessage: userInput,
   });
-  const text = await streamSemanticMemoryJson(
+  const classified = await streamSemanticMemoryJson(
     context,
     "You are Linghun's memory-control veto classifier. Return exactly one compact JSON object and no prose.",
     prompt,
     200,
     owner,
   );
-  const parsed = text ? parseJsonObject(text) : undefined;
+  const parsed = classified.text ? parseJsonObject(classified.text) : undefined;
   return typeof parsed?.veto === "boolean" ? parsed.veto : undefined;
 }
 
@@ -1126,16 +1313,33 @@ function isMemoryLearningOwnerCurrent(
   return (
     !owner ||
     (!owner.signal.aborted &&
-      context.currentRequestTurnId === owner.requestTurnId &&
+      context.memory.learningMode === "active" &&
+      (owner.isCurrent ? owner.isCurrent() : context.currentRequestTurnId === owner.requestTurnId) &&
       context.sessionId === owner.sessionId)
   );
 }
 
-function createSkippedMemoryLearningRun(reason: string): MemoryLearningRun {
+async function refreshPersistedLearningModeForAutoLearning(context: TuiContext): Promise<boolean> {
+  const userDir = context.memory.userDir || resolveStoragePaths(context.config, context.projectPath).memoryUser;
+  const persisted = await readPersistentMemoryLearningState(userDir);
+  if (!persisted) return context.memory.learningMode === "active";
+  Object.assign(context.memory, persisted);
+  if (persisted.learningMode === "active") return true;
+  if (context.memoryAutoLearningRuntime) {
+    context.memoryAutoLearningRuntime.latestRequestTurnId = undefined;
+    context.memoryAutoLearningRuntime.trailing = undefined;
+  }
+  return false;
+}
+
+function createSkippedMemoryLearningRun(
+  reason: string,
+  modelCalled = false,
+): MemoryLearningRun {
   return {
     trigger: "manual",
     candidatesCreated: 0,
-    modelCalled: false,
+    modelCalled,
     skippedReason: `memory_extraction:${reason}`,
     createdAt: new Date().toISOString(),
   };

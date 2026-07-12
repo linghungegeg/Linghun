@@ -46,6 +46,7 @@ import {
 } from "./failure-learning-runtime.js";
 import { hydrateResumeContext, loadOrCreateHandoffPacket } from "./handoff-session-runtime.js";
 import { createIndexState } from "./index-runtime.js";
+import { withMemoryDirectoryLock } from "./memory-extraction-runtime.js";
 import { createMcpStdioRunner, runMcpStdioToolCall } from "./mcp-stdio-runtime.js";
 import { mcpSseRequest, type McpTransportLimits } from "./mcp-sse-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
@@ -1988,6 +1989,38 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
     expect(context.evidence[0]?.supportsClaims).toContain("verification_passed");
   });
 
+  it("keeps stale failure learning out of context and transcript", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const beforeTranscript = (await context.store.resume(sessionId)).transcript;
+    let ownerIsCurrent = true;
+    let pendingCapture: Promise<void>;
+
+    await withMemoryDirectoryLock(context.failureLearning.directory, async () => {
+      pendingCapture = captureFailureLearning(
+        context,
+        sessionId,
+        {
+          category: "tool_failure",
+          failureSummary: "Read failed",
+          rootCauseGuess: "missing file",
+          avoidNextTime: "check file exists",
+          sourceRef: "tool:Read",
+          relatedTarget: "Read",
+        },
+        () => ownerIsCurrent,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      ownerIsCurrent = false;
+    });
+    await pendingCapture!;
+
+    expect(context.failureLearning.records).toEqual([]);
+    expect(context.lastMetaSchedulerFailureLearningFulfilled).not.toBe(true);
+    expect(context.lastToolFailure).toBeUndefined();
+    expect((await context.store.resume(sessionId)).transcript).toEqual(beforeTranscript);
+  });
+
   it("refreshes freshness, executes break-cache mutations, and consumes request fields safely", async () => {
     const context = await createTestContext();
     context.permissionMode = "full-access";
@@ -2142,13 +2175,29 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
     });
 
     const packet = await loadOrCreateHandoffPacket(context, "parent-session");
-    expect(packet.id).toBe("handoff-1");
+    expect(packet.id).not.toBe("handoff-1");
+    expect(packet.evidenceRefs).toContainEqual(expect.objectContaining({ id: "ev-1" }));
     expect(packet.solutionCompleteness).toBe(context.solutionCompleteness);
 
-    context.memory.lastHandoff = undefined;
+    context.tools.todos = [
+      { id: "fresh-agent-todo", content: "dispatch fresh agent context", status: "in_progress" },
+    ];
+    context.evidence = [
+      {
+        id: "ev-fresh-agent",
+        kind: "file_read",
+        summary: "fresh agent evidence",
+        source: "src/fresh-agent.ts",
+        supportsClaims: ["code_fact"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
     const created = await loadOrCreateHandoffPacket(context, "parent-session", context.sessionId);
-    expect(created.evidenceRefs.length).toBeGreaterThan(0);
-    expect(created.keyFiles).toContain("src/a.ts");
+    expect(created.id).not.toBe(packet.id);
+    expect(created.goal).toBe("dispatch fresh agent context");
+    expect(created.evidenceRefs).toContainEqual(expect.objectContaining({ id: "ev-fresh-agent" }));
+    expect(created.evidenceRefs).not.toContainEqual(expect.objectContaining({ id: "ev-1" }));
+    expect(created.keyFiles).toContain("src/fresh-agent.ts");
   });
 });
 

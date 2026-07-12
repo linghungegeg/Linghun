@@ -258,6 +258,42 @@ describe("D.14G stable point matrix", () => {
     expect(outcome.kind).toBe("failed");
     if (outcome.kind === "failed") expect(outcome.reason).toContain("nothing to commit");
   });
+
+  it("abort during git commit reaches the active runner and stops the stable point", async () => {
+    const controller = new AbortController();
+    let markCommitStarted: (() => void) | undefined;
+    const commitStarted = new Promise<void>((resolve) => {
+      markCommitStarted = resolve;
+    });
+    const runner: GitRunner = async (_cwd, args, abortSignal) => {
+      if (args[0] === "commit") {
+        markCommitStarted?.();
+        return await new Promise<GitRunResult>((resolve) => {
+          abortSignal?.addEventListener("abort", () => resolve(fail("aborted")), { once: true });
+        });
+      }
+      if (args[0] === "status") return ok("## main\n M a.ts");
+      if (args[0] === "log") return ok("abc1234\tfeat: prior");
+      if (args[0] === "branch") return ok("main");
+      if (args[0] === "rev-parse") {
+        return ok(args[1] === "--show-toplevel" ? "/repo" : "true");
+      }
+      if (args[0] === "add") return ok("");
+      return fail(`unexpected git command: ${args.join(" ")}`);
+    };
+
+    const outcomePromise = createGitStablePoint(
+      "/repo",
+      { message: "x" },
+      runner,
+      controller.signal,
+    );
+    await commitStarted;
+    controller.abort();
+
+    const outcome = await outcomePromise;
+    expect(outcome).toEqual({ kind: "failed", reason: "aborted" });
+  });
 });
 
 describe("D.14G managed worktree create", () => {
@@ -363,6 +399,44 @@ describe("D.14G managed worktree create", () => {
     const { runner } = makeRecordingRunner(entries);
     const outcome = await createManagedWorktree(repoRoot, { name: "feat" }, runner);
     expect(outcome.kind).toBe("failed");
+  });
+
+  it("abort during worktree add reaches the active runner and prevents success", async () => {
+    const controller = new AbortController();
+    let markAddStarted: (() => void) | undefined;
+    const addStarted = new Promise<void>((resolve) => {
+      markAddStarted = resolve;
+    });
+    const runner: GitRunner = async (_cwd, args, abortSignal) => {
+      if (args[0] === "worktree" && args[1] === "add") {
+        markAddStarted?.();
+        return await new Promise<GitRunResult>((resolve) => {
+          abortSignal?.addEventListener("abort", () => resolve(fail("aborted")), { once: true });
+        });
+      }
+      if (args[0] === "worktree" && args[1] === "list") {
+        return ok(`worktree ${repoRoot}\nHEAD abc\nbranch refs/heads/main\n`);
+      }
+      if (args[0] === "rev-parse" && args[1] === "--path-format=absolute") {
+        return ok(join(repoRoot, ".git"));
+      }
+      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return ok(repoRoot);
+      if (args[0] === "rev-parse") return ok("true");
+      return fail(`unexpected git command: ${args.join(" ")}`);
+    };
+
+    const outcomePromise = createManagedWorktree(
+      repoRoot,
+      { name: "feat" },
+      runner,
+      new Date("2026-01-01T00:00:00Z"),
+      controller.signal,
+    );
+    await addStarted;
+    controller.abort();
+
+    const outcome = await outcomePromise;
+    expect(outcome).toEqual({ kind: "failed", reason: "aborted" });
   });
 
   it("not a git repo → not_a_git_repo", async () => {
@@ -489,6 +563,40 @@ describe("D.14G managed worktree remove", () => {
     ]);
     const result = await executeManagedWorktreeRemove(repoRoot, managedTarget, false, runner);
     expect(result.kind).toBe("failed");
+  });
+
+  it("abort during worktree remove reaches the active runner and prevents success", async () => {
+    const controller = new AbortController();
+    let markRemoveStarted: (() => void) | undefined;
+    const removeStarted = new Promise<void>((resolve) => {
+      markRemoveStarted = resolve;
+    });
+    const runner: GitRunner = async (_cwd, args, abortSignal) => {
+      if (args[0] === "worktree" && args[1] === "remove") {
+        markRemoveStarted?.();
+        return await new Promise<GitRunResult>((resolve) => {
+          abortSignal?.addEventListener("abort", () => resolve(fail("aborted")), { once: true });
+        });
+      }
+      if (args[0] === "rev-parse" && args[1] === "--path-format=absolute") {
+        return ok(`${repoRoot}/.git`);
+      }
+      if (args[0] === "rev-parse") return ok("true");
+      return fail(`unexpected git command: ${args.join(" ")}`);
+    };
+
+    const resultPromise = executeManagedWorktreeRemove(
+      repoRoot,
+      managedTarget,
+      false,
+      runner,
+      controller.signal,
+    );
+    await removeStarted;
+    controller.abort();
+
+    const result = await resultPromise;
+    expect(result).toEqual({ kind: "failed", reason: "aborted" });
   });
 });
 

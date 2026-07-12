@@ -1722,13 +1722,21 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   if (options.onEvent) {
     const { onEvent } = options;
     const _origAppend = store.appendEvent.bind(store);
-    store.appendEvent = async (sessionId, event) => {
+    store.appendEvent = async (sessionId, event, commitGuard) => {
+      let appendApproved = commitGuard === undefined;
+      const trackedCommitGuard = commitGuard
+        ? () => {
+            appendApproved = commitGuard();
+            return appendApproved;
+          }
+        : undefined;
+      await _origAppend(sessionId, event, trackedCommitGuard);
+      if (!appendApproved) return;
       try {
         onEvent(event);
       } catch {
         // 旁路回调异常不得影响引擎事件写入
       }
-      return _origAppend(sessionId, event);
     };
   }
   context.permissionMode = options.mode ?? "full-access";
@@ -2799,6 +2807,41 @@ export function __testBindCompactOutputMemoryForShell(
   context.compactOutputMemory = (options) => shellOutput.compactOutputMemory(options);
 }
 
+async function claimAndPersistAllowAlwaysApproval(
+  approval: Extract<PendingLocalApproval, { kind: "model_tool_use" }>,
+  context: TuiContext,
+  gateway: ModelGateway | undefined,
+  output: Writable,
+  persistRule: typeof addAllowRule = addAllowRule,
+): Promise<{
+  result: Awaited<ReturnType<typeof addAllowRule>>;
+  restored: boolean;
+}> {
+  context.pendingLocalApproval = undefined;
+  const risk: PermissionRule["risk"] = approval.toolName === "Bash" ? "high" : "medium";
+  const result = await persistRule(context, approval.toolName, risk);
+  if (result.kind !== "save_failed" && result.kind !== "invalid") {
+    return { result, restored: false };
+  }
+  if (!context.pendingLocalApproval) {
+    context.pendingLocalApproval = approval;
+    return { result, restored: true };
+  }
+  await executePermissionDeny(
+    approval,
+    context,
+    gateway,
+    output,
+    true,
+    result.kind === "save_failed"
+      ? "allow_always_save_failed_superseded"
+      : "allow_always_invalid_superseded",
+  );
+  return { result, restored: false };
+}
+
+export const __testClaimAndPersistAllowAlwaysApproval = claimAndPersistAllowAlwaysApproval;
+
 async function runInkShell(
   input: Readable,
   output: Writable,
@@ -3789,7 +3832,8 @@ async function runInkShell(
             return;
           }
           case "allow_always_tool": {
-            // 修正 #3：先持久化 allow rule，成功后再 approve；失败则不 approve、保留 pending
+            // 修正 #3：先原子取走本次 approval，再持久化 allow rule；成功后只 approve
+            // 已取走的 approval，不清理期间可能出现的新 approval。失败时仅在槽为空时恢复。
             if (approval.kind !== "model_tool_use") {
               writeLine(
                 shellOutput,
@@ -3802,8 +3846,12 @@ async function runInkShell(
               return;
             }
             const tool = approval.toolName;
-            const risk: PermissionRule["risk"] = tool === "Bash" ? "high" : "medium";
-            const result = await addAllowRule(context, tool, risk);
+            const { result, restored } = await claimAndPersistAllowAlwaysApproval(
+              approval,
+              context,
+              gateway,
+              shellOutput,
+            );
             // D.13L Block 0-C — 权限卡里的"项目级允许"反馈降噪：
             // 不再把 "已添加权限规则：<uuid> allow Bash high" 这类含 rule.id 的审计文案
             // 直接写到主屏。added / duplicate 都视为持久化成功，给同一句"已记住"。
@@ -3835,9 +3883,13 @@ async function runInkShell(
               );
               writeLine(
                 shellOutput,
-                isEn
-                  ? "Permission rule was not persisted; pending approval kept."
-                  : "权限规则未保存；当前 pending 仍保留，可重试或选择其它动作。",
+                restored
+                  ? isEn
+                    ? "Permission rule was not persisted; pending approval kept."
+                    : "权限规则未保存；当前 pending 仍保留，可重试或选择其它动作。"
+                  : isEn
+                    ? "Permission rule was not persisted; the superseded action was cancelled without replacing the newer approval."
+                    : "权限规则未保存；旧动作已安全取消，未覆盖新的待审批动作。",
               );
               shell?.rerender();
               await shell?.waitUntilRenderFlush();
@@ -3850,7 +3902,6 @@ async function runInkShell(
               return;
             }
             // duplicate / added 都视为持久化成功 → approve
-            context.pendingLocalApproval = undefined;
             await refreshApprovedPermissionProgress(approval);
             await executePermissionApprove(approval, context, gateway, shellOutput);
             shell?.rerender();

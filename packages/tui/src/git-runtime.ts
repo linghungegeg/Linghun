@@ -24,7 +24,11 @@ const GIT_TIMEOUT_MS = 5000;
  */
 export type GitRunResult = { stdout: string; ok: boolean; stderr: string };
 
-export type GitRunner = (cwd: string, args: string[]) => Promise<GitRunResult>;
+export type GitRunner = (
+  cwd: string,
+  args: string[],
+  abortSignal?: AbortSignal,
+) => Promise<GitRunResult>;
 
 export type GitStatus =
   | { kind: "not_a_git_repo" }
@@ -84,10 +88,15 @@ export type StablePointHint = {
  * longer timeout than the 5s read-only probe default.
  */
 export function createGitRunner(timeoutMs: number): GitRunner {
-  return async (cwd: string, args: string[]): Promise<GitRunResult> => {
+  return async (
+    cwd: string,
+    args: string[],
+    abortSignal?: AbortSignal,
+  ): Promise<GitRunResult> => {
     try {
       const { stdout, stderr } = await execFileAsync("git", args, {
         cwd,
+        signal: abortSignal,
         timeout: timeoutMs,
         maxBuffer: 4 * 1024 * 1024,
         env: {

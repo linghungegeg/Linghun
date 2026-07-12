@@ -46,7 +46,6 @@ import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtim
 import type { TuiContext } from "./index.js";
 import {
   type MetaOrchestrationAction,
-  handleProviderRetryForMetaOrchestration,
   recordMetaOrchestrationRuntimeEvent,
   resolveMetaOrchestrationAction,
 } from "./meta-orchestration-runtime.js";
@@ -270,6 +269,7 @@ export type JobAgentCommandRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     task: BackgroundTaskState,
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   appendRouteDecisionEvent: (
     context: TuiContext,
@@ -331,6 +331,7 @@ export type JobAgentCommandRuntimeDeps = {
     toolName: ToolName,
     output: ToolOutput,
     input: unknown,
+    commitGuard?: () => boolean,
   ) => Promise<string | undefined>;
   recordAgentToolFailureEvidence: (
     context: TuiContext,
@@ -338,6 +339,7 @@ export type JobAgentCommandRuntimeDeps = {
     agent: AgentRun,
     toolName: ToolName,
     summary: string,
+    commitGuard?: () => boolean,
   ) => Promise<string | undefined>;
   recordToolResultBudgetEvidence: (
     context: TuiContext,
@@ -535,14 +537,19 @@ async function appendAgentLifecycleSystemEvent(
   agent: AgentRun,
   message: string,
   level: "info" | "warning" = "info",
+  commitGuard?: () => boolean,
 ): Promise<void> {
-  await context.store.appendEvent(agent.transcriptSessionId, {
-    type: "system_event",
-    id: randomUUID(),
-    level,
-    message,
-    createdAt: new Date().toISOString(),
-  });
+  await context.store.appendEvent(
+    agent.transcriptSessionId,
+    {
+      type: "system_event",
+      id: randomUUID(),
+      level,
+      message,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
 }
 
 async function appendAgentTaskAssignmentEvent(
@@ -569,7 +576,9 @@ async function enqueueAgentSystemMailbox(
   context: TuiContext,
   agent: AgentRun,
   text: string,
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   const now = new Date().toISOString();
   agent.mailbox = normalizeAgentMailbox(agent);
   trimAgentMailboxHistory(agent);
@@ -588,6 +597,8 @@ async function enqueueAgentSystemMailbox(
     context,
     agent,
     `mailbox_enqueued:${message.id}; kind=message; task=-; from=${message.from}; to=${message.to}; summary=${message.summary}`,
+    "info",
+    commitGuard,
   );
 }
 
@@ -821,6 +832,8 @@ export async function handleJobCommand(
     permissionMode?: PermissionMode;
     invokingRequestTurnId?: string;
     userActionConstraints?: UserActionConstraints;
+    ignoreForegroundModelGuard?: boolean;
+    ownerSignal?: AbortSignal;
   } = {},
 ): Promise<void> {
   const action = args[0] ?? "list";
@@ -896,16 +909,21 @@ export async function handleJobCommand(
       });
     }
     const job = await createDurableJob(context, options, effectiveStart, runtimeOptions);
+    if (runtimeOptions.ownerSignal?.aborted) return;
     await persistDurableJobProgress(
       context,
       job,
       `job ${action}: ${job.status}; pause reason ${job.pauseReason ?? "none"}`,
     );
+    if (runtimeOptions.ownerSignal?.aborted) {
+      await transitionDurableJob(job, context, "cancelled", "invoking owner cancelled");
+      return;
+    }
     if (effectiveStart && job.status === "running") {
       await startRunnerForDurableJob(context, job);
     }
     if (effectiveStart && job.status === "running") {
-      await runDurableJobLiteTick(context, job);
+      await runDurableJobLiteTick(context, job, createSilentOutput(), runtimeOptions.ownerSignal);
       await persistDurableJobProgress(context, job, `job ${action}: final state ${job.status}`);
     }
     writeLine(output, formatJobPrimary(job, context));
@@ -1149,6 +1167,7 @@ export async function createDurableJob(
     permissionMode?: PermissionMode;
     invokingRequestTurnId?: string;
     userActionConstraints?: UserActionConstraints;
+    ignoreForegroundModelGuard?: boolean;
   } = {},
 ): Promise<DurableJobState> {
   const now = new Date().toISOString();
@@ -1161,7 +1180,9 @@ export async function createDurableJob(
   const preflight = prepareJobPreflight(context, handoffPacket, options);
   const missing = preflight.missing;
   const resourceGuard = start
-    ? (deps().checkResourceGuard(context, "model") ??
+    ? ((runtimeOptions.ignoreForegroundModelGuard === true
+        ? null
+        : deps().checkResourceGuard(context, "model")) ??
       deps().checkBackgroundStartGuard(context, "job", false))
     : null;
   const runningCap = Math.max(1, options.runningCap ?? options.requestedAgents);
@@ -1421,6 +1442,7 @@ async function startDurableJobAgentRun(
   job: DurableJobState,
   assignment: DurableJobState["agents"][number],
   output: Writable,
+  ownerSignal?: AbortSignal,
 ): Promise<AgentRun> {
   const parentSessionId = await deps().ensureSession(context);
   const role = getAgentRole(assignment.type);
@@ -1431,7 +1453,7 @@ async function startDurableJobAgentRun(
   const effectiveModel = resolved.route.primaryModel ?? context.model;
   const cwdResult =
     job.isolation === "worktree" && resolved.usable
-      ? await createDurableJobAgentWorktree(context, job, assignment)
+      ? await createDurableJobAgentWorktree(context, job, assignment, ownerSignal)
       : {
           ok: true as const,
           cwd: context.projectPath,
@@ -1531,12 +1553,19 @@ async function createDurableJobAgentWorktree(
   context: TuiContext,
   job: DurableJobState,
   assignment: DurableJobState["agents"][number],
+  ownerSignal?: AbortSignal,
 ): Promise<
   | { ok: true; cwd: string; isolation: "worktree"; evidenceText: string }
   | { ok: false; text: string }
 > {
   const name = `${job.id}-${assignment.id}`.replace(/[^a-z0-9-]/giu, "-").slice(0, 48);
-  const outcome = await createManagedWorktree(context.projectPath, { name });
+  const outcome = await createManagedWorktree(
+    context.projectPath,
+    { name },
+    undefined,
+    undefined,
+    ownerSignal,
+  );
   const summary = summarizeWorktreeCreateOutcome(outcome, context.language);
   if (!summary.ok || (outcome.kind !== "created" && outcome.kind !== "resumed")) {
     return { ok: false, text: summary.text };
@@ -1836,8 +1865,13 @@ export async function runDurableJobLiteTick(
   context: TuiContext,
   job: DurableJobState,
   output: Writable = createSilentOutput(),
+  ownerSignal?: AbortSignal,
 ): Promise<void> {
   if (job.status !== "running") {
+    return;
+  }
+  if (ownerSignal?.aborted) {
+    await transitionDurableJob(job, context, "cancelled", "invoking owner cancelled");
     return;
   }
   updateDurableJobEffectiveAgentCap(
@@ -1865,6 +1899,10 @@ export async function runDurableJobLiteTick(
   await persistDurableJobProgress(context, job, "worker loop started");
 
   while (job.status === "running" && hasRunnableJobAgents(job)) {
+    if (ownerSignal?.aborted) {
+      await transitionDurableJob(job, context, "cancelled", "invoking owner cancelled");
+      return;
+    }
     const stepIndex = job.budget.usedSteps ?? 0;
     // P1-5 — maxSteps 预算只在用户显式设置（--max-steps）时强制；默认无用户可见
     // 预算（默认 maxSteps 等于 plan 步数，while 条件自然终止，不走该 blocked 分支）。
@@ -1988,8 +2026,21 @@ export async function runDurableJobLiteTick(
       );
       await persistDurableJobProgress(context, job, `worker step ${nextStepIndex + 1} persisted`);
 
-      const agent = await startDurableJobAgentRun(context, job, assignment, output);
+      const agent = await startDurableJobAgentRun(
+        context,
+        job,
+        assignment,
+        output,
+        ownerSignal,
+      );
       const task = context.backgroundTasks.find((item) => item.id === agent.id);
+      if (ownerSignal?.aborted) {
+        if (task && agent.status === "running") {
+          await completeAgent(agent, task, context, output);
+        }
+        await transitionDurableJob(job, context, "cancelled", "invoking owner cancelled");
+        return;
+      }
       if (!task) {
         assignment.status = "blocked";
         assignment.statusReason = "missing_agent_background_task";
@@ -2015,13 +2066,30 @@ export async function runDurableJobLiteTick(
       break;
     }
 
-    const completedBatch = await Promise.all(
-      batch.map(async (item) => {
-        await completeAgent(item.agent, item.task, context, output);
-        syncJobAssignmentFromAgent(item.assignment, item.agent);
-        return item;
-      }),
-    );
+    const abortBatch = (): void => {
+      for (const item of batch) {
+        context.backgroundAbortControllers?.get(item.agent.id)?.abort(ownerSignal?.reason);
+      }
+    };
+    if (ownerSignal?.aborted) abortBatch();
+    else ownerSignal?.addEventListener("abort", abortBatch, { once: true });
+    let completedBatch: typeof batch;
+    try {
+      completedBatch = await Promise.all(
+        batch.map(async (item) => {
+          await completeAgent(item.agent, item.task, context, output);
+          syncJobAssignmentFromAgent(item.assignment, item.agent);
+          return item;
+        }),
+      );
+    } finally {
+      ownerSignal?.removeEventListener("abort", abortBatch);
+    }
+
+    if (ownerSignal?.aborted) {
+      await transitionDurableJob(job, context, "cancelled", "invoking owner cancelled");
+      return;
+    }
 
     for (const item of completedBatch) {
       const assignmentStatus = item.assignment.status as DurableJobAgentStatus;
@@ -2410,9 +2478,29 @@ export async function handleForkCommand(
     invokingRequestTurnId?: string;
     userActionConstraints?: UserActionConstraints;
     commitGuard?: () => boolean;
+    ownerSignal?: AbortSignal;
   } = {},
 ): Promise<AgentRun | undefined> {
-  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
+  const workflowTaskId = runtimeOptions.workflowRunId;
+  const workflowOwnerStillRunning = (): boolean => {
+    if (!workflowTaskId) return true;
+    const run =
+      context.workflows.activeRuns?.find((item) => item.id === workflowTaskId) ??
+      (context.workflows.activeRun?.id === workflowTaskId
+        ? context.workflows.activeRun
+        : undefined);
+    return run?.status === "running";
+  };
+  const ownerSignal =
+    runtimeOptions.ownerSignal ??
+    (workflowTaskId
+      ? context.backgroundAbortControllers?.get(workflowTaskId)?.signal
+      : context.activeAbortController?.signal);
+  const ownerStillValid = (): boolean =>
+    ownerSignal?.aborted !== true &&
+    workflowOwnerStillRunning() &&
+    (!runtimeOptions.commitGuard || runtimeOptions.commitGuard());
+  if (!ownerStillValid()) return;
   const options = parseForkCommandArgs(args);
   const registryAgent = resolveForkRegistryAgent(context, options.rawType);
   const type = registryAgent ? mapRegistryAgentType(registryAgent) : options.type;
@@ -2429,10 +2517,9 @@ export async function handleForkCommand(
   }
   const requestedType: AgentType = type;
   let effectiveType: AgentType = requestedType;
-  const activeWorkflowRun =
-    context.workflows.activeRun?.status === "running" ? context.workflows.activeRun : undefined;
-  const workflowTaskId = runtimeOptions.workflowRunId ?? activeWorkflowRun?.id;
-  const engineeringSignal = runtimeOptions.engineeringSignal ?? snapshotEngineeringSignal(context);
+  const engineeringSignal = workflowTaskId
+    ? runtimeOptions.engineeringSignal
+    : (runtimeOptions.engineeringSignal ?? snapshotEngineeringSignal(context));
   const guard = deps().checkBackgroundStartGuard(context, "agent", false, workflowTaskId);
   if (guard) {
     writeLine(output, guard);
@@ -2440,39 +2527,39 @@ export async function handleForkCommand(
   }
 
   const parentSessionId =
-    runtimeOptions.ownerSessionId ??
-    activeWorkflowRun?.ownerSessionId ??
-    (await deps().ensureSession(context));
-  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
-  const orchestrationAction = resolveMetaOrchestrationAction(context, "agent-dispatch");
-  const policy = resolveAgentDispatchRuntimePolicy(orchestrationAction, {
-    kind: "fork-agent",
-    type: requestedType,
-    start: true,
-  });
-  if (policy.action === "block") {
-    await recordMetaOrchestrationRuntimeEvent(context, parentSessionId, {
-      stepId: "agent-dispatch",
-      status: "blocked",
-      summary: `agent fork blocked before start: ${policy.reason}`,
-      level: "warning",
+    runtimeOptions.ownerSessionId ?? (await deps().ensureSession(context));
+  if (!ownerStillValid()) return;
+  if (!workflowTaskId) {
+    const orchestrationAction = resolveMetaOrchestrationAction(context, "agent-dispatch");
+    const policy = resolveAgentDispatchRuntimePolicy(orchestrationAction, {
+      kind: "fork-agent",
+      type: requestedType,
+      start: true,
     });
-    writeLine(output, `Agent dispatch blocked by meta scheduler: ${policy.reason}`);
-    return;
-  }
-  if (policy.action === "degrade-agent-role") {
-    effectiveType = policy.type;
-    await recordMetaOrchestrationRuntimeEvent(context, parentSessionId, {
-      stepId: "agent-dispatch",
-      status: "degraded",
-      summary: `agent fork degraded from ${requestedType} to ${effectiveType}: ${policy.reason}`,
-      level: "warning",
-    });
+    if (policy.action === "block") {
+      await recordMetaOrchestrationRuntimeEvent(context, parentSessionId, {
+        stepId: "agent-dispatch",
+        status: "blocked",
+        summary: `agent fork blocked before start: ${policy.reason}`,
+        level: "warning",
+      });
+      writeLine(output, `Agent dispatch blocked by meta scheduler: ${policy.reason}`);
+      return;
+    }
+    if (policy.action === "degrade-agent-role") {
+      effectiveType = policy.type;
+      await recordMetaOrchestrationRuntimeEvent(context, parentSessionId, {
+        stepId: "agent-dispatch",
+        status: "degraded",
+        summary: `agent fork degraded from ${requestedType} to ${effectiveType}: ${policy.reason}`,
+        level: "warning",
+      });
+    }
   }
   const packet = await loadOrCreateHandoffPacket(context, parentSessionId);
-  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
-  const cwdResult = await resolveAgentCwd(context, options);
-  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) {
+  if (!ownerStillValid()) return;
+  const cwdResult = await resolveAgentCwd(context, options, ownerSignal);
+  if (!ownerStillValid()) {
     if (cwdResult.ok && cwdResult.createdWorktree) {
       const cleanup = await executeManagedWorktreeRemove(context.projectPath, cwdResult.cwd, true);
       if (cleanup.kind === "failed") throw new Error(cleanup.reason);
@@ -2483,11 +2570,43 @@ export async function handleForkCommand(
     writeLine(output, cwdResult.text);
     return;
   }
+  let childSessionId: string | undefined;
+  let startedAgentId: string | undefined;
+  let startedController: AbortController | undefined;
+  let startCommitted = false;
+  let cleanupComplete = false;
+  const cleanupPendingStart = async (): Promise<void> => {
+    if (cleanupComplete) return;
+    cleanupComplete = true;
+    if (startedAgentId && startedController) {
+      startedController.abort();
+      clearAgentAbortController(context, startedAgentId, startedController);
+    }
+    if (startedAgentId) {
+      context.agents = context.agents.filter((item) => item.id !== startedAgentId);
+      context.backgroundTasks = context.backgroundTasks.filter((item) => item.id !== startedAgentId);
+    }
+    await Promise.all([
+      childSessionId
+        ? context.store.delete(childSessionId).catch(() => undefined)
+        : Promise.resolve(),
+      startedAgentId
+        ? rm(resolve(getAgentRunsDir(context), `${startedAgentId}.json`), { force: true }).catch(
+            () => undefined,
+          )
+        : Promise.resolve(),
+    ]);
+    if (cwdResult.createdWorktree) {
+      const cleanup = await executeManagedWorktreeRemove(context.projectPath, cwdResult.cwd, true);
+      if (cleanup.kind === "failed") throw new Error(cleanup.reason);
+    }
+  };
+  try {
   const role = getAgentRole(effectiveType);
   const effectiveTask = registryAgent ? `${registryAgent.prompt}\n\nTask: ${task}` : task;
   const resolved = resolveRoleRoute(context, role, `/fork ${effectiveType}`);
   await deps().appendRouteDecisionEvent(context, parentSessionId, resolved.decision);
-  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
+  if (!ownerStillValid()) return;
   if (!resolved.usable) {
     writeLine(output, formatRoutePauseMessage(role, resolved.decision));
     return;
@@ -2496,19 +2615,13 @@ export async function handleForkCommand(
   const effectiveModel = registryAgent?.model ?? route.primaryModel ?? context.model;
   const registryAllowedTools = normalizeRegistryAllowedTools(registryAgent?.allowedTools);
   const registryMaxTurns = normalizeRegistryAgentMaxTurns(registryAgent?.maxTurns);
-  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
+  if (!ownerStillValid()) return;
   const child = await context.store.create({
     model: effectiveModel,
     summary: `agent:${effectiveType}:${truncateDisplay(task, 60)}`,
   });
-  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) {
-    await context.store.delete(child.id);
-    if (cwdResult.ok && cwdResult.createdWorktree) {
-      const cleanup = await executeManagedWorktreeRemove(context.projectPath, cwdResult.cwd, true);
-      if (cleanup.kind === "failed") throw new Error(cleanup.reason);
-    }
-    return;
-  }
+  childSessionId = child.id;
+  if (!ownerStillValid()) return;
   const now = new Date().toISOString();
   const agent: AgentRun = {
     id: `agent-${randomUUID().slice(0, 8)}`,
@@ -2559,37 +2672,67 @@ export async function handleForkCommand(
     startedAt: now,
     updatedAt: now,
   };
+  startedAgentId = agent.id;
   if (context.cache.lastCacheSafePrefix) {
     Object.defineProperty(agent, "cacheSafePrefixSnapshot", {
       value: context.cache.lastCacheSafePrefix,
       enumerable: false,
     });
   }
-  if (runtimeOptions.commitGuard && !runtimeOptions.commitGuard()) return;
+  if (!ownerStillValid()) return;
   context.agents.unshift(agent);
   const background = createAgentBackgroundTask(agent, context);
   if (workflowTaskId) background.workflowRunId = workflowTaskId;
   rememberBackgroundTask(context, background);
-  registerBackgroundAbortController(context, agent.id);
+  const backgroundController = registerBackgroundAbortController(context, agent.id);
+  startedController = backgroundController;
+  const discardStaleStart = async (): Promise<boolean> => {
+    if (ownerStillValid()) return false;
+    await cleanupPendingStart();
+    return true;
+  };
+  if (await discardStaleStart()) return;
   await persistAgentRun(context, agent);
-  await context.store.appendEvent(parentSessionId, { type: "agent_start", agent, createdAt: now });
-  await context.store.appendEvent(child.id, {
-    type: "system_event",
-    id: randomUUID(),
-    level: "info",
-    message: `${agent.contextSummary} | cwd ${cwdResult.cwd} | isolation ${cwdResult.isolation ?? "none"} | registry ${agent.registryAgentId ?? "none"} | model ${agent.model} | max turns ${getAgentMaxTurns(agent)} | allowed tools ${agent.allowedTools?.join(",") ?? "default"}`,
-    createdAt: now,
-  });
-  if (cwdResult.evidenceText) {
-    await context.store.appendEvent(child.id, {
+  if (await discardStaleStart()) return;
+  await context.store.appendEvent(
+    parentSessionId,
+    { type: "agent_start", agent, createdAt: now },
+    ownerStillValid,
+  );
+  if (await discardStaleStart()) return;
+  await context.store.appendEvent(
+    child.id,
+    {
       type: "system_event",
       id: randomUUID(),
       level: "info",
-      message: cwdResult.evidenceText,
+      message: `${agent.contextSummary} | cwd ${cwdResult.cwd} | isolation ${cwdResult.isolation ?? "none"} | registry ${agent.registryAgentId ?? "none"} | model ${agent.model} | max turns ${getAgentMaxTurns(agent)} | allowed tools ${agent.allowedTools?.join(",") ?? "default"}`,
       createdAt: now,
-    });
+    },
+    ownerStillValid,
+  );
+  if (await discardStaleStart()) return;
+  if (cwdResult.evidenceText) {
+    await context.store.appendEvent(
+      child.id,
+      {
+        type: "system_event",
+        id: randomUUID(),
+        level: "info",
+        message: cwdResult.evidenceText,
+        createdAt: now,
+      },
+      ownerStillValid,
+    );
+    if (await discardStaleStart()) return;
   }
-  await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+  await deps().appendBackgroundTaskEvent(
+    context,
+    parentSessionId,
+    background,
+    ownerStillValid,
+  );
+  if (await discardStaleStart()) return;
   writeLine(output, formatBackgroundTask(background, context.language));
 
   if (options.runInBackground) {
@@ -2599,6 +2742,8 @@ export async function handleForkCommand(
         ? `Background agent started: ${agent.id}. Use /agents show ${agent.id} or /agents cancel ${agent.id}.`
         : `后台 agent 已启动：${agent.id}。可用 /agents show ${agent.id} 或 /agents cancel ${agent.id}。`,
     );
+    if (await discardStaleStart()) return;
+    startCommitted = true;
     setTimeout(() => {
       void completeAgent(agent, background, context, output).catch((error: unknown) => {
         const message = `background agent complete failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -2615,8 +2760,13 @@ export async function handleForkCommand(
     return agent;
   }
 
+  if (await discardStaleStart()) return;
+  startCommitted = true;
   await completeAgent(agent, background, context, output);
   return agent;
+  } finally {
+    if (!startCommitted) await cleanupPendingStart();
+  }
 }
 
 export async function completeAgent(
@@ -2640,126 +2790,126 @@ export async function completeAgent(
   const ownedController =
     context.backgroundAbortControllers?.get(agent.id) ??
     registerBackgroundAbortController(context, agent.id);
-  let result: AgentWorkResult;
   try {
-    result = await runAgentWork(agent, context, output);
-  } catch (error) {
-    if (agent.status === "stale") {
-      await enqueueAgentCompletionReturn(
-        context,
-        agent,
-        task,
-        "stale",
-        agent.summary,
-        [],
-        parentSessionId,
-        task.workflowRunId,
-      );
-      await persistAgentRun(context, agent);
-      await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
-      clearAgentAbortController(context, agent.id, ownedController);
+    let result: AgentWorkResult;
+    try {
+      result = await runAgentWork(agent, context, output);
+    } catch (error) {
+      if (agent.status === "stale") {
+        await enqueueAgentCompletionReturn(
+          context,
+          agent,
+          task,
+          "stale",
+          agent.summary,
+          [],
+          parentSessionId,
+          task.workflowRunId,
+        );
+        await persistAgentRun(context, agent);
+        await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
+        return;
+      }
+      await failAgent(agent, task, context, output, parentSessionId, error);
       return;
     }
-    await failAgent(agent, task, context, output, parentSessionId, error);
-    clearAgentAbortController(context, agent.id, ownedController);
-    return;
-  }
-  if (agent.status === "cancelled" || agent.status === "stale") {
-    if (agent.status === "stale") {
-      await enqueueAgentCompletionReturn(
-        context,
-        agent,
-        task,
-        "stale",
-        agent.summary,
-        [],
-        parentSessionId,
-        task.workflowRunId,
-      );
+    if (agent.status === "cancelled" || agent.status === "stale") {
+      if (agent.status === "stale") {
+        await enqueueAgentCompletionReturn(
+          context,
+          agent,
+          task,
+          "stale",
+          agent.summary,
+          [],
+          parentSessionId,
+          task.workflowRunId,
+        );
+      }
+      await persistAgentRun(context, agent);
+      return;
     }
+    const now = new Date().toISOString();
+    agent.status = result.status;
+    agent.summary = result.summary;
+    if (result.status === "completed" || result.status === "idle") {
+      agent.lastTerminalStatus = result.status === "completed" ? "completed" : undefined;
+      setAgentIdle(agent, result.summary, now);
+    } else {
+      agent.lastTerminalStatus = result.status === "failed" ? "failed" : "blocked";
+      setAgentActivity(agent, "blocked", result.summary);
+      if (agent.activeTask) {
+        agent.activeTask.status = "blocked";
+        agent.activeTask.resultSummary = result.summary;
+      }
+      agent.updatedAt = now;
+    }
+    agent.cost.outputTokens = Math.ceil(result.summary.length / 4);
+    deps().addRoleUsage(
+      context,
+      agent.role,
+      {
+        ...getRoleRoute(context.config, agent.role),
+        provider: agent.provider,
+        primaryModel: agent.model,
+      },
+      agent.cost.inputTokens,
+      agent.cost.outputTokens,
+      `${agent.type} agent ${result.status}`,
+    );
+    context.roleHandoffs.unshift(
+      deps().createRoleHandoff("executor", agent.role, agent.id, result.summary, context),
+    );
+    syncBackgroundWithAgentStatus(task, agent);
+    task.updatedAt = now;
+    task.lastOutputAt = now;
+    task.nextAction =
+      context.language === "en-US" ? "Review /agents show output." : "查看 /agents show 输出。";
+    await context.store.appendEvent(agent.transcriptSessionId, {
+      type: "assistant_text_delta",
+      id: randomUUID(),
+      text: result.summary,
+      createdAt: now,
+    });
+    await context.store.appendEvent(parentSessionId, {
+      type: "agent_end",
+      agentId: agent.id,
+      status: result.status === "idle" ? "cancelled" : result.status,
+      summary: result.summary,
+      createdAt: now,
+    });
+    const evidenceResult: AgentEvidenceResult | undefined =
+      result.status === "idle"
+        ? undefined
+        : {
+            status: result.status,
+            summary: result.summary,
+            evidenceRefs: result.evidenceRefs,
+          };
+    const agentEvidenceId = evidenceResult
+      ? await deps().recordAgentExecutionEvidence(context, parentSessionId, agent, evidenceResult)
+      : undefined;
+    if (agentEvidenceId) {
+      result.evidenceRefs = Array.from(new Set([...result.evidenceRefs, agentEvidenceId]));
+    }
+    await enqueueAgentCompletionReturn(
+      context,
+      agent,
+      task,
+      result.status === "idle" ? "stale" : result.status,
+      result.summary,
+      result.evidenceRefs,
+      parentSessionId,
+      task.workflowRunId,
+    );
     await persistAgentRun(context, agent);
+    await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
+    writeLine(output, formatAgentSummary(agent, context));
+    writeLine(output, formatAgentCompletionSummary(agent, context));
+    deps().writeStatus(output, context);
+  } finally {
     clearAgentAbortController(context, agent.id, ownedController);
-    return;
   }
-  const now = new Date().toISOString();
-  agent.status = result.status;
-  agent.summary = result.summary;
-  if (result.status === "completed" || result.status === "idle") {
-    agent.lastTerminalStatus = result.status === "completed" ? "completed" : undefined;
-    setAgentIdle(agent, result.summary, now);
-  } else {
-    agent.lastTerminalStatus = result.status === "failed" ? "failed" : "blocked";
-    setAgentActivity(agent, "blocked", result.summary);
-    if (agent.activeTask) {
-      agent.activeTask.status = "blocked";
-      agent.activeTask.resultSummary = result.summary;
-    }
-    agent.updatedAt = now;
-  }
-  agent.cost.outputTokens = Math.ceil(result.summary.length / 4);
-  deps().addRoleUsage(
-    context,
-    agent.role,
-    {
-      ...getRoleRoute(context.config, agent.role),
-      provider: agent.provider,
-      primaryModel: agent.model,
-    },
-    agent.cost.inputTokens,
-    agent.cost.outputTokens,
-    `${agent.type} agent ${result.status}`,
-  );
-  context.roleHandoffs.unshift(
-    deps().createRoleHandoff("executor", agent.role, agent.id, result.summary, context),
-  );
-  syncBackgroundWithAgentStatus(task, agent);
-  task.updatedAt = now;
-  task.lastOutputAt = now;
-  task.nextAction =
-    context.language === "en-US" ? "Review /agents show output." : "查看 /agents show 输出。";
-  await context.store.appendEvent(agent.transcriptSessionId, {
-    type: "assistant_text_delta",
-    id: randomUUID(),
-    text: result.summary,
-    createdAt: now,
-  });
-  await context.store.appendEvent(parentSessionId, {
-    type: "agent_end",
-    agentId: agent.id,
-    status: result.status === "idle" ? "cancelled" : result.status,
-    summary: result.summary,
-    createdAt: now,
-  });
-  const evidenceResult: AgentEvidenceResult | undefined =
-    result.status === "idle"
-      ? undefined
-      : {
-          status: result.status,
-          summary: result.summary,
-          evidenceRefs: result.evidenceRefs,
-        };
-  const agentEvidenceId = evidenceResult
-    ? await deps().recordAgentExecutionEvidence(context, parentSessionId, agent, evidenceResult)
-    : undefined;
-  if (agentEvidenceId) {
-    result.evidenceRefs = Array.from(new Set([...result.evidenceRefs, agentEvidenceId]));
-  }
-  await enqueueAgentCompletionReturn(
-    context,
-    agent,
-    task,
-    result.status === "idle" ? "stale" : result.status,
-    result.summary,
-    result.evidenceRefs,
-    parentSessionId,
-    task.workflowRunId,
-  );
-  await persistAgentRun(context, agent);
-  await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
-  clearAgentAbortController(context, agent.id, ownedController);
-  writeLine(output, formatAgentSummary(agent, context));
-  writeLine(output, formatAgentCompletionSummary(agent, context));
-  deps().writeStatus(output, context);
 }
 
 // D.14C — agent 真实执行异常（非用户取消、非权限拒绝）才走这里。把 agent/task
@@ -2855,9 +3005,12 @@ export async function runAgentWork(
         ownerSessionId: parentSessionId,
         ownerSignal,
         workflowRunId,
+        requestTurnId: agent.invokingRequestTurnId,
         changedFiles: [],
         level: "smoke",
         commitGuard: verifierStillValid,
+        permissionMode: agent.permissionMode,
+        userActionConstraints: agent.userActionConstraints,
       },
     );
     const cancelled =
@@ -3111,6 +3264,7 @@ export async function runModelBackedAgent(
     context.backgroundAbortControllers?.get(agent.id) ??
     registerBackgroundAbortController(context, agent.id);
   const signal = controller.signal;
+  const commitGuard = () => !isAgentExecutionCancelled(agent, signal);
   let finalText = "";
   const maxTurns = getAgentMaxTurns(agent);
   let currentRuntime = resolveAgentRuntimeForModel(
@@ -3218,8 +3372,6 @@ export async function runModelBackedAgent(
             assistantText = "";
             pendingAttemptUsage = undefined;
           },
-          onRetry: (info) =>
-            handleProviderRetryForMetaOrchestration(context, agent.transcriptSessionId, info),
         },
       )) {
         if (isAgentExecutionCancelled(agent, signal)) {
@@ -3251,13 +3403,17 @@ export async function runModelBackedAgent(
               evidenceRefs: [],
             };
           }
-          await context.store.appendEvent(agent.transcriptSessionId, {
-            type: "system_event",
-            id: randomUUID(),
-            level: "warning",
-            message: `agent child provider failure: kind ${kind}; code ${code}; provider ${currentRuntime.provider}; model ${currentRuntime.model}`,
-            createdAt: new Date().toISOString(),
-          });
+          await context.store.appendEvent(
+            agent.transcriptSessionId,
+            {
+              type: "system_event",
+              id: randomUUID(),
+              level: "warning",
+              message: `agent child provider failure: kind ${kind}; code ${code}; provider ${currentRuntime.provider}; model ${currentRuntime.model}`,
+              createdAt: new Date().toISOString(),
+            },
+            commitGuard,
+          );
           if (isAgentExecutionCancelled(agent, signal)) {
             return {
               status: "blocked",
@@ -3287,13 +3443,17 @@ export async function runModelBackedAgent(
                 context.language,
                 fallbackCooldown.reasonCode,
               );
-              await context.store.appendEvent(agent.transcriptSessionId, {
-                type: "system_event",
-                id: randomUUID(),
-                level: "warning",
-                message: `agent child provider cooldown: provider ${fallback.runtime.provider}; model ${fallback.runtime.model}; code ${fallbackCooldown.reasonCode}`,
-                createdAt: new Date().toISOString(),
-              });
+              await context.store.appendEvent(
+                agent.transcriptSessionId,
+                {
+                  type: "system_event",
+                  id: randomUUID(),
+                  level: "warning",
+                  message: `agent child provider cooldown: provider ${fallback.runtime.provider}; model ${fallback.runtime.model}; code ${fallbackCooldown.reasonCode}`,
+                  createdAt: new Date().toISOString(),
+                },
+                commitGuard,
+              );
               if (isAgentExecutionCancelled(agent, signal)) {
                 return {
                   status: "blocked",
@@ -3441,12 +3601,16 @@ export async function runModelBackedAgent(
       }
       messages.push({ role: "assistant", content: assistantText, toolCalls });
       if (assistantText) {
-        await context.store.appendEvent(agent.transcriptSessionId, {
-          type: "assistant_text_delta",
-          id: randomUUID(),
-          text: assistantText,
-          createdAt: new Date().toISOString(),
-        });
+        await context.store.appendEvent(
+          agent.transcriptSessionId,
+          {
+            type: "assistant_text_delta",
+            id: randomUUID(),
+            text: assistantText,
+            createdAt: new Date().toISOString(),
+          },
+          commitGuard,
+        );
         if (isAgentExecutionCancelled(agent, signal)) {
           return {
             status: "blocked",
@@ -3518,13 +3682,17 @@ export async function runModelBackedAgent(
     context.language,
   );
   if (summaryGate.status === "downgraded") {
-    await context.store.appendEvent(agent.transcriptSessionId, {
-      type: "system_event",
-      id: randomUUID(),
-      level: "warning",
-      message: `child_summary_claim_gate: downgraded unsupported claims; missing ${summaryGate.missingEvidenceKinds.join(", ") || "matching evidence"}`,
-      createdAt: new Date().toISOString(),
-    });
+    await context.store.appendEvent(
+      agent.transcriptSessionId,
+      {
+        type: "system_event",
+        id: randomUUID(),
+        level: "warning",
+        message: `child_summary_claim_gate: downgraded unsupported claims; missing ${summaryGate.missingEvidenceKinds.join(", ") || "matching evidence"}`,
+        createdAt: new Date().toISOString(),
+      },
+      commitGuard,
+    );
   }
   return {
     status: "completed",
@@ -3637,6 +3805,10 @@ async function executeAgentToolCall(
   parentSessionId: string,
   output: Writable,
   signal: AbortSignal,
+  awaitOverrides?: {
+    appendBackgroundTaskEvent?: JobAgentCommandRuntimeDeps["appendBackgroundTaskEvent"];
+    persistAgentRun?: typeof persistAgentRun;
+  },
 ): Promise<{
   ok: boolean;
   tool: string;
@@ -3645,13 +3817,22 @@ async function executeAgentToolCall(
   evidenceId?: string;
   pendingApproval?: boolean;
 }> {
+  const commitGuard = () => !isAgentExecutionCancelled(agent, signal);
   if (isAgentExecutionCancelled(agent, signal)) {
     return { ok: false, tool: toolCall.name, text: "Agent tool call cancelled." };
   }
   const toolName = normalizeAgentToolName(toolCall.name);
   if (!toolName) {
     const text = `Unknown agent tool: ${toolCall.name}`;
-    await appendAgentToolResultEvent(agent, context, toolCall.id, toolCall.name, text, true);
+    await appendAgentToolResultEvent(
+      agent,
+      context,
+      toolCall.id,
+      toolCall.name,
+      text,
+      true,
+      commitGuard,
+    );
     return { ok: false, tool: toolCall.name, text };
   }
   const allowedTools = new Set(getAgentAllowedTools(agent).map((tool) => tool.name));
@@ -3662,27 +3843,50 @@ async function executeAgentToolCall(
     setAgentActivity(agent, "blocked", text);
     const background = ensureAgentBackgroundTask(agent, context);
     syncBackgroundWithAgentStatus(background, agent);
-    await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+    await deps().appendBackgroundTaskEvent(context, parentSessionId, background, commitGuard);
+    if (!commitGuard()) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+    }
     await persistAgentRun(context, agent);
-    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    if (!commitGuard()) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+    }
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true, commitGuard);
     return { ok: false, tool: toolName, text };
   }
   const permission = await decidePermission(toolName, toolCall.input, context, parentSessionId, {
     permissionMode: agent.permissionMode,
     userActionConstraints: agent.userActionConstraints,
   });
-  await context.store.appendEvent(parentSessionId, {
-    type: "permission_request",
-    request: permission.request,
-    createdAt: new Date().toISOString(),
-  });
-  await context.store.appendEvent(parentSessionId, {
-    type: "permission_result",
-    requestId: permission.request.id,
-    decision: permission.decision,
-    reason: permission.reason,
-    createdAt: new Date().toISOString(),
-  });
+  if (isAgentExecutionCancelled(agent, signal)) {
+    return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+  }
+  await context.store.appendEvent(
+    parentSessionId,
+    {
+      type: "permission_request",
+      request: permission.request,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (isAgentExecutionCancelled(agent, signal)) {
+    return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+  }
+  await context.store.appendEvent(
+    parentSessionId,
+    {
+      type: "permission_result",
+      requestId: permission.request.id,
+      decision: permission.decision,
+      reason: permission.reason,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (isAgentExecutionCancelled(agent, signal)) {
+    return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+  }
   if (permission.decision !== "allow") {
     const text = `${permission.decision}: ${permission.reason}`;
     let pendingApproval = false;
@@ -3703,27 +3907,55 @@ async function executeAgentToolCall(
           setAgentActivity(agent, "blocked", `${toolName} waiting for parent approval`);
           const background = ensureAgentBackgroundTask(agent, context);
           syncBackgroundWithAgentStatus(background, agent);
-          await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
-          await persistAgentRun(context, agent);
-          await context.store.appendEvent(agent.transcriptSessionId, {
+          await (awaitOverrides?.appendBackgroundTaskEvent ?? deps().appendBackgroundTaskEvent)(
+            context,
+            parentSessionId,
+            background,
+            commitGuard,
+          );
+          if (isAgentExecutionCancelled(agent, signal)) {
+            return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+          }
+          await (awaitOverrides?.persistAgentRun ?? persistAgentRun)(context, agent);
+          if (isAgentExecutionCancelled(agent, signal)) {
+            return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+          }
+          await context.store.appendEvent(
+            agent.transcriptSessionId,
+            {
+              type: "system_event",
+              id: randomUUID(),
+              level: "warning",
+              message: `agent_permission_pending:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
+              createdAt: new Date().toISOString(),
+            },
+            commitGuard,
+          );
+          if (isAgentExecutionCancelled(agent, signal)) {
+            return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+          }
+        }
+      } else {
+        await context.store.appendEvent(
+          agent.transcriptSessionId,
+          {
             type: "system_event",
             id: randomUUID(),
             level: "warning",
-            message: `agent_permission_pending:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
+            message: `agent_permission_not_bridged:${toolCall.id}; tool=${toolName}`,
             createdAt: new Date().toISOString(),
-          });
-        }
-      } else {
-        await context.store.appendEvent(agent.transcriptSessionId, {
-          type: "system_event",
-          id: randomUUID(),
-          level: "warning",
-          message: `agent_permission_not_bridged:${toolCall.id}; tool=${toolName}`,
-          createdAt: new Date().toISOString(),
-        });
+          },
+          commitGuard,
+        );
       }
     }
-    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    if (isAgentExecutionCancelled(agent, signal)) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+    }
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true, commitGuard);
+    if (isAgentExecutionCancelled(agent, signal)) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
+    }
     return {
       ok: false,
       tool: toolName,
@@ -3742,7 +3974,7 @@ async function executeAgentToolCall(
       return { ok: false, tool: toolName, text: "Agent tool call cancelled." };
     }
     const text = error instanceof Error ? error.message : String(error);
-    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true, commitGuard);
     return {
       ok: false,
       tool: toolName,
@@ -3772,6 +4004,7 @@ async function executeAgentToolCall(
         toolName,
         result.output,
         toolCall.input,
+        commitGuard,
       )
     : undefined;
   const failed = isAgentToolOutputFailure(toolName, result.output);
@@ -3806,6 +4039,7 @@ export async function executeApprovedAgentToolUse(
   cancelled?: boolean;
 }> {
   const now = new Date().toISOString();
+  const agentStatusGuard = () => agent.status !== "cancelled" && agent.status !== "stale";
   if (agent.status === "cancelled" || agent.status === "stale") {
     return {
       ok: false,
@@ -3822,8 +4056,19 @@ export async function executeApprovedAgentToolUse(
       agent,
       toolName,
       text,
+      agentStatusGuard,
     );
-    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    if (!agentStatusGuard()) return { ok: false, tool: toolName, text };
+    await appendAgentToolResultEvent(
+      agent,
+      context,
+      toolCall.id,
+      toolName,
+      text,
+      true,
+      agentStatusGuard,
+    );
+    if (!agentStatusGuard()) return { ok: false, tool: toolName, text };
     setAgentActivity(agent, "blocked", text);
     agent.summary = text;
     await persistAgentRun(context, agent);
@@ -3833,16 +4078,21 @@ export async function executeApprovedAgentToolUse(
   const controller =
     context.backgroundAbortControllers?.get(agent.id) ??
     registerBackgroundAbortController(context, agent.id);
+  const commitGuard = () => !isAgentExecutionCancelled(agent, controller.signal);
   setAgentBusy(agent, `${toolName} approved; executing agent-owned tool call`);
   syncBackgroundWithAgentStatus(background, agent);
   try {
-    await context.store.appendEvent(agent.transcriptSessionId, {
-      type: "system_event",
-      id: randomUUID(),
-      level: "info",
-      message: `agent_permission_approved:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
-      createdAt: now,
-    });
+    await context.store.appendEvent(
+      agent.transcriptSessionId,
+      {
+        type: "system_event",
+        id: randomUUID(),
+        level: "info",
+        message: `agent_permission_approved:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
+        createdAt: now,
+      },
+      commitGuard,
+    );
     if (isAgentExecutionCancelled(agent, controller.signal)) {
       return { ok: false, tool: toolName, text: "Agent tool call cancelled.", cancelled: true };
     }
@@ -3875,14 +4125,21 @@ export async function executeApprovedAgentToolUse(
       toolName,
       result.output,
       toolCall.input,
+      commitGuard,
     );
+    if (!commitGuard()) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled.", cancelled: true };
+    }
     const failed = isAgentToolOutputFailure(toolName, result.output);
     if (failed) {
       agent.status = "blocked";
       agent.summary = `agent ${agent.id} approved ${toolName} executed but failed; inspect transcript/evidence ${evidenceId ?? "none"}.`;
       setAgentActivity(agent, "blocked", agent.summary);
       syncBackgroundWithAgentStatus(background, agent);
-      await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+      await deps().appendBackgroundTaskEvent(context, parentSessionId, background, commitGuard);
+      if (!commitGuard()) {
+        return { ok: false, tool: toolName, text: "Agent tool call cancelled.", cancelled: true };
+      }
       await persistAgentRun(context, agent);
       clearAgentAbortController(context, agent.id, controller);
       return {
@@ -3898,11 +4155,21 @@ export async function executeApprovedAgentToolUse(
       context,
       agent,
       `Approved ${toolName} result: ${result.output.text}`,
+      commitGuard,
     );
+    if (!commitGuard()) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled.", cancelled: true };
+    }
     setAgentBusy(agent, `${toolName} approved; continuing child loop`);
     syncBackgroundWithAgentStatus(background, agent);
-    await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+    await deps().appendBackgroundTaskEvent(context, parentSessionId, background, commitGuard);
+    if (!commitGuard()) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled.", cancelled: true };
+    }
     await persistAgentRun(context, agent);
+    if (!commitGuard()) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled.", cancelled: true };
+    }
     await completeAgent(agent, background, context, createSilentOutput(), "permission_approved");
     return {
       ok: true,
@@ -3923,13 +4190,20 @@ export async function executeApprovedAgentToolUse(
       agent,
       toolName,
       text,
+      commitGuard,
     );
-    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    if (!commitGuard()) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled.", cancelled: true };
+    }
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true, commitGuard);
     agent.status = "blocked";
     agent.summary = `agent ${agent.id} approved ${toolName} failed: ${truncateDisplay(text, 160)}`;
     setAgentActivity(agent, "blocked", agent.summary);
     syncBackgroundWithAgentStatus(background, agent);
-    await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+    await deps().appendBackgroundTaskEvent(context, parentSessionId, background, commitGuard);
+    if (!commitGuard()) {
+      return { ok: false, tool: toolName, text: "Agent tool call cancelled.", cancelled: true };
+    }
     await persistAgentRun(context, agent);
     clearAgentAbortController(context, agent.id, controller);
     return { ok: false, tool: toolName, text, evidenceId };
@@ -3944,6 +4218,7 @@ export async function denyAgentToolUse(
   parentSessionId: string,
   outcomeText: string,
 ): Promise<{ ok: false; tool: string; text: string; evidenceId?: string }> {
+  const commitGuard = () => agent.status !== "cancelled" && agent.status !== "stale";
   const text = AGENT_PERMISSION_BRIDGE_TOOLS.has(toolName)
     ? `${outcomeText}; ${toolName} was NOT executed / NOT written.`
     : outcomeText;
@@ -3953,18 +4228,28 @@ export async function denyAgentToolUse(
     agent,
     toolName,
     text,
+    commitGuard,
   );
-  await context.store.appendEvent(agent.transcriptSessionId, {
-    type: "system_event",
-    id: randomUUID(),
-    level: "warning",
-    message: `agent_permission_denied:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
-    createdAt: new Date().toISOString(),
-  });
-  await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
-  agent.status = "blocked";
-  agent.summary = `agent ${agent.id} ${toolName} permission denied; child loop remains stopped.`;
-  setAgentActivity(agent, "blocked", agent.summary);
+  if (!commitGuard()) return { ok: false, tool: toolName, text };
+  await context.store.appendEvent(
+    agent.transcriptSessionId,
+    {
+      type: "system_event",
+      id: randomUUID(),
+      level: "warning",
+      message: `agent_permission_denied:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (!commitGuard()) return { ok: false, tool: toolName, text };
+  await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true, commitGuard);
+  if (!commitGuard()) return { ok: false, tool: toolName, text };
+  if (agent.status !== "cancelled" && agent.status !== "stale") {
+    agent.status = "blocked";
+    agent.summary = `agent ${agent.id} ${toolName} permission denied; child loop remains stopped.`;
+    setAgentActivity(agent, "blocked", agent.summary);
+  }
   const background =
     context.backgroundTasks.find((task) => task.id === agent.id) ??
     createAgentBackgroundTask(agent, context);
@@ -3972,7 +4257,8 @@ export async function denyAgentToolUse(
     rememberBackgroundTask(context, background);
   }
   syncBackgroundWithAgentStatus(background, agent);
-  await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+  await deps().appendBackgroundTaskEvent(context, parentSessionId, background, commitGuard);
+  if (!commitGuard()) return { ok: false, tool: toolName, text };
   await persistAgentRun(context, agent);
   clearAgentAbortController(context, agent.id);
   return { ok: false, tool: toolName, text, evidenceId };
@@ -3980,13 +4266,9 @@ export async function denyAgentToolUse(
 
 function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): string {
   const readonlyAuditHint = createReadonlyAuditToolHint(agent);
-  const engineeringProfile =
-    agent.engineeringSignal?.profile ??
-    context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.profile ??
-    "generic";
+  const engineeringProfile = agent.engineeringSignal?.profile ?? "generic";
   const engineeringStrategy =
     agent.engineeringSignal?.strategyHint ??
-    context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.strategyHint ??
     formatEngineeringProfileStrategyHint(engineeringProfile);
   const roleHint =
     agent.type === "explorer"
@@ -4197,18 +4479,27 @@ async function appendAgentToolEvents(
   callId: string = randomUUID(),
   signal?: AbortSignal,
 ): Promise<void> {
-  if (signal && isAgentExecutionCancelled(agent, signal)) return;
-  await context.store.appendEvent(agent.transcriptSessionId, {
-    type: "tool_call_start",
-    id: callId,
-    name,
-    input,
-    createdAt: new Date().toISOString(),
-  });
-  if (signal && isAgentExecutionCancelled(agent, signal)) return;
-  await context.store.appendEvent(agent.transcriptSessionId, createToolEndEvent(callId, output));
-  if (signal && isAgentExecutionCancelled(agent, signal)) return;
-  await appendAgentToolResultEvent(agent, context, callId, name, output, false);
+  const commitGuard = signal ? () => !isAgentExecutionCancelled(agent, signal) : undefined;
+  if (commitGuard && !commitGuard()) return;
+  await context.store.appendEvent(
+    agent.transcriptSessionId,
+    {
+      type: "tool_call_start",
+      id: callId,
+      name,
+      input,
+      createdAt: new Date().toISOString(),
+    },
+    commitGuard,
+  );
+  if (commitGuard && !commitGuard()) return;
+  await context.store.appendEvent(
+    agent.transcriptSessionId,
+    createToolEndEvent(callId, output),
+    commitGuard,
+  );
+  if (commitGuard && !commitGuard()) return;
+  await appendAgentToolResultEvent(agent, context, callId, name, output, false, commitGuard);
 }
 
 async function appendAgentToolResultEvent(
@@ -4218,6 +4509,7 @@ async function appendAgentToolResultEvent(
   toolName: string,
   content: unknown,
   isError: boolean,
+  commitGuard?: () => boolean,
 ): Promise<void> {
   await appendToolResultEvent(
     context,
@@ -4226,6 +4518,8 @@ async function appendAgentToolResultEvent(
     toolName as ToolName,
     content,
     isError,
+    undefined,
+    commitGuard,
   );
 }
 
@@ -4234,7 +4528,11 @@ export async function cancelAgent(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  if (!isAgentCancellable(agent)) {
+  const pendingApprovalAtCancel = context.pendingLocalApproval;
+  const ownsPendingApproval =
+    pendingApprovalAtCancel?.kind === "agent_tool_use" &&
+    pendingApprovalAtCancel.agentId === agent.id;
+  if (!isAgentCancellable(agent) && !ownsPendingApproval) {
     writeLine(output, `agent ${agent.id} 当前状态为 ${agent.status}，无需取消。`);
     return;
   }
@@ -4337,7 +4635,10 @@ export async function cancelAgentByRef(
     writeLine(output, "未找到 agent。");
     return undefined;
   }
-  if (!isAgentCancellable(agent)) {
+  const pendingApproval = context.pendingLocalApproval;
+  const ownsPendingApproval =
+    pendingApproval?.kind === "agent_tool_use" && pendingApproval.agentId === agent.id;
+  if (!isAgentCancellable(agent) && !ownsPendingApproval) {
     writeLine(output, `agent ${agent.id} 当前状态为 ${agent.status}，无需取消。`);
     return undefined;
   }
@@ -5123,6 +5424,7 @@ function mapRegistryAgentType(agent: TuiContext["agentRegistry"]["agents"][numbe
 async function resolveAgentCwd(
   context: TuiContext,
   options: ForkCommandOptions,
+  ownerSignal?: AbortSignal,
 ): Promise<
   | {
       ok: true;
@@ -5138,7 +5440,13 @@ async function resolveAgentCwd(
   }
   if (options.isolation === "worktree") {
     const name = options.name ?? `${options.type ?? "agent"}-${randomUUID().slice(0, 6)}`;
-    const outcome = await createManagedWorktree(context.projectPath, { name });
+    const outcome = await createManagedWorktree(
+      context.projectPath,
+      { name },
+      undefined,
+      undefined,
+      ownerSignal,
+    );
     const summary = summarizeWorktreeCreateOutcome(outcome, context.language);
     if (!summary.ok || (outcome.kind !== "created" && outcome.kind !== "resumed")) {
       return { ok: false, text: summary.text };
@@ -5206,3 +5514,4 @@ async function runAgentToolInCwd(
 }
 
 export const __testRunAgentToolInCwd = runAgentToolInCwd;
+export const __testExecuteAgentToolCall = executeAgentToolCall;

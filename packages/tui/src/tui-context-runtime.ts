@@ -347,6 +347,16 @@ export type TuiContext = {
   mcp: McpState;
   index: IndexState;
   memory: MemoryState;
+  memoryAutoLearningRuntime?: {
+    latestRequestTurnId?: string;
+    inFlight?: Promise<void>;
+    trailing?: {
+      userText: string;
+      requestTurnId: string;
+      sessionId: string;
+      signal: AbortSignal;
+    };
+  };
   keybindings?: Keybinding[];
   failureLearning: FailureLearningState;
   skills: SkillState;

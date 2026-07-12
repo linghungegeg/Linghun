@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { TranscriptEvent } from "@linghun/core";
+import { isUsableDeepCompactPacket, type TranscriptEvent } from "@linghun/core";
 import type { ModelGateway, ModelMessage, ModelRequest } from "@linghun/providers";
 import { redactCommonSecrets } from "@linghun/shared";
 import {
@@ -700,24 +700,7 @@ export function createDeepCompactPacket(input: {
 }
 
 export function isDeepCompactPacket(value: unknown): value is DeepCompactPacket {
-  if (!value || typeof value !== "object") return false;
-  const obj = value as Record<string, unknown>;
-  return (
-    obj.kind === "deep" &&
-    obj.scope === "full transcript semantic compact" &&
-    typeof obj.id === "string" &&
-    typeof obj.summary === "string" &&
-    Array.isArray(obj.preservedEvidenceRefs) &&
-    Array.isArray(obj.preservedFiles) &&
-    Array.isArray(obj.activeAgentsWorkflows) &&
-    Array.isArray(obj.pendingItems) &&
-    Array.isArray(obj.decisions) &&
-    Array.isArray(obj.risks) &&
-    typeof obj.createdAt === "string" &&
-    typeof obj.model === "string" &&
-    typeof obj.provider === "string" &&
-    typeof obj.trigger === "string"
-  );
+  return isUsableDeepCompactPacket(value);
 }
 
 export function buildDeepCompactRequestMessages(

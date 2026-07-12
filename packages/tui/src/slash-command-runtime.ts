@@ -943,6 +943,7 @@ import {
   writeErrorLine,
   writeLocalCommandOutputLine,
 } from "./tui-output-surface.js";
+import { currentRequestUserActionConstraints } from "./user-action-constraints.js";
 import {
   addAllowRule,
   decidePermission,
@@ -1084,8 +1085,9 @@ export async function runCommandCaptureForTest(
   args: string[],
   cwd: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): ReturnType<typeof runCommandCapture> {
-  return runCommandCapture(command, args, cwd, timeoutMs);
+  return runCommandCapture(command, args, cwd, timeoutMs, signal);
 }
 
 export async function handleDoctorCommand(
@@ -2259,6 +2261,7 @@ export async function handleVerifyCommand(
   }
 
   const sessionId = await ensureSession(context);
+  const userActionConstraints = currentRequestUserActionConstraints(context);
   const report = await runVerificationPlan(
     plan,
     context,
@@ -2272,8 +2275,9 @@ export async function handleVerifyCommand(
           requestTurnId: context.currentRequestTurnId,
           changedFiles: focusedChangedFiles,
           level: "focused",
+          userActionConstraints,
         }
-      : {},
+      : { userActionConstraints },
   );
   if (isCurrentVerificationReport(context, report)) {
     context.lastVerification = report;
@@ -2618,7 +2622,9 @@ export async function recordAgentToolEvidence(
   toolName: ToolName,
   output: ToolOutput,
   input: unknown,
+  commitGuard?: () => boolean,
 ): Promise<string | undefined> {
+  if (commitGuard && !commitGuard()) return undefined;
   const workflowRunId = context.backgroundTasks.find((task) => task.id === agent.id)?.workflowRunId;
   const evidence = await recordToolEvidence(
     context,
@@ -2626,7 +2632,7 @@ export async function recordAgentToolEvidence(
     toolName,
     output,
     input,
-    undefined,
+    commitGuard,
     undefined,
     {
       ownerSessionId: sessionId,
@@ -2641,6 +2647,7 @@ export async function recordAgentToolEvidence(
     sessionId,
     `agent tool evidence: agent ${agent.id}; tool ${toolName}; evidence ${evidence?.id ?? "none"}`,
     "info",
+    commitGuard,
   );
   return evidence?.id;
 }
@@ -2651,13 +2658,15 @@ export async function recordAgentToolFailureEvidence(
   agent: AgentRun,
   toolName: ToolName,
   summary: string,
+  commitGuard?: () => boolean,
 ): Promise<string | undefined> {
+  if (commitGuard && !commitGuard()) return undefined;
   const evidence = await recordToolFailureEvidence(
     context,
     sessionId,
     toolName,
     `agent ${agent.id}: ${summary}`,
-    undefined,
+    commitGuard,
     undefined,
     {
       ownerSessionId: sessionId,
@@ -2672,11 +2681,19 @@ export async function recordAgentToolFailureEvidence(
     sessionId,
     `agent tool failure: agent ${agent.id}; tool ${toolName}; evidence ${evidence.id}`,
     "warning",
+    commitGuard,
   );
   return evidence.id;
 }
 
-export async function runIndexSafetyRepair(context: TuiContext, output: Writable): Promise<void> {
+export async function runIndexSafetyRepair(
+  context: TuiContext,
+  output: Writable,
+  options: { signal?: AbortSignal; commitGuard?: () => boolean } = {},
+): Promise<void> {
+  const ownerIsCurrent = () =>
+    options.signal?.aborted !== true && (options.commitGuard?.() ?? true);
+  if (!ownerIsCurrent()) return;
   const riskyFiles = context.index.safetyRiskyFiles ?? [];
   if (riskyFiles.length === 0 || !context.index.safetyWarning) {
     writeLine(
@@ -2690,6 +2707,7 @@ export async function runIndexSafetyRepair(context: TuiContext, output: Writable
   }
 
   const plan = await createIndexSafetyRepairPlan(context, riskyFiles);
+  if (!ownerIsCurrent()) return;
   writeLine(
     output,
     context.language === "en-US"
@@ -2708,7 +2726,13 @@ export async function runIndexSafetyRepair(context: TuiContext, output: Writable
   );
 
   if (plan.missingEntries.length > 0) {
-    const writeResult = await runIndexIgnoreWritePlan(plan, context, output);
+    const writeResult = await runIndexIgnoreWritePlan(
+      plan,
+      context,
+      output,
+      ownerIsCurrent,
+      options.signal,
+    );
     if (!writeResult) {
       writeStatus(output, context);
       return;
@@ -2724,6 +2748,8 @@ export async function runIndexSafetyRepair(context: TuiContext, output: Writable
 
   const refreshed = await runIndexRepairRefresh(context, output, {
     guardAlreadyChecked: true,
+    signal: options.signal,
+    commitGuard: ownerIsCurrent,
   });
   if (!refreshed) {
     writeStatus(output, context);
@@ -2735,8 +2761,15 @@ export async function runIndexSafetyRepair(context: TuiContext, output: Writable
 export async function runIndexRepairRefresh(
   context: TuiContext,
   output: Writable,
-  options: { guardAlreadyChecked?: boolean } = {},
+  options: {
+    guardAlreadyChecked?: boolean;
+    signal?: AbortSignal;
+    commitGuard?: () => boolean;
+  } = {},
 ): Promise<boolean> {
+  const ownerIsCurrent = () =>
+    options.signal?.aborted !== true && (options.commitGuard?.() ?? true);
+  if (!ownerIsCurrent()) return false;
   const artifactDir = getCodebaseMemoryArtifactDir(context.projectPath);
   try {
     await rm(artifactDir, { recursive: true, force: true });
@@ -2749,6 +2782,7 @@ export async function runIndexRepairRefresh(
     );
     return false;
   }
+  if (!ownerIsCurrent()) return false;
 
   const projectName = context.index.projectName;
   if (projectName) {
@@ -2756,7 +2790,10 @@ export async function runIndexRepairRefresh(
       context,
       projectName,
       context.projectPath,
+      30_000,
+      options.signal,
     );
+    if (!ownerIsCurrent()) return false;
     if (!resetResult.ok) {
       writeErrorLine(
         output,
@@ -2770,7 +2807,10 @@ export async function runIndexRepairRefresh(
 
   await runIndexRepository(context, context.config.index.mode, "refresh", false, output, {
     guardAlreadyChecked: Boolean(options.guardAlreadyChecked),
+    signal: options.signal,
+    commitGuard: ownerIsCurrent,
   });
+  if (!ownerIsCurrent()) return false;
   if (!context.index.safetyWarning) {
     writeLine(output, formatIndexRefreshSummary(context));
   }
@@ -2934,22 +2974,29 @@ async function runIndexIgnoreWritePlan(
   plan: IndexSafetyRepairPlan,
   context: TuiContext,
   output: Writable,
+  commitGuard?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  if (commitGuard && !commitGuard()) return false;
   const sessionId = await ensureSession(context);
+  if (commitGuard && !commitGuard()) return false;
   const input = { path: plan.path, content: plan.content, expectedHash: plan.expectedHash };
   const permission = await decidePermission("Write", input, context, sessionId);
+  if (commitGuard && !commitGuard()) return false;
   await context.store.appendEvent(sessionId, {
     type: "permission_request",
     request: permission.request,
     createdAt: new Date().toISOString(),
-  });
+  }, commitGuard);
+  if (commitGuard && !commitGuard()) return false;
   await context.store.appendEvent(sessionId, {
     type: "permission_result",
     requestId: permission.request.id,
     decision: permission.decision,
     reason: permission.reason,
     createdAt: new Date().toISOString(),
-  });
+  }, commitGuard);
+  if (commitGuard && !commitGuard()) return false;
   if (permission.decision === "ask") {
     context.pendingLocalApproval = { kind: "index_ignore_write", plan };
     // P0-1 — ink 主屏走 PermissionPanel（index_ignore_write 已被
@@ -2978,7 +3025,9 @@ async function runIndexIgnoreWritePlan(
       sessionId,
       "Write",
       `permission ${permission.decision}: ${permission.reason}; ${permission.request.summary}`,
+      commitGuard,
     );
+    if (commitGuard && !commitGuard()) return false;
     writeLine(
       output,
       context.language === "en-US"
@@ -2990,15 +3039,19 @@ async function runIndexIgnoreWritePlan(
   if (permission.preflight) {
     writeLine(output, permission.preflight);
   }
-  return executeIndexIgnoreWritePlan(plan, context, output);
+  return executeIndexIgnoreWritePlan(plan, context, output, commitGuard, signal);
 }
 
 export async function executeIndexIgnoreWritePlan(
   plan: IndexSafetyRepairPlan,
   context: TuiContext,
   output: Writable,
+  commitGuard?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  if (commitGuard && !commitGuard()) return false;
   const sessionId = await ensureSession(context);
+  if (commitGuard && !commitGuard()) return false;
   const input = { path: plan.path, content: plan.content, expectedHash: plan.expectedHash };
   const callId = randomUUID();
   await context.store.appendEvent(sessionId, {
@@ -3007,11 +3060,33 @@ export async function executeIndexIgnoreWritePlan(
     name: "Write",
     input,
     createdAt: new Date().toISOString(),
-  });
+  }, commitGuard);
+  if (commitGuard && !commitGuard()) return false;
   try {
-    const result = await runTool("Write", input, context.tools);
-    await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));
-    const evidence = await recordToolEvidence(context, sessionId, "Write", result.output, input);
+    const toolContext = signal
+      ? new Proxy(context.tools, {
+          get(target, property, receiver) {
+            if (property === "abortSignal") return signal;
+            return Reflect.get(target, property, receiver);
+          },
+        })
+      : context.tools;
+    const result = await runTool("Write", input, toolContext);
+    if (commitGuard && !commitGuard()) return false;
+    await context.store.appendEvent(
+      sessionId,
+      createToolEndEvent(callId, result.output),
+      commitGuard,
+    );
+    const evidence = await recordToolEvidence(
+      context,
+      sessionId,
+      "Write",
+      result.output,
+      input,
+      commitGuard,
+    );
+    if (commitGuard && !commitGuard()) return false;
     rememberToolFiles(context, "Write", input, result.output);
     await appendToolResultEvent(
       context,
@@ -3021,7 +3096,9 @@ export async function executeIndexIgnoreWritePlan(
       result.output,
       false,
       evidence?.id,
+      commitGuard,
     );
+    if (commitGuard && !commitGuard()) return false;
     writeLine(
       output,
       context.language === "en-US"
@@ -3030,9 +3107,26 @@ export async function executeIndexIgnoreWritePlan(
     );
     return true;
   } catch (error) {
+    if (commitGuard && !commitGuard()) return false;
     const text = formatError(error, context.language);
-    const evidence = await recordToolFailureEvidence(context, sessionId, "Write", text);
-    await appendToolResultEvent(context, sessionId, callId, "Write", text, true, evidence.id);
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      text,
+      commitGuard,
+    );
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      callId,
+      "Write",
+      text,
+      true,
+      evidence.id,
+      commitGuard,
+    );
+    if (commitGuard && !commitGuard()) return false;
     writeErrorLine(
       output,
       context.language === "en-US"

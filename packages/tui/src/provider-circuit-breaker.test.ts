@@ -1072,6 +1072,78 @@ describe("provider-circuit-breaker", () => {
       }
     });
 
+    it("releases the provider slot when iterator return never resolves", async () => {
+      const model: ModelInfo = {
+        id: "gpt-4o",
+        displayName: "GPT-4o",
+        providerId: "openai",
+        contextWindow: 128_000,
+        maxOutputTokens: 4_096,
+        supportsTools: true,
+        supportsVision: false,
+        supportsThinking: false,
+        supportsPromptCache: false,
+      };
+      const returnStream = vi.fn(() => new Promise<IteratorResult<LinghunEvent>>(() => undefined));
+      const provider = {
+        id: "openai",
+        displayName: "OpenAI",
+        supports: { streaming: true, usage: true },
+        async listModels() {
+          return [model];
+        },
+        stream() {
+          let emitted = false;
+          return {
+            [Symbol.asyncIterator]() {
+              return {
+                next: async () => {
+                  if (emitted) return { done: true, value: undefined };
+                  emitted = true;
+                  return {
+                    done: false,
+                    value: {
+                      type: "error",
+                      error: new LinghunError({
+                        code: "PROVIDER_BAD_REQUEST",
+                        message: "invalid request",
+                        recoverable: false,
+                      }),
+                    } satisfies LinghunEvent,
+                  };
+                },
+                return: returnStream,
+              };
+            },
+          };
+        },
+      } as unknown as Provider;
+      const gateway = new ModelGateway([provider]);
+      const events: LinghunEvent[] = [];
+      const run = (async () => {
+        for await (const event of withProviderRetry(
+          gateway,
+          state,
+          "openai",
+          { messages: [], model: "gpt-4o" },
+          new AbortController().signal,
+          { maxRetries: 0 },
+        )) {
+          events.push(event);
+        }
+      })();
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(returnStream).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(500);
+      await run;
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.type).toBe("error");
+      expect(checkProviderGate(state, "openai", "gpt-4o")).toMatchObject({ allowed: true });
+      expect(state.entries.get("openai::gpt-4o")?.activeCount ?? 0).toBe(0);
+    });
+
     it("does not trip the idle watchdog when stream events keep arriving", async () => {
       const model: ModelInfo = {
         id: "gpt-4o",

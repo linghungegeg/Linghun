@@ -2219,7 +2219,7 @@ describe("model-loop-runtime", () => {
   });
 
   describe("D.13V-C RuntimeStatus prompt projection", () => {
-    it("剔除 provider，保留 model.name 与 index/cache/permissionMode", async () => {
+    it("剔除 provider 和 cache 自反馈，保留 model.name 与 index/permissionMode", async () => {
       const { projectRuntimeStatusForPrompt } = await import("./model-loop-runtime.js");
       const projected = projectRuntimeStatusForPrompt({
         memory: { linghunMd: "found", candidates: 0, accepted: 1, autoAccept: false },
@@ -2238,7 +2238,8 @@ describe("model-loop-runtime", () => {
       expect(JSON.stringify(projected)).not.toContain("provider");
       expect(JSON.stringify(projected)).not.toContain("openai-compatible");
       expect(projected?.index.status).toBe("ready");
-      expect(projected?.cache.latestHitRate).toBe(0.42);
+      expect(JSON.stringify(projected)).not.toContain("latestHitRate");
+      expect(JSON.stringify(projected)).not.toContain("changedKeys");
       expect(projected?.permissionMode).toBe("default");
     });
 

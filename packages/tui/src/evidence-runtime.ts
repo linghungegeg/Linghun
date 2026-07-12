@@ -4,8 +4,10 @@ import type { DiffSummary, TodoItem, ToolName, ToolOutput } from "@linghun/tools
 import type { ArchitectureCard } from "./architecture-runtime.js";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
 import { stringifyValueWithinBudget } from "./context-estimator.js";
-import type { FailureLearningInput } from "./failure-learning-runtime.js";
-import { mergeFailureRecord, writeFailureRecord } from "./failure-learning-runtime.js";
+import {
+  commitFailureLearningInput,
+  type FailureLearningInput,
+} from "./failure-learning-runtime.js";
 import { writeHandoffPacket } from "./handoff-session-runtime.js";
 import { deriveToolSupportsClaims } from "./model-loop-runtime.js";
 import { classifyProviderFailure } from "./request-lifecycle-presenter.js";
@@ -25,7 +27,6 @@ import type {
   BackgroundTaskState,
   EvidenceClaimSeed,
   EvidenceRecord,
-  FailureLearningRecord,
   RoleRouteDecision,
   VerificationReport,
 } from "./tui-data-types.js";
@@ -491,22 +492,21 @@ export async function captureFailureLearning(
   commitGuard?: () => boolean,
 ): Promise<void> {
   if (commitGuard && !commitGuard()) return;
-  context.lastMetaSchedulerFailureLearningFulfilled = true;
-  if (input.category === "tool_failure") {
-    context.lastToolFailure = {
-      toolName: input.relatedTarget ?? "unknown",
-      summary: input.failureSummary,
-    };
-  }
-  let record: FailureLearningRecord | undefined;
   try {
-    ({ record } = mergeFailureRecord(context.failureLearning, input));
-    await writeFailureRecord(context.failureLearning, record);
+    const result = await commitFailureLearningInput(context.failureLearning, input, commitGuard);
+    if (result.status !== "committed") return;
     if (commitGuard && !commitGuard()) return;
+    context.lastMetaSchedulerFailureLearningFulfilled = true;
+    if (input.category === "tool_failure") {
+      context.lastToolFailure = {
+        toolName: input.relatedTarget ?? "unknown",
+        summary: input.failureSummary,
+      };
+    }
     await appendSystemEvent(
       context,
       sessionId,
-      `failure_learning recorded category=${record.category} count=${record.count} severity=${record.severity}`,
+      `failure_learning recorded category=${result.record.category} count=${result.record.count} severity=${result.record.severity}`,
       "info",
       commitGuard,
     );
@@ -515,7 +515,7 @@ export async function captureFailureLearning(
     await appendSystemEvent(
       context,
       sessionId,
-      `failure_learning degraded warning=write_failed category=${record?.category ?? input.category}`,
+      `failure_learning degraded warning=write_failed category=${input.category}`,
       "warning",
       commitGuard,
     ).catch(() => undefined);
@@ -792,7 +792,7 @@ export async function recordVerificationEvidence(
       sourceRef: `evidence:${evidence.id}`,
       relatedTarget: failedCommand?.kind ?? "verification",
       severity: report.status === "fail" ? "high" : "medium",
-    });
+    }, options.commitGuard);
   }
 }
 

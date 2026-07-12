@@ -706,7 +706,15 @@ export async function executePermissionApprove(
       context,
       approval.sessionId,
       output,
+      approval.continuation,
     );
+    if (
+      approval.continuation?.abortSignal?.aborted === true ||
+      (approval.continuation?.requestTurnId &&
+        context.currentRequestTurnId !== approval.continuation.requestTurnId)
+    ) {
+      return;
+    }
     if (gateway && approval.continuation) {
       await appendBudgetedToolResultToContinuation(
         context,

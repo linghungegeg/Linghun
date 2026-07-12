@@ -43,8 +43,12 @@ const MCP_SSE_CONNECTION_TIMEOUT_MS = 15_000;
 const MCP_SSE_TOOL_CALL_TIMEOUT_MS = 100_000_000;
 const MCP_SSE_TOOL_LIST_CACHE_TTL_MS = 5_000;
 const MCP_SSE_TOOL_LIST_CACHE_MAX_ENTRIES = 20;
+const MCP_SSE_LIVENESS_HEARTBEAT_MS = 30_000;
 let nextJsonRpcId = 1;
-const toolListCache = new Map<string, { expiresAt: number; toolNames: string[] }>();
+const toolListCache = new Map<
+  McpServerConfig,
+  { url: string; expiresAt: number; toolNames: string[] }
+>();
 
 export async function runMcpSseToolCall(
   server: McpServerConfig,
@@ -60,7 +64,7 @@ export async function runMcpSseToolCall(
   options.onProgress?.({ phase: "starting", transport: "sse" });
   options.onProgress?.({ phase: "listing", transport: "sse" });
   const list = await getMcpSseToolNames(
-    server.url,
+    server,
     MCP_SSE_CONNECTION_TIMEOUT_MS,
     signal,
     options.onProgress,
@@ -89,19 +93,20 @@ export async function runMcpSseToolCall(
 }
 
 async function getMcpSseToolNames(
-  url: string,
+  server: McpServerConfig,
   timeoutMs: number,
   signal?: AbortSignal,
   onProgress?: McpRuntimeOptions["onProgress"],
 ): Promise<{ ok: true; toolNames: string[] } | { ok: false; summary: string; errorCode?: string }> {
-  const cached = toolListCache.get(url);
+  const url = server.url ?? "";
+  const cached = toolListCache.get(server);
   const now = Date.now();
-  for (const [cachedUrl, entry] of toolListCache) {
-    if (entry.expiresAt <= now) toolListCache.delete(cachedUrl);
+  for (const [cachedServer, entry] of toolListCache) {
+    if (entry.expiresAt <= now) toolListCache.delete(cachedServer);
   }
-  if (cached && cached.expiresAt > now) {
-    toolListCache.delete(url);
-    toolListCache.set(url, cached);
+  if (cached && cached.url === url && cached.expiresAt > now) {
+    toolListCache.delete(server);
+    toolListCache.set(server, cached);
     return { ok: true, toolNames: [...cached.toolNames] };
   }
   const list = await mcpSseRequest(url, "tools/list", {}, timeoutMs, signal, onProgress, timeoutMs);
@@ -109,15 +114,16 @@ async function getMcpSseToolNames(
     return { ok: false, summary: list.summary, errorCode: list.errorCode };
   }
   const toolNames = extractMcpToolNames(list.data);
-  toolListCache.delete(url);
-  toolListCache.set(url, {
+  toolListCache.delete(server);
+  toolListCache.set(server, {
+    url,
     expiresAt: Date.now() + MCP_SSE_TOOL_LIST_CACHE_TTL_MS,
     toolNames,
   });
   while (toolListCache.size > MCP_SSE_TOOL_LIST_CACHE_MAX_ENTRIES) {
-    const oldestUrl = toolListCache.keys().next().value;
-    if (typeof oldestUrl !== "string") break;
-    toolListCache.delete(oldestUrl);
+    const oldestServer = toolListCache.keys().next().value;
+    if (!oldestServer) break;
+    toolListCache.delete(oldestServer);
   }
   return { ok: true, toolNames };
 }
@@ -139,6 +145,7 @@ export async function mcpSseRequest(
   else signal?.addEventListener("abort", abortFromCaller, { once: true });
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let hardTimer: ReturnType<typeof setTimeout> | undefined;
+  let livenessTimer: ReturnType<typeof setTimeout> | undefined;
   const armInactivityTimeout = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
@@ -146,7 +153,21 @@ export async function mcpSseRequest(
       controller.abort();
     }, idleTimeoutMs);
   };
+  const armLivenessHeartbeat = (): void => {
+    if (livenessTimer) clearTimeout(livenessTimer);
+    if (!onProgress) return;
+    livenessTimer = setTimeout(() => {
+      onProgress({ phase: "waiting", transport: "sse" });
+      armLivenessHeartbeat();
+    }, MCP_SSE_LIVENESS_HEARTBEAT_MS);
+    livenessTimer.unref?.();
+  };
+  const reportProgress = (progress: McpRuntimeProgress): void => {
+    onProgress?.(progress);
+    armLivenessHeartbeat();
+  };
   armInactivityTimeout();
+  armLivenessHeartbeat();
   hardTimer = setTimeout(() => {
     timeoutKind = "hard";
     controller.abort();
@@ -159,7 +180,7 @@ export async function mcpSseRequest(
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
       signal: controller.signal,
     });
-    onProgress?.({ phase: "waiting", transport: "sse" });
+    reportProgress({ phase: "waiting", transport: "sse" });
     if (!response.ok) {
       return { ok: false, summary: `MCP SSE HTTP ${response.status}`, errorCode: "MCP_SSE_HTTP_ERROR" };
     }
@@ -168,13 +189,13 @@ export async function mcpSseRequest(
       const json = await readBoundedJsonResponse(response, limits);
       if (isValidMcpProtocolActivity(json, id)) {
         armInactivityTimeout();
-        onProgress?.({ phase: "receiving", transport: "sse" });
+        reportProgress({ phase: "receiving", transport: "sse" });
       }
       return unwrapJsonRpc(json, id);
     }
     const frame = await readSseJsonFrame(response, id, (receivedBytes) => {
       armInactivityTimeout();
-      onProgress?.({ phase: "receiving", transport: "sse", receivedBytes });
+      reportProgress({ phase: "receiving", transport: "sse", receivedBytes });
     }, limits);
     return unwrapJsonRpc(frame, id);
   } catch (error) {
@@ -197,6 +218,7 @@ export async function mcpSseRequest(
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
     if (hardTimer) clearTimeout(hardTimer);
+    if (livenessTimer) clearTimeout(livenessTimer);
     signal?.removeEventListener("abort", abortFromCaller);
   }
 }

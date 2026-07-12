@@ -81,9 +81,6 @@ export function getAgentPermissionMode(
   if (type === "explorer" || type === "planner") {
     return "plan";
   }
-  if (type === "verifier") {
-    return "default";
-  }
   return parentMode;
 }
 

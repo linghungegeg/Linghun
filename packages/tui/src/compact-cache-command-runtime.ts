@@ -756,7 +756,6 @@ export async function appendUsageEvents(
 ): Promise<void> {
   const createdAt = new Date().toISOString();
   await context.store.appendEvent(sessionId, { type: "usage", usage: stats, createdAt });
-  await context.store.appendEvent(sessionId, { type: "cache_update", stats, createdAt });
 }
 
 
