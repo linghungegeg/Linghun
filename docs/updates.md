@@ -43,7 +43,7 @@
 
 - compact、工具预算、请求恢复和最终回答闸门共享同一份结构化证据边界；历史失败、降级状态和约束措辞按作用域判断，不再仅凭关键词制造误拦截。
 - 预检引擎只向模型开放 TypeScript/TSX、Python、Rust、Go、Java 五条达到产品级验收的链路，统一使用 `pre_context`、`pre_plan`、`pre_impact`、`pre_verify`，没有新增第二套白名单或语义机制。
-- Windows预检包固定携带 TypeScript `5.9.3` 与 Pyright `1.1.410`：项目明确安装的版本优先，否则自动使用 Linghun兼容版；Rust、Go、Java继续复用官方工具链，避免主包膨胀为数 GB。
+- Windows、Linux 与 macOS预检平台包固定携带 TypeScript `5.9.3` 与 Pyright `1.1.410`：项目明确安装的版本优先，否则自动使用 Linghun兼容版；Rust、Go、Java继续复用官方工具链，避免主包膨胀为数 GB。
 - SQL、Shell、C#、PHP、Ruby、Kotlin、Dart、Swift、C/C++ 等未成熟语言保持隐藏；未覆盖文件快速返回 `not_covered`，缺少官方工具时明确返回 `tool_missing` 或降级状态，不用通用 AST冒充完整验证。
 
 ### 验证、发包与用户体验

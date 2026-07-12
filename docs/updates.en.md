@@ -43,7 +43,7 @@ This release is not only about the pre-check engine. It converges the long-task,
 
 - Compact, tool budgets, request recovery, and the final-answer gate now share the same structured evidence boundary. Historical failures, degraded states, and constraint wording are evaluated by scope instead of keyword-only blocking.
 - The pre-check engine exposes only five product-grade paths—TypeScript/TSX, Python, Rust, Go, and Java—through the same `pre_context`, `pre_plan`, `pre_impact`, and `pre_verify` contract, without a second allowlist or semantic mechanism.
-- The Windows pre-check package now carries TypeScript `5.9.3` and Pyright `1.1.410`. Explicit project versions win; otherwise Linghun uses its fixed compatible runtime. Rust, Go, and Java continue to reuse official toolchains so the main package does not grow by several gigabytes.
+- The Windows, Linux, and macOS pre-check platform packages now carry TypeScript `5.9.3` and Pyright `1.1.410`. Explicit project versions win; otherwise Linghun uses its fixed compatible runtime. Rust, Go, and Java continue to reuse official toolchains so the main package does not grow by several gigabytes.
 - SQL, Shell, C#, PHP, Ruby, Kotlin, Dart, Swift, and C/C++ remain hidden until product-grade. Uncovered files return `not_covered` quickly, while missing official tools return explicit `tool_missing` or degraded states instead of generic AST output presented as complete verification.
 
 ### Verification, Publishing, and User Experience
