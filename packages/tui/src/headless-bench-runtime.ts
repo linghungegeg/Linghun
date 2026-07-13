@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { runTool, createToolContext } from "@linghun/tools";
 
 const DEFAULT_TEST_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_REPAIR_ATTEMPTS = 1;
@@ -701,98 +701,15 @@ async function runOfficialTestCommand(input: {
   outcome: "completed" | "timeout" | "cancelled";
   logPath: string;
 }> {
-  const result = await runShellCommand(input.command, input.projectPath, input.timeoutMs);
-  const postTestLog = result.exitCode === 0 ? "" : await readPostTestFailureLog(input.projectPath);
-  const output = postTestLog ? `${result.output}\n\n[post-test/tests.log]\n${postTestLog}` : result.output;
+  const context = createToolContext(input.projectPath, {});
+  const toolResult = await runTool("Bash", { command: input.command, timeoutMs: input.timeoutMs }, context);
+  const exitCode = (toolResult.output.data as { exitCode?: number })?.exitCode ?? 1;
+  const outcome = (toolResult.output.data as { outcome?: "completed" | "timeout" | "cancelled" })?.outcome ?? "completed";
+  const rawOutput = toolResult.output.text;
+  const postTestLog = exitCode === 0 ? "" : await readPostTestFailureLog(input.projectPath);
+  const output = postTestLog ? `${rawOutput}\n\n[post-test/tests.log]\n${postTestLog}` : rawOutput;
   const logPath = await writeHeadlessLog(input.projectPath, "official-test.log", output);
-  return { ...result, output, logPath };
-}
-
-function runShellCommand(
-  command: string,
-  cwd: string,
-  timeoutMs: number,
-): Promise<{ exitCode: number; output: string; outcome: "completed" | "timeout" | "cancelled" }> {
-  return new Promise((resolvePromise) => {
-    const detached = process.platform !== "win32";
-    const child = spawn(command, {
-      cwd,
-      shell: true,
-      windowsHide: true,
-      detached,
-      env: createSanitizedChildEnv(process.env),
-    });
-    let output = "";
-    let settled = false;
-    const append = (chunk: Buffer | string) => {
-      output += chunk.toString();
-      if (output.length > OUTPUT_LIMIT) {
-        output = output.slice(output.length - OUTPUT_LIMIT);
-      }
-    };
-    const finish = (
-      exitCode: number,
-      outcome: "completed" | "timeout" | "cancelled" = "completed",
-    ) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolvePromise({ exitCode, output, outcome });
-    };
-    const timer = setTimeout(() => {
-      append(`\nCommand timed out after ${timeoutMs}ms.`);
-      killShellProcess(child.pid);
-      finish(1, "timeout");
-    }, timeoutMs);
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
-    child.on("error", (error) => {
-      append(`\nCommand failed to start: ${error.message}`);
-      finish(1);
-    });
-    child.on("close", (code) => finish(code ?? 1));
-  });
-}
-
-function createSanitizedChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const next: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (isSecretEnvKey(key)) continue;
-    next[key] = value;
-  }
-  return next;
-}
-
-function isSecretEnvKey(key: string): boolean {
-  return /(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION|BEARER|CREDENTIAL)/iu.test(key);
-}
-
-function killShellProcess(pid: number | undefined): void {
-  if (!pid) return;
-  try {
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
-        stdio: "ignore",
-        windowsHide: true,
-      }).unref();
-      process.kill(pid);
-    } else {
-      process.kill(-pid, "SIGTERM");
-      setTimeout(() => {
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          // The process group has already exited.
-        }
-      }, 1_000).unref();
-    }
-  } catch {
-    try {
-      process.kill(pid);
-    } catch {
-      // The process already exited.
-    }
-  }
+  return { exitCode, output, outcome, logPath };
 }
 
 async function isToolAvailable(tool: string, cwd: string): Promise<boolean> {
@@ -800,8 +717,10 @@ async function isToolAvailable(tool: string, cwd: string): Promise<boolean> {
     process.platform === "win32"
       ? `where ${cmdQuote(tool)} >nul 2>nul`
       : `command -v ${shellQuote(tool)} >/dev/null 2>&1`;
-  const result = await runShellCommand(command, cwd, 5_000);
-  return result.exitCode === 0;
+  const context = createToolContext(cwd, {});
+  const toolResult = await runTool("Bash", { command, timeoutMs: 5_000 }, context);
+  const exitCode = (toolResult.output.data as { exitCode?: number })?.exitCode ?? 1;
+  return exitCode === 0;
 }
 
 async function writeHeadlessLog(projectPath: string, name: string, content: string): Promise<string> {
