@@ -2188,10 +2188,15 @@ export function deriveToolSupportsClaims(
     const command = typeof inputObj.command === "string" ? inputObj.command : "";
     claims.add("command_ran");
     const dataExit = (output.data as { exitCode?: unknown } | undefined)?.exitCode;
-    const exitOk =
-      (typeof dataExit === "number" && dataExit === 0) ||
-      (typeof dataExit !== "number" && /(?:^|\s)exit\s*code\s*0(?:\s|$)/iu.test(output.text ?? ""));
-    claims.add(exitOk ? "bash_exit_0" : "bash_exit_nonzero");
+    const textExit = /(?:^|\s)exit\s*code\s*(-?\d+)(?:\s|$)/iu.exec(output.text ?? "");
+    const exitCode =
+      typeof dataExit === "number"
+        ? dataExit
+        : textExit
+          ? Number(textExit[1])
+          : undefined;
+    const exitOk = exitCode === 0;
+    if (exitCode !== undefined) claims.add(exitOk ? "bash_exit_0" : "bash_exit_nonzero");
     const cmd = command.toLowerCase();
     if (exitOk) {
       if (

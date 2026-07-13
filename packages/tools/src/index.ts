@@ -4214,20 +4214,63 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     });
     closeSync(outFd);
     closeSync(errFd);
-    child.unref();
     trackChildProcess?.(child, {
       detached,
       cwd,
       label: `BashBg:${command.slice(0, 80)}`,
       retainAfterExit: true,
     });
-    onComplete?.({
-      taskId,
-      exitCode: 0,
-      outcome: "completed",
-      outputPath: fullOutputPath,
-      command: sanitizeSecrets(originalCommand),
-    });
+
+    let settled = false;
+    let forceTimer: NodeJS.Timeout | undefined;
+    let outcome: "completed" | "cancelled" = "completed";
+
+    const finish = (exitCode: number, detail?: string) => {
+      if (settled) return;
+      settled = true;
+      if (forceTimer) clearTimeout(forceTimer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      const footer = `${detail ? `\n${detail}\n` : ""}\nexit code ${exitCode}\noutcome ${outcome}\n`;
+      void appendFile(fullOutputPath, footer, "utf8").finally(() => {
+        onComplete?.({
+          taskId,
+          exitCode,
+          outcome,
+          outputPath: fullOutputPath,
+          command: sanitizeSecrets(originalCommand),
+        });
+      });
+    };
+
+    const requestStop = async (force: boolean): Promise<void> => {
+      if (process.platform === "win32" && child.pid) {
+        await stopWindowsProcessTree(child.pid, cwd);
+        return;
+      }
+      const signal = force ? "SIGKILL" : "SIGTERM";
+      if (detached && child.pid) {
+        try { process.kill(-child.pid, signal); } catch { child.kill(signal); }
+      } else {
+        child.kill(signal);
+      }
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      outcome = "cancelled";
+      void appendFile(fullOutputPath, "\n[cancelled] 工具调用已取消，正在终止子进程。\n", "utf8");
+      void requestStop(false);
+      forceTimer = setTimeout(() => {
+        void requestStop(true);
+        setTimeout(() => finish(1), 500);
+      }, 3000);
+    };
+
+    child.once("close", (code) => finish(code ?? 1));
+    child.once("error", (error) => finish(1, `[error] ${error.message}`));
+    if (abortSignal?.aborted) onAbort();
+    else abortSignal?.addEventListener("abort", onAbort, { once: true });
+    child.unref();
     return;
   }
   const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
@@ -4323,9 +4366,6 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     waitForCloseOrForceKill();
   }, timeoutMs);
 
-  if (abortSignal?.aborted) { onAbort(); return; }
-  abortSignal?.addEventListener("abort", onAbort, { once: true });
-
   child.stdout.on("data", (chunk: Buffer) => {
     const text = decodeShellChunk(chunk);
     fileStream.write(text);
@@ -4345,6 +4385,8 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     fileStream.write(`\n[error] ${err.message}\n`);
     finish(1);
   });
+  if (abortSignal?.aborted) onAbort();
+  else abortSignal?.addEventListener("abort", onAbort, { once: true });
 }
 
 function decodeShellChunk(chunk: Buffer): string {

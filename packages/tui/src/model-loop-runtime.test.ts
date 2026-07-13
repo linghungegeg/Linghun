@@ -1683,6 +1683,17 @@ describe("model-loop-runtime", () => {
       expect(claims).toContain("bash_exit_nonzero");
     });
 
+    it("Bash background start without a terminal exit derives no exit claim", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "node server.js", run_in_background: true },
+        { text: "命令已在后台启动。", data: { backgroundTaskId: "bg-1" } },
+      );
+
+      expect(claims).not.toContain("bash_exit_0");
+      expect(claims).not.toContain("bash_exit_nonzero");
+    });
+
     it("Bash echo does NOT derive test_passed/build_passed/typecheck_passed", () => {
       const claims = deriveToolSupportsClaims(
         "Bash",

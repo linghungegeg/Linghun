@@ -1569,7 +1569,9 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
         "command_output",
         `Bash(background): ${result.command}; exit=${result.exitCode} ${result.outcome}`,
         result.outputPath,
-        result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
+        result.outcome === "completed" && result.exitCode === 0
+          ? ["background_bash_pass"]
+          : ["background_bash_fail"],
       );
       scopeEvidenceToContext(context, evidence, {
         ownerSessionId: sessionId,

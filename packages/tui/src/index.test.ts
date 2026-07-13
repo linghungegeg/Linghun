@@ -21711,7 +21711,10 @@ describe("Phase 06 TUI slash commands", () => {
           kind: "command_output",
           summary: `Bash(background): ${result.command}; exit=${result.exitCode} ${result.outcome}`,
           source: result.outputPath,
-          supportsClaims: result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
+          supportsClaims:
+            result.outcome === "completed" && result.exitCode === 0
+              ? ["background_bash_pass"]
+              : ["background_bash_fail"],
           createdAt: new Date().toISOString(),
         });
       }
@@ -21849,7 +21852,9 @@ describe("Phase 06 TUI slash commands", () => {
         "command_output",
         `Bash(background): ${result.command}; exit=${result.exitCode} ${result.outcome}`,
         result.outputPath,
-        result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
+        result.outcome === "completed" && result.exitCode === 0
+          ? ["background_bash_pass"]
+          : ["background_bash_fail"],
       );
       rememberEvidence(context, evidence);
     };

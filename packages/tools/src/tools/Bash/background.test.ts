@@ -171,6 +171,31 @@ describe("Bash background execution (Stage 7+8)", () => {
     expect(finalContent).not.toBe("still_alive");
   });
 
+  it("a pre-aborted background process reports cancelled exactly once", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const context = createToolContext(project);
+    context.abortSignal = controller.signal;
+    const completions: BashBackgroundResult[] = [];
+    context.onBackgroundBashComplete = (result) => completions.push(result);
+
+    await runTool(
+      "Bash",
+      { command: `node -e "setTimeout(() => {}, 5000)"`, run_in_background: true },
+      context,
+    );
+
+    await vi.waitFor(
+      async () => {
+        expect(completions).toHaveLength(1);
+      },
+      { timeout: 10_000, interval: 100 },
+    );
+    expect(completions[0]?.outcome).toBe("cancelled");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(completions).toHaveLength(1);
+  });
+
   it("completion event contains taskId, exitCode, outcome, outputPath, and command", async () => {
     const context = createToolContext(project);
     const completions: BashBackgroundResult[] = [];
@@ -197,8 +222,10 @@ describe("Bash background execution (Stage 7+8)", () => {
   });
 
   it("headless run_in_background retains a service process after returning", async () => {
+    const controller = new AbortController();
     const context = createToolContext(project);
     context.isHeadlessBench = true;
+    context.abortSignal = controller.signal;
     const completions: BashBackgroundResult[] = [];
     context.onBackgroundBashComplete = (r) => completions.push(r);
     const port = 45_000 + Math.floor(Math.random() * 1_000);
@@ -220,23 +247,99 @@ describe("Bash background execution (Stage 7+8)", () => {
     expect(result.output.data).toHaveProperty("backgroundTaskId");
     await vi.waitFor(
       async () => {
-        expect(completions).toHaveLength(1);
-      },
-      { timeout: 5_000, interval: 50 },
-    );
-    expect(completions[0]).toMatchObject({
-      exitCode: 0,
-      outcome: "completed",
-      outputPath: (result.output.data as { outputPath: string }).outputPath,
-    });
-    await vi.waitFor(
-      async () => {
         await expect(connectsToLocalPort(port)).resolves.toBe(true);
       },
       { timeout: 5_000, interval: 100 },
     );
-    const pid = Number(await readFile(pidFile, "utf8"));
-    if (Number.isInteger(pid) && pid > 0) process.kill(pid, "SIGTERM");
+    expect(completions).toHaveLength(0);
+    await expect(readFile(pidFile, "utf8")).resolves.toMatch(/^\d+$/);
+
+    controller.abort();
+    await vi.waitFor(
+      async () => {
+        expect(completions).toHaveLength(1);
+      },
+      { timeout: 10_000, interval: 100 },
+    );
+    expect(completions[0]).toMatchObject({
+      outcome: "cancelled",
+      outputPath: (result.output.data as { outputPath: string }).outputPath,
+    });
+    expect(completions[0]!.exitCode).not.toBe(0);
+  });
+
+  it("headless retained process reports completion only after a real zero exit", async () => {
+    const context = createToolContext(project);
+    context.isHeadlessBench = true;
+    const completions: BashBackgroundResult[] = [];
+    context.onBackgroundBashComplete = (result) => completions.push(result);
+
+    await runTool(
+      "Bash",
+      { command: `node -e "setTimeout(() => process.exit(0), 200)"`, run_in_background: true },
+      context,
+    );
+
+    expect(completions).toHaveLength(0);
+    await vi.waitFor(
+      async () => {
+        expect(completions).toHaveLength(1);
+      },
+      { timeout: 5_000, interval: 50 },
+    );
+    expect(completions[0]).toMatchObject({ exitCode: 0, outcome: "completed" });
+  });
+
+  it("headless retained process reports a real non-zero exit only once", async () => {
+    const context = createToolContext(project);
+    context.isHeadlessBench = true;
+    const completions: BashBackgroundResult[] = [];
+    context.onBackgroundBashComplete = (result) => completions.push(result);
+
+    await runTool(
+      "Bash",
+      { command: `node -e "process.exit(7)"`, run_in_background: true },
+      context,
+    );
+
+    await vi.waitFor(
+      async () => {
+        expect(completions).toHaveLength(1);
+      },
+      { timeout: 5_000, interval: 50 },
+    );
+    expect(completions[0]).toMatchObject({ exitCode: 7, outcome: "completed" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(completions).toHaveLength(1);
+  });
+
+  it("retained process with continuous output does not produce intermediate completion", async () => {
+    const context = createToolContext(project);
+    context.isHeadlessBench = true;
+    const completions: BashBackgroundResult[] = [];
+    context.onBackgroundBashComplete = (result) => completions.push(result);
+
+    // Process outputs 100 lines over 2 seconds, then exits
+    const cmd = `node -e "let i=0;const t=setInterval(()=>{console.log('progress',i++);if(i>=100){clearInterval(t);setTimeout(()=>process.exit(0),100)}},20)"`;
+
+    await runTool(
+      "Bash",
+      { command: cmd, run_in_background: true },
+      context,
+    );
+
+    // Verify no completion during the 2-second output phase
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(completions).toHaveLength(0);
+
+    // Wait for real exit and verify exactly one completion
+    await vi.waitFor(
+      async () => {
+        expect(completions).toHaveLength(1);
+      },
+      { timeout: 10_000, interval: 50 },
+    );
+    expect(completions[0]).toMatchObject({ exitCode: 0, outcome: "completed" });
   });
 });
 
