@@ -7,7 +7,9 @@ import {
   buildPostCompactRestorePayload,
   formatPostCompactRestorePayload,
 } from "./compact-restore-runtime.js";
+import { createEmptyMemoryTombstoneIndex } from "./memory-tombstone-runtime.js";
 import type { TuiContext } from "./index.js";
+import type { MemoryCandidate } from "./tui-data-types.js";
 
 function makeContext(projectPath: string, overrides: Partial<TuiContext> = {}): TuiContext {
   return {
@@ -18,6 +20,21 @@ function makeContext(projectPath: string, overrides: Partial<TuiContext> = {}): 
     activePlan: undefined,
     agents: [],
     workflows: {},
+    memory: {
+      projectDir: join(projectPath, ".linghun", "memory", "project"),
+      userDir: join(projectPath, ".linghun", "memory", "user"),
+      sessionDir: join(projectPath, ".linghun", "memory", "session"),
+      projectRulesPath: join(projectPath, "LINGHUN.md"),
+      projectRulesExists: false,
+      projectRulesSummary: "missing",
+      candidates: [],
+      accepted: [],
+      rejected: [],
+      disabled: [],
+      retired: [],
+      learningMode: "off",
+      tombstones: createEmptyMemoryTombstoneIndex(),
+    },
     ...overrides,
   } as TuiContext;
 }
@@ -145,5 +162,132 @@ describe("post compact restore runtime", () => {
     context.cache.deepCompact = { id: "deep-2" } as never;
     const afterCompact = await buildPostCompactRestoreMessage(context);
     expect(afterCompact?.content).toContain("current = 3");
+  });
+
+  it("does not resurrect deleted memory after compact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
+    const userMemory: MemoryCandidate = {
+      id: "mem-user-1",
+      scope: "user",
+      status: "accepted",
+      taxonomy: "user",
+      summary: "User prefers concise summaries",
+      source: "manual",
+      sourceRefs: [],
+      risk: "low",
+      inferred: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const tombstoneIndex = createEmptyMemoryTombstoneIndex();
+    tombstoneIndex.ids.add(`user\0${userMemory.id}`);
+
+    const context = makeContext(project, {
+      memory: {
+        projectDir: join(project, ".linghun", "memory", "project"),
+        userDir: join(project, ".linghun", "memory", "user"),
+        sessionDir: join(project, ".linghun", "memory", "session"),
+        projectRulesPath: join(project, "LINGHUN.md"),
+        projectRulesExists: false,
+        projectRulesSummary: "missing",
+        candidates: [],
+        accepted: [userMemory],
+        rejected: [],
+        disabled: [],
+        retired: [],
+        learningMode: "off",
+        tombstones: tombstoneIndex,
+      },
+    });
+
+    const payload = await buildPostCompactRestorePayload(context);
+    expect(payload.userConstraints).toEqual([]);
+  });
+
+  it("does not resurrect disabled memory after compact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
+    const disabledMemory: MemoryCandidate = {
+      id: "mem-user-2",
+      scope: "user",
+      status: "disabled",
+      taxonomy: "user",
+      summary: "Disabled preference",
+      source: "manual",
+      sourceRefs: [],
+      risk: "low",
+      inferred: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    const context = makeContext(project, {
+      memory: {
+        projectDir: join(project, ".linghun", "memory", "project"),
+        userDir: join(project, ".linghun", "memory", "user"),
+        sessionDir: join(project, ".linghun", "memory", "session"),
+        projectRulesPath: join(project, "LINGHUN.md"),
+        projectRulesExists: false,
+        projectRulesSummary: "missing",
+        candidates: [],
+        accepted: [disabledMemory],
+        rejected: [],
+        disabled: [disabledMemory],
+        retired: [],
+        learningMode: "off",
+        tombstones: createEmptyMemoryTombstoneIndex(),
+      },
+    });
+
+    const payload = await buildPostCompactRestorePayload(context);
+    expect(payload.userConstraints).toEqual([]);
+  });
+
+  it("restores only current valid user memory after compact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
+    const validMemory: MemoryCandidate = {
+      id: "mem-user-3",
+      scope: "user",
+      status: "accepted",
+      taxonomy: "user",
+      summary: "Valid user preference",
+      source: "manual",
+      sourceRefs: [],
+      risk: "low",
+      inferred: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const deletedMemory: MemoryCandidate = {
+      id: "mem-user-4",
+      scope: "user",
+      status: "accepted",
+      taxonomy: "user",
+      summary: "Deleted user preference",
+      source: "manual",
+      sourceRefs: [],
+      risk: "low",
+      inferred: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const tombstoneIndex = createEmptyMemoryTombstoneIndex();
+    tombstoneIndex.ids.add(`user\0${deletedMemory.id}`);
+
+    const context = makeContext(project, {
+      memory: {
+        projectDir: join(project, ".linghun", "memory", "project"),
+        userDir: join(project, ".linghun", "memory", "user"),
+        sessionDir: join(project, ".linghun", "memory", "session"),
+        projectRulesPath: join(project, "LINGHUN.md"),
+        projectRulesExists: false,
+        projectRulesSummary: "missing",
+        candidates: [],
+        accepted: [validMemory, deletedMemory],
+        rejected: [],
+        disabled: [],
+        retired: [],
+        learningMode: "off",
+        tombstones: tombstoneIndex,
+      },
+    });
+
+    const payload = await buildPostCompactRestorePayload(context);
+    expect(payload.userConstraints).toEqual(["Valid user preference"]);
   });
 });

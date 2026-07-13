@@ -3,17 +3,21 @@ import { relative, resolve } from "node:path";
 import type { ModelMessage } from "@linghun/providers";
 import { redactCommonSecrets } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
+import { isMemoryTombstoned } from "./memory-tombstone-runtime.js";
 import {
   sanitizeDiagnosticText,
   sanitizeDisplayPaths,
   truncateDisplay,
 } from "./startup-runtime.js";
+import type { MemoryCandidate } from "./tui-data-types.js";
 
 const RESTORE_FILE_LIMIT = 5;
 const RESTORE_FILE_MAX_CHARS = 5_000;
 const RESTORE_TOTAL_MAX_CHARS = 30_000;
 const RESTORE_PLAN_MAX_CHARS = 4_000;
 const RESTORE_STATUS_MAX_CHARS = 4_000;
+const RESTORE_MEMORY_LIMIT = 4;
+const RESTORE_MEMORY_ITEM_MAX_CHARS = 160;
 
 export type CompactRestoreFile = {
   path: string;
@@ -25,7 +29,7 @@ export type CompactRestorePayload = {
   files: CompactRestoreFile[];
   plan?: string;
   runtimeStatus: string[];
-  sessionMemoryRecords: Array<{ id: string; summary: string; scope: string }>;
+  userConstraints: string[];
 };
 
 export async function buildPostCompactRestoreMessage(
@@ -58,12 +62,11 @@ export async function buildPostCompactRestorePayload(
   context: TuiContext,
 ): Promise<CompactRestorePayload> {
   const files = await readRestoreFiles(context);
-  const sessionMemoryRecords = context.cache.compactProjection?.restoreContext?.sessionMemoryRecords ?? [];
   return {
     files,
     plan: formatActivePlan(context),
     runtimeStatus: collectRuntimeStatus(context),
-    sessionMemoryRecords,
+    userConstraints: collectUserConstraints(context),
   };
 }
 
@@ -74,13 +77,6 @@ export function formatPostCompactRestorePayload(
     "Post-compact restored context",
     "role current working context restored after deep compact",
   ];
-
-  if (payload.sessionMemoryRecords.length > 0) {
-    sections.push("restored session memories");
-    for (const record of payload.sessionMemoryRecords) {
-      sections.push(`- ${record.summary}`);
-    }
-  }
 
   if (payload.files.length > 0) {
     sections.push("restored files");
@@ -97,6 +93,10 @@ export function formatPostCompactRestorePayload(
 
   if (payload.runtimeStatus.length > 0) {
     sections.push(`active agents/workflows\n${payload.runtimeStatus.join("\n")}`);
+  }
+
+  if (payload.userConstraints.length > 0) {
+    sections.push(`user constraints\n${payload.userConstraints.join("\n")}`);
   }
 
   if (sections.length === 2) return undefined;
@@ -203,4 +203,19 @@ function sanitizeRestoreText(
   const redacted = redactCommonSecrets(value);
   const sanitized = sanitizeDiagnosticText(sanitizeDisplayPaths(redacted, context.projectPath));
   return truncateDisplay(sanitized, Math.max(0, maxChars - 1)).trim();
+}
+
+function collectUserConstraints(context: TuiContext): string[] {
+  const tombstoneIndex = context.memory.tombstones;
+  const candidates = context.memory.accepted
+    .filter((item) => {
+      if (item.status !== "accepted") return false;
+      if (item.scope !== "user" && item.taxonomy !== "user") return false;
+      if (isMemoryTombstoned(tombstoneIndex, item)) return false;
+      return true;
+    })
+    .slice(0, RESTORE_MEMORY_LIMIT)
+    .map((item) => sanitizeRestoreText(context, item.summary, RESTORE_MEMORY_ITEM_MAX_CHARS))
+    .filter(Boolean);
+  return candidates;
 }

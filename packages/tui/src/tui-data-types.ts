@@ -194,8 +194,6 @@ export type VerificationScope = {
   workflowRunId?: string;
   requestTurnId?: string;
   level?: string;
-  originalTask?: string;
-  targetPackage?: string;
 };
 
 export type VerificationReport = {
@@ -311,8 +309,6 @@ export type CompactRestoreContext = {
   goal: string;
   currentTask: string;
   phaseStatus: string;
-  userConstraints: string[];
-  sessionMemoryRecords: Array<{ id: string; summary: string; scope: string }>;
   keyFiles: string[];
   changedFiles: string[];
   evidenceRefs: string[];
