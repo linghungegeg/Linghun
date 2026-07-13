@@ -1498,6 +1498,29 @@ function sanitizeSecrets(text: string): string {
   return sanitized;
 }
 
+function sanitizeEnvironmentForHeadlessBench(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = {};
+  const sensitivePatterns = [
+    /API[_-]?KEY/i,
+    /TOKEN/i,
+    /SECRET/i,
+    /PASSWORD/i,
+    /PASSWD/i,
+    /AUTH/i,
+    /CREDENTIAL/i,
+  ];
+
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value === undefined) continue;
+    const isSensitive = sensitivePatterns.some(pattern => pattern.test(key));
+    if (!isSensitive) {
+      sanitized[key] = value;
+    }
+  }
+
+  return sanitized;
+}
+
 async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOutput> {
   if (!input.command) {
     throw new Error("Bash.command 必须提供。");
@@ -1507,6 +1530,10 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   const fullOutputPath = join(logRoot, `bash-${Date.now()}-${randomUUID()}.log`);
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
   const adapted = adaptShellCommand(input.command);
+  // Sanitize environment for headless bench mode
+  const childEnv = context.isHeadlessBench
+    ? sanitizeEnvironmentForHeadlessBench(process.env)
+    : undefined;
   // Background execution: only when explicitly requested via runInBackground=true
   if (input.runInBackground === true) {
     const taskId = randomUUID();
@@ -1524,6 +1551,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
       abortSignal: context.abortSignal,
       trackChildProcess: context.trackChildProcess,
       onComplete: context.onBackgroundBashComplete,
+      env: childEnv,
     });
     return {
       text: `命令已在后台启动。\ntaskId: ${taskId}\noutputPath: ${fullOutputPath}`,
@@ -1552,6 +1580,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
     context.trackChildProcess,
     createBashNoOutputHint(input.command),
+    childEnv,
   );
   const cmdInterpretation = interpretCommandResult(input.command, result.exitCode);
   const diagnostics = createBashOutcomeDiagnostics(input.command, result.outcome);
@@ -3977,10 +4006,11 @@ function runShell(
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
   trackChildProcess?: ToolContext["trackChildProcess"],
   noOutputHint?: string,
+  env?: NodeJS.ProcessEnv,
 ): Promise<{ exitCode: number; capture: BashOutputCapture; outcome: "completed" | "timeout" | "cancelled" }> {
   return new Promise((resolvePromise) => {
     const detached = process.platform !== "win32";
-    const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
+    const child = spawn(command, { cwd, shell: true, windowsHide: true, detached, env });
     trackChildProcess?.(child, {
       detached,
       cwd,
@@ -4195,6 +4225,7 @@ type RunBackgroundBashOptions = {
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void;
   trackChildProcess?: ToolContext["trackChildProcess"];
   onComplete?: (result: BashBackgroundResult) => void;
+  env?: NodeJS.ProcessEnv;
 };
 
 async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> {
@@ -4212,6 +4243,7 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     onProgress,
     trackChildProcess,
     onComplete,
+    env,
   } = opts;
 
   await mkdir(dirname(fullOutputPath), { recursive: true }).catch(() => {});
@@ -4237,6 +4269,7 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
       windowsHide: true,
       detached,
       stdio: ["ignore", outFd, errFd],
+      env,
     });
     closeSync(outFd);
     closeSync(errFd);
@@ -4299,7 +4332,7 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     child.unref();
     return;
   }
-  const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
+  const child = spawn(command, { cwd, shell: true, windowsHide: true, detached, env });
   trackChildProcess?.(child, {
     detached,
     cwd,
