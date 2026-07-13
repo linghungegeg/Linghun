@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -10,6 +11,7 @@ const MAX_REPAIR_ATTEMPTS = 2;
 const MAX_ENVIRONMENT_SETUP_RETRIES = 3;
 const OUTPUT_LIMIT = 24_000;
 const SUMMARY_LIMIT = 4_000;
+const DEFAULT_OVERALL_DEADLINE_MS = 1_800_000;
 
 export type HeadlessBenchFailureCategory =
   | "model_patch_failed"
@@ -65,6 +67,7 @@ export type HeadlessBenchValidationResult =
 export type HeadlessArtifactChecklist = {
   requiredArtifacts: Array<{ path: string; present: boolean }>;
   changedFiles: string[];
+  workspaceChangeHash?: string;
   verificationRan: boolean;
   lastVerificationExitCode?: number;
   gitAvailable: boolean | "unknown";
@@ -325,10 +328,12 @@ export async function collectHeadlessArtifactChecklist(input: {
     (input.lastValidation?.ok === true && input.lastValidation.testRan) ||
     Boolean(failedValidation?.command);
   const lastVerificationExitCode = failedValidation?.exitCode;
+  const workspaceChangeHash = await computeWorkspaceChangeHash(input.projectPath, input.changedFiles);
   const summary = [
     `artifacts=${requiredArtifacts.length}`,
     `artifactsPresent=${requiredArtifacts.filter((item) => item.present).length}/${requiredArtifacts.length}`,
     `changedFiles=${input.changedFiles.length}`,
+    `workspaceHash=${workspaceChangeHash.slice(0, 8)}`,
     `verificationRan=${verificationRan ? "yes" : "no"}`,
     `lastVerificationExitCode=${lastVerificationExitCode ?? "none"}`,
     `git=${gitAvailable}`,
@@ -336,6 +341,7 @@ export async function collectHeadlessArtifactChecklist(input: {
   return {
     requiredArtifacts,
     changedFiles: [...input.changedFiles],
+    workspaceChangeHash,
     verificationRan,
     ...(lastVerificationExitCode === undefined ? {} : { lastVerificationExitCode }),
     gitAvailable,
@@ -831,7 +837,8 @@ async function readPostTestFailureLog(projectPath: string): Promise<string> {
 }
 
 function summarizeFailureOutput(output: string, category: HeadlessBenchFailureCategory): string {
-  const lines = output
+  const normalized = normalizeFailureFingerprint(output);
+  const lines = normalized
     .split(/\r?\n/u)
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
@@ -879,6 +886,41 @@ function splitList(value: string | undefined): string[] {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+async function computeWorkspaceChangeHash(projectPath: string, changedFiles: string[]): Promise<string> {
+  if (changedFiles.length === 0) return "empty";
+  const sorted = [...changedFiles].sort();
+  const contentParts: string[] = [];
+  for (const file of sorted.slice(0, 50)) {
+    const fullPath = resolve(projectPath, file);
+    try {
+      const content = await readFile(fullPath, "utf8");
+      contentParts.push(`${file}:${content.length}:${hashString(content.slice(0, 1000))}`);
+    } catch {
+      contentParts.push(`${file}:missing`);
+    }
+  }
+  return hashString(contentParts.join("|"));
+}
+
+function hashString(input: string): string {
+  return createHash("sha256").update(input, "utf8").digest("hex").slice(0, 16);
+}
+
+export function normalizeFailureFingerprint(output: string): string {
+  return output
+    .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})?/g, "TIMESTAMP")
+    .replace(/\b\d+ms\b/g, "Xms")
+    .replace(/\b\d+s\b/g, "Xs")
+    .replace(/\btimed out after \d+ms\b/gi, "timed out after Xms")
+    .replace(/\d+ milliseconds?\b/gi, "X milliseconds")
+    .replace(/\bat line \d+/gi, "at line X")
+    .replace(/:\d+:\d+/g, ":X:X")
+    .replace(/0x[0-9a-f]+/gi, "0xADDR")
+    .replace(/\b[A-Z]:\\[\w\\.-]+/g, "WIN_PATH")
+    .replace(/\/[\w/.-]+\.linghun\/[\w/.-]+/g, "/PROJECT/.linghun/PATH")
+    .replace(/\/tmp\/[\w.-]+/g, "/tmp/TEMP");
 }
 
 async function canRead(path: string): Promise<boolean> {

@@ -3677,7 +3677,177 @@ describe("runHeadlessTask", () => {
     expect(timeoutPrompt).toContain("narrow validation to focused tests");
     expect(timeoutPrompt).toContain("avoid repeatedly launching full expensive runs");
   });
+
+  it("TB21-6: explicit maxRepairAttempts=1 runs exactly 1 initial + 1 repair attempt", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-repair-max1-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix the project.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `node -e "console.error('test failed'); process.exit(1)"`,
+      },
+      __testSendMessage: async () => {
+        attempts += 1;
+      },
+    });
+
+    expect(exitCode).toBe(5);
+    expect(attempts).toBe(2);
+    expect(stderr.text).toContain("headless bench 修补已达上限 1");
+  });
+
+  it("TB21-6: default headless run has overall deadline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-default-deadline-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Long task.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineMs: 500,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 10,
+        testCommand: `node -e "setTimeout(() => {}, 10000)"`,
+        testTimeoutMs: 5000,
+      },
+      __testSendMessage: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      },
+    });
+
+    expect(exitCode).toBe(6);
+  });
+
+  it("TB21-6: detects same-file content changes across repair attempts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-change-detection-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    const target = join(project, "output.txt");
+    let attempt = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Create output.txt with correct content.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 2,
+        testCommand: `node -e "const fs = require('fs'); const c = fs.readFileSync('${target.replace(/\\/g, "\\\\")}', 'utf8'); if (c !== 'correct') process.exit(1);"`,
+      },
+      __testSendMessage: async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          await writeFile(target, "wrong1", "utf8");
+          context.tools.changedFiles.push("output.txt");
+        } else if (attempt === 2) {
+          await writeFile(target, "wrong2", "utf8");
+        } else if (attempt === 3) {
+          await writeFile(target, "correct", "utf8");
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(attempt).toBe(3);
+  });
+
+  it("TB21-6: detects no workspace change when same file unchanged", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-no-change-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    const target = join(project, "output.txt");
+    await writeFile(target, "static", "utf8");
+    context.tools.changedFiles.push("output.txt");
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix test.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 2,
+        testCommand: `node -e "process.exit(1)"`,
+      },
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(5);
+    expect(stderr.text).toContain("工作区未变化");
+  });
+
+  it("TB21-6: failure fingerprint normalizes timestamps and paths", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-fingerprint-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Fix test.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `node -e "console.error('Error at 2024-01-15T10:30:45.123Z in C:\\\\Users\\\\test\\\\file.ts:123:45'); process.exit(1)"`,
+      },
+      __testSendMessage: async (text) => {
+        prompts.push(text);
+      },
+    });
+
+    expect(exitCode).toBe(5);
+    expect(prompts[1]).toContain("TIMESTAMP");
+    expect(prompts[1]).toContain("WIN_PATH");
+    expect(prompts[1]).toContain(":X:X");
+    expect(prompts[1]).not.toContain("2024-01-15");
+    expect(prompts[1]).not.toContain("C:\\Users");
+    expect(prompts[1]).not.toContain(":123:45");
+  });
 });
+
 
 describe("headless runtime failure classification", () => {
   it("bounds official validation by the remaining headless deadline", async () => {

@@ -2015,7 +2015,10 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       }
     }
     if (benchConfig.enabled) {
-      for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
+      let previousWorkspaceHash: string | undefined;
+      let repairAttempt = 0;
+      const maxAttempts = benchConfig.maxRepairAttempts + 1;
+      while (repairAttempt < maxAttempts) {
         emitHeadlessPhase(output, "validating", `bench attempt=${repairAttempt + 1}`, {
           suppress: suppressGenericHeadlessPhases,
         });
@@ -2066,6 +2069,19 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           );
           return 6;
         }
+        const checklist = await collectHeadlessArtifactChecklist({
+          projectPath,
+          config: benchConfig,
+          changedFiles: context.tools.changedFiles,
+          lastValidation: validation,
+        });
+        if (previousWorkspaceHash !== undefined && checklist.workspaceChangeHash === previousWorkspaceHash) {
+          writeLine(
+            errorOutput,
+            `[headless] 工作区未变化 (hash=${checklist.workspaceChangeHash?.slice(0, 8)})，切换修复策略。`,
+          );
+        }
+        previousWorkspaceHash = checklist.workspaceChangeHash;
         const repairPrompt = createHeadlessBenchRepairPrompt({
           originalPrompt: prompt,
           failure,
@@ -2074,6 +2090,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           profile: benchConfig.profile,
           ...(benchPreflight ? { preflight: benchPreflight } : {}),
         });
+        repairAttempt += 1;
         const repairStatus = await runOneRequest(repairPrompt);
         if (repairStatus.exitCode !== undefined) {
           emitHeadlessPhase(errorOutput, "failed", `exitCode=${repairStatus.exitCode}`, {
@@ -2382,7 +2399,11 @@ function resolveHeadlessDeadlineAtMs(options: RunHeadlessOptions): number | unde
   if (Number.isFinite(envDeadlineAt) && envDeadlineAt > 0) {
     return envDeadlineAt;
   }
-  return undefined;
+  const envDeadlineMs = Number.parseInt(process.env.LINGHUN_HEADLESS_DEADLINE_MS ?? "", 10);
+  if (Number.isFinite(envDeadlineMs) && envDeadlineMs > 0) {
+    return Date.now() + envDeadlineMs;
+  }
+  return Date.now() + 1_800_000;
 }
 
 function isHeadlessDeadlineApproaching(deadlineAtMs: number | undefined): boolean {
