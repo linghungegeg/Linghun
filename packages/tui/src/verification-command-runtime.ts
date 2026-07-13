@@ -527,6 +527,8 @@ export async function runVerificationPlan(
     commitGuard?: () => boolean;
     permissionMode?: PermissionMode;
     userActionConstraints?: UserActionConstraints;
+    originalTask?: string;
+    targetPackage?: string;
   } = {},
 ): Promise<VerificationReport> {
   const runId = randomUUID();

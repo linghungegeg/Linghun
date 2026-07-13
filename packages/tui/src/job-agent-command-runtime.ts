@@ -3011,6 +3011,10 @@ export async function runAgentWork(
         commitGuard: verifierStillValid,
         permissionMode: agent.permissionMode,
         userActionConstraints: agent.userActionConstraints,
+        originalTask: agent.task,
+        targetPackage: verificationCwd !== context.projectPath
+          ? relative(context.projectPath, verificationCwd) || undefined
+          : undefined,
       },
     );
     const cancelled =
