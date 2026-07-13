@@ -3404,8 +3404,8 @@ describe("runHeadlessTask", () => {
     });
 
     expect(exitCode).toBe(5);
-    expect(attempts).toBe(2);
-    expect(stderr.text).toContain("headless bench 修补已达上限 1");
+    expect(attempts).toBeGreaterThanOrEqual(3);
+    expect(stderr.text).toContain("相同失败连续");
     expect(stderr.text).toContain("model_patch_failed");
   });
 
@@ -3654,22 +3654,22 @@ describe("runHeadlessTask", () => {
       originalPrompt: "Fix C++",
       failure: { category: "model_patch_failed", summary: "undefined reference" },
       attempt: 1,
-      maxAttempts: 1,
       profile: "polyglot_cpp",
+      workspaceChanged: false,
     });
     const artifactPrompt = createHeadlessBenchRepairPrompt({
       originalPrompt: "Write out.txt",
       failure: { category: "missing_artifact", summary: "Missing", missingArtifacts: ["out.txt"] },
       attempt: 1,
-      maxAttempts: 1,
       profile: "binary_or_artifact",
+      workspaceChanged: false,
     });
     const timeoutPrompt = createHeadlessBenchRepairPrompt({
       originalPrompt: "Fix project",
       failure: { category: "test_timeout", summary: "timeout" },
       attempt: 1,
-      maxAttempts: 1,
       profile: "large_python_project",
+      workspaceChanged: false,
     });
 
     expect(compilePrompt).toContain("align header/test signatures");

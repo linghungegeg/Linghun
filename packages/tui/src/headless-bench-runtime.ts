@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 const DEFAULT_TEST_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_REPAIR_ATTEMPTS = 1;
 const DEFAULT_ENVIRONMENT_SETUP_RETRIES = 1;
-const MAX_REPAIR_ATTEMPTS = 2;
+const MAX_REPAIR_STRATEGY_REPEAT = 3;
 const MAX_ENVIRONMENT_SETUP_RETRIES = 3;
 const OUTPUT_LIMIT = 24_000;
 const SUMMARY_LIMIT = 4_000;
@@ -115,7 +115,7 @@ export async function resolveHeadlessBenchConfig(input: {
     input.options?.maxRepairAttempts ?? parsePositiveInteger(env.LINGHUN_HEADLESS_MAX_REPAIRS),
     DEFAULT_MAX_REPAIR_ATTEMPTS,
     0,
-    MAX_REPAIR_ATTEMPTS,
+    Number.POSITIVE_INFINITY,
   );
   const environmentSetupRetries = clampPositiveInteger(
     input.options?.environmentSetupRetries ??
@@ -386,16 +386,25 @@ export function createHeadlessBenchRepairPrompt(input: {
   originalPrompt: string;
   failure: HeadlessBenchFailure;
   attempt: number;
-  maxAttempts: number;
   profile?: HeadlessBenchTaskProfile;
   preflight?: HeadlessEnvironmentPreflight;
+  lastFailureFingerprint?: string;
+  workspaceChanged: boolean;
 }): string {
   const artifactLine = input.failure.missingArtifacts?.length
     ? `Missing artifacts: ${input.failure.missingArtifacts.join(", ")}`
     : "";
   const logLine = input.failure.logPath ? `Full failure log: ${input.failure.logPath}` : "";
+
+  const strategyHint = input.lastFailureFingerprint && !input.workspaceChanged
+    ? "IMPORTANT: The previous repair did not change the workspace and produced the same failure. You MUST try a fundamentally different repair strategy now."
+    : input.workspaceChanged
+      ? "Workspace has changed since last attempt. Verify the change addressed the failure before proceeding."
+      : "";
+
   return [
-    `Headless verification failed (${input.failure.category}) on repair attempt ${input.attempt}/${input.maxAttempts}.`,
+    `Headless verification failed (${input.failure.category}) on repair attempt ${input.attempt}.`,
+    strategyHint,
     "Continue from the current workspace. Do not restart from scratch unless necessary.",
     "Use the official test failure and current files to make the smallest fix, then rerun the official test or artifact check.",
     formatRepairProfileStrategy(input.failure.category, input.profile ?? "generic"),
@@ -413,6 +422,11 @@ export function createHeadlessBenchRepairPrompt(input: {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+export function computeHeadlessFailureFingerprint(failure: HeadlessBenchFailure): string {
+  const normalized = `${failure.category}:${failure.summary.slice(0, 200).toLowerCase().replace(/\s+/gu, " ").trim()}`;
+  return normalized;
 }
 
 export async function detectHeadlessBenchTaskProfile(input: {

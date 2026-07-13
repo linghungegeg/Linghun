@@ -767,6 +767,7 @@ import {
   type HeadlessBenchOptions,
   type HeadlessBenchValidationResult,
   collectHeadlessArtifactChecklist,
+  computeHeadlessFailureFingerprint,
   createHeadlessBenchInitialPrompt,
   createHeadlessBenchRepairPrompt,
   resolveHeadlessBenchConfig,
@@ -829,6 +830,7 @@ export type RunHeadlessOptions = {
 
 const DEFAULT_HEADLESS_MAX_CONTINUATIONS = 3;
 const MAX_HEADLESS_CONTINUATIONS = 3;
+const MAX_REPAIR_STRATEGY_REPEAT = 3;
 const HEADLESS_CONTINUATION_BACKOFF_BASE_MS = 250;
 const HEADLESS_CLEANUP_SETTLE_MS = 500;
 const HEADLESS_DEADLINE_CLOSURE_WINDOW_MS = 60_000;
@@ -2015,7 +2017,12 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       }
     }
     if (benchConfig.enabled) {
-      for (let repairAttempt = 0; repairAttempt <= benchConfig.maxRepairAttempts; repairAttempt += 1) {
+      let repairAttempt = 0;
+      let lastFailureFingerprint: string | undefined;
+      let sameFailureCount = 0;
+      let workspaceChangedFilesSnapshot = [...context.tools.changedFiles];
+
+      while (true) {
         emitHeadlessPhase(output, "validating", `bench attempt=${repairAttempt + 1}`, {
           suppress: suppressGenericHeadlessPhases,
         });
@@ -2044,6 +2051,8 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           errorOutput,
           `[headless] bench validation failed: ${failure.category}; ${failure.summary.split(/\r?\n/u)[0]}`,
         );
+
+        // Deadline termination (only stop condition from external constraints)
         if (failure.category === "agent_timeout" || isHeadlessDeadlineExpired(deadlineAtMs)) {
           writeLine(
             errorOutput,
@@ -2051,13 +2060,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           );
           return 6;
         }
-        if (repairAttempt >= benchConfig.maxRepairAttempts) {
-          writeLine(
-            errorOutput,
-            `错误：headless bench 修补已达上限 ${benchConfig.maxRepairAttempts}，最后失败类别：${failure.category}`,
-          );
-          return 5;
-        }
+
         if (isHeadlessDeadlineApproaching(deadlineAtMs)) {
           const remaining = formatHeadlessRemainingTime(deadlineAtMs);
           writeLine(
@@ -2066,13 +2069,37 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           );
           return 6;
         }
+
+        // Compute failure fingerprint
+        const currentFingerprint = computeHeadlessFailureFingerprint(failure);
+        const workspaceChanged = workspaceChangedFilesSnapshot.length !== context.tools.changedFiles.length ||
+          !workspaceChangedFilesSnapshot.every((file, idx) => file === context.tools.changedFiles[idx]);
+
+        // Detect same failure without workspace change (strategy not working)
+        if (currentFingerprint === lastFailureFingerprint && !workspaceChanged) {
+          sameFailureCount += 1;
+          if (sameFailureCount >= MAX_REPAIR_STRATEGY_REPEAT) {
+            writeLine(
+              errorOutput,
+              `错误：相同失败连续 ${MAX_REPAIR_STRATEGY_REPEAT} 次且工作区无变化，修复策略无效。最后失败类别：${failure.category}`,
+            );
+            return 5;
+          }
+        } else {
+          sameFailureCount = 0;
+        }
+
+        lastFailureFingerprint = currentFingerprint;
+        workspaceChangedFilesSnapshot = [...context.tools.changedFiles];
+
         const repairPrompt = createHeadlessBenchRepairPrompt({
           originalPrompt: prompt,
           failure,
           attempt: repairAttempt + 1,
-          maxAttempts: benchConfig.maxRepairAttempts,
           profile: benchConfig.profile,
           ...(benchPreflight ? { preflight: benchPreflight } : {}),
+          lastFailureFingerprint: sameFailureCount > 0 ? lastFailureFingerprint : undefined,
+          workspaceChanged,
         });
         const repairStatus = await runOneRequest(repairPrompt);
         if (repairStatus.exitCode !== undefined) {
@@ -2085,6 +2112,8 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           writeLine(errorOutput, "错误：headless bench 修补期间 provider stream 失败。");
           return 1;
         }
+
+        repairAttempt += 1;
       }
     }
     if (context.sessionId) {
