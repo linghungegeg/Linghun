@@ -787,25 +787,6 @@ function updateToolBatchExecutionState(
   state.lastBatchFailureReason = result.text;
 }
 
-function latestUserTextFromMessages(messages: ModelMessage[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role !== "user") continue;
-    const content = message.content.trim();
-    if (!content) continue;
-    if (isInternalFinalGateUserPrompt(content)) continue;
-    return content;
-  }
-  return undefined;
-}
-
-function isInternalFinalGateUserPrompt(content: string): boolean {
-  return content.startsWith("Final answer evidence preflight:") ||
-    content.startsWith("最终回答证据前置检查：") ||
-    content.startsWith("Final answer claim alignment:") ||
-    content.startsWith("最终回答声明对齐：");
-}
-
 function recordCacheRequestObservation(
   context: TuiContext,
   kind: CacheRequestKind,
@@ -1924,135 +1905,6 @@ async function recordFinalAnswerGateDowngrade(
   });
 }
 
-type FinalGateTransitionInput = {
-  gateResult: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
-  context: TuiContext;
-  sessionId: string;
-  assistantText: string;
-  output: Writable;
-  assistantStreamBlockId: string;
-  messages: ModelMessage[];
-  userText: string | undefined;
-  finalAnswerClaimAlignmentRewrites: number;
-  finalAnswerEvidenceActionRetries: number;
-  finalGapProgressState: FinalGapProgressState | undefined;
-  noProgressRounds: number;
-  killThreshold: number;
-  isContinuation: boolean;
-  staleCheckFn?: () => Promise<boolean>;
-};
-
-type FinalGateTransitionResult =
-  | { action: "rewrite"; newAssistantText: string; newRoundAssistantText: string }
-  | { action: "downgrade_and_break"; downgradedText: string }
-  | { action: "retry_with_directive"; directive: string; newProgressState: FinalGapProgressState; newNoProgressRounds: number };
-
-async function executeFinalGateTransition(input: FinalGateTransitionInput): Promise<FinalGateTransitionResult> {
-  const {
-    gateResult,
-    context,
-    sessionId,
-    assistantText,
-    output,
-    assistantStreamBlockId,
-    messages,
-    userText,
-    finalAnswerClaimAlignmentRewrites,
-    finalAnswerEvidenceActionRetries,
-    finalGapProgressState,
-    noProgressRounds,
-    killThreshold,
-    isContinuation,
-    staleCheckFn,
-  } = input;
-
-  await appendSystemEvent(
-    context,
-    sessionId,
-    `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
-    "warning",
-  );
-
-  if (staleCheckFn && (await staleCheckFn())) {
-    return { action: "downgrade_and_break", downgradedText: assistantText };
-  }
-
-  if (
-    shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
-    finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
-  ) {
-    await appendSystemEvent(
-      context,
-      sessionId,
-      `final_answer_claim_alignment_rewrite ${isContinuation ? "continuation=yes " : ""}attempt=${finalAnswerClaimAlignmentRewrites + 1}`,
-      "warning",
-    );
-    if (staleCheckFn && (await staleCheckFn())) {
-      return { action: "downgrade_and_break", downgradedText: assistantText };
-    }
-    discardAssistantBlock(output, assistantStreamBlockId);
-    messages.push({
-      role: "user",
-      content: createFinalGateClaimAlignmentRewritePrompt(context.language),
-    });
-    return { action: "rewrite", newAssistantText: "", newRoundAssistantText: "" };
-  }
-
-  const actionPlan = planFinalGateEvidenceGapAction({
-    result: gateResult,
-    context,
-    userText,
-    assistantText,
-    retryBudgetRemaining: finalGapHasProgress(gateResult, context, finalGapProgressState),
-    evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
-  });
-
-  await appendSystemEvent(
-    context,
-    sessionId,
-    `final_answer_gap_planner action=${actionPlan.action} reason=${actionPlan.reason}`,
-    actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
-      ? "warning"
-      : "info",
-  );
-
-  if (staleCheckFn && (await staleCheckFn())) {
-    return { action: "downgrade_and_break", downgradedText: assistantText };
-  }
-
-  if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
-    await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-    if (staleCheckFn && (await staleCheckFn())) {
-      return { action: "downgrade_and_break", downgradedText: assistantText };
-    }
-    const downgradedText = buildEvidenceBackedFinalBoundaryAnswer(
-      gateResult,
-      context.language,
-      evidenceForCurrentVerificationScope(context),
-    );
-    replaceAssistantBlockContent(output, assistantStreamBlockId, downgradedText);
-    return { action: "downgrade_and_break", downgradedText };
-  }
-
-  discardAssistantBlock(output, assistantStreamBlockId);
-  const newProgressState = captureFinalGapProgressState(gateResult, context, actionPlan.evidenceAction);
-  messages.push({ role: "user", content: actionPlan.directive });
-
-  await appendSystemEvent(
-    context,
-    sessionId,
-    `final_answer_gap_returned_to_model_loop ${isContinuation ? "continuation=yes " : ""}reason=${actionPlan.reason} noProgress=${noProgressRounds + 1}/${killThreshold}`,
-    "warning",
-  );
-
-  return {
-    action: "retry_with_directive",
-    directive: actionPlan.directive,
-    newProgressState,
-    newNoProgressRounds: noProgressRounds + 1,
-  };
-}
-
 export function handleNaturalInput(
   text: string,
   context: TuiContext,
@@ -3047,6 +2899,7 @@ export async function sendMessage(
               requestTurnId,
               abortSignal: toolAttemptController.signal,
               attemptedRuntimeKeys: [...attemptedRuntimeKeys],
+              originalUserText: text,
               ...(reportWriteGuard ? { reportWriteGuard } : {}),
             };
             earlyToolFeed = createStreamingToolCallFeed(toolCalls);
@@ -3228,7 +3081,7 @@ export async function sendMessage(
       const acceptedAttemptGeneration = providerAttemptGeneration;
       if (pendingRoundUsage) {
         recordCacheUsageObservation(context, "main", pendingRoundUsage);
-        const stats = recordModelUsage(context, pendingRoundUsage, "main");
+        const stats = recordModelUsage(context, pendingRoundUsage);
         await appendUsageEvents(context, sessionId, stats);
         if (
           acceptedAttemptGeneration !== providerAttemptGeneration ||
@@ -3464,43 +3317,83 @@ export async function sendMessage(
           );
 
           if (gateResult.status === "needs_disclaimer") {
-            const transitionResult = await executeFinalGateTransition({
-              gateResult,
+            await appendSystemEvent(
               context,
               sessionId,
-              assistantText,
-              output,
-              assistantStreamBlockId,
-              messages: messagesForProvider,
-              userText: text,
-              finalAnswerClaimAlignmentRewrites,
-              finalAnswerEvidenceActionRetries,
-              finalGapProgressState,
-              noProgressRounds,
-              killThreshold: _killThreshold,
-              isContinuation: false,
-              staleCheckFn: stopStaleRequest,
-            });
-
-            if (transitionResult.action === "rewrite") {
-              assistantText = transitionResult.newAssistantText;
-              roundAssistantText = transitionResult.newRoundAssistantText;
+              `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
+              "warning",
+            );
+            if (await stopStaleRequest()) return;
+            if (
+              shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
+              finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
+            ) {
               finalAnswerClaimAlignmentRewrites += 1;
-              continue;
-            }
-
-            if (transitionResult.action === "downgrade_and_break") {
-              assistantText = transitionResult.downgradedText;
-              break;
-            }
-
-            if (transitionResult.action === "retry_with_directive") {
+              await appendSystemEvent(
+                context,
+                sessionId,
+                `final_answer_claim_alignment_rewrite attempt=${finalAnswerClaimAlignmentRewrites}`,
+                "warning",
+              );
+              if (await stopStaleRequest()) return;
+              discardAssistantBlock(output, assistantStreamBlockId);
               assistantText = "";
               roundAssistantText = "";
-              noProgressRounds = transitionResult.newNoProgressRounds;
-              finalGapProgressState = transitionResult.newProgressState;
+              messagesForProvider.push({
+                role: "user",
+                content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+              });
               continue;
             }
+            const actionPlan = planFinalGateEvidenceGapAction({
+              result: gateResult,
+              context,
+              userText: text,
+              assistantText,
+              retryBudgetRemaining: finalGapHasProgress(
+                gateResult,
+                context,
+                finalGapProgressState,
+              ),
+              evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
+            });
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_planner action=${actionPlan.action} reason=${actionPlan.reason}`,
+              actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+                ? "warning"
+                : "info",
+            );
+            if (await stopStaleRequest()) return;
+            if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
+              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              if (await stopStaleRequest()) return;
+              assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+                gateResult,
+                context.language,
+                evidenceForCurrentVerificationScope(context),
+              );
+              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+              break;
+            }
+            discardAssistantBlock(output, assistantStreamBlockId);
+            assistantText = "";
+            roundAssistantText = "";
+            noProgressRounds += 1;
+            finalGapProgressState = captureFinalGapProgressState(
+              gateResult,
+              context,
+              actionPlan.evidenceAction,
+            );
+            messagesForProvider.push({ role: "user", content: actionPlan.directive });
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_returned_to_model_loop reason=${actionPlan.reason} noProgress=${noProgressRounds}/${_killThreshold}`,
+              "warning",
+            );
+            continue;
           }
         }
         break;
@@ -4951,7 +4844,7 @@ async function streamFinalModelAnswerWithoutTools(
   const acceptedAttemptGeneration = providerAttemptGeneration;
   if (pendingUsage && !requestIsStale()) {
     recordCacheUsageObservation(context, "final", pendingUsage);
-    const stats = recordModelUsage(context, pendingUsage, "final");
+    const stats = recordModelUsage(context, pendingUsage);
     await appendUsageEvents(context, sessionId, stats);
     if (acceptedAttemptGeneration !== providerAttemptGeneration || requestIsStale()) return "";
     scheduleApiTokenCountDiagnostics({
@@ -5052,7 +4945,7 @@ async function streamFinalModelAnswerWithoutTools(
       const actionPlan = planFinalGateEvidenceGapAction({
         result: gateResult,
         context,
-        userText: latestUserTextFromMessages(continuation.messages),
+        userText: continuation.originalUserText,
         assistantText,
         retryBudgetRemaining: false,
         evidenceActionRetryCount,
@@ -5697,7 +5590,7 @@ export async function continueModelAfterToolResults(
       const acceptedAttemptGeneration = providerAttemptGeneration;
       if (pendingRoundUsage && requestOwnerIsCurrent()) {
         recordCacheUsageObservation(context, "continuation", pendingRoundUsage);
-        const stats = recordModelUsage(context, pendingRoundUsage, "continuation");
+        const stats = recordModelUsage(context, pendingRoundUsage);
         await appendUsageEvents(context, sessionId, stats);
         if (
           acceptedAttemptGeneration !== providerAttemptGeneration ||
@@ -5912,43 +5805,79 @@ export async function continueModelAfterToolResults(
           );
           const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
           if (gateResult.status === "needs_disclaimer") {
-            const transitionResult = await executeFinalGateTransition({
-              gateResult,
+            await appendSystemEvent(
               context,
               sessionId,
-              assistantText,
-              output,
-              assistantStreamBlockId,
-              messages: continuation.messages,
-              userText: latestUserTextFromMessages(continuation.messages),
-              finalAnswerClaimAlignmentRewrites,
-              finalAnswerEvidenceActionRetries,
-              finalGapProgressState,
-              noProgressRounds,
-              killThreshold: _killThreshold,
-              isContinuation: true,
-              staleCheckFn: async () => !requestOwnerIsCurrent(),
-            });
-
-            if (transitionResult.action === "rewrite") {
-              assistantText = transitionResult.newAssistantText;
-              roundAssistantText = transitionResult.newRoundAssistantText;
+              `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
+              "warning",
+            );
+            if (
+              shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
+              finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
+            ) {
               finalAnswerClaimAlignmentRewrites += 1;
-              continue;
-            }
-
-            if (transitionResult.action === "downgrade_and_break") {
-              assistantText = transitionResult.downgradedText;
-              break;
-            }
-
-            if (transitionResult.action === "retry_with_directive") {
+              await appendSystemEvent(
+                context,
+                sessionId,
+                `final_answer_claim_alignment_rewrite continuation=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
+                "warning",
+              );
+              discardAssistantBlock(output, assistantStreamBlockId);
               assistantText = "";
               roundAssistantText = "";
-              noProgressRounds = transitionResult.newNoProgressRounds;
-              finalGapProgressState = transitionResult.newProgressState;
+              continuation.messages.push({
+                role: "user",
+                content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+              });
               continue;
             }
+            const actionPlan = planFinalGateEvidenceGapAction({
+              result: gateResult,
+              context,
+              userText: continuation.originalUserText,
+              assistantText,
+              retryBudgetRemaining: finalGapHasProgress(
+                gateResult,
+                context,
+                finalGapProgressState,
+              ),
+              evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
+            });
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_planner action=${actionPlan.action} reason=${actionPlan.reason}`,
+              actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+                ? "warning"
+                : "info",
+            );
+            if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
+              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+                gateResult,
+                context.language,
+                evidenceForCurrentVerificationScope(context),
+              );
+              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+              break;
+            }
+            discardAssistantBlock(output, assistantStreamBlockId);
+            assistantText = "";
+            roundAssistantText = "";
+            noProgressRounds += 1;
+            finalGapProgressState = captureFinalGapProgressState(
+              gateResult,
+              context,
+              actionPlan.evidenceAction,
+            );
+            continuation.messages.push({ role: "user", content: actionPlan.directive });
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_gap_returned_to_model_loop continuation=yes reason=${actionPlan.reason} noProgress=${noProgressRounds}/${_killThreshold}`,
+              "warning",
+            );
+            continue;
           }
         }
         break;
@@ -6132,7 +6061,7 @@ export async function continueModelAfterToolResults(
             const actionPlan = planFinalGateEvidenceGapAction({
               result: gateResult,
               context,
-              userText: latestUserTextFromMessages(continuation.messages),
+              userText: continuation.originalUserText,
               assistantText,
               retryBudgetRemaining: false,
               evidenceActionRetryCount: finalAnswerEvidenceActionRetries,

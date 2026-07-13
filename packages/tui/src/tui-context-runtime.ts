@@ -265,6 +265,7 @@ export type PendingModelContinuation = {
   requestTurnId?: string;
   abortSignal?: AbortSignal;
   attemptedRuntimeKeys?: string[];
+  originalUserText?: string;
 };
 
 export function runtimeFromContinuation(
