@@ -787,25 +787,6 @@ function updateToolBatchExecutionState(
   state.lastBatchFailureReason = result.text;
 }
 
-function latestUserTextFromMessages(messages: ModelMessage[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role !== "user") continue;
-    const content = message.content.trim();
-    if (!content) continue;
-    if (isInternalFinalGateUserPrompt(content)) continue;
-    return content;
-  }
-  return undefined;
-}
-
-function isInternalFinalGateUserPrompt(content: string): boolean {
-  return content.startsWith("Final answer evidence preflight:") ||
-    content.startsWith("最终回答证据前置检查：") ||
-    content.startsWith("Final answer claim alignment:") ||
-    content.startsWith("最终回答声明对齐：");
-}
-
 function recordCacheRequestObservation(
   context: TuiContext,
   kind: CacheRequestKind,
@@ -2918,6 +2899,7 @@ export async function sendMessage(
               requestTurnId,
               abortSignal: toolAttemptController.signal,
               attemptedRuntimeKeys: [...attemptedRuntimeKeys],
+              originalUserText: text,
               ...(reportWriteGuard ? { reportWriteGuard } : {}),
             };
             earlyToolFeed = createStreamingToolCallFeed(toolCalls);
@@ -4963,7 +4945,7 @@ async function streamFinalModelAnswerWithoutTools(
       const actionPlan = planFinalGateEvidenceGapAction({
         result: gateResult,
         context,
-        userText: latestUserTextFromMessages(continuation.messages),
+        userText: continuation.originalUserText,
         assistantText,
         retryBudgetRemaining: false,
         evidenceActionRetryCount,
@@ -5852,7 +5834,7 @@ export async function continueModelAfterToolResults(
             const actionPlan = planFinalGateEvidenceGapAction({
               result: gateResult,
               context,
-              userText: latestUserTextFromMessages(continuation.messages),
+              userText: continuation.originalUserText,
               assistantText,
               retryBudgetRemaining: finalGapHasProgress(
                 gateResult,
@@ -6079,7 +6061,7 @@ export async function continueModelAfterToolResults(
             const actionPlan = planFinalGateEvidenceGapAction({
               result: gateResult,
               context,
-              userText: latestUserTextFromMessages(continuation.messages),
+              userText: continuation.originalUserText,
               assistantText,
               retryBudgetRemaining: false,
               evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
