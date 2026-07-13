@@ -1828,6 +1828,8 @@ async function executeRegistryWorkflowStep(
         ownerSignal: run?.id
           ? context.backgroundAbortControllers?.get(run.id)?.signal
           : undefined,
+        originalTask: goal,
+        targetPackage: run?.cwd ? relative(context.projectPath, run.cwd) || undefined : undefined,
       });
       const status = workflowStepStatusFromVerification(report.status);
       if (status !== "completed") {
@@ -2249,6 +2251,8 @@ async function executeWorkflowStep(
           ownerSignal: run?.id
             ? context.backgroundAbortControllers?.get(run.id)?.signal
             : undefined,
+          originalTask: run?.goal,
+          targetPackage: run?.cwd ? relative(context.projectPath, run.cwd) || undefined : undefined,
         },
       );
       const status = workflowStepStatusFromVerification(report.status);
@@ -2818,6 +2822,8 @@ export async function runWorkflowVerificationStep(
     changedFiles?: string[];
     permissionMode?: WorkflowRunState["permissionMode"];
     userActionConstraints?: WorkflowRunState["userActionConstraints"];
+    originalTask?: string;
+    targetPackage?: string;
   } = {},
 ): Promise<VerificationReport> {
   const sessionId = options.ownerSessionId ?? (await ensureSession(context));
@@ -2840,6 +2846,8 @@ export async function runWorkflowVerificationStep(
     ...(options.workflowRunId ? { workflowRunId: options.workflowRunId } : {}),
     ...(options.requestTurnId ? { requestTurnId: options.requestTurnId } : {}),
     level,
+    ...(options.originalTask ? { originalTask: options.originalTask } : {}),
+    ...(options.targetPackage ? { targetPackage: options.targetPackage } : {}),
   };
   const workflowOwnerStillActive = (): boolean => {
     if (!options.workflowRunId) return true;
@@ -2927,6 +2935,8 @@ export async function runWorkflowVerificationStep(
         commitGuard: ownerStillValid,
         permissionMode: options.permissionMode,
         userActionConstraints: options.userActionConstraints,
+        originalTask: options.originalTask,
+        targetPackage: options.targetPackage,
       },
     );
   } finally {
