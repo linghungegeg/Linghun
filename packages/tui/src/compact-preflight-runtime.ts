@@ -779,10 +779,6 @@ function createCompactProjection(
     goal,
     currentTask,
     phaseStatus: context.memory.lastHandoff?.phaseStatus ?? "in_progress",
-    userConstraints: context.memory.accepted
-      .filter((item) => item.scope === "user" || item.taxonomy === "user")
-      .slice(0, 4)
-      .map((item) => sanitizeCompactSummaryText(context, item.summary, 160)),
     keyFiles: files,
     changedFiles,
     evidenceRefs,
@@ -815,7 +811,6 @@ function createCompactProjection(
     `user goal ${restoreContext.goal}`,
     `current task ${restoreContext.currentTask}`,
     `phase status ${restoreContext.phaseStatus}`,
-    `user constraints ${restoreContext.userConstraints.join("; ") || "none recorded"}`,
     `key files ${restoreContext.keyFiles.join(", ") || "none"}`,
     `target budget tokens ${Math.ceil(input.postCompactTargetChars / CONTEXT_CHARS_PER_TOKEN_ESTIMATE)}`,
     "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",

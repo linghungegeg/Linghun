@@ -309,7 +309,6 @@ export type CompactRestoreContext = {
   goal: string;
   currentTask: string;
   phaseStatus: string;
-  userConstraints: string[];
   keyFiles: string[];
   changedFiles: string[];
   evidenceRefs: string[];
