@@ -1,15 +1,17 @@
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { runTool, createToolContext } from "@linghun/tools";
 
 const DEFAULT_TEST_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_REPAIR_ATTEMPTS = 1;
 const DEFAULT_ENVIRONMENT_SETUP_RETRIES = 1;
-const MAX_REPAIR_STRATEGY_REPEAT = 3;
+const MAX_REPAIR_ATTEMPTS = 2;
 const MAX_ENVIRONMENT_SETUP_RETRIES = 3;
 const OUTPUT_LIMIT = 24_000;
 const SUMMARY_LIMIT = 4_000;
+const DEFAULT_OVERALL_DEADLINE_MS = 1_800_000;
 
 export type HeadlessBenchFailureCategory =
   | "model_patch_failed"
@@ -65,6 +67,7 @@ export type HeadlessBenchValidationResult =
 export type HeadlessArtifactChecklist = {
   requiredArtifacts: Array<{ path: string; present: boolean }>;
   changedFiles: string[];
+  workspaceChangeHash?: string;
   verificationRan: boolean;
   lastVerificationExitCode?: number;
   gitAvailable: boolean | "unknown";
@@ -115,7 +118,7 @@ export async function resolveHeadlessBenchConfig(input: {
     input.options?.maxRepairAttempts ?? parsePositiveInteger(env.LINGHUN_HEADLESS_MAX_REPAIRS),
     DEFAULT_MAX_REPAIR_ATTEMPTS,
     0,
-    Number.POSITIVE_INFINITY,
+    MAX_REPAIR_ATTEMPTS,
   );
   const environmentSetupRetries = clampPositiveInteger(
     input.options?.environmentSetupRetries ??
@@ -325,10 +328,12 @@ export async function collectHeadlessArtifactChecklist(input: {
     (input.lastValidation?.ok === true && input.lastValidation.testRan) ||
     Boolean(failedValidation?.command);
   const lastVerificationExitCode = failedValidation?.exitCode;
+  const workspaceChangeHash = await computeWorkspaceChangeHash(input.projectPath, input.changedFiles);
   const summary = [
     `artifacts=${requiredArtifacts.length}`,
     `artifactsPresent=${requiredArtifacts.filter((item) => item.present).length}/${requiredArtifacts.length}`,
     `changedFiles=${input.changedFiles.length}`,
+    `workspaceHash=${workspaceChangeHash.slice(0, 8)}`,
     `verificationRan=${verificationRan ? "yes" : "no"}`,
     `lastVerificationExitCode=${lastVerificationExitCode ?? "none"}`,
     `git=${gitAvailable}`,
@@ -336,6 +341,7 @@ export async function collectHeadlessArtifactChecklist(input: {
   return {
     requiredArtifacts,
     changedFiles: [...input.changedFiles],
+    workspaceChangeHash,
     verificationRan,
     ...(lastVerificationExitCode === undefined ? {} : { lastVerificationExitCode }),
     gitAvailable,
@@ -386,25 +392,16 @@ export function createHeadlessBenchRepairPrompt(input: {
   originalPrompt: string;
   failure: HeadlessBenchFailure;
   attempt: number;
+  maxAttempts: number;
   profile?: HeadlessBenchTaskProfile;
   preflight?: HeadlessEnvironmentPreflight;
-  lastFailureFingerprint?: string;
-  workspaceChanged: boolean;
 }): string {
   const artifactLine = input.failure.missingArtifacts?.length
     ? `Missing artifacts: ${input.failure.missingArtifacts.join(", ")}`
     : "";
   const logLine = input.failure.logPath ? `Full failure log: ${input.failure.logPath}` : "";
-
-  const strategyHint = input.lastFailureFingerprint && !input.workspaceChanged
-    ? "IMPORTANT: The previous repair did not change the workspace and produced the same failure. You MUST try a fundamentally different repair strategy now."
-    : input.workspaceChanged
-      ? "Workspace has changed since last attempt. Verify the change addressed the failure before proceeding."
-      : "";
-
   return [
-    `Headless verification failed (${input.failure.category}) on repair attempt ${input.attempt}.`,
-    strategyHint,
+    `Headless verification failed (${input.failure.category}) on repair attempt ${input.attempt}/${input.maxAttempts}.`,
     "Continue from the current workspace. Do not restart from scratch unless necessary.",
     "Use the official test failure and current files to make the smallest fix, then rerun the official test or artifact check.",
     formatRepairProfileStrategy(input.failure.category, input.profile ?? "generic"),
@@ -422,11 +419,6 @@ export function createHeadlessBenchRepairPrompt(input: {
   ]
     .filter(Boolean)
     .join("\n");
-}
-
-export function computeHeadlessFailureFingerprint(failure: HeadlessBenchFailure): string {
-  const normalized = `${failure.category}:${failure.summary.slice(0, 200).toLowerCase().replace(/\s+/gu, " ").trim()}`;
-  return normalized;
 }
 
 export async function detectHeadlessBenchTaskProfile(input: {
@@ -715,15 +707,98 @@ async function runOfficialTestCommand(input: {
   outcome: "completed" | "timeout" | "cancelled";
   logPath: string;
 }> {
-  const context = createToolContext(input.projectPath, {});
-  const toolResult = await runTool("Bash", { command: input.command, timeoutMs: input.timeoutMs }, context);
-  const exitCode = (toolResult.output.data as { exitCode?: number })?.exitCode ?? 1;
-  const outcome = (toolResult.output.data as { outcome?: "completed" | "timeout" | "cancelled" })?.outcome ?? "completed";
-  const rawOutput = toolResult.output.text;
-  const postTestLog = exitCode === 0 ? "" : await readPostTestFailureLog(input.projectPath);
-  const output = postTestLog ? `${rawOutput}\n\n[post-test/tests.log]\n${postTestLog}` : rawOutput;
+  const result = await runShellCommand(input.command, input.projectPath, input.timeoutMs);
+  const postTestLog = result.exitCode === 0 ? "" : await readPostTestFailureLog(input.projectPath);
+  const output = postTestLog ? `${result.output}\n\n[post-test/tests.log]\n${postTestLog}` : result.output;
   const logPath = await writeHeadlessLog(input.projectPath, "official-test.log", output);
-  return { exitCode, output, outcome, logPath };
+  return { ...result, output, logPath };
+}
+
+function runShellCommand(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+): Promise<{ exitCode: number; output: string; outcome: "completed" | "timeout" | "cancelled" }> {
+  return new Promise((resolvePromise) => {
+    const detached = process.platform !== "win32";
+    const child = spawn(command, {
+      cwd,
+      shell: true,
+      windowsHide: true,
+      detached,
+      env: createSanitizedChildEnv(process.env),
+    });
+    let output = "";
+    let settled = false;
+    const append = (chunk: Buffer | string) => {
+      output += chunk.toString();
+      if (output.length > OUTPUT_LIMIT) {
+        output = output.slice(output.length - OUTPUT_LIMIT);
+      }
+    };
+    const finish = (
+      exitCode: number,
+      outcome: "completed" | "timeout" | "cancelled" = "completed",
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise({ exitCode, output, outcome });
+    };
+    const timer = setTimeout(() => {
+      append(`\nCommand timed out after ${timeoutMs}ms.`);
+      killShellProcess(child.pid);
+      finish(1, "timeout");
+    }, timeoutMs);
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.on("error", (error) => {
+      append(`\nCommand failed to start: ${error.message}`);
+      finish(1);
+    });
+    child.on("close", (code) => finish(code ?? 1));
+  });
+}
+
+function createSanitizedChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (isSecretEnvKey(key)) continue;
+    next[key] = value;
+  }
+  return next;
+}
+
+function isSecretEnvKey(key: string): boolean {
+  return /(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION|BEARER|CREDENTIAL)/iu.test(key);
+}
+
+function killShellProcess(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true,
+      }).unref();
+      process.kill(pid);
+    } else {
+      process.kill(-pid, "SIGTERM");
+      setTimeout(() => {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // The process group has already exited.
+        }
+      }, 1_000).unref();
+    }
+  } catch {
+    try {
+      process.kill(pid);
+    } catch {
+      // The process already exited.
+    }
+  }
 }
 
 async function isToolAvailable(tool: string, cwd: string): Promise<boolean> {
@@ -731,10 +806,8 @@ async function isToolAvailable(tool: string, cwd: string): Promise<boolean> {
     process.platform === "win32"
       ? `where ${cmdQuote(tool)} >nul 2>nul`
       : `command -v ${shellQuote(tool)} >/dev/null 2>&1`;
-  const context = createToolContext(cwd, {});
-  const toolResult = await runTool("Bash", { command, timeoutMs: 5_000 }, context);
-  const exitCode = (toolResult.output.data as { exitCode?: number })?.exitCode ?? 1;
-  return exitCode === 0;
+  const result = await runShellCommand(command, cwd, 5_000);
+  return result.exitCode === 0;
 }
 
 async function writeHeadlessLog(projectPath: string, name: string, content: string): Promise<string> {
@@ -764,7 +837,8 @@ async function readPostTestFailureLog(projectPath: string): Promise<string> {
 }
 
 function summarizeFailureOutput(output: string, category: HeadlessBenchFailureCategory): string {
-  const lines = output
+  const normalized = normalizeFailureFingerprint(output);
+  const lines = normalized
     .split(/\r?\n/u)
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
@@ -812,6 +886,41 @@ function splitList(value: string | undefined): string[] {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+async function computeWorkspaceChangeHash(projectPath: string, changedFiles: string[]): Promise<string> {
+  if (changedFiles.length === 0) return "empty";
+  const sorted = [...changedFiles].sort();
+  const contentParts: string[] = [];
+  for (const file of sorted.slice(0, 50)) {
+    const fullPath = resolve(projectPath, file);
+    try {
+      const content = await readFile(fullPath, "utf8");
+      contentParts.push(`${file}:${content.length}:${hashString(content.slice(0, 1000))}`);
+    } catch {
+      contentParts.push(`${file}:missing`);
+    }
+  }
+  return hashString(contentParts.join("|"));
+}
+
+function hashString(input: string): string {
+  return createHash("sha256").update(input, "utf8").digest("hex").slice(0, 16);
+}
+
+export function normalizeFailureFingerprint(output: string): string {
+  return output
+    .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})?/g, "TIMESTAMP")
+    .replace(/\b\d+ms\b/g, "Xms")
+    .replace(/\b\d+s\b/g, "Xs")
+    .replace(/\btimed out after \d+ms\b/gi, "timed out after Xms")
+    .replace(/\d+ milliseconds?\b/gi, "X milliseconds")
+    .replace(/\bat line \d+/gi, "at line X")
+    .replace(/:\d+:\d+/g, ":X:X")
+    .replace(/0x[0-9a-f]+/gi, "0xADDR")
+    .replace(/\b[A-Z]:\\[\w\\.-]+/g, "WIN_PATH")
+    .replace(/\/[\w/.-]+\.linghun\/[\w/.-]+/g, "/PROJECT/.linghun/PATH")
+    .replace(/\/tmp\/[\w.-]+/g, "/tmp/TEMP");
 }
 
 async function canRead(path: string): Promise<boolean> {
