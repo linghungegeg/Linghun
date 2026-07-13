@@ -25,6 +25,7 @@ export type CompactRestorePayload = {
   files: CompactRestoreFile[];
   plan?: string;
   runtimeStatus: string[];
+  sessionMemoryRecords: Array<{ id: string; summary: string; scope: string }>;
 };
 
 export async function buildPostCompactRestoreMessage(
@@ -57,10 +58,12 @@ export async function buildPostCompactRestorePayload(
   context: TuiContext,
 ): Promise<CompactRestorePayload> {
   const files = await readRestoreFiles(context);
+  const sessionMemoryRecords = context.cache.compactProjection?.restoreContext?.sessionMemoryRecords ?? [];
   return {
     files,
     plan: formatActivePlan(context),
     runtimeStatus: collectRuntimeStatus(context),
+    sessionMemoryRecords,
   };
 }
 
@@ -71,6 +74,13 @@ export function formatPostCompactRestorePayload(
     "Post-compact restored context",
     "role current working context restored after deep compact",
   ];
+
+  if (payload.sessionMemoryRecords.length > 0) {
+    sections.push("restored session memories");
+    for (const record of payload.sessionMemoryRecords) {
+      sections.push(`- ${record.summary}`);
+    }
+  }
 
   if (payload.files.length > 0) {
     sections.push("restored files");

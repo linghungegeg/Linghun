@@ -40,14 +40,27 @@ export function formatStats(args: string[], context: TuiContext): string {
     return formatEndpointStats(context.cache.history);
   }
   const totals = sumCacheHistory(context.cache.history);
+  const mainChainTotals = sumCacheHistory(
+    context.cache.history.filter((item) =>
+      item.kind === "main" || item.kind === "continuation" || item.kind === "final"
+    ),
+  );
   const totalEstimatedCny = sumRoleUsageEstimatedCny(context);
   const latest = context.cache.history.at(-1);
   const provider = latest?.provider ?? "unknown";
-  const hitRate = computePromptCacheHitRate({
+  const allCallsHitRate = computePromptCacheHitRate({
     inputTokens: totals.inputTokens,
     outputTokens: totals.outputTokens,
     cacheReadTokens: totals.cacheReadTokens,
     cacheWriteTokens: totals.cacheWriteTokens,
+    provider,
+    model: context.model,
+  });
+  const mainChainHitRate = computePromptCacheHitRate({
+    inputTokens: mainChainTotals.inputTokens,
+    outputTokens: mainChainTotals.outputTokens,
+    cacheReadTokens: mainChainTotals.cacheReadTokens,
+    cacheWriteTokens: mainChainTotals.cacheWriteTokens,
     provider,
     model: context.model,
   });
@@ -57,7 +70,8 @@ export function formatStats(args: string[], context: TuiContext): string {
     `- elapsed ms: ${Date.now() - context.cache.startedAt}`,
     `- model: ${context.model}`,
     `- provider: ${provider}`,
-    `- hit rate: ${formatPercent(hitRate)}`,
+    `- main-chain hit rate: ${formatPercent(mainChainHitRate)}`,
+    `- all-calls hit rate: ${formatPercent(allCallsHitRate)}`,
     `- tokens: input ${totals.inputTokens}; output ${totals.outputTokens}; cache read ${totals.cacheReadTokens}; cache write ${totals.cacheWriteTokens}`,
     `- cost: estimated ${formatEstimatedCny(totalEstimatedCny)}（packaged model pricing estimate; not billing）`,
     "- role/model/provider usage (estimated):",
