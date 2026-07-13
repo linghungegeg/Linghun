@@ -2509,6 +2509,53 @@ describe("Phase 05 core tools", () => {
     expect(git.adapter).toBe("native");
   });
 
+  it("allows legitimate PowerShell compound commands with semicolons", () => {
+    const pwshCmdlets = adaptShellCommandForPlatform(
+      "Write-Output 'hello'; Write-Output 'world'",
+      "win32",
+    );
+    expect(pwshCmdlets.adapter).toBe("powershell-adapted");
+    expect(pwshCmdlets.command).toContain("powershell.exe");
+    expect(pwshCmdlets.command).toContain("Write-Output 'hello'; Write-Output 'world'");
+
+    const ordinaryCommands = adaptShellCommandForPlatform("node --version; npm --version", "win32");
+    expect(ordinaryCommands.adapter).toBe("native");
+    expect(ordinaryCommands.command).toBe("node --version; npm --version");
+
+    const multipleCommands = adaptShellCommandForPlatform(
+      "git --version; node --version; npm --version",
+      "win32",
+    );
+    expect(multipleCommands.adapter).toBe("native");
+
+    const explicitPowerShell = adaptShellCommandForPlatform(
+      "powershell.exe -NoProfile -Command 'Get-Date; Write-Output test'",
+      "win32",
+    );
+    expect(explicitPowerShell.adapter).toBe("native");
+  });
+
+  it("blocks dangerous compound commands on Windows", () => {
+    const remotePayloadLeak = adaptShellCommandForPlatform("adb shell ls | grep .apk", "win32");
+    expect(remotePayloadLeak.adapter).toBe("blocked");
+    expect(remotePayloadLeak.command).toContain("Ambiguous remote shell command");
+
+    const fileWrite = adaptShellCommandForPlatform(
+      "cat <<EOF > file.txt\ncontent\nEOF",
+      "win32",
+    );
+    expect(fileWrite.adapter).toBe("blocked");
+    expect(fileWrite.command).toContain("Linghun Bash does not support");
+
+    const posixExport = adaptShellCommandForPlatform("export VAR=value; echo $VAR", "win32");
+    expect(posixExport.adapter).toBe("blocked");
+    expect(posixExport.command).toContain("Unsupported POSIX shell syntax");
+
+    const commandSubstitution = adaptShellCommandForPlatform("echo $(date); echo done", "win32");
+    expect(commandSubstitution.adapter).toBe("blocked");
+    expect(commandSubstitution.command).toContain("Unsupported POSIX shell syntax");
+  });
+
   it("blocks unsupported Windows Unix command forms without leaking raw scripts", () => {
     const catPipeline = adaptShellCommandForPlatform("cat package.json | grep version", "win32");
     expect(catPipeline.adapter).toBe("blocked");

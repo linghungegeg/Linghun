@@ -2453,6 +2453,21 @@ const WINDOWS_SHELL_ADAPTER_REGISTRY: WindowsShellAdapterRule[] = [
         : undefined,
   },
   {
+    name: "PowerShellCompoundAdapter",
+    adapt: (command) => {
+      const normalized = command.trim();
+      if (!normalized.includes(";")) return undefined;
+      if (/\n/u.test(normalized)) return undefined;
+      if (looksLikePowerShellScript(normalized)) {
+        return { command, adapter: "native" };
+      }
+      if (!/[|&]/u.test(normalized) && !/<<|export\s+\w+=|\$\([^)]*\)/u.test(normalized)) {
+        return { command, adapter: "native" };
+      }
+      return undefined;
+    },
+  },
+  {
     name: "UnsupportedPosixAdapter",
     adapt: (command) => blockUnsupportedPosixShellSyntax(command),
   },
