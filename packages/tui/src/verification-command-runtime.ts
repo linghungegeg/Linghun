@@ -520,6 +520,8 @@ export async function runVerificationPlan(
     requestTurnId?: string;
     changedFiles?: string[];
     level?: string;
+    originalTask?: string;
+    targetPackage?: string;
     heartbeatIntervalMs?: number;
     staleAfterMs?: number;
     commitGuard?: () => boolean;
@@ -540,6 +542,8 @@ export async function runVerificationPlan(
     ...(options.workflowRunId ? { workflowRunId: options.workflowRunId } : {}),
     ...(options.requestTurnId ? { requestTurnId: options.requestTurnId } : {}),
     ...(options.level ? { level: options.level } : {}),
+    ...(options.originalTask ? { originalTask: options.originalTask } : {}),
+    ...(options.targetPackage ? { targetPackage: options.targetPackage } : {}),
   };
   const startedAt = new Date().toISOString();
   const orchestration = resolveMetaOrchestrationAction(context, "verification");

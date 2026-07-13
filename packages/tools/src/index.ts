@@ -2372,6 +2372,16 @@ type WindowsShellAdapterRule = {
 
 const WINDOWS_SHELL_ADAPTER_REGISTRY: WindowsShellAdapterRule[] = [
   {
+    name: "CompoundCommandAdapter",
+    adapt: (command) => {
+      const hasCompound = detectHostCompoundCommand(command);
+      if (!hasCompound) return undefined;
+      return createBlockedPowerShellAdapter(
+        "Host-level compound commands (cmd1; cmd2) on Windows require PowerShell syntax; use 'cmd1; cmd2' in PowerShell or chain with && for sequential execution.",
+      );
+    },
+  },
+  {
     name: "DiagnosticAdapter",
     adapt: (_command, classification) => {
       if (classification.domain !== "ambiguous" || !isRemoteShellProgram(classification.program)) {
@@ -2588,6 +2598,22 @@ function scanShellCommand(command: string, predicate: (char: string, quoted: boo
 
 function isExplicitPowerShellCommand(command: string): boolean {
   return /^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/iu.test(command.trim());
+}
+
+function detectHostCompoundCommand(command: string): boolean {
+  // Detect unquoted semicolons that would split commands at host level
+  // Ignore semicolons inside quotes or PowerShell native contexts
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+
+  // If it's explicit PowerShell, semicolons are native syntax
+  if (isExplicitPowerShellCommand(trimmed)) return false;
+
+  // If it looks like PowerShell script, semicolons are native
+  if (looksLikePowerShellScript(trimmed)) return false;
+
+  // Scan for unquoted semicolons
+  return scanShellCommand(command, (char, quoted) => !quoted && char === ";");
 }
 
 const WINDOWS_SHELL_WRITE_BLOCK_MESSAGE =
