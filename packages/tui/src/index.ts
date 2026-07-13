@@ -1798,6 +1798,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     let lastValidation: HeadlessBenchValidationResult | undefined;
     const initialEvidenceIds = new Set(context.evidence.map((record) => record.id));
     const headlessRequestTurnIds = new Set<string>();
+    let previousAttemptProcessGuard: ProcessGuard | undefined;
     const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
       let nextText = text;
       while (true) {
@@ -1807,6 +1808,16 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         emitHeadlessPhase(output, "waiting_first_delta", `attempt=${requestAttempts}`, {
           suppress: suppressGenericHeadlessPhases,
         });
+        // Clean up previous attempt's retained processes before starting new attempt
+        if (previousAttemptProcessGuard) {
+          previousAttemptProcessGuard.requestStop(true);
+          previousAttemptProcessGuard = undefined;
+        }
+        // Create new ProcessGuard for this attempt
+        const attemptProcessGuard = createProcessGuard();
+        previousAttemptProcessGuard = attemptProcessGuard;
+        context.processGuard = attemptProcessGuard;
+        context.tools.trackChildProcess = attemptProcessGuard.track;
         const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
         const deferredApprovals: HeadlessDeferredApproval[] = [];
         const emitActivity = createHeadlessActivityEmitter(output, context, {
@@ -2087,6 +2098,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         }
       }
     }
+    // Clean up retained processes from the last attempt before final cleanup
+    if (previousAttemptProcessGuard) {
+      previousAttemptProcessGuard.requestStop(true);
+      previousAttemptProcessGuard = undefined;
+    }
     if (context.sessionId) {
       await recordHeadlessArtifactChecklist(context, context.sessionId, benchConfig, lastValidation);
     }
@@ -2118,6 +2134,10 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     return 1;
   } finally {
     options.signal?.removeEventListener("abort", interruptHandler);
+    // Clean up any remaining retained processes from attempts
+    if (previousAttemptProcessGuard) {
+      previousAttemptProcessGuard.requestStop(true);
+    }
     await finishHeadlessRuntime(context);
     try {
       await clearRemoteCommandRuntime(context);

@@ -3677,6 +3677,91 @@ describe("runHeadlessTask", () => {
     expect(timeoutPrompt).toContain("narrow validation to focused tests");
     expect(timeoutPrompt).toContain("avoid repeatedly launching full expensive runs");
   });
+
+  it("cleans up retained processes from previous repair attempts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-retained-cleanup-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const pidFiles: string[] = [];
+    let attemptCount = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Start background services.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 2,
+        testCommand: `node -e "process.exit(1)"`,
+      },
+      __testSendMessage: async () => {
+        attemptCount += 1;
+        const pidFile = join(project, `service-${attemptCount}.pid`);
+        pidFiles.push(pidFile);
+        const port = 45_000 + attemptCount;
+        const script = [
+          `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));`,
+          "const http=require('http');",
+          `const server=http.createServer((req,res)=>res.end('ok'));`,
+          `server.listen(${port},'127.0.0.1');`,
+          "setInterval(()=>{},1000);",
+        ].join("");
+
+        const { spawn } = await import("node:child_process");
+        const child = spawn(process.execPath, ["-e", script], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+        context.processGuard?.track(child, {
+          detached: true,
+          label: `test-service-${attemptCount}`,
+          retainAfterExit: true,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      },
+    });
+
+    expect(exitCode).toBe(5);
+    expect(attemptCount).toBe(3);
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const alivePids: number[] = [];
+    for (const pidFile of pidFiles) {
+      try {
+        const pidContent = await readFile(pidFile, "utf8");
+        const pid = Number(pidContent);
+        if (Number.isInteger(pid) && pid > 0) {
+          try {
+            process.kill(pid, 0);
+            alivePids.push(pid);
+          } catch {
+            // Process already dead, as expected
+          }
+        }
+      } catch {
+        // PID file not created or process died
+      }
+    }
+
+    for (const pid of alivePids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already dead
+      }
+    }
+
+    expect(alivePids.length).toBe(0);
+  });
 });
 
 describe("headless runtime failure classification", () => {
