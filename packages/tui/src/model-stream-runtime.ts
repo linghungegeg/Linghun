@@ -30,6 +30,7 @@ import {
   pathsReferToSameArtifactHint,
   readEvidenceDataRecord,
   uniqueArtifactTargets,
+  validateArtifactFreshness,
 } from "./artifact-evidence-runtime.js";
 import { RESOURCE_GUARD_KIND, checkResourceGuard } from "./background-control-runtime.js";
 import { buildPromptCacheRequestFields } from "./break-cache-runtime.js";
@@ -1221,6 +1222,36 @@ function evaluateEngineeringFinalBoundary(
 function hasArtifactEvidence(context: TuiContext, evidence: TuiContext["evidence"] = context.evidence): boolean {
   const signalTargets =
     context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
+
+  // Use freshness validation when context has request ownership info
+  if (context.currentRequestTurnId) {
+    return evidence.some((record) => {
+      // Check if this evidence matches the target artifacts
+      const matchesTarget = signalTargets.length === 0 ||
+        signalTargets.some((target) => {
+          const artifactHint = readEvidenceDataRecord(record, "artifactHint");
+          const binaryPreflight = readEvidenceDataRecord(record, "binaryPreflight");
+          const evidencePath = typeof artifactHint?.path === "string" ? artifactHint.path :
+            typeof binaryPreflight?.path === "string" ? binaryPreflight.path : null;
+          return evidencePath && pathsReferToSameArtifact(evidencePath, target);
+        });
+
+      if (!matchesTarget) return false;
+
+      // Validate with owner + freshness
+      return validateArtifactFreshness(
+        record,
+        {
+          currentRequestTurnId: context.currentRequestTurnId,
+          sessionId: context.sessionId,
+          projectPath: context.projectPath,
+        },
+        { requireFresh: true }
+      );
+    });
+  }
+
+  // Fallback to simple existence check when no request context
   return hasStructuredArtifactEvidence(evidence, signalTargets);
 }
 
