@@ -122,3 +122,92 @@ function normalizeArtifactHintPath(path: string): string {
 function basenameLike(path: string): string {
   return path.split("/").filter(Boolean).at(-1) ?? path;
 }
+
+export type ArtifactFreshnessContext = {
+  currentRequestTurnId?: string;
+  sessionId?: string;
+  projectPath: string;
+};
+
+export type ArtifactFreshnessOptions = {
+  requireFresh?: boolean;
+  maxAgeMs?: number;
+  now?: Date;
+};
+
+/**
+ * Validates artifact evidence for owner matching and freshness.
+ *
+ * When requireFresh is true:
+ * - Evidence must have valid createdAt
+ * - Evidence must not be stale (older than maxAgeMs)
+ * - Evidence must match the current request owner context
+ *
+ * Returns true if evidence passes all applicable checks.
+ */
+export function validateArtifactFreshness(
+  evidence: Pick<import("./tui-data-types.js").EvidenceRecord, "data" | "createdAt" | "ownerScope" | "kind">,
+  context: ArtifactFreshnessContext,
+  options: ArtifactFreshnessOptions = {},
+): boolean {
+  const { requireFresh = false, maxAgeMs = 30 * 60 * 1000, now = new Date() } = options;
+
+  if (!requireFresh) {
+    // Non-fresh mode: only check if artifact evidence exists
+    return hasAnyStructuredArtifactEvidence(evidence);
+  }
+
+  // Fresh mode: check existence + owner + freshness
+  if (!hasAnyStructuredArtifactEvidence(evidence)) {
+    return false;
+  }
+
+  // Validate createdAt presence and format
+  if (!evidence.createdAt || typeof evidence.createdAt !== "string") {
+    return false;
+  }
+
+  const createdTimestamp = Date.parse(evidence.createdAt);
+  if (Number.isNaN(createdTimestamp)) {
+    return false;
+  }
+
+  // Check staleness
+  const age = now.getTime() - createdTimestamp;
+  if (age > maxAgeMs) {
+    return false;
+  }
+
+  // Check owner matching using the same logic as evidenceMatchesRequestOwner
+  // but replicated here to avoid circular dependency
+  if (evidence.kind === "user_provided") {
+    return true;
+  }
+
+  if (!context.currentRequestTurnId) {
+    // No request context means we can't validate ownership for fresh evidence
+    return false;
+  }
+
+  const owner = evidence.ownerScope;
+  if (!owner || owner.ownerAgentId || owner.workflowRunId) {
+    return false;
+  }
+
+  if (context.sessionId && owner.ownerSessionId !== context.sessionId) {
+    return false;
+  }
+
+  if (owner.requestTurnId !== context.currentRequestTurnId) {
+    return false;
+  }
+
+  if (typeof owner.cwd !== "string" || typeof context.projectPath !== "string") {
+    return false;
+  }
+
+  const cwd = owner.cwd.trim().replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase();
+  const project = context.projectPath.trim().replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase();
+
+  return cwd === project || cwd.startsWith(`${project}/`);
+}

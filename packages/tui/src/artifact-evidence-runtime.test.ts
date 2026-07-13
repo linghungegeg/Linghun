@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  hasStructuredArtifactEvidence,
   hasStructuredArtifactEvidenceForPath,
   pathsReferToSameArtifact,
   pathsReferToSameArtifactHint,
+  validateArtifactFreshness,
 } from "./artifact-evidence-runtime.js";
 
 describe("artifact evidence path matching", () => {
@@ -19,7 +19,7 @@ describe("artifact evidence path matching", () => {
     expect(pathsReferToSameArtifact("dist/report.md", "docs/report.md")).toBe(false);
     expect(
       hasStructuredArtifactEvidenceForPath(
-        [{ data: { artifactHint: { path: "dist/report.md", exists: true } }, createdAt: new Date().toISOString() }],
+        [{ data: { artifactHint: { path: "dist/report.md", exists: true } } }],
         "docs/report.md",
       ),
     ).toBe(false);
@@ -30,105 +30,248 @@ describe("artifact evidence path matching", () => {
   });
 });
 
-describe("artifact evidence freshness validation", () => {
-  it("accepts artifacts without freshness requirements", () => {
-    const evidence = [
-      {
-        data: { artifactHint: { path: "out.txt", exists: true } },
-        createdAt: new Date(Date.now() - 60_000).toISOString(),
-      },
-    ];
-    expect(hasStructuredArtifactEvidenceForPath(evidence, "out.txt")).toBe(true);
-  });
+describe("validateArtifactFreshness", () => {
+  const now = new Date("2024-01-01T12:00:00.000Z");
+  const projectPath = "/workspace/project";
 
-  it("rejects stale artifacts when freshness is required", () => {
-    const staleEvidence = [
-      {
-        data: { artifactHint: { path: "out.txt", exists: true } },
-        createdAt: new Date(Date.now() - 10_000).toISOString(),
-        ownerScope: { ownerSessionId: "session-1" },
+  it("validates artifact with requireFresh=false (existence only)", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: new Date(now.getTime() - 60 * 60 * 1000).toISOString(), // 1 hour old
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        cwd: projectPath,
       },
-    ];
-    expect(
-      hasStructuredArtifactEvidenceForPath(staleEvidence, "out.txt", {
-        requireFresh: true,
-        maxAgeMs: 5_000,
-      }),
-    ).toBe(false);
-  });
+      kind: "command_output" as const,
+    };
 
-  it("accepts fresh artifacts when freshness is required", () => {
-    const freshEvidence = [
-      {
-        data: { artifactHint: { path: "out.txt", exists: true } },
-        createdAt: new Date(Date.now() - 2_000).toISOString(),
-        ownerScope: { ownerSessionId: "session-1" },
-      },
-    ];
     expect(
-      hasStructuredArtifactEvidenceForPath(freshEvidence, "out.txt", {
-        requireFresh: true,
-        maxAgeMs: 5_000,
-      }),
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: false, now },
+      ),
     ).toBe(true);
   });
 
-  it("rejects artifacts from different owner when owner check is required", () => {
-    const wrongOwnerEvidence = [
-      {
-        data: { artifactHint: { path: "out.txt", exists: true } },
-        createdAt: new Date().toISOString(),
-        ownerScope: { ownerSessionId: "session-old" },
+  it("rejects artifact with missing createdAt when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: "",
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        cwd: projectPath,
       },
-    ];
+      kind: "command_output" as const,
+    };
+
     expect(
-      hasStructuredArtifactEvidenceForPath(wrongOwnerEvidence, "out.txt", {
-        requireFresh: true,
-        currentOwner: "session-new",
-      }),
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: true, now },
+      ),
     ).toBe(false);
   });
 
-  it("accepts artifacts from current owner", () => {
-    const correctOwnerEvidence = [
-      {
-        data: { artifactHint: { path: "out.txt", exists: true } },
-        createdAt: new Date().toISOString(),
-        ownerScope: { ownerSessionId: "session-current" },
+  it("rejects artifact with invalid createdAt when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: "invalid-date",
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        cwd: projectPath,
       },
-    ];
+      kind: "command_output" as const,
+    };
+
     expect(
-      hasStructuredArtifactEvidenceForPath(correctOwnerEvidence, "out.txt", {
-        requireFresh: true,
-        currentOwner: "session-current",
-      }),
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: true, now },
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects stale artifact when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: new Date(now.getTime() - 40 * 60 * 1000).toISOString(), // 40 minutes old
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        cwd: projectPath,
+      },
+      kind: "command_output" as const,
+    };
+
+    expect(
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: true, maxAgeMs: 30 * 60 * 1000, now },
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts fresh artifact with matching owner when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: new Date(now.getTime() - 10 * 60 * 1000).toISOString(), // 10 minutes old
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        cwd: projectPath,
+      },
+      kind: "command_output" as const,
+    };
+
+    expect(
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: true, now },
+      ),
     ).toBe(true);
   });
 
-  it("works with hasStructuredArtifactEvidence for multiple targets", () => {
-    const mixedEvidence = [
-      {
-        data: { artifactHint: { path: "fresh.txt", exists: true } },
-        createdAt: new Date(Date.now() - 1_000).toISOString(),
-        ownerScope: { ownerSessionId: "session-1" },
+  it("rejects artifact from different requestTurnId when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-OLD",
+        cwd: projectPath,
       },
-      {
-        data: { artifactHint: { path: "stale.txt", exists: true } },
-        createdAt: new Date(Date.now() - 20_000).toISOString(),
-        ownerScope: { ownerSessionId: "session-1" },
-      },
-    ];
+      kind: "command_output" as const,
+    };
+
     expect(
-      hasStructuredArtifactEvidence(mixedEvidence, ["fresh.txt"], {
-        requireFresh: true,
-        maxAgeMs: 5_000,
-      }),
-    ).toBe(true);
-    expect(
-      hasStructuredArtifactEvidence(mixedEvidence, ["stale.txt"], {
-        requireFresh: true,
-        maxAgeMs: 5_000,
-      }),
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-NEW",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: true, now },
+      ),
     ).toBe(false);
+  });
+
+  it("rejects artifact from different session when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-OLD",
+        requestTurnId: "turn-1",
+        cwd: projectPath,
+      },
+      kind: "command_output" as const,
+    };
+
+    expect(
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-NEW",
+          projectPath,
+        },
+        { requireFresh: true, now },
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects artifact from agent when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        ownerAgentId: "agent-123",
+        cwd: projectPath,
+      },
+      kind: "command_output" as const,
+    };
+
+    expect(
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: true, now },
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects artifact without ownerScope when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
+      kind: "command_output" as const,
+    };
+
+    expect(
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: true, now },
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts user_provided evidence when requireFresh=true", () => {
+    const evidence = {
+      data: { artifactHint: { path: "dist/report.md", exists: true } },
+      createdAt: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
+      kind: "user_provided" as const,
+    };
+
+    expect(
+      validateArtifactFreshness(
+        evidence,
+        {
+          currentRequestTurnId: "turn-1",
+          sessionId: "session-1",
+          projectPath,
+        },
+        { requireFresh: true, now },
+      ),
+    ).toBe(true);
   });
 });
