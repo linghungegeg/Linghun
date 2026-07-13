@@ -2067,6 +2067,7 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
         currentTask: "restore phase five metadata",
         phaseStatus: "in_progress",
         userConstraints: ["keep evidence references"],
+        sessionMemoryRecords: [],
         keyFiles: ["src/a.ts", "src/restore.ts"],
         changedFiles: ["src/restore.ts"],
         evidenceRefs: ["ev-1"],

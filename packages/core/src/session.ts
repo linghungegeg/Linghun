@@ -46,6 +46,7 @@ export type CacheTurnStats = {
   compacted: boolean;
   freshness: CacheFreshness;
   rawUsage?: unknown;
+  kind?: "main" | "continuation" | "final" | "agent-child" | "side-question" | "deep-compact";
 };
 
 export type CacheUsageRaw = {
@@ -78,6 +79,10 @@ export type CacheSummary = {
   historySize: number;
   lastWriteTokensSource?: CacheWriteTokensSource;
   lastFreshness?: CacheFreshness;
+  mainChainHitRate?: number | null;
+  allCallsHitRate?: number | null;
+  mainChainReadTokens?: number;
+  mainChainWriteTokens?: number;
 };
 
 export type Session = {
@@ -605,6 +610,10 @@ export function createEmptyCacheSummary(): CacheSummary {
     readTokens: 0,
     writeTokens: 0,
     historySize: 0,
+    mainChainHitRate: null,
+    allCallsHitRate: null,
+    mainChainReadTokens: 0,
+    mainChainWriteTokens: 0,
   };
 }
 

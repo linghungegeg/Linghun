@@ -312,6 +312,7 @@ export type CompactRestoreContext = {
   currentTask: string;
   phaseStatus: string;
   userConstraints: string[];
+  sessionMemoryRecords: Array<{ id: string; summary: string; scope: string }>;
   keyFiles: string[];
   changedFiles: string[];
   evidenceRefs: string[];

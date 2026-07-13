@@ -672,7 +672,11 @@ export async function executeBreakCacheMutation(
 // store.appendEvent, appendSystemEvent, refreshCacheFreshness or writeLine stay
 // in index.ts (Path A safety valve #2).
 
-export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheTurnStats {
+export function recordModelUsage(
+  context: TuiContext,
+  usage: ModelUsage,
+  kind?: "main" | "continuation" | "final" | "agent-child" | "side-question" | "deep-compact",
+): CacheTurnStats {
   const executorRoute = getRoleRoute(context.config, "executor");
   const freshness = getCurrentFreshness(context);
   const changedKeys = diffFreshness(context.cache.lastFreshness, freshness);
@@ -716,6 +720,7 @@ export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheT
     compacted: context.cache.compacted,
     freshness: { ...freshness, changedKeys },
     rawUsage: usage.rawUsage,
+    kind,
   };
   recordConfirmedContextUsage(context, usage);
   context.cache.nextTurn += 1;

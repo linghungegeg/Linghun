@@ -68,6 +68,7 @@ function makeCompactRestoreContext(overrides: Record<string, unknown> = {}) {
     currentTask: "current task",
     phaseStatus: "in_progress",
     userConstraints: [],
+    sessionMemoryRecords: [],
     keyFiles: [],
     changedFiles: [],
     evidenceRefs: [],

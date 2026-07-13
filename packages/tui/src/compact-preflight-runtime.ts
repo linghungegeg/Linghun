@@ -775,6 +775,14 @@ function createCompactProjection(
       : "",
     ...failureLearning.map((item) => `failure learning:${item}`),
   ].filter(Boolean);
+  const sessionMemoryRecords = context.memory.accepted
+    .filter((item) => item.scope === "session" && item.status === "accepted")
+    .slice(0, 8)
+    .map((item) => ({
+      id: item.id,
+      summary: sanitizeCompactSummaryText(context, redactCommonSecrets(item.summary), 200),
+      scope: item.scope,
+    }));
   const restoreContext: CompactRestoreContext = {
     goal,
     currentTask,
@@ -783,6 +791,7 @@ function createCompactProjection(
       .filter((item) => item.scope === "user" || item.taxonomy === "user")
       .slice(0, 4)
       .map((item) => sanitizeCompactSummaryText(context, item.summary, 160)),
+    sessionMemoryRecords,
     keyFiles: files,
     changedFiles,
     evidenceRefs,
