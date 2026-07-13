@@ -2325,4 +2325,53 @@ describe("model-loop-runtime", () => {
       expect(out.toLowerCase()).toContain("extension tool");
     });
   });
+
+  describe("Phase 6: Historical QA and completion claim evidence gate", () => {
+    it("historical QA (chat taskKind) passes without verification if no completion claim", () => {
+      const evidence: EvidenceRecord[] = [];
+      const text = "上一轮做了什么？";
+      const verdict = evaluateFinalAnswerClaims(text, evidence);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("general QA (code_fact taskKind) passes without verification if no completion claim", () => {
+      const evidence: EvidenceRecord[] = [];
+      const text = "What is the difference between async/await and promises?";
+      const verdict = evaluateFinalAnswerClaims(text, evidence);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("historical QA with completion claim in answer still requires evidence gate", () => {
+      const evidence: EvidenceRecord[] = [];
+      const claimText =
+        '上一轮已完成。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}';
+      const verdict = evaluateFinalAnswerClaims(claimText, evidence);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_pass");
+    });
+
+    it("completion claim requires matching goal + execution evidence + verification scope", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["test_passed"],
+          summary: "test passed",
+        }),
+      ];
+      const claimText =
+        '已完成修复。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"completion_claim","phrase":"任务完成"}]}';
+      const verdict = evaluateFinalAnswerClaims(claimText, evidence);
+      // Should fail because completion_claim needs explicit task_completed evidence with scope/validation/risk
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_claim");
+    });
+
+    it("directive input does not change historical QA classification", () => {
+      const evidence: EvidenceRecord[] = [];
+      // Even with directive words, if it's asking about past state, it's still historical
+      const text = "请告诉我上一轮的修复是否完成了？";
+      const verdict = evaluateFinalAnswerClaims(text, evidence);
+      expect(verdict.status).toBe("passed");
+    });
+  });
 });

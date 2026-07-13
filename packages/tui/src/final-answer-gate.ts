@@ -242,6 +242,12 @@ function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
 }
 
 export function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
+  // Phase 6: Check request metadata to determine if this is a historical/general QA request.
+  // Historical questions and general Q&A about past state don't need engineering verification.
+  // BUT completion claims in the answer text still need evidence gate regardless of question type.
+  const taskKind = context.lastMetaSchedulerDecision?.policyDecision.taskKind;
+  const isHistoricalOrGeneralQA = taskKind === "chat" || taskKind === "code_fact";
+
   const headlessDiagnosticsCheck = checkHeadlessRecentDiagnostics(context);
   if (headlessDiagnosticsCheck.status !== "passed") {
     return headlessDiagnosticsCheck;
@@ -265,9 +271,12 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     // D.14H Phase 7.5-C：纯自然语言高风险 claim 兜底识别。
     // 无结构化 claim 时，对"测试通过 / PASS / 已完成"等无证据高风险表述
     // 做最小匹配；普通低风险文本不误伤。
-    const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
-    if (nlCheck.status !== "passed") {
-      return nlCheck;
+    // Phase 6: Skip NL claim detection for historical/general QA unless there's a closure statement.
+    if (!isHistoricalOrGeneralQA || looksLikeFinalClosureStatement(claim)) {
+      const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
+      if (nlCheck.status !== "passed") {
+        return nlCheck;
+      }
     }
     return { status: "passed", unsupportedClaims: [] };
   }
