@@ -2847,6 +2847,45 @@ describe("runHeadlessTask", () => {
     );
   }, 30_000);
 
+  it("keeps the successful attempt retained service alive after final cleanup", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-retained-success-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    let retainedPid: number | undefined;
+
+    try {
+      const exitCode = await runHeadlessTask({
+        prompt: "start retained service",
+        projectPath: project,
+        stdout: new MemoryOutput(),
+        stderr: new MemoryOutput(),
+        __testContext: context,
+        __testStore: store,
+        __testSkipHydration: true,
+        __testSendMessage: async () => {
+          const child = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 30000)"], {
+            stdio: "ignore",
+            windowsHide: true,
+            detached: process.platform !== "win32",
+          });
+          retainedPid = child.pid;
+          context.tools.trackChildProcess?.(child, {
+            detached: process.platform !== "win32",
+            label: "headless-winning-retained",
+            retainAfterExit: true,
+          });
+        },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(retainedPid).toBeTypeOf("number");
+      expect(() => process.kill(retainedPid!, 0)).not.toThrow();
+    } finally {
+      await context.processGuard?.requestStopAndConfirm(true, 3_000);
+    }
+  }, 30_000);
+
   it("handles a host interrupt signal through the current runtime owner", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-sigint-owner-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -3670,12 +3709,14 @@ describe("runHeadlessTask", () => {
       attempt: 1,
       maxAttempts: 1,
       profile: "large_python_project",
+      workspaceUnchanged: true,
     });
 
     expect(compilePrompt).toContain("align header/test signatures");
     expect(artifactPrompt).toContain("generate or write the required artifact");
     expect(timeoutPrompt).toContain("narrow validation to focused tests");
     expect(timeoutPrompt).toContain("avoid repeatedly launching full expensive runs");
+    expect(timeoutPrompt).toContain("previous repair did not change workspace content");
   });
 
   it("cleans up retained processes from previous repair attempts", async () => {
@@ -3704,12 +3745,12 @@ describe("runHeadlessTask", () => {
         attemptCount += 1;
         const pidFile = join(project, `service-${attemptCount}.pid`);
         pidFiles.push(pidFile);
-        const port = 45_000 + attemptCount;
+        const port = 45_321;
         const script = [
-          `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));`,
+          "const fs=require('fs');",
           "const http=require('http');",
           `const server=http.createServer((req,res)=>res.end('ok'));`,
-          `server.listen(${port},'127.0.0.1');`,
+          `server.listen(${port},'127.0.0.1',()=>fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid)));`,
           "setInterval(()=>{},1000);",
         ].join("");
 
@@ -3734,12 +3775,14 @@ describe("runHeadlessTask", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 200));
 
+    const recordedPids: number[] = [];
     const alivePids: number[] = [];
     for (const pidFile of pidFiles) {
       try {
         const pidContent = await readFile(pidFile, "utf8");
         const pid = Number(pidContent);
         if (Number.isInteger(pid) && pid > 0) {
+          recordedPids.push(pid);
           try {
             process.kill(pid, 0);
             alivePids.push(pid);
@@ -3760,6 +3803,7 @@ describe("runHeadlessTask", () => {
       }
     }
 
+    expect(recordedPids).toHaveLength(3);
     expect(alivePids.length).toBe(0);
   });
 });

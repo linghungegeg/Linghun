@@ -379,6 +379,7 @@ import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import {
   createProcessGuard,
   installProcessGuardExitHandlers,
+  type ProcessGuard,
 } from "./process-guard.js";
 export { isPotentiallyMutatingMcpTool } from "./mcp-stdio-runtime.js";
 import { startFeishuLongConnection } from "./feishu-long-connection-runtime.js";
@@ -831,6 +832,7 @@ const DEFAULT_HEADLESS_MAX_CONTINUATIONS = 3;
 const MAX_HEADLESS_CONTINUATIONS = 3;
 const HEADLESS_CONTINUATION_BACKOFF_BASE_MS = 250;
 const HEADLESS_CLEANUP_SETTLE_MS = 500;
+const HEADLESS_ATTEMPT_PROCESS_STOP_TIMEOUT_MS = 3_000;
 const HEADLESS_DEADLINE_CLOSURE_WINDOW_MS = 60_000;
 
 type HeadlessPhase =
@@ -1718,6 +1720,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
   options.signal?.addEventListener("abort", interruptHandler, { once: true });
   if (options.signal?.aborted) interruptHandler();
   let suppressGenericHeadlessPhases = false;
+  let previousAttemptProcessGuard: ProcessGuard | undefined;
   try {
   if (options.onEvent) {
     const { onEvent } = options;
@@ -1798,7 +1801,6 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     let lastValidation: HeadlessBenchValidationResult | undefined;
     const initialEvidenceIds = new Set(context.evidence.map((record) => record.id));
     const headlessRequestTurnIds = new Set<string>();
-    let previousAttemptProcessGuard: ProcessGuard | undefined;
     const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
       let nextText = text;
       while (true) {
@@ -1810,7 +1812,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         });
         // Clean up previous attempt's retained processes before starting new attempt
         if (previousAttemptProcessGuard) {
-          previousAttemptProcessGuard.requestStop(true);
+          const cleanup = await stopHeadlessAttemptProcesses(previousAttemptProcessGuard);
+          if (!cleanup.ok) {
+            writeLine(errorOutput, `错误：上一 headless attempt 子进程未确认退出：${cleanup.reason}`);
+            return { exitCode: 1 };
+          }
           previousAttemptProcessGuard = undefined;
         }
         // Create new ProcessGuard for this attempt
@@ -2086,7 +2092,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           changedFiles: context.tools.changedFiles,
           lastValidation: validation,
         });
-        if (previousWorkspaceHash !== undefined && checklist.workspaceChangeHash === previousWorkspaceHash) {
+        const workspaceUnchanged =
+          previousWorkspaceHash !== undefined && checklist.workspaceChangeHash === previousWorkspaceHash;
+        if (workspaceUnchanged) {
           writeLine(
             errorOutput,
             `[headless] 工作区未变化 (hash=${checklist.workspaceChangeHash?.slice(0, 8)})，切换修复策略。`,
@@ -2099,6 +2107,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           attempt: repairAttempt + 1,
           maxAttempts: benchConfig.maxRepairAttempts,
           profile: benchConfig.profile,
+          workspaceUnchanged,
           ...(benchPreflight ? { preflight: benchPreflight } : {}),
         });
         repairAttempt += 1;
@@ -2114,11 +2123,6 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           return 1;
         }
       }
-    }
-    // Clean up retained processes from the last attempt before final cleanup
-    if (previousAttemptProcessGuard) {
-      previousAttemptProcessGuard.requestStop(true);
-      previousAttemptProcessGuard = undefined;
     }
     if (context.sessionId) {
       await recordHeadlessArtifactChecklist(context, context.sessionId, benchConfig, lastValidation);
@@ -2143,6 +2147,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       context.sessionEnded = true;
     }
     emitHeadlessPhase(output, "done", "exitCode=0", { suppress: suppressGenericHeadlessPhases });
+    previousAttemptProcessGuard = undefined;
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : "headless run 执行失败。";
@@ -2153,7 +2158,8 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     options.signal?.removeEventListener("abort", interruptHandler);
     // Clean up any remaining retained processes from attempts
     if (previousAttemptProcessGuard) {
-      previousAttemptProcessGuard.requestStop(true);
+      await stopHeadlessAttemptProcesses(previousAttemptProcessGuard);
+      previousAttemptProcessGuard = undefined;
     }
     await finishHeadlessRuntime(context);
     try {
@@ -2402,6 +2408,16 @@ async function runWithHeadlessApprovalPump(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+async function stopHeadlessAttemptProcesses(
+  guard: ProcessGuard,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const result = await guard.requestStopAndConfirm(
+    true,
+    HEADLESS_ATTEMPT_PROCESS_STOP_TIMEOUT_MS,
+  );
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason };
 }
 
 function createHeadlessContinuationBackoffMs(attempt: number): number {

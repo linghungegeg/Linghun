@@ -1498,29 +1498,6 @@ function sanitizeSecrets(text: string): string {
   return sanitized;
 }
 
-function sanitizeEnvironmentForHeadlessBench(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const sanitized: NodeJS.ProcessEnv = {};
-  const sensitivePatterns = [
-    /API[_-]?KEY/i,
-    /TOKEN/i,
-    /SECRET/i,
-    /PASSWORD/i,
-    /PASSWD/i,
-    /AUTH/i,
-    /CREDENTIAL/i,
-  ];
-
-  for (const [key, value] of Object.entries(baseEnv)) {
-    if (value === undefined) continue;
-    const isSensitive = sensitivePatterns.some(pattern => pattern.test(key));
-    if (!isSensitive) {
-      sanitized[key] = value;
-    }
-  }
-
-  return sanitized;
-}
-
 async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOutput> {
   if (!input.command) {
     throw new Error("Bash.command 必须提供。");
@@ -1530,10 +1507,6 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   const fullOutputPath = join(logRoot, `bash-${Date.now()}-${randomUUID()}.log`);
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
   const adapted = adaptShellCommand(input.command);
-  // Sanitize environment for headless bench mode
-  const childEnv = context.isHeadlessBench
-    ? sanitizeEnvironmentForHeadlessBench(process.env)
-    : undefined;
   // Background execution: only when explicitly requested via runInBackground=true
   if (input.runInBackground === true) {
     const taskId = randomUUID();
@@ -1551,7 +1524,6 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
       abortSignal: context.abortSignal,
       trackChildProcess: context.trackChildProcess,
       onComplete: context.onBackgroundBashComplete,
-      env: childEnv,
     });
     return {
       text: `命令已在后台启动。\ntaskId: ${taskId}\noutputPath: ${fullOutputPath}`,
@@ -1580,7 +1552,6 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
     context.trackChildProcess,
     createBashNoOutputHint(input.command),
-    childEnv,
   );
   const cmdInterpretation = interpretCommandResult(input.command, result.exitCode);
   const diagnostics = createBashOutcomeDiagnostics(input.command, result.outcome);
@@ -2401,16 +2372,6 @@ type WindowsShellAdapterRule = {
 
 const WINDOWS_SHELL_ADAPTER_REGISTRY: WindowsShellAdapterRule[] = [
   {
-    name: "CompoundCommandAdapter",
-    adapt: (command) => {
-      const hasCompound = detectHostCompoundCommand(command);
-      if (!hasCompound) return undefined;
-      return createBlockedPowerShellAdapter(
-        "Host-level compound commands (cmd1; cmd2) on Windows require PowerShell syntax; use 'cmd1; cmd2' in PowerShell or chain with && for sequential execution.",
-      );
-    },
-  },
-  {
     name: "DiagnosticAdapter",
     adapt: (_command, classification) => {
       if (classification.domain !== "ambiguous" || !isRemoteShellProgram(classification.program)) {
@@ -2440,10 +2401,6 @@ const WINDOWS_SHELL_ADAPTER_REGISTRY: WindowsShellAdapterRule[] = [
     adapt: (command) => convertNodeHereDocForPowerShell(command),
   },
   {
-    name: "NativePowerShellAdapter",
-    adapt: (command) => convertNativePowerShellCommand(command),
-  },
-  {
     name: "UnsupportedMultilineAdapter",
     adapt: (command) =>
       looksLikeUnsupportedUnixMultiline(command)
@@ -2456,16 +2413,32 @@ const WINDOWS_SHELL_ADAPTER_REGISTRY: WindowsShellAdapterRule[] = [
     name: "PowerShellCompoundAdapter",
     adapt: (command) => {
       const normalized = command.trim();
-      if (!normalized.includes(";")) return undefined;
+      const hasUnquotedSemicolon = scanShellCommand(
+        normalized,
+        (char, quoted) => !quoted && char === ";",
+      );
+      if (!hasUnquotedSemicolon) return undefined;
       if (/\n/u.test(normalized)) return undefined;
       if (looksLikePowerShellScript(normalized)) {
-        return { command, adapter: "native" };
+        return convertNativePowerShellCommand(normalized, true);
       }
-      if (!/[|&]/u.test(normalized) && !/<<|export\s+\w+=|\$\([^)]*\)/u.test(normalized)) {
-        return { command, adapter: "native" };
-      }
-      return undefined;
+      const hasUnsupportedUnquotedSyntax = scanShellCommand(
+        normalized,
+        (char, quoted, index) =>
+          !quoted &&
+          (char === "|" ||
+            char === "&" ||
+            normalized.startsWith("<<", index) ||
+            normalized.startsWith("$(", index) ||
+            /^export\s+\w+=/iu.test(normalized.slice(index))),
+      );
+      if (hasUnsupportedUnquotedSyntax) return undefined;
+      return convertNativePowerShellCommand(normalized, true);
     },
+  },
+  {
+    name: "NativePowerShellAdapter",
+    adapt: (command) => convertNativePowerShellCommand(command),
   },
   {
     name: "UnsupportedPosixAdapter",
@@ -2620,44 +2593,31 @@ function tokenizeShellCommandWords(command: string): string[] | undefined {
   return tokens.length > 0 ? tokens : undefined;
 }
 
-function scanShellCommand(command: string, predicate: (char: string, quoted: boolean) => boolean): boolean {
+function scanShellCommand(
+  command: string,
+  predicate: (char: string, quoted: boolean, index: number) => boolean,
+): boolean {
   let quote: "'" | '"' | undefined;
   for (let index = 0; index < command.length; index += 1) {
     const char = command[index];
     if (!char) continue;
     if (quote) {
       if (char === quote) quote = undefined;
-      if (predicate(char, true)) return true;
+      if (predicate(char, true, index)) return true;
       continue;
     }
     if (char === "'" || char === '"') {
       quote = char;
-      if (predicate(char, true)) return true;
+      if (predicate(char, true, index)) return true;
       continue;
     }
-    if (predicate(char, false)) return true;
+    if (predicate(char, false, index)) return true;
   }
   return false;
 }
 
 function isExplicitPowerShellCommand(command: string): boolean {
   return /^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/iu.test(command.trim());
-}
-
-function detectHostCompoundCommand(command: string): boolean {
-  // Detect unquoted semicolons that would split commands at host level
-  // Ignore semicolons inside quotes or PowerShell native contexts
-  const trimmed = command.trim();
-  if (!trimmed) return false;
-
-  // If it's explicit PowerShell, semicolons are native syntax
-  if (isExplicitPowerShellCommand(trimmed)) return false;
-
-  // If it looks like PowerShell script, semicolons are native
-  if (looksLikePowerShellScript(trimmed)) return false;
-
-  // Scan for unquoted semicolons
-  return scanShellCommand(command, (char, quoted) => !quoted && char === ";");
 }
 
 const WINDOWS_SHELL_WRITE_BLOCK_MESSAGE =
@@ -2685,18 +2645,24 @@ function blockWindowsShellFileWriteCommand(command: string): ShellCommandAdapter
   return undefined;
 }
 
-function convertNativePowerShellCommand(command: string): ShellCommandAdapter | undefined {
+function convertNativePowerShellCommand(
+  command: string,
+  force = false,
+): ShellCommandAdapter | undefined {
   const normalized = command.trim();
   if (!normalized) return undefined;
   if (isExplicitPowerShellCommand(normalized)) return undefined;
-  if (!looksLikePowerShellScript(normalized)) {
+  if (!force && !looksLikePowerShellScript(normalized)) {
     return undefined;
   }
+  const script = `$ErrorActionPreference='Stop'; ${normalized}`;
   return {
-    command: [
-      "powershell.exe -NoProfile -NonInteractive -Command",
-      quoteCmdArg(`$ErrorActionPreference='Stop'; ${normalized}`),
-    ].join(" "),
+    command: force
+      ? `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`
+      : [
+          "powershell.exe -NoProfile -NonInteractive -Command",
+          quoteCmdArg(script),
+        ].join(" "),
     adapter: "powershell-adapted",
     logCommand: `powershell.exe -NoProfile -NonInteractive -Command <powershell script>`,
   };
@@ -4021,11 +3987,10 @@ function runShell(
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
   trackChildProcess?: ToolContext["trackChildProcess"],
   noOutputHint?: string,
-  env?: NodeJS.ProcessEnv,
 ): Promise<{ exitCode: number; capture: BashOutputCapture; outcome: "completed" | "timeout" | "cancelled" }> {
   return new Promise((resolvePromise) => {
     const detached = process.platform !== "win32";
-    const child = spawn(command, { cwd, shell: true, windowsHide: true, detached, env });
+    const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
     trackChildProcess?.(child, {
       detached,
       cwd,
@@ -4240,7 +4205,6 @@ type RunBackgroundBashOptions = {
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void;
   trackChildProcess?: ToolContext["trackChildProcess"];
   onComplete?: (result: BashBackgroundResult) => void;
-  env?: NodeJS.ProcessEnv;
 };
 
 async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> {
@@ -4258,7 +4222,6 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     onProgress,
     trackChildProcess,
     onComplete,
-    env,
   } = opts;
 
   await mkdir(dirname(fullOutputPath), { recursive: true }).catch(() => {});
@@ -4284,7 +4247,6 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
       windowsHide: true,
       detached,
       stdio: ["ignore", outFd, errFd],
-      env,
     });
     closeSync(outFd);
     closeSync(errFd);
@@ -4347,7 +4309,7 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     child.unref();
     return;
   }
-  const child = spawn(command, { cwd, shell: true, windowsHide: true, detached, env });
+  const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
   trackChildProcess?.(child, {
     detached,
     cwd,

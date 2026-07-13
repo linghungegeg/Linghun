@@ -33,6 +33,10 @@ export type ProcessGuardStopResult = {
   failures: ProcessGuardStopFailure[];
 };
 
+export type ProcessGuardConfirmedStopResult =
+  | { ok: true; stopResult: ProcessGuardStopResult }
+  | { ok: false; stopResult: ProcessGuardStopResult; alivePids: number[]; reason: string };
+
 type TrackedProcess = {
   child: ProcessGuardTrackedChild;
   pid: number;
@@ -131,6 +135,7 @@ export class ProcessGuardRegistry {
     deps: Required<ProcessGuardDeps>,
     allowAsyncWindowsTreeKill: boolean,
     ownerId?: string,
+    removeOnDispatch = true,
   ): ProcessGuardStopResult {
     const result: ProcessGuardStopResult = {
       kind,
@@ -148,7 +153,10 @@ export class ProcessGuardRegistry {
         result.skipped += 1;
         continue;
       }
-      if (stopEntry(entry, force, deps, allowAsyncWindowsTreeKill, result)) {
+      if (
+        stopEntry(entry, force, deps, allowAsyncWindowsTreeKill, result, !removeOnDispatch) &&
+        removeOnDispatch
+      ) {
         removeEntries.push({ pid: entry.pid, ownerId: entry.ownerId });
       }
     }
@@ -162,6 +170,10 @@ export class ProcessGuardRegistry {
 export type ProcessGuard = {
   track: (child: ProcessGuardTrackedChild, options?: ProcessGuardTrackOptions) => boolean;
   requestStop: (force: boolean) => ProcessGuardStopResult;
+  requestStopAndConfirm: (
+    force: boolean,
+    timeoutMs: number,
+  ) => Promise<ProcessGuardConfirmedStopResult>;
   cleanupForExit: () => ProcessGuardStopResult;
   snapshot: () => ReturnType<ProcessGuardRegistry["snapshot"]>;
   activeSnapshot: () => ReturnType<ProcessGuardRegistry["snapshot"]>;
@@ -188,17 +200,58 @@ export function createProcessGuard(
 ): ProcessGuard {
   const resolvedDeps = resolveDeps(deps);
   const ownerId = randomUUID();
+  const requestStop = (force: boolean) =>
+    recordStopResult(
+      registry.stopAll(force ? "force" : "graceful", force, resolvedDeps, true, ownerId),
+    );
   return {
     track: (child, options) => registry.track(child, options, ownerId),
-    requestStop: (force) =>
-      recordStopResult(
-        registry.stopAll(force ? "force" : "graceful", force, resolvedDeps, true, ownerId),
-      ),
+    requestStop,
+    requestStopAndConfirm: async (force, timeoutMs) => {
+      const trackedPids = registry.snapshot(ownerId).map((entry) => entry.pid);
+      const stopResult = recordStopResult(
+        registry.stopAll(
+          force ? "force" : "graceful",
+          force,
+          resolvedDeps,
+          true,
+          ownerId,
+          false,
+        ),
+      );
+      const deadline = Date.now() + Math.max(0, timeoutMs);
+      let alivePids = trackedPids.filter((pid) => isProcessAlive(pid, resolvedDeps.kill));
+      while (alivePids.length > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        alivePids = trackedPids.filter((pid) => isProcessAlive(pid, resolvedDeps.kill));
+      }
+      if (alivePids.length === 0 && stopResult.failures.length === 0) {
+        for (const pid of trackedPids) registry.untrack(pid, ownerId);
+        return { ok: true, stopResult };
+      }
+      const failureSummary = stopResult.failures
+        .map((failure) => `${failure.pid}:${failure.message}`)
+        .join("; ");
+      const reason = [
+        ...(alivePids.length > 0 ? [`pids=${alivePids.join(",")}; timeout=${timeoutMs}ms`] : []),
+        ...(failureSummary ? [failureSummary] : []),
+      ].join("; ");
+      return { ok: false, stopResult, alivePids, reason };
+    },
     cleanupForExit: () =>
       recordStopResult(registry.stopAll("exit-cleanup", true, resolvedDeps, false, ownerId)),
     snapshot: () => registry.snapshot(ownerId),
     activeSnapshot: () => registry.activeSnapshot(ownerId),
   };
+}
+
+function isProcessAlive(pid: number, kill: typeof process.kill): boolean {
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 export function trackChildProcess(
@@ -266,8 +319,12 @@ function stopEntry(
   deps: Required<ProcessGuardDeps>,
   allowAsyncWindowsTreeKill: boolean,
   result: ProcessGuardStopResult,
+  allowRepeatedStop = false,
 ): boolean {
-  if (entry.stopState === "force" || (entry.stopState === "graceful" && !force)) {
+  if (
+    !allowRepeatedStop &&
+    (entry.stopState === "force" || (entry.stopState === "graceful" && !force))
+  ) {
     result.skipped += 1;
     return false;
   }

@@ -46,7 +46,7 @@ import {
   executeModelToolUse,
 } from "./model-tool-runtime.js";
 import { routeNaturalIntent } from "./natural-command-bridge.js";
-import { executePermissionApprove } from "./permission-approval-runtime.js";
+import { executePermissionApprove, executePermissionDeny } from "./permission-approval-runtime.js";
 import { classifyToolRequest } from "./permission-policy-engine.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import {
@@ -2166,6 +2166,40 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     } finally {
       builtInTools.Bash.call = originalCall;
     }
+  });
+
+  it("drops a denied foreground continuation after its request owner is replaced", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    context.currentRequestTurnId = "replacement-request";
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    await executePermissionDeny(
+      {
+        kind: "model_tool_use",
+        toolCall: call("Write", { path: "stale.txt", content: "stale" }),
+        toolName: "Write",
+        sessionId,
+        continuation: {
+          messages: [],
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          reasoningSent: false,
+          requestTurnId: "invoking-request",
+        },
+      },
+      context,
+      { stream } as unknown as ModelGateway,
+      new MemoryOutput(),
+      false,
+    );
+
+    expect(stream).not.toHaveBeenCalled();
+    expect(context.currentRequestTurnId).toBe("replacement-request");
+    expect(context.evidence).toEqual([]);
   });
 
   it("scopes approved Bash verification evidence to the resumed foreground owner", async () => {

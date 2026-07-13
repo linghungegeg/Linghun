@@ -161,7 +161,7 @@ export function scopeEvidenceToContext(
 }
 
 export function evidenceMatchesRequestOwner(
-  record: EvidenceRecord,
+  record: Pick<EvidenceRecord, "kind" | "ownerScope">,
   context: Pick<TuiContext, "currentRequestTurnId" | "projectPath" | "sessionId">,
 ): boolean {
   if (record.kind === "user_provided") return true;

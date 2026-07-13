@@ -70,7 +70,6 @@ function makeCompactRestoreContext(overrides: Record<string, unknown> = {}) {
     goal: "continue",
     currentTask: "current task",
     phaseStatus: "in_progress",
-    userConstraints: [],
     sessionMemoryRecords: [],
     keyFiles: [],
     changedFiles: [],
@@ -162,6 +161,32 @@ describe("continuation abort ownership", () => {
         abortSignal: controller.signal,
       },
       {} as TuiContext,
+      gateway,
+      new MemoryOutput(),
+    );
+
+    expect(providerStarted).toBe(false);
+  });
+
+  it("does not revive a continuation owned by a replaced request", async () => {
+    let providerStarted = false;
+    const gateway = {
+      async *stream() {
+        providerStarted = true;
+        yield { type: "message_stop", chunkCount: 0, hadUsage: false };
+      },
+    } as unknown as ModelGateway;
+
+    await continueModelAfterToolResults(
+      {
+        messages: [],
+        provider: "openai-compatible",
+        model: "gpt-test",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        requestTurnId: "request-old",
+      },
+      { currentRequestTurnId: "request-new" } as TuiContext,
       gateway,
       new MemoryOutput(),
     );
@@ -486,6 +511,7 @@ describe("runtime-local auto-learning drain", () => {
 
 type TestStreamEvent =
   | { type: "assistant_text_delta"; text: string }
+  | { type: "usage"; usage: { inputTokens: number; outputTokens: number; totalTokens: number } }
   | { type: "message_stop"; chunkCount: number; hadUsage: boolean; finishReason?: string };
 
 function gatewayByTurn(
@@ -1218,8 +1244,59 @@ describe("model message prompt cache layout", () => {
     expect(usageEvents).toHaveLength(1);
     expect(usageEvents[0]?.usage).toMatchObject({ inputTokens: 100, outputTokens: 10 });
     expect(context.cache.contextUsage?.confirmedUsedTokens).toBe(100);
+    expect(context.cache.history.at(-1)?.kind).toBe("main");
     expect(JSON.stringify(events)).not.toContain('"totalTokens":990');
   }, 30_000);
+
+  it("records final and continuation usage with their production cache kinds", async () => {
+    const finalRuntime = await makeSendMessageContext();
+    await __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "final" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        originalUserText: "final",
+      },
+      finalRuntime.context,
+      gatewayByTurn(
+        [[
+          { type: "assistant_text_delta", text: "final answer" },
+          { type: "usage", usage: { inputTokens: 20, outputTokens: 2, totalTokens: 22 } },
+          { type: "message_stop", chunkCount: 2, hadUsage: true, finishReason: "stop" },
+        ]],
+        { count: 0 },
+      ),
+      finalRuntime.context.sessionId!,
+      new MemoryOutput(),
+      new AbortController().signal,
+    );
+    expect(finalRuntime.context.cache.history.at(-1)?.kind).toBe("final");
+
+    const continuationRuntime = await makeSendMessageContext();
+    await continueModelAfterToolResults(
+      {
+        messages: [{ role: "user", content: "continue" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        originalUserText: "continue",
+      },
+      continuationRuntime.context,
+      gatewayByTurn(
+        [[
+          { type: "assistant_text_delta", text: "continued answer" },
+          { type: "usage", usage: { inputTokens: 30, outputTokens: 3, totalTokens: 33 } },
+          { type: "message_stop", chunkCount: 2, hadUsage: true, finishReason: "stop" },
+        ]],
+        { count: 0 },
+      ),
+      new MemoryOutput(),
+    );
+    expect(continuationRuntime.context.cache.history.at(-1)?.kind).toBe("continuation");
+  });
 
   it("starts a complete tool_use before message_stop while preserving terminal usage", async () => {
     const { context, events } = await makeSendMessageContext();
@@ -2044,7 +2121,7 @@ describe("model message prompt cache layout", () => {
     expect(serialized).not.toContain("RAW_BEFORE_VALID");
   });
 
-  it("keeps persisted compact memory constraints immutable across later memory changes", async () => {
+  it("strips legacy memory constraints from persisted compact projections", async () => {
     const projection = makeCompactProjection(
       "Linghun compact summary\nuser constraints OLD_DELETED_MEMORY",
       {
@@ -2104,7 +2181,7 @@ describe("model message prompt cache layout", () => {
     );
     const serialized = JSON.stringify(messages);
 
-    expect(serialized).toContain("OLD_DELETED_MEMORY");
+    expect(serialized).not.toContain("OLD_DELETED_MEMORY");
     expect(serialized).not.toContain("CURRENT_MEMORY");
   });
 
@@ -3684,7 +3761,7 @@ describe("final answer gate aggregation", () => {
     });
   });
 
-  it("continues with minimal verification after a completion scope check miss", () => {
+  it("downgrades broad completion after one verification attempt", () => {
     const context = { ...makeGateContext(), permissionMode: "full-access", language: "zh-CN" };
     const result = evaluateAggregatedFinalAnswerGate(
       context as never,
@@ -3700,13 +3777,59 @@ describe("final answer gate aggregation", () => {
       userText: "继续修复",
       evidenceActionRetryCount: 1,
     });
-    expect(plan.action).toBe("verification_request");
-    expect(plan.reason).toBe("completion_gap_verification_allowed_by_mode");
-    expect(plan.evidenceAction).toMatchObject({
-      toolName: "RunVerification",
-      input: { level: "typecheck" },
-    });
+    expect(plan.action).toBe("downgrade_only");
+    expect(plan.reason).toBe("completion_gap_verified_scope_only");
   });
+
+  it("does not turn a historical question into current-request verification", () => {
+    const context = {
+      ...makeGateContext(),
+      permissionMode: "full-access",
+      language: "zh-CN",
+      lastMetaSchedulerDecision: {
+        policyDecision: { taskKind: "chat" },
+      },
+    };
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("上一轮已完成。", [{ kind: "completion_claim", phrase: "已完成" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "上一轮完成了吗？",
+    });
+    expect(plan.action).toBe("downgrade_only");
+    expect(plan.reason).toBe("non_executable_request_evidence_gap");
+  });
+
+  it.each(["engineering_full_suite_unverified", "engineering_test_timeout"])(
+    "selects test verification for %s",
+    (unsupportedKind) => {
+      const plan = planFinalGateEvidenceGapAction({
+        result: {
+          status: "needs_disclaimer",
+          unsupportedKinds: [unsupportedKind],
+        },
+        context: {
+          ...makeGateContext(),
+          permissionMode: "full-access",
+          language: "zh-CN",
+        } as never,
+        userText: "继续当前修复",
+      });
+
+      expect(plan.action).toBe("verification_request");
+      expect(plan.evidenceAction).toMatchObject({
+        toolName: "RunVerification",
+        input: { level: "test" },
+      });
+    },
+  );
 
   it("chases test evidence for a tests-passed completion claim", () => {
     const context = { ...makeGateContext(), permissionMode: "full-access", language: "zh-CN" };
@@ -3829,6 +3952,9 @@ describe("final answer gate aggregation", () => {
   it("accepts binary preflight artifact evidence for the requested target", () => {
     const context = {
       ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-binary",
+      currentRequestTurnId: "request-binary",
       lastMetaSchedulerDecision: {
         policyDecision: {
           engineeringSignal: {
@@ -3840,6 +3966,11 @@ describe("final answer gate aggregation", () => {
       evidence: [
         makeEvidence({
           data: { binaryPreflight: { path: "dist/app.bin" } },
+          ownerScope: {
+            ownerSessionId: "session-binary",
+            requestTurnId: "request-binary",
+            cwd: "C:/repo",
+          },
         }),
       ],
     };
@@ -3853,7 +3984,7 @@ describe("final answer gate aggregation", () => {
     expect(result.status).toBe("passed");
   });
 
-  it("returns an evidence gap to the existing model loop instead of a second dispatcher", async () => {
+  it("does not turn an ordinary code-fact question into a verification retry", async () => {
     const { context, events } = await makeSendMessageContext();
     let attempts = 0;
     const gateway = {
@@ -3879,8 +4010,8 @@ describe("final answer gate aggregation", () => {
 
     await __testSendMessage("检查当前代码并准确汇报", context, gateway, new MemoryOutput());
 
-    expect(attempts).toBe(2);
-    expect(JSON.stringify(events)).toContain("final_answer_gap_returned_to_model_loop");
+    expect(attempts).toBe(1);
+    expect(JSON.stringify(events)).not.toContain("final_answer_gap_returned_to_model_loop");
     expect(JSON.stringify(events)).not.toContain("final_answer_gap_action dispatch");
   });
 
@@ -3910,9 +4041,8 @@ describe("final answer gate aggregation", () => {
     });
 
     expect(plan.action).toBe("blocked_explanation");
-    expect(plan.directive).toContain("不要执行命令/测试");
-    expect(plan.directive).not.toContain("Bash");
-    expect(plan.directive).not.toContain("RunVerification");
+    expect(plan.directive).toContain("只读/plan 模式");
+    expect(plan.directive).toContain("请求授权");
     expect(plan.evidenceAction).toBeUndefined();
   });
 
@@ -3980,7 +4110,7 @@ describe("final answer gate aggregation", () => {
 
     expect(plan.action).toBe("verification_request");
     expect(plan.directive).toContain("RunVerification");
-    expect(plan.directive).toContain("focused/typecheck");
+    expect(plan.directive).toContain("类型检查");
     expect(plan.directive).toContain("不要直接跑全量套件");
     expect(plan.evidenceAction).toMatchObject({
       toolName: "RunVerification",
@@ -4250,6 +4380,34 @@ describe("final answer gate aggregation", () => {
     expect(__testCurrentVerificationReportForRequest(context)).toBeUndefined();
   });
 
+  it("ignores a session-level verification report while a request owner is active", () => {
+    const context = {
+      currentRequestTurnId: "request-new",
+      sessionId: "session-timeout",
+      tools: { changedFiles: [] },
+      lastVerification: {
+        id: "verification-session-timeout",
+        status: "timeout",
+        summary: "TIMEOUT",
+        commands: [],
+        unverified: ["timeout"],
+        risk: [],
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        durationMs: 1,
+        nextAction: "resume",
+        scope: {
+          ownerKey: "session:session-timeout",
+          cwd: "C:/repo",
+          changedFiles: [],
+          ownerSessionId: "session-timeout",
+        },
+      },
+    } as unknown as TuiContext;
+
+    expect(__testCurrentVerificationReportForRequest(context)).toBeUndefined();
+  });
+
   it("plans artifact gaps with a direct Read when the draft names a file", () => {
     const plan = planFinalGateEvidenceGapAction({
       result: {
@@ -4481,7 +4639,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       const previous = {
         unsupportedKinds: ["test_claim", "completion_claim"],
         relevantEvidenceIds: new Set<string>(),
-        retryCount: 0,
+        attemptedCommandFingerprints: new Set<string>(),
       };
 
       const result = {
@@ -4492,7 +4650,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
     });
 
-    it("returns false when readonly evidence appears without gap shrinking", () => {
+    it("allows a new owner-matching readonly result to advance to another strategy", () => {
       const context = {
         evidence: [
           {
@@ -4500,7 +4658,12 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
             kind: "source_read",
             source: "Read",
             supportsClaims: [],
-            ownerScope: { requestTurnId: "turn-1", ownerSessionId: "session-1", cwd: "/test" },
+            ownerScope: {
+              requestTurnId: "turn-1",
+              ownerSessionId: "session-1",
+              cwd: "/test",
+              targets: ["test.ts"],
+            },
           },
         ],
         currentRequestTurnId: "turn-1",
@@ -4516,7 +4679,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
           input: { path: "test.ts" },
           summary: "read test file",
         },
-        retryCount: 0,
+        attemptedCommandFingerprints: new Set<string>(),
       };
 
       const result = {
@@ -4524,10 +4687,10 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
         unsupportedKinds: ["test_claim"],
       };
 
-      expect(__testFinalGapHasProgress(result, context, previous)).toBe(false);
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
     });
 
-    it("returns true when new verification evidence appears", () => {
+    it("returns false when matching verification evidence leaves the same level gap", () => {
       const context = {
         evidence: [
           {
@@ -4536,6 +4699,15 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
             source: "Bash",
             supportsClaims: ["test_passed"],
             ownerScope: { requestTurnId: "turn-1", ownerSessionId: "session-1", cwd: "/test" },
+            data: {
+              verificationScope: {
+                ownerKey: "request:session-1:turn-1",
+                ownerSessionId: "session-1",
+                requestTurnId: "turn-1",
+                cwd: "/test",
+                changedFiles: [],
+              },
+            },
           },
         ],
         currentRequestTurnId: "turn-1",
@@ -4551,7 +4723,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
           input: { level: "test" },
           summary: "run test",
         },
-        retryCount: 0,
+        attemptedCommandFingerprints: new Set<string>(),
       };
 
       const result = {
@@ -4559,7 +4731,33 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
         unsupportedKinds: ["test_claim"],
       };
 
-      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(false);
+    });
+
+    it("returns false when the same action fingerprint already made no gap progress", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+      const previous = {
+        unsupportedKinds: ["test_claim"],
+        relevantEvidenceIds: new Set<string>(),
+        evidenceAction: {
+          toolName: "RunVerification",
+          input: { level: "test" },
+          summary: "run test",
+        },
+        commandFingerprint: "same-action",
+        attemptedCommandFingerprints: new Set(["same-action"]),
+      };
+
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(false);
     });
   });
 
@@ -4584,13 +4782,29 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
     it("rejects typecheck evidence for test-level action", () => {
       const record = {
         id: "typecheck-1",
-        kind: "command_output",
-        source: "Bash",
+        kind: "test_result",
+        source: "Verification Runner",
         supportsClaims: ["typecheck_passed"],
       } as unknown as EvidenceRecord;
 
       const action = {
         toolName: "Bash",
+        input: { level: "test" },
+        summary: "run test",
+      } as const;
+
+      expect(__testEvidenceMatchesFinalGapAction(record, action)).toBe(false);
+    });
+
+    it("rejects failed test_result evidence for test-level action", () => {
+      const record = {
+        id: "failed-test-1",
+        kind: "test_result",
+        source: "Verification Runner",
+        supportsClaims: ["verification attempted", "verification:fail"],
+      } as unknown as EvidenceRecord;
+      const action = {
+        toolName: "RunVerification",
         input: { level: "test" },
         summary: "run test",
       } as const;
@@ -4651,7 +4865,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
   });
 
   describe("captureFinalGapProgressState", () => {
-    it("increments retry count from previous state", () => {
+    it("remembers the previous action fingerprint when scheduling another action", () => {
       const context = {
         evidence: [],
         currentRequestTurnId: "turn-1",
@@ -4673,23 +4887,22 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       const previous = {
         unsupportedKinds: ["test_claim"],
         relevantEvidenceIds: new Set<string>(),
-        retryCount: 0,
+        commandFingerprint: "previous-action",
+        attemptedCommandFingerprints: new Set<string>(),
       };
 
       const state = __testCaptureFinalGapProgressState(
         result,
         context,
         evidenceAction,
-        "test",
         previous,
       );
 
-      expect(state.retryCount).toBe(1);
-      expect(state.selectedLevel).toBe("test");
       expect(state.commandFingerprint).toBeDefined();
+      expect(state.attemptedCommandFingerprints.has("previous-action")).toBe(true);
     });
 
-    it("starts retry count at 0 for first attempt", () => {
+    it("starts with no prior action fingerprints", () => {
       const context = {
         evidence: [],
         currentRequestTurnId: "turn-1",
@@ -4712,14 +4925,12 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
         result,
         context,
         evidenceAction,
-        "test",
-        undefined,
       );
 
-      expect(state.retryCount).toBe(0);
+      expect(state.attemptedCommandFingerprints.size).toBe(0);
     });
 
-    it("tracks verification scope from request turn", () => {
+    it("marks a repeated action fingerprint as already attempted", () => {
       const context = {
         evidence: [],
         currentRequestTurnId: "turn-123",
@@ -4738,15 +4949,15 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
         summary: "run test",
       } as const;
 
-      const state = __testCaptureFinalGapProgressState(
+      const first = __testCaptureFinalGapProgressState(
         result,
         context,
         evidenceAction,
-        "test",
-        undefined,
       );
+      const state = __testCaptureFinalGapProgressState(result, context, evidenceAction, first);
 
-      expect(state.verificationScope).toBe("request:turn-123");
+      expect(state.commandFingerprint).toBe(first.commandFingerprint);
+      expect(state.attemptedCommandFingerprints.has(first.commandFingerprint!)).toBe(true);
     });
   });
 });

@@ -601,6 +601,54 @@ describe("SessionStore", () => {
     ).toBeUndefined();
   });
 
+  it("hydrates current restore contexts without reviving legacy memory constraints", () => {
+    const restoreContext = {
+      goal: "continue",
+      currentTask: "finish parser compatibility",
+      phaseStatus: "in_progress",
+      keyFiles: ["packages/core/src/session.ts"],
+      changedFiles: ["packages/core/src/session.ts"],
+      evidenceRefs: [],
+      activeAgentsWorkflows: [],
+      needsAttentionAgentsWorkflows: [],
+      staleResumableAgentsWorkflows: [],
+      pendingItems: [],
+      decisions: [],
+      risks: [],
+      indexStatus: "ready",
+      cacheFreshness: "fresh",
+      memoryStatus: "available",
+      verificationRequirement: "focused test",
+    };
+    const event = {
+      type: "system_event",
+      id: "projection-current-restore",
+      level: "info",
+      message: `compact_projection:${JSON.stringify({
+        ...makeUsableCompactProjection("current restore"),
+        restoreContext,
+      })}`,
+      createdAt: new Date(1).toISOString(),
+    } as const;
+
+    expect(parseUsableTranscriptCompactBoundary(event)).toMatchObject({
+      projection: { restoreContext },
+      hydrationProjection: { restoreContext },
+    });
+
+    const legacyEvent = {
+      ...event,
+      message: `compact_projection:${JSON.stringify({
+        ...makeUsableCompactProjection("legacy restore"),
+        summary: "legacy restore\nuser constraints OLD_MEMORY",
+        restoreContext: { ...restoreContext, userConstraints: ["OLD_MEMORY"] },
+      })}`,
+    };
+    const legacy = parseUsableTranscriptCompactBoundary(legacyEvent);
+    expect(JSON.stringify(legacy)).not.toContain("OLD_MEMORY");
+    expect(legacy).toMatchObject({ hydrationProjection: { restoreContext } });
+  });
+
   it("records a warning when metadata cannot be parsed", async () => {
     const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-project-"));

@@ -1119,6 +1119,7 @@ describe("model-loop-runtime", () => {
         withClaims("已完成，PASS，无问题。", [{ kind: "completion_pass", phrase: "已完成" }]),
         [
           makeEvidence({
+            id: "completion-edit",
             kind: "command_output",
             supportsClaims: ["Bash", "command_ran", "bash_exit_0", "typecheck_passed"],
             summary: "Bash: tsc --noEmit exited 0",
@@ -1129,7 +1130,12 @@ describe("model-loop-runtime", () => {
       expect(verdict.unsupportedKinds).toContain("completion_pass");
     });
 
-    it("passes overall completion only with task completion scope validation and remaining risk evidence", () => {
+    it("passes overall completion with a current-owner mutation and matching verification", () => {
+      const ownerScope = {
+        ownerSessionId: "session-completion",
+        requestTurnId: "request-completion",
+        cwd: "C:/repo",
+      };
       const verdict = evaluateFinalAnswerClaims(
         withClaims("已完成，测试通过。", [
           { kind: "completion_pass", phrase: "已完成" },
@@ -1138,23 +1144,75 @@ describe("model-loop-runtime", () => {
         [
           makeEvidence({
             kind: "command_output",
-            supportsClaims: [
-              "task_completed",
-              "scope:packages/tui/src/model-loop-runtime.ts",
-              "validation:focused vitest",
-              "remaining_risk:none",
-            ],
-            summary:
-              "task_completed scope=claim-check validation=focused vitest remaining_risk=none",
+            source: "Edit",
+            supportsClaims: ["Edit", "file_written"],
+            summary: "Edit: packages/tui/src/model-loop-runtime.ts",
+            ownerScope: {
+              ...ownerScope,
+              targets: ["packages/tui/src/model-loop-runtime.ts"],
+            },
           }),
           makeEvidence({
-            kind: "command_output",
-            supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
-            summary: "Bash: vitest --run model-loop-runtime.test.ts exited 0",
+            id: "completion-verification",
+            kind: "test_result",
+            source: "Verification Runner",
+            supportsClaims: ["verification_passed", "test_passed", "test_scope:focused"],
+            summary: "focused verification passed",
+            ownerScope,
+            data: {
+              verificationScope: {
+                ownerKey: "request:session-completion:request-completion",
+                ...ownerScope,
+                changedFiles: ["packages/tui/src/model-loop-runtime.ts"],
+              },
+            },
           }),
         ],
       );
       expect(verdict.status).toBe("passed");
+    });
+
+    it("blocks task completion when mutation and verification owners differ", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成。", [{ kind: "completion_claim", phrase: "已完成" }]),
+        [
+          makeEvidence({
+            id: "completion-old-edit",
+            kind: "command_output",
+            source: "Edit",
+            supportsClaims: ["Edit", "file_written"],
+            ownerScope: {
+              ownerSessionId: "session-completion",
+              requestTurnId: "request-old",
+              cwd: "C:/repo",
+              targets: ["src/a.ts"],
+            },
+          }),
+          makeEvidence({
+            id: "completion-current-verification",
+            kind: "test_result",
+            source: "Verification Runner",
+            supportsClaims: ["verification_passed", "test_passed"],
+            ownerScope: {
+              ownerSessionId: "session-completion",
+              requestTurnId: "request-current",
+              cwd: "C:/repo",
+            },
+            data: {
+              verificationScope: {
+                ownerKey: "request:session-completion:request-current",
+                ownerSessionId: "session-completion",
+                requestTurnId: "request-current",
+                cwd: "C:/repo",
+                changedFiles: ["src/a.ts"],
+              },
+            },
+          }),
+        ],
+      );
+
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_claim");
     });
 
     it("does not let typecheck PASS support test PASS claim", () => {

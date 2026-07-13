@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { TuiContext } from "./index.js";
+import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { evaluateAggregatedFinalAnswerGate } from "./model-stream-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
 
 describe("final-answer-gate artifact freshness integration", () => {
-  const now = new Date("2024-01-01T12:00:00.000Z");
+  const now = new Date();
   const projectPath = "/workspace/project";
 
   function createBaseContext(overrides?: Partial<TuiContext>): TuiContext {
@@ -15,10 +16,12 @@ describe("final-answer-gate artifact freshness integration", () => {
       evidence: [],
       language: "en-US",
       permissionMode: "default",
+      solutionCompleteness: createSolutionCompletenessStatus(),
       lastMetaSchedulerDecision: {
         policyDecision: {
           engineeringSignal: {
             artifactTargets: ["dist/report.md"],
+            failureCategory: "missing_artifact",
           },
         },
       },
@@ -63,7 +66,7 @@ describe("final-answer-gate artifact freshness integration", () => {
     expect(result.status).toBe("passed");
   });
 
-  it("fails when artifact evidence has no createdAt", () => {
+  it("does not reject current-owner artifact evidence because createdAt is absent", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -77,14 +80,10 @@ describe("final-answer-gate artifact freshness integration", () => {
       "LinghunFinalAnswerClaims: completion_claim",
     );
 
-    // Should fail because createdAt is missing
-    expect(result.status).toBe("needs_disclaimer");
-    if (result.status === "needs_disclaimer") {
-      expect(result.unsupportedKinds).toContain("engineering_missing_artifact");
-    }
+    expect(result.status).toBe("passed");
   });
 
-  it("fails when artifact evidence has invalid createdAt", () => {
+  it("does not reject current-owner artifact evidence because createdAt is invalid", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -98,14 +97,10 @@ describe("final-answer-gate artifact freshness integration", () => {
       "LinghunFinalAnswerClaims: completion_claim",
     );
 
-    // Should fail because createdAt is invalid
-    expect(result.status).toBe("needs_disclaimer");
-    if (result.status === "needs_disclaimer") {
-      expect(result.unsupportedKinds).toContain("engineering_missing_artifact");
-    }
+    expect(result.status).toBe("passed");
   });
 
-  it("fails when artifact evidence is stale (older than 30 minutes)", () => {
+  it("keeps current-owner artifact evidence valid past the former wall-clock TTL", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -119,11 +114,7 @@ describe("final-answer-gate artifact freshness integration", () => {
       "LinghunFinalAnswerClaims: completion_claim",
     );
 
-    // Should fail because evidence is older than 30 minutes
-    expect(result.status).toBe("needs_disclaimer");
-    if (result.status === "needs_disclaimer") {
-      expect(result.unsupportedKinds).toContain("engineering_missing_artifact");
-    }
+    expect(result.status).toBe("passed");
   });
 
   it("fails when artifact evidence is from a different requestTurnId", () => {
@@ -251,7 +242,7 @@ describe("final-answer-gate artifact freshness integration", () => {
     expect(result.status).toBe("passed");
   });
 
-  it("falls back to simple existence check when no currentRequestTurnId", () => {
+  it("fails closed when no current request owner exists", () => {
     const context = createBaseContext({
       currentRequestTurnId: undefined,
       evidence: [
@@ -271,7 +262,9 @@ describe("final-answer-gate artifact freshness integration", () => {
       "LinghunFinalAnswerClaims: completion_claim",
     );
 
-    // Should pass because without currentRequestTurnId, only existence is checked
-    expect(result.status).toBe("passed");
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status === "needs_disclaimer") {
+      expect(result.unsupportedKinds).toContain("engineering_missing_artifact");
+    }
   });
 });

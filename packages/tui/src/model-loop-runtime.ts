@@ -1203,16 +1203,84 @@ function isSmokeCompletionClaim(text: string, phrase: string): boolean {
   );
 }
 
-function evidenceSupportsTaskCompletion(record: EvidenceRecord): boolean {
-  const tokens = evidenceTokens(record);
-  return (
-    /(?:task_completed|completion_evidence|任务完成证据)/iu.test(tokens) &&
-    /(?:scope[:=]|scope_|范围[:=]|范围_)/iu.test(tokens) &&
-    /(?:validation[:=]|validation_|验证[:=]|验证_)/iu.test(tokens) &&
-    /(?:remaining[_\s-]?risk[:=]|remaining[_\s-]?risk_|residual[_\s-]?risk[:=]|risk[:=]|剩余风险[:=]|剩余风险_)/iu.test(
-      tokens,
-    )
+function evidenceOwnersMatch(left: EvidenceRecord, right: EvidenceRecord): boolean {
+  const leftOwner = left.ownerScope;
+  const rightOwner = right.ownerScope;
+  return Boolean(
+    leftOwner?.ownerSessionId &&
+      leftOwner.requestTurnId &&
+      leftOwner.cwd &&
+      rightOwner?.ownerSessionId === leftOwner.ownerSessionId &&
+      rightOwner.requestTurnId === leftOwner.requestTurnId &&
+      rightOwner.ownerAgentId === leftOwner.ownerAgentId &&
+      rightOwner.workflowRunId === leftOwner.workflowRunId &&
+      normalizeEvidenceTarget(rightOwner.cwd ?? "") === normalizeEvidenceTarget(leftOwner.cwd),
   );
+}
+
+function verificationCoversCompletionAction(
+  verification: EvidenceRecord,
+  action: EvidenceRecord,
+): boolean {
+  if (!verification.data || typeof verification.data !== "object" || Array.isArray(verification.data)) {
+    return false;
+  }
+  const scope = (verification.data as Record<string, unknown>).verificationScope;
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) return false;
+  const scopeRecord = scope as Record<string, unknown>;
+  if (
+    scopeRecord.ownerSessionId !== action.ownerScope?.ownerSessionId ||
+    scopeRecord.requestTurnId !== action.ownerScope?.requestTurnId ||
+    scopeRecord.ownerAgentId !== action.ownerScope?.ownerAgentId ||
+    scopeRecord.workflowRunId !== action.ownerScope?.workflowRunId
+  ) {
+    return false;
+  }
+  const targets = action.ownerScope?.targets ?? [];
+  if (targets.length === 0) return true;
+  const changedFiles = scopeRecord.changedFiles;
+  if (!Array.isArray(changedFiles)) return false;
+  return targets.some((target) =>
+    changedFiles.some(
+      (file) =>
+        typeof file === "string" &&
+        evidencePathMatches(
+          normalizeEvidenceTarget(target),
+          normalizeEvidenceTarget(file),
+          action.ownerScope?.cwd,
+        ),
+    ),
+  );
+}
+
+function evaluateTaskCompletionEvidence(
+  evidence: EvidenceRecord[],
+  kind: FinalAnswerClaimKind,
+  now: Date,
+): { supported: boolean; stale: boolean } {
+  const actions = evidence.filter(evidenceSupportsActionExecuted);
+  const verifications = evidence.filter(evidenceSupportsVerificationClaim);
+  let stale = false;
+  for (const action of actions) {
+    for (const verification of verifications) {
+      if (
+        action.id === verification.id ||
+        !evidenceOwnersMatch(action, verification) ||
+        !verificationCoversCompletionAction(verification, action)
+      ) {
+        continue;
+      }
+      if (
+        isEvidenceStaleForClaim(action, kind, now) ||
+        isEvidenceStaleForClaim(verification, kind, now)
+      ) {
+        stale = true;
+        continue;
+      }
+      return { supported: true, stale: false };
+    }
+  }
+  return { supported: false, stale };
 }
 
 function evidenceSupportsCommandClaim(
@@ -1254,7 +1322,7 @@ function evidenceSupportsCompletionClaim(
   if (isSmokeCompletionClaim(text, match.phrase)) {
     return evidenceSupportsCommandClaim(record, "smoke");
   }
-  return evidenceSupportsTaskCompletion(record);
+  return false;
 }
 
 function evidenceSupportsVerificationClaim(record: EvidenceRecord): boolean {
@@ -1582,13 +1650,7 @@ export function evaluateStructuredFinalAnswerClaims(
     let supported = false;
     let supporter: (record: EvidenceRecord) => boolean;
     if (kind === "completion_claim") {
-      const result = evaluateEachClaimMatch(
-        matches.filter((match) => match.kind === kind),
-        evidence,
-        (record) => evidenceSupportsTaskCompletion(record),
-        kind,
-        now,
-      );
+      const result = evaluateTaskCompletionEvidence(evidence, kind, now);
       supported = result.supported;
       if (!supported) {
         unsupported.push(kind);
@@ -1634,17 +1696,31 @@ export function evaluateStructuredFinalAnswerClaims(
     }
     if (kind === "completion_pass") {
       const completionMatches = matches.filter((item) => item.kind === "completion_pass");
-      const result = evaluateEachClaimMatch(
-        completionMatches,
-        evidence,
-        (record, match) => evidenceSupportsCompletionClaim(record, sourceText, match),
-        kind,
-        now,
-      );
-      supported = result.supported;
+      let stale = false;
+      supported = completionMatches.every((match) => {
+        const requiresTaskCompletion = !(
+          isTestCompletionClaim(sourceText, match.phrase) ||
+          isTypecheckCompletionClaim(sourceText, match.phrase) ||
+          isBuildCompletionClaim(sourceText, match.phrase) ||
+          isDiffCheckCompletionClaim(sourceText, match.phrase) ||
+          isSmokeCompletionClaim(sourceText, match.phrase)
+        );
+        const result = requiresTaskCompletion
+          ? evaluateTaskCompletionEvidence(evidence, kind, now)
+          : evaluateEachClaimMatch(
+              [match],
+              evidence,
+              (record, currentMatch) =>
+                evidenceSupportsCompletionClaim(record, sourceText, currentMatch),
+              kind,
+              now,
+            );
+        stale ||= result.stale;
+        return result.supported;
+      });
       if (!supported) {
         unsupported.push(kind);
-        if (result.stale) {
+        if (stale) {
           staleKinds.push(kind);
         }
       }

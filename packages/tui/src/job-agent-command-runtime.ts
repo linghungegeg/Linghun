@@ -3011,10 +3011,6 @@ export async function runAgentWork(
         commitGuard: verifierStillValid,
         permissionMode: agent.permissionMode,
         userActionConstraints: agent.userActionConstraints,
-        originalTask: agent.task,
-        targetPackage: verificationCwd !== context.projectPath
-          ? relative(context.projectPath, verificationCwd) || undefined
-          : undefined,
       },
     );
     const cancelled =
@@ -4221,8 +4217,11 @@ export async function denyAgentToolUse(
   context: TuiContext,
   parentSessionId: string,
   outcomeText: string,
+  allowCancelledTerminal = false,
 ): Promise<{ ok: false; tool: string; text: string; evidenceId?: string }> {
-  const commitGuard = () => agent.status !== "cancelled" && agent.status !== "stale";
+  const commitGuard = () =>
+    (allowCancelledTerminal && agent.status === "cancelled") ||
+    (agent.status !== "cancelled" && agent.status !== "stale");
   const text = AGENT_PERMISSION_BRIDGE_TOOLS.has(toolName)
     ? `${outcomeText}; ${toolName} was NOT executed / NOT written.`
     : outcomeText;
@@ -4565,6 +4564,7 @@ export async function cancelAgent(
         context,
         pendingApproval.sessionId,
         "agent cancelled while tool approval was pending",
+        true,
       );
     } catch (error) {
       pendingApprovalCleanupError = error instanceof Error ? error.message : String(error);

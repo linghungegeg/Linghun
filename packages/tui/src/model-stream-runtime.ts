@@ -26,11 +26,9 @@ import {
 import {
   hasStructuredArtifactEvidence,
   hasStructuredArtifactEvidenceForPath,
-  pathsReferToSameArtifact,
   pathsReferToSameArtifactHint,
   readEvidenceDataRecord,
   uniqueArtifactTargets,
-  validateArtifactFreshness,
 } from "./artifact-evidence-runtime.js";
 import { RESOURCE_GUARD_KIND, checkResourceGuard } from "./background-control-runtime.js";
 import { buildPromptCacheRequestFields } from "./break-cache-runtime.js";
@@ -984,10 +982,8 @@ type FinalGapProgressState = {
   unsupportedKinds: string[];
   relevantEvidenceIds: Set<string>;
   evidenceAction?: FinalGateEvidenceGapActionPlan["evidenceAction"];
-  selectedLevel?: FinalGateVerificationLevel;
   commandFingerprint?: string;
-  verificationScope?: string;
-  retryCount: number;
+  attemptedCommandFingerprints: Set<string>;
 };
 
 function finalGapHasProgress(
@@ -1011,6 +1007,12 @@ function finalGapHasProgress(
 
   // Stage 4: Read/Grep/repeated PASS without gap change is NOT progress
   if (!previous.evidenceAction) return false;
+  if (
+    previous.commandFingerprint &&
+    previous.attemptedCommandFingerprints.has(previous.commandFingerprint)
+  ) {
+    return false;
+  }
 
   const currentEvidence = evidenceForCurrentVerificationScope(context);
   const newMatchingEvidence = currentEvidence.filter(
@@ -1021,19 +1023,12 @@ function finalGapHasProgress(
 
   // Stage 4: New evidence must directly address the current gap
   if (newMatchingEvidence.length === 0) return false;
-
-  // Stage 4: Readonly tool evidence (Read/Grep) does NOT count as progress
-  // unless it directly reduces unsupportedKinds
-  const hasReadonlyOnlyEvidence = newMatchingEvidence.every(
-    (record) =>
-      record.source === "Read" ||
-      record.source === "Grep" ||
-      record.source === "Glob" ||
-      record.source.startsWith("Read:") ||
-      record.source.startsWith("Grep:"),
-  );
-
-  if (hasReadonlyOnlyEvidence && currentKinds.size >= previousKinds.size) {
+  if (
+    (previous.evidenceAction.toolName === "RunVerification" ||
+      previous.evidenceAction.toolName === "Bash") &&
+    readRequestedVerificationLevel(previous.evidenceAction.input) ===
+      selectFinalGateVerificationLevel(result)
+  ) {
     return false;
   }
 
@@ -1044,7 +1039,6 @@ function captureFinalGapProgressState(
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
   context: TuiContext,
   evidenceAction: FinalGateEvidenceGapActionPlan["evidenceAction"],
-  selectedLevel?: FinalGateVerificationLevel,
   previousState?: FinalGapProgressState,
 ): FinalGapProgressState {
   const currentEvidence = evidenceForCurrentVerificationScope(context);
@@ -1055,38 +1049,26 @@ function captureFinalGapProgressState(
   );
 
   // Stage 4: Calculate command fingerprint for deduplication
-  const commandFingerprint = evidenceAction
-    ? createCommandFingerprint(evidenceAction, selectedLevel)
-    : undefined;
-
-  // Stage 4: Track verification scope
-  const verificationScope = context.currentRequestTurnId
-    ? `request:${context.currentRequestTurnId}`
-    : context.sessionId
-      ? `session:${context.sessionId}`
-      : "global";
-
-  // Stage 4: Retry count increments from 0 for real attempts
-  const retryCount = previousState?.retryCount !== undefined ? previousState.retryCount + 1 : 0;
+  const commandFingerprint = evidenceAction ? createCommandFingerprint(evidenceAction) : undefined;
+  const attemptedCommandFingerprints = new Set(previousState?.attemptedCommandFingerprints ?? []);
+  if (previousState?.commandFingerprint) {
+    attemptedCommandFingerprints.add(previousState.commandFingerprint);
+  }
 
   return {
     unsupportedKinds: [...new Set(result.unsupportedKinds)],
     relevantEvidenceIds,
     evidenceAction,
-    selectedLevel,
     commandFingerprint,
-    verificationScope,
-    retryCount,
+    attemptedCommandFingerprints,
   };
 }
 
 function createCommandFingerprint(
   evidenceAction: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>,
-  selectedLevel?: FinalGateVerificationLevel,
 ): string {
   const parts = [
     evidenceAction.toolName,
-    selectedLevel ?? "none",
     evidenceAction.strategy ?? "default",
     stableStringify(evidenceAction.input ?? null).slice(0, 500),
   ];
@@ -1102,13 +1084,13 @@ function evidenceMatchesFinalGapAction(
     const requestedLevel = readRequestedVerificationLevel(action.input);
 
     if (requestedLevel === "test") {
-      // Stage 4: test gap requires real test evidence, not typecheck
-      return (
-        record.kind === "test_result" ||
-        record.supportsClaims.some((claim) =>
-          /^(?:test_passed|test_scope:|full_test_suite_passed|all_tests_passed)$/u.test(claim)
-        )
+      return record.supportsClaims.some((claim) =>
+        /^(?:test_passed|test_scope:full|full_test_suite_passed|all_tests_passed)$/u.test(claim)
       );
+    }
+
+    if (requestedLevel === "typecheck") {
+      return record.supportsClaims.includes("typecheck_passed");
     }
 
     if (requestedLevel === "build") {
@@ -1123,13 +1105,9 @@ function evidenceMatchesFinalGapAction(
       return record.supportsClaims.includes("smoke_passed");
     }
 
-    // Stage 4: typecheck or unspecified level
-    return (
-      record.kind === "test_result" ||
-      record.supportsClaims.some((claim) =>
-        /^(?:verification_(?:attempted|passed)|test_passed|test_scope:|typecheck_passed|build_passed|lint_passed|diff_check_passed|smoke_passed|full_test_suite_passed|all_tests_passed)$/u.test(
-          claim,
-        )
+    return record.supportsClaims.some((claim) =>
+      /^(?:verification_passed|test_passed|test_scope:full|typecheck_passed|build_passed|lint_passed|diff_check_passed|smoke_passed|full_test_suite_passed|all_tests_passed)$/u.test(
+        claim,
       )
     );
   }
@@ -1225,9 +1203,7 @@ function currentVerificationReportForRequest(context: TuiContext) {
   const scope = report.scope;
   if (!scope) return undefined;
   if (scope.ownerAgentId || scope.workflowRunId) return undefined;
-  if (scope.requestTurnId) {
-    if (scope.requestTurnId !== context.currentRequestTurnId) return undefined;
-  }
+  if (scope.requestTurnId !== context.currentRequestTurnId) return undefined;
   if (context.sessionId && scope.ownerSessionId !== context.sessionId) return undefined;
   return sameVerificationChangedFiles(
     scope.changedFiles,
@@ -1260,10 +1236,9 @@ export function __testCaptureFinalGapProgressState(
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
   context: TuiContext,
   evidenceAction: FinalGateEvidenceGapActionPlan["evidenceAction"],
-  selectedLevel?: FinalGateVerificationLevel,
   previousState?: FinalGapProgressState,
 ): FinalGapProgressState {
-  return captureFinalGapProgressState(result, context, evidenceAction, selectedLevel, previousState);
+  return captureFinalGapProgressState(result, context, evidenceAction, previousState);
 }
 
 function evaluateEngineeringFinalBoundary(
@@ -1337,37 +1312,9 @@ function evaluateEngineeringFinalBoundary(
 function hasArtifactEvidence(context: TuiContext, evidence: TuiContext["evidence"] = context.evidence): boolean {
   const signalTargets =
     context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal.artifactTargets ?? [];
-
-  // Use freshness validation when context has request ownership info
-  if (context.currentRequestTurnId) {
-    return evidence.some((record) => {
-      // Check if this evidence matches the target artifacts
-      const matchesTarget = signalTargets.length === 0 ||
-        signalTargets.some((target) => {
-          const artifactHint = readEvidenceDataRecord(record, "artifactHint");
-          const binaryPreflight = readEvidenceDataRecord(record, "binaryPreflight");
-          const evidencePath = typeof artifactHint?.path === "string" ? artifactHint.path :
-            typeof binaryPreflight?.path === "string" ? binaryPreflight.path : null;
-          return evidencePath && pathsReferToSameArtifact(evidencePath, target);
-        });
-
-      if (!matchesTarget) return false;
-
-      // Validate with owner + freshness
-      return validateArtifactFreshness(
-        record,
-        {
-          currentRequestTurnId: context.currentRequestTurnId,
-          sessionId: context.sessionId,
-          projectPath: context.projectPath,
-        },
-        { requireFresh: true }
-      );
-    });
-  }
-
-  // Fallback to simple existence check when no request context
-  return hasStructuredArtifactEvidence(evidence, signalTargets);
+  if (!context.currentRequestTurnId) return false;
+  const ownedEvidence = evidence.filter((record) => evidenceMatchesRequestOwner(record, context));
+  return hasStructuredArtifactEvidence(ownedEvidence, signalTargets);
 }
 
 function hasFullVerificationEvidence(
@@ -1411,6 +1358,17 @@ export function planFinalGateEvidenceGapAction(input: {
   }
   const gap = classifyFinalGateEvidenceGap(result.unsupportedKinds);
   const constraints = parseUserActionConstraints(input.userText);
+  const taskKind = context.lastMetaSchedulerDecision?.policyDecision.taskKind;
+  if (
+    (gap === "verification" || gap === "completion") &&
+    (taskKind === "chat" || taskKind === "code_fact")
+  ) {
+    return {
+      action: "downgrade_only",
+      reason: "non_executable_request_evidence_gap",
+      directive: createFinalGateEvidenceTaskDirective(result, language),
+    };
+  }
   if (gap === "verification" || gap === "completion") {
     if (forbidsVerificationEvidence(constraints)) {
       return {
@@ -1493,6 +1451,13 @@ export function planFinalGateEvidenceGapAction(input: {
     };
   }
   if (gap === "completion") {
+    if ((input.evidenceActionRetryCount ?? 0) > 0) {
+      return {
+        action: "downgrade_only",
+        reason: "completion_gap_verified_scope_only",
+        directive: createFinalGateEvidenceTaskDirective(result, language),
+      };
+    }
     if (context.permissionMode === "plan") {
       return {
         action: "blocked_explanation",
@@ -1560,15 +1525,8 @@ function createVerificationEvidenceGapPlan(input: {
   reason: string;
   missingKinds: string[];
   level?: FinalGateVerificationLevel;
-  previousAttempt?: { level: FinalGateVerificationLevel; failed: boolean };
 }): FinalGateEvidenceGapActionPlan {
-  // Stage 4: Select verification level, with fallback strategy on failure
-  let level = input.level ?? "typecheck";
-
-  // Stage 4: Strategy upgrade - if previous attempt failed, try next level
-  if (input.previousAttempt?.failed) {
-    level = upgradeVerificationLevel(input.previousAttempt.level, input.missingKinds);
-  }
+  const level = input.level ?? "typecheck";
 
   // Stage 4: Directive must exactly match selectedLevel
   const levelLabel = formatVerificationLevelLabel(level, input.language);
@@ -1606,35 +1564,6 @@ function createVerificationEvidenceGapPlan(input: {
   };
 }
 
-function upgradeVerificationLevel(
-  failedLevel: FinalGateVerificationLevel,
-  missingKinds: string[],
-): FinalGateVerificationLevel {
-  // Stage 4: Strategy upgrade path based on what failed
-  const hasTestGap = missingKinds.some((kind) =>
-    kind.includes("test") || kind === "engineering_full_suite_unverified",
-  );
-
-  if (failedLevel === "typecheck") {
-    return hasTestGap ? "test" : "lint";
-  }
-
-  if (failedLevel === "lint") {
-    return hasTestGap ? "test" : "build";
-  }
-
-  if (failedLevel === "test") {
-    return "build";
-  }
-
-  if (failedLevel === "build") {
-    return "smoke";
-  }
-
-  // Already at smoke, cannot upgrade further
-  return "smoke";
-}
-
 function formatVerificationLevelLabel(
   level: FinalGateVerificationLevel,
   language: Language,
@@ -1664,19 +1593,21 @@ function selectFinalGateVerificationLevel(
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
 ): FinalGateVerificationLevel {
   const claimVerdict = result.claimVerdict;
-  const phrases = claimVerdict?.matchedClaims
-    .filter((claim) => claimVerdict.unsupportedKinds.includes(claim.kind))
-    .map((claim) => claim.phrase.toLowerCase()) ?? [];
+  const phrases = claimVerdict?.missingEvidenceByClaim.length
+    ? claimVerdict.missingEvidenceByClaim.map((claim) => claim.phrase.toLowerCase())
+    : claimVerdict?.matchedClaims
+        .filter((claim) => claimVerdict.unsupportedKinds.includes(claim.kind))
+        .map((claim) => claim.phrase.toLowerCase()) ?? [];
   const joined = phrases.join(" ");
   if (
-    result.unsupportedKinds.includes("test_claim") ||
+    result.unsupportedKinds.some((kind) => /test|full_suite/iu.test(kind)) ||
     /(?:测试|tests?\s+passed|vitest|jest|pytest|go\s+test|cargo\s+test)/iu.test(joined)
   ) {
     return "test";
   }
   if (
     /(?:build|构建)/iu.test(joined) ||
-    result.unsupportedKinds.includes("engineering_full_suite_unverified")
+    result.unsupportedKinds.some((kind) => /build/iu.test(kind))
   ) {
     return "build";
   }
@@ -3311,7 +3242,7 @@ export async function sendMessage(
       const acceptedAttemptGeneration = providerAttemptGeneration;
       if (pendingRoundUsage) {
         recordCacheUsageObservation(context, "main", pendingRoundUsage);
-        const stats = recordModelUsage(context, pendingRoundUsage);
+        const stats = recordModelUsage(context, pendingRoundUsage, "main");
         await appendUsageEvents(context, sessionId, stats);
         if (
           acceptedAttemptGeneration !== providerAttemptGeneration ||
@@ -3611,12 +3542,11 @@ export async function sendMessage(
             assistantText = "";
             roundAssistantText = "";
             noProgressRounds += 1;
-            const selectedLevel = readRequestedVerificationLevel(actionPlan.evidenceAction?.input);
+            finalAnswerEvidenceActionRetries += 1;
             finalGapProgressState = captureFinalGapProgressState(
               gateResult,
               context,
               actionPlan.evidenceAction,
-              selectedLevel,
               finalGapProgressState,
             );
             messagesForProvider.push({ role: "user", content: actionPlan.directive });
@@ -3667,6 +3597,7 @@ export async function sendMessage(
               requestTurnId,
               abortSignal: controller.signal,
               attemptedRuntimeKeys: [...attemptedRuntimeKeys],
+              originalUserText: text,
               ...(reportWriteGuard ? { reportWriteGuard } : {}),
             },
             collectFailureFingerprints: true,
@@ -5077,7 +5008,7 @@ async function streamFinalModelAnswerWithoutTools(
   const acceptedAttemptGeneration = providerAttemptGeneration;
   if (pendingUsage && !requestIsStale()) {
     recordCacheUsageObservation(context, "final", pendingUsage);
-    const stats = recordModelUsage(context, pendingUsage);
+    const stats = recordModelUsage(context, pendingUsage, "final");
     await appendUsageEvents(context, sessionId, stats);
     if (acceptedAttemptGeneration !== providerAttemptGeneration || requestIsStale()) return "";
     scheduleApiTokenCountDiagnostics({
@@ -5332,11 +5263,14 @@ export async function continueModelAfterToolResults(
 ): Promise<void> {
   const inheritedSignal = continuation.abortSignal;
   if (inheritedSignal?.aborted) return;
+  if (
+    continuation.requestTurnId &&
+    continuation.requestTurnId !== context.currentRequestTurnId
+  ) {
+    return;
+  }
   const sessionId = await ensureSession(context);
-  const requestTurnId =
-    continuation.requestTurnId && continuation.requestTurnId === context.currentRequestTurnId
-      ? continuation.requestTurnId
-      : beginForegroundRequestTurn(context);
+  const requestTurnId = continuation.requestTurnId ?? beginForegroundRequestTurn(context);
   const controller = new AbortController();
   const abortFromInheritedSignal = () => controller.abort(inheritedSignal?.reason);
   inheritedSignal?.addEventListener("abort", abortFromInheritedSignal, { once: true });
@@ -5823,7 +5757,7 @@ export async function continueModelAfterToolResults(
       const acceptedAttemptGeneration = providerAttemptGeneration;
       if (pendingRoundUsage && requestOwnerIsCurrent()) {
         recordCacheUsageObservation(context, "continuation", pendingRoundUsage);
-        const stats = recordModelUsage(context, pendingRoundUsage);
+        const stats = recordModelUsage(context, pendingRoundUsage, "continuation");
         await appendUsageEvents(context, sessionId, stats);
         if (
           acceptedAttemptGeneration !== providerAttemptGeneration ||
@@ -6098,12 +6032,11 @@ export async function continueModelAfterToolResults(
             assistantText = "";
             roundAssistantText = "";
             noProgressRounds += 1;
-            const selectedLevel = readRequestedVerificationLevel(actionPlan.evidenceAction?.input);
+            finalAnswerEvidenceActionRetries += 1;
             finalGapProgressState = captureFinalGapProgressState(
               gateResult,
               context,
               actionPlan.evidenceAction,
-              selectedLevel,
               finalGapProgressState,
             );
             continuation.messages.push({ role: "user", content: actionPlan.directive });

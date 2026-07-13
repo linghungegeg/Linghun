@@ -1,77 +1,79 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { normalizeFailureFingerprint } from "./headless-bench-runtime.js";
 
 describe("headless-bench-runtime", () => {
-  describe("normalizeFailureFingerprint", () => {
-    it("normalizes timestamps", () => {
-      const input = "Error at 2024-01-15T10:30:45.123Z: failed";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("Error at TIMESTAMP: failed");
+  it("keeps exact failure paths and line numbers in repair evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-raw-failure-"));
+    const script = join(project, "failure.js");
+    await writeFile(script, "console.error('src/file.ts:123:45 exact failure'); process.exit(1);", "utf8");
+    const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`,
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+      },
     });
 
-    it("normalizes milliseconds", () => {
-      const input = "Test failed after 1234ms";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("Test failed after Xms");
-    });
-
-    it("normalizes line numbers", () => {
-      const input = "Error at line 42: undefined";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("Error at line X: undefined");
-    });
-
-    it("normalizes file paths with line:column", () => {
-      const input = "src/file.ts:123:45";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("src/file.ts:X:X");
-    });
-
-    it("normalizes memory addresses", () => {
-      const input = "Segfault at 0xdeadbeef";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("Segfault at 0xADDR");
-    });
-
-    it("normalizes Windows paths", () => {
-      const input = "File not found: C:\\Users\\test\\project\\file.txt";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("File not found: WIN_PATH");
-    });
-
-    it("normalizes .linghun paths", () => {
-      const input = "Log: /project/.linghun/headless/test.log";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("Log: /PROJECT/.linghun/PATH");
-    });
-
-    it("normalizes temp paths", () => {
-      const input = "Temp file: /tmp/linghun-test-abc123";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("Temp file: /tmp/TEMP");
-    });
-
-    it("normalizes timeout messages", () => {
-      const input = "Command timed out after 5000ms";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("Command timed out after Xms");
-    });
-
-    it("preserves error keywords", () => {
-      const input = "AssertionError: expected 5 to equal 6";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("AssertionError: expected 5 to equal 6");
-    });
-
-    it("handles multiple timestamps in one string", () => {
-      const input = "Start: 2024-01-15T10:30:45Z, End: 2024-01-15T10:31:00Z";
-      const output = normalizeFailureFingerprint(input);
-      expect(output).toBe("Start: TIMESTAMP, End: TIMESTAMP");
-    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.failure.summary).toContain("src/file.ts:123:45 exact failure");
   });
+
+  it("confirms a timed-out official process tree is gone before returning", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-timeout-tree-"));
+    const childScript = join(project, "child.js");
+    const parentScript = join(project, "parent.js");
+    const pidFile = join(project, "child.pid");
+    await writeFile(childScript, "setInterval(()=>{},1000);", "utf8");
+    await writeFile(
+      parentScript,
+      [
+        "const {spawn}=require('node:child_process');",
+        "const fs=require('node:fs');",
+        `const child=spawn(process.execPath,[${JSON.stringify(childScript)}],{stdio:'ignore'});`,
+        `fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));`,
+        "setInterval(()=>{},1000);",
+      ].join(""),
+      "utf8",
+    );
+    const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
+    let childPid: number | undefined;
+
+    try {
+      const result = await validateHeadlessBenchCompletion({
+        projectPath: project,
+        config: {
+          enabled: true,
+          profile: "generic",
+          testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(parentScript)}`,
+          testTimeoutMs: 500,
+          maxRepairAttempts: 1,
+          requiredArtifacts: [],
+          preflight: false,
+          environmentSetupRetries: 0,
+        },
+      });
+      childPid = Number(await readFile(pidFile, "utf8"));
+
+      expect(result).toMatchObject({ ok: false, failure: { category: "test_timeout" } });
+      expect(() => process.kill(childPid!, 0)).toThrow();
+    } finally {
+      if (childPid) {
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch {}
+      }
+    }
+  }, 15_000);
 
   describe("workspace change detection", () => {
     let tempDir: string;
@@ -122,6 +124,86 @@ describe("headless-bench-runtime", () => {
       expect(checklist1.workspaceChangeHash).toBeDefined();
       expect(checklist2.workspaceChangeHash).toBeDefined();
       expect(checklist1.workspaceChangeHash).not.toBe(checklist2.workspaceChangeHash);
+    });
+
+    it("detects equal-length changes after the first 1000 characters", async () => {
+      const { collectHeadlessArtifactChecklist } = await import("./headless-bench-runtime.js");
+      const file = join(tempDir, "large.txt");
+      await writeFile(file, `${"a".repeat(1_500)}x`, "utf8");
+      const config = {
+        enabled: true,
+        profile: "generic" as const,
+        testTimeoutMs: 1000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+      };
+      const before = await collectHeadlessArtifactChecklist({
+        projectPath: tempDir,
+        config,
+        changedFiles: ["large.txt"],
+      });
+
+      await writeFile(file, `${"a".repeat(1_500)}y`, "utf8");
+      const after = await collectHeadlessArtifactChecklist({
+        projectPath: tempDir,
+        config,
+        changedFiles: ["large.txt"],
+      });
+
+      expect(after.workspaceChangeHash).not.toBe(before.workspaceChangeHash);
+    });
+
+    it("streams multi-megabyte files through the workspace hash", async () => {
+      const { collectHeadlessArtifactChecklist } = await import("./headless-bench-runtime.js");
+      const file = join(tempDir, "large.bin");
+      await writeFile(file, Buffer.alloc(8 * 1024 * 1024, 1));
+      const config = {
+        enabled: true,
+        profile: "generic" as const,
+        testTimeoutMs: 1000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+      };
+      const before = await collectHeadlessArtifactChecklist({
+        projectPath: tempDir,
+        config,
+        changedFiles: ["large.bin"],
+      });
+      const changed = Buffer.alloc(8 * 1024 * 1024, 1);
+      changed[changed.length - 1] = 2;
+      await writeFile(file, changed);
+      const after = await collectHeadlessArtifactChecklist({
+        projectPath: tempDir,
+        config,
+        changedFiles: ["large.bin"],
+      });
+
+      expect(after.workspaceChangeHash).not.toBe(before.workspaceChangeHash);
+    });
+
+    it("includes changed files after the first 50 entries", async () => {
+      const { collectHeadlessArtifactChecklist } = await import("./headless-bench-runtime.js");
+      const changedFiles = Array.from({ length: 51 }, (_, index) => `file-${String(index).padStart(2, "0")}.txt`);
+      await Promise.all(changedFiles.map((file) => writeFile(join(tempDir, file), "stable", "utf8")));
+      const config = {
+        enabled: true,
+        profile: "generic" as const,
+        testTimeoutMs: 1000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+      };
+      const before = await collectHeadlessArtifactChecklist({ projectPath: tempDir, config, changedFiles });
+
+      await writeFile(join(tempDir, changedFiles[50]!), "change", "utf8");
+      const after = await collectHeadlessArtifactChecklist({ projectPath: tempDir, config, changedFiles });
+
+      expect(after.workspaceChangeHash).not.toBe(before.workspaceChangeHash);
     });
 
     it("returns same hash for unchanged content", async () => {

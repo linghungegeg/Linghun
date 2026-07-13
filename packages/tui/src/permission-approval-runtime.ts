@@ -807,6 +807,21 @@ export async function executePermissionDeny(
   cancelled: boolean,
   decisionSource = cancelled ? "cancel" : "deny",
 ): Promise<void> {
+  if (gateway && "continuation" in approval && approval.continuation) {
+    const invokingRequestTurnId = approval.continuation.requestTurnId;
+    if (
+      approval.continuation.abortSignal?.aborted ||
+      (invokingRequestTurnId &&
+        context.currentRequestTurnId &&
+        context.currentRequestTurnId !== invokingRequestTurnId)
+    ) {
+      return;
+    }
+    if (invokingRequestTurnId && !context.currentRequestTurnId) {
+      context.runtimeContextId = invokingRequestTurnId;
+      context.currentRequestTurnId = invokingRequestTurnId;
+    }
+  }
   const sessionId = await ensureSession(context);
   const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
   await recordPermissionUserDecision(

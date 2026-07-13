@@ -79,10 +79,6 @@ export type CacheSummary = {
   historySize: number;
   lastWriteTokensSource?: CacheWriteTokensSource;
   lastFreshness?: CacheFreshness;
-  mainChainHitRate?: number | null;
-  allCallsHitRate?: number | null;
-  mainChainReadTokens?: number;
-  mainChainWriteTokens?: number;
 };
 
 export type Session = {
@@ -484,15 +480,32 @@ export function parseUsableTranscriptCompactBoundary(
     );
     if (!isRecord(parsed) || typeof parsed.summary !== "string") return undefined;
     const { restoreContext, ...projectionFields } = parsed;
+    const sanitizedSummary = parsed.summary
+      .split(/\r?\n/u)
+      .filter((line) => !line.startsWith("user constraints "))
+      .join("\n");
+    const sanitizedRestoreContext = isRecord(restoreContext)
+      ? Object.fromEntries(
+          Object.entries(restoreContext).filter(([key]) => key !== "userConstraints"),
+        )
+      : undefined;
     const projection: UsableCompactProjection = {
       ...projectionFields,
-      summary: parsed.summary,
-      ...(isRecord(restoreContext) ? { restoreContext } : {}),
+      summary: sanitizedSummary,
+      ...(sanitizedRestoreContext ? { restoreContext: sanitizedRestoreContext } : {}),
     };
+    const hydrationProjection: HydratableCompactProjection | undefined =
+      isHydratableCompactProjection(parsed)
+        ? {
+            ...parsed,
+            summary: sanitizedSummary,
+            ...(sanitizedRestoreContext ? { restoreContext: sanitizedRestoreContext } : {}),
+          }
+        : undefined;
     return {
       kind: "projection",
       projection,
-      ...(isHydratableCompactProjection(parsed) ? { hydrationProjection: parsed } : {}),
+      ...(hydrationProjection ? { hydrationProjection } : {}),
     };
   } catch {
     return undefined;
@@ -563,7 +576,7 @@ function isCompactRestoreContext(value: unknown): value is Record<string, unknow
     typeof value.goal === "string" &&
     typeof value.currentTask === "string" &&
     typeof value.phaseStatus === "string" &&
-    isStringArray(value.userConstraints) &&
+    (value.userConstraints === undefined || isStringArray(value.userConstraints)) &&
     isStringArray(value.keyFiles) &&
     isStringArray(value.changedFiles) &&
     isStringArray(value.evidenceRefs) &&
@@ -610,10 +623,6 @@ export function createEmptyCacheSummary(): CacheSummary {
     readTokens: 0,
     writeTokens: 0,
     historySize: 0,
-    mainChainHitRate: null,
-    allCallsHitRate: null,
-    mainChainReadTokens: 0,
-    mainChainWriteTokens: 0,
   };
 }
 

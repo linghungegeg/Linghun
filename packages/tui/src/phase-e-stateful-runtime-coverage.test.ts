@@ -775,9 +775,9 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(context.cache.compactProjection?.restoreContext?.pendingItems).toContain(
       "todo:pending:keep the latest request",
     );
-    expect(
-      context.cache.compactProjection?.restoreContext?.userConstraints.join("\n"),
-    ).not.toContain("SECRET_TOKEN");
+    expect(JSON.stringify(context.cache.compactProjection?.restoreContext)).not.toContain(
+      "SECRET_TOKEN",
+    );
     if (!compacted.blocked) {
       const compactMessage = compacted.messages.map((message) => message.content).join("\n");
       expect(compactMessage).toContain("[Context restore metadata]");
@@ -1533,16 +1533,12 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(new Set(restore?.keyFiles).size).toBe(restore?.keyFiles.length);
     expect(restore?.changedFiles).toHaveLength(8);
     expect(restore?.evidenceRefs).toEqual(Array.from({ length: 8 }, (_, index) => `ev-${index}`));
-    expect(restore?.userConstraints).toHaveLength(4);
     expect(restore?.pendingItems).toHaveLength(6);
     expect(restore?.decisions).toHaveLength(5);
     expect(restore?.activeAgentsWorkflows).toHaveLength(10);
     expect(restore?.needsAttentionAgentsWorkflows).toHaveLength(10);
     expect(restore?.staleResumableAgentsWorkflows).toHaveLength(10);
     expect(JSON.stringify(restore)).not.toContain("SECRET_");
-    expect(
-      Math.max(...(restore?.userConstraints.map((item) => item.length) ?? [0])),
-    ).toBeLessThanOrEqual(161);
     expect(Math.max(...(restore?.keyFiles.map((item) => item.length) ?? [0]))).toBeLessThanOrEqual(
       120,
     );
@@ -2066,8 +2062,6 @@ describe("Phase E evidence, compact-cache, break-cache, and handoff coverage", (
         goal: "continue compact phase",
         currentTask: "restore phase five metadata",
         phaseStatus: "in_progress",
-        userConstraints: ["keep evidence references"],
-        sessionMemoryRecords: [],
         keyFiles: ["src/a.ts", "src/restore.ts"],
         changedFiles: ["src/restore.ts"],
         evidenceRefs: ["ev-1"],

@@ -2489,7 +2489,7 @@ describe("Phase 05 core tools", () => {
     );
     expect(probe.adapter).toBe("powershell-adapted");
     expect(probe.command).toContain("powershell.exe");
-    expect(probe.command).toContain("$PWD.Path; Get-Command rg");
+    expect(probe.command).toContain("-EncodedCommand");
 
     const hereString = adaptShellCommandForPlatform("$x = @'\nhello\n'@; Write-Output $x", "win32");
     expect(hereString.adapter).toBe("powershell-adapted");
@@ -2516,17 +2516,29 @@ describe("Phase 05 core tools", () => {
     );
     expect(pwshCmdlets.adapter).toBe("powershell-adapted");
     expect(pwshCmdlets.command).toContain("powershell.exe");
-    expect(pwshCmdlets.command).toContain("Write-Output 'hello'; Write-Output 'world'");
+    expect(pwshCmdlets.command).toContain("-EncodedCommand");
 
     const ordinaryCommands = adaptShellCommandForPlatform("node --version; npm --version", "win32");
-    expect(ordinaryCommands.adapter).toBe("native");
-    expect(ordinaryCommands.command).toBe("node --version; npm --version");
+    expect(ordinaryCommands.adapter).toBe("powershell-adapted");
+    expect(ordinaryCommands.command).toContain("powershell.exe");
 
     const multipleCommands = adaptShellCommandForPlatform(
       "git --version; node --version; npm --version",
       "win32",
     );
-    expect(multipleCommands.adapter).toBe("native");
+    expect(multipleCommands.adapter).toBe("powershell-adapted");
+
+    const quotedOperators = adaptShellCommandForPlatform(
+      `node -e "console.log('a;b|c&d$()')"; npm --version`,
+      "win32",
+    );
+    expect(quotedOperators.adapter).toBe("powershell-adapted");
+
+    const quotedUrl = adaptShellCommandForPlatform(
+      `node -e "console.log('https://example.test/?a=1&b=2')"; node --version`,
+      "win32",
+    );
+    expect(quotedUrl.adapter).toBe("powershell-adapted");
 
     const explicitPowerShell = adaptShellCommandForPlatform(
       "powershell.exe -NoProfile -Command 'Get-Date; Write-Output test'",
@@ -2749,16 +2761,6 @@ describe("Phase 05 core tools", () => {
     expect(writeBlocked.command).toContain("Edit/Write");
   });
 
-  it("blocks host-level compound commands on Windows", () => {
-    const compound = adaptShellCommandForPlatform("echo hello; echo world", "win32");
-    expect(compound.adapter).toBe("blocked");
-    expect(compound.command).toContain("compound commands");
-
-    const gitCompound = adaptShellCommandForPlatform("git add .; git commit -m 'test'", "win32");
-    expect(gitCompound.adapter).toBe("blocked");
-    expect(gitCompound.command).toContain("PowerShell syntax");
-  });
-
   it("allows PowerShell native semicolons", () => {
     const powershell = adaptShellCommandForPlatform("$x = 1; Write-Output $x", "win32");
     expect(powershell.adapter).toBe("powershell-adapted");
@@ -2769,6 +2771,44 @@ describe("Phase 05 core tools", () => {
     );
     expect(explicitPowerShell.adapter).toBe("native");
   });
+
+  it("executes a Windows compound command without treating quoted operators as syntax", async () => {
+    if (process.platform !== "win32") return;
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-quoted-compound-"));
+    const result = await runTool(
+      "Bash",
+      {
+        command: `node -e "console.log('a;b|c&d')"; node -e "console.log('done')"`,
+      },
+      createToolContext(project),
+    );
+
+    expect(result.output.data).toMatchObject({ exitCode: 0, outcome: "completed" });
+    expect(result.output.text).toContain("a;b|c&d");
+    expect(result.output.text).toContain("done");
+
+    const nativeCmdlet = adaptShellCommandForPlatform(
+      'Write-Output "a&b|c"; Write-Output done',
+      "win32",
+    );
+    expect(nativeCmdlet.command).toContain("-EncodedCommand");
+    const nativeResult = await runTool(
+      "Bash",
+      { command: 'Write-Output "a&b|c"; Write-Output done' },
+      createToolContext(project),
+    );
+    expect(nativeResult.output.data).toMatchObject({ exitCode: 0, outcome: "completed" });
+    expect(nativeResult.output.text).toContain("a&b|c");
+    expect(nativeResult.output.text).toContain("done");
+
+    const variableResult = await runTool(
+      "Bash",
+      { command: '$x="q;w"; Write-Output $x' },
+      createToolContext(project),
+    );
+    expect(variableResult.output.data).toMatchObject({ exitCode: 0, outcome: "completed" });
+    expect(variableResult.output.text).toContain("q;w");
+  }, 15_000);
 
   it("does not apply Windows shell adaptation on non-Windows platforms", () => {
     const command = "$PWD.Path; Get-Command rg";

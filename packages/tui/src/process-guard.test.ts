@@ -162,6 +162,60 @@ describe("ProcessGuard", () => {
     expect(result.failures).toEqual([{ pid: 5002, message: "kill denied" }]);
   });
 
+  it("waits until a forced process-group stop is confirmed", async () => {
+    const registry = new ProcessGuardRegistry();
+    const gone = Object.assign(new Error("gone"), { code: "ESRCH" });
+    let alive = true;
+    const killMock = vi.fn((pid: number, signal: NodeJS.Signals | number) => {
+      if (signal === 0) {
+        if (alive) return true;
+        throw gone;
+      }
+      if (pid === -5020 && signal === "SIGKILL") alive = false;
+      return true;
+    });
+    const guard = createProcessGuard(registry, { platform: "linux", kill: killMock as never });
+    guard.track(createFakeChild(5020), { detached: true });
+
+    await expect(guard.requestStopAndConfirm(true, 100)).resolves.toMatchObject({
+      ok: true,
+      stopResult: { attempted: 1, force: true, failures: [] },
+    });
+  });
+
+  it("retains an unconfirmed process for a repeated confirmed stop", async () => {
+    const registry = new ProcessGuardRegistry();
+    const gone = Object.assign(new Error("gone"), { code: "ESRCH" });
+    let forceAttempts = 0;
+    let alive = true;
+    const killMock = vi.fn((pid: number, signal: NodeJS.Signals | number) => {
+      if (signal === 0) {
+        if (alive) return true;
+        throw gone;
+      }
+      if (pid === -5021 && signal === "SIGKILL") {
+        forceAttempts += 1;
+        if (forceAttempts === 2) alive = false;
+      }
+      return true;
+    });
+    const guard = createProcessGuard(registry, { platform: "linux", kill: killMock as never });
+    guard.track(createFakeChild(5021), { detached: true });
+
+    await expect(guard.requestStopAndConfirm(true, 0)).resolves.toMatchObject({
+      ok: false,
+      alivePids: [5021],
+      reason: expect.stringContaining("pids=5021"),
+    });
+    expect(guard.snapshot()).toEqual([{ pid: 5021, detached: true, label: undefined }]);
+
+    await expect(guard.requestStopAndConfirm(true, 100)).resolves.toMatchObject({
+      ok: true,
+      stopResult: { attempted: 1, force: true, failures: [] },
+    });
+    expect(guard.snapshot()).toEqual([]);
+  });
+
   it("removes exited children from the tracked registry", () => {
     const registry = new ProcessGuardRegistry();
     const child = createFakeChild(5003);

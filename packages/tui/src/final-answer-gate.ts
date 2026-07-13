@@ -242,12 +242,6 @@ function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
 }
 
 export function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
-  // Phase 6: Check request metadata to determine if this is a historical/general QA request.
-  // Historical questions and general Q&A about past state don't need engineering verification.
-  // BUT completion claims in the answer text still need evidence gate regardless of question type.
-  const taskKind = context.lastMetaSchedulerDecision?.policyDecision.taskKind;
-  const isHistoricalOrGeneralQA = taskKind === "chat" || taskKind === "code_fact";
-
   const headlessDiagnosticsCheck = checkHeadlessRecentDiagnostics(context);
   if (headlessDiagnosticsCheck.status !== "passed") {
     return headlessDiagnosticsCheck;
@@ -271,12 +265,9 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     // D.14H Phase 7.5-C：纯自然语言高风险 claim 兜底识别。
     // 无结构化 claim 时，对"测试通过 / PASS / 已完成"等无证据高风险表述
     // 做最小匹配；普通低风险文本不误伤。
-    // Phase 6: Skip NL claim detection for historical/general QA unless there's a closure statement.
-    if (!isHistoricalOrGeneralQA || looksLikeFinalClosureStatement(claim)) {
-      const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
-      if (nlCheck.status !== "passed") {
-        return nlCheck;
-      }
+    const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
+    if (nlCheck.status !== "passed") {
+      return nlCheck;
     }
     return { status: "passed", unsupportedClaims: [] };
   }
@@ -373,7 +364,10 @@ function hasServiceDiagnosticEvidence(
   if (typeof diagnostic.targetHost === "string" && typeof diagnostic.targetPort === "number") {
     targets.add(`${diagnostic.targetHost}:${diagnostic.targetPort}`);
   }
-  return context.evidence.some((item) => {
+  const evidence = context.currentRequestTurnId
+    ? context.evidence.filter((item) => evidenceMatchesRequestOwner(item, context))
+    : context.evidence;
+  return evidence.some((item) => {
     const service = readGenericEvidenceDataRecord(item, "service");
     const serviceHint = readGenericEvidenceDataRecord(item, "serviceHint");
     return serviceMatchesDiagnostic(service, targets) || serviceMatchesDiagnostic(serviceHint, targets);
@@ -391,7 +385,10 @@ function serviceMatchesDiagnostic(
 }
 
 function hasArtifactDiagnosticEvidence(context: TuiContext, path: string): boolean {
-  return hasStructuredArtifactEvidenceForPath(context.evidence, path);
+  const evidence = context.currentRequestTurnId
+    ? context.evidence.filter((item) => evidenceMatchesRequestOwner(item, context))
+    : context.evidence;
+  return hasStructuredArtifactEvidenceForPath(evidence, path);
 }
 
 function readGenericEvidenceDataRecord(
