@@ -983,6 +983,10 @@ type FinalGapProgressState = {
   unsupportedKinds: string[];
   relevantEvidenceIds: Set<string>;
   evidenceAction?: FinalGateEvidenceGapActionPlan["evidenceAction"];
+  selectedLevel?: FinalGateVerificationLevel;
+  commandFingerprint?: string;
+  verificationScope?: string;
+  retryCount: number;
 };
 
 function finalGapHasProgress(
@@ -991,36 +995,101 @@ function finalGapHasProgress(
   previous: FinalGapProgressState | undefined,
 ): boolean {
   if (!previous) return true;
+
+  // Stage 4: Gap must shrink or new matching evidence must appear
   const currentKinds = new Set(result.unsupportedKinds);
   const previousKinds = new Set(previous.unsupportedKinds);
+
+  // Real progress: gap shrinks (fewer unsupported kinds)
   if (
     currentKinds.size < previousKinds.size &&
     [...currentKinds].every((kind) => previousKinds.has(kind))
   ) {
     return true;
   }
+
+  // Stage 4: Read/Grep/repeated PASS without gap change is NOT progress
   if (!previous.evidenceAction) return false;
-  return evidenceForCurrentVerificationScope(context).some(
+
+  const currentEvidence = evidenceForCurrentVerificationScope(context);
+  const newMatchingEvidence = currentEvidence.filter(
     (record) =>
       !previous.relevantEvidenceIds.has(record.id) &&
       evidenceMatchesFinalGapAction(record, previous.evidenceAction!),
   );
+
+  // Stage 4: New evidence must directly address the current gap
+  if (newMatchingEvidence.length === 0) return false;
+
+  // Stage 4: Readonly tool evidence (Read/Grep) does NOT count as progress
+  // unless it directly reduces unsupportedKinds
+  const hasReadonlyOnlyEvidence = newMatchingEvidence.every(
+    (record) =>
+      record.source === "Read" ||
+      record.source === "Grep" ||
+      record.source === "Glob" ||
+      record.source.startsWith("Read:") ||
+      record.source.startsWith("Grep:"),
+  );
+
+  if (hasReadonlyOnlyEvidence && currentKinds.size >= previousKinds.size) {
+    return false;
+  }
+
+  return true;
 }
 
 function captureFinalGapProgressState(
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
   context: TuiContext,
   evidenceAction: FinalGateEvidenceGapActionPlan["evidenceAction"],
+  selectedLevel?: FinalGateVerificationLevel,
+  previousState?: FinalGapProgressState,
 ): FinalGapProgressState {
+  const currentEvidence = evidenceForCurrentVerificationScope(context);
+  const relevantEvidenceIds = new Set(
+    currentEvidence
+      .filter((record) => evidenceAction && evidenceMatchesFinalGapAction(record, evidenceAction))
+      .map((record) => record.id),
+  );
+
+  // Stage 4: Calculate command fingerprint for deduplication
+  const commandFingerprint = evidenceAction
+    ? createCommandFingerprint(evidenceAction, selectedLevel)
+    : undefined;
+
+  // Stage 4: Track verification scope
+  const verificationScope = context.currentRequestTurnId
+    ? `request:${context.currentRequestTurnId}`
+    : context.sessionId
+      ? `session:${context.sessionId}`
+      : "global";
+
+  // Stage 4: Retry count increments from 0 for real attempts
+  const retryCount = previousState?.retryCount !== undefined ? previousState.retryCount + 1 : 0;
+
   return {
     unsupportedKinds: [...new Set(result.unsupportedKinds)],
-    relevantEvidenceIds: new Set(
-      evidenceForCurrentVerificationScope(context)
-        .filter((record) => evidenceAction && evidenceMatchesFinalGapAction(record, evidenceAction))
-        .map((record) => record.id),
-    ),
+    relevantEvidenceIds,
     evidenceAction,
+    selectedLevel,
+    commandFingerprint,
+    verificationScope,
+    retryCount,
   };
+}
+
+function createCommandFingerprint(
+  evidenceAction: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>,
+  selectedLevel?: FinalGateVerificationLevel,
+): string {
+  const parts = [
+    evidenceAction.toolName,
+    selectedLevel ?? "none",
+    evidenceAction.strategy ?? "default",
+    stableStringify(evidenceAction.input ?? null).slice(0, 500),
+  ];
+  return stableHash(parts.join("|"));
 }
 
 function evidenceMatchesFinalGapAction(
@@ -1028,6 +1097,32 @@ function evidenceMatchesFinalGapAction(
   action: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>,
 ): boolean {
   if (action.toolName === "RunVerification" || action.toolName === "Bash") {
+    // Stage 4: Evidence must match the actual verification level requested
+    const requestedLevel = readRequestedVerificationLevel(action.input);
+
+    if (requestedLevel === "test") {
+      // Stage 4: test gap requires real test evidence, not typecheck
+      return (
+        record.kind === "test_result" ||
+        record.supportsClaims.some((claim) =>
+          /^(?:test_passed|test_scope:|full_test_suite_passed|all_tests_passed)$/u.test(claim)
+        )
+      );
+    }
+
+    if (requestedLevel === "build") {
+      return record.supportsClaims.includes("build_passed");
+    }
+
+    if (requestedLevel === "lint") {
+      return record.supportsClaims.includes("lint_passed");
+    }
+
+    if (requestedLevel === "smoke") {
+      return record.supportsClaims.includes("smoke_passed");
+    }
+
+    // Stage 4: typecheck or unspecified level
     return (
       record.kind === "test_result" ||
       record.supportsClaims.some((claim) =>
@@ -1049,6 +1144,20 @@ function evidenceMatchesFinalGapAction(
       pathsReferToSameArtifactHint(target, expectedPath)
     ) === true || hasStructuredArtifactEvidenceForPath([record], expectedPath)
   );
+}
+
+function readRequestedVerificationLevel(
+  input: unknown,
+): FinalGateVerificationLevel | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const record = input as Record<string, unknown>;
+  if (typeof record.level === "string") {
+    const level = record.level as string;
+    if (level === "test" || level === "build" || level === "lint" || level === "smoke" || level === "typecheck") {
+      return level as FinalGateVerificationLevel;
+    }
+  }
+  return undefined;
 }
 
 function isVerificationEvidenceRecord(record: TuiContext["evidence"][number]): boolean {
@@ -1129,6 +1238,31 @@ function currentVerificationReportForRequest(context: TuiContext) {
 
 export function __testCurrentVerificationReportForRequest(context: TuiContext) {
   return currentVerificationReportForRequest(context);
+}
+
+export function __testFinalGapHasProgress(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  context: TuiContext,
+  previous: FinalGapProgressState | undefined,
+): boolean {
+  return finalGapHasProgress(result, context, previous);
+}
+
+export function __testEvidenceMatchesFinalGapAction(
+  record: EvidenceRecord,
+  action: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>,
+): boolean {
+  return evidenceMatchesFinalGapAction(record, action);
+}
+
+export function __testCaptureFinalGapProgressState(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  context: TuiContext,
+  evidenceAction: FinalGateEvidenceGapActionPlan["evidenceAction"],
+  selectedLevel?: FinalGateVerificationLevel,
+  previousState?: FinalGapProgressState,
+): FinalGapProgressState {
+  return captureFinalGapProgressState(result, context, evidenceAction, selectedLevel, previousState);
 }
 
 function evaluateEngineeringFinalBoundary(
@@ -1395,8 +1529,26 @@ function createVerificationEvidenceGapPlan(input: {
   reason: string;
   missingKinds: string[];
   level?: FinalGateVerificationLevel;
+  previousAttempt?: { level: FinalGateVerificationLevel; failed: boolean };
 }): FinalGateEvidenceGapActionPlan {
-  const level = input.level ?? "typecheck";
+  // Stage 4: Select verification level, with fallback strategy on failure
+  let level = input.level ?? "typecheck";
+
+  // Stage 4: Strategy upgrade - if previous attempt failed, try next level
+  if (input.previousAttempt?.failed) {
+    level = upgradeVerificationLevel(input.previousAttempt.level, input.missingKinds);
+  }
+
+  // Stage 4: Directive must exactly match selectedLevel
+  const levelLabel = formatVerificationLevelLabel(level, input.language);
+  const toolDirective = input.permissionMode === "default"
+    ? input.language === "en-US"
+      ? `Use one minimal ${levelLabel} Bash command so decidePermission can route approval through pendingLocalApproval/PermissionPanel; do not use RunVerification to bypass ask mode.`
+      : `使用一条最小 ${levelLabel} Bash 命令，让 decidePermission 通过 pendingLocalApproval/PermissionPanel 处理授权；不要用 RunVerification 绕过 ask 模式。`
+    : input.language === "en-US"
+      ? `Run the smallest ${levelLabel} verification first; do not run a full suite unless ${levelLabel} evidence is insufficient.`
+      : `先运行最小 ${levelLabel} 验证；除非 ${levelLabel} 证据不足，不要直接跑全量套件。`;
+
   return {
     action: "verification_request",
     reason: input.reason,
@@ -1405,14 +1557,7 @@ function createVerificationEvidenceGapPlan(input: {
       action: "verification_request",
       missing: mapFinalGateKindsToUserLabels(input.missingKinds, input.language),
       tools: input.permissionMode === "default" ? ["Bash"] : ["RunVerification"],
-      note:
-        input.permissionMode === "default"
-          ? input.language === "en-US"
-            ? "Use one minimal focused/typecheck Bash command so decidePermission can route approval through pendingLocalApproval/PermissionPanel; do not use RunVerification to bypass ask mode."
-            : "使用一条最小 focused/typecheck Bash 命令，让 decidePermission 通过 pendingLocalApproval/PermissionPanel 处理授权；不要用 RunVerification 绕过 ask 模式。"
-          : input.language === "en-US"
-            ? "Run the smallest focused/typecheck verification first; do not run a full suite unless focused evidence is insufficient."
-            : "先运行最小 focused/typecheck 验证；除非 focused 证据不足，不要直接跑全量套件。",
+      note: toolDirective,
     }),
     evidenceAction:
       input.permissionMode === "default"
@@ -1420,7 +1565,7 @@ function createVerificationEvidenceGapPlan(input: {
             toolName: "Bash",
             input: { level },
             strategy: "minimal_bash_verification",
-            summary: "run one minimal verification command through Bash permission flow",
+            summary: `run one minimal ${level} verification command through Bash permission flow`,
           }
         : {
             toolName: "RunVerification",
@@ -1428,6 +1573,60 @@ function createVerificationEvidenceGapPlan(input: {
             summary: `run minimal ${level} verification through RunVerification`,
           },
   };
+}
+
+function upgradeVerificationLevel(
+  failedLevel: FinalGateVerificationLevel,
+  missingKinds: string[],
+): FinalGateVerificationLevel {
+  // Stage 4: Strategy upgrade path based on what failed
+  const hasTestGap = missingKinds.some((kind) =>
+    kind.includes("test") || kind === "engineering_full_suite_unverified",
+  );
+
+  if (failedLevel === "typecheck") {
+    return hasTestGap ? "test" : "lint";
+  }
+
+  if (failedLevel === "lint") {
+    return hasTestGap ? "test" : "build";
+  }
+
+  if (failedLevel === "test") {
+    return "build";
+  }
+
+  if (failedLevel === "build") {
+    return "smoke";
+  }
+
+  // Already at smoke, cannot upgrade further
+  return "smoke";
+}
+
+function formatVerificationLevelLabel(
+  level: FinalGateVerificationLevel,
+  language: Language,
+): string {
+  if (language === "en-US") {
+    const labels: Record<FinalGateVerificationLevel, string> = {
+      typecheck: "typecheck",
+      test: "test",
+      lint: "lint",
+      build: "build",
+      smoke: "smoke",
+    };
+    return labels[level];
+  }
+
+  const labels: Record<FinalGateVerificationLevel, string> = {
+    typecheck: "类型检查",
+    test: "测试",
+    lint: "lint",
+    build: "构建",
+    smoke: "smoke",
+  };
+  return labels[level];
 }
 
 function selectFinalGateVerificationLevel(
@@ -3381,10 +3580,13 @@ export async function sendMessage(
             assistantText = "";
             roundAssistantText = "";
             noProgressRounds += 1;
+            const selectedLevel = readRequestedVerificationLevel(actionPlan.evidenceAction?.input);
             finalGapProgressState = captureFinalGapProgressState(
               gateResult,
               context,
               actionPlan.evidenceAction,
+              selectedLevel,
+              finalGapProgressState,
             );
             messagesForProvider.push({ role: "user", content: actionPlan.directive });
             await appendSystemEvent(
@@ -5865,10 +6067,13 @@ export async function continueModelAfterToolResults(
             assistantText = "";
             roundAssistantText = "";
             noProgressRounds += 1;
+            const selectedLevel = readRequestedVerificationLevel(actionPlan.evidenceAction?.input);
             finalGapProgressState = captureFinalGapProgressState(
               gateResult,
               context,
               actionPlan.evidenceAction,
+              selectedLevel,
+              finalGapProgressState,
             );
             continuation.messages.push({ role: "user", content: actionPlan.directive });
             await appendSystemEvent(

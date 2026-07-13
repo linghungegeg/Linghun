@@ -14,6 +14,9 @@ import {
   __testScheduleApiTokenCountDiagnostics,
   __testSendMessage,
   __testStreamFinalModelAnswerWithoutTools,
+  __testFinalGapHasProgress,
+  __testEvidenceMatchesFinalGapAction,
+  __testCaptureFinalGapProgressState,
   buildAggregatedDowngradedFinalAnswer,
   buildEvidenceBackedFinalBoundaryAnswer,
   beginForegroundRequestTurn,
@@ -4462,5 +4465,288 @@ describe("api token count diagnostics", () => {
 
     expect((context as { lastApiTokenCount?: unknown }).lastApiTokenCount).toBeUndefined();
     expect((context as { cache: { history: unknown[] } }).cache.history).toEqual([]);
+  });
+});
+
+describe("Final Gap Progress Detection (Stage 4)", () => {
+  describe("finalGapHasProgress", () => {
+    it("returns true when gap shrinks (fewer unsupported kinds)", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+
+      const previous = {
+        unsupportedKinds: ["test_claim", "completion_claim"],
+        relevantEvidenceIds: new Set<string>(),
+        retryCount: 0,
+      };
+
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
+    });
+
+    it("returns false when readonly evidence appears without gap shrinking", () => {
+      const context = {
+        evidence: [
+          {
+            id: "new-read",
+            kind: "source_read",
+            source: "Read",
+            supportsClaims: [],
+            ownerScope: { requestTurnId: "turn-1", ownerSessionId: "session-1", cwd: "/test" },
+          },
+        ],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+
+      const previous = {
+        unsupportedKinds: ["test_claim"],
+        relevantEvidenceIds: new Set<string>(),
+        evidenceAction: {
+          toolName: "Read",
+          input: { path: "test.ts" },
+          summary: "read test file",
+        },
+        retryCount: 0,
+      };
+
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(false);
+    });
+
+    it("returns true when new verification evidence appears", () => {
+      const context = {
+        evidence: [
+          {
+            id: "new-test",
+            kind: "test_result",
+            source: "Bash",
+            supportsClaims: ["test_passed"],
+            ownerScope: { requestTurnId: "turn-1", ownerSessionId: "session-1", cwd: "/test" },
+          },
+        ],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+
+      const previous = {
+        unsupportedKinds: ["test_claim"],
+        relevantEvidenceIds: new Set<string>(),
+        evidenceAction: {
+          toolName: "Bash",
+          input: { level: "test" },
+          summary: "run test",
+        },
+        retryCount: 0,
+      };
+
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
+    });
+  });
+
+  describe("evidenceMatchesFinalGapAction", () => {
+    it("matches test evidence to test-level verification action", () => {
+      const record = {
+        id: "test-1",
+        kind: "test_result",
+        source: "Bash",
+        supportsClaims: ["test_passed"],
+      } as unknown as EvidenceRecord;
+
+      const action = {
+        toolName: "Bash",
+        input: { level: "test" },
+        summary: "run test",
+      } as const;
+
+      expect(__testEvidenceMatchesFinalGapAction(record, action)).toBe(true);
+    });
+
+    it("rejects typecheck evidence for test-level action", () => {
+      const record = {
+        id: "typecheck-1",
+        kind: "command_output",
+        source: "Bash",
+        supportsClaims: ["typecheck_passed"],
+      } as unknown as EvidenceRecord;
+
+      const action = {
+        toolName: "Bash",
+        input: { level: "test" },
+        summary: "run test",
+      } as const;
+
+      expect(__testEvidenceMatchesFinalGapAction(record, action)).toBe(false);
+    });
+
+    it("matches build evidence to build-level action", () => {
+      const record = {
+        id: "build-1",
+        kind: "command_output",
+        source: "Bash",
+        supportsClaims: ["build_passed"],
+      } as unknown as EvidenceRecord;
+
+      const action = {
+        toolName: "Bash",
+        input: { level: "build" },
+        summary: "run build",
+      } as const;
+
+      expect(__testEvidenceMatchesFinalGapAction(record, action)).toBe(true);
+    });
+
+    it("rejects test evidence for build-level action", () => {
+      const record = {
+        id: "test-1",
+        kind: "test_result",
+        source: "Bash",
+        supportsClaims: ["test_passed"],
+      } as unknown as EvidenceRecord;
+
+      const action = {
+        toolName: "Bash",
+        input: { level: "build" },
+        summary: "run build",
+      } as const;
+
+      expect(__testEvidenceMatchesFinalGapAction(record, action)).toBe(false);
+    });
+
+    it("matches any verification evidence to unspecified level", () => {
+      const typecheckRecord = {
+        id: "typecheck-1",
+        kind: "command_output",
+        source: "Bash",
+        supportsClaims: ["typecheck_passed"],
+      } as unknown as EvidenceRecord;
+
+      const action = {
+        toolName: "Bash",
+        input: {},
+        summary: "run verification",
+      } as const;
+
+      expect(__testEvidenceMatchesFinalGapAction(typecheckRecord, action)).toBe(true);
+    });
+  });
+
+  describe("captureFinalGapProgressState", () => {
+    it("increments retry count from previous state", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+
+      const evidenceAction = {
+        toolName: "Bash",
+        input: { level: "test" },
+        summary: "run test",
+      } as const;
+
+      const previous = {
+        unsupportedKinds: ["test_claim"],
+        relevantEvidenceIds: new Set<string>(),
+        retryCount: 0,
+      };
+
+      const state = __testCaptureFinalGapProgressState(
+        result,
+        context,
+        evidenceAction,
+        "test",
+        previous,
+      );
+
+      expect(state.retryCount).toBe(1);
+      expect(state.selectedLevel).toBe("test");
+      expect(state.commandFingerprint).toBeDefined();
+    });
+
+    it("starts retry count at 0 for first attempt", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+
+      const evidenceAction = {
+        toolName: "Bash",
+        input: { level: "test" },
+        summary: "run test",
+      } as const;
+
+      const state = __testCaptureFinalGapProgressState(
+        result,
+        context,
+        evidenceAction,
+        "test",
+        undefined,
+      );
+
+      expect(state.retryCount).toBe(0);
+    });
+
+    it("tracks verification scope from request turn", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-123",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+
+      const evidenceAction = {
+        toolName: "Bash",
+        input: { level: "test" },
+        summary: "run test",
+      } as const;
+
+      const state = __testCaptureFinalGapProgressState(
+        result,
+        context,
+        evidenceAction,
+        "test",
+        undefined,
+      );
+
+      expect(state.verificationScope).toBe("request:turn-123");
+    });
   });
 });
