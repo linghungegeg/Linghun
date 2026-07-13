@@ -40,11 +40,10 @@ export function formatStats(args: string[], context: TuiContext): string {
     return formatEndpointStats(context.cache.history);
   }
   const totals = sumCacheHistory(context.cache.history);
-  const mainChainTotals = sumCacheHistory(
-    context.cache.history.filter((item) =>
-      item.kind === "main" || item.kind === "continuation" || item.kind === "final"
-    ),
+  const mainChainSamples = context.cache.history.filter((item) =>
+    item.kind === "main" || item.kind === "continuation" || item.kind === "final"
   );
+  const mainChainTotals = sumCacheHistory(mainChainSamples);
   const totalEstimatedCny = sumRoleUsageEstimatedCny(context);
   const latest = context.cache.history.at(-1);
   const provider = latest?.provider ?? "unknown";
@@ -56,7 +55,7 @@ export function formatStats(args: string[], context: TuiContext): string {
     provider,
     model: context.model,
   });
-  const mainChainHitRate = computePromptCacheHitRate({
+  const mainChainHitRate = mainChainSamples.length === 0 ? null : computePromptCacheHitRate({
     inputTokens: mainChainTotals.inputTokens,
     outputTokens: mainChainTotals.outputTokens,
     cacheReadTokens: mainChainTotals.cacheReadTokens,

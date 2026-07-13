@@ -3228,7 +3228,7 @@ export async function sendMessage(
       const acceptedAttemptGeneration = providerAttemptGeneration;
       if (pendingRoundUsage) {
         recordCacheUsageObservation(context, "main", pendingRoundUsage);
-        const stats = recordModelUsage(context, pendingRoundUsage);
+        const stats = recordModelUsage(context, pendingRoundUsage, "main");
         await appendUsageEvents(context, sessionId, stats);
         if (
           acceptedAttemptGeneration !== providerAttemptGeneration ||
@@ -4951,7 +4951,7 @@ async function streamFinalModelAnswerWithoutTools(
   const acceptedAttemptGeneration = providerAttemptGeneration;
   if (pendingUsage && !requestIsStale()) {
     recordCacheUsageObservation(context, "final", pendingUsage);
-    const stats = recordModelUsage(context, pendingUsage);
+    const stats = recordModelUsage(context, pendingUsage, "final");
     await appendUsageEvents(context, sessionId, stats);
     if (acceptedAttemptGeneration !== providerAttemptGeneration || requestIsStale()) return "";
     scheduleApiTokenCountDiagnostics({
@@ -5697,7 +5697,7 @@ export async function continueModelAfterToolResults(
       const acceptedAttemptGeneration = providerAttemptGeneration;
       if (pendingRoundUsage && requestOwnerIsCurrent()) {
         recordCacheUsageObservation(context, "continuation", pendingRoundUsage);
-        const stats = recordModelUsage(context, pendingRoundUsage);
+        const stats = recordModelUsage(context, pendingRoundUsage, "continuation");
         await appendUsageEvents(context, sessionId, stats);
         if (
           acceptedAttemptGeneration !== providerAttemptGeneration ||
