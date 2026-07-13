@@ -2,21 +2,55 @@ import { pathsReferToSameLocation } from "@linghun/shared";
 import type { EvidenceRecord } from "./tui-data-types.js";
 
 export function hasStructuredArtifactEvidence(
-  evidence: Array<Pick<EvidenceRecord, "data">>,
+  evidence: Array<Pick<EvidenceRecord, "data" | "ownerScope" | "createdAt">>,
   targets: string[],
+  options?: { requireFresh?: boolean; currentOwner?: string; maxAgeMs?: number },
 ): boolean {
   const normalizedTargets = uniqueArtifactTargets(targets);
   return evidence.some((item) => {
-    if (normalizedTargets.length === 0) return hasAnyStructuredArtifactEvidence(item);
-    return normalizedTargets.some((target) => structuredArtifactEvidenceMatchesPath(item, target));
+    if (normalizedTargets.length === 0) {
+      if (!hasAnyStructuredArtifactEvidence(item)) return false;
+    } else if (!normalizedTargets.some((target) => structuredArtifactEvidenceMatchesPath(item, target))) {
+      return false;
+    }
+    return validateArtifactFreshness(item, options);
   });
 }
 
 export function hasStructuredArtifactEvidenceForPath(
-  evidence: Array<Pick<EvidenceRecord, "data">>,
+  evidence: Array<Pick<EvidenceRecord, "data" | "ownerScope" | "createdAt">>,
   path: string,
+  options?: { requireFresh?: boolean; currentOwner?: string; maxAgeMs?: number },
 ): boolean {
-  return evidence.some((item) => structuredArtifactEvidenceMatchesPath(item, path));
+  return evidence.some((item) => {
+    if (!structuredArtifactEvidenceMatchesPath(item, path)) return false;
+    return validateArtifactFreshness(item, options);
+  });
+}
+
+function validateArtifactFreshness(
+  evidence: Pick<EvidenceRecord, "data" | "ownerScope" | "createdAt">,
+  options?: { requireFresh?: boolean; currentOwner?: string; maxAgeMs?: number },
+): boolean {
+  if (!options?.requireFresh) return true;
+
+  // Owner check: artifact must belong to current owner
+  if (options.currentOwner) {
+    const evidenceOwner = evidence.ownerScope?.ownerSessionId ?? evidence.ownerScope?.ownerAgentId;
+    if (!evidenceOwner || evidenceOwner !== options.currentOwner) {
+      return false;
+    }
+  }
+
+  // Freshness check: artifact must be recent
+  if (options.maxAgeMs !== undefined && evidence.createdAt) {
+    const ageMs = Date.now() - new Date(evidence.createdAt).getTime();
+    if (ageMs > options.maxAgeMs) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export function structuredArtifactEvidenceMatchesPath(

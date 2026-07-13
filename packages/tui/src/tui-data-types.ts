@@ -194,6 +194,8 @@ export type VerificationScope = {
   workflowRunId?: string;
   requestTurnId?: string;
   level?: string;
+  originalTask?: string;
+  targetPackage?: string;
 };
 
 export type VerificationReport = {

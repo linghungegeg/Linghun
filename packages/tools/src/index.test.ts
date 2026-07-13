@@ -2702,6 +2702,27 @@ describe("Phase 05 core tools", () => {
     expect(writeBlocked.command).toContain("Edit/Write");
   });
 
+  it("blocks host-level compound commands on Windows", () => {
+    const compound = adaptShellCommandForPlatform("echo hello; echo world", "win32");
+    expect(compound.adapter).toBe("blocked");
+    expect(compound.command).toContain("compound commands");
+
+    const gitCompound = adaptShellCommandForPlatform("git add .; git commit -m 'test'", "win32");
+    expect(gitCompound.adapter).toBe("blocked");
+    expect(gitCompound.command).toContain("PowerShell syntax");
+  });
+
+  it("allows PowerShell native semicolons", () => {
+    const powershell = adaptShellCommandForPlatform("$x = 1; Write-Output $x", "win32");
+    expect(powershell.adapter).toBe("powershell-adapted");
+
+    const explicitPowerShell = adaptShellCommandForPlatform(
+      "powershell.exe -Command \"$x = 1; Write-Output $x\"",
+      "win32",
+    );
+    expect(explicitPowerShell.adapter).toBe("native");
+  });
+
   it("does not apply Windows shell adaptation on non-Windows platforms", () => {
     const command = "$PWD.Path; Get-Command rg";
     const adapted = adaptShellCommandForPlatform(command, "linux");
