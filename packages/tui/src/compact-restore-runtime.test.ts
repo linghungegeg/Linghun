@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildPostCompactRestoreMessage,
   buildPostCompactRestorePayload,
@@ -9,6 +9,14 @@ import {
 } from "./compact-restore-runtime.js";
 import { createEmptyMemoryTombstoneIndex } from "./memory-tombstone-runtime.js";
 import type { TuiContext } from "./index.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+  };
+});
 
 function makeContext(projectPath: string, overrides: Partial<TuiContext> = {}): TuiContext {
   return {
@@ -172,6 +180,41 @@ describe("post compact restore runtime", () => {
     context.cache.deepCompact = { id: "deep-2" } as never;
     const afterCompact = await buildPostCompactRestoreMessage(context);
     expect(afterCompact?.content).toContain("current = 3");
+  });
+
+  it("does not latch restore content when owner changes while file read is pending", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
+    await mkdir(join(project, "src"));
+    await writeFile(join(project, "src", "current.ts"), "export const current = 1;\n", "utf8");
+    const fsPromises = await import("node:fs/promises");
+    const readFileMock = vi.mocked(fsPromises.readFile);
+    let releaseRead!: () => void;
+    let markReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    const readRelease = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    readFileMock.mockImplementationOnce(async () => {
+      markReadStarted();
+      await readRelease;
+      return "export const stale = true;\n" as never;
+    });
+    let canCommit = true;
+    const context = makeContext(project, {
+      recentlyMentionedFiles: ["src/current.ts"],
+      tools: { changedFiles: ["src/current.ts"], todos: [], workspaceRoot: project },
+    });
+    context.cache.deepCompact = { id: "deep-stale-read" } as never;
+
+    const messagePromise = buildPostCompactRestoreMessage(context, () => canCommit);
+    await readStarted;
+    canCommit = false;
+    releaseRead();
+
+    await expect(messagePromise).resolves.toBeUndefined();
+    expect(context.cache.postCompactRestoreLatch).toBeUndefined();
   });
 
   it("does not inject accepted memory through the restore payload", async () => {

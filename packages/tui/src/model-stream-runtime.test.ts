@@ -5,13 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
 import { LinghunError, SessionStore } from "@linghun/core";
-import type { ModelGateway } from "@linghun/providers";
+import type { ModelGateway, ModelMessage } from "@linghun/providers";
 import { builtInTools, createToolContext } from "@linghun/tools";
 import { interruptAllActiveWork } from "./background-control-runtime.js";
 import {
   __testApplyPromptCacheKey,
   __testBuildModelMessagesWithRecentContext,
   __testCurrentVerificationReportForRequest,
+  __testPrepareMessagesForProviderPreflightWithActivity,
   __testScheduleApiTokenCountDiagnostics,
   __testSendMessage,
   __testStreamFinalModelAnswerWithoutTools,
@@ -143,6 +144,180 @@ class MemoryOutput extends Writable {
 }
 
 describe("continuation abort ownership", () => {
+  it("does not let a superseded compact preflight overwrite the new request activity", async () => {
+    const { context } = await makeSendMessageContext();
+    const oldController = new AbortController();
+    context.currentRequestTurnId = "compact-old";
+    context.activeAbortController = oldController;
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "compact-old" };
+    context.requestActivityPhase = "request_started";
+    let releaseDeepCompact!: () => void;
+    let markDeepCompactStarted!: () => void;
+    const deepCompactStarted = new Promise<void>((resolve) => {
+      markDeepCompactStarted = resolve;
+    });
+    const deepCompactGate = new Promise<void>((resolve) => {
+      releaseDeepCompact = resolve;
+    });
+    context.modelGateway = {
+      async *stream() {
+        markDeepCompactStarted();
+        await deepCompactGate;
+        yield { type: "assistant_text_delta", id: "compact", text: "owned summary" } as const;
+        yield { type: "message_stop", id: "compact", chunkCount: 1, hadUsage: false } as const;
+      },
+    } as unknown as ModelGateway;
+
+    const running = __testPrepareMessagesForProviderPreflightWithActivity(
+      new MemoryOutput(),
+      context,
+      {
+        messages: [
+          { role: "system", content: "system" },
+          ...Array.from({ length: 18 }, (_, index) => ({
+            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            content: `old context ${index} ${"x".repeat(60_000)}`,
+          })),
+          { role: "user", content: "latest request" },
+        ],
+        context,
+        sessionId: context.sessionId!,
+        runtime: { role: "executor", provider: "test", model: "deepseek-chat" },
+        trigger: "request",
+        deps: {
+          appendSystemEvent: async () => undefined,
+          captureFailureLearning: async () => undefined,
+          recordToolResultBudgetEvidence: async () => undefined,
+          refreshCacheFreshness: () => undefined,
+          runDeepCompact: {
+            appendSystemEvent: async () => undefined,
+            captureFailureLearning: async () => undefined,
+            refreshCacheFreshness: () => undefined,
+            recordCompactBoundary: () => undefined,
+          },
+        },
+      },
+    );
+
+    await deepCompactStarted;
+    const oldDeepCompactRun = context.deepCompactInFlight?.promise;
+    expect(context.requestActivityOwner).toEqual({
+      kind: "foreground",
+      requestTurnId: "compact-old",
+    });
+    expect(context.requestActivityPhase).toBe("compacting_context");
+
+    oldController.abort();
+    context.currentRequestTurnId = "compact-new";
+    context.activeAbortController = new AbortController();
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "compact-new" };
+    context.requestActivityPhase = "request_started";
+    await running;
+
+    expect(context.requestActivityOwner).toEqual({
+      kind: "foreground",
+      requestTurnId: "compact-new",
+    });
+    expect(context.requestActivityPhase).toBe("request_started");
+    releaseDeepCompact();
+    await oldDeepCompactRun;
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+    expect(context.cache.compactProjection).toBeUndefined();
+    expect(context.cache.postCompactCacheWarmup).toBeUndefined();
+    expect(context.evidence).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ supportsClaims: expect.arrayContaining(["context_compact_boundary"]) }),
+      ]),
+    );
+  });
+
+  it("does not half-commit compact state when terminal projection loses ownership", async () => {
+    const { context } = await makeSendMessageContext();
+    const oldController = new AbortController();
+    context.currentRequestTurnId = "terminal-old";
+    context.activeAbortController = oldController;
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "terminal-old" };
+    context.requestActivityPhase = "request_started";
+    const transcriptBlocks: unknown[] = [];
+    context.pushTranscriptBlock = (block) => {
+      transcriptBlocks.push(block);
+    };
+    let refreshCount = 0;
+    let releaseProjection!: () => void;
+    let markProjectionStarted!: () => void;
+    const projectionStarted = new Promise<void>((resolve) => {
+      markProjectionStarted = resolve;
+    });
+    const projectionRelease = new Promise<void>((resolve) => {
+      releaseProjection = resolve;
+    });
+    context.compactOutputMemory = async () => {
+      markProjectionStarted();
+      await projectionRelease;
+      return { beforeCount: 12, afterCount: 5 };
+    };
+    const messages: ModelMessage[] = [
+      { role: "system", content: "system" },
+      ...Array.from({ length: 18 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `old terminal projection context ${index} ${"x".repeat(60_000)}`,
+      })),
+      { role: "user", content: "latest request" },
+    ];
+
+    const running = __testPrepareMessagesForProviderPreflightWithActivity(
+      new MemoryOutput(),
+      context,
+      {
+        messages,
+        context,
+        sessionId: context.sessionId!,
+        runtime: { role: "executor", provider: "test", model: "deepseek-chat" },
+        trigger: "request",
+        deps: {
+          appendSystemEvent: async () => undefined,
+          captureFailureLearning: async () => undefined,
+          recordToolResultBudgetEvidence: async () => undefined,
+          refreshCacheFreshness: () => {
+            refreshCount += 1;
+          },
+        },
+      },
+    );
+
+    await Promise.race([
+      projectionStarted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("terminal projection did not start")), 1_000),
+      ),
+    ]);
+    expect(context.requestActivityPhase).toBe("compacting_context");
+
+    oldController.abort();
+    context.currentRequestTurnId = "terminal-new";
+    context.activeAbortController = new AbortController();
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "terminal-new" };
+    context.requestActivityPhase = "request_started";
+    releaseProjection();
+
+    const result = await running;
+
+    expect(result).toEqual({ blocked: false, messages });
+    expect(context.requestActivityOwner).toEqual({
+      kind: "foreground",
+      requestTurnId: "terminal-new",
+    });
+    expect(context.requestActivityPhase).toBe("request_started");
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+    expect(context.cache.compactProjection).toBeUndefined();
+    expect(context.cache.postCompactCacheWarmup).toBeUndefined();
+    expect(context.cache.compactStrategy).toBeUndefined();
+    expect(context.cache.contextUsage).toBeUndefined();
+    expect(context.evidence).toEqual([]);
+    expect(transcriptBlocks).toEqual([]);
+    expect(refreshCount).toBe(0);
+  });
+
   it("does not revive a continuation whose inherited signal is already aborted", async () => {
     const controller = new AbortController();
     controller.abort("stale owner");
@@ -2752,7 +2927,7 @@ describe("model message prompt cache layout", () => {
     expect(attemptedModels).toEqual(["primary-model", "fallback-b", "fallback-c"]);
   });
 
-  it("does not immediately downgrade a verification directive after an unrelated Read", async () => {
+  it("bounds a verification directive after an unrelated Read without cycling", async () => {
     const { context, events } = await makeSendMessageContext();
     await writeFile(join(context.projectPath, "unrelated.txt"), "unrelated evidence\n", "utf8");
     let attempts = 0;
@@ -2792,10 +2967,10 @@ describe("model message prompt cache layout", () => {
 
     await __testSendMessage("确认测试是否通过", context, gateway, new MemoryOutput());
 
-    expect(attempts).toBe(4);
+    expect(attempts).toBe(3);
     expect(JSON.stringify(events)).toContain("final_answer_gap_returned_to_model_loop");
     expect(JSON.stringify(events)).toContain("unrelated evidence");
-    expect(JSON.stringify(events)).toContain("本请求尚未获得测试通过证据");
+    expect(JSON.stringify(events)).toContain("我已确认目前检查覆盖到的部分");
     expect(JSON.stringify(events)).not.toContain("所有可用且不重复");
     expect(JSON.stringify(events)).not.toContain("执行失败");
   }, 30_000);
@@ -2855,6 +3030,73 @@ describe("model message prompt cache layout", () => {
     expect(serialized).not.toContain("RAW_OLD_CONTEXT");
   });
 
+  it("keeps latest user request and current prohibitions after compact resume metadata", async () => {
+    const projection = makeCompactProjection("OLD_COMPACT_SUMMARY_RUN_TESTS", {
+      boundaryId: "compact-boundary-current-request",
+      restoreContext: makeCompactRestoreContext({
+        currentTask: "OLD_TODO_WRITE_PATCH",
+        pendingItems: ["todo:in_progress:OLD_PENDING_TODO_EDIT"],
+        risks: ["HISTORICAL_FINDING_NOT_AUTHORIZATION"],
+      }),
+    });
+    const latestText = [
+      "LATEST_USER_REQUEST_READ_ONLY_EXPLORER",
+      "FORBID_WRITE_CURRENT_TURN",
+      "CURRENT_ONLY_NEXT_STEP_REPORT_TEST_LANDING",
+    ].join("\n");
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            {
+              type: "system_event",
+              level: "info",
+              message: `compact_projection:${JSON.stringify(projection)}`,
+            },
+            { type: "user_message", text: "old request after compact" },
+            { type: "assistant_text_delta", text: "old answer after compact" },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-compact-current-request",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      latestText,
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(messages.at(-1)).toMatchObject({ role: "user", content: latestText });
+    expect(messages.at(-1)?.content).toContain("LATEST_USER_REQUEST_READ_ONLY_EXPLORER");
+    expect(messages.at(-1)?.content).toContain("FORBID_WRITE_CURRENT_TURN");
+    expect(messages.at(-1)?.content).toContain("CURRENT_ONLY_NEXT_STEP_REPORT_TEST_LANDING");
+    expect(messages.at(-1)?.content).not.toContain("OLD_COMPACT_SUMMARY_RUN_TESTS");
+    expect(messages.at(-1)?.content).not.toContain("OLD_TODO_WRITE_PATCH");
+    expect(messages.at(-1)?.content).not.toContain("HISTORICAL_FINDING_NOT_AUTHORIZATION");
+    expect(serialized.indexOf("LATEST_USER_REQUEST_READ_ONLY_EXPLORER")).toBeGreaterThan(
+      serialized.indexOf("OLD_COMPACT_SUMMARY_RUN_TESTS"),
+    );
+    expect(serialized.indexOf("CURRENT_ONLY_NEXT_STEP_REPORT_TEST_LANDING")).toBeGreaterThan(
+      serialized.indexOf("OLD_TODO_WRITE_PATCH"),
+    );
+    expect(serialized).toContain("risk count: 1");
+    expect(serialized).not.toContain("HISTORICAL_FINDING_NOT_AUTHORIZATION");
+    expect(serialized).not.toContain("AUTHORIZED_BY_HISTORY");
+  });
+
   it("stops the reverse transcript scan at the latest compact boundary", async () => {
     const projection = makeCompactProjection("STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL", {
       boundaryId: "compact-boundary-outside-tail",
@@ -2875,6 +3117,8 @@ describe("model message prompt cache layout", () => {
       { type: "user_message", text: "current user" },
     ];
     const readLimits: number[] = [];
+    const readByteLimits: number[] = [];
+    const readLineLimits: number[] = [];
     const stopPredicates: boolean[] = [];
     const context = {
       model: "test-model",
@@ -2882,11 +3126,18 @@ describe("model message prompt cache layout", () => {
       store: {
         readRecentTranscriptEvents: async (
           _sessionId: string,
-          input: { limit: number; stopPredicate?: (event: unknown) => boolean },
+          input: {
+            limit: number;
+            maxBytes?: number;
+            maxLineBytes?: number;
+            stopPredicate?: (event: unknown) => boolean;
+          },
         ) => {
           readLimits.push(input.limit);
+          readByteLimits.push(input.maxBytes ?? 0);
+          readLineLimits.push(input.maxLineBytes ?? 0);
           stopPredicates.push(Boolean(input.stopPredicate?.(boundary)));
-          return { events: [boundary, ...activeTail] };
+          return { events: [boundary, ...activeTail], diagnostics: [] };
         },
         appendEvent: async () => undefined,
       },
@@ -2908,11 +3159,101 @@ describe("model message prompt cache layout", () => {
     );
     const serialized = JSON.stringify(messages);
 
-    expect(readLimits).toEqual([Number.MAX_SAFE_INTEGER]);
+    expect(readLimits).toEqual([10_000]);
+    expect(readByteLimits).toEqual([4 * 1024 * 1024]);
+    expect(readLineLimits).toEqual([1024 * 1024]);
     expect(stopPredicates).toEqual([true]);
     expect(serialized).toContain("STABLE_COMPACT_SUMMARY_OUTSIDE_TAIL");
     expect(serialized).toContain("post-boundary answer 0");
     expect(serialized).toContain("post-boundary answer 29");
+  });
+
+  it("marks bounded transcript continuity without exposing raw loader diagnostics", async () => {
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            { type: "assistant_text_delta", text: "recent bounded answer" },
+            { type: "user_message", text: "current user" },
+          ],
+          diagnostics: [
+            {
+              line: 0,
+              message: "jsonl_tail_truncated: scanned the newest 4194304 bytes",
+            },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-bounded-tail",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(serialized).toContain("Transcript continuity notice");
+    expect(serialized).toContain("recent bounded answer");
+    expect(serialized).not.toContain("jsonl_tail_truncated");
+  });
+
+  it("does not add a bounded-tail notice when the event limit includes a usable boundary", async () => {
+    const boundary = {
+      type: "system_event",
+      level: "info",
+      message: `compact_projection:${JSON.stringify(
+        makeCompactProjection("BOUNDARY_AT_EVENT_LIMIT"),
+      )}`,
+    };
+    const events = [
+      boundary,
+      ...Array.from({ length: 9_998 }, (_, index) => ({
+        type: "assistant_text_delta",
+        text: `bounded answer ${index}`,
+      })),
+      { type: "user_message", text: "current user" },
+    ];
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({ events, diagnostics: [] }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-boundary-at-limit",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+    const serialized = JSON.stringify(messages);
+
+    expect(events).toHaveLength(10_000);
+    expect(serialized).toContain("BOUNDARY_AT_EVENT_LIMIT");
+    expect(serialized).not.toContain("Transcript continuity notice");
   });
 
   it("skips unusable compact records and stops at the latest usable boundary", async () => {
@@ -5428,7 +5769,9 @@ describe("final answer gate aggregation", () => {
       }
 
       expect(rounds).toBe(2);
-      expect(output.text).toContain("没有与所选验证级别匹配的可执行命令");
+      expect(output.text).toContain("我已确认目前检查覆盖到的部分");
+      expect(output.text).toContain("本请求未能证实");
+      expect(output.text).not.toContain("执行失败");
       expect(output.text).not.toContain("所有可用且不重复的真实补证路径均已尝试");
     },
   );
@@ -6691,12 +7034,13 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       expect(__testFinalGapHasProgress(result, context, previous)).toBe(false);
     });
 
-    it("allows same-level verification after owner-scoped freshness changes", () => {
+    it("allows same-level verification after the changed-file scope changes", () => {
       const context = {
         evidence: [],
         currentRequestTurnId: "turn-1",
         sessionId: "session-1",
         projectPath: "/test",
+        currentRequestChangedFiles: [],
       } as unknown as TuiContext;
 
       const result = {
@@ -6725,6 +7069,118 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
           ownerSessionId: "session-1",
           cwd: "/test",
           targets: ["src/a.ts"],
+        },
+      } as unknown as EvidenceRecord);
+      context.currentRequestChangedFiles = ["src/a.ts"];
+
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
+    });
+
+    it("does not revive a verification action for unrelated evidence or readonly files", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+        currentRequestChangedFiles: [],
+        currentRequestMentionedFiles: [],
+        tools: { changedFiles: [] },
+      } as unknown as TuiContext;
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+      const evidenceAction = {
+        toolName: "RunVerification",
+        input: { level: "test" },
+        summary: "run focused test",
+      } as const;
+      const continuation = {
+        finalGapProgressState: __testCaptureFinalGapProgressState(
+          result,
+          context,
+          evidenceAction,
+        ),
+      };
+      const actionFingerprint = continuation.finalGapProgressState.commandFingerprint!;
+      continuation.finalGapProgressState.attemptedCommandFingerprints.add(actionFingerprint);
+      context.currentRequestMentionedFiles = ["src/readonly.ts"];
+
+      for (let index = 0; index < 1_000; index += 1) {
+        context.evidence.push({
+          id: `unrelated-${index}`,
+          kind: "command_output",
+          source: "IndexOperation",
+          summary: `index operation ${index}`,
+          supportsClaims: ["index_operation"],
+          ownerScope: {
+            requestTurnId: "turn-1",
+            ownerSessionId: "session-1",
+            cwd: "/test",
+          },
+        } as unknown as EvidenceRecord);
+      }
+
+      expect(__testFinalGapHasProgress(result, context, continuation.finalGapProgressState)).toBe(
+        false,
+      );
+      expect(recordSuccessfulToolExecutionProgress(
+        continuation,
+        { name: "IndexOperation", input: { action: "status" } },
+        {
+          ok: true,
+          tool: "IndexOperation",
+          text: "indexed",
+          evidenceId: "unrelated-999",
+        },
+        context,
+      )).toBe(false);
+      expect(continuation.finalGapProgressState.attemptedCommandFingerprints).toContain(
+        actionFingerprint,
+      );
+    });
+
+    it("counts only new evidence that directly supports the selected gap action", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+        tools: { changedFiles: [] },
+      } as unknown as TuiContext;
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+      const evidenceAction = {
+        toolName: "RunVerification",
+        input: { level: "test" },
+        summary: "run focused test",
+      } as const;
+      const previous = __testCaptureFinalGapProgressState(
+        result,
+        context,
+        evidenceAction,
+      );
+      context.evidence.push({
+        id: "matching-test-pass",
+        kind: "test_result",
+        source: "Verification Runner",
+        summary: "focused test passed",
+        supportsClaims: ["test_passed"],
+        ownerScope: {
+          requestTurnId: "turn-1",
+          ownerSessionId: "session-1",
+          cwd: "/test",
+        },
+        data: {
+          verificationScope: {
+            ownerKey: "request:session-1:turn-1",
+            ownerSessionId: "session-1",
+            requestTurnId: "turn-1",
+            cwd: "/test",
+            changedFiles: [],
+          },
         },
       } as unknown as EvidenceRecord);
 

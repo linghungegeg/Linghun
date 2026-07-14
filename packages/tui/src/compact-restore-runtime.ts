@@ -30,7 +30,9 @@ export type CompactRestorePayload = {
 
 export async function buildPostCompactRestoreMessage(
   context: TuiContext,
+  commitGuard: () => boolean = () => true,
 ): Promise<ModelMessage | undefined> {
+  if (!commitGuard()) return undefined;
   const deepCompactId = context.cache.deepCompact?.id;
   const compactProjectionBoundaryId = context.cache.compactProjection?.boundaryId;
   const restoreLatch = context.cache.postCompactRestoreLatch;
@@ -42,9 +44,11 @@ export async function buildPostCompactRestoreMessage(
     const content = restoreLatch.content;
     return content ? { role: "user", content } : undefined;
   }
-  const payload = await buildPostCompactRestorePayload(context);
+  const payload = await buildPostCompactRestorePayload(context, commitGuard);
+  if (!commitGuard()) return undefined;
   const content = formatPostCompactRestorePayload(payload);
   if (deepCompactId) {
+    if (!commitGuard()) return undefined;
     context.cache.postCompactRestoreLatch = {
       deepCompactId,
       compactProjectionBoundaryId,
@@ -56,8 +60,12 @@ export async function buildPostCompactRestoreMessage(
 
 export async function buildPostCompactRestorePayload(
   context: TuiContext,
+  commitGuard: () => boolean = () => true,
 ): Promise<CompactRestorePayload> {
-  const files = await readRestoreFiles(context);
+  const files = await readRestoreFiles(context, commitGuard);
+  if (!commitGuard()) {
+    return { files: [], runtimeStatus: [] };
+  }
   return {
     files,
     plan: formatActivePlan(context),
@@ -97,7 +105,10 @@ export function formatPostCompactRestorePayload(
   return truncateDisplay(sections.join("\n"), RESTORE_TOTAL_MAX_CHARS);
 }
 
-async function readRestoreFiles(context: TuiContext): Promise<CompactRestoreFile[]> {
+async function readRestoreFiles(
+  context: TuiContext,
+  commitGuard: () => boolean,
+): Promise<CompactRestoreFile[]> {
   const candidates = uniqueFiles([
     ...context.recentlyMentionedFiles,
     ...context.tools.changedFiles,
@@ -107,10 +118,12 @@ async function readRestoreFiles(context: TuiContext): Promise<CompactRestoreFile
   let remaining = RESTORE_TOTAL_MAX_CHARS;
 
   for (const candidate of candidates) {
+    if (!commitGuard()) break;
     if (remaining <= 0) break;
     const resolved = resolveWorkspaceFile(context.projectPath, candidate);
     if (!resolved) continue;
     const raw = await readFile(resolved.absolutePath, "utf8").catch(() => undefined);
+    if (!commitGuard()) break;
     if (!raw) continue;
     const maxChars = Math.min(RESTORE_FILE_MAX_CHARS, remaining);
     const sanitized = sanitizeRestoreText(context, raw, maxChars);

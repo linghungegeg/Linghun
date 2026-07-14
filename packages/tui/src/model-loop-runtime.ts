@@ -269,7 +269,7 @@ export const EXECUTE_EXTRA_TOOL_DESCRIPTION =
   "Invoke a deferred tool that was previously returned by SearchExtraTools with executable=true. Built-in tools (Read/ReadSnippets/SourcePack/Edit/Write/Bash/Grep/Glob/Todo) MUST be called directly, not via this wrapper. tool_name must match a discovered tool exactly; params must include all required args.";
 
 export const PRE_CONTEXT_DESCRIPTION =
-  "Fast readonly repository analysis: return AST-based definition, references, callees, callers, signature facts, and an answer_pack with entry points, affected files, related tests, risks, missing evidence, and suggested minimal line-window reads. Use after index-backed search/graph tools narrow candidate symbols, or before broad Grep/Read exploration when the index is missing, stale, or insufficient. If answer_pack has high/medium confidence and little missing evidence, answer from it and use ReadSnippets on suggested_minimal_reads line windows or specific gaps instead of broad Grep/full-file Read. For abstract architecture or impact questions without a concrete change list, use this on likely anchor symbols to map the relevant entry points.";
+  "Fast readonly repository analysis: return AST-based definition, references, callees, callers, signature facts, and an answer_pack with entry points, affected files, related tests, risks, missing evidence, and suggested minimal line-window reads. Use after index-backed search/graph tools narrow candidate symbols, or before broad Grep/Read exploration when the index is missing, stale, or insufficient. If answer_pack has high/medium confidence and little missing evidence, answer from its positive findings and use ReadSnippets on suggested_minimal_reads line windows or specific gaps instead of broad Grep/full-file Read. Empty references, callers, or callees do not prove repository-wide absence; use targeted Grep and ReadSnippets before making a negative claim. For abstract architecture or impact questions without a concrete change list, use this on likely anchor symbols to map the relevant entry points.";
 
 export const PRE_IMPACT_DESCRIPTION =
   "Fast readonly repository impact analysis: given planned file/symbol changes, return affected files, functions, and related tests from AST cross-references. Use after you already have planned changes; if the task is abstract and no changes are known yet, call pre_context on anchor symbols first.";
@@ -1373,15 +1373,102 @@ function evidenceSupportsIndexCodeFact(record: EvidenceRecord): boolean {
   );
 }
 
-export function evidenceSupportsLocalCodeFact(record: EvidenceRecord): boolean {
+export function evidenceSupportsLocalCodeFact(
+  record: EvidenceRecord,
+  claim?: FinalAnswerClaimMatch,
+): boolean {
+  if (record.supportsClaims.includes("tool_failure")) return false;
+  const negativeClaim = claim ? isNegativeCodeFactPhrase(claim.phrase) : false;
   if (record.kind === "index_query") {
-    return evidenceSupportsIndexCodeFact(record);
+    return !negativeClaim && evidenceSupportsIndexCodeFact(record);
   }
-  if (record.kind === "file_read" || record.kind === "grep_result") {
-    return true;
+  if (record.kind === "grep_result") {
+    if (!record.supportsClaims.includes("Grep") || !claim) return false;
+    const claimText = claim.phrase.toLowerCase();
+    const patternMatchesClaim = record.supportsClaims
+      .filter((item) => item.startsWith("pattern:"))
+      .flatMap((item) => item.slice("pattern:".length).match(/[\p{L}\p{N}_$.-]{2,}/gu) ?? [])
+      .some((token) => claimText.includes(token.toLowerCase()));
+    if (!patternMatchesClaim) return false;
+    if (!negativeClaim) {
+      return record.supportsClaims.includes("grep_match");
+    }
+    if (!record.supportsClaims.includes("grep_no_matches")) return false;
+    return (
+      record.supportsClaims.includes("grep_scope:workspace") ||
+      (claim !== undefined && extractClaimTargets(claim).length > 0)
+    );
+  }
+  if (record.kind === "file_read") {
+    return (
+      !negativeClaim &&
+      claim !== undefined &&
+      extractClaimTargets(claim).length > 0 &&
+      record.supportsClaims.includes("read_nonempty")
+    );
   }
   const tokens = evidenceTokens(record);
   return /(?:git_local_fact|git_status)/iu.test(tokens);
+}
+
+function isNegativeCodeFactPhrase(phrase: string): boolean {
+  return /(?:未发现|未找到|找不到|未(?:被)?(?:调用|引用|使用)|没有(?:发现|找到|任何|被)?(?:调用|引用|使用|匹配)|不(?:调用|引用|使用)|不存在|无(?:任何)?(?:调用|引用|匹配)|never\s+(?:calls?|uses?|references?|invokes?)|not\s+(?:found|used|using|referenced|called|invoked)|no\s+(?:calls?|callers?|invocations?|references?|matches?|usages?|uses?)|(?:do|does)\s+not\s+(?:call|use|reference|invoke|exist)|(?:don't|doesn't)\s+(?:call|use|reference|invoke|exist)|[\p{L}\p{N}_$./\\-]{2,}.{0,40}\bunused\b|\bunused\s+[\p{L}\p{N}_$./\\-]{2,})/iu.test(
+    phrase,
+  );
+}
+
+function localCodeFactEvidenceSuperseded(
+  record: EvidenceRecord,
+  evidence: EvidenceRecord[],
+): boolean {
+  if (record.kind !== "file_read" && record.kind !== "grep_result") return false;
+  const recordedAt = Date.parse(record.createdAt);
+  if (Number.isNaN(recordedAt)) return false;
+  const workspaceScope = record.supportsClaims.includes("grep_scope:workspace");
+  const scopedPath = record.supportsClaims
+    .find((item) => item.startsWith("grep_scope:") && item !== "grep_scope:workspace")
+    ?.slice("grep_scope:".length);
+  const recordTargets = record.ownerScope?.targets ?? [];
+  const recordIndex = evidence.indexOf(record);
+  return evidence.some((candidate) => {
+    if (!evidenceSupportsFileChangeClaim(candidate) || !evidenceOwnersMatch(record, candidate)) {
+      return false;
+    }
+    const changedAt = Date.parse(candidate.createdAt);
+    const candidateIndex = evidence.indexOf(candidate);
+    if (
+      Number.isNaN(changedAt) ||
+      changedAt < recordedAt ||
+      (changedAt === recordedAt && candidateIndex <= recordIndex)
+    ) {
+      return false;
+    }
+    if (workspaceScope) return true;
+    const changedTargets = candidate.ownerScope?.targets ?? [];
+    if (scopedPath) {
+      const normalizedScope = normalizeEvidenceTarget(scopedPath).replace(/\/+$/u, "");
+      if (
+        changedTargets.some((target) => {
+          const normalizedChanged = normalizeEvidenceTarget(target);
+          return (
+            normalizedChanged === normalizedScope ||
+            normalizedChanged.startsWith(`${normalizedScope}/`)
+          );
+        })
+      ) {
+        return true;
+      }
+    }
+    return recordTargets.some((target) =>
+      changedTargets.some((changed) =>
+        evidencePathMatches(
+          normalizeEvidenceTarget(target),
+          normalizeEvidenceTarget(changed),
+          record.ownerScope?.cwd,
+        ),
+      ),
+    );
+  });
 }
 
 function evidenceSupportsExternalCurrent(record: EvidenceRecord): boolean {
@@ -1478,10 +1565,20 @@ export function evaluateFinalAnswerClaims(
   evidence: EvidenceRecord[],
   now: Date = new Date(),
 ): FinalAnswerClaimVerdict {
+  const inferred = inferVisibleFinalAnswerClaims(text);
+  const visibleTargetedCodeFacts = inferred.filter(
+    (claim) => claim.kind === "code_fact" && extractClaimTargets(claim).length > 0,
+  );
   const structured = extractStructuredFinalAnswerClaims(text).filter(
     (claim) => claim.kind !== "architecture_boundary" && claim.kind !== "completeness",
+  ).filter(
+    (claim) =>
+      claim.kind !== "code_fact" ||
+      extractClaimTargets(claim).length > 0 ||
+      !visibleTargetedCodeFacts.some((visibleClaim) =>
+        visibleClaim.phrase.toLowerCase().includes(claim.phrase.toLowerCase()),
+      ),
   );
-  const inferred = inferVisibleFinalAnswerClaims(text);
   const seen = new Set<string>();
   const claims = [...inferred, ...structured].filter((claim) => {
     const key = `${claim.kind}\u0000${claim.phrase}`;
@@ -1510,27 +1607,74 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
       );
       for (const match of matches) {
         if (
-          match[0] &&
-          !isNegatedOrProspectiveClaim(
-            claimText.slice(0, (match.index ?? 0) + match[0].length),
-            visible,
+          isReadonlyInspectionOnlyClaim(
+            kind,
+            claimText,
+            match[0] ?? "",
+            match.index ?? 0,
           )
         ) {
-          claims.push({ kind, phrase: match[0].trim() });
+          continue;
+        }
+        if (
+          match[0] &&
+          (kind === "code_fact" && isNegativeCodeFactPhrase(match[0])
+            ? true
+            : !isNegatedOrProspectiveClaim(
+                claimText.slice(0, (match.index ?? 0) + match[0].length),
+                visible,
+              ))
+        ) {
+          claims.push({
+            kind,
+            phrase:
+              kind === "code_fact" &&
+              (isNegativeCodeFactPhrase(match[0]) ||
+                extractClaimTargets({ kind, phrase: claimText }).length > 0)
+                ? claimText.trim()
+                : match[0].trim(),
+          });
         }
       }
     }
   };
   add("test_claim", /(?:测试|tests?|vitest|jest|pytest|go\s+test|cargo\s+test).{0,40}(?:通过|passed|pass)/iu);
-  add("verification_claim", /(?:验证|typecheck|lint|build|构建|smoke|冒烟).{0,40}(?:通过|passed|pass|成功)/iu);
+  add(
+    "verification_claim",
+    /(?:(?:tests?|测试|typecheck|lint|build|构建|smoke|冒烟).{0,40}(?:通过|passed|pass|成功)|(?:验证|verification).{0,24}(?:测试|tests?|typecheck|lint|build|构建|smoke|冒烟).{0,24}(?:通过|passed|pass|成功))/iu,
+  );
   add("file_change_claim", /(?:已|已经|successfully\s+)?(?:修改|写入|创建|更新|删除|edited|wrote|created|updated|deleted).{0,100}(?:文件|file|[\w./\\-]+\.[A-Za-z0-9._-]+)/iu);
   add("agent_status_claim", /(?:agent|子\s*agent|智能体).{0,60}(?:完成|completed|通过|passed|成功)/iu);
   add("workflow_status_claim", /(?:workflow|工作流).{0,60}(?:完成|completed|通过|passed|成功)/iu);
-  add("action_executed", /(?:已|已经|successfully\s+)?(?:执行|安装|启动|停止|ran|executed|installed|started|stopped).{0,100}(?:命令|command|服务|service|依赖|package)?/iu);
+  add(
+    "action_executed",
+    /(?:(?:已|已经|successfully\s+)?(?:执行|ran|executed)(?!\s*(?:了|过)?\s*(?:pre_context|pre_impact|pre_plan|Read(?:Snippets)?|SourcePack|Grep|Glob|源码交叉验证))[^。；;\n]{0,100}|(?:已|已经|successfully\s+)?(?:安装|启动|停止|installed|started|stopped)[^。；;\n]{0,100})/iu,
+  );
   add("external_current_fact", /(?:当前|最新|今天|现在|current|latest|today).{0,100}(?:版本|状态|价格|文档|发布|version|status|price|release|docs?)/iu);
-  add("code_fact", /(?:代码|函数|方法|类|模块|function|method|class|module).{0,100}(?:负责|会|调用|返回|实现|uses?|calls?|returns?|implements?)/iu);
+  add(
+    "code_fact",
+    /(?:(?:代码|函数|方法|类|模块|function|method|class|module).{0,100}(?:负责|会|调用|返回|实现|uses?|calls?|returns?|implements?|(?:(?:do|does)\s+not|don't|doesn't)\s+(?:call|use|reference|invoke))|[\p{L}\p{N}_$.-]{2,}.{0,40}(?:未(?:被)?|没有(?:被)?|不)(?:调用|引用|使用)|(?:未发现|未找到|找不到|没有(?:发现|找到|任何)?|不存在|无(?:任何)?)[^。；;\n]{0,80}(?:调用|引用|使用|匹配|callers?|references?|matches?)|(?:不|没有(?:被)?)(?:调用|引用|使用)[^。；;\n]{0,80}|(?:no\s+(?:calls?|callers?|invocations?|references?|matches?|usages?|uses?)|not\s+(?:used|using|referenced|called|invoked)|(?:(?:do|does)\s+not|don't|doesn't)\s+(?:call|use|reference|invoke)|[\p{L}\p{N}_$./\\-]{2,}[^.\n]{0,40}\bunused\b|\bunused\s+[\p{L}\p{N}_$./\\-]{2,})[^.\n]{0,80})/iu,
+  );
   add("completion_claim", /(?:已完成|已经完成|已修复|已经修复|completed|fixed|done)/iu);
   return claims;
+}
+
+function isReadonlyInspectionOnlyClaim(
+  kind: FinalAnswerClaimKind,
+  claimText: string,
+  matchText: string,
+  matchIndex: number,
+): boolean {
+  if (kind !== "action_executed" && kind !== "completion_claim") return false;
+  const readonlyPattern =
+    /(?:pre_context|pre_impact|pre_plan|Read(?:Snippets)?|SourcePack|Grep|Glob|源码交叉验证)/iu;
+  if (!readonlyPattern.test(claimText)) return false;
+  if (readonlyPattern.test(matchText)) return true;
+  const prefix = claimText.slice(0, matchIndex);
+  if (!readonlyPattern.test(prefix)) return false;
+  return /^(?:已|已经|successfully\s+)?(?:执行|ran|executed)(?:成功|了|过)?\s*$|^(?:已完成|已经完成|completed|done)\s*$/iu.test(
+    matchText.trim(),
+  );
 }
 
 function stripClaimExplanationExamples(clause: string): string {
@@ -1633,7 +1777,7 @@ export function evaluateStructuredFinalAnswerClaims(
   const staleKinds: FinalAnswerClaimKind[] = [];
   for (const kind of matchedKinds) {
     let supported = false;
-    let supporter: (record: EvidenceRecord) => boolean;
+    let supporter: (record: EvidenceRecord, claim?: FinalAnswerClaimMatch) => boolean;
     if (kind === "completion_claim") {
       const result = evaluateTaskCompletionEvidence(evidence, kind, now);
       supported = result.supported;
@@ -1734,7 +1878,9 @@ export function evaluateStructuredFinalAnswerClaims(
     const result = evaluateEachClaimMatch(
       matches.filter((match) => match.kind === kind),
       evidence,
-      (record) => supporter(record),
+      (record, claim) =>
+        supporter(record, claim) &&
+        (kind !== "code_fact" || !localCodeFactEvidenceSuperseded(record, evidence)),
       kind,
       now,
     );
@@ -1789,6 +1935,21 @@ function extractClaimTargets(claim: FinalAnswerClaimMatch): string[] {
 
 function evidenceMatchesTarget(record: EvidenceRecord, target: string): boolean {
   const normalizedTarget = normalizeEvidenceTarget(target);
+  if (record.kind === "grep_result" && record.supportsClaims.includes("grep_no_matches")) {
+    if (record.supportsClaims.includes("grep_scope:workspace")) return true;
+    const scope = record.supportsClaims
+      .find((item) => item.startsWith("grep_scope:"))
+      ?.slice("grep_scope:".length);
+    if (scope) {
+      const normalizedScope = normalizeEvidenceTarget(scope).replace(/\/+$/u, "");
+      if (
+        normalizedTarget === normalizedScope ||
+        normalizedTarget.startsWith(`${normalizedScope}/`)
+      ) {
+        return true;
+      }
+    }
+  }
   const explicitIds = [record.ownerScope?.ownerAgentId, record.ownerScope?.workflowRunId]
     .filter((item): item is string => Boolean(item))
     .map(normalizeEvidenceTarget);
@@ -2338,9 +2499,28 @@ export function deriveToolSupportsClaims(
 ): string[] {
   const claims = new Set<string>([name]);
   const inputObj = (input ?? {}) as Record<string, unknown>;
+  const outputData =
+    output.data && typeof output.data === "object" && !Array.isArray(output.data)
+      ? (output.data as Record<string, unknown>)
+      : undefined;
 
   if (name === "Read" || name === "ReadSnippets" || name === "SourcePack") {
     claims.add("local_read");
+    const hasReadContent =
+      name === "Read"
+        ? typeof outputData?.lines === "number" && outputData.lines > 0
+        : name === "ReadSnippets"
+          ? Array.isArray(outputData?.ranges) &&
+            outputData.ranges.some(
+              (range) =>
+                range &&
+                typeof range === "object" &&
+                !("error" in range) &&
+                typeof (range as { content?: unknown }).content === "string" &&
+                (range as { content: string }).content.trim().length > 0,
+            )
+          : typeof outputData?.count === "number" && outputData.count > 0;
+    if (hasReadContent) claims.add("read_nonempty");
     const filePath =
       typeof inputObj.file_path === "string"
         ? inputObj.file_path
@@ -2352,13 +2532,29 @@ export function deriveToolSupportsClaims(
   }
   if (name === "Grep") {
     claims.add("local_read");
-    claims.add("grep_match");
+    const count = outputData?.count;
+    if (count === 0) claims.add("grep_no_matches");
+    if (typeof count === "number" && count > 0) claims.add("grep_match");
+    const scope = typeof inputObj.path === "string" ? inputObj.path.trim() : ".";
+    claims.add(
+      !scope || scope === "." || scope === "./" || scope === ".\\"
+        ? "grep_scope:workspace"
+        : `grep_scope:${scope.slice(0, 120)}`,
+    );
     const pattern = typeof inputObj.pattern === "string" ? inputObj.pattern : undefined;
-    if (pattern) claims.add(`pattern:${pattern.slice(0, 60)}`);
+    if (pattern) claims.add(`pattern:${pattern.slice(0, 120)}`);
   }
   if (name === "Glob") {
     claims.add("local_read");
-    claims.add("grep_match");
+    const count = outputData?.count;
+    if (count === 0) claims.add("grep_no_matches");
+    if (typeof count === "number" && count > 0) claims.add("grep_match");
+    const scope = typeof inputObj.path === "string" ? inputObj.path.trim() : ".";
+    claims.add(
+      !scope || scope === "." || scope === "./" || scope === ".\\"
+        ? "grep_scope:workspace"
+        : `grep_scope:${scope.slice(0, 120)}`,
+    );
   }
   if (name === "Write" || name === "Edit" || name === "MultiEdit") {
     claims.add("file_written");

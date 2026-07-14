@@ -101,6 +101,8 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(segments.stable).toContain("TemporaryCredentialRule=");
     expect(segments.stable).toContain("不要仅因为它是密钥就拒绝");
     expect(segments.stable).toContain("进程环境变量或内存请求配置临时使用");
+    expect(segments.stable).toContain("FinalAnswerClaimSchemaCodeFactTargetRule=");
+    expect(segments.stable).toContain("keep the concrete file path or scoped target");
     expect(segments.dynamic).toContain("RuntimeStatusForModel=");
     expect(segments.dynamic).toContain("EvidenceSummary=");
     expect(segments.dynamic).toContain("SolutionCompleteness=");

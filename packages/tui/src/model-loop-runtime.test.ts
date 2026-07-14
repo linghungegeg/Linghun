@@ -21,6 +21,7 @@ import {
   formatSolutionCompletenessTrigger,
   hasModelSynthesisIntent,
   inferSolutionCompletenessImpactAreas,
+  inferVisibleFinalAnswerClaims,
   isEvidenceStaleForClaim,
   isNaturalReadFileRequest,
   looksLikeFilePath,
@@ -371,6 +372,8 @@ describe("model-loop-runtime", () => {
       expect(preContext?.description).toContain("index is missing, stale, or insufficient");
       expect(preContext?.description).toContain("use ReadSnippets");
       expect(preContext?.description).toContain("instead of broad Grep/full-file Read");
+      expect(preContext?.description).toContain("do not prove repository-wide absence");
+      expect(preContext?.description).toContain("targeted Grep and ReadSnippets");
       expect(preContext?.description).toContain("abstract architecture or impact questions");
       expect(preContext?.description).toContain("anchor symbols");
       expect(preImpact?.description).toContain("impact analysis");
@@ -1243,15 +1246,271 @@ describe("model-loop-runtime", () => {
 
     it("passes code-fact claims when Read/Grep evidence exists", () => {
       const evidence: EvidenceRecord[] = [
-        makeEvidence({ kind: "grep_result", supportsClaims: ["Grep", "local_read"] }),
+        makeEvidence({
+          kind: "grep_result",
+          supportsClaims: ["Grep", "local_read", "grep_match", "pattern:MessageBuilder"],
+        }),
       ];
       const verdict = evaluateFinalAnswerClaims(
-        withClaims("代码里已经实现 X，调用链是 A→B。", [
-          { kind: "code_fact", phrase: "调用链是 A→B" },
+        withClaims("MessageBuilder 调用了 build。", [
+          { kind: "code_fact", phrase: "MessageBuilder 调用了 build" },
         ]),
         evidence,
       );
       expect(verdict.status).toBe("passed");
+    });
+
+    it("requires a workspace-scoped no-match Grep for repository-wide negative code facts", () => {
+      const claim = withClaims("未发现 MessageBuilder 调用者。", [
+        { kind: "code_fact", phrase: "未发现 MessageBuilder 调用者" },
+      ]);
+      const emptyPreContext = makeEvidence({
+        kind: "command_output",
+        source: "deferred-tool:pre_context",
+        supportsClaims: ["deferred_tool_output", "pre_context"],
+      });
+      const scopedNoMatch = makeEvidence({
+        kind: "grep_result",
+        source: "Grep",
+        supportsClaims: [
+          "Grep",
+          "local_read",
+          "grep_no_matches",
+          "grep_scope:src",
+          "pattern:MessageBuilder",
+        ],
+      });
+      const workspaceNoMatch = makeEvidence({
+        kind: "grep_result",
+        source: "Grep",
+        supportsClaims: [
+          "Grep",
+          "local_read",
+          "grep_no_matches",
+          "grep_scope:workspace",
+          "pattern:MessageBuilder",
+        ],
+      });
+
+      expect(evaluateFinalAnswerClaims(claim, [emptyPreContext, scopedNoMatch]).status).toBe(
+        "needs_disclaimer",
+      );
+      expect(evaluateFinalAnswerClaims(claim, [emptyPreContext, workspaceNoMatch]).status).toBe(
+        "passed",
+      );
+      for (const text of [
+        "没有使用 MessageBuilder。",
+        "MessageBuilder 没有被使用。",
+        "MessageBuilder 不调用 build。",
+        "MessageBuilder does not call build.",
+        "MessageBuilder helpers do not call build.",
+        "MessageBuilder helpers don't use build.",
+        "MessageBuilder is unused.",
+        "MessageBuilder is not using build.",
+      ]) {
+        expect(evaluateFinalAnswerClaims(text, [emptyPreContext, workspaceNoMatch]).status).toBe(
+          "passed",
+        );
+      }
+    });
+
+    it("allows a file-scoped no-match Grep only for a claim naming that file", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("src/consumer.ts 未发现 MessageBuilder 调用。", [
+          { kind: "code_fact", phrase: "src/consumer.ts 未发现 MessageBuilder 调用" },
+        ]),
+        [
+          makeEvidence({
+            kind: "grep_result",
+            source: "Grep",
+            summary: "Grep: src/consumer.ts; output_chars=0",
+            supportsClaims: [
+              "Grep",
+              "local_read",
+              "grep_no_matches",
+              "grep_scope:src/consumer.ts",
+              "pattern:MessageBuilder",
+            ],
+            ownerScope: { targets: ["src/consumer.ts"] },
+          }),
+        ],
+      );
+
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("does not let an unrelated Grep or any Glob support a code behavior claim", () => {
+      const claim = withClaims("MessageBuilder 调用了 build。", [
+        { kind: "code_fact", phrase: "MessageBuilder 调用了 build" },
+      ]);
+      const unrelated = makeEvidence({
+        kind: "grep_result",
+        supportsClaims: ["Grep", "grep_match", "pattern:OtherSymbol"],
+      });
+      const glob = makeEvidence({
+        kind: "grep_result",
+        supportsClaims: ["Glob", "grep_match", "grep_scope:workspace"],
+      });
+
+      expect(evaluateFinalAnswerClaims(claim, [unrelated]).status).toBe("needs_disclaimer");
+      expect(evaluateFinalAnswerClaims(claim, [glob]).status).toBe("needs_disclaimer");
+    });
+
+    it("gates visible negative code facts even when structured claims are omitted", () => {
+      const chinese = evaluateFinalAnswerClaims("未发现 MessageBuilder 调用者。", []);
+      const chinesePostfix = evaluateFinalAnswerClaims("MessageBuilder 未被调用。", []);
+      const chineseNoUse = evaluateFinalAnswerClaims("没有使用 MessageBuilder。", []);
+      const chineseNoUsed = evaluateFinalAnswerClaims("MessageBuilder 没有被使用。", []);
+      const chineseDoesNotCall = evaluateFinalAnswerClaims("MessageBuilder 不调用 build。", []);
+      const english = evaluateFinalAnswerClaims("There are no calls to MessageBuilder.", []);
+      const englishDoesNotCall = evaluateFinalAnswerClaims(
+        "MessageBuilder does not call build.",
+        [],
+      );
+      const englishDoNotCall = evaluateFinalAnswerClaims(
+        "MessageBuilder helpers do not call build.",
+        [],
+      );
+      const englishDontUse = evaluateFinalAnswerClaims(
+        "MessageBuilder helpers don't use build.",
+        [],
+      );
+      const englishUnused = evaluateFinalAnswerClaims("MessageBuilder is unused.", []);
+      const englishNotUsing = evaluateFinalAnswerClaims(
+        "MessageBuilder is not using build.",
+        [],
+      );
+
+      expect(chinese.unsupportedKinds).toContain("code_fact");
+      expect(chinesePostfix.unsupportedKinds).toContain("code_fact");
+      expect(chineseNoUse.unsupportedKinds).toContain("code_fact");
+      expect(chineseNoUsed.unsupportedKinds).toContain("code_fact");
+      expect(chineseDoesNotCall.unsupportedKinds).toContain("code_fact");
+      expect(english.unsupportedKinds).toContain("code_fact");
+      expect(englishDoesNotCall.unsupportedKinds).toContain("code_fact");
+      expect(englishDoNotCall.unsupportedKinds).toContain("code_fact");
+      expect(englishDontUse.unsupportedKinds).toContain("code_fact");
+      expect(englishUnused.unsupportedKinds).toContain("code_fact");
+      expect(englishNotUsing.unsupportedKinds).toContain("code_fact");
+    });
+
+    it("keeps visible positive and negative code fact inference symmetric", () => {
+      for (const text of [
+        "函数 MessageBuilder 调用了 build。",
+        "MessageBuilder 不调用 build。",
+        "The function MessageBuilder calls build.",
+        "MessageBuilder does not call build.",
+        "MessageBuilder helpers do not call build.",
+        "MessageBuilder helpers don't reference build.",
+        "MessageBuilder is unused.",
+        "MessageBuilder is not using build.",
+      ]) {
+        expect(evaluateFinalAnswerClaims(text, []).unsupportedKinds).toContain("code_fact");
+      }
+    });
+
+    it("keeps common executed actions visible while excluding readonly inspection", () => {
+      expect(inferVisibleFinalAnswerClaims("已执行 npm test。").map((item) => item.kind)).toContain(
+        "action_executed",
+      );
+      expect(inferVisibleFinalAnswerClaims("已启动 nginx。 ").map((item) => item.kind)).toContain(
+        "action_executed",
+      );
+      expect(inferVisibleFinalAnswerClaims("已执行 pre_context。").map((item) => item.kind)).not.toContain(
+        "action_executed",
+      );
+      expect(inferVisibleFinalAnswerClaims("pre_context 已执行成功。")).toHaveLength(0);
+      expect(inferVisibleFinalAnswerClaims("源码交叉验证已完成。")).toHaveLength(0);
+      expect(
+        inferVisibleFinalAnswerClaims("Read 检查后已执行 npm install。").map((item) => item.kind),
+      ).toContain("action_executed");
+      const mixed = evaluateFinalAnswerClaims("Read 检查后已执行 npm install。", [
+        makeEvidence({
+          kind: "command_output",
+          source: "Bash",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+          summary: "Bash: npm install exited 0",
+        }),
+      ]);
+      expect(mixed.status).toBe("passed");
+      expect(mixed.matchedClaims.map((claim) => claim.kind)).toEqual(["action_executed"]);
+    });
+
+    it("requires an explicit file target before Read supports a positive code fact", () => {
+      const read = makeEvidence({
+        kind: "file_read",
+        source: "src/unrelated.ts",
+        supportsClaims: ["Read", "local_read", "read_nonempty"],
+      });
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("MessageBuilder 调用了 build。", [
+          { kind: "code_fact", phrase: "MessageBuilder 调用了 build" },
+        ]),
+        [read],
+      );
+
+      expect(verdict.status).toBe("needs_disclaimer");
+    });
+
+    it("uses visible file targets when structured code_fact phrase omits the path", () => {
+      const readA = makeEvidence({
+        kind: "file_read",
+        source: "src/a.ts",
+        summary: "Read src/a.ts",
+        supportsClaims: ["Read", "local_read", "read_nonempty"],
+        ownerScope: { targets: ["src/a.ts"] },
+      });
+      const readB = makeEvidence({
+        kind: "file_read",
+        source: "src/b.ts",
+        summary: "Read src/b.ts",
+        supportsClaims: ["Read", "local_read", "read_nonempty"],
+        ownerScope: { targets: ["src/b.ts"] },
+      });
+      const answer = withClaims("src/a.ts 的函数会返回结果。", [
+        { kind: "code_fact", phrase: "函数会返回结果" },
+      ]);
+
+      expect(evaluateFinalAnswerClaims(answer, [readA]).status).toBe("passed");
+      expect(evaluateFinalAnswerClaims(answer, [readB]).status).toBe("needs_disclaimer");
+      expect(evaluateFinalAnswerClaims(answer, []).unsupportedKinds).toContain("code_fact");
+    });
+
+    it("invalidates same-owner code reads after a later write to the same target", () => {
+      const owner = {
+        ownerSessionId: "session-code-fact",
+        requestTurnId: "request-code-fact",
+        cwd: "C:/repo",
+      };
+      const read = makeEvidence({
+        id: "read-before-edit",
+        kind: "file_read",
+        supportsClaims: ["Read", "local_read", "read_nonempty"],
+        createdAt: "2026-07-14T10:00:00.000Z",
+        ownerScope: { ...owner, targets: ["src/a.ts"] },
+      });
+      const editSameFile = makeEvidence({
+        id: "edit-after-read",
+        kind: "command_output",
+        supportsClaims: ["Edit", "file_written"],
+        createdAt: "2026-07-14T10:00:00.000Z",
+        ownerScope: { ...owner, targets: ["src/a.ts"] },
+      });
+      const editOtherFile = makeEvidence({
+        id: "edit-other-file",
+        kind: "command_output",
+        supportsClaims: ["Edit", "file_written"],
+        createdAt: "2026-07-14T10:00:00.000Z",
+        ownerScope: { ...owner, targets: ["src/b.ts"] },
+      });
+      const claim = withClaims("src/a.ts 的函数会返回结果。", [
+        { kind: "code_fact", phrase: "src/a.ts 的函数会返回结果" },
+      ]);
+
+      expect(evaluateFinalAnswerClaims(claim, [read, editSameFile]).status).toBe(
+        "needs_disclaimer",
+      );
+      expect(evaluateFinalAnswerClaims(claim, [read, editOtherFile]).status).toBe("passed");
     });
 
     it("does not let generic command output or Edit file tags support code facts", () => {
@@ -1270,6 +1529,25 @@ describe("model-loop-runtime", () => {
             kind: "command_output",
             source: "Edit",
             supportsClaims: ["Edit", "file_written", "file:src/a.ts"],
+          }),
+        ],
+      );
+
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("code_fact");
+    });
+
+    it("does not let failed Read or Grep output support code facts", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X。", [{ kind: "code_fact", phrase: "代码里已经实现 X" }]),
+        [
+          makeEvidence({
+            kind: "file_read",
+            supportsClaims: ["Read", "local_read", "read_nonempty", "tool_failure"],
+          }),
+          makeEvidence({
+            kind: "grep_result",
+            supportsClaims: ["Grep", "local_read", "grep_match", "tool_failure"],
           }),
         ],
       );
@@ -1657,6 +1935,44 @@ describe("model-loop-runtime", () => {
       );
       expect(terminal.status).toBe("passed");
     });
+
+    it("keeps readonly source inspection out of verification and action claims", () => {
+      const readonly = evaluateFinalAnswerClaims(
+        "已执行 pre_context 并完成源码交叉验证：python/consumer.py 中该函数调用 MessageBuilder。",
+        [
+          makeEvidence({
+            kind: "file_read",
+            source: "ReadSnippets",
+            summary: "python/consumer.py contains a MessageBuilder call",
+            supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
+          }),
+        ],
+      );
+      expect(readonly.status).toBe("passed");
+      expect(readonly.matchedClaims.map((claim) => claim.kind)).toEqual(["code_fact"]);
+
+      const preContextOnly = evaluateFinalAnswerClaims(
+        withClaims("未发现 MessageBuilder 调用者。", [
+          { kind: "code_fact", phrase: "未发现 MessageBuilder 调用者" },
+        ]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            source: "deferred-tool:pre_context",
+            supportsClaims: ["deferred_tool_output", "pre_context"],
+          }),
+        ],
+      );
+      expect(preContextOnly.status).toBe("needs_disclaimer");
+      expect(preContextOnly.unsupportedKinds).toContain("code_fact");
+
+      const engineeringClaims = evaluateFinalAnswerClaims(
+        "typecheck passed，命令已成功执行。",
+        [],
+      );
+      expect(engineeringClaims.unsupportedKinds).toContain("verification_claim");
+      expect(engineeringClaims.unsupportedKinds).toContain("action_executed");
+    });
   });
 
   describe("D.13U deriveToolSupportsClaims", () => {
@@ -1684,10 +2000,81 @@ describe("model-loop-runtime", () => {
       expect(nonzero).toEqual(expect.arrayContaining(["bash_outcome_completed", "bash_exit_nonzero"]));
     });
     it("Read derives local_read + file path", () => {
-      const claims = deriveToolSupportsClaims("Read", { file_path: "src/index.ts" }, { text: "" });
+      const claims = deriveToolSupportsClaims(
+        "Read",
+        { file_path: "src/index.ts" },
+        { text: "export const value = 1;", data: { lines: 1 } },
+      );
       expect(claims).toContain("Read");
       expect(claims).toContain("local_read");
+      expect(claims).toContain("read_nonempty");
       expect(claims).toContain("file:src/index.ts");
+    });
+
+    it("distinguishes Grep matches from bounded no-match evidence", () => {
+      const matched = deriveToolSupportsClaims(
+        "Grep",
+        { pattern: "MessageBuilder" },
+        { text: "src/a.ts:1: MessageBuilder", data: { count: 1 } },
+      );
+      const absent = deriveToolSupportsClaims(
+        "Grep",
+        { pattern: "MessageBuilder", path: "src" },
+        { text: "未找到匹配内容。", data: { count: 0 } },
+      );
+
+      expect(matched).toEqual(expect.arrayContaining(["grep_match", "grep_scope:workspace"]));
+      expect(matched).not.toContain("grep_no_matches");
+      expect(absent).toEqual(expect.arrayContaining(["grep_no_matches", "grep_scope:src"]));
+      expect(absent).not.toContain("grep_match");
+    });
+
+    it("keeps short Grep identifiers available for claim matching", () => {
+      const claims = deriveToolSupportsClaims(
+        "Grep",
+        { pattern: "id" },
+        { text: "src/a.ts:1: id", data: { count: 1 } },
+      );
+
+      expect(claims).toContain("pattern:id");
+    });
+
+    it("does not treat failed or empty structured readonly output as source content", () => {
+      const failedSnippets = deriveToolSupportsClaims(
+        "ReadSnippets",
+        { ranges: [{ path: "src/missing.ts", start: 1, end: 2 }] },
+        {
+          text: "src/missing.ts:1-2\nERROR: not found",
+          data: {
+            count: 0,
+            requestedRanges: 1,
+            ranges: [{ path: "src/missing.ts", content: "", error: "not found" }],
+          },
+        },
+      );
+      const mixedSnippets = deriveToolSupportsClaims(
+        "ReadSnippets",
+        {},
+        {
+          text: "mixed",
+          data: {
+            count: 1,
+            ranges: [
+              { path: "src/a.ts", content: "1\tconst a = 1;" },
+              { path: "src/missing.ts", content: "", error: "not found" },
+            ],
+          },
+        },
+      );
+      const emptySourcePack = deriveToolSupportsClaims(
+        "SourcePack",
+        { query: "MessageBuilder" },
+        { text: "empty: no matching source snippets found.", data: { count: 0, snippets: [] } },
+      );
+
+      expect(failedSnippets).not.toContain("read_nonempty");
+      expect(mixedSnippets).toContain("read_nonempty");
+      expect(emptySourcePack).not.toContain("read_nonempty");
     });
 
     it("ReadSnippets and SourcePack derive source read claims but no pass evidence", () => {
@@ -2062,13 +2449,14 @@ describe("model-loop-runtime", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "file_read",
-          supportsClaims: ["Read", "local_read"],
+          source: "src/a.ts",
+          supportsClaims: ["Read", "local_read", "read_nonempty"],
           createdAt: minutesAgo(20),
         }),
       ];
       const verdict = evaluateFinalAnswerClaims(
-        withClaims("代码里已经实现 X，调用链是 A→B。", [
-          { kind: "code_fact", phrase: "调用链是 A→B" },
+        withClaims("src/a.ts 里已经实现 X。", [
+          { kind: "code_fact", phrase: "src/a.ts 里已经实现 X" },
         ]),
         evidence,
         NOW,
@@ -2080,13 +2468,14 @@ describe("model-loop-runtime", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "file_read",
-          supportsClaims: ["Read", "local_read"],
+          source: "src/a.ts",
+          supportsClaims: ["Read", "local_read", "read_nonempty"],
           createdAt: minutesAgo(90),
         }),
       ];
       const verdict = evaluateFinalAnswerClaims(
-        withClaims("代码里已经实现 X，调用链是 A→B。", [
-          { kind: "code_fact", phrase: "调用链是 A→B" },
+        withClaims("src/a.ts 里已经实现 X。", [
+          { kind: "code_fact", phrase: "src/a.ts 里已经实现 X" },
         ]),
         evidence,
         NOW,

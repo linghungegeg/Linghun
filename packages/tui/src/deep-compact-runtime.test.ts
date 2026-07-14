@@ -11,6 +11,7 @@ import {
   sanitizeProviderStableCompactText,
   shouldRunDeepCompact,
 } from "./deep-compact-runtime.js";
+import { recordCompactBoundary } from "./compact-preflight-runtime.js";
 import { hydrateResumeContext } from "./handoff-session-runtime.js";
 import type { DeepCompactPacket } from "./tui-data-types.js";
 import type { TuiContext } from "./tui-context-runtime.js";
@@ -118,6 +119,9 @@ describe("deep compact prompt insertion", () => {
     const packet = makePacket();
     let resumeCalls = 0;
     let stopMatched = false;
+    let readOptions:
+      | { limit?: number; maxBytes?: number; maxLineBytes?: number; maxDiagnostics?: number }
+      | undefined;
     const context = {
       language: "en-US",
       cache: {
@@ -127,8 +131,15 @@ describe("deep compact prompt insertion", () => {
       store: {
         readRecentTranscriptEvents: async (
           _sessionId: string,
-          input: { stopPredicate?: (event: unknown) => boolean },
+          input: {
+            limit?: number;
+            maxBytes?: number;
+            maxLineBytes?: number;
+            maxDiagnostics?: number;
+            stopPredicate?: (event: unknown) => boolean;
+          },
         ) => {
+          readOptions = input;
           const boundary = { type: "deep_compact_packet", packet };
           stopMatched = Boolean(input.stopPredicate?.(boundary));
           return { events: [boundary, { type: "user_message", text: "new work" }] };
@@ -152,6 +163,12 @@ describe("deep compact prompt insertion", () => {
     expect(result).toMatchObject({ ok: false, message: expect.stringContaining("cooling down") });
     expect(stopMatched).toBe(true);
     expect(resumeCalls).toBe(0);
+    expect(readOptions).toMatchObject({
+      limit: 10_000,
+      maxBytes: 8 * 1024 * 1024,
+      maxLineBytes: 1024 * 1024,
+      maxDiagnostics: 20,
+    });
   });
 
   it("keeps the full resume path for the first deep compact", async () => {
@@ -337,6 +354,101 @@ describe("deep compact prompt insertion", () => {
     expect(appendedEvents.some((event) => event.type === "deep_compact_packet")).toBe(false);
   });
 
+  it("does not write compact progress when the owner is stale before deep compact starts", async () => {
+    const { context, deps } = createOwnedCompactHarness();
+    let rerenders = 0;
+    context.shellRerender = () => {
+      rerenders += 1;
+    };
+    const gateway = {
+      async *stream() {
+        yield { type: "assistant_text_delta", id: "stale-start", text: "should not start" };
+        yield { type: "message_stop", id: "stale-start", chunkCount: 1, hadUsage: false };
+      },
+    };
+
+    const result = await maybeRunDeepCompactBeforeProvider({
+      context,
+      sessionId: "session-stale-start",
+      runtime: { model: "test-model", provider: "test-provider" } as never,
+      trigger: "manual",
+      gateway: gateway as never,
+      signal: new AbortController().signal,
+      commitGuard: () => false,
+      deps,
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(context.cache.compactProgress).toBeUndefined();
+    expect(context.deepCompactInFlight).toBeUndefined();
+    expect(rerenders).toBe(0);
+  });
+
+  it("does not run an unguarded boundary projection after deep compact commit", async () => {
+    const { context, deps } = createOwnedCompactHarness();
+    const projections: Array<{ projectMainScreen?: boolean } | undefined> = [];
+    context.compactOutputMemory = async (options) => {
+      projections.push(options);
+      return { beforeCount: 8, afterCount: 4 };
+    };
+    const gateway = {
+      async *stream() {
+        yield { type: "assistant_text_delta", id: "single-projection", text: "single projection" };
+        yield { type: "message_stop", id: "single-projection", chunkCount: 1, hadUsage: false };
+      },
+    };
+
+    const result = await maybeRunDeepCompactBeforeProvider({
+      context,
+      sessionId: "session-single-projection",
+      runtime: { model: "test-model", provider: "test-provider" } as never,
+      trigger: "manual",
+      gateway: gateway as never,
+      signal: new AbortController().signal,
+      deps: { ...deps, recordCompactBoundary },
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(projections).toEqual([{ projectMainScreen: true }]);
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+  });
+
+  it("does not append a deep compact failure event after owner changes during append", async () => {
+    const { context, deps, appendedEvents } = createOwnedCompactHarness();
+    const failureEvents: string[] = [];
+    const gateway = {
+      async *stream() {
+        yield {
+          type: "error",
+          error: { code: "provider_failed", message: "stale failure" },
+        };
+      },
+    };
+
+    const result = await maybeRunDeepCompactBeforeProvider({
+      context,
+      sessionId: "session-failure-append-owner",
+      runtime: { model: "test-model", provider: "test-provider" } as never,
+      trigger: "manual",
+      gateway: gateway as never,
+      signal: new AbortController().signal,
+      deps: {
+        ...deps,
+        appendSystemEvent: async (_context, _sessionId, message, level, commitGuard) => {
+          context.currentRequestTurnId = "turn-b";
+          context.runtimeContextId = "turn-b";
+          if (!commitGuard || commitGuard()) {
+            appendedEvents.push({ type: "system_event" });
+            if (message.includes("deep compact failed")) failureEvents.push(`${level}:${message}`);
+          }
+        },
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(failureEvents).toEqual([]);
+  });
+
   it("uses the transcript commit guard when ownership changes during packet append", async () => {
     let releasePacketAppend!: () => void;
     let markPacketAppendStarted!: () => void;
@@ -377,6 +489,86 @@ describe("deep compact prompt insertion", () => {
     releasePacketAppend();
 
     await expect(resultPromise).resolves.toMatchObject({ ok: false });
+    expect(context.cache.deepCompact).toBeUndefined();
+    expect(boundaries).toEqual([]);
+    expect(appendedEvents.some((event) => event.type === "deep_compact_packet")).toBe(false);
+  });
+
+  it("does not start deep compact when ownership changes while restoring transcript", async () => {
+    let releaseResume!: () => void;
+    let markResumeStarted!: () => void;
+    const resumeStarted = new Promise<void>((resolve) => {
+      markResumeStarted = resolve;
+    });
+    const resumeRelease = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    const { context, deps, appendedEvents, boundaries } = createOwnedCompactHarness();
+    context.store.resume = async () => {
+      markResumeStarted();
+      await resumeRelease;
+      return {
+        session: {
+          id: "session-resume-owner",
+          projectPath: process.cwd(),
+          projectName: "Linghun",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          model: "test-model",
+          permissionMode: "default",
+          language: "en-US",
+          transcriptPath: "transcript.jsonl",
+          cost: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            estimatedUsd: 0,
+            estimatedCny: 0,
+          },
+          cache: {
+            hitRate: null,
+            readTokens: 0,
+            writeTokens: 0,
+            historySize: 0,
+          },
+        },
+        transcript: [
+          {
+            type: "user_message",
+            id: "large-restored-transcript",
+            text: "large restored transcript ".repeat(10_000),
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        diagnostics: [],
+      };
+    };
+    let providerStarted = false;
+    const gateway = {
+      async *stream() {
+        providerStarted = true;
+        yield { type: "assistant_text_delta", id: "resume", text: "stale resume packet" };
+        yield { type: "message_stop", id: "resume", chunkCount: 1, hadUsage: false };
+      },
+    };
+
+    const resultPromise = maybeRunDeepCompactBeforeProvider({
+      context,
+      sessionId: "session-resume-owner",
+      runtime: { model: "test-model", provider: "test-provider" } as never,
+      trigger: "manual",
+      gateway: gateway as never,
+      signal: new AbortController().signal,
+      deps,
+    });
+    await resumeStarted;
+    context.currentRequestTurnId = "turn-b";
+    context.runtimeContextId = "turn-b";
+    releaseResume();
+
+    await expect(resultPromise).resolves.toMatchObject({ ok: false });
+    expect(providerStarted).toBe(false);
     expect(context.cache.deepCompact).toBeUndefined();
     expect(boundaries).toEqual([]);
     expect(appendedEvents.some((event) => event.type === "deep_compact_packet")).toBe(false);

@@ -55,6 +55,10 @@ export const DEEP_COMPACT_EVENT_TYPE = "deep_compact_packet" as const;
 const DEEP_COMPACT_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
 const DEEP_COMPACT_SUMMARY_MAX_CHARS = 4_000;
 const DEEP_COMPACT_RERUN_EVENT_THRESHOLD = 40;
+const DEEP_COMPACT_TRANSCRIPT_MAX_EVENTS = 10_000;
+const DEEP_COMPACT_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024;
+const DEEP_COMPACT_TRANSCRIPT_MAX_LINE_BYTES = 1024 * 1024;
+const DEEP_COMPACT_TRANSCRIPT_MAX_DIAGNOSTICS = 20;
 const RECENT_TRANSCRIPT_TAIL_EVENTS = 24;
 const EVENT_TEXT_LIMIT = 420;
 const VERBATIM_USER_MESSAGE_LIMIT = 6;
@@ -109,6 +113,9 @@ export async function maybeRunDeepCompactBeforeProvider(input: {
   ) {
     return waitForDeepCompact(input.context, existing.promise, input.signal);
   }
+  if (!ownerIsCurrent()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   const progress =
     existing || !input.context.cache.compactProgress ? createDeepCompactProgress() : undefined;
   if (progress) {
@@ -156,16 +163,25 @@ async function runDeepCompactIfNeeded(input: {
   if (reusablePacket) {
     return { ok: true, packet: reusablePacket };
   }
+  if (input.commitGuard && !input.commitGuard()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
 
   const transcript = input.context.cache.deepCompact
     ? (
         await input.context.store.readRecentTranscriptEvents(input.sessionId, {
-          limit: Number.MAX_SAFE_INTEGER,
+          limit: DEEP_COMPACT_TRANSCRIPT_MAX_EVENTS,
+          maxBytes: DEEP_COMPACT_TRANSCRIPT_MAX_BYTES,
+          maxLineBytes: DEEP_COMPACT_TRANSCRIPT_MAX_LINE_BYTES,
+          maxDiagnostics: DEEP_COMPACT_TRANSCRIPT_MAX_DIAGNOSTICS,
           stopPredicate: (event) =>
             event.type === DEEP_COMPACT_EVENT_TYPE && isDeepCompactPacket(event.packet),
         })
       ).events
     : (await input.context.store.resume(input.sessionId)).transcript;
+  if (input.commitGuard && !input.commitGuard()) {
+    return failMessage(input.context, "Deep compact cancelled by stale request owner.");
+  }
   const activeTranscript = transcript.filter(
     (event) => !isCompactCommandControlEvent(event),
   );
@@ -1300,6 +1316,7 @@ async function recordDeepCompactFailure(
     sessionId,
     `deep compact failed: blocked yes; reason ${context.cache.compactFailure.reason}; cooldown until ${context.cache.compactFailure.cooldownUntil}`,
     "warning",
+    commitGuard,
   );
   if (!commitGuard()) return;
   await recordMetaOrchestrationRuntimeEvent(context, sessionId, {

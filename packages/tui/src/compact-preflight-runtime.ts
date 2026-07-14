@@ -61,16 +61,19 @@ export type CompactPreflightDeps = {
     sessionId: string,
     message: string,
     level: "info" | "warning",
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   captureFailureLearning: (
     context: TuiContext,
     sessionId: string,
     input: FailureLearningInput,
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   recordToolResultBudgetEvidence: (
     context: TuiContext,
     sessionId: string,
     record: ToolResultBudgetRecord,
+    commitGuard?: () => boolean,
   ) => Promise<string | undefined>;
   refreshCacheFreshness: (context: TuiContext) => void;
   runDeepCompact?: DeepCompactRuntimeDeps;
@@ -105,14 +108,22 @@ export async function prepareMessagesForProviderPreflight(input: {
   runtime: CompactPreflightRuntime;
   trigger: CompactPreflightTrigger;
   deps: CompactPreflightDeps;
+  onCompactStart?: () => void;
+  signal?: AbortSignal;
+  commitGuard?: () => boolean;
 }): Promise<ProviderPreflightCompactResult> {
+  const canCommit = () =>
+    input.signal?.aborted !== true && (input.commitGuard?.() ?? true);
+  if (!canCommit()) return { blocked: false, messages: input.messages };
   const originalChars = estimateModelMessageChars(input.messages);
   const budgeted = await prepareMessagesForProviderWithToolResultBudget(
     input.messages,
     input.context,
     input.sessionId,
     input.deps,
+    canCommit,
   );
+  if (!canCommit()) return { blocked: false, messages: input.messages };
   const budgetedToolResultChars = countProviderVisibleToolResultChars(budgeted);
   const toolResultBudgetExceeded =
     budgetedToolResultChars > LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS;
@@ -163,7 +174,8 @@ export async function prepareMessagesForProviderPreflight(input: {
     !toolResultBudgetExceeded &&
     activeTailGrowthChars < activeRetriggerTailGrowthThreshold
   ) {
-    const guardedMessages = await injectDeepCompactContext(budgeted, input.context);
+    const guardedMessages = await injectDeepCompactContext(budgeted, input.context, canCommit);
+    if (!canCommit()) return { blocked: false, messages: input.messages };
     if (estimateModelMessageChars(guardedMessages) <= contextMaxChars) {
       return { blocked: false, messages: guardedMessages };
     }
@@ -173,7 +185,8 @@ export async function prepareMessagesForProviderPreflight(input: {
     budgetedChars <= triggerChars &&
     !toolResultBudgetExceeded
   ) {
-    const withDeep = await injectDeepCompactContext(budgeted, input.context);
+    const withDeep = await injectDeepCompactContext(budgeted, input.context, canCommit);
+    if (!canCommit()) return { blocked: false, messages: input.messages };
     const withDeepChars = estimateModelMessageChars(withDeep);
     strategySteps.push({
       layer: "semantic_deep",
@@ -210,7 +223,9 @@ export async function prepareMessagesForProviderPreflight(input: {
       input.sessionId,
       "context_compact_cooldown_active",
       "warning",
+      canCommit,
     );
+    if (!canCommit()) return { blocked: false, messages: input.messages };
     if (budgetedChars <= contextMaxChars && !toolResultBudgetExceeded) {
       recordCompactStrategy(input.context, {
         runtime: input.runtime,
@@ -246,7 +261,9 @@ export async function prepareMessagesForProviderPreflight(input: {
       input.sessionId,
       `context_compact_skipped_tool_pairing: pending=${pairing.pending} orphan=${pairing.orphan} duplicate=${pairing.duplicate}`,
       "warning",
+      canCommit,
     );
+    if (!canCommit()) return { blocked: false, messages: input.messages };
     recordCompactStrategy(input.context, {
       runtime: input.runtime,
       trigger: input.trigger,
@@ -279,7 +296,9 @@ export async function prepareMessagesForProviderPreflight(input: {
         "tool_pairing_unsafe_over_context_limit",
         true,
         input.deps,
+        canCommit,
       );
+      if (!canCommit()) return { blocked: false, messages: input.messages };
       const message =
         input.context.language === "en-US"
           ? "Context pressure is over the provider limit, but an unfinished tool pair makes compact unsafe. This provider request is blocked."
@@ -289,6 +308,8 @@ export async function prepareMessagesForProviderPreflight(input: {
     return { blocked: false, messages: budgeted };
   }
 
+  if (!canCommit()) return { blocked: false, messages: input.messages };
+  input.onCompactStart?.();
   try {
     if (
       input.deps.runDeepCompact &&
@@ -300,12 +321,18 @@ export async function prepareMessagesForProviderPreflight(input: {
         runtime: input.runtime,
         trigger: toDeepCompactTrigger(input.trigger),
         gateway: input.context.modelGateway,
-        signal: input.context.activeAbortController?.signal,
+        signal: input.signal ?? input.context.activeAbortController?.signal,
+        commitGuard: canCommit,
         deps: input.deps.runDeepCompact,
       });
-      const afterDeep = estimateModelMessageChars(
-        await injectDeepCompactContext(budgeted, input.context),
+      if (!canCommit()) return { blocked: false, messages: input.messages };
+      const injectedAfterDeep = await injectDeepCompactContext(
+        budgeted,
+        input.context,
+        canCommit,
       );
+      if (!canCommit()) return { blocked: false, messages: input.messages };
+      const afterDeep = estimateModelMessageChars(injectedAfterDeep);
       if (!deep.ok) {
         const deepMessage = "message" in deep ? deep.message : "Deep compact failed.";
         strategySteps.push({
@@ -332,14 +359,19 @@ export async function prepareMessagesForProviderPreflight(input: {
             `deep_compact_failed:${deepMessage}`,
             blocked,
             input.deps,
+            canCommit,
           );
+          if (!canCommit()) return { blocked: false, messages: input.messages };
           if (blocked) {
             return { blocked: true, messages: budgeted, message: deepMessage };
           }
-          return {
-            blocked: false,
-            messages: await injectDeepCompactContext(budgeted, input.context),
-          };
+          const fallbackMessages = await injectDeepCompactContext(
+            budgeted,
+            input.context,
+            canCommit,
+          );
+          if (!canCommit()) return { blocked: false, messages: input.messages };
+          return { blocked: false, messages: fallbackMessages };
         }
       }
       if (deep.ok) {
@@ -352,9 +384,13 @@ export async function prepareMessagesForProviderPreflight(input: {
         });
       }
     } else {
-      const afterDeep = estimateModelMessageChars(
-        await injectDeepCompactContext(budgeted, input.context),
+      const injectedAfterDeep = await injectDeepCompactContext(
+        budgeted,
+        input.context,
+        canCommit,
       );
+      if (!canCommit()) return { blocked: false, messages: input.messages };
+      const afterDeep = estimateModelMessageChars(injectedAfterDeep);
       strategySteps.push({
         layer: "semantic_deep",
         status: input.context.cache.deepCompact ? "applied" : "skipped",
@@ -427,7 +463,9 @@ export async function prepareMessagesForProviderPreflight(input: {
         ? injectCompactProjectionMessage(compacted.messages, projection)
         : compacted.messages,
       input.context,
+      canCommit,
     );
+    if (!canCommit()) return { blocked: false, messages: input.messages };
     const providerMessageChars = estimateModelMessageChars(providerMessages);
     const providerProjectionIndex = providerMessages.findIndex(
       (message) =>
@@ -473,16 +511,6 @@ export async function prepareMessagesForProviderPreflight(input: {
         "post-compact provider context remains at or above the auto-compact trigger",
       );
     }
-    recordCompactStrategy(input.context, {
-      runtime: input.runtime,
-      trigger: input.trigger,
-      contextMaxChars,
-      triggerChars,
-      postCompactTargetChars,
-      finalChars: providerMessageChars,
-      steps: strategySteps,
-      savingsRatio: projection.savingsRatio,
-    });
     if (
       providerMessageChars > contextMaxChars ||
       countProviderVisibleToolResultChars(providerMessages) >
@@ -494,7 +522,9 @@ export async function prepareMessagesForProviderPreflight(input: {
         "post_compact_summary_over_context_limit",
         true,
         input.deps,
+        canCommit,
       );
+      if (!canCommit()) return { blocked: false, messages: input.messages };
       const message =
         input.context.language === "en-US"
           ? "Context compact summary still exceeds the provider limit, so the request is blocked."
@@ -508,14 +538,38 @@ export async function prepareMessagesForProviderPreflight(input: {
         "post_compact_pairing_unsafe",
         true,
         input.deps,
+        canCommit,
       );
+      if (!canCommit()) return { blocked: false, messages: input.messages };
       const message =
         input.context.language === "en-US"
           ? "Context compact produced an unsafe tool pairing boundary, so the provider request is blocked."
           : "上下文压缩后的 tool pairing 边界不安全，本次 provider 请求已阻断。";
       return { blocked: true, messages: budgeted, message };
     }
-    recordCompactBoundary(input.context, compacted.boundary);
+    if (!canCommit()) return { blocked: false, messages: input.messages };
+    const terminalProjection = terminalVisibleProjectionEnabled
+      ? await input.context.compactOutputMemory?.({ projectMainScreen: true })
+      : undefined;
+    if (!canCommit()) return { blocked: false, messages: input.messages };
+    if (terminalVisibleProjectionEnabled) {
+      if (terminalProjection) {
+        projection.terminalVisibleBeforeCount = terminalProjection.beforeCount;
+        projection.terminalVisibleAfterCount = terminalProjection.afterCount;
+      }
+    }
+    refreshCompactProjectionAcceptance(projection, input.context);
+    recordCompactStrategy(input.context, {
+      runtime: input.runtime,
+      trigger: input.trigger,
+      contextMaxChars,
+      triggerChars,
+      postCompactTargetChars,
+      finalChars: providerMessageChars,
+      steps: strategySteps,
+      savingsRatio: projection.savingsRatio,
+    });
+    commitCompactBoundaryState(input.context, compacted.boundary);
     input.context.cache.compactFailure = undefined;
     input.context.cache.compactCooldownUntil = undefined;
     input.deps.refreshCacheFreshness(input.context);
@@ -526,16 +580,6 @@ export async function prepareMessagesForProviderPreflight(input: {
         input.context.language,
       ),
     );
-    if (terminalVisibleProjectionEnabled) {
-      const terminalProjection = await input.context.compactOutputMemory?.({
-        projectMainScreen: true,
-      });
-      if (terminalProjection) {
-        projection.terminalVisibleBeforeCount = terminalProjection.beforeCount;
-        projection.terminalVisibleAfterCount = terminalProjection.afterCount;
-      }
-    }
-    refreshCompactProjectionAcceptance(projection, input.context);
     input.context.cache.compactProjection = projection;
     input.context.cache.postCompactCacheWarmup = createPostCompactCacheWarmup({
       projection,
@@ -547,16 +591,33 @@ export async function prepareMessagesForProviderPreflight(input: {
         input.sessionId,
         `context_compact_retrigger_risk: providerMessageChars=${providerMessageChars}; triggerChars=${triggerChars}; next full_summary suppressed until active tail grows by ${retriggerTailGrowthThreshold} chars`,
         "warning",
+        canCommit,
       );
+      if (!canCommit()) return { blocked: false, messages: input.messages };
     }
     if (replacementProjectionEnabled) {
-      await appendCompactProjectionEvents(input.context, input.sessionId, projection, input.deps);
+      await appendCompactProjectionEvents(
+        input.context,
+        input.sessionId,
+        projection,
+        input.deps,
+        canCommit,
+      );
+      if (!canCommit()) return { blocked: false, messages: input.messages };
     }
     return { blocked: false, messages: providerMessages };
   } catch (error) {
+    if (!canCommit()) return { blocked: false, messages: input.messages };
     const reason = error instanceof Error ? error.message : String(error);
     const blocked = budgetedChars > contextMaxChars || toolResultBudgetExceeded;
-    await recordCompactFailure(input.context, input.sessionId, reason, blocked, input.deps);
+    await recordCompactFailure(
+      input.context,
+      input.sessionId,
+      reason,
+      blocked,
+      input.deps,
+      canCommit,
+    );
     if (!blocked) {
       return { blocked: false, messages: budgeted };
     }
@@ -573,6 +634,7 @@ async function prepareMessagesForProviderWithToolResultBudget(
   context: TuiContext,
   sessionId: string,
   deps: CompactPreflightDeps,
+  commitGuard: () => boolean,
 ): Promise<ModelMessage[]> {
   const budgeted = await applyToolResultBudgetToMessages(messages, {
     projectPath: context.projectPath,
@@ -583,9 +645,10 @@ async function prepareMessagesForProviderWithToolResultBudget(
       resolveToolResultBudgetLedgerRecords(context, sessionId, lookups),
   });
   for (const record of budgeted.records) {
-    await deps.recordToolResultBudgetEvidence(context, sessionId, record);
+    if (!commitGuard()) return messages;
+    await deps.recordToolResultBudgetEvidence(context, sessionId, record, commitGuard);
   }
-  return budgeted.messages;
+  return commitGuard() ? budgeted.messages : messages;
 }
 
 function countProviderVisibleToolResultChars(messages: readonly ModelMessage[]): number {
@@ -601,12 +664,15 @@ function getToolResultBudgetState(context: TuiContext): ToolResultBudgetState {
 }
 
 export function recordCompactBoundary(context: TuiContext, boundary: CompactBoundary): void {
+  commitCompactBoundaryState(context, boundary);
+}
+
+function commitCompactBoundaryState(context: TuiContext, boundary: CompactBoundary): void {
   context.cache.compacted = true;
   context.cache.compactBoundaries.push(boundary);
   if (context.cache.compactBoundaries.length > MAX_COMPACT_BOUNDARIES) {
     context.cache.compactBoundaries.shift();
   }
-  void context.compactOutputMemory?.();
 }
 
 function getAutoCompactBufferTokens(context: TuiContext, runtime: CompactPreflightRuntime): number {
@@ -992,10 +1058,13 @@ export function sanitizeCompactSummaryText(
 async function injectDeepCompactContext(
   messages: ModelMessage[],
   context: TuiContext,
+  commitGuard: () => boolean = () => true,
 ): Promise<ModelMessage[]> {
+  if (!commitGuard()) return messages;
   const packet = context.cache.deepCompact;
   if (!packet) return messages;
-  const restoreMessage = await buildPostCompactRestoreMessage(context);
+  const restoreMessage = await buildPostCompactRestoreMessage(context, commitGuard);
+  if (!commitGuard()) return messages;
   return injectDeepCompactSummary(messages, packet, restoreMessage ? [restoreMessage] : []);
 }
 
@@ -1068,21 +1137,30 @@ async function appendCompactProjectionEvents(
   sessionId: string,
   projection: CompactProjection,
   deps: CompactPreflightDeps,
+  commitGuard: () => boolean,
 ): Promise<void> {
+  if (!commitGuard()) return;
   await deps.appendSystemEvent(
     context,
     sessionId,
     `${COMPACT_PROJECTION_EVENT_PREFIX}${JSON.stringify(projection)}`,
     "info",
+    commitGuard,
   );
+  if (!commitGuard()) return;
   const evidence = createEvidenceRecord(
     "user_provided",
     `compact boundary ${projection.boundaryId}; scope provider-visible recent context projection; pressure ${projection.pressureRatio}; replacement ${projection.replacedMessageCount ?? "unknown"}->${projection.replacementMessageCount ?? "unknown"}; visible ${projection.terminalVisibleBeforeCount ?? "unknown"}->${projection.terminalVisibleAfterCount ?? "unknown"}; tool pairing safe ${projection.toolPairingSafe ? "yes" : "no"}`,
     `compact:${projection.boundaryId}`,
     ["context_compact_boundary"],
   );
+  if (!commitGuard()) return;
   rememberEvidence(context, evidence);
-  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  await context.store.appendEvent(
+    sessionId,
+    { type: "evidence_record", ...evidence },
+    commitGuard,
+  );
 }
 
 function recordCompactStrategy(
@@ -1154,7 +1232,9 @@ async function recordCompactFailure(
   reason: string,
   blocked: boolean,
   deps: CompactPreflightDeps,
+  commitGuard: () => boolean,
 ): Promise<void> {
+  if (!commitGuard()) return;
   const cooldownUntilMs = Date.now() + COMPACT_FAILURE_COOLDOWN_MS;
   context.cache.compactCooldownUntil = cooldownUntilMs;
   context.cache.compactFailure = {
@@ -1168,7 +1248,9 @@ async function recordCompactFailure(
     sessionId,
     `context compact failed: blocked ${blocked ? "yes" : "no"}; reason ${context.cache.compactFailure.reason}; cooldown until ${context.cache.compactFailure.cooldownUntil}`,
     "warning",
+    commitGuard,
   );
+  if (!commitGuard()) return;
   await deps.captureFailureLearning(context, sessionId, {
     category: "resource_cap",
     failureSummary: "context compact failed before provider request",
@@ -1179,7 +1261,7 @@ async function recordCompactFailure(
     sourceRef: "system_event:context_compact_failed",
     relatedTarget: "context compact",
     severity: "medium",
-  });
+  }, commitGuard);
 }
 
 export function getProviderContextWindowChars(
