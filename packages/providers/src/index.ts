@@ -878,7 +878,8 @@ export class OpenAiCompatibleProvider implements Provider {
         });
 
         if (!response.ok) {
-          const responseText = await safeReadResponseText(response);
+          const responseText = await safeReadResponseText(response, requestSignal);
+          assertProviderStreamActive(requestSignal);
           const fallback = await tryNonStreamingFallback({
             providerConfig: this.config,
             request,
@@ -893,7 +894,10 @@ export class OpenAiCompatibleProvider implements Provider {
               reason: "stream_http_error",
               replacement: "non_streaming_fallback",
             });
-            yield* fallback;
+            for (const fallbackEvent of fallback) {
+              assertProviderStreamActive(requestSignal);
+              yield fallbackEvent;
+            }
             return;
           }
           if (response.status === 401 || response.status === 403) {
@@ -918,7 +922,12 @@ export class OpenAiCompatibleProvider implements Provider {
           });
         }
 
-        await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
+        await assertSseContentType(
+          response,
+          contract.endpointProfile,
+          contract.endpoint,
+          requestSignal,
+        );
 
         let yieldedToolUse = false;
         for await (const event of parseAnthropicMessagesStream(
@@ -930,6 +939,7 @@ export class OpenAiCompatibleProvider implements Provider {
           ),
           contract.endpoint,
         )) {
+          assertProviderStreamActive(requestSignal);
           if (event.type === "tool_use") yieldedToolUse = true;
           if (!yieldedToolUse && isProviderIncompleteStreamErrorEvent(event)) {
             const fallback = await tryNonStreamingFallback({
@@ -944,7 +954,10 @@ export class OpenAiCompatibleProvider implements Provider {
                 reason: "stream_incomplete",
                 replacement: "non_streaming_fallback",
               });
-              yield* fallback;
+              for (const fallbackEvent of fallback) {
+                assertProviderStreamActive(requestSignal);
+                yield fallbackEvent;
+              }
               return;
             }
           }
@@ -969,7 +982,8 @@ export class OpenAiCompatibleProvider implements Provider {
       });
 
       if (!response.ok) {
-        const responseText = await safeReadResponseText(response);
+        const responseText = await safeReadResponseText(response, requestSignal);
+        assertProviderStreamActive(requestSignal);
         const fallback = await tryNonStreamingFallback({
           providerConfig: this.config,
           request,
@@ -984,7 +998,10 @@ export class OpenAiCompatibleProvider implements Provider {
             reason: "stream_http_error",
             replacement: "non_streaming_fallback",
           });
-          yield* fallback;
+          for (const fallbackEvent of fallback) {
+            assertProviderStreamActive(requestSignal);
+            yield fallbackEvent;
+          }
           return;
         }
         if (response.status === 401 || response.status === 403) {
@@ -1009,7 +1026,12 @@ export class OpenAiCompatibleProvider implements Provider {
         });
       }
 
-      await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
+      await assertSseContentType(
+        response,
+        contract.endpointProfile,
+        contract.endpoint,
+        requestSignal,
+      );
 
       let yieldedToolUse = false;
       for await (const event of parseOpenAiStream(
@@ -1021,6 +1043,7 @@ export class OpenAiCompatibleProvider implements Provider {
         ),
         contract.endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
       )) {
+        assertProviderStreamActive(requestSignal);
         if (event.type === "tool_use") yieldedToolUse = true;
         if (!yieldedToolUse && isProviderIncompleteStreamErrorEvent(event)) {
           const fallback = await tryNonStreamingFallback({
@@ -1035,7 +1058,10 @@ export class OpenAiCompatibleProvider implements Provider {
               reason: "stream_incomplete",
               replacement: "non_streaming_fallback",
             });
-            yield* fallback;
+            for (const fallbackEvent of fallback) {
+              assertProviderStreamActive(requestSignal);
+              yield fallbackEvent;
+            }
             return;
           }
         }
@@ -1458,27 +1484,27 @@ async function fetchWithRequestTimeout(
   init: RequestInit,
   timeoutMs: number,
 ): Promise<Response> {
-  const controller = new AbortController();
+  const timeoutController = new AbortController();
   const callerSignal = init.signal;
-  const abortFromCaller = () => controller.abort(callerSignal?.reason);
-  if (callerSignal?.aborted) {
-    abortFromCaller();
-  } else {
-    callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
-  }
+  const requestSignal = callerSignal
+    ? AbortSignal.any([callerSignal, timeoutController.signal])
+    : timeoutController.signal;
   let timer: NodeJS.Timeout | undefined;
   let timedOut = false;
   const timeoutError = createProviderRequestTimeoutError(timeoutMs);
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
-      controller.abort(timeoutError);
+      timeoutController.abort(timeoutError);
       reject(timeoutError);
     }, timeoutMs);
   });
-  const request = fetch(url, { ...init, signal: controller.signal }).catch((error: unknown) => {
+  const request = fetch(url, { ...init, signal: requestSignal }).catch((error: unknown) => {
     if (timedOut) {
       throw timeoutError;
+    }
+    if (callerSignal?.aborted) {
+      throw createProviderAbortError(callerSignal.reason);
     }
     throw error;
   });
@@ -1486,7 +1512,6 @@ async function fetchWithRequestTimeout(
     return await Promise.race([request, timeout]);
   } finally {
     if (timer) clearTimeout(timer);
-    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
 }
 
@@ -1516,10 +1541,14 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function safeReadResponseText(response: Response): Promise<string | undefined> {
+async function safeReadResponseText(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   try {
     return await response.text();
   } catch (error) {
+    if (signal?.aborted) return undefined;
     process.stderr.write(
       `[linghun] provider_response_text_read_failed status=${response.status} reason=${formatDiagnosticError(error)}\n`,
     );
@@ -1545,6 +1574,7 @@ async function assertSseContentType(
   response: Response,
   endpointProfile: EndpointProfile,
   endpoint: string,
+  signal: AbortSignal,
 ): Promise<void> {
   const rawContentType = response.headers.get("content-type") ?? "";
   const lower = rawContentType.toLowerCase();
@@ -1552,7 +1582,8 @@ async function assertSseContentType(
   // 以及部分网关写成 `event-stream` 的情况。
   if (lower.includes("event-stream")) return;
 
-  const bodyText = await safeReadResponseText(response);
+  const bodyText = await safeReadResponseText(response, signal);
+  assertProviderStreamActive(signal);
   const preview = summarizeNonSseBodyForError(bodyText);
   const contentTypeLabel = rawContentType.trim() || "<未声明>";
   throw new LinghunError({
@@ -1591,10 +1622,12 @@ async function tryNonStreamingFallback(input: {
       signal: input.requestSignal,
     },
   );
+  assertProviderStreamActive(input.requestSignal);
   if (!response.ok) {
     return undefined;
   }
   const parsed = await safeReadJson(response);
+  assertProviderStreamActive(input.requestSignal);
   const text = extractNonStreamingText(parsed, input.contract.endpointProfile);
   if (!text) {
     return undefined;
@@ -1726,8 +1759,10 @@ function withStreamIdleTimeout(
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       let timer: NodeJS.Timeout | undefined;
+      let idleTimeoutTriggered = false;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
+          idleTimeoutTriggered = true;
           const error = new LinghunError({
             code: "PROVIDER_STREAM_TIMEOUT",
             message: `模型请求失败：流式响应超过 ${timeoutMs}ms 没有新数据。`,
@@ -1739,12 +1774,27 @@ function withStreamIdleTimeout(
           reject(error);
         }, timeoutMs);
       });
+      let abortFromSignal: (() => void) | undefined;
+      const aborted = new Promise<never>((_, reject) => {
+        abortFromSignal = () => {
+          if (idleTimeoutTriggered) return;
+          const error = createProviderAbortError(signal.reason);
+          void reader.cancel(error).catch(() => undefined);
+          requestController?.abort(error);
+          reject(error);
+        };
+        if (signal.aborted) {
+          abortFromSignal();
+          return;
+        }
+        signal.addEventListener("abort", abortFromSignal, { once: true });
+      });
       const clearIdleTimeout = () => {
         if (timer) clearTimeout(timer);
       };
       signal.addEventListener("abort", clearIdleTimeout, { once: true });
       try {
-        const result = await Promise.race([reader.read(), timeout]);
+        const result = await Promise.race([reader.read(), timeout, aborted]);
         if (result.done) {
           controller.close();
           return;
@@ -1753,6 +1803,7 @@ function withStreamIdleTimeout(
       } finally {
         clearIdleTimeout();
         signal.removeEventListener("abort", clearIdleTimeout);
+        if (abortFromSignal) signal.removeEventListener("abort", abortFromSignal);
       }
     },
     cancel(reason) {
@@ -3653,6 +3704,17 @@ function createProviderAbortError(cause?: unknown): LinghunError {
     cause,
     recoverable: false,
   });
+}
+
+function assertProviderStreamActive(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  if (
+    signal.reason instanceof LinghunError &&
+    signal.reason.code === "PROVIDER_STREAM_TIMEOUT"
+  ) {
+    throw signal.reason;
+  }
+  throw createProviderAbortError(signal.reason);
 }
 
 function classifyProviderStreamFailure(

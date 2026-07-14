@@ -858,6 +858,149 @@ describe("OpenAI compatible provider", () => {
     expect(events.at(-1)).toMatchObject({ type: "message_stop", hadUsage: false });
   });
 
+  it("stops non-streaming fallback events after caller abort", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              output_text: "fallback ok",
+              usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        ),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "test-model",
+      endpointProfile: "responses",
+    });
+    const caller = new AbortController();
+    const events: LinghunEvent[] = [];
+    const collect = async () => {
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        caller.signal,
+      )) {
+        events.push(event);
+        caller.abort("test_cancel");
+      }
+    };
+
+    await expect(collect()).rejects.toMatchObject({ code: "ABORT_ERR" });
+    expect(events.map((event) => event.type)).toEqual(["assistant_text_delta"]);
+  });
+
+  it("does not return an incomplete stream error when caller abort wins the fallback response", async () => {
+    const caller = new AbortController();
+    const incomplete = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'data: {"id":"chatcmpl-incomplete","choices":[{"delta":{"content":"partial"}}]}\n\n',
+            ),
+          );
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(incomplete)
+        .mockImplementationOnce(async () => {
+          queueMicrotask(() => caller.abort("test_cancel"));
+          return new Response("fallback failed", { status: 500 });
+        }),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "test-model",
+      endpointProfile: "chat_completions",
+    });
+    const events: LinghunEvent[] = [];
+    const resets: string[] = [];
+    const collect = async () => {
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        caller.signal,
+        { onAttemptReset: (info) => resets.push(info.reason) },
+      )) {
+        events.push(event);
+      }
+    };
+
+    await expect(collect()).rejects.toMatchObject({ code: "ABORT_ERR" });
+    expect(events.map((event) => event.type)).toEqual(["assistant_text_delta"]);
+    expect(resets).toEqual([]);
+  });
+
+  it("cancels a provider error body read after response headers", async () => {
+    let bodyAborted = false;
+    let markBodyReady: (() => void) | undefined;
+    const bodyReady = new Promise<void>((resolve) => {
+      markBodyReady = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const signal = init.signal as AbortSignal;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              signal.addEventListener(
+                "abort",
+                () => {
+                  bodyAborted = true;
+                  controller.error(signal.reason);
+                },
+                { once: true },
+              );
+              markBodyReady?.();
+            },
+          }),
+          { status: 500 },
+        );
+      }),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "test-model",
+      endpointProfile: "responses",
+    });
+    const caller = new AbortController();
+    const collect = async () => {
+      for await (const _event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        caller.signal,
+      )) {
+      }
+    };
+    const running = collect();
+
+    await bodyReady;
+    caller.abort("test_cancel");
+
+    await expect(running).rejects.toMatchObject({ code: "ABORT_ERR" });
+    expect(bodyAborted).toBe(true);
+  });
+
   it.each([
     {
       endpointProfile: "chat_completions" as const,
@@ -1040,6 +1183,201 @@ describe("OpenAI compatible provider", () => {
     expect(getEventListeners(caller.signal, "abort")).toHaveLength(0);
     expect(capturedRequestSignal).toBeDefined();
     expect(getEventListeners(capturedRequestSignal!, "abort")).toHaveLength(0);
+  });
+
+  it("drops buffered provider events immediately after caller abort", async () => {
+    const frames = [
+      ...Array.from(
+        { length: 1_000 },
+        (_, index) =>
+          `data: {"id":"chatcmpl-abort-${index}","choices":[{"delta":{"content":"ok"}}]}\n\n`,
+      ),
+      'data: {"id":"chatcmpl-abort","choices":[{"finish_reason":"stop","delta":{}}]}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(frames));
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      ),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "test-model",
+      endpointProfile: "chat_completions",
+    });
+    const caller = new AbortController();
+    const events: LinghunEvent[] = [];
+    const resets: string[] = [];
+    const collect = async () => {
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        caller.signal,
+        { onAttemptReset: (info) => resets.push(info.reason) },
+      )) {
+        events.push(event);
+        caller.abort("test_cancel");
+      }
+    };
+
+    await expect(collect()).rejects.toMatchObject({ code: "ABORT_ERR" });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("assistant_text_delta");
+    expect(resets).toEqual([]);
+    expect(events.some((event) => event.type === "usage" || event.type === "message_stop")).toBe(
+      false,
+    );
+  });
+
+  it("drops buffered Anthropic events immediately after caller abort", async () => {
+    const frames = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-abort","usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
+      ...Array.from(
+        { length: 1_000 },
+        () =>
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+      ),
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ].join("");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(frames));
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      ),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "anthropic-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "claude-test",
+      endpointProfile: "anthropic_messages",
+    });
+    const caller = new AbortController();
+    const events: LinghunEvent[] = [];
+    const collect = async () => {
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        caller.signal,
+      )) {
+        events.push(event);
+        if (event.type === "assistant_text_delta") caller.abort("test_cancel");
+      }
+    };
+
+    await expect(collect()).rejects.toMatchObject({ code: "ABORT_ERR" });
+    expect(events.filter((event) => event.type === "assistant_text_delta")).toHaveLength(1);
+    expect(events.some((event) => event.type === "message_stop")).toBe(false);
+  });
+
+  it("cancels a pending provider body read when the caller aborts", async () => {
+    let bodyCancelled = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  'data: {"id":"chatcmpl-pending","choices":[{"delta":{"content":"ok"}}]}\n\n',
+                ),
+              );
+            },
+            cancel() {
+              bodyCancelled = true;
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      ),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "test-model",
+      endpointProfile: "chat_completions",
+    });
+    const caller = new AbortController();
+    const collect = async () => {
+      for await (const _event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        caller.signal,
+      )) {
+        caller.abort("test_cancel");
+      }
+    };
+
+    await expect(collect()).rejects.toMatchObject({ code: "ABORT_ERR" });
+    expect(bodyCancelled).toBe(true);
+  });
+
+  it("preserves provider stream timeout classification when the idle watchdog aborts", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    'data: {"id":"chatcmpl-timeout","choices":[{"delta":{"content":"ok"}}]}\n\n',
+                  ),
+                );
+              },
+            }),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          ),
+        ),
+      );
+      const provider = new OpenAiCompatibleProvider({
+        id: "openai-compatible",
+        type: "openai-compatible",
+        baseUrl: "https://example.com/v1/",
+        apiKey: "test-key",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+      });
+      const iterator = provider.stream({ messages: [{ role: "user", content: "hi" }] });
+
+      await expect(iterator.next()).resolves.toMatchObject({
+        done: false,
+        value: { type: "assistant_text_delta" },
+      });
+      const pending = iterator.next();
+      const pendingAssertion = expect(pending).rejects.toMatchObject({
+        code: "PROVIDER_STREAM_TIMEOUT",
+      });
+      await vi.advanceTimersByTimeAsync(60_001);
+
+      await pendingAssertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps concurrent fallback attempt resets scoped to their provider request", async () => {
