@@ -73,7 +73,7 @@ export function parseModelSetupPrefill(text: string): ModelSetupPrefill {
   if (model) prefill.model = model;
 
   const reasoning = text.match(
-    /(?:reasoning|推理等级|推理)\s*[=:：]?\s*(Low|Medium|High|XHigh|Max|低|中|高)/iu,
+    /(?:reasoning|推理等级|推理)\s*[=:：]?\s*(Low|Medium|High|XHigh|Max|低|中|高)(?![\p{L}\p{N}_-])/iu,
   )?.[1];
   if (reasoning) prefill.reasoningLevel = normalizeModelSetupReasoningLevel(reasoning);
 
@@ -125,6 +125,24 @@ export function looksLikeModelSetupInput(text: string): boolean {
 
 export function applyModelSetupValues(setup: PendingModelSetup, values: ModelSetupPrefill): void {
   const next = { ...setup.values, ...values };
+  if (values.providerType === "openai-compatible") {
+    if (
+      values.endpointProfile !== undefined ||
+      setup.values.providerType !== "openai-compatible" ||
+      next.endpointProfile === undefined
+    ) {
+      next.endpointProfile = values.endpointProfile ?? "responses";
+    }
+  } else if (values.providerType === "gemini" || values.providerType === "grok") {
+    next.endpointProfile = undefined;
+    if (
+      values.providerType === "grok" ||
+      (values.reasoningLevel === undefined &&
+        (next.reasoningLevel === "XHigh" || next.reasoningLevel === "Max"))
+    ) {
+      next.reasoningLevel = undefined;
+    }
+  }
   validateModelSetupPartial(next);
   setup.values = next;
 }
@@ -185,6 +203,9 @@ export function formatModelSetupMessage(
   setup: PendingModelSetup,
 ): string {
   const english = language === "en-US";
+  const supportsExtendedReasoning =
+    setup.values.providerType === "openai-compatible" &&
+    (setup.values.endpointProfile === undefined || setup.values.endpointProfile === "responses");
   const messagesByKey: Record<ModelSetupMessageKey, string> = {
     intro: english
       ? [
@@ -218,8 +239,8 @@ export function formatModelSetupMessage(
       ? "Model name is missing. Enter the model name."
       : "缺少模型名称。请输入模型名称。",
     reasoningPrompt: english
-      ? `Reasoning level: ${setup.values.providerType === "gemini" ? "Low / Medium / High" : "Low / Medium / High / XHigh / Max"}. Press Enter to use Medium.`
-      : `推理等级可选 ${setup.values.providerType === "gemini" ? "Low / Medium / High" : "Low / Medium / High / XHigh / Max"}，默认 Medium。直接回车使用 Medium。`,
+      ? `Reasoning level: ${supportsExtendedReasoning ? "Low / Medium / High / XHigh / Max" : "Low / Medium / High"}. Press Enter to use Medium.`
+      : `推理等级可选 ${supportsExtendedReasoning ? "Low / Medium / High / XHigh / Max" : "Low / Medium / High"}，默认 Medium。直接回车使用 Medium。`,
     auxModelPrompt: english
       ? "Auxiliary model is optional. Press Enter to let helper roles follow the main model."
       : "辅助模型可选，直接回车则跟随主模型。",

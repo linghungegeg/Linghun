@@ -486,6 +486,49 @@ describe("config directories", () => {
     expect(executor?.primaryModel).toBe("deepseek-reasoner");
   });
 
+  it.each([
+    {
+      name: "DeepSeek",
+      level: "Max",
+      providerId: "deepseek",
+      model: "deepseek-reasoner",
+      env: {
+        LINGHUN_DEEPSEEK_BASE_URL: "https://api.deepseek.com/v1",
+        LINGHUN_DEEPSEEK_API_KEY: "sk-shell-deepseek-secret",
+        LINGHUN_DEEPSEEK_MODEL: "deepseek-reasoner",
+      },
+    },
+    {
+      name: "Grok",
+      level: "XHigh",
+      providerId: "grok",
+      model: "grok-4.20-reasoning",
+      env: {
+        LINGHUN_GROK_BASE_URL: "https://api.x.ai/v1",
+        LINGHUN_GROK_API_KEY: "xai-shell-secret",
+        LINGHUN_GROK_MODEL: "grok-4.20-reasoning",
+      },
+    },
+  ])(
+    "does not apply global reasoning $level to the default OpenAI provider for $name",
+    async ({ level, providerId, model, env }) => {
+      const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+      const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+      vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+      vi.stubEnv("LINGHUN_INFERENCE_LEVEL", level);
+      for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+      vi.resetModules();
+      const indexModule = await import("./index.js");
+      await mkdir(indexModule.getProjectConfigDir(project), { recursive: true });
+      await writeFile(indexModule.getProjectSettingsPath(project), "{}", "utf8");
+
+      const config = await indexModule.loadConfig(project);
+
+      expect(config.providers[providerId]?.model).toBe(model);
+      expect(config.providers["openai-compatible"]?.reasoningLevel).toBeUndefined();
+    },
+  );
+
   it("uses complete shell provider env over explicit project routes", async () => {
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
@@ -709,7 +752,7 @@ describe("config directories", () => {
     );
   });
 
-  it("warns when Anthropic provider.env requests unsupported XHigh reasoning", async () => {
+  it("rejects unsupported Anthropic provider.env reasoning", async () => {
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
     vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
@@ -730,12 +773,36 @@ describe("config directories", () => {
       "utf8",
     );
 
-    const config = await indexModule.loadConfig(project);
-
-    expect(config.providers["openai-compatible"]?.reasoningLevel).not.toBe("Medium");
-    expect(indexModule.lastProviderEnvWarning?.reason).toContain(
+    await expect(indexModule.loadConfig(project)).rejects.toThrow(
       "Anthropic Messages 不支持推理等级 XHigh",
     );
+  });
+
+  it("applies shell reasoning before validating provider.env", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "Low");
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      indexModule.getProviderEnvPath(home),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1",
+        "LINGHUN_OPENAI_API_KEY=sk-provider-secret",
+        "LINGHUN_OPENAI_MODEL=claude-sonnet-4",
+        "LINGHUN_OPENAI_ENDPOINT_PROFILE=anthropic_messages",
+        "LINGHUN_INFERENCE_LEVEL=Max",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = await indexModule.loadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.model).toBe("claude-sonnet-4");
+    expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("Low");
   });
 
   it("keeps legacy project apiKey readable but strips apiKey on settings writes", async () => {
@@ -886,9 +953,31 @@ describe("config directories", () => {
     const values = await envReadProviderEnvValues(home);
 
     expect(raw).toContain("LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1");
+    expect(raw).toContain("LINGHUN_OPENAI_ENDPOINT_PROFILE=chat_completions");
     expect(raw).toContain("LINGHUN_INFERENCE_LEVEL=Medium");
     expect(values.LINGHUN_OPENAI_API_KEY).toBe("sk-provider-secret");
   });
+
+  it.each(["XHigh", "Max"] as const)(
+    "rejects %s for explicit OpenAI chat setup",
+    async (reasoningLevel) => {
+      const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+
+      await expect(
+        saveProviderEnvSetup(
+          {
+            baseUrl: "https://provider.invalid/v1",
+            apiKey: "sk-provider-secret",
+            model: "provider-model",
+            endpointProfile: "chat_completions",
+            reasoningLevel,
+          },
+          home,
+        ),
+      ).rejects.toThrow("XHigh / Max 仅支持 Responses");
+      expect(await providerEnvExists(home)).toBe(false);
+    },
+  );
 
   it.each([
     ["gemini", "LINGHUN_GEMINI", "gemini-3.5-flash", "chat_completions"],
@@ -946,6 +1035,43 @@ describe("config directories", () => {
     const config = await indexModule.loadConfig(project);
 
     expect(config.providers.gemini.reasoningLevel).toBe("High");
+  });
+
+  it("keeps shell reasoning priority for Gemini loaded from project settings", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "High");
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        providers: {
+          gemini: {
+            type: "gemini",
+            model: "gemini-project-model",
+            reasoningLevel: "Low",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.providers.gemini.model).toBe("gemini-project-model");
+    expect(config.providers.gemini.reasoningLevel).toBe("High");
+  });
+
+  it("does not apply shell reasoning to the unconfigured default Gemini provider", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "High");
+
+    const config = await loadConfig(project);
+
+    expect(config.providers.gemini.reasoningLevel).toBeUndefined();
   });
 
   it.each([
@@ -1039,10 +1165,7 @@ describe("config directories", () => {
       "utf8",
     );
 
-    const config = await loadConfig(project);
-
-    expect(config.providers["openai-compatible"]?.reasoningLevel).not.toBe("Medium");
-    expect(lastConfigRecoveryWarning?.reason).toContain(
+    await expect(loadConfig(project)).rejects.toThrow(
       "Anthropic Messages 不支持推理等级 Max",
     );
   });

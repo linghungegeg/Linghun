@@ -29,6 +29,7 @@ import {
 } from "./model-doctor-runtime.js";
 import {
   type ModelSetupPrefill,
+  type PendingModelSetup,
   applyModelSetupValues,
   formatModelSetupFallbackError,
   formatModelSetupMessage,
@@ -187,13 +188,15 @@ export async function startModelSetup(
 ): Promise<void> {
   const existed = await providerEnvExists();
   const providerEnvPath = existed ? getProviderEnvPath() : await ensureProviderEnvTemplate();
-  const values: Partial<ProviderEnvSetup> = { ...prefill };
-  context.pendingModelSetup = {
-    step: getNextModelSetupStep(values),
+  const setup: PendingModelSetup = {
+    step: "provider",
     providerEnvPath,
     createdTemplate: !existed,
-    values,
+    values: {},
   };
+  applyModelSetupValues(setup, prefill);
+  setup.step = getNextModelSetupStep(setup.values);
+  context.pendingModelSetup = setup;
   writeLine(output, formatModelSetupMessage("intro", context.language, context.pendingModelSetup));
   if (context.pendingModelSetup.step === "confirm") {
     writeLine(output, formatModelSetupSummary(context.pendingModelSetup, context.language));

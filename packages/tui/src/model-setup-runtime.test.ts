@@ -93,6 +93,12 @@ describe("model-setup-runtime", () => {
       expect(parseModelSetupPrefill("reasoning=xhigh").reasoningLevel).toBe("XHigh");
       expect(parseModelSetupPrefill("reasoning=MAX").reasoningLevel).toBe("Max");
     });
+    it.each(["reasoning=xhighest", "reasoning=maximum", "推理=高档"])(
+      "does not accept a valid reasoning prefix in %s",
+      (text) => {
+        expect(parseModelSetupPrefill(text).reasoningLevel).toBeUndefined();
+      },
+    );
     it("extracts API key with sk- prefix", () => {
       const result = parseModelSetupPrefill("sk-abcdefgh12345678");
       expect(result.apiKey).toBe("sk-abcdefgh12345678");
@@ -185,6 +191,72 @@ describe("model-setup-runtime", () => {
       expect(setup.values.baseUrl).toBe("https://api.example.com/v1");
       expect(setup.values.apiKey).toBe("sk-test12345678");
     });
+    it("defaults OpenAI setup to Responses", () => {
+      const setup: PendingModelSetup = {
+        step: "provider",
+        providerEnvPath: "/tmp/provider.env",
+        createdTemplate: false,
+        values: {},
+      };
+
+      applyModelSetupValues(setup, { providerType: "openai-compatible" });
+
+      expect(setup.values.endpointProfile).toBe("responses");
+    });
+    it("preserves an explicit OpenAI endpoint when provider is repeated", () => {
+      const setup: PendingModelSetup = {
+        step: "reasoning",
+        providerEnvPath: "/tmp/provider.env",
+        createdTemplate: false,
+        values: {
+          providerType: "openai-compatible",
+          endpointProfile: "anthropic_messages",
+        },
+      };
+
+      applyModelSetupValues(setup, {
+        providerType: "openai-compatible",
+        reasoningLevel: "High",
+      });
+
+      expect(setup.values.endpointProfile).toBe("anthropic_messages");
+    });
+    it("clears incompatible reasoning when switching providers", () => {
+      const setup: PendingModelSetup = {
+        step: "confirm",
+        providerEnvPath: "/tmp/provider.env",
+        createdTemplate: false,
+        values: {
+          providerType: "openai-compatible",
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "sk-test12345678",
+          model: "gpt-5.5",
+          endpointProfile: "responses",
+          reasoningLevel: "Max",
+        },
+      };
+
+      applyModelSetupValues(setup, { providerType: "gemini" });
+      expect(setup.values.endpointProfile).toBeUndefined();
+      expect(setup.values.reasoningLevel).toBeUndefined();
+      expect(getNextModelSetupStep(setup.values)).toBe("reasoning");
+
+      applyModelSetupValues(setup, { providerType: "grok" });
+      expect(setup.values.reasoningLevel).toBeUndefined();
+      expect(getNextModelSetupStep(setup.values)).toBe("confirm");
+    });
+    it("rejects an explicitly supplied unsupported Gemini level", () => {
+      const setup: PendingModelSetup = {
+        step: "provider",
+        providerEnvPath: "/tmp/provider.env",
+        createdTemplate: false,
+        values: {},
+      };
+
+      expect(() =>
+        applyModelSetupValues(setup, { providerType: "gemini", reasoningLevel: "Max" }),
+      ).toThrow("Gemini 不支持推理等级 Max");
+    });
   });
 
   describe("validateModelSetupPartial", () => {
@@ -200,6 +272,15 @@ describe("model-setup-runtime", () => {
       expect(() => validateModelSetupPartial({ baseUrl: "not-a-url" })).toThrow();
       expect(() => validateModelSetupPartial({ apiKey: "" })).toThrow();
       expect(() => validateModelSetupPartial({ model: "" })).toThrow();
+    });
+    it("rejects extended reasoning for explicit OpenAI chat setup", () => {
+      expect(() =>
+        validateModelSetupPartial({
+          providerType: "openai-compatible",
+          endpointProfile: "chat_completions",
+          reasoningLevel: "Max",
+        }),
+      ).toThrow("XHigh / Max 仅支持 Responses");
     });
   });
 
@@ -230,7 +311,13 @@ describe("model-setup-runtime", () => {
         ...setup,
         values: { providerType: "gemini" },
       });
+      const openAiChat = formatModelSetupMessage("reasoningPrompt", "en-US", {
+        ...setup,
+        values: { providerType: "openai-compatible", endpointProfile: "chat_completions" },
+      });
       expect(openAi).toContain("Low / Medium / High / XHigh / Max");
+      expect(openAiChat).toContain("Low / Medium / High");
+      expect(openAiChat).not.toContain("XHigh");
       expect(gemini).toContain("Low / Medium / High");
       expect(gemini).not.toContain("XHigh");
       expect(gemini).not.toContain("Max");

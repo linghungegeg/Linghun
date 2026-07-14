@@ -30,6 +30,13 @@ export type ProviderCompatibilityProfile =
 
 export type ReasoningLevel = "Low" | "Medium" | "High" | "XHigh" | "Max";
 
+class ReasoningLevelUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReasoningLevelUnsupportedError";
+  }
+}
+
 export type ProviderConfig = {
   type: "openai-compatible" | "deepseek" | "gemini" | "grok";
   baseUrl?: string;
@@ -488,9 +495,6 @@ const openAiCompatibleModelPlaceholder = "openai-compatible-model";
 const defaultOpenAiEndpointProfile = normalizeEndpointProfile(
   process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE,
 );
-const defaultReasoningLevel = process.env.LINGHUN_INFERENCE_LEVEL
-  ? normalizeReasoningLevel(process.env.LINGHUN_INFERENCE_LEVEL)
-  : undefined;
 const providerEnvFileName = "provider.env";
 const providerEnvKeys = new Set([
   "LINGHUN_OPENAI_BASE_URL",
@@ -656,7 +660,6 @@ export const defaultConfig: LinghunConfig = {
       model: process.env.LINGHUN_OPENAI_MODEL ?? openAiCompatibleModelPlaceholder,
       endpointProfile: defaultOpenAiEndpointProfile,
       compatibilityProfile: "strict_openai_compatible",
-      reasoningLevel: defaultReasoningLevel,
       includeUsage: parseEnvBoolean(process.env.LINGHUN_OPENAI_INCLUDE_USAGE),
     },
     gemini: {
@@ -1067,14 +1070,15 @@ export function validateProviderEnvSetup(setup: ProviderEnvSetup): ProviderEnvSe
   const baseUrl = setup.baseUrl.trim();
   const apiKey = setup.apiKey;
   const model = setup.model.trim();
+  const providerType = setup.providerType ?? "openai-compatible";
+  const endpointProfile = setup.endpointProfile ?? "chat_completions";
   const reasoningLevel =
-    setup.providerType === "grok"
+    providerType === "grok"
       ? undefined
-      : normalizeProviderReasoningLevel(
-          setup.providerType ?? "openai-compatible",
-          setup.endpointProfile,
-          setup.reasoningLevel ?? "Medium",
-        );
+      : normalizeReasoningLevel(setup.reasoningLevel ?? "Medium");
+  if (reasoningLevel) {
+    assertProviderReasoningLevel(providerType, endpointProfile, reasoningLevel);
+  }
   validateProviderBaseUrl(baseUrl);
   validateProviderApiKey(apiKey);
   validateProviderModel(model);
@@ -1084,7 +1088,7 @@ export function validateProviderEnvSetup(setup: ProviderEnvSetup): ProviderEnvSe
     apiKey,
     model,
     reasoningLevel,
-    endpointProfile: setup.endpointProfile ?? "chat_completions",
+    endpointProfile,
     includeUsage: setup.includeUsage ?? false,
     auxModel: setup.auxModel?.trim(),
   };
@@ -1154,32 +1158,38 @@ function normalizeReasoningLevel(value: string): ReasoningLevel {
   if (normalized === "high") return "High";
   if (normalized === "xhigh") return "XHigh";
   if (normalized === "max") return "Max";
-  throw new Error("推理等级可选 Low / Medium / High / XHigh / Max，默认 Medium。");
+  throw new ReasoningLevelUnsupportedError(
+    "推理等级可选 Low / Medium / High / XHigh / Max，默认 Medium。",
+  );
 }
 
-function isAnthropicReasoningLevel(
-  value: ReasoningLevel | undefined,
-): value is "Low" | "Medium" | "High" {
-  return value === "Low" || value === "Medium" || value === "High";
-}
-
-function normalizeProviderReasoningLevel(
+function assertProviderReasoningLevel(
   providerType: ProviderConfig["type"],
   endpointProfile: EndpointProfile | undefined,
-  value: string,
-): ReasoningLevel {
-  const reasoningLevel = normalizeReasoningLevel(value);
-  const usesAnthropicReasoning = endpointProfile === "anthropic_messages";
+  reasoningLevel: ReasoningLevel,
+): void {
+  if (providerType === "deepseek" || providerType === "grok") return;
+  const isStandardLevel =
+    reasoningLevel === "Low" || reasoningLevel === "Medium" || reasoningLevel === "High";
   if (
-    (providerType === "gemini" || usesAnthropicReasoning) &&
-    !isAnthropicReasoningLevel(reasoningLevel)
+    (providerType === "gemini" ||
+      (providerType === "openai-compatible" && endpointProfile === "anthropic_messages")) &&
+    !isStandardLevel
   ) {
     const providerName = providerType === "gemini" ? "Gemini" : "Anthropic Messages";
-    throw new Error(
+    throw new ReasoningLevelUnsupportedError(
       `${providerName} 不支持推理等级 ${reasoningLevel}；当前仅支持 Low / Medium / High。`,
     );
   }
-  return reasoningLevel;
+  if (
+    providerType === "openai-compatible" &&
+    endpointProfile !== "responses" &&
+    (reasoningLevel === "XHigh" || reasoningLevel === "Max")
+  ) {
+    throw new ReasoningLevelUnsupportedError(
+      `OpenAI-compatible ${endpointProfile ?? "chat_completions"} 不支持推理等级 ${reasoningLevel}；XHigh / Max 仅支持 Responses。`,
+    );
+  }
 }
 
 function normalizeProviderConfigReasoning(provider: ProviderConfig): ProviderConfig {
@@ -1188,11 +1198,7 @@ function normalizeProviderConfigReasoning(provider: ProviderConfig): ProviderCon
   }
   return {
     ...provider,
-    reasoningLevel: normalizeProviderReasoningLevel(
-      provider.type,
-      provider.endpointProfile,
-      provider.reasoningLevel,
-    ),
+    reasoningLevel: normalizeReasoningLevel(provider.reasoningLevel),
   };
 }
 
@@ -1321,14 +1327,15 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
     const endpointProfile = normalizeEndpointProfile(
       process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE ?? values.LINGHUN_OPENAI_ENDPOINT_PROFILE,
     );
+    const reasoningLevel = normalizeReasoningLevel(
+      process.env.LINGHUN_INFERENCE_LEVEL || values.LINGHUN_INFERENCE_LEVEL || "Medium",
+    );
     validateProviderEnvSetup({
       baseUrl: process.env.LINGHUN_OPENAI_BASE_URL ?? values.LINGHUN_OPENAI_BASE_URL ?? "",
       apiKey: process.env.LINGHUN_OPENAI_API_KEY ?? values.LINGHUN_OPENAI_API_KEY ?? "",
       model: process.env.LINGHUN_OPENAI_MODEL ?? values.LINGHUN_OPENAI_MODEL ?? "",
       endpointProfile,
-      reasoningLevel: values.LINGHUN_INFERENCE_LEVEL
-        ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
-        : "Medium",
+      reasoningLevel,
     });
     if (values.LINGHUN_OPENAI_BASE_URL) openAiProvider.baseUrl = values.LINGHUN_OPENAI_BASE_URL;
     if (values.LINGHUN_OPENAI_API_KEY) openAiProvider.apiKey = values.LINGHUN_OPENAI_API_KEY;
@@ -1337,9 +1344,7 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
     if (values.LINGHUN_OPENAI_INCLUDE_USAGE) {
       openAiProvider.includeUsage = parseEnvBoolean(values.LINGHUN_OPENAI_INCLUDE_USAGE);
     }
-    openAiProvider.reasoningLevel = values.LINGHUN_INFERENCE_LEVEL
-      ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
-      : "Medium";
+    openAiProvider.reasoningLevel = reasoningLevel;
     providerConfig["openai-compatible"] = {
       type: "openai-compatible",
       model:
@@ -1373,7 +1378,7 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
     const apiKey = process.env.LINGHUN_GEMINI_API_KEY ?? values.LINGHUN_GEMINI_API_KEY ?? "";
     const model = process.env.LINGHUN_GEMINI_MODEL ?? values.LINGHUN_GEMINI_MODEL ?? "";
     const reasoningLevel = normalizeReasoningLevel(
-      process.env.LINGHUN_INFERENCE_LEVEL ?? values.LINGHUN_INFERENCE_LEVEL ?? "Medium",
+      process.env.LINGHUN_INFERENCE_LEVEL || values.LINGHUN_INFERENCE_LEVEL || "Medium",
     );
     validateProviderEnvSetup({
       providerType: "gemini",
@@ -1449,6 +1454,7 @@ async function readProviderEnvConfig(home = homedir()): Promise<Partial<LinghunC
     lastProviderEnvWarning = undefined;
     return providerEnvToConfig(values);
   } catch (error) {
+    if (error instanceof ReasoningLevelUnsupportedError) throw error;
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       lastProviderEnvWarning = undefined;
       return providerEnvToConfig({});
@@ -1541,6 +1547,7 @@ export async function loadConfig(projectPath = process.cwd()): Promise<LinghunCo
       mergeConfig(mergeProviderEnvConfig(applyUserLanguage(parsed, userLanguage), providerEnv)),
     );
   } catch (error) {
+    if (error instanceof ReasoningLevelUnsupportedError) throw error;
     const baseInput = userLanguage ? { language: userLanguage } : {};
     const base = mergeConfig(mergeProviderEnvConfig(baseInput, providerEnv));
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
@@ -1948,7 +1955,7 @@ function validateProviders(providers: Record<string, ProviderConfig>): void {
         provider.reasoningLevel,
         `settings.providers.${providerId}.reasoningLevel`,
       );
-      normalizeProviderReasoningLevel(
+      assertProviderReasoningLevel(
         provider.type,
         provider.endpointProfile,
         provider.reasoningLevel,
@@ -2425,6 +2432,7 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
     normalizedProviders?.["openai-compatible"],
     process.env.LINGHUN_OPENAI_MODEL ? openAiCompatibleModelPlaceholder : undefined,
   );
+  const geminiProvider = cleanProviderOverride(normalizedProviders?.gemini);
 
   return {
     ...defaultConfig,
@@ -2470,16 +2478,8 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
             openAiCompatibleProvider?.endpointProfile ??
             defaultConfig.providers["openai-compatible"].endpointProfile,
         ),
-        reasoningLevel: process.env.LINGHUN_INFERENCE_LEVEL
-          ? normalizeProviderReasoningLevel(
-              "openai-compatible",
-              normalizeEndpointProfile(
-                process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE ??
-                  openAiCompatibleProvider?.endpointProfile ??
-                  defaultConfig.providers["openai-compatible"].endpointProfile,
-              ),
-              process.env.LINGHUN_INFERENCE_LEVEL,
-            )
+        reasoningLevel: openAiCompatibleProvider && process.env.LINGHUN_INFERENCE_LEVEL
+          ? normalizeReasoningLevel(process.env.LINGHUN_INFERENCE_LEVEL)
           : (openAiCompatibleProvider?.reasoningLevel ??
             defaultConfig.providers["openai-compatible"].reasoningLevel),
         includeUsage:
@@ -2487,6 +2487,14 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
             ? parseEnvBoolean(process.env.LINGHUN_OPENAI_INCLUDE_USAGE)
             : (openAiCompatibleProvider?.includeUsage ??
               defaultConfig.providers["openai-compatible"].includeUsage),
+      },
+      gemini: {
+        ...defaultConfig.providers.gemini,
+        ...geminiProvider,
+        reasoningLevel:
+          geminiProvider && process.env.LINGHUN_INFERENCE_LEVEL
+            ? normalizeReasoningLevel(process.env.LINGHUN_INFERENCE_LEVEL)
+            : (geminiProvider?.reasoningLevel ?? defaultConfig.providers.gemini.reasoningLevel),
       },
     },
     modelRoutes: {

@@ -837,7 +837,11 @@ export class OpenAiCompatibleProvider implements Provider {
       );
       const url = joinBaseUrlAndEndpoint(baseUrlDiagnostic.normalizedBaseUrl, contract.endpoint);
       if (contract.endpointProfile === "anthropic_messages") {
-        const body = this.createAnthropicMessagesRequest(request);
+        const body = getRegisteredClientFactories().anthropicMessages({
+          config: this.config,
+          request,
+          contract,
+        });
         // D.13H：Anthropic Context Editing / cache_edits 收口。仅在
         //   contextEditingEnabled === true
         //   AND endpointProfile === "anthropic_messages"
@@ -951,8 +955,8 @@ export class OpenAiCompatibleProvider implements Provider {
 
       const body =
         contract.endpointProfile === "responses"
-          ? this.createResponsesRequest(request)
-          : this.createChatRequest(request);
+          ? getRegisteredClientFactories().responses({ config: this.config, request, contract })
+          : getRegisteredClientFactories().chat({ config: this.config, request, contract });
       const response = await fetchWithProviderRetry(url, {
         method: "POST",
         headers: {
@@ -1571,15 +1575,9 @@ async function tryNonStreamingFallback(input: {
   if (!shouldAttemptNonStreamingFallback(input.request, input.status)) {
     return undefined;
   }
-  const endpoint =
-    input.contract.endpointProfile === "responses"
-      ? "/responses"
-      : input.contract.endpointProfile === "anthropic_messages"
-        ? "/v1/messages"
-        : "/chat/completions";
   const body = createNonStreamingFallbackBody(input.request, input.providerConfig, input.contract);
   const response = await fetchWithProviderRetry(
-    joinBaseUrlAndEndpoint(input.baseUrl, endpoint),
+    joinBaseUrlAndEndpoint(input.baseUrl, input.contract.endpoint),
     {
       method: "POST",
       headers: createProviderRequestHeaders(input.providerConfig, input.contract),
@@ -1644,14 +1642,14 @@ function createNonStreamingFallbackBody(
   contract: ProviderRuntimeContract,
 ): unknown {
   if (contract.endpointProfile === "responses") {
-    const body = createResponsesProfileRequest(request, config);
+    const body = createResponsesProfileRequest(request, config, contract);
     return { ...body, stream: false };
   }
   if (contract.endpointProfile === "anthropic_messages") {
-    const body = createAnthropicMessagesProfileRequest(request, config);
+    const body = createAnthropicMessagesProfileRequest(request, config, contract);
     return { ...body, stream: false };
   }
-  const body = createChatProfileRequest(request, config);
+  const body = createChatProfileRequest(request, config, contract);
   return { ...body, stream: false, stream_options: undefined };
 }
 
@@ -1764,16 +1762,16 @@ function normalizeProviderRequestModel(model: string, config: ProviderConfig): s
 function createChatProfileRequest(
   request: ModelRequest,
   config: ProviderConfig,
+  contract: ProviderRuntimeContract,
 ): OpenAiChatRequest {
-  if (request.endpointProfile === "responses") {
+  if (contract.endpointProfile !== "chat_completions") {
     throw new LinghunError({
       code: "PROVIDER_PROFILE_MISMATCH",
-      message: "Provider profile mismatch: chat request builder received responses profile.",
+      message: `Provider profile mismatch: chat request builder received ${contract.endpointProfile} profile.`,
       suggestion: "请检查 endpointProfile；chat_completions 与 responses schema 不能混用。",
       recoverable: true,
     });
   }
-  const contract = resolveProviderRuntimeContract(config, request);
   assertReasoningCapability(contract);
   const model = normalizeProviderRequestModel(request.model ?? config.model, config);
   const tools = createOpenAiChatTools(request, contract);
@@ -1807,16 +1805,16 @@ function createChatProfileRequest(
 function createResponsesProfileRequest(
   request: ModelRequest,
   config: ProviderConfig,
+  contract: ProviderRuntimeContract,
 ): OpenAiResponsesRequest {
-  if (request.endpointProfile && request.endpointProfile !== "responses") {
+  if (contract.endpointProfile !== "responses") {
     throw new LinghunError({
       code: "PROVIDER_PROFILE_MISMATCH",
-      message: "Provider profile mismatch: responses request builder received chat profile.",
+      message: `Provider profile mismatch: responses request builder received ${contract.endpointProfile} profile.`,
       suggestion: "请检查 endpointProfile；chat_completions 与 responses schema 不能混用。",
       recoverable: true,
     });
   }
-  const contract = resolveProviderRuntimeContract(config, request);
   assertReasoningCapability(contract);
   const model = normalizeProviderRequestModel(request.model ?? config.model, config);
   const tools = createOpenAiResponsesTools(request, contract);
@@ -1847,30 +1845,13 @@ function createResponsesProfileRequest(
 function createAnthropicMessagesProfileRequest(
   request: ModelRequest,
   config: ProviderConfig,
+  contract: ProviderRuntimeContract,
 ): AnthropicMessagesRequest {
   // D.13H：cache_edits / cache_reference 已硬禁，无论 contextEditingEnabled 是否 true、
   // anthropicBetaHeaders 是否非空，本 builder 永不在 body 写入这两个字段；只有
   // stream() 在 sendable=true 时才会附加 anthropic-beta header。详见
   // resolveAnthropicContextEditingDiagnostic 与 model-doctor。
-  // D.13G：guard 不能只看 raw request.endpointProfile —— TUI 真实路径会从
-  // SelectedModelRuntime 透传 endpointProfile=chat_completions placeholder（type 还是
-  // chat_completions | responses），但决策器会把 Claude + chat_completions 视为占位
-  // 切回 anthropic_messages。如果在这里只比对 raw 值，placeholder continuation 就会
-  // 误抛 PROFILE_MISMATCH。改用 resolveEffectiveEndpointProfile 得到的 effective 值，
-  // 仅当真正不是 anthropic_messages（例如 request 显式 responses）时才抛。
-  const effectiveProfile = resolveEffectiveEndpointProfile({
-    requestEndpointProfile: request.endpointProfile,
-    configEndpointProfile: config.endpointProfile,
-    configBaseUrl: config.baseUrl,
-    configModel: config.model,
-    requestModel: request.model,
-  }).endpointProfile;
-  const deepSeekAnthropicMessages =
-    config.type === "deepseek" &&
-    (request.endpointProfile === "anthropic_messages" ||
-      config.endpointProfile === "anthropic_messages" ||
-      inferEndpointProfileFromBaseUrl(config.baseUrl) === "anthropic_messages");
-  if (effectiveProfile !== "anthropic_messages" && !deepSeekAnthropicMessages) {
+  if (contract.endpointProfile !== "anthropic_messages") {
     throw new LinghunError({
       code: "PROVIDER_PROFILE_MISMATCH",
       message:
@@ -1880,7 +1861,6 @@ function createAnthropicMessagesProfileRequest(
       recoverable: true,
     });
   }
-  const contract = resolveProviderRuntimeContract(config, request);
   assertReasoningCapability(contract);
   // D.13G：anthropic_messages 现在原生支持 tools；只有 contract.supportsTools=false（用户
   // 显式禁用）时才让 assertToolCapability 抛 MODEL_TOOLS_UNSUPPORTED；否则直接放过。
@@ -3597,10 +3577,11 @@ export class DeepSeekProvider extends OpenAiCompatibleProvider {
 }
 
 registerClientFactories({
-  chat: ({ request, config }) => createChatProfileRequest(request, config),
-  responses: ({ request, config }) => createResponsesProfileRequest(request, config),
-  anthropicMessages: ({ request, config }) =>
-    createAnthropicMessagesProfileRequest(request, config),
+  chat: ({ request, config, contract }) => createChatProfileRequest(request, config, contract),
+  responses: ({ request, config, contract }) =>
+    createResponsesProfileRequest(request, config, contract),
+  anthropicMessages: ({ request, config, contract }) =>
+    createAnthropicMessagesProfileRequest(request, config, contract),
 });
 
 export function normalizeProviderError(error: unknown): LinghunError {

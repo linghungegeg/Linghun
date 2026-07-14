@@ -474,6 +474,38 @@ describe("OpenAI compatible provider", () => {
     );
   });
 
+  it("rejects public builders that do not match the resolved endpoint profile", () => {
+    const anthropic = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-sonnet-4",
+      endpointProfile: "anthropic_messages",
+      reasoningLevel: "High",
+    });
+    const request = { messages: [{ role: "user" as const, content: "hello" }] };
+
+    expect(() => anthropic.createChatRequest(request)).toThrowError(
+      expect.objectContaining({ code: "PROVIDER_PROFILE_MISMATCH" }),
+    );
+    expect(() => anthropic.createResponsesRequest(request)).toThrowError(
+      expect.objectContaining({ code: "PROVIDER_PROFILE_MISMATCH" }),
+    );
+
+    const responses = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+    });
+    expect(() => responses.createChatRequest(request)).toThrowError(
+      expect.objectContaining({ code: "PROVIDER_PROFILE_MISMATCH" }),
+    );
+  });
+
   it("sends max reasoning effort to Responses gateways", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
@@ -898,6 +930,36 @@ describe("OpenAI compatible provider", () => {
       expect(events.at(-1)).toMatchObject({ type: "message_stop", hadUsage: true });
     },
   );
+
+  it("keeps the DeepSeek Anthropic endpoint for non-streaming fallback", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ content: [{ type: "text", text: "fallback ok" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new DeepSeekProvider({
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "test-key",
+      model: "deepseek-reasoner",
+      endpointProfile: "anthropic_messages",
+    });
+
+    for await (const _event of provider.stream({
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      // Drain the successful fallback.
+    }
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://api.deepseek.com/anthropic/v1/messages",
+      "https://api.deepseek.com/anthropic/v1/messages",
+    ]);
+  });
 
   it("removes caller and per-chunk abort listeners after a completed stream", async () => {
     const encoder = new TextEncoder();
