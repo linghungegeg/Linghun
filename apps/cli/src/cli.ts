@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -122,6 +123,17 @@ function configurePlatformBundledRoot(
   envName: string,
 ): void {
   if (process.env[envName]) {
+    return;
+  }
+  const cliBundledRoot = process.env.LINGHUN_CLI_BUNDLED_ROOT;
+  const commandName = kind === "codebase-memory" ? "codebase-memory-mcp" : `linghun-${kind}`;
+  const fileName = process.platform === "win32" ? `${commandName}.exe` : commandName;
+  if (
+    cliBundledRoot &&
+    existsSync(
+      join(cliBundledRoot, kind, `${process.platform}-${process.arch}`, fileName),
+    )
+  ) {
     return;
   }
   const packageName = `@linghun/${kind}-${process.platform}-${process.arch}`;

@@ -5545,6 +5545,87 @@ describe("Phase 06 TUI slash commands", () => {
     expect(detailsText).toContain("scope: provider-visible recent context projection");
   });
 
+  it("does not report compact activity for below-threshold provider preflight", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-below-trigger-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const onCompactStart = vi.fn();
+
+    const result = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "system" },
+        { role: "user", content: "small request" },
+      ],
+      context,
+      sessionId: session.id,
+      runtime: { role: "executor", provider: "openai-compatible", model: "gpt-4.1" },
+      trigger: "request",
+      onCompactStart,
+      deps: {
+        appendSystemEvent: async () => undefined,
+        captureFailureLearning: async () => undefined,
+        recordToolResultBudgetEvidence: async () => undefined,
+        refreshCacheFreshness: () => undefined,
+      },
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(onCompactStart).not.toHaveBeenCalled();
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+  });
+
+  it("reports compact activity once when a full compact boundary is applied", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-activity-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "compact-activity-model" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "compact-activity-model",
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "compact-activity-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? { ...route, primaryModel: "compact-activity-model", maxInputTokens: 80_000 }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    const onCompactStart = vi.fn();
+
+    const result = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "system" },
+        ...Array.from({ length: 18 }, (_, index) => ({
+          role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+          content: `old context ${index} ${"x".repeat(20_000)}`,
+        })),
+        { role: "user", content: "latest request" },
+      ],
+      context,
+      sessionId: session.id,
+      runtime: {
+        role: "executor",
+        provider: "openai-compatible",
+        model: "compact-activity-model",
+      },
+      trigger: "request",
+      onCompactStart,
+      deps: {
+        appendSystemEvent: async () => undefined,
+        captureFailureLearning: async () => undefined,
+        recordToolResultBudgetEvidence: async () => undefined,
+        refreshCacheFreshness: () => undefined,
+      },
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(onCompactStart).toHaveBeenCalledTimes(1);
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+  });
+
   it("reuses cached tool_result budget replacements during provider preflight", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

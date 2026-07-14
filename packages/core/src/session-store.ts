@@ -24,6 +24,11 @@ const MAX_SESSION_ID_LENGTH = 128;
 const SESSION_ID_INVALID_CHAR = /[\\/\t\r\n :*?"<>|%]/u;
 const RESUME_FULL_TRANSCRIPT_MAX_BYTES = 4 * 1024 * 1024;
 const RESUME_TRANSCRIPT_TAIL_EVENTS = 10_000;
+const RESUME_TRANSCRIPT_TAIL_MAX_BYTES = 16 * 1024 * 1024;
+const RESUME_TRANSCRIPT_MAX_LINE_BYTES = 4 * 1024 * 1024;
+const RECENT_TRANSCRIPT_DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
+const RECENT_TRANSCRIPT_DEFAULT_MAX_LINE_BYTES = 4 * 1024 * 1024;
+const RECENT_TRANSCRIPT_DEFAULT_MAX_DIAGNOSTICS = 100;
 
 export function assertValidSessionId(sessionId: unknown): asserts sessionId is string {
   if (typeof sessionId !== "string" || sessionId.length === 0) {
@@ -70,6 +75,9 @@ export type ResumeSessionResult = {
 
 export type ReadRecentTranscriptEventsInput = {
   limit: number;
+  maxBytes?: number;
+  maxLineBytes?: number;
+  maxDiagnostics?: number;
   predicate?: (event: TranscriptEvent) => boolean;
   stopPredicate?: (event: TranscriptEvent) => boolean;
 };
@@ -161,6 +169,8 @@ export class SessionStore {
       ? await readJsonl<TranscriptEvent>(session.transcriptPath)
       : await readJsonlTail<TranscriptEvent>(session.transcriptPath, {
           limit: RESUME_TRANSCRIPT_TAIL_EVENTS,
+          maxBytes: RESUME_TRANSCRIPT_TAIL_MAX_BYTES,
+          maxLineBytes: RESUME_TRANSCRIPT_MAX_LINE_BYTES,
           stopPredicate: (event) => parseUsableTranscriptCompactBoundary(event) !== undefined,
         });
     if (transcriptSize > RESUME_FULL_TRANSCRIPT_MAX_BYTES) {
@@ -198,6 +208,9 @@ export class SessionStore {
 
     const transcript = await readJsonlTail<TranscriptEvent>(session.transcriptPath, {
       limit: input.limit,
+      maxBytes: input.maxBytes ?? RECENT_TRANSCRIPT_DEFAULT_MAX_BYTES,
+      maxLineBytes: input.maxLineBytes ?? RECENT_TRANSCRIPT_DEFAULT_MAX_LINE_BYTES,
+      maxDiagnostics: input.maxDiagnostics ?? RECENT_TRANSCRIPT_DEFAULT_MAX_DIAGNOSTICS,
       predicate: input.predicate,
       stopPredicate: input.stopPredicate,
     });

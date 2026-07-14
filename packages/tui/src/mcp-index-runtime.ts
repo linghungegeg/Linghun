@@ -78,6 +78,7 @@ import {
 import type { BackgroundTaskState, EvidenceRecord, McpToolState } from "./tui-data-types.js";
 import { writeDiagnosticLine } from "./tui-output-surface.js";
 import { createMcpState, createMcpToolPlaceholders, pathExists } from "./tui-state-runtime.js";
+import { currentRequestUserActionConstraints } from "./user-action-constraints.js";
 
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
@@ -2419,6 +2420,10 @@ export async function executeExtraTool(
       text: `ExecuteExtraTool: 工具 ${args.tool_name} 已被本 session 记为发现过，但已不在当前可用 deferred 工具清单中（白名单或会话状态可能已变化）。请重新运行 SearchExtraTools。`,
     };
   }
+  const constraintDenial = getExecuteExtraToolConstraintDenial(context, target);
+  if (constraintDenial) {
+    return { ok: false, text: constraintDenial };
+  }
   if (!target.executable) {
     return {
       ok: false,
@@ -2621,6 +2626,32 @@ export async function executeExtraTool(
     ok: false,
     text: `ExecuteExtraTool: 工具 ${target.name} (${target.kind}) 没有可用的安全执行适配器。`,
   };
+}
+
+function getExecuteExtraToolConstraintDenial(
+  context: TuiContext,
+  target: { name: string; kind: string },
+): string | undefined {
+  const constraints = currentRequestUserActionConstraints(context);
+  if (!constraints) return undefined;
+  if (constraints.forbidAllTools) {
+    return `denied: current request forbids all tools; ${target.name} was not executed.`;
+  }
+  if (!constraints.forbidShell) return undefined;
+  if (target.kind === "pre-engine") {
+    return `denied: current request forbids shell commands; pre-engine target ${target.name} was not executed.`;
+  }
+  if (target.kind === "codebase-memory") {
+    return `denied: current request forbids shell commands; codebase-memory target ${target.name} was not executed.`;
+  }
+  if (target.kind === "mcp") {
+    const parsed = parseMcpDeferredToolName(target.name);
+    const serverConfig = parsed ? context.config.mcp.servers[parsed.server] : undefined;
+    if (isLocalStdioMcpServer(serverConfig)) {
+      return `denied: current request forbids shell commands; local stdio MCP target ${target.name} was not executed.`;
+    }
+  }
+  return undefined;
 }
 
 export function stabilizeMcpToolList(tools: McpToolState[]): McpToolState[] {

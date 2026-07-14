@@ -29,9 +29,14 @@ function runPhpLint(root, files) {
         cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true, timeout: 30000,
       });
-    } catch (e) { continue; }
+    } catch (e) {
+      return { error: `php lint failed: ${e.message}` };
+    }
 
-    if (r.error) continue;
+    if (r.error) {
+      const reason = r.error.code === "ETIMEDOUT" ? "php lint timeout" : r.error.message;
+      return { error: reason };
+    }
 
     const output = (r.stdout || "") + (r.stderr || "");
     if (r.status !== 0) {
@@ -146,7 +151,7 @@ async function handleRequest(req) {
   }
 
   const lintResult = runPhpLint(root, files);
-  if (lintResult) {
+  if (lintResult && !lintResult.error) {
     return {
       issues: lintResult.issues,
       status: lintResult.issues.length > 0 ? "php_error" : "clean",
@@ -156,10 +161,20 @@ async function handleRequest(req) {
   }
 
   const fallbackIssues = fallbackSyntaxCheck(root, files);
+  if (lintResult && lintResult.error) {
+    return {
+      issues: fallbackIssues,
+      status: "fallback_used",
+      reason: "fallback",
+      fallback: lintResult.error,
+      elapsed_ms: Date.now() - t0,
+    };
+  }
   return {
     issues: fallbackIssues,
-    status: fallbackIssues.length > 0 ? "syntax_error" : "clean",
+    status: "fallback_used",
     reason: fallbackIssues.length > 0 ? "fallback" : "fallback_clean",
+    fallback: "php_not_found",
     elapsed_ms: Date.now() - t0,
   };
 }

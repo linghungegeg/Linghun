@@ -600,6 +600,7 @@ export async function recordToolEvidence(
     name === "WebFetch";
   const supportsClaims = [
     ...deriveToolSupportsClaims(name, input, output),
+    ...(isToolOutputFailure(name, output) ? ["tool_failure"] : []),
     ...(kind === "web_source" ? ["web_source", "external_current_fact"] : []),
     ...(readOnlyEvidence ? ["readonly_low_noise_evidence"] : []),
   ];
@@ -618,9 +619,12 @@ export async function recordToolEvidence(
     ? input as Record<string, unknown>
     : undefined;
   const verificationScope = inputRecord?.verificationScope;
-  const targetValues = ["path", "file", "cwd", "url"]
+  const inputTargets = ["path", "file", "cwd", "url"]
     .map((key) => inputRecord?.[key])
     .filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  const outputTargets = extractOutputCandidatePaths(output.data);
+  const targetValues =
+    name === "ReadSnippets" || name === "SourcePack" ? outputTargets : inputTargets;
   evidence.ownerScope = {
     ...(context.sessionId ? { ownerSessionId: context.sessionId } : { ownerSessionId: sessionId }),
     ...(context.currentRequestTurnId ? { requestTurnId: context.currentRequestTurnId } : {}),
@@ -669,7 +673,7 @@ function formatReadOnlyToolEvidenceSummary(
     name === "SourcePack"
       ? sourcePackEvidenceTarget(input, output)
       : name === "ReadSnippets"
-        ? readSnippetsEvidenceTarget(input)
+        ? readSnippetsEvidenceTarget(output)
         : readToolEvidenceTarget(input);
   const artifact = output.fullOutputPath ? "artifact=yes" : "artifact=no";
   const bytes = output.text.length;
@@ -684,17 +688,8 @@ function sourcePackEvidenceTarget(input: unknown, output: ToolOutput): string {
   return `query=${truncateDisplay((query ?? "unspecified").replace(/\s+/g, " "), 90)}${pathText}`;
 }
 
-function readSnippetsEvidenceTarget(input: unknown): string {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return "ranges=unspecified";
-  const ranges = (input as Record<string, unknown>).ranges;
-  if (!Array.isArray(ranges)) return "ranges=unspecified";
-  const paths = ranges
-    .map((item) =>
-      item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string"
-        ? (item as { path: string }).path
-        : undefined,
-    )
-    .filter((item): item is string => Boolean(item));
+function readSnippetsEvidenceTarget(output: ToolOutput): string {
+  const paths = extractOutputCandidatePaths(output.data);
   return paths.length > 0
     ? `ranges=${truncateDisplay(paths.slice(0, 4).join(","), 120)}`
     : "ranges=unspecified";
@@ -714,10 +709,23 @@ function extractOutputCandidatePaths(data: unknown): string[] {
     return candidatePaths.filter((item): item is string => typeof item === "string");
   }
   const snippets = record.snippets;
-  if (!Array.isArray(snippets)) return [];
-  return snippets
+  if (Array.isArray(snippets)) {
+    return snippets
+      .map((item) =>
+        item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string"
+          ? (item as { path: string }).path
+          : undefined,
+      )
+      .filter((item): item is string => Boolean(item));
+  }
+  const ranges = record.ranges;
+  if (!Array.isArray(ranges)) return [];
+  return ranges
     .map((item) =>
-      item && typeof item === "object" && typeof (item as { path?: unknown }).path === "string"
+      item &&
+      typeof item === "object" &&
+      typeof (item as { path?: unknown }).path === "string" &&
+      !("error" in item)
         ? (item as { path: string }).path
         : undefined,
     )
@@ -916,6 +924,10 @@ export async function recordToolResultBudgetEvidence(
   }
 }
 
+const TOOL_RESULT_LEDGER_SCAN_MAX_BYTES = 4 * 1024 * 1024;
+const TOOL_RESULT_LEDGER_SCAN_MAX_LINE_BYTES = 1024 * 1024;
+const TOOL_RESULT_LEDGER_SCAN_MAX_DIAGNOSTICS = 20;
+
 export async function resolveToolResultBudgetLedgerRecords(
   context: TuiContext,
   sessionId: string,
@@ -975,6 +987,9 @@ export async function resolveToolResultBudgetLedgerRecords(
   const boundedIdentities = new Set<string>();
   await readRecent.call(context.store, sessionId, {
     limit: 1,
+    maxBytes: TOOL_RESULT_LEDGER_SCAN_MAX_BYTES,
+    maxLineBytes: TOOL_RESULT_LEDGER_SCAN_MAX_LINE_BYTES,
+    maxDiagnostics: TOOL_RESULT_LEDGER_SCAN_MAX_DIAGNOSTICS,
     predicate: () => false,
     stopPredicate: (event) => {
       if (event.type === "evidence_record") {
@@ -1321,7 +1336,8 @@ export function isToolOutputFailure(name: ToolName, output: ToolOutput): boolean
     const data = output.data as { isError?: unknown } | undefined;
     return data?.isError === true;
   }
-  return false;
+  const data = output.data as { isError?: unknown } | undefined;
+  return data?.isError === true;
 }
 
 export async function appendDerivedToolEvents(

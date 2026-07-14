@@ -130,7 +130,7 @@ async function handleRequest(req) {
   if (shellcheckResult && shellcheckResult.error) {
     return {
       issues: fallbackIssues,
-      status: fallbackIssues.length > 0 ? "syntax_error" : "clean",
+      status: "fallback_used",
       reason: "fallback",
       fallback: shellcheckResult.error,
       elapsed_ms: Date.now() - t0,
@@ -139,8 +139,9 @@ async function handleRequest(req) {
 
   return {
     issues: fallbackIssues,
-    status: fallbackIssues.length > 0 ? "syntax_error" : "clean",
+    status: "fallback_used",
     reason: fallbackIssues.length > 0 ? "fallback" : "fallback_clean",
+    fallback: "shellcheck_not_found",
     elapsed_ms: Date.now() - t0,
   };
 }
@@ -158,4 +159,3 @@ rl.on("line", (line) => {
   });
 });
 rl.on("close", () => { process.exit(0); });
-

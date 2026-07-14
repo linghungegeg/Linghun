@@ -1436,15 +1436,17 @@ describe("model-loop-runtime", () => {
       expect(mixed.matchedClaims.map((claim) => claim.kind)).toEqual(["action_executed"]);
     });
 
-    it("requires an explicit file target before Read supports a positive code fact", () => {
+    it("does not let ordinary Read prove a positive behavior code fact", () => {
       const read = makeEvidence({
         kind: "file_read",
-        source: "src/unrelated.ts",
+        source: "src/a.ts",
+        summary: "Read src/a.ts",
         supportsClaims: ["Read", "local_read", "read_nonempty"],
+        ownerScope: { targets: ["src/a.ts"] },
       });
       const verdict = evaluateFinalAnswerClaims(
-        withClaims("MessageBuilder 调用了 build。", [
-          { kind: "code_fact", phrase: "MessageBuilder 调用了 build" },
+        withClaims("src/a.ts 已实现 nonexistentSymbol。", [
+          { kind: "code_fact", phrase: "src/a.ts 已实现 nonexistentSymbol" },
         ]),
         [read],
       );
@@ -1452,19 +1454,38 @@ describe("model-loop-runtime", () => {
       expect(verdict.status).toBe("needs_disclaimer");
     });
 
+    it("lets fresh SourcePack snippets prove a positive behavior code fact", () => {
+      const sourcePack = makeEvidence({
+        kind: "file_read",
+        source: "SourcePack",
+        summary: "SourcePack src/a.ts includes nonexistentSymbol implementation",
+        supportsClaims: ["SourcePack", "local_read", "read_nonempty", "source_snippet"],
+        ownerScope: { targets: ["src/a.ts"] },
+      });
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("src/a.ts 已实现 nonexistentSymbol。", [
+          { kind: "code_fact", phrase: "src/a.ts 已实现 nonexistentSymbol" },
+        ]),
+        [sourcePack],
+      );
+
+      expect(verdict.status).toBe("passed");
+      expect(verdict.matchedClaims.map((claim) => claim.kind)).toEqual(["code_fact"]);
+    });
+
     it("uses visible file targets when structured code_fact phrase omits the path", () => {
       const readA = makeEvidence({
         kind: "file_read",
         source: "src/a.ts",
-        summary: "Read src/a.ts",
-        supportsClaims: ["Read", "local_read", "read_nonempty"],
+        summary: "ReadSnippets src/a.ts",
+        supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
         ownerScope: { targets: ["src/a.ts"] },
       });
       const readB = makeEvidence({
         kind: "file_read",
         source: "src/b.ts",
-        summary: "Read src/b.ts",
-        supportsClaims: ["Read", "local_read", "read_nonempty"],
+        summary: "ReadSnippets src/b.ts",
+        supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
         ownerScope: { targets: ["src/b.ts"] },
       });
       const answer = withClaims("src/a.ts 的函数会返回结果。", [
@@ -1485,7 +1506,7 @@ describe("model-loop-runtime", () => {
       const read = makeEvidence({
         id: "read-before-edit",
         kind: "file_read",
-        supportsClaims: ["Read", "local_read", "read_nonempty"],
+        supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
         createdAt: "2026-07-14T10:00:00.000Z",
         ownerScope: { ...owner, targets: ["src/a.ts"] },
       });
@@ -1507,10 +1528,11 @@ describe("model-loop-runtime", () => {
         { kind: "code_fact", phrase: "src/a.ts 的函数会返回结果" },
       ]);
 
-      expect(evaluateFinalAnswerClaims(claim, [read, editSameFile]).status).toBe(
+      expect(evaluateFinalAnswerClaims(claim, [editSameFile, read]).status).toBe(
         "needs_disclaimer",
       );
-      expect(evaluateFinalAnswerClaims(claim, [read, editOtherFile]).status).toBe("passed");
+      expect(evaluateFinalAnswerClaims(claim, [read, editSameFile]).status).toBe("passed");
+      expect(evaluateFinalAnswerClaims(claim, [editOtherFile, read]).status).toBe("passed");
     });
 
     it("does not let generic command output or Edit file tags support code facts", () => {
@@ -2445,12 +2467,12 @@ describe("model-loop-runtime", () => {
       expect(isEvidenceStaleForClaim(evidence, "external_current_fact", NOW)).toBe(true);
     });
 
-    it("fresh Read evidence still allows code_fact (baseline)", () => {
+    it("fresh source snippet evidence still allows code_fact (baseline)", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "file_read",
           source: "src/a.ts",
-          supportsClaims: ["Read", "local_read", "read_nonempty"],
+          supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
           createdAt: minutesAgo(20),
         }),
       ];
@@ -2464,12 +2486,12 @@ describe("model-loop-runtime", () => {
       expect(verdict.status).toBe("passed");
     });
 
-    it("stale Read evidence (>60min) blocks code_fact", () => {
+    it("stale source snippet evidence (>60min) blocks code_fact", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "file_read",
           source: "src/a.ts",
-          supportsClaims: ["Read", "local_read", "read_nonempty"],
+          supportsClaims: ["SourcePack", "local_read", "read_nonempty", "source_snippet"],
           createdAt: minutesAgo(90),
         }),
       ];

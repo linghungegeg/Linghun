@@ -41,6 +41,7 @@ export type DeepCompactRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     input: FailureLearningInput,
+    commitGuard?: () => boolean,
   ) => Promise<void>;
   refreshCacheFreshness: (context: TuiContext) => void;
   recordCompactBoundary: (context: TuiContext, boundary: CompactBoundary) => void;
@@ -1304,8 +1305,7 @@ async function recordDeepCompactFailure(
 ): Promise<void> {
   if (!commitGuard()) return;
   const cooldownUntilMs = Date.now() + DEEP_COMPACT_FAILURE_COOLDOWN_MS;
-  context.cache.deepCompactCooldownUntil = cooldownUntilMs;
-  context.cache.compactFailure = {
+  const compactFailure = {
     at: new Date().toISOString(),
     reason: sanitizeDeepCompactText(context, reason, 220),
     blocked: true,
@@ -1314,7 +1314,7 @@ async function recordDeepCompactFailure(
   await deps.appendSystemEvent(
     context,
     sessionId,
-    `deep compact failed: blocked yes; reason ${context.cache.compactFailure.reason}; cooldown until ${context.cache.compactFailure.cooldownUntil}`,
+    `deep compact failed: blocked yes; reason ${compactFailure.reason}; cooldown until ${compactFailure.cooldownUntil}`,
     "warning",
     commitGuard,
   );
@@ -1323,7 +1323,7 @@ async function recordDeepCompactFailure(
     stepId: "compact-context",
     executor: "compact-runtime",
     status: "failed",
-    summary: `deep compact failed: ${context.cache.compactFailure.reason}`,
+    summary: `deep compact failed: ${compactFailure.reason}`,
     level: "warning",
   });
   if (!commitGuard()) return;
@@ -1331,20 +1331,23 @@ async function recordDeepCompactFailure(
     stepId: "provider-request",
     executor: "provider-runtime",
     status: "degraded",
-    summary: `deep compact provider path failed: ${context.cache.compactFailure.reason}`,
+    summary: `deep compact provider path failed: ${compactFailure.reason}`,
     level: "warning",
   });
   if (!commitGuard()) return;
   await deps.captureFailureLearning(context, sessionId, {
     category: "resource_cap",
     failureSummary: "deep compact failed before provider request",
-    rootCauseGuess: context.cache.compactFailure.reason,
+    rootCauseGuess: compactFailure.reason,
     avoidNextTime:
       "Do not continue with partial context after deep compact failure; retry after cooldown or reduce context pressure",
     sourceRef: "system_event:deep_compact_failed",
     relatedTarget: "deep compact",
     severity: "medium",
-  });
+  }, commitGuard);
+  if (!commitGuard()) return;
+  context.cache.deepCompactCooldownUntil = cooldownUntilMs;
+  context.cache.compactFailure = compactFailure;
 }
 
 function failMessage(context: TuiContext, english: string): DeepCompactRunResult {

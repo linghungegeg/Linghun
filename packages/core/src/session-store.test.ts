@@ -332,6 +332,36 @@ describe("SessionStore", () => {
     expect(recent.diagnostics).toEqual([]);
   });
 
+  it("applies default byte and line bounds to recent transcript reads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+    const freshEvent = {
+      type: "user_message",
+      id: "fresh-after-oversized",
+      text: "fresh",
+      createdAt: new Date(0).toISOString(),
+    };
+    await writeFile(
+      session.transcriptPath,
+      Buffer.concat([
+        Buffer.alloc(20 * 1024 * 1024, 0x78),
+        Buffer.from(`\n${JSON.stringify(freshEvent)}\n`, "utf8"),
+      ]),
+    );
+
+    const recent = await store.readRecentTranscriptEvents(session.id, { limit: 80 });
+
+    expect(recent.events).toEqual([freshEvent]);
+    expect(recent.diagnostics.map((diagnostic) => diagnostic.message)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("jsonl_line_oversized"),
+        expect.stringContaining("jsonl_tail_truncated"),
+      ]),
+    );
+  });
+
   it("stops reverse transcript reads at the latest matching boundary", async () => {
     const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-project-"));

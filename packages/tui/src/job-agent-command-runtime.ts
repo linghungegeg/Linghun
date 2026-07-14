@@ -3676,9 +3676,10 @@ export async function runModelBackedAgent(
     };
   }
   agent.lastResultFullReport = finalText;
+  const summaryEvidence = filterChildAgentSummaryEvidence(context, agent);
   const summaryGate = evaluateChildAgentSummaryClaims(
     finalText,
-    context.evidence,
+    summaryEvidence,
     context.language,
   );
   if (summaryGate.status === "downgraded") {
@@ -3700,6 +3701,36 @@ export async function runModelBackedAgent(
     evidenceRefs: [],
   };
 }
+
+function filterChildAgentSummaryEvidence(
+  context: TuiContext,
+  agent: AgentRun,
+): EvidenceRecord[] {
+  const workflowRunId = context.backgroundTasks.find((task) => task.id === agent.id)?.workflowRunId;
+  const expectedCwd = normalizeAgentEvidenceCwd(agent.cwd ?? context.projectPath);
+  return context.evidence.filter((record) => {
+    const owner = record.ownerScope;
+    if (!owner) return false;
+    if (owner.ownerAgentId !== agent.id) return false;
+    if (agent.invokingRequestTurnId && owner.requestTurnId !== agent.invokingRequestTurnId) {
+      return false;
+    }
+    if (workflowRunId && owner.workflowRunId !== workflowRunId) return false;
+    if (agent.parentSessionId && owner.ownerSessionId !== agent.parentSessionId) {
+      return false;
+    }
+    const cwd = normalizeAgentEvidenceCwd(owner.cwd);
+    return !!cwd && (cwd === expectedCwd || cwd.startsWith(`${expectedCwd}/`));
+  });
+}
+
+function normalizeAgentEvidenceCwd(cwd: unknown): string {
+  return typeof cwd === "string"
+    ? cwd.trim().replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase()
+    : "";
+}
+
+export const __testFilterChildAgentSummaryEvidence = filterChildAgentSummaryEvidence;
 
 export function evaluateChildAgentSummaryClaims(
   text: string,

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createToolContext } from "@linghun/tools";
 import {
+  __testFilterChildAgentSummaryEvidence,
   __testRunAgentToolInCwd,
   __testClearAgentAbortController,
   createAgentRuntimeForFallbackModel,
@@ -181,13 +182,17 @@ describe("agent-owned tool context", () => {
 });
 
 describe("child agent summary claim gate", () => {
-  const evidence = (supportsClaims: string[]): EvidenceRecord => ({
+  const evidence = (
+    supportsClaims: string[],
+    overrides: Partial<EvidenceRecord> = {},
+  ): EvidenceRecord => ({
     id: `ev-${supportsClaims.join("-")}`,
     kind: "command_output",
     summary: "test evidence",
     source: "test",
     supportsClaims,
     createdAt: new Date().toISOString(),
+    ...overrides,
   });
 
   it("does not downgrade ordinary read-only audit findings", () => {
@@ -221,6 +226,116 @@ describe("child agent summary claim gate", () => {
     );
 
     expect(result.status).toBe("passed");
+  });
+
+  it("evaluates child summary claims only against current agent request workflow cwd evidence", () => {
+    const agent = makeAgent({
+      id: "agent-current",
+      invokingRequestTurnId: "request-current",
+      parentSessionId: "session-current",
+      cwd: "F:/repo/worktrees/current",
+    });
+    const matching = evidence(["test_passed"], {
+      id: "ev-matching",
+      ownerScope: {
+        ownerAgentId: "agent-current",
+        requestTurnId: "request-current",
+        workflowRunId: "workflow-current",
+        ownerSessionId: "session-current",
+        cwd: "F:/repo/worktrees/current/src",
+      },
+    });
+    const context = {
+      projectPath: "F:/repo",
+      language: "zh-CN",
+      backgroundTasks: [
+        {
+          id: "agent-current",
+          kind: "agent",
+          title: "agent current",
+          status: "running",
+          startedAt: "2026-06-12T00:00:00.000Z",
+          updatedAt: "2026-06-12T00:00:00.000Z",
+          heartbeatIntervalMs: 1_000,
+          staleAfterMs: 60_000,
+          hasOutput: false,
+          workflowRunId: "workflow-current",
+        },
+      ],
+      evidence: [
+        evidence(["test_passed"], {
+          id: "ev-wrong-agent",
+          ownerScope: {
+            ownerAgentId: "agent-other",
+            requestTurnId: "request-current",
+            workflowRunId: "workflow-current",
+            ownerSessionId: "session-current",
+            cwd: "F:/repo/worktrees/current",
+          },
+        }),
+        evidence(["test_passed"], {
+          id: "ev-wrong-request",
+          ownerScope: {
+            ownerAgentId: "agent-current",
+            requestTurnId: "request-other",
+            workflowRunId: "workflow-current",
+            ownerSessionId: "session-current",
+            cwd: "F:/repo/worktrees/current",
+          },
+        }),
+        evidence(["test_passed"], {
+          id: "ev-wrong-workflow",
+          ownerScope: {
+            ownerAgentId: "agent-current",
+            requestTurnId: "request-current",
+            workflowRunId: "workflow-other",
+            ownerSessionId: "session-current",
+            cwd: "F:/repo/worktrees/current",
+          },
+        }),
+        evidence(["test_passed"], {
+          id: "ev-wrong-cwd",
+          ownerScope: {
+            ownerAgentId: "agent-current",
+            requestTurnId: "request-current",
+            workflowRunId: "workflow-current",
+            ownerSessionId: "session-current",
+            cwd: "F:/repo/worktrees/other",
+          },
+        }),
+        evidence(["test_passed"], {
+          id: "ev-missing-session",
+          ownerScope: {
+            ownerAgentId: "agent-current",
+            requestTurnId: "request-current",
+            workflowRunId: "workflow-current",
+            cwd: "F:/repo/worktrees/current",
+          },
+        }),
+        evidence(["test_passed"], {
+          id: "ev-wrong-session",
+          ownerScope: {
+            ownerAgentId: "agent-current",
+            requestTurnId: "request-current",
+            workflowRunId: "workflow-current",
+            ownerSessionId: "session-other",
+            cwd: "F:/repo/worktrees/current",
+          },
+        }),
+      ],
+    } as unknown as TuiContext;
+
+    const filteredWrongEvidence = __testFilterChildAgentSummaryEvidence(context, agent);
+    expect(filteredWrongEvidence).toEqual([]);
+    expect(evaluateChildAgentSummaryClaims("测试通过，PASS。", filteredWrongEvidence, "zh-CN").status)
+      .toBe("downgraded");
+
+    context.evidence = [...context.evidence, matching];
+    const filtered = __testFilterChildAgentSummaryEvidence(context, agent);
+    expect(filtered.map((record) => record.id)).toEqual(["ev-matching"]);
+    expect(evaluateChildAgentSummaryClaims("测试通过，PASS。", filtered, "zh-CN").status).toBe(
+      "passed",
+    );
   });
 
   it("downgrades unsupported file change claims", () => {

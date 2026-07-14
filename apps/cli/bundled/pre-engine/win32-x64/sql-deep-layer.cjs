@@ -142,7 +142,7 @@ async function handleRequest(req) {
   if (sqlfluffResult && sqlfluffResult.error) {
     return {
       issues: fallbackIssues,
-      status: fallbackIssues.length > 0 ? "syntax_error" : "clean",
+      status: "fallback_used",
       reason: "fallback",
       fallback: sqlfluffResult.error,
       elapsed_ms: Date.now() - t0,
@@ -151,8 +151,9 @@ async function handleRequest(req) {
 
   return {
     issues: fallbackIssues,
-    status: fallbackIssues.length > 0 ? "syntax_error" : "clean",
+    status: "fallback_used",
     reason: fallbackIssues.length > 0 ? "fallback" : "fallback_clean",
+    fallback: "sqlfluff_not_found",
     elapsed_ms: Date.now() - t0,
   };
 }

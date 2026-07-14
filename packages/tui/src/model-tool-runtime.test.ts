@@ -815,6 +815,130 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
     expect(calls).toHaveBeenCalledTimes(validCases.length);
   });
 
+  it("records denied ExecuteExtraTool as error tool_result and tool_failure evidence", async () => {
+    const events: unknown[] = [];
+    const context = createWebToolTestContext(events);
+    context.config = defaultConfig;
+    context.index = createIndexState(defaultConfig);
+    context.discoveredDeferredToolNames = new Set(["list_projects"]);
+    context.currentUserActionConstraintsRequestTurnId = "turn-web";
+    context.currentUserActionConstraints = {
+      readonlyOnly: true,
+      forbidWrite: true,
+      forbidTests: false,
+      forbidBuild: false,
+      forbidLint: false,
+      forbidTypecheck: false,
+      forbidSmoke: false,
+      forbidShell: true,
+      forbidAllTools: false,
+    };
+    context.mcp = { enabled: false, servers: [], tools: [] };
+    context.skills = { enabled: false, skills: [], trustedIds: [], disabledIds: [] } as never;
+    context.plugins = { enabled: false, plugins: [], trustedIds: [], disabledIds: [] } as never;
+
+    const result = await executeDeferredDispatchToolUse(
+      {
+        id: "denied-extra-tool",
+        name: "ExecuteExtraTool",
+        input: { tool_name: "list_projects", params: {} },
+      },
+      context,
+      "session-web",
+      new WebToolOutput(),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("current request forbids shell commands");
+    const toolResult = events.find(
+      (event): event is {
+        type: "tool_result";
+        toolName: string;
+        isError: boolean;
+        content: string;
+        evidenceId?: string;
+      } =>
+        (event as { type?: string }).type === "tool_result" &&
+        (event as { toolName?: string }).toolName === "ExecuteExtraTool",
+    );
+    expect(toolResult).toMatchObject({
+      isError: true,
+      content: expect.stringContaining("current request forbids shell commands"),
+    });
+    expect(toolResult?.evidenceId).toBe(result.evidenceId);
+    const evidence = context.evidence.find((record) => record.id === result.evidenceId);
+    expect(evidence).toMatchObject({
+      kind: "command_output",
+      supportsClaims: expect.arrayContaining([
+        "deferred_tool_output",
+        "list_projects",
+        "tool_failure",
+      ]),
+    });
+  });
+
+  it("records forbidAllTools ExecuteExtraTool denial as error tool_result and tool_failure evidence", async () => {
+    const events: unknown[] = [];
+    const context = createWebToolTestContext(events);
+    context.config = defaultConfig;
+    context.index = createIndexState(defaultConfig);
+    context.discoveredDeferredToolNames = new Set(["list_projects"]);
+    context.currentUserActionConstraintsRequestTurnId = "turn-web";
+    context.currentUserActionConstraints = {
+      readonlyOnly: true,
+      forbidWrite: true,
+      forbidTests: false,
+      forbidBuild: false,
+      forbidLint: false,
+      forbidTypecheck: false,
+      forbidSmoke: false,
+      forbidShell: false,
+      forbidAllTools: true,
+    };
+    context.mcp = { enabled: false, servers: [], tools: [] };
+    context.skills = { enabled: false, skills: [], trustedIds: [], disabledIds: [] } as never;
+    context.plugins = { enabled: false, plugins: [], trustedIds: [], disabledIds: [] } as never;
+
+    const result = await executeDeferredDispatchToolUse(
+      {
+        id: "denied-all-extra-tool",
+        name: "ExecuteExtraTool",
+        input: { tool_name: "list_projects", params: {} },
+      },
+      context,
+      "session-web",
+      new WebToolOutput(),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("current request forbids all tools");
+    const toolResult = events.find(
+      (event): event is {
+        type: "tool_result";
+        toolName: string;
+        isError: boolean;
+        content: string;
+        evidenceId?: string;
+      } =>
+        (event as { type?: string }).type === "tool_result" &&
+        (event as { toolName?: string }).toolName === "ExecuteExtraTool",
+    );
+    expect(toolResult).toMatchObject({
+      isError: true,
+      content: expect.stringContaining("current request forbids all tools"),
+    });
+    expect(toolResult?.evidenceId).toBe(result.evidenceId);
+    const evidence = context.evidence.find((record) => record.id === result.evidenceId);
+    expect(evidence).toMatchObject({
+      kind: "command_output",
+      supportsClaims: expect.arrayContaining([
+        "deferred_tool_output",
+        "list_projects",
+        "tool_failure",
+      ]),
+    });
+  });
+
   it("does not pass cwd to slash fork when StartAgent requests managed worktree isolation", () => {
     const args = __testBuildForkArgsFromStartAgentInput(
       {

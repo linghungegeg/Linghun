@@ -416,6 +416,14 @@ describe("deep compact prompt insertion", () => {
   it("does not append a deep compact failure event after owner changes during append", async () => {
     const { context, deps, appendedEvents } = createOwnedCompactHarness();
     const failureEvents: string[] = [];
+    let releaseFailureAppend!: () => void;
+    let markFailureAppendStarted!: () => void;
+    const failureAppendStarted = new Promise<void>((resolve) => {
+      markFailureAppendStarted = resolve;
+    });
+    const failureAppendRelease = new Promise<void>((resolve) => {
+      releaseFailureAppend = resolve;
+    });
     const gateway = {
       async *stream() {
         yield {
@@ -425,7 +433,7 @@ describe("deep compact prompt insertion", () => {
       },
     };
 
-    const result = await maybeRunDeepCompactBeforeProvider({
+    const resultPromise = maybeRunDeepCompactBeforeProvider({
       context,
       sessionId: "session-failure-append-owner",
       runtime: { model: "test-model", provider: "test-provider" } as never,
@@ -435,8 +443,10 @@ describe("deep compact prompt insertion", () => {
       deps: {
         ...deps,
         appendSystemEvent: async (_context, _sessionId, message, level, commitGuard) => {
-          context.currentRequestTurnId = "turn-b";
-          context.runtimeContextId = "turn-b";
+          if (message.includes("deep compact failed")) {
+            markFailureAppendStarted();
+            await failureAppendRelease;
+          }
           if (!commitGuard || commitGuard()) {
             appendedEvents.push({ type: "system_event" });
             if (message.includes("deep compact failed")) failureEvents.push(`${level}:${message}`);
@@ -445,8 +455,16 @@ describe("deep compact prompt insertion", () => {
       },
     });
 
+    await failureAppendStarted;
+    context.currentRequestTurnId = "turn-b";
+    context.runtimeContextId = "turn-b";
+    releaseFailureAppend();
+    const result = await resultPromise;
+
     expect(result).toMatchObject({ ok: false });
     expect(failureEvents).toEqual([]);
+    expect(context.cache.compactFailure).toBeUndefined();
+    expect(context.cache.deepCompactCooldownUntil).toBeUndefined();
   });
 
   it("uses the transcript commit guard when ownership changes during packet append", async () => {

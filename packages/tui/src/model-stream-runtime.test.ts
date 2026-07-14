@@ -5,9 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
 import { LinghunError, SessionStore } from "@linghun/core";
-import type { ModelGateway, ModelMessage } from "@linghun/providers";
+import type { ModelGateway, ModelMessage, ModelRequest } from "@linghun/providers";
 import { builtInTools, createToolContext } from "@linghun/tools";
 import { interruptAllActiveWork } from "./background-control-runtime.js";
+import {
+  createPostCompactCacheWarmup,
+  recordCacheRequestObservation,
+} from "./cache-policy-runtime.js";
 import {
   __testApplyPromptCacheKey,
   __testBuildModelMessagesWithRecentContext,
@@ -89,6 +93,42 @@ function makeCompactRestoreContext(overrides: Record<string, unknown> = {}) {
     memoryStatus: "none",
     verificationRequirement: "verify with evidence",
     ...overrides,
+  };
+}
+
+function seedPostCompactWarmupObservation(context: TuiContext): unknown {
+  const request: ModelRequest = {
+    messages: [
+      { role: "system", content: "system" },
+      { role: "user", content: "hello" },
+    ],
+    model: "test-model",
+    endpointProfile: "anthropic_messages",
+    promptCacheEnabled: true,
+  };
+  const baseline = recordCacheRequestObservation(context.cache, "main", "anthropic", request);
+  context.cache.postCompactCacheWarmup = createPostCompactCacheWarmup({
+    projection: {
+      boundaryId: "compact-boundary",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      summary: "summary",
+      restoreContext: makeCompactRestoreContext(),
+      replacementKind: "provider-visible",
+      replacementMessageCount: 1,
+      pressureRatio: 0.9,
+      preCompactChars: 100,
+      postCompactChars: 10,
+      discardedRange: "events 1-2",
+      toolPairingSafe: true,
+      risks: [],
+      evidenceRefs: [],
+    },
+    baseline,
+    totalTurns: 2,
+  });
+  return {
+    ...context.cache.postCompactCacheWarmup,
+    lastChangedKeys: [...context.cache.postCompactCacheWarmup.lastChangedKeys],
   };
 }
 
@@ -275,7 +315,17 @@ describe("continuation abort ownership", () => {
         runtime: { role: "executor", provider: "test", model: "deepseek-chat" },
         trigger: "request",
         deps: {
-          appendSystemEvent: async () => undefined,
+          appendSystemEvent: async (_context, _sessionId, message, level, commitGuard) => {
+            if (message.startsWith("compact_projection:")) {
+              await _context.store.appendEvent(_sessionId, {
+                type: "system_event",
+                id: "compact-projection-before-evidence-test",
+                level,
+                message,
+                createdAt: new Date().toISOString(),
+              }, commitGuard);
+            }
+          },
           captureFailureLearning: async () => undefined,
           recordToolResultBudgetEvidence: async () => undefined,
           refreshCacheFreshness: () => {
@@ -316,6 +366,482 @@ describe("continuation abort ownership", () => {
     expect(context.evidence).toEqual([]);
     expect(transcriptBlocks).toEqual([]);
     expect(refreshCount).toBe(0);
+  });
+
+  it("does not half-commit compact state when projection append loses owner before durable transcript write", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const oldController = new AbortController();
+    context.currentRequestTurnId = "projection-before-write-old";
+    context.activeAbortController = oldController;
+    context.requestActivityOwner = {
+      kind: "foreground",
+      requestTurnId: "projection-before-write-old",
+    };
+    context.requestActivityPhase = "request_started";
+    const transcriptBlocks: unknown[] = [];
+    context.pushTranscriptBlock = (block) => {
+      transcriptBlocks.push(block);
+    };
+    let refreshCount = 0;
+    let enterProjectionAppend: (() => void) | undefined;
+    let releaseProjectionAppend: (() => void) | undefined;
+    const projectionAppendEntered = new Promise<void>((resolve) => {
+      enterProjectionAppend = resolve;
+    });
+    const projectionAppendGate = new Promise<void>((resolve) => {
+      releaseProjectionAppend = resolve;
+    });
+    context.compactOutputMemory = async () => ({ beforeCount: 12, afterCount: 5 });
+    const messages: ModelMessage[] = [
+      { role: "system", content: "system" },
+      ...Array.from({ length: 18 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `old projection before write context ${index} ${"x".repeat(60_000)}`,
+      })),
+      { role: "user", content: "latest request" },
+    ];
+
+    const running = __testPrepareMessagesForProviderPreflightWithActivity(
+      new MemoryOutput(),
+      context,
+      {
+        messages,
+        context,
+        sessionId: context.sessionId!,
+        runtime: { role: "executor", provider: "test", model: "deepseek-chat" },
+        trigger: "request",
+        deps: {
+          appendSystemEvent: async (_context, _sessionId, message, level, commitGuard) => {
+            if (message.startsWith("compact_projection:")) {
+              enterProjectionAppend?.();
+              await projectionAppendGate;
+              await _context.store.appendEvent(_sessionId, {
+                type: "system_event",
+                id: "compact-projection-before-write-owner-test",
+                level,
+                message,
+                createdAt: new Date().toISOString(),
+              }, commitGuard);
+            }
+          },
+          captureFailureLearning: async () => undefined,
+          recordToolResultBudgetEvidence: async () => undefined,
+          refreshCacheFreshness: () => {
+            refreshCount += 1;
+          },
+        },
+      },
+    );
+
+    await Promise.race([
+      projectionAppendEntered,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("compact projection append did not start")), 1_000),
+      ),
+    ]);
+    oldController.abort();
+    context.currentRequestTurnId = "projection-before-write-new";
+    context.activeAbortController = new AbortController();
+    context.requestActivityOwner = {
+      kind: "foreground",
+      requestTurnId: "projection-before-write-new",
+    };
+    context.requestActivityPhase = "request_started";
+    releaseProjectionAppend?.();
+
+    const result = await running;
+
+    expect(result).toEqual({ blocked: false, messages });
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+    expect(context.cache.compactProjection).toBeUndefined();
+    expect(context.cache.postCompactCacheWarmup).toBeUndefined();
+    expect(context.cache.compactStrategy).toBeUndefined();
+    expect(context.cache.contextUsage).toBeUndefined();
+    expect(context.evidence).toEqual([]);
+    expect(transcriptBlocks).toEqual([]);
+    expect(refreshCount).toBe(0);
+    expect(
+      events.some(
+        (event) =>
+          (event as { type?: string; message?: string }).type === "system_event" &&
+          (event as { message?: string }).message?.startsWith("compact_projection:"),
+      ),
+    ).toBe(false);
+    expect(events.some((event) => (event as { type?: string }).type === "evidence_record")).toBe(
+      false,
+    );
+  });
+
+  it("commits compact state when durable projection append becomes the commit point", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const oldController = new AbortController();
+    context.currentRequestTurnId = "projection-durable-old";
+    context.activeAbortController = oldController;
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "projection-durable-old" };
+    context.requestActivityPhase = "request_started";
+    const transcriptBlocks: unknown[] = [];
+    context.pushTranscriptBlock = (block) => {
+      transcriptBlocks.push(block);
+    };
+    let refreshCount = 0;
+    let enterProjectionAppend: (() => void) | undefined;
+    let releaseProjectionAppend: (() => void) | undefined;
+    const projectionAppendEntered = new Promise<void>((resolve) => {
+      enterProjectionAppend = resolve;
+    });
+    const projectionAppendGate = new Promise<void>((resolve) => {
+      releaseProjectionAppend = resolve;
+    });
+    let projectionDurablyAppended = false;
+    context.compactOutputMemory = async () => ({ beforeCount: 12, afterCount: 5 });
+    const messages: ModelMessage[] = [
+      { role: "system", content: "system" },
+      ...Array.from({ length: 18 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `old durable projection context ${index} ${"x".repeat(60_000)}`,
+      })),
+      { role: "user", content: "latest request" },
+    ];
+
+    const running = __testPrepareMessagesForProviderPreflightWithActivity(
+      new MemoryOutput(),
+      context,
+      {
+        messages,
+        context,
+        sessionId: context.sessionId!,
+        runtime: { role: "executor", provider: "test", model: "deepseek-chat" },
+        trigger: "request",
+        deps: {
+          appendSystemEvent: async (_context, _sessionId, message, level, commitGuard) => {
+            if (message.startsWith("compact_projection:")) {
+              await _context.store.appendEvent(_sessionId, {
+                type: "system_event",
+                id: "compact-projection-durable-owner-test",
+                level,
+                message,
+                createdAt: new Date().toISOString(),
+              }, commitGuard);
+              projectionDurablyAppended = true;
+              enterProjectionAppend?.();
+              await projectionAppendGate;
+            }
+          },
+          captureFailureLearning: async () => undefined,
+          recordToolResultBudgetEvidence: async () => undefined,
+          refreshCacheFreshness: () => {
+            refreshCount += 1;
+          },
+        },
+      },
+    );
+
+    await Promise.race([
+      projectionAppendEntered,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("compact projection append did not start")), 1_000),
+      ),
+    ]);
+    oldController.abort();
+    context.currentRequestTurnId = "projection-durable-new";
+    context.activeAbortController = new AbortController();
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "projection-durable-new" };
+    context.requestActivityPhase = "request_started";
+    releaseProjectionAppend?.();
+
+    const result = await running;
+
+    expect(result).toEqual({ blocked: false, messages });
+    expect(projectionDurablyAppended).toBe(true);
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+    expect(context.cache.compactProjection).toBeDefined();
+    expect(context.cache.postCompactCacheWarmup).toBeDefined();
+    expect(context.cache.compactStrategy).toBeDefined();
+    expect(context.cache.contextUsage).toBeDefined();
+    expect(context.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ supportsClaims: expect.arrayContaining(["context_compact_boundary"]) }),
+      ]),
+    );
+    expect(transcriptBlocks).toHaveLength(1);
+    expect(refreshCount).toBe(1);
+    expect(
+      events.some(
+        (event) =>
+          (event as { type?: string; message?: string }).type === "system_event" &&
+          (event as { message?: string }).message?.startsWith("compact_projection:"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not half-commit compact state when retrigger warning append loses ownership", async () => {
+    const { context } = await makeSendMessageContext();
+    const oldController = new AbortController();
+    context.config = {
+      ...context.config,
+      modelRoutes: {
+        ...context.config.modelRoutes,
+        routes: context.config.modelRoutes.routes.map((route) =>
+          route.role === "executor" ? { ...route, maxInputTokens: 210_000 } : route,
+        ),
+      },
+    };
+    context.currentRequestTurnId = "compact-retrigger-old";
+    context.activeAbortController = oldController;
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "compact-retrigger-old" };
+    context.requestActivityPhase = "request_started";
+    const transcriptBlocks: unknown[] = [];
+    context.pushTranscriptBlock = (block) => {
+      transcriptBlocks.push(block);
+    };
+    let refreshCount = 0;
+    let enterRetriggerAppend: (() => void) | undefined;
+    let releaseRetriggerAppend: (() => void) | undefined;
+    const retriggerAppendEntered = new Promise<void>((resolve) => {
+      enterRetriggerAppend = resolve;
+    });
+    const retriggerAppendGate = new Promise<void>((resolve) => {
+      releaseRetriggerAppend = resolve;
+    });
+    context.compactOutputMemory = async () => ({ beforeCount: 12, afterCount: 5 });
+    const messages: ModelMessage[] = [
+      { role: "system", content: "system" },
+      ...Array.from({ length: 18 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `old retrigger append context ${index} ${"x".repeat(10_000)}`,
+      })),
+      { role: "user", content: `latest request ${"x".repeat(790_000)}` },
+    ];
+
+    const running = __testPrepareMessagesForProviderPreflightWithActivity(
+      new MemoryOutput(),
+      context,
+      {
+        messages,
+        context,
+        sessionId: context.sessionId!,
+        runtime: { role: "executor", provider: "test", model: "deepseek-chat" },
+        trigger: "request",
+        deps: {
+          appendSystemEvent: async (_context, _sessionId, message) => {
+            if (message.startsWith("context_compact_retrigger_risk:")) {
+              enterRetriggerAppend?.();
+              await retriggerAppendGate;
+            }
+          },
+          captureFailureLearning: async () => undefined,
+          recordToolResultBudgetEvidence: async () => undefined,
+          refreshCacheFreshness: () => {
+            refreshCount += 1;
+          },
+        },
+      },
+    );
+
+    await Promise.race([
+      retriggerAppendEntered,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("compact retrigger append did not start")), 1_000),
+      ),
+    ]);
+    oldController.abort();
+    context.currentRequestTurnId = "compact-retrigger-new";
+    context.activeAbortController = new AbortController();
+    context.requestActivityOwner = {
+      kind: "foreground",
+      requestTurnId: "compact-retrigger-new",
+    };
+    context.requestActivityPhase = "request_started";
+    releaseRetriggerAppend?.();
+
+    const result = await running;
+
+    expect(result).toEqual({ blocked: false, messages });
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+    expect(context.cache.compactProjection).toBeUndefined();
+    expect(context.cache.postCompactCacheWarmup).toBeUndefined();
+    expect(context.cache.compactStrategy).toBeUndefined();
+    expect(context.cache.contextUsage).toBeUndefined();
+    expect(context.evidence).toEqual([]);
+    expect(transcriptBlocks).toEqual([]);
+    expect(refreshCount).toBe(0);
+  });
+
+  it("keeps compact state committed when evidence append loses ownership after projection commit", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const oldController = new AbortController();
+    context.currentRequestTurnId = "compact-evidence-old";
+    context.activeAbortController = oldController;
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "compact-evidence-old" };
+    context.requestActivityPhase = "request_started";
+    const transcriptBlocks: unknown[] = [];
+    context.pushTranscriptBlock = (block) => {
+      transcriptBlocks.push(block);
+    };
+    let refreshCount = 0;
+    let enterEvidenceAppend: (() => void) | undefined;
+    let releaseEvidenceAppend: (() => void) | undefined;
+    const evidenceAppendEntered = new Promise<void>((resolve) => {
+      enterEvidenceAppend = resolve;
+    });
+    const evidenceAppendGate = new Promise<void>((resolve) => {
+      releaseEvidenceAppend = resolve;
+    });
+    const appendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (sessionId, event, commitGuard) => {
+      if ((event as { type?: string }).type === "evidence_record") {
+        enterEvidenceAppend?.();
+        await evidenceAppendGate;
+      }
+      return appendEvent(sessionId, event, commitGuard);
+    };
+    context.compactOutputMemory = async () => ({ beforeCount: 12, afterCount: 5 });
+    const messages: ModelMessage[] = [
+      { role: "system", content: "system" },
+      ...Array.from({ length: 18 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `old evidence append context ${index} ${"x".repeat(60_000)}`,
+      })),
+      { role: "user", content: "latest request" },
+    ];
+
+    const running = __testPrepareMessagesForProviderPreflightWithActivity(
+      new MemoryOutput(),
+      context,
+      {
+        messages,
+        context,
+        sessionId: context.sessionId!,
+        runtime: { role: "executor", provider: "test", model: "deepseek-chat" },
+        trigger: "request",
+        deps: {
+          appendSystemEvent: async () => undefined,
+          captureFailureLearning: async () => undefined,
+          recordToolResultBudgetEvidence: async () => undefined,
+          refreshCacheFreshness: () => {
+            refreshCount += 1;
+          },
+        },
+      },
+    );
+
+    await Promise.race([
+      evidenceAppendEntered,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("compact evidence append did not start")), 1_000),
+      ),
+    ]);
+    oldController.abort();
+    context.currentRequestTurnId = "compact-evidence-new";
+    context.activeAbortController = new AbortController();
+    context.requestActivityOwner = {
+      kind: "foreground",
+      requestTurnId: "compact-evidence-new",
+    };
+    context.requestActivityPhase = "request_started";
+    releaseEvidenceAppend?.();
+
+    const result = await running;
+
+    expect(result).toEqual({ blocked: false, messages });
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+    expect(context.cache.compactProjection).toBeDefined();
+    expect(context.cache.postCompactCacheWarmup).toBeDefined();
+    expect(context.cache.compactStrategy).toBeDefined();
+    expect(context.cache.contextUsage).toBeDefined();
+    expect(context.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ supportsClaims: expect.arrayContaining(["context_compact_boundary"]) }),
+      ]),
+    );
+    expect(transcriptBlocks).toHaveLength(1);
+    expect(refreshCount).toBe(1);
+    expect(events.some((event) => (event as { type?: string }).type === "evidence_record")).toBe(
+      true,
+    );
+  });
+
+  it("does not commit compact failure cooldown when warning append loses ownership", async () => {
+    const { context } = await makeSendMessageContext();
+    const oldController = new AbortController();
+    context.config = {
+      ...context.config,
+      modelRoutes: {
+        ...context.config.modelRoutes,
+        routes: context.config.modelRoutes.routes.map((route) =>
+          route.role === "executor" ? { ...route, maxInputTokens: 10 } : route,
+        ),
+      },
+    };
+    context.currentRequestTurnId = "compact-failure-old";
+    context.activeAbortController = oldController;
+    context.requestActivityOwner = { kind: "foreground", requestTurnId: "compact-failure-old" };
+    context.requestActivityPhase = "request_started";
+    let enterFailureAppend: (() => void) | undefined;
+    let releaseFailureAppend: (() => void) | undefined;
+    const failureAppendEntered = new Promise<void>((resolve) => {
+      enterFailureAppend = resolve;
+    });
+    const failureAppendGate = new Promise<void>((resolve) => {
+      releaseFailureAppend = resolve;
+    });
+    let failureLearningCount = 0;
+    const messages: ModelMessage[] = [
+      { role: "system", content: "system" },
+      {
+        role: "assistant",
+        content: `pending tool ${"x".repeat(1_000)}`,
+        toolCalls: [{ id: "pending-tool", name: "Read", input: { path: "src/a.ts" } }],
+      },
+    ];
+
+    const running = __testPrepareMessagesForProviderPreflightWithActivity(
+      new MemoryOutput(),
+      context,
+      {
+        messages,
+        context,
+        sessionId: context.sessionId!,
+        runtime: { role: "executor", provider: "test", model: "deepseek-chat" },
+        trigger: "request",
+        deps: {
+          appendSystemEvent: async (_context, _sessionId, message) => {
+            if (message.startsWith("context compact failed:")) {
+              enterFailureAppend?.();
+              await failureAppendGate;
+            }
+          },
+          captureFailureLearning: async () => {
+            failureLearningCount += 1;
+          },
+          recordToolResultBudgetEvidence: async () => undefined,
+          refreshCacheFreshness: () => undefined,
+        },
+      },
+    );
+
+    await Promise.race([
+      failureAppendEntered,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("compact failure append did not start")), 1_000),
+      ),
+    ]);
+    oldController.abort();
+    context.currentRequestTurnId = "compact-failure-new";
+    context.activeAbortController = new AbortController();
+    context.requestActivityOwner = {
+      kind: "foreground",
+      requestTurnId: "compact-failure-new",
+    };
+    context.requestActivityPhase = "request_started";
+    releaseFailureAppend?.();
+
+    const result = await running;
+
+    expect(result).toEqual({ blocked: false, messages });
+    expect(context.cache.compactFailure).toBeUndefined();
+    expect(context.cache.compactCooldownUntil).toBeUndefined();
+    expect(failureLearningCount).toBe(0);
   });
 
   it("does not revive a continuation whose inherited signal is already aborted", async () => {
@@ -2067,6 +2593,209 @@ describe("model message prompt cache layout", () => {
           (event as { text?: string }).text === "old continuation final",
       ),
     ).toBe(false);
+  });
+
+  it("does not commit main usage/cache when owner changes inside queued usage append", async () => {
+    const { context, events } = await makeSendMessageContext();
+    let warmupBefore: unknown;
+    let enterUsageAppend: (() => void) | undefined;
+    let releaseUsageAppend: (() => void) | undefined;
+    const usageAppendEntered = new Promise<void>((resolve) => {
+      enterUsageAppend = resolve;
+    });
+    const usageAppendGate = new Promise<void>((resolve) => {
+      releaseUsageAppend = resolve;
+    });
+    let historyAtUsageAppend: unknown[] = [];
+    let contextUsageAtUsageAppend: unknown;
+    let nextTurnAtUsageAppend = 0;
+    let roleUsageAtUsageAppend: unknown[] = [];
+    const appendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (sessionId, event, commitGuard) => {
+      if ((event as { type?: string }).type === "assistant_text_delta" && !warmupBefore) {
+        warmupBefore = seedPostCompactWarmupObservation(context);
+      }
+      if ((event as { type?: string }).type === "usage") {
+        historyAtUsageAppend = [...context.cache.history];
+        contextUsageAtUsageAppend = context.cache.contextUsage
+          ? { ...context.cache.contextUsage }
+          : undefined;
+        nextTurnAtUsageAppend = context.cache.nextTurn;
+        roleUsageAtUsageAppend = context.roleUsage.map((item) => ({ ...item }));
+        enterUsageAppend?.();
+        await usageAppendGate;
+      }
+      return appendEvent(sessionId, event, commitGuard);
+    };
+    const gateway = gatewayByTurn(
+      [[
+        { type: "assistant_text_delta", text: "old main usage" },
+        { type: "usage", usage: { inputTokens: 40, outputTokens: 4, totalTokens: 44 } },
+        { type: "message_stop", chunkCount: 2, hadUsage: true, finishReason: "stop" },
+      ]],
+      { count: 0 },
+    );
+
+    const running = __testSendMessage("old main usage", context, gateway, new MemoryOutput());
+    await usageAppendEntered;
+    const oldController = context.activeAbortController;
+    beginForegroundRequestTurn(context, "new main request");
+    context.activeAbortController = new AbortController();
+    oldController?.abort("owner_replaced");
+    releaseUsageAppend?.();
+    await running;
+
+    expect(events.some((event) => (event as { type?: string }).type === "usage")).toBe(false);
+    expect(context.cache.history).toEqual(historyAtUsageAppend);
+    expect(context.cache.contextUsage).toEqual(contextUsageAtUsageAppend);
+    expect(context.cache.nextTurn).toBe(nextTurnAtUsageAppend);
+    expect(context.cache.postCompactCacheWarmup).toEqual(warmupBefore);
+    expect(context.roleUsage).toEqual(roleUsageAtUsageAppend);
+  });
+
+  it("does not commit final usage/cache when owner changes inside queued usage append", async () => {
+    const { context, events } = await makeSendMessageContext();
+    let warmupBefore: unknown;
+    const requestTurnId = beginForegroundRequestTurn(context, "old final request");
+    const oldController = new AbortController();
+    context.activeAbortController = oldController;
+    let enterUsageAppend: (() => void) | undefined;
+    let releaseUsageAppend: (() => void) | undefined;
+    const usageAppendEntered = new Promise<void>((resolve) => {
+      enterUsageAppend = resolve;
+    });
+    const usageAppendGate = new Promise<void>((resolve) => {
+      releaseUsageAppend = resolve;
+    });
+    let historyAtUsageAppend: unknown[] = [];
+    let contextUsageAtUsageAppend: unknown;
+    let nextTurnAtUsageAppend = 0;
+    let roleUsageAtUsageAppend: unknown[] = [];
+    const appendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (sessionId, event, commitGuard) => {
+      if ((event as { type?: string }).type === "assistant_text_delta" && !warmupBefore) {
+        warmupBefore = seedPostCompactWarmupObservation(context);
+      }
+      if ((event as { type?: string }).type === "usage") {
+        historyAtUsageAppend = [...context.cache.history];
+        contextUsageAtUsageAppend = context.cache.contextUsage
+          ? { ...context.cache.contextUsage }
+          : undefined;
+        nextTurnAtUsageAppend = context.cache.nextTurn;
+        roleUsageAtUsageAppend = context.roleUsage.map((item) => ({ ...item }));
+        enterUsageAppend?.();
+        await usageAppendGate;
+      }
+      return appendEvent(sessionId, event, commitGuard);
+    };
+
+    const running = __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "final" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        originalUserText: "final",
+        requestTurnId,
+        abortSignal: oldController.signal,
+      },
+      context,
+      gatewayByTurn(
+        [[
+          { type: "assistant_text_delta", text: "old final usage" },
+          { type: "usage", usage: { inputTokens: 50, outputTokens: 5, totalTokens: 55 } },
+          { type: "message_stop", chunkCount: 2, hadUsage: true, finishReason: "stop" },
+        ]],
+        { count: 0 },
+      ),
+      context.sessionId!,
+      new MemoryOutput(),
+      oldController.signal,
+    );
+
+    await usageAppendEntered;
+    beginForegroundRequestTurn(context, "new final request");
+    context.activeAbortController = new AbortController();
+    oldController.abort("owner_replaced");
+    releaseUsageAppend?.();
+    await running;
+
+    expect(events.some((event) => (event as { type?: string }).type === "usage")).toBe(false);
+    expect(context.cache.history).toEqual(historyAtUsageAppend);
+    expect(context.cache.contextUsage).toEqual(contextUsageAtUsageAppend);
+    expect(context.cache.nextTurn).toBe(nextTurnAtUsageAppend);
+    expect(context.cache.postCompactCacheWarmup).toEqual(warmupBefore);
+    expect(context.roleUsage).toEqual(roleUsageAtUsageAppend);
+  });
+
+  it("does not commit continuation usage/cache when owner changes inside queued usage append", async () => {
+    const { context, events } = await makeSendMessageContext();
+    let warmupBefore: unknown;
+    let enterUsageAppend: (() => void) | undefined;
+    let releaseUsageAppend: (() => void) | undefined;
+    const usageAppendEntered = new Promise<void>((resolve) => {
+      enterUsageAppend = resolve;
+    });
+    const usageAppendGate = new Promise<void>((resolve) => {
+      releaseUsageAppend = resolve;
+    });
+    let historyAtUsageAppend: unknown[] = [];
+    let contextUsageAtUsageAppend: unknown;
+    let nextTurnAtUsageAppend = 0;
+    let roleUsageAtUsageAppend: unknown[] = [];
+    const appendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (sessionId, event, commitGuard) => {
+      if ((event as { type?: string }).type === "assistant_text_delta" && !warmupBefore) {
+        warmupBefore = seedPostCompactWarmupObservation(context);
+      }
+      if ((event as { type?: string }).type === "usage") {
+        historyAtUsageAppend = [...context.cache.history];
+        contextUsageAtUsageAppend = context.cache.contextUsage
+          ? { ...context.cache.contextUsage }
+          : undefined;
+        nextTurnAtUsageAppend = context.cache.nextTurn;
+        roleUsageAtUsageAppend = context.roleUsage.map((item) => ({ ...item }));
+        enterUsageAppend?.();
+        await usageAppendGate;
+      }
+      return appendEvent(sessionId, event, commitGuard);
+    };
+    const gateway = gatewayByTurn(
+      [[
+        { type: "assistant_text_delta", text: "old continuation usage" },
+        { type: "usage", usage: { inputTokens: 60, outputTokens: 6, totalTokens: 66 } },
+        { type: "message_stop", chunkCount: 2, hadUsage: true, finishReason: "stop" },
+      ]],
+      { count: 0 },
+    );
+
+    const running = continueModelAfterToolResults(
+      {
+        messages: [{ role: "user", content: "continue" }],
+        provider: "deepseek",
+        model: "deepseek-chat",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+      },
+      context,
+      gateway,
+      new MemoryOutput(),
+    );
+    await usageAppendEntered;
+    const oldController = context.activeAbortController;
+    beginForegroundRequestTurn(context, "new continuation request");
+    context.activeAbortController = new AbortController();
+    oldController?.abort("owner_replaced");
+    releaseUsageAppend?.();
+    await running;
+
+    expect(events.some((event) => (event as { type?: string }).type === "usage")).toBe(false);
+    expect(context.cache.history).toEqual(historyAtUsageAppend);
+    expect(context.cache.contextUsage).toEqual(contextUsageAtUsageAppend);
+    expect(context.cache.nextTurn).toBe(nextTurnAtUsageAppend);
+    expect(context.cache.postCompactCacheWarmup).toEqual(warmupBefore);
+    expect(context.roleUsage).toEqual(roleUsageAtUsageAppend);
   });
 
   it("commits usage only from the terminal provider attempt after a partial retry", async () => {
@@ -5314,9 +6043,10 @@ describe("final answer gate aggregation", () => {
 
     for (const entry of ["main", "continuation"] as const) {
       const result = await runCase(entry);
-      expect(result.rounds).toBe(3);
+      expect(result.rounds).toBe(5);
       expect(result.finalText).toContain("answer 函数返回 42");
       expect(result.output).toContain("Read(fact.ts)");
+      expect(result.output).toContain("ReadSnippets");
       expect(result.finalText).not.toMatch(/PARTIAL|部分完成|如果继续|round.?limit|轮次上限/iu);
       expect(JSON.stringify(result.events)).toContain("final_answer_gap_returned_to_model_loop");
     }
@@ -5382,9 +6112,10 @@ describe("final answer gate aggregation", () => {
 
     for (const entry of ["main", "continuation"] as const) {
       const result = await runCase(entry);
-      expect(result.rounds).toBe(3);
+      expect(result.rounds).toBe(5);
       expect(result.finalText).toContain("ignored.ts 导出 value 42");
       expect(result.output).not.toContain("所有可用且不重复的真实补证路径均已尝试");
+      expect(result.output).toContain("ReadSnippets");
       expect(result.finalText).not.toMatch(/PARTIAL|部分完成|如果继续|round.?limit|轮次上限/iu);
       expect(result.serializedEvents).toContain("final_answer_gap_auto_execute");
       expect(result.serializedEvents).toContain("tool_call_start");

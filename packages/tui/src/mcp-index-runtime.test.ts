@@ -175,6 +175,197 @@ describe("mcp-index-runtime", () => {
     expect(result.text).toContain("已跳过 AST 预分析");
   });
 
+  test("denies first-class pre-engine when current request forbids shell before resolving the binary", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-deny-shell-"));
+    const resolvePreEngineBinary = vi.fn(async () => "mock-pre-engine");
+    const callPreEngineTool = vi.fn(async () => ({ ok: true, summary: "ok" }));
+    const context = {
+      ...createIndexContext(projectPath),
+      currentRequestTurnId: "turn-deny-shell",
+      currentUserActionConstraintsRequestTurnId: "turn-deny-shell",
+      currentUserActionConstraints: {
+        readonlyOnly: true,
+        forbidWrite: true,
+        forbidTests: false,
+        forbidBuild: false,
+        forbidLint: false,
+        forbidTypecheck: false,
+        forbidSmoke: false,
+        forbidShell: true,
+        forbidAllTools: false,
+      },
+      discoveredDeferredToolNames: new Set<string>(["pre_plan"]),
+      mcp: { enabled: false, servers: [], tools: [] },
+      skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [] },
+      plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [] },
+    };
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-test",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary,
+      callPreEngineTool,
+    });
+
+    const result = await executeExtraTool(
+      { tool_name: "pre_plan", params: { task: "inspect repository" } },
+      context as never,
+      { firstClassPreEngine: true },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("current request forbids shell commands");
+    expect(resolvePreEngineBinary).not.toHaveBeenCalled();
+    expect(callPreEngineTool).not.toHaveBeenCalled();
+  });
+
+  test("denies local stdio MCP when current request forbids shell before spawning", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-mcp-deny-shell-"));
+    const sentinel = join(projectPath, "spawned.txt");
+    const context = {
+      ...createIndexContext(projectPath),
+      config: {
+        ...defaultConfig,
+        mcp: {
+          ...defaultConfig.mcp,
+          enabledServers: ["local-denied"],
+          servers: {
+            ...defaultConfig.mcp.servers,
+            "local-denied": {
+              command: process.execPath,
+              args: [
+                "-e",
+                `require("node:fs").writeFileSync(${JSON.stringify(sentinel)}, "spawned")`,
+              ],
+            },
+          },
+        },
+      },
+      currentRequestTurnId: "turn-deny-mcp",
+      currentUserActionConstraintsRequestTurnId: "turn-deny-mcp",
+      currentUserActionConstraints: {
+        readonlyOnly: true,
+        forbidWrite: true,
+        forbidTests: false,
+        forbidBuild: false,
+        forbidLint: false,
+        forbidTypecheck: false,
+        forbidSmoke: false,
+        forbidShell: true,
+        forbidAllTools: false,
+      },
+      discoveredDeferredToolNames: new Set<string>(["mcp:local-denied:demo"]),
+      mcp: {
+        enabled: true,
+        servers: [{ name: "local-denied", command: process.execPath, status: "configured" }],
+        tools: [
+          {
+            server: "local-denied",
+            name: "demo",
+            description: "demo",
+            discovery: "discovered",
+            trusted: true,
+            schemaLoaded: true,
+            runtimeVersion: "compatible",
+          },
+        ],
+      },
+      skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [] },
+      plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [] },
+    };
+
+    const result = await executeExtraTool(
+      { tool_name: "mcp:local-denied:demo", params: {} },
+      context as never,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("current request forbids shell commands");
+    await expect(access(sentinel)).rejects.toThrow();
+  });
+
+  test("denies SSE MCP when current request forbids all tools before fetching", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-mcp-deny-all-"));
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("SSE fetch should not run");
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      value: fetchSpy,
+      configurable: true,
+      writable: true,
+    });
+    try {
+      const context = {
+        ...createIndexContext(projectPath),
+        config: {
+          ...defaultConfig,
+          mcp: {
+            ...defaultConfig.mcp,
+            enabledServers: ["sse-denied"],
+            servers: {
+              ...defaultConfig.mcp.servers,
+              "sse-denied": {
+                transport: "sse",
+                url: "https://example.com/mcp",
+              },
+            },
+          },
+        },
+        currentRequestTurnId: "turn-deny-all",
+        currentUserActionConstraintsRequestTurnId: "turn-deny-all",
+        currentUserActionConstraints: {
+          readonlyOnly: true,
+          forbidWrite: true,
+          forbidTests: false,
+          forbidBuild: false,
+          forbidLint: false,
+          forbidTypecheck: false,
+          forbidSmoke: false,
+          forbidShell: true,
+          forbidAllTools: true,
+        },
+        discoveredDeferredToolNames: new Set<string>(["mcp:sse-denied:demo"]),
+        mcp: {
+          enabled: true,
+          servers: [{ name: "sse-denied", command: "", status: "configured" }],
+          tools: [
+            {
+              server: "sse-denied",
+              name: "demo",
+              description: "demo",
+              discovery: "discovered",
+              trusted: true,
+              schemaLoaded: true,
+              runtimeVersion: "compatible",
+            },
+          ],
+        },
+        skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [] },
+        plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [] },
+      };
+
+      const result = await executeExtraTool(
+        { tool_name: "mcp:sse-denied:demo", params: {} },
+        context as never,
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.text).toContain("current request forbids all tools");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(globalThis, "fetch", {
+        value: originalFetch,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
+
   test("first-class pre-engine tools degrade when analysis returns low confidence", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-low-confidence-"));
     const context = {

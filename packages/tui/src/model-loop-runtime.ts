@@ -1404,7 +1404,8 @@ export function evidenceSupportsLocalCodeFact(
       !negativeClaim &&
       claim !== undefined &&
       extractClaimTargets(claim).length > 0 &&
-      record.supportsClaims.includes("read_nonempty")
+      record.supportsClaims.includes("read_nonempty") &&
+      record.supportsClaims.includes("source_snippet")
     );
   }
   const tokens = evidenceTokens(record);
@@ -1439,7 +1440,7 @@ function localCodeFactEvidenceSuperseded(
     if (
       Number.isNaN(changedAt) ||
       changedAt < recordedAt ||
-      (changedAt === recordedAt && candidateIndex <= recordIndex)
+      (changedAt === recordedAt && candidateIndex >= recordIndex)
     ) {
       return false;
     }

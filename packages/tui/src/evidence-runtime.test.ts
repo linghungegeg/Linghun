@@ -208,6 +208,42 @@ describe("evidence-runtime", () => {
     ).toHaveLength(1);
   });
 
+  it("bounds the transcript fallback scan for a missing tool-result ledger", async () => {
+    let readOptions:
+      | { limit: number; maxBytes?: number; maxLineBytes?: number; maxDiagnostics?: number }
+      | undefined;
+    const context = {
+      projectPath: "F:/repo",
+      sessionId: "session-ledger-bounds",
+      evidence: [],
+      toolResultBudgetState: {
+        seenIds: new Set<string>(),
+        replacements: new Map(),
+        hasLegacyArtifactPaths: true,
+      },
+      store: {
+        readRecentTranscriptEvents: async (_sessionId: string, options: typeof readOptions) => {
+          readOptions = options;
+          return { events: [], diagnostics: [] };
+        },
+      },
+    } as unknown as TuiContext;
+
+    const resolutions = await resolveToolResultBudgetLedgerRecords(
+      context,
+      "session-ledger-bounds",
+      [{ toolUseId: "tool-old", contentSha256: "a".repeat(64) }],
+    );
+
+    expect(resolutions).toEqual([{ identity: undefined, content: undefined }]);
+    expect(readOptions).toMatchObject({
+      limit: 1,
+      maxBytes: 4 * 1024 * 1024,
+      maxLineBytes: 1024 * 1024,
+      maxDiagnostics: 20,
+    });
+  });
+
   it("persists owner scope before guarded tool failure evidence append", async () => {
     const events: Array<{ type?: string; ownerScope?: unknown }> = [];
     const context = {
@@ -425,6 +461,59 @@ describe("evidence-runtime", () => {
     expect(events).toHaveLength(1);
   });
 
+  it("marks failed readonly tool evidence as non-supportive", async () => {
+    const context = {
+      evidence: [],
+      store: { appendEvent: async () => undefined },
+    } as never;
+
+    const evidence = await recordToolEvidence(
+      context,
+      "session-1",
+      "Read",
+      { text: "file not found", data: { isError: true } },
+      { path: "src/missing.ts" },
+    );
+
+    expect(evidence?.supportsClaims).toEqual(expect.arrayContaining(["Read", "tool_failure"]));
+    expect(evidence?.supportsClaims).not.toContain("read_nonempty");
+  });
+
+  it("keeps only successful structured readonly targets", async () => {
+    const context = {
+      evidence: [],
+      projectPath: "C:/repo",
+      store: { appendEvent: async () => undefined },
+    } as never;
+
+    const evidence = await recordToolEvidence(
+      context,
+      "session-1",
+      "ReadSnippets",
+      {
+        text: "mixed",
+        data: {
+          count: 1,
+          ranges: [
+            { path: "src/a.ts", content: "1\tconst a = 1;" },
+            { path: "src/missing.ts", content: "", error: "not found" },
+          ],
+        },
+      },
+      {
+        ranges: [
+          { path: "src/a.ts", start: 1, end: 1 },
+          { path: "src/missing.ts", start: 1, end: 1 },
+        ],
+      },
+    );
+
+    expect(evidence?.ownerScope?.targets).toEqual(["src/a.ts"]);
+    expect(evidence?.summary).toContain("ranges=src/a.ts");
+    expect(evidence?.summary).not.toContain("src/missing.ts");
+    expect(evidence?.supportsClaims).toContain("read_nonempty");
+  });
+
   it("records SourcePack and ReadSnippets targets without pass evidence", async () => {
     const events: unknown[] = [];
     const context = {
@@ -450,7 +539,10 @@ describe("evidence-runtime", () => {
       context,
       "session-1",
       "ReadSnippets",
-      { text: "src/b.ts:1-1\n1\tconst b = 1;" },
+      {
+        text: "src/b.ts:1-1\n1\tconst b = 1;",
+        data: { count: 1, ranges: [{ path: "src/b.ts", content: "1\tconst b = 1;" }] },
+      },
       { ranges: [{ path: "src/b.ts", start: 1, end: 1 }] },
     );
 

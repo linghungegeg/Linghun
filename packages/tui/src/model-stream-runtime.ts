@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import {
+  type CacheTurnStats,
   parseUsableTranscriptCompactBoundary,
   type TranscriptEvent,
 } from "@linghun/core";
@@ -44,7 +45,6 @@ import {
   resolveCachePolicy,
 } from "./cache-policy-runtime.js";
 import {
-  appendUsageEvents,
   compactPreflightDeps,
   markContextUsageStale,
   recordModelUsage,
@@ -859,11 +859,20 @@ function finalGapExecutionStateAdvanced(
   state: FinalGapProgressState | undefined,
 ): boolean {
   if (!state) return false;
-  return (
-    (!!state.scopeFingerprint && state.scopeFingerprint !== finalGapScopeFingerprint(context)) ||
-    (!!state.freshnessFingerprint &&
-      state.freshnessFingerprint !== finalGapFreshnessFingerprint(context))
-  );
+  if (state.scopeFingerprint && state.scopeFingerprint !== finalGapScopeFingerprint(context)) {
+    return true;
+  }
+  if (!state.evidenceAction) return false;
+  const evidenceAction = state.evidenceAction;
+  const previousFingerprints = state.relevantEvidenceFingerprints ?? new Set<string>();
+  return evidenceForCurrentVerificationScope(context)
+    .filter(
+      (record) =>
+        evidenceSupportsExecutionProgress(record) &&
+        evidenceMatchesFinalGapAction(record, evidenceAction),
+    )
+    .map(createEvidenceProgressFingerprint)
+    .some((fingerprint) => !previousFingerprints.has(fingerprint));
 }
 
 function evidenceSupportsExecutionProgress(record: EvidenceRecord): boolean {
@@ -919,6 +928,105 @@ function recordCacheUsageObservation(
   usage: ModelUsage,
 ): void {
   recordCacheUsageObservationState(context.cache, usage, kind);
+}
+
+type ModelUsageCommitKind = "main" | "continuation" | "final";
+
+type StagedModelUsageCommit = {
+  stats: CacheTurnStats;
+  cache: Pick<
+    TuiContext["cache"],
+    | "lastRequestObservation"
+    | "lastMainChainRequestObservation"
+    | "lastRequestObservationByKind"
+    | "contextUsage"
+    | "nextTurn"
+    | "lastFreshness"
+    | "history"
+    | "postCompactCacheWarmup"
+  >;
+  roleUsage: TuiContext["roleUsage"];
+};
+
+function stageModelUsageCommit(
+  context: TuiContext,
+  usage: ModelUsage,
+  kind: ModelUsageCommitKind,
+): StagedModelUsageCommit {
+  const shadowCache: TuiContext["cache"] = {
+    ...context.cache,
+    history: [...context.cache.history],
+    lastRequestObservation: context.cache.lastRequestObservation
+      ? { ...context.cache.lastRequestObservation }
+      : undefined,
+    lastMainChainRequestObservation: context.cache.lastMainChainRequestObservation
+      ? { ...context.cache.lastMainChainRequestObservation }
+      : undefined,
+    lastRequestObservationByKind: context.cache.lastRequestObservationByKind
+      ? { ...context.cache.lastRequestObservationByKind }
+      : undefined,
+    contextUsage: context.cache.contextUsage
+      ? { ...context.cache.contextUsage }
+      : undefined,
+    lastFreshness: context.cache.lastFreshness
+      ? {
+          ...context.cache.lastFreshness,
+          changedKeys: [...context.cache.lastFreshness.changedKeys],
+        }
+      : undefined,
+    postCompactCacheWarmup: context.cache.postCompactCacheWarmup
+      ? {
+          ...context.cache.postCompactCacheWarmup,
+          lastChangedKeys: [...context.cache.postCompactCacheWarmup.lastChangedKeys],
+        }
+      : undefined,
+  };
+  const shadowContext = {
+    ...context,
+    cache: shadowCache,
+    roleUsage: context.roleUsage.map((item) => ({ ...item })),
+  } as TuiContext;
+  recordCacheUsageObservation(shadowContext, kind, usage);
+  const stats = recordModelUsage(shadowContext, usage, kind);
+  return {
+    stats,
+    cache: {
+      lastRequestObservation: shadowCache.lastRequestObservation,
+      lastMainChainRequestObservation: shadowCache.lastMainChainRequestObservation,
+      lastRequestObservationByKind: shadowCache.lastRequestObservationByKind,
+      contextUsage: shadowCache.contextUsage,
+      nextTurn: shadowCache.nextTurn,
+      lastFreshness: shadowCache.lastFreshness,
+      history: shadowCache.history,
+      postCompactCacheWarmup: shadowCache.postCompactCacheWarmup,
+    },
+    roleUsage: shadowContext.roleUsage,
+  };
+}
+
+async function appendUsageEventGuarded(
+  context: TuiContext,
+  sessionId: string,
+  stats: CacheTurnStats,
+  commitGuard: () => boolean,
+): Promise<void> {
+  await context.store.appendEvent(
+    sessionId,
+    { type: "usage", usage: stats, createdAt: new Date().toISOString() },
+    commitGuard,
+  );
+}
+
+function commitStagedModelUsage(context: TuiContext, staged: StagedModelUsageCommit): void {
+  context.cache.lastRequestObservation = staged.cache.lastRequestObservation;
+  context.cache.lastMainChainRequestObservation = staged.cache.lastMainChainRequestObservation;
+  context.cache.lastRequestObservationByKind = staged.cache.lastRequestObservationByKind;
+  context.cache.contextUsage = staged.cache.contextUsage;
+  context.cache.nextTurn = staged.cache.nextTurn;
+  context.cache.lastFreshness = staged.cache.lastFreshness;
+  context.cache.history = staged.cache.history;
+  context.cache.postCompactCacheWarmup = staged.cache.postCompactCacheWarmup;
+  context.roleUsage = staged.roleUsage;
 }
 
 function injectAgentCompletionMainChainContext(
@@ -1109,13 +1217,6 @@ function finalGapHasProgress(
   if (previous.scopeFingerprint && previous.scopeFingerprint !== currentScopeFingerprint) {
     return true;
   }
-  const currentFreshnessFingerprint = finalGapFreshnessFingerprint(context);
-  if (
-    previous.freshnessFingerprint &&
-    previous.freshnessFingerprint !== currentFreshnessFingerprint
-  ) {
-    return true;
-  }
 
   // Stage 4: Gap must shrink or new matching evidence must appear
   const currentKinds = new Set(result.unsupportedKinds);
@@ -1132,8 +1233,7 @@ function finalGapHasProgress(
   // Read/Grep/repeated PASS without gap change is not progress unless a new
   // owner-scoped evidence record directly supports the action that was run.
   if (!previous.evidenceAction) return false;
-
-  return false;
+  return finalGapExecutionStateAdvanced(context, previous);
 }
 
 function captureFinalGapProgressState(
@@ -1252,7 +1352,7 @@ function abortSupersededFinalGapVerification(context: TuiContext): void {
 function finalGapScopeFingerprint(context: TuiContext): string {
   return stableHash({
     projectPath: normalizeEvidenceCwd(context.projectPath),
-    changedFiles: [...getRequestScopedVerificationChangedFiles(context)].sort(),
+    changedFiles: [...(context.currentRequestChangedFiles ?? [])].sort(),
   });
 }
 
@@ -2877,26 +2977,74 @@ async function prepareMessagesForProviderPreflightWithActivity(
 ): Promise<Awaited<ReturnType<typeof prepareMessagesForProviderPreflight>>> {
   const previousPhase = context.requestActivityPhase;
   const previousOwner = context.requestActivityOwner;
+  const requestOwner = previousOwner ?? resolveRequestActivityOwner(context);
+  const requestController = context.activeAbortController;
+  const requestSignal = requestController?.signal;
+  const previousToolName = context.requestActivityToolName;
+  const previousToolUseId = context.requestActivityToolUseId;
+  const previousToolTarget = (context as { requestActivityToolTarget?: string })
+    .requestActivityToolTarget;
   const preflightInput = shouldForceCompactFromConfirmedUsage(context)
     ? { ...input, trigger: "reactive" as const }
     : input;
   let result: Awaited<ReturnType<typeof prepareMessagesForProviderPreflight>> | undefined;
-  startRequestActivity(output, context, "compacting_context");
+  let compactActivityStarted = false;
+  const requestIsCurrent = () =>
+    requestSignal?.aborted !== true &&
+    (requestOwner.kind !== "foreground" ||
+      (requestOwner.requestTurnId !== undefined &&
+        context.currentRequestTurnId === requestOwner.requestTurnId &&
+        context.activeAbortController === requestController));
   try {
-    result = await prepareMessagesForProviderPreflight(preflightInput);
+    result = await prepareMessagesForProviderPreflight({
+      ...preflightInput,
+      onCompactStart: () => {
+        if (
+          compactActivityStarted ||
+          !requestIsCurrent() ||
+          (context.requestActivityOwner !== undefined &&
+            !sameRequestActivityOwner(context.requestActivityOwner, requestOwner))
+        ) {
+          return;
+        }
+        startRequestActivity(output, context, "compacting_context", {
+          ownerKind: requestOwner.kind,
+          requestTurnId: requestOwner.requestTurnId,
+        });
+        compactActivityStarted =
+          context.requestActivityPhase === "compacting_context" &&
+          sameRequestActivityOwner(context.requestActivityOwner, requestOwner);
+      },
+      signal: requestSignal,
+      commitGuard: requestIsCurrent,
+    });
     return result;
   } finally {
-    if (context.requestActivityPhase === "compacting_context") {
+    if (
+      compactActivityStarted &&
+      requestIsCurrent() &&
+      context.requestActivityPhase === "compacting_context" &&
+      sameRequestActivityOwner(context.requestActivityOwner, requestOwner)
+    ) {
       if (result?.blocked) {
-        clearRequestActivity(context, previousOwner);
+        clearRequestActivity(context, requestOwner);
       } else if (previousPhase) {
-        startRequestActivity(output, context, previousPhase, previousOwner);
+        startRequestActivity(output, context, previousPhase, {
+          ownerKind: requestOwner.kind,
+          requestTurnId: requestOwner.requestTurnId,
+          toolName: previousToolName,
+          toolUseId: previousToolUseId,
+          toolTarget: previousToolTarget,
+        });
       } else {
-        clearRequestActivity(context, previousOwner);
+        clearRequestActivity(context, requestOwner);
       }
     }
   }
 }
+
+export const __testPrepareMessagesForProviderPreflightWithActivity =
+  prepareMessagesForProviderPreflightWithActivity;
 
 async function appendNaturalGateDebugEvent(
   context: TuiContext,
@@ -3342,6 +3490,7 @@ export async function sendMessage(
         return;
       }
       const promptCacheFields = await buildPromptCacheRequestFields(context);
+      if (await stopStaleRequest()) return;
       let providerRequest: ModelRequest = {
         messages: requestMessages,
         model: selectedRuntime.model,
@@ -3567,14 +3716,18 @@ export async function sendMessage(
           if (await stopStaleRequest()) return;
           if (!hadToolUse && !reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
             reactiveCompactRetried = true;
-            const reactivePreflight = await prepareMessagesForProviderPreflight({
+            const reactivePreflight = await prepareMessagesForProviderPreflightWithActivity(
+              output,
+              context,
+              {
               messages: messagesForProvider,
               context,
               sessionId,
               runtime: selectedRuntime,
               trigger: "reactive",
               deps: compactPreflightDeps,
-            });
+              },
+            );
             if (await stopStaleRequest()) return;
             if (reactivePreflight.blocked) {
               writeLine(output, reactivePreflight.message);
@@ -3690,16 +3843,18 @@ export async function sendMessage(
       if (await stopStaleRequest()) return;
       const acceptedAttemptGeneration = providerAttemptGeneration;
       if (pendingRoundUsage) {
-        recordCacheUsageObservation(context, "main", pendingRoundUsage);
-        const stats = recordModelUsage(context, pendingRoundUsage, "main");
-        await appendUsageEvents(context, sessionId, stats);
-        if (
-          acceptedAttemptGeneration !== providerAttemptGeneration ||
-          (await stopStaleRequest())
-        ) {
-          return;
-        }
-        scheduleApiTokenCountDiagnostics({
+          const stagedUsage = stageModelUsageCommit(context, pendingRoundUsage, "main");
+          await appendUsageEventGuarded(context, sessionId, stagedUsage.stats, () =>
+            requestOwnerIsCurrent() && acceptedAttemptGeneration === providerAttemptGeneration,
+          );
+          if (
+            acceptedAttemptGeneration !== providerAttemptGeneration ||
+            (await stopStaleRequest())
+          ) {
+            return;
+          }
+          commitStagedModelUsage(context, stagedUsage);
+          scheduleApiTokenCountDiagnostics({
           context,
           gateway,
           runtime: selectedRuntime,
@@ -4036,11 +4191,10 @@ export async function sendMessage(
                 );
                 if (await stopStaleRequest()) return;
               } else {
-                assistantText = buildEvidenceBackedFailureAnswer(
-                  context,
-                  context.language === "en-US"
-                    ? "the selected verification level has no executable command in the current workspace"
-                    : "当前工作区没有与所选验证级别匹配的可执行命令",
+                assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+                  gateResult,
+                  context.language,
+                  evidenceForCurrentVerificationScope(context),
                 );
                 roundAssistantText = assistantText;
                 replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
@@ -5018,6 +5172,13 @@ function modelHistoryCompactSummary(
   };
 }
 
+const MODEL_HISTORY_TRANSCRIPT_MAX_EVENTS = 10_000;
+const MODEL_HISTORY_TRANSCRIPT_MAX_BYTES = 4 * 1024 * 1024;
+const MODEL_HISTORY_TRANSCRIPT_MAX_LINE_BYTES = 1024 * 1024;
+const MODEL_HISTORY_TRANSCRIPT_MAX_DIAGNOSTICS = 20;
+const BOUNDED_TRANSCRIPT_HISTORY_NOTICE =
+  "Transcript continuity notice: one or more transcript records were omitted by bounded history loading. Treat omitted history as unavailable evidence.";
+
 export async function buildModelMessagesWithRecentContext(
   context: TuiContext,
   sessionId: string,
@@ -5029,7 +5190,10 @@ export async function buildModelMessagesWithRecentContext(
   const messages: ModelMessage[] = toSystemMessages(systemPrompt);
   try {
     const recentTranscript = await context.store.readRecentTranscriptEvents(sessionId, {
-      limit: Number.MAX_SAFE_INTEGER,
+      limit: MODEL_HISTORY_TRANSCRIPT_MAX_EVENTS,
+      maxBytes: MODEL_HISTORY_TRANSCRIPT_MAX_BYTES,
+      maxLineBytes: MODEL_HISTORY_TRANSCRIPT_MAX_LINE_BYTES,
+      maxDiagnostics: MODEL_HISTORY_TRANSCRIPT_MAX_DIAGNOSTICS,
       predicate: (event) =>
         event.type === "user_message" ||
         event.type === "assistant_text_delta" ||
@@ -5045,6 +5209,12 @@ export async function buildModelMessagesWithRecentContext(
       if (!isModelHistoryCompactBoundary(recent[index])) continue;
       compactBoundaryIndex = index;
       break;
+    }
+    if (
+      (recent.length >= MODEL_HISTORY_TRANSCRIPT_MAX_EVENTS && compactBoundaryIndex < 0) ||
+      (recentTranscript.diagnostics?.length ?? 0) > 0
+    ) {
+      messages.push({ role: "system", content: BOUNDED_TRANSCRIPT_HISTORY_NOTICE });
     }
     const compactSummary = modelHistoryCompactSummary(recent[compactBoundaryIndex]);
     const activeRecent = compactBoundaryIndex >= 0 ? recent.slice(compactBoundaryIndex + 1) : recent;
@@ -5273,13 +5443,18 @@ async function streamFinalModelAnswerWithoutTools(
   evidenceActionRetryCount = 0,
 ): Promise<string> {
   const requestTurnId = continuation.requestTurnId;
+  const foregroundControllerAtEntry = context.activeAbortController;
   const attemptedRuntimeKeys = new Set(
     continuation.attemptedRuntimeKeys ?? [providerRuntimeKey(runtimeFromContinuation(continuation))],
   );
   const requestIsStale = (): boolean =>
     signal.aborted ||
     continuation.abortSignal?.aborted === true ||
-    Boolean(requestTurnId && context.currentRequestTurnId !== requestTurnId);
+    Boolean(
+      requestTurnId &&
+        (context.currentRequestTurnId !== requestTurnId ||
+          context.activeAbortController !== foregroundControllerAtEntry),
+    );
   const activityOwner = requestTurnId
     ? { kind: "foreground" as const, requestTurnId }
     : undefined;
@@ -5332,6 +5507,7 @@ async function streamFinalModelAnswerWithoutTools(
     ...(requestTurnId ? { requestTurnId } : {}),
   });
   const promptCacheFields = await buildPromptCacheRequestFields(context);
+  if (requestIsStale()) return "";
   const providerRequest: ModelRequest = applyPromptCacheKey(
     applyCacheWritePolicyToRequest(
       {
@@ -5523,10 +5699,12 @@ async function streamFinalModelAnswerWithoutTools(
   }
   const acceptedAttemptGeneration = providerAttemptGeneration;
   if (pendingUsage && !requestIsStale()) {
-    recordCacheUsageObservation(context, "final", pendingUsage);
-    const stats = recordModelUsage(context, pendingUsage, "final");
-    await appendUsageEvents(context, sessionId, stats);
+    const stagedUsage = stageModelUsageCommit(context, pendingUsage, "final");
+    await appendUsageEventGuarded(context, sessionId, stagedUsage.stats, () =>
+      !requestIsStale() && acceptedAttemptGeneration === providerAttemptGeneration,
+    );
     if (acceptedAttemptGeneration !== providerAttemptGeneration || requestIsStale()) return "";
+    commitStagedModelUsage(context, stagedUsage);
     scheduleApiTokenCountDiagnostics({
       context,
       gateway,
@@ -6247,14 +6425,18 @@ export async function continueModelAfterToolResults(
           if (await stopStaleContinuation()) return;
           if (!hadToolUse && !reactiveCompactRetried && isReactiveCompactProviderError(event.error)) {
             reactiveCompactRetried = true;
-            const reactivePreflight = await prepareMessagesForProviderPreflight({
+            const reactivePreflight = await prepareMessagesForProviderPreflightWithActivity(
+              output,
+              context,
+              {
               messages: continuation.messages,
               context,
               sessionId,
               runtime: currentRuntime,
               trigger: "reactive",
               deps: compactPreflightDeps,
-            });
+              },
+            );
             if (await stopStaleContinuation()) return;
             if (reactivePreflight.blocked) {
               writeLine(output, reactivePreflight.message);
@@ -6356,15 +6538,17 @@ export async function continueModelAfterToolResults(
       try {
       const acceptedAttemptGeneration = providerAttemptGeneration;
       if (pendingRoundUsage && requestOwnerIsCurrent()) {
-        recordCacheUsageObservation(context, "continuation", pendingRoundUsage);
-        const stats = recordModelUsage(context, pendingRoundUsage, "continuation");
-        await appendUsageEvents(context, sessionId, stats);
+        const stagedUsage = stageModelUsageCommit(context, pendingRoundUsage, "continuation");
+        await appendUsageEventGuarded(context, sessionId, stagedUsage.stats, () =>
+          requestOwnerIsCurrent() && acceptedAttemptGeneration === providerAttemptGeneration,
+        );
         if (
           acceptedAttemptGeneration !== providerAttemptGeneration ||
           (await stopStaleContinuation())
         ) {
           return;
         }
+        commitStagedModelUsage(context, stagedUsage);
         scheduleApiTokenCountDiagnostics({
           context,
           gateway,
@@ -6701,11 +6885,10 @@ export async function continueModelAfterToolResults(
                 );
                 if (await stopStaleContinuation()) return;
               } else {
-                assistantText = buildEvidenceBackedFailureAnswer(
-                  context,
-                  context.language === "en-US"
-                    ? "the selected verification level has no executable command in the current workspace"
-                    : "当前工作区没有与所选验证级别匹配的可执行命令",
+                assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+                  gateResult,
+                  context.language,
+                  evidenceForCurrentVerificationScope(context),
                 );
                 roundAssistantText = assistantText;
                 replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);

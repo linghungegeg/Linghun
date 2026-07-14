@@ -1,7 +1,42 @@
 "use strict";
 const readline = require("readline");
 const path = require("path");
+const fs = require("fs");
+const os = require("os");
 const { spawnSync } = require("child_process");
+
+let powershellBridge;
+
+function getPowershellBridge() {
+  if (powershellBridge) return powershellBridge;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "linghun-argv-bridge-"));
+  powershellBridge = path.join(dir, "invoke.ps1");
+  fs.writeFileSync(powershellBridge, [
+    "$tool = $args[0]",
+    "$toolArgs = @()",
+    "if ($args.Count -gt 1) { $toolArgs = @($args[1..($args.Count - 1)]) }",
+    "& $tool @toolArgs",
+    "exit $LASTEXITCODE",
+  ].join("\r\n"));
+  process.once("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
+  return powershellBridge;
+}
+
+function spawnToolSync(command, args, options) {
+  if (process.platform === "win32" && /\.(bat|cmd)$/i.test(command)) {
+    if ([command, ...args].some(value => /[&|<>^%!"\r\n]/.test(value))) {
+      const error = new Error("unsafe .bat/.cmd tool path or argument");
+      error.code = "UNSAFE_BATCH_ARGUMENT";
+      return { status: null, stdout: "", stderr: "", error };
+    }
+    const powershell = path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    return spawnSync(powershell, [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+      getPowershellBridge(), command, ...args,
+    ], { ...options, shell: false });
+  }
+  return spawnSync(command, args, { ...options, shell: false });
+}
 
 function findKotlinc() {
   const whichCmd = process.platform === "win32" ? "where.exe" : "which";
@@ -23,14 +58,23 @@ function runKotlincCheck(root, files) {
   for (const f of files) {
     const abs = path.isAbsolute(f) ? f : path.join(root, f);
     let r;
+    let outputDir;
     try {
-      r = spawnSync(kotlinc, ["-script", abs, "-nowarn"], {
+      outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "linghun-kotlinc-"));
+      r = spawnToolSync(kotlinc, ["-nowarn", abs, "-d", outputDir], {
         cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true, timeout: 60000,
       });
-    } catch (e) { continue; }
+    } catch (e) {
+      return { issues: [], error: `kotlinc execution failed: ${e.message}` };
+    } finally {
+      if (outputDir) fs.rmSync(outputDir, { recursive: true, force: true });
+    }
 
-    if (r.error) continue;
+    if (r.error) {
+      const message = r.error.code === "ETIMEDOUT" ? "kotlinc check timed out" : r.error.message;
+      return { issues: [], error: message };
+    }
 
     if (r.status !== 0) {
       const output = (r.stderr || "") + (r.stdout || "");
@@ -69,11 +113,20 @@ async function handleRequest(req) {
   const root = req.root || process.cwd();
   const files = req.files || [];
   if (files.length === 0) {
-    return { issues: [], status: "clean", reason: "no_files", elapsed_ms: 0 };
+    return { issues: [], status: "not_covered", reason: "no_files", elapsed_ms: 0 };
   }
 
   const lintResult = runKotlincCheck(root, files);
   if (lintResult) {
+    if (lintResult.error) {
+      return {
+        issues: [],
+        status: "error",
+        reason: "kotlinc_execution_failed",
+        error: lintResult.error,
+        elapsed_ms: Date.now() - t0,
+      };
+    }
     return {
       issues: lintResult.issues,
       status: lintResult.issues.length > 0 ? "kotlin_error" : "clean",
@@ -84,7 +137,7 @@ async function handleRequest(req) {
 
   return {
     issues: [],
-    status: "unavailable",
+    status: "tool_missing",
     reason: "kotlinc_not_found",
     elapsed_ms: Date.now() - t0,
   };

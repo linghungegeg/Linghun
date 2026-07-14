@@ -99,6 +99,7 @@ const POST_COMPACT_TARGET_RATIO = 0.3;
 const POST_COMPACT_TARGET_MIN_TOKENS = 40_000;
 const POST_COMPACT_TARGET_MAX_TOKENS = 80_000;
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
+const COMPACT_PROJECTION_EVENT_LOOKUP_LIMIT = 48;
 const MAX_COMPACT_BOUNDARIES = 20;
 
 export async function prepareMessagesForProviderPreflight(input: {
@@ -558,6 +559,32 @@ export async function prepareMessagesForProviderPreflight(input: {
         projection.terminalVisibleAfterCount = terminalProjection.afterCount;
       }
     }
+    if (willRetriggerNextTurn) {
+      await input.deps.appendSystemEvent(
+        input.context,
+        input.sessionId,
+        `context_compact_retrigger_risk: providerMessageChars=${providerMessageChars}; triggerChars=${triggerChars}; next full_summary suppressed until active tail grows by ${retriggerTailGrowthThreshold} chars`,
+        "warning",
+        canCommit,
+      );
+      if (!canCommit()) return { blocked: false, messages: input.messages };
+    }
+    const projectionEventMessage = replacementProjectionEnabled
+      ? `${COMPACT_PROJECTION_EVENT_PREFIX}${JSON.stringify(projection)}`
+      : undefined;
+    if (projectionEventMessage) {
+      const projectionEventCommitted = await appendCompactProjectionEvent(
+        input.context,
+        input.sessionId,
+        projectionEventMessage,
+        input.deps,
+        canCommit,
+      );
+      if (!projectionEventCommitted) return { blocked: false, messages: input.messages };
+    }
+    const projectionEvidence = projectionEventMessage
+      ? createCompactProjectionEvidence(projection)
+      : undefined;
     refreshCompactProjectionAcceptance(projection, input.context);
     recordCompactStrategy(input.context, {
       runtime: input.runtime,
@@ -585,26 +612,14 @@ export async function prepareMessagesForProviderPreflight(input: {
       projection,
       baseline: input.context.cache.lastRequestObservationByKind?.main,
     });
-    if (willRetriggerNextTurn) {
-      await input.deps.appendSystemEvent(
-        input.context,
+    if (projectionEvidence) {
+      rememberEvidence(input.context, projectionEvidence);
+      await input.context.store.appendEvent(
         input.sessionId,
-        `context_compact_retrigger_risk: providerMessageChars=${providerMessageChars}; triggerChars=${triggerChars}; next full_summary suppressed until active tail grows by ${retriggerTailGrowthThreshold} chars`,
-        "warning",
-        canCommit,
+        { type: "evidence_record", ...projectionEvidence },
       );
-      if (!canCommit()) return { blocked: false, messages: input.messages };
     }
-    if (replacementProjectionEnabled) {
-      await appendCompactProjectionEvents(
-        input.context,
-        input.sessionId,
-        projection,
-        input.deps,
-        canCommit,
-      );
-      if (!canCommit()) return { blocked: false, messages: input.messages };
-    }
+    if (!canCommit()) return { blocked: false, messages: input.messages };
     return { blocked: false, messages: providerMessages };
   } catch (error) {
     if (!canCommit()) return { blocked: false, messages: input.messages };
@@ -618,15 +633,56 @@ export async function prepareMessagesForProviderPreflight(input: {
       input.deps,
       canCommit,
     );
-    if (!blocked) {
-      return { blocked: false, messages: budgeted };
+    if (!canCommit()) return { blocked: false, messages: input.messages };
+    if (blocked) {
+      const message =
+        input.context.language === "en-US"
+          ? "Context compact failed and the original context still exceeds the provider limit, so the request is blocked."
+          : "上下文压缩失败且原始上下文仍超过 provider 上限，本次请求已阻断。";
+      return { blocked: true, messages: budgeted, message };
     }
-    const message =
-      input.context.language === "en-US"
-        ? "Context compact failed, so this provider request is blocked instead of continuing with partial context."
-        : "上下文压缩失败，本次 provider 请求已阻断，不会拿半截上下文继续运行。";
-    return { blocked: true, messages: budgeted, message };
+    return { blocked: false, messages: budgeted };
   }
+}
+
+async function appendCompactProjectionEvent(
+  context: TuiContext,
+  sessionId: string,
+  message: string,
+  deps: CompactPreflightDeps,
+  commitGuard: () => boolean,
+): Promise<boolean> {
+  if (!commitGuard()) return false;
+  await deps.appendSystemEvent(
+    context,
+    sessionId,
+    message,
+    "info",
+    commitGuard,
+  );
+  if (commitGuard()) return true;
+  const transcript = await context.store.readRecentTranscriptEvents(sessionId, {
+    limit: COMPACT_PROJECTION_EVENT_LOOKUP_LIMIT,
+    predicate: (event) =>
+      event.type === "system_event" &&
+      event.level === "info" &&
+      event.message === message,
+  });
+  return transcript.events.some(
+    (event) =>
+      event.type === "system_event" &&
+      event.level === "info" &&
+      event.message === message,
+  );
+}
+
+function createCompactProjectionEvidence(projection: CompactProjection) {
+  return createEvidenceRecord(
+    "user_provided",
+    `compact boundary ${projection.boundaryId}; scope provider-visible recent context projection; pressure ${projection.pressureRatio}; replacement ${projection.replacedMessageCount ?? "unknown"}->${projection.replacementMessageCount ?? "unknown"}; visible ${projection.terminalVisibleBeforeCount ?? "unknown"}->${projection.terminalVisibleAfterCount ?? "unknown"}; tool pairing safe ${projection.toolPairingSafe ? "yes" : "no"}`,
+    `compact:${projection.boundaryId}`,
+    ["context_compact_boundary"],
+  );
 }
 
 async function prepareMessagesForProviderWithToolResultBudget(
@@ -1132,37 +1188,6 @@ function injectCompactProjectionMessage(
   return insertAfterLeadingSystemMessages(messages, summaryMessage);
 }
 
-async function appendCompactProjectionEvents(
-  context: TuiContext,
-  sessionId: string,
-  projection: CompactProjection,
-  deps: CompactPreflightDeps,
-  commitGuard: () => boolean,
-): Promise<void> {
-  if (!commitGuard()) return;
-  await deps.appendSystemEvent(
-    context,
-    sessionId,
-    `${COMPACT_PROJECTION_EVENT_PREFIX}${JSON.stringify(projection)}`,
-    "info",
-    commitGuard,
-  );
-  if (!commitGuard()) return;
-  const evidence = createEvidenceRecord(
-    "user_provided",
-    `compact boundary ${projection.boundaryId}; scope provider-visible recent context projection; pressure ${projection.pressureRatio}; replacement ${projection.replacedMessageCount ?? "unknown"}->${projection.replacementMessageCount ?? "unknown"}; visible ${projection.terminalVisibleBeforeCount ?? "unknown"}->${projection.terminalVisibleAfterCount ?? "unknown"}; tool pairing safe ${projection.toolPairingSafe ? "yes" : "no"}`,
-    `compact:${projection.boundaryId}`,
-    ["context_compact_boundary"],
-  );
-  if (!commitGuard()) return;
-  rememberEvidence(context, evidence);
-  await context.store.appendEvent(
-    sessionId,
-    { type: "evidence_record", ...evidence },
-    commitGuard,
-  );
-}
-
 function recordCompactStrategy(
   context: TuiContext,
   input: {
@@ -1236,8 +1261,7 @@ async function recordCompactFailure(
 ): Promise<void> {
   if (!commitGuard()) return;
   const cooldownUntilMs = Date.now() + COMPACT_FAILURE_COOLDOWN_MS;
-  context.cache.compactCooldownUntil = cooldownUntilMs;
-  context.cache.compactFailure = {
+  const compactFailure = {
     at: new Date().toISOString(),
     reason: sanitizeCompactSummaryText(context, reason, 220),
     blocked,
@@ -1246,7 +1270,7 @@ async function recordCompactFailure(
   await deps.appendSystemEvent(
     context,
     sessionId,
-    `context compact failed: blocked ${blocked ? "yes" : "no"}; reason ${context.cache.compactFailure.reason}; cooldown until ${context.cache.compactFailure.cooldownUntil}`,
+    `context compact failed: blocked ${blocked ? "yes" : "no"}; reason ${compactFailure.reason}; cooldown until ${compactFailure.cooldownUntil}`,
     "warning",
     commitGuard,
   );
@@ -1254,7 +1278,7 @@ async function recordCompactFailure(
   await deps.captureFailureLearning(context, sessionId, {
     category: "resource_cap",
     failureSummary: "context compact failed before provider request",
-    rootCauseGuess: context.cache.compactFailure.reason,
+    rootCauseGuess: compactFailure.reason,
     avoidNextTime: blocked
       ? "Do not continue with partial context after compact failure; retry after cooldown or reduce context pressure"
       : "Compact failed but the budgeted context stayed within the provider limit; continue with budgeted context and retry compact later",
@@ -1262,6 +1286,9 @@ async function recordCompactFailure(
     relatedTarget: "context compact",
     severity: "medium",
   }, commitGuard);
+  if (!commitGuard()) return;
+  context.cache.compactCooldownUntil = cooldownUntilMs;
+  context.cache.compactFailure = compactFailure;
 }
 
 export function getProviderContextWindowChars(
