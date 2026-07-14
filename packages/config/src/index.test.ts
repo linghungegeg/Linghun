@@ -611,10 +611,13 @@ describe("config directories", () => {
     expect(config.providers["openai-compatible"]?.includeUsage).toBe(true);
   });
 
-  it("loads max inference level from env", async () => {
+  it.each([
+    ["xHiGh", "XHigh"],
+    ["mAx", "Max"],
+  ] as const)("normalizes %s inference level from env to %s", async (input, expected) => {
     vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://api.example.com/v1");
     vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "responses");
-    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "Max");
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", input);
     vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.6-sol");
     vi.resetModules();
     const { loadConfig: envLoadConfig } = await import("./index.js");
@@ -622,7 +625,7 @@ describe("config directories", () => {
 
     const config = await envLoadConfig(project);
 
-    expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("Max");
+    expect(config.providers["openai-compatible"]?.reasoningLevel).toBe(expected);
   });
 
   it("loads deepseek endpoint profile from env", async () => {
@@ -703,6 +706,35 @@ describe("config directories", () => {
     expect(config.providers["openai-compatible"]?.model).toBe("openai-compatible-model");
     expect(warningModule.lastProviderEnvWarning?.reason).toContain(
       "endpointProfile 可选 chat_completions / responses / anthropic_messages",
+    );
+  });
+
+  it("warns when Anthropic provider.env requests unsupported XHigh reasoning", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "");
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      indexModule.getProviderEnvPath(home),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1",
+        "LINGHUN_OPENAI_API_KEY=sk-provider-secret",
+        "LINGHUN_OPENAI_MODEL=claude-sonnet-4",
+        "LINGHUN_OPENAI_ENDPOINT_PROFILE=anthropic_messages",
+        "LINGHUN_INFERENCE_LEVEL=XHigh",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = await indexModule.loadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.reasoningLevel).not.toBe("Medium");
+    expect(indexModule.lastProviderEnvWarning?.reason).toContain(
+      "Anthropic Messages 不支持推理等级 XHigh",
     );
   });
 
@@ -832,6 +864,13 @@ describe("config directories", () => {
     expect(template).toContain("# LINGHUN_DEEPSEEK_ENDPOINT_PROFILE=anthropic_messages");
     expect(template).toContain("# LINGHUN_GEMINI_MODEL=gemini-3.5-flash");
     expect(template).toContain("# LINGHUN_GROK_MODEL=grok-4.20-reasoning");
+    expect(template).toContain("# OpenAI-compatible Responses: Low, Medium, High, XHigh, Max.");
+    expect(template).toContain(
+      "# Anthropic Messages and Gemini: Low, Medium, High only; XHigh/Max are unsupported.",
+    );
+    expect(template).toContain(
+      "# DeepSeek and Grok reasoning is model-controlled; this setting is not sent.",
+    );
     expect(template).toContain("LINGHUN_AUX_MODEL=");
 
     await envSaveProviderEnvSetup(
@@ -907,6 +946,105 @@ describe("config directories", () => {
     const config = await indexModule.loadConfig(project);
 
     expect(config.providers.gemini.reasoningLevel).toBe("High");
+  });
+
+  it.each([
+    ["openai-compatible", "anthropic_messages", "XHigh", "Anthropic Messages"],
+    ["gemini", undefined, "Max", "Gemini"],
+  ] as const)(
+    "rejects unsupported %s reasoning without falling back to Medium",
+    async (providerType, endpointProfile, reasoningLevel, providerName) => {
+      const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+
+      await expect(
+        saveProviderEnvSetup(
+          {
+            providerType,
+            baseUrl: "https://provider.invalid/v1",
+            apiKey: "sk-provider-secret",
+            model: "provider-model",
+            endpointProfile,
+            reasoningLevel,
+          },
+          home,
+        ),
+      ).rejects.toThrow(
+        `${providerName} 不支持推理等级 ${reasoningLevel}；当前仅支持 Low / Medium / High。`,
+      );
+      expect(await providerEnvExists(home)).toBe(false);
+    },
+  );
+
+  it("lists all supported reasoning levels in validation errors", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+
+    await expect(
+      saveProviderEnvSetup(
+        {
+          baseUrl: "https://provider.invalid/v1",
+          apiKey: "sk-provider-secret",
+          model: "provider-model",
+          reasoningLevel: "Ultra" as never,
+        },
+        home,
+      ),
+    ).rejects.toThrow("推理等级可选 Low / Medium / High / XHigh / Max，默认 Medium。");
+    expect(await providerEnvExists(home)).toBe(false);
+  });
+
+  it("normalizes project settings reasoning levels case-insensitively", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "");
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            model: "gpt-5.6-sol",
+            endpointProfile: "responses",
+            reasoningLevel: "XHIGH",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("XHigh");
+  });
+
+  it("reports unsupported project reasoning instead of falling back to Medium", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "");
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            model: "claude-sonnet-4",
+            endpointProfile: "anthropic_messages",
+            reasoningLevel: "Max",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.reasoningLevel).not.toBe("Medium");
+    expect(lastConfigRecoveryWarning?.reason).toContain(
+      "Anthropic Messages 不支持推理等级 Max",
+    );
   });
 
   it("loads supported DeepSeek fields from provider.env", async () => {

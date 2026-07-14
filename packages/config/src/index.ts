@@ -28,6 +28,8 @@ export type ProviderCompatibilityProfile =
   | "gemini"
   | "grok";
 
+export type ReasoningLevel = "Low" | "Medium" | "High" | "XHigh" | "Max";
+
 export type ProviderConfig = {
   type: "openai-compatible" | "deepseek" | "gemini" | "grok";
   baseUrl?: string;
@@ -37,7 +39,7 @@ export type ProviderConfig = {
   supportsTools?: boolean;
   endpointProfile?: EndpointProfile;
   compatibilityProfile?: ProviderCompatibilityProfile;
-  reasoningLevel?: string;
+  reasoningLevel?: ReasoningLevel;
   includeUsage?: boolean;
   // D.13H：Anthropic Context Editing / cache_edits 收口（hard-disabled）。
   // 默认未配置；只读字段，model-doctor / providers 运行时透传给
@@ -339,7 +341,7 @@ export type ProviderEnvSetup = {
   baseUrl: string;
   apiKey: string;
   model: string;
-  reasoningLevel?: "Low" | "Medium" | "High" | "Max";
+  reasoningLevel?: ReasoningLevel;
   endpointProfile?: EndpointProfile;
   includeUsage?: boolean;
   auxModel?: string;
@@ -486,7 +488,9 @@ const openAiCompatibleModelPlaceholder = "openai-compatible-model";
 const defaultOpenAiEndpointProfile = normalizeEndpointProfile(
   process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE,
 );
-const defaultReasoningLevel = process.env.LINGHUN_INFERENCE_LEVEL;
+const defaultReasoningLevel = process.env.LINGHUN_INFERENCE_LEVEL
+  ? normalizeReasoningLevel(process.env.LINGHUN_INFERENCE_LEVEL)
+  : undefined;
 const providerEnvFileName = "provider.env";
 const providerEnvKeys = new Set([
   "LINGHUN_OPENAI_BASE_URL",
@@ -541,7 +545,9 @@ LINGHUN_OPENAI_INCLUDE_USAGE=false
 # LINGHUN_GROK_API_KEY=
 # LINGHUN_GROK_MODEL=grok-4.20-reasoning
 
-# Supported reasoning levels: Low, Medium, High, Max.
+# OpenAI-compatible Responses: Low, Medium, High, XHigh, Max.
+# Anthropic Messages and Gemini: Low, Medium, High only; XHigh/Max are unsupported.
+# DeepSeek and Grok reasoning is model-controlled; this setting is not sent.
 LINGHUN_INFERENCE_LEVEL=High
 # Optional: leave empty to let helper roles follow the main model.
 LINGHUN_AUX_MODEL=
@@ -660,7 +666,6 @@ export const defaultConfig: LinghunConfig = {
       model: process.env.LINGHUN_GEMINI_MODEL ?? "gemini-3.5-flash",
       endpointProfile: "chat_completions",
       compatibilityProfile: "gemini",
-      reasoningLevel: defaultReasoningLevel,
     },
     grok: {
       type: "grok",
@@ -1062,7 +1067,14 @@ export function validateProviderEnvSetup(setup: ProviderEnvSetup): ProviderEnvSe
   const baseUrl = setup.baseUrl.trim();
   const apiKey = setup.apiKey;
   const model = setup.model.trim();
-  const reasoningLevel = normalizeReasoningLevel(setup.reasoningLevel ?? "Medium");
+  const reasoningLevel =
+    setup.providerType === "grok"
+      ? undefined
+      : normalizeProviderReasoningLevel(
+          setup.providerType ?? "openai-compatible",
+          setup.endpointProfile,
+          setup.reasoningLevel ?? "Medium",
+        );
   validateProviderBaseUrl(baseUrl);
   validateProviderApiKey(apiKey);
   validateProviderModel(model);
@@ -1134,14 +1146,54 @@ function validateProviderModel(value: string): void {
   }
 }
 
-function normalizeReasoningLevel(value: string): "Low" | "Medium" | "High" | "Max" {
+function normalizeReasoningLevel(value: string): ReasoningLevel {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return "Medium";
   if (normalized === "low") return "Low";
   if (normalized === "medium") return "Medium";
   if (normalized === "high") return "High";
+  if (normalized === "xhigh") return "XHigh";
   if (normalized === "max") return "Max";
-  throw new Error("推理等级可选 Low / Medium / High / Max，默认 Medium。");
+  throw new Error("推理等级可选 Low / Medium / High / XHigh / Max，默认 Medium。");
+}
+
+function isAnthropicReasoningLevel(
+  value: ReasoningLevel | undefined,
+): value is "Low" | "Medium" | "High" {
+  return value === "Low" || value === "Medium" || value === "High";
+}
+
+function normalizeProviderReasoningLevel(
+  providerType: ProviderConfig["type"],
+  endpointProfile: EndpointProfile | undefined,
+  value: string,
+): ReasoningLevel {
+  const reasoningLevel = normalizeReasoningLevel(value);
+  const usesAnthropicReasoning = endpointProfile === "anthropic_messages";
+  if (
+    (providerType === "gemini" || usesAnthropicReasoning) &&
+    !isAnthropicReasoningLevel(reasoningLevel)
+  ) {
+    const providerName = providerType === "gemini" ? "Gemini" : "Anthropic Messages";
+    throw new Error(
+      `${providerName} 不支持推理等级 ${reasoningLevel}；当前仅支持 Low / Medium / High。`,
+    );
+  }
+  return reasoningLevel;
+}
+
+function normalizeProviderConfigReasoning(provider: ProviderConfig): ProviderConfig {
+  if (provider.reasoningLevel === undefined || typeof provider.reasoningLevel !== "string") {
+    return provider;
+  }
+  return {
+    ...provider,
+    reasoningLevel: normalizeProviderReasoningLevel(
+      provider.type,
+      provider.endpointProfile,
+      provider.reasoningLevel,
+    ),
+  };
 }
 
 function formatProviderEnv(setup: ProviderEnvSetup): string {
@@ -1266,10 +1318,14 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
   const providerConfig: Record<string, ProviderConfig> = {};
   const openAiProvider: Partial<ProviderConfig> = {};
   if (hasMainProviderValue) {
+    const endpointProfile = normalizeEndpointProfile(
+      process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE ?? values.LINGHUN_OPENAI_ENDPOINT_PROFILE,
+    );
     validateProviderEnvSetup({
       baseUrl: process.env.LINGHUN_OPENAI_BASE_URL ?? values.LINGHUN_OPENAI_BASE_URL ?? "",
       apiKey: process.env.LINGHUN_OPENAI_API_KEY ?? values.LINGHUN_OPENAI_API_KEY ?? "",
       model: process.env.LINGHUN_OPENAI_MODEL ?? values.LINGHUN_OPENAI_MODEL ?? "",
+      endpointProfile,
       reasoningLevel: values.LINGHUN_INFERENCE_LEVEL
         ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
         : "Medium",
@@ -1277,9 +1333,7 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
     if (values.LINGHUN_OPENAI_BASE_URL) openAiProvider.baseUrl = values.LINGHUN_OPENAI_BASE_URL;
     if (values.LINGHUN_OPENAI_API_KEY) openAiProvider.apiKey = values.LINGHUN_OPENAI_API_KEY;
     if (values.LINGHUN_OPENAI_MODEL) openAiProvider.model = values.LINGHUN_OPENAI_MODEL;
-    openAiProvider.endpointProfile = values.LINGHUN_OPENAI_ENDPOINT_PROFILE
-      ? normalizeEndpointProfile(values.LINGHUN_OPENAI_ENDPOINT_PROFILE)
-      : "chat_completions";
+    openAiProvider.endpointProfile = endpointProfile;
     if (values.LINGHUN_OPENAI_INCLUDE_USAGE) {
       openAiProvider.includeUsage = parseEnvBoolean(values.LINGHUN_OPENAI_INCLUDE_USAGE);
     }
@@ -1889,10 +1943,17 @@ function validateProviders(providers: Record<string, ProviderConfig>): void {
     ) {
       throw new Error(`settings.providers.${providerId}.compatibilityProfile is invalid`);
     }
-    assertOptionalString(
-      provider.reasoningLevel,
-      `settings.providers.${providerId}.reasoningLevel`,
-    );
+    if (provider.reasoningLevel !== undefined) {
+      assertOptionalString(
+        provider.reasoningLevel,
+        `settings.providers.${providerId}.reasoningLevel`,
+      );
+      normalizeProviderReasoningLevel(
+        provider.type,
+        provider.endpointProfile,
+        provider.reasoningLevel,
+      );
+    }
     assertOptionalBoolean(provider.includeUsage, `settings.providers.${providerId}.includeUsage`);
     // D.13H：Anthropic Context Editing / cache_edits 字段校验。
     // contextEditingEnabled 必须是布尔；anthropicBetaHeaders 若存在必须是 string[]，
@@ -2351,9 +2412,17 @@ function mergeWorkspaceTrustConfig(
 }
 
 function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
-  const deepseekProvider = cleanProviderOverride(input.providers?.deepseek);
+  const normalizedProviders = input.providers
+    ? Object.fromEntries(
+        Object.entries(input.providers).map(([providerId, provider]) => [
+          providerId,
+          normalizeProviderConfigReasoning(provider),
+        ]),
+      )
+    : undefined;
+  const deepseekProvider = cleanProviderOverride(normalizedProviders?.deepseek);
   const openAiCompatibleProvider = cleanProviderOverride(
-    input.providers?.["openai-compatible"],
+    normalizedProviders?.["openai-compatible"],
     process.env.LINGHUN_OPENAI_MODEL ? openAiCompatibleModelPlaceholder : undefined,
   );
 
@@ -2364,7 +2433,7 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
       process.env.LINGHUN_DEFAULT_MODEL ?? input.defaultModel ?? defaultConfig.defaultModel,
     providers: {
       ...defaultConfig.providers,
-      ...input.providers,
+      ...normalizedProviders,
       deepseek: {
         ...defaultConfig.providers.deepseek,
         ...deepseekProvider,
@@ -2401,10 +2470,18 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
             openAiCompatibleProvider?.endpointProfile ??
             defaultConfig.providers["openai-compatible"].endpointProfile,
         ),
-        reasoningLevel:
-          process.env.LINGHUN_INFERENCE_LEVEL ??
-          openAiCompatibleProvider?.reasoningLevel ??
-          defaultConfig.providers["openai-compatible"].reasoningLevel,
+        reasoningLevel: process.env.LINGHUN_INFERENCE_LEVEL
+          ? normalizeProviderReasoningLevel(
+              "openai-compatible",
+              normalizeEndpointProfile(
+                process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE ??
+                  openAiCompatibleProvider?.endpointProfile ??
+                  defaultConfig.providers["openai-compatible"].endpointProfile,
+              ),
+              process.env.LINGHUN_INFERENCE_LEVEL,
+            )
+          : (openAiCompatibleProvider?.reasoningLevel ??
+            defaultConfig.providers["openai-compatible"].reasoningLevel),
         includeUsage:
           process.env.LINGHUN_OPENAI_INCLUDE_USAGE !== undefined
             ? parseEnvBoolean(process.env.LINGHUN_OPENAI_INCLUDE_USAGE)

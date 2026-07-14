@@ -73,7 +73,7 @@ export function parseModelSetupPrefill(text: string): ModelSetupPrefill {
   if (model) prefill.model = model;
 
   const reasoning = text.match(
-    /(?:reasoning|推理等级|推理)\s*[=:：]?\s*(Low|Medium|High|低|中|高)/iu,
+    /(?:reasoning|推理等级|推理)\s*[=:：]?\s*(Low|Medium|High|XHigh|Max|低|中|高)/iu,
   )?.[1];
   if (reasoning) prefill.reasoningLevel = normalizeModelSetupReasoningLevel(reasoning);
 
@@ -95,11 +95,16 @@ export function normalizeModelSetupProviderType(value: string): ProviderSetupTyp
   throw new Error("provider 可选 openai-compatible / gemini / grok。");
 }
 
-export function normalizeModelSetupReasoningLevel(value: string): "Low" | "Medium" | "High" {
+export function normalizeModelSetupReasoningLevel(
+  value: string,
+): "Low" | "Medium" | "High" | "XHigh" | "Max" {
   const normalized = value.trim().toLowerCase();
   if (normalized === "low" || normalized === "低") return "Low";
+  if (normalized === "medium" || normalized === "中") return "Medium";
   if (normalized === "high" || normalized === "高") return "High";
-  return "Medium";
+  if (normalized === "xhigh") return "XHigh";
+  if (normalized === "max") return "Max";
+  throw new Error("推理等级可选 Low / Medium / High / XHigh / Max，默认 Medium。");
 }
 
 export function looksLikeModelSetupInput(text: string): boolean {
@@ -213,8 +218,8 @@ export function formatModelSetupMessage(
       ? "Model name is missing. Enter the model name."
       : "缺少模型名称。请输入模型名称。",
     reasoningPrompt: english
-      ? "Reasoning level: Low / Medium / High. Press Enter to use Medium."
-      : "推理等级可选 Low / Medium / High，默认 Medium。直接回车使用 Medium。",
+      ? `Reasoning level: ${setup.values.providerType === "gemini" ? "Low / Medium / High" : "Low / Medium / High / XHigh / Max"}. Press Enter to use Medium.`
+      : `推理等级可选 ${setup.values.providerType === "gemini" ? "Low / Medium / High" : "Low / Medium / High / XHigh / Max"}，默认 Medium。直接回车使用 Medium。`,
     auxModelPrompt: english
       ? "Auxiliary model is optional. Press Enter to let helper roles follow the main model."
       : "辅助模型可选，直接回车则跟随主模型。",

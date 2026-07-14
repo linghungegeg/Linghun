@@ -832,7 +832,7 @@ describe("model-doctor-runtime", () => {
       expect(output).not.toContain("thinking.budget_tokens=2048");
     });
 
-    it("D.13K: anthropic_messages provider 无 reasoningLevel → reasoning=not configured/未生效", async () => {
+    it("D.13K: anthropic_messages provider 无 reasoningLevel → reasoning=not configured/not-sent", async () => {
       const config: LinghunConfig = {
         ...baseConfig,
         providers: {
@@ -847,7 +847,30 @@ describe("model-doctor-runtime", () => {
         },
       };
       const output = await formatModelRouteDoctor(makeContext(config));
-      expect(output).toContain("reasoning not configured/未生效");
+      expect(output).toContain("reasoning not configured/not-sent");
+    });
+
+    it("shows DeepSeek and Grok reasoning as model-controlled/not-sent", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          grok: {
+            type: "grok",
+            baseUrl: "https://api.x.ai/v1",
+            apiKey: "xai-test-key",
+            model: "grok-4.20-reasoning",
+            reasoningLevel: "Max",
+          },
+        },
+      };
+
+      const output = await formatModelRouteDoctor(makeContext(config));
+
+      expect(output).toContain("deepseek: type deepseek");
+      expect(output).toContain("grok: type grok");
+      expect(output.match(/reasoning model-controlled\/not-sent/g)).toHaveLength(2);
+      expect(output).toContain("推理由模型控制；不发送 reasoning 字段");
     });
 
     it("never leaks raw apiKey or prompt text", async () => {
@@ -898,7 +921,7 @@ describe("model-doctor-runtime", () => {
         "provider openai-compatible; model gpt-5.5; runtime profile openai_responses; endpoint profile responses",
       );
       expect(output).toContain("endpoint path /responses");
-      expect(output).toContain("reasoning effective/sent reasoning.effort=High");
+      expect(output).toContain("reasoning effective/sent reasoning.effort=high");
       expect(output).not.toContain("reasoning ignored/unsupported");
     });
 

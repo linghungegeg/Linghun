@@ -61,6 +61,7 @@ describe("Gemini and Grok native gateways", () => {
 
     expect(contract.profile).toBe("gemini_chat_completions");
     expect(contract.sendReasoning).toBe(true);
+    expect(contract.reasoningTransport).toBe("openai-reasoning-effort");
     expect(request.reasoning).toEqual({ effort: "medium" });
     expect(request.tools?.at(-1)).toEqual({ type: "web_search_preview" });
     expect(request.tools).not.toContainEqual(
@@ -75,14 +76,14 @@ describe("Gemini and Grok native gateways", () => {
       baseUrl: "https://gateway.example.com/v1",
       apiKey: "test-key",
       model: "grok-4.20-reasoning",
-      reasoningLevel: "High",
+      reasoningLevel: "Max",
     });
 
     const contract = resolveProviderRuntimeContract({
       id: "grok",
       type: "grok",
       model: "grok-4.20-reasoning",
-      reasoningLevel: "High",
+      reasoningLevel: "Max",
     });
     const request = provider.createResponsesRequest({
       messages: [{ role: "user", content: "Search the web." }],
@@ -94,6 +95,7 @@ describe("Gemini and Grok native gateways", () => {
 
     expect(contract.profile).toBe("grok_responses");
     expect(contract.sendReasoning).toBe(false);
+    expect(contract.reasoningTransport).toBe("model-controlled");
     expect(request).not.toHaveProperty("reasoning");
     expect(request.tools?.at(-1)).toEqual({ type: "web_search", external_web_access: true });
     expect(request.tools).not.toContainEqual(expect.objectContaining({ name: "WebSearch" }));
@@ -151,6 +153,26 @@ describe("Gemini and Grok native gateways", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(testCase.expectedUrl);
     expect(events).toContainEqual(testCase.expectedEvent);
+  });
+
+  it.each(["XHigh", "Max"])("rejects unverified Gemini reasoning level %s", (level) => {
+    const provider = new GeminiProvider({
+      id: "gemini",
+      type: "gemini",
+      baseUrl: "https://gateway.example.com/v1",
+      apiKey: "test-key",
+      model: "gemini-3.5-flash",
+      reasoningLevel: level,
+    });
+
+    expect(() =>
+      provider.createChatRequest({ messages: [{ role: "user", content: "hi" }] }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "MODEL_REASONING_LEVEL_UNSUPPORTED",
+        suggestion: expect.stringContaining("Low / Medium / High"),
+      }),
+    );
   });
 });
 
@@ -407,6 +429,51 @@ describe("OpenAI compatible provider", () => {
     expect(request.reasoning).toEqual({ effort: "high" });
   });
 
+  it.each([
+    ["LOW", "low"],
+    ["Medium", "medium"],
+    ["hIgH", "high"],
+    ["XHIGH", "xhigh"],
+    ["mAx", "max"],
+  ])("sends Responses reasoning level %s as exact effort %s", (level, effort) => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+      reasoningLevel: level,
+    });
+
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    expect(request.reasoning).toEqual({ effort });
+  });
+
+  it("rejects unknown Responses reasoning levels instead of sending raw values", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+      reasoningLevel: "Extreme",
+    });
+
+    expect(() =>
+      provider.createResponsesRequest({ messages: [{ role: "user", content: "hello" }] }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "MODEL_REASONING_LEVEL_UNSUPPORTED",
+        suggestion: expect.stringContaining("XHigh / Max"),
+      }),
+    );
+  });
+
   it("sends max reasoning effort to Responses gateways", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
@@ -628,6 +695,7 @@ describe("OpenAI compatible provider", () => {
       toolSchemaShape: "openai_chat_tools",
       toolResultShape: "chat_tool_message",
       sendReasoning: false,
+      reasoningTransport: "model-controlled",
       retryStatuses: [429, 502, 503, 504],
       maxAttempts: 10,
       requestTimeoutMs: 120_000,
@@ -638,6 +706,7 @@ describe("OpenAI compatible provider", () => {
       toolSchemaShape: "openai_chat_tools",
       toolResultShape: "chat_tool_message",
       sendReasoning: false,
+      reasoningTransport: "not-sent",
     });
     expect(responses).toMatchObject({
       profile: "openai_responses",
@@ -646,6 +715,7 @@ describe("OpenAI compatible provider", () => {
       toolSchemaShape: "openai_responses_tools",
       toolResultShape: "responses_function_call_output",
       sendReasoning: true,
+      reasoningTransport: "openai-reasoning-effort",
     });
   });
 
@@ -1256,7 +1326,13 @@ describe("OpenAI compatible provider", () => {
     const provider = new DeepSeekProvider({
       apiKey: "test-key",
       model: "deepseek-v4-pro",
-      reasoningLevel: "Medium",
+      reasoningLevel: "XHigh",
+    });
+    const contract = resolveProviderRuntimeContract({
+      id: "deepseek",
+      type: "deepseek",
+      model: "deepseek-reasoner",
+      reasoningLevel: "XHigh",
     });
 
     const request = provider.createChatRequest({
@@ -1265,6 +1341,10 @@ describe("OpenAI compatible provider", () => {
 
     expect(request.max_tokens).toBe(8_192);
     expect(request).not.toHaveProperty("reasoning");
+    expect(contract).toMatchObject({
+      sendReasoning: false,
+      reasoningTransport: "model-controlled",
+    });
   });
 
   it("returns a visible diagnostic when provider config disables tool support", async () => {
@@ -2590,6 +2670,7 @@ describe("resolveProviderRuntimeContract anthropic_messages branch", () => {
       apiKey: "test-key",
       model: "deepseek-v4-pro",
       endpointProfile: "anthropic_messages",
+      reasoningLevel: "Max",
     });
     const contract = resolveProviderRuntimeContract({
       id: "deepseek",
@@ -2598,6 +2679,7 @@ describe("resolveProviderRuntimeContract anthropic_messages branch", () => {
       apiKey: "test-key",
       model: "deepseek-v4-pro",
       endpointProfile: "anthropic_messages",
+      reasoningLevel: "Max",
     });
 
     const request = provider.createAnthropicMessagesRequest({
@@ -2607,7 +2689,9 @@ describe("resolveProviderRuntimeContract anthropic_messages branch", () => {
 
     expect(contract.profile).toBe("deepseek_anthropic_messages");
     expect(contract.endpoint).toBe("/anthropic/v1/messages");
+    expect(contract.reasoningTransport).toBe("model-controlled");
     expect(request.model).toBe("deepseek-v4-pro");
+    expect(request).not.toHaveProperty("thinking");
     expect(request.tools?.at(-1)).toEqual({
       type: "web_search_20250305",
       name: "web_search",
@@ -4840,6 +4924,7 @@ describe("D.13K Anthropic Messages extended thinking", () => {
     });
     expect(contract.endpointProfile).toBe("anthropic_messages");
     expect(contract.sendReasoning).toBe(true);
+    expect(contract.reasoningTransport).toBe("anthropic-thinking-budget");
   });
 
   it("contract: anthropic_messages 无 reasoningLevel → sendReasoning=false", () => {
@@ -4891,6 +4976,25 @@ describe("D.13K Anthropic Messages extended thinking", () => {
       expect(body.thinking?.budget_tokens).toBe(8192);
     }
   });
+
+  it.each(["XHigh", "Max", "Extreme"])(
+    "body: unsupported reasoningLevel=%s 明确报错，不回退 Medium",
+    (level) => {
+      const provider = buildClaudeProvider();
+
+      expect(() =>
+        provider.createAnthropicMessagesRequest({
+          messages: [{ role: "user", content: "hi" }],
+          reasoningLevel: level,
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "MODEL_REASONING_LEVEL_UNSUPPORTED",
+          suggestion: expect.stringContaining("不会静默回退到 Medium"),
+        }),
+      );
+    },
+  );
 
   it("body: 无 reasoningLevel → 不写 thinking 字段", () => {
     const provider = buildClaudeProvider();

@@ -396,32 +396,47 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     // 技术字段（effective/sent level High，路径详情）仍写在同一行的括号里，
     // 避免再开一段；既不破坏现有 doctor grep 用例（仍含 effective/sent 关键字），
     // 也让普通用户能直接看懂主行。
-    const reasoningSentLocal = Boolean(
-      reasoningLevel && contract.sendReasoning,
-    );
-    const reasoningPlain = !reasoningLevel
-      ? context.language === "en-US"
-        ? "Reasoning not configured"
-        : "未配置推理等级"
-      : reasoningSentLocal
+    const normalizedReasoningLevel = reasoningLevel?.trim().toLowerCase();
+    const anthropicBudget =
+      normalizedReasoningLevel === "low"
+        ? 1024
+        : normalizedReasoningLevel === "medium"
+          ? 4096
+          : normalizedReasoningLevel === "high"
+            ? 8192
+            : undefined;
+    const reasoningTechnical =
+      contract.reasoningTransport === "model-controlled"
+        ? "model-controlled/not-sent"
+        : contract.unsupportedReasoningLevel
+          ? `unsupported/not-sent level=${contract.unsupportedReasoningLevel}`
+          : contract.reasoningTransport === "openai-reasoning-effort" && normalizedReasoningLevel
+            ? `effective/sent reasoning.effort=${normalizedReasoningLevel}`
+            : contract.reasoningTransport === "anthropic-thinking-budget" && anthropicBudget
+              ? `effective/sent thinking.budget_tokens=${anthropicBudget}`
+              : reasoningLevel
+                ? `not-sent compatibility profile ${compatibilityProfile}`
+                : "not configured/not-sent";
+    const reasoningPlain =
+      contract.reasoningTransport === "model-controlled"
         ? context.language === "en-US"
-          ? `Reasoning ${reasoningLevel} sent`
-          : `推理 ${reasoningLevel} 已发送`
-        : context.language === "en-US"
-          ? `Reasoning ${reasoningLevel} not sent (gateway or model rejects it)`
-          : `推理 ${reasoningLevel} 不会发送（当前网关或模型不接受）`;
-    const reasoningTechnical = reasoningLevel
-      ? !contract.sendReasoning
-        ? `ignored/unsupported/未生效 compatibility profile ${compatibilityProfile}`
-        : endpointProfile === "responses"
-        ? `effective/sent reasoning.effort=${reasoningLevel}`
-        : endpointProfile === "anthropic_messages"
-          ? `effective/sent thinking.budget_tokens=${reasoningLevel === "Low" ? "1024" : reasoningLevel === "Medium" ? "4096" : reasoningLevel === "High" ? "8192" : reasoningLevel}`
-          : compatibilityProfile === "permissive_openai_compatible" ||
-              compatibilityProfile === "gemini"
-            ? `effective/sent reasoning.effort=${reasoningLevel}`
-            : `ignored/unsupported/未生效 compatibility profile ${compatibilityProfile}`
-      : "not configured/未生效";
+          ? "Reasoning is model-controlled; no reasoning field is sent"
+          : "推理由模型控制；不发送 reasoning 字段"
+        : contract.unsupportedReasoningLevel
+          ? context.language === "en-US"
+            ? `Reasoning ${contract.unsupportedReasoningLevel} is unsupported and not sent`
+            : `推理 ${contract.unsupportedReasoningLevel} 不受支持且不会发送`
+          : !reasoningLevel
+            ? context.language === "en-US"
+              ? "Reasoning not configured"
+              : "未配置推理等级"
+            : contract.sendReasoning
+              ? context.language === "en-US"
+                ? `Reasoning ${reasoningLevel} sent`
+                : `推理 ${reasoningLevel} 已发送`
+              : context.language === "en-US"
+                ? `Reasoning ${reasoningLevel} not sent (gateway or model rejects it)`
+                : `推理 ${reasoningLevel} 不会发送（当前网关或模型不接受）`;
     // 顺序保持 technical 在前，让诊断仍容易搜索；human-readable 段放在括号里，
     // 给普通用户当主语义看。
     const reasoningStatus = `${reasoningTechnical} (${reasoningPlain})`;

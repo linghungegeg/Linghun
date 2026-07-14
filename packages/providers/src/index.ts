@@ -93,6 +93,12 @@ export type ProviderRuntimeProfile =
   | "gemini_chat_completions"
   | "grok_responses";
 
+export type ProviderReasoningTransport =
+  | "openai-reasoning-effort"
+  | "anthropic-thinking-budget"
+  | "model-controlled"
+  | "not-sent";
+
 export type ProviderConfig = {
   id: string;
   type: "openai-compatible" | "deepseek" | "gemini" | "grok";
@@ -434,6 +440,8 @@ export type ProviderRuntimeContract = {
   compatibilityProfile: ProviderCompatibilityProfile;
   supportsTools: boolean;
   sendReasoning: boolean;
+  reasoningTransport: ProviderReasoningTransport;
+  unsupportedReasoningLevel?: string;
   includeUsage: boolean;
   toolSchemaShape:
     | "openai_chat_tools"
@@ -1054,19 +1062,49 @@ export class OpenAiCompatibleProvider implements Provider {
   }
 }
 
+type ProviderReasoningCapability = Pick<
+  ProviderRuntimeContract,
+  "sendReasoning" | "reasoningTransport" | "unsupportedReasoningLevel"
+>;
+
+function resolveSendableReasoning(
+  level: string | undefined,
+  transport: Exclude<ProviderReasoningTransport, "model-controlled" | "not-sent">,
+  supportedLevels: readonly string[],
+): ProviderReasoningCapability {
+  if (!level) {
+    return { sendReasoning: false, reasoningTransport: "not-sent" };
+  }
+  const normalized = level.trim().toLowerCase();
+  if (supportedLevels.includes(normalized)) {
+    return { sendReasoning: true, reasoningTransport: transport };
+  }
+  return {
+    sendReasoning: false,
+    reasoningTransport: "not-sent",
+    unsupportedReasoningLevel: level,
+  };
+}
+
 export function resolveProviderRuntimeContract(
   config: ProviderConfig,
   request: ModelRequest = { messages: [] },
 ): ProviderRuntimeContract {
   const supportsTools = config.supportsTools !== false;
+  const reasoningLevel = request.reasoningLevel ?? config.reasoningLevel;
   if (config.type === "gemini") {
+    const reasoning = resolveSendableReasoning(
+      reasoningLevel,
+      "openai-reasoning-effort",
+      ["low", "medium", "high"],
+    );
     return {
       profile: "gemini_chat_completions",
       endpointProfile: "chat_completions",
       endpoint: "/chat/completions",
       compatibilityProfile: "gemini",
       supportsTools,
-      sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
+      ...reasoning,
       includeUsage: true,
       toolSchemaShape: supportsTools ? "openai_chat_tools" : "tools_disabled",
       toolResultShape: supportsTools ? "chat_tool_message" : "tools_disabled",
@@ -1084,6 +1122,7 @@ export function resolveProviderRuntimeContract(
       compatibilityProfile: "grok",
       supportsTools,
       sendReasoning: false,
+      reasoningTransport: "model-controlled",
       includeUsage: true,
       toolSchemaShape: supportsTools ? "openai_responses_tools" : "tools_disabled",
       toolResultShape: supportsTools ? "responses_function_call_output" : "tools_disabled",
@@ -1107,7 +1146,8 @@ export function resolveProviderRuntimeContract(
         endpoint: "/anthropic/v1/messages",
         compatibilityProfile: "anthropic_messages",
         supportsTools,
-        sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
+        sendReasoning: false,
+        reasoningTransport: "model-controlled",
         includeUsage: false,
         toolSchemaShape: supportsTools ? "anthropic_tools" : "tools_disabled",
         toolResultShape: supportsTools ? "anthropic_tool_result" : "tools_disabled",
@@ -1124,6 +1164,7 @@ export function resolveProviderRuntimeContract(
       compatibilityProfile: "deepseek",
       supportsTools,
       sendReasoning: false,
+      reasoningTransport: "model-controlled",
       includeUsage: config.includeUsage === true,
       toolSchemaShape: "openai_chat_tools",
       toolResultShape: "chat_tool_message",
@@ -1153,21 +1194,25 @@ export function resolveProviderRuntimeContract(
     config.compatibilityProfile ??
     (endpointProfile === "anthropic_messages" ? "anthropic_messages" : "strict_openai_compatible");
   if (endpointProfile === "anthropic_messages") {
+    const reasoning = resolveSendableReasoning(
+      reasoningLevel,
+      "anthropic-thinking-budget",
+      ["low", "medium", "high"],
+    );
     // D.13G：anthropic_messages profile 现在原生支持 tools/tool calling。
     // 默认 supportsTools=true（与 OpenAI 路径行为一致），仅当用户显式
     // config.supportsTools=false 时才禁用；toolSchemaShape="anthropic_tools"
     // 走 Anthropic 原生 schema（{name, description, input_schema}），
     // toolResultShape="anthropic_tool_result" 走 user content block 形态。
-    // D.13K：Anthropic Messages 原生支持 extended thinking。当
-    // request.reasoningLevel 或 config.reasoningLevel 非空时，sendReasoning=true，
-    // body builder 会注入 thinking 字段（不复用 OpenAI reasoning.effort）。
+    // D.13K：Anthropic Messages 原生支持 extended thinking。仅 Low/Medium/High
+    // 会由 body builder 注入 thinking 字段（不复用 OpenAI reasoning.effort）。
     return {
       profile: "anthropic_messages",
       endpointProfile,
       endpoint: "/v1/messages",
       compatibilityProfile,
       supportsTools,
-      sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
+      ...reasoning,
       includeUsage: false,
       toolSchemaShape: supportsTools ? "anthropic_tools" : "tools_disabled",
       toolResultShape: supportsTools ? "anthropic_tool_result" : "tools_disabled",
@@ -1178,13 +1223,18 @@ export function resolveProviderRuntimeContract(
     };
   }
   if (endpointProfile === "responses") {
+    const reasoning = resolveSendableReasoning(
+      reasoningLevel,
+      "openai-reasoning-effort",
+      ["low", "medium", "high", "xhigh", "max"],
+    );
     return {
       profile: "openai_responses",
       endpointProfile,
       endpoint: "/responses",
       compatibilityProfile,
       supportsTools,
-      sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
+      ...reasoning,
       includeUsage: config.includeUsage === true,
       toolSchemaShape: "openai_responses_tools",
       toolResultShape: "responses_function_call_output",
@@ -1194,6 +1244,15 @@ export function resolveProviderRuntimeContract(
       streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
     };
   }
+  const reasoning =
+    compatibilityProfile === "permissive_openai_compatible"
+      ? resolveSendableReasoning(reasoningLevel, "openai-reasoning-effort", [
+          "low",
+          "medium",
+          "high",
+          "max",
+        ])
+      : ({ sendReasoning: false, reasoningTransport: "not-sent" } as const);
   return {
     profile:
       compatibilityProfile === "permissive_openai_compatible"
@@ -1203,9 +1262,7 @@ export function resolveProviderRuntimeContract(
     endpoint: "/chat/completions",
     compatibilityProfile,
     supportsTools,
-    sendReasoning:
-      compatibilityProfile === "permissive_openai_compatible" &&
-      Boolean(request.reasoningLevel ?? config.reasoningLevel),
+    ...reasoning,
     includeUsage: config.includeUsage === true,
     toolSchemaShape: "openai_chat_tools",
     toolResultShape: "chat_tool_message",
@@ -1717,6 +1774,7 @@ function createChatProfileRequest(
     });
   }
   const contract = resolveProviderRuntimeContract(config, request);
+  assertReasoningCapability(contract);
   const model = normalizeProviderRequestModel(request.model ?? config.model, config);
   const tools = createOpenAiChatTools(request, contract);
   const repaired = repairToolMessagePairing(request.messages);
@@ -1759,6 +1817,7 @@ function createResponsesProfileRequest(
     });
   }
   const contract = resolveProviderRuntimeContract(config, request);
+  assertReasoningCapability(contract);
   const model = normalizeProviderRequestModel(request.model ?? config.model, config);
   const tools = createOpenAiResponsesTools(request, contract);
   const repaired = repairToolMessagePairing(request.messages);
@@ -1822,6 +1881,7 @@ function createAnthropicMessagesProfileRequest(
     });
   }
   const contract = resolveProviderRuntimeContract(config, request);
+  assertReasoningCapability(contract);
   // D.13G：anthropic_messages 现在原生支持 tools；只有 contract.supportsTools=false（用户
   // 显式禁用）时才让 assertToolCapability 抛 MODEL_TOOLS_UNSUPPORTED；否则直接放过。
   assertToolCapability(request, contract);
@@ -1947,9 +2007,8 @@ function createAnthropicMessagesProfileRequest(
     stream: true,
   };
   // D.13K：Anthropic Messages extended thinking 注入。
-  // 仅在 contract.sendReasoning=true（即 request 或 config 含 reasoningLevel）时附加；
-  // Low/Medium/High → budget_tokens=1024/4096/8192。其它字符串视为未识别，按
-  // Medium 兜底（与 model-setup 默认一致），避免静默丢失推理意图。
+  // 仅在 contract.sendReasoning=true 时附加；Low/Medium/High 分别映射为
+  // 1024/4096/8192。其它等级在 builder 入口明确报 unsupported，不做静默回退。
   // max_tokens 安全处理：thinking budget 必须严格小于 max_tokens；
   // 不足时把 max_tokens 抬到 budget + 1024，保证 Anthropic 不返回 invalid_request_error。
   if (contract.sendReasoning) {
@@ -2280,6 +2339,25 @@ function assertToolCapability(request: ModelRequest, contract: ProviderRuntimeCo
   });
 }
 
+function assertReasoningCapability(contract: ProviderRuntimeContract): void {
+  const level = contract.unsupportedReasoningLevel;
+  if (!level) {
+    return;
+  }
+  const supported =
+    contract.profile === "openai_responses"
+      ? "Low / Medium / High / XHigh / Max"
+      : contract.profile === "anthropic_messages" || contract.profile === "gemini_chat_completions"
+        ? "Low / Medium / High"
+        : "Low / Medium / High / Max";
+  throw new LinghunError({
+    code: "MODEL_REASONING_LEVEL_UNSUPPORTED",
+    message: `Reasoning level ${JSON.stringify(level)} is unsupported for provider profile ${contract.profile}.`,
+    suggestion: `请为当前 provider/profile 选择已验证等级：${supported}；Linghun 不会静默回退到 Medium。`,
+    recoverable: true,
+  });
+}
+
 const TOOL_CALL_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 
 export function repairToolMessagePairing(messages: ModelMessage[]): ToolMessagePairingRepair {
@@ -2377,6 +2455,7 @@ function normalizeOpenAiReasoningEffort(level: string): string {
     normalized === "low" ||
     normalized === "medium" ||
     normalized === "high" ||
+    normalized === "xhigh" ||
     normalized === "max"
   ) {
     return normalized;
@@ -2385,7 +2464,7 @@ function normalizeOpenAiReasoningEffort(level: string): string {
 }
 
 // D.13K：Anthropic Messages extended thinking budget 映射。
-// Low → 1024 / Medium → 4096 / High → 8192；其它字符串按 Medium 兜底。
+// Low → 1024 / Medium → 4096 / High → 8192；其它字符串由 capability gate 拒绝。
 // 仅由 createAnthropicMessagesProfileRequest 在 contract.sendReasoning=true 时调用，
 // 不复用 OpenAI reasoning.effort 字段；OpenAI 路径不会触发该 helper。
 function createAnthropicThinkingPayload(
@@ -2395,8 +2474,9 @@ function createAnthropicThinkingPayload(
   const normalized = level.trim().toLowerCase();
   let budget: number;
   if (normalized === "low") budget = 1024;
+  else if (normalized === "medium") budget = 4096;
   else if (normalized === "high") budget = 8192;
-  else budget = 4096; // medium / 未识别 → 与 model-setup 默认 Medium 一致
+  else return undefined;
   return { type: "enabled", budget_tokens: budget };
 }
 

@@ -89,9 +89,9 @@ describe("model-setup-runtime", () => {
       const result = parseModelSetupPrefill("模型：gpt-4o");
       expect(result.model).toBe("gpt-4o");
     });
-    it("extracts reasoning level", () => {
-      const result = parseModelSetupPrefill("reasoning=High");
-      expect(result.reasoningLevel).toBe("High");
+    it("extracts extended reasoning levels case-insensitively", () => {
+      expect(parseModelSetupPrefill("reasoning=xhigh").reasoningLevel).toBe("XHigh");
+      expect(parseModelSetupPrefill("reasoning=MAX").reasoningLevel).toBe("Max");
     });
     it("extracts API key with sk- prefix", () => {
       const result = parseModelSetupPrefill("sk-abcdefgh12345678");
@@ -126,10 +126,16 @@ describe("model-setup-runtime", () => {
       expect(normalizeModelSetupReasoningLevel("High")).toBe("High");
       expect(normalizeModelSetupReasoningLevel("高")).toBe("High");
     });
-    it("defaults to Medium", () => {
+    it("normalizes Medium, XHigh, and Max", () => {
       expect(normalizeModelSetupReasoningLevel("medium")).toBe("Medium");
       expect(normalizeModelSetupReasoningLevel("中")).toBe("Medium");
-      expect(normalizeModelSetupReasoningLevel("anything")).toBe("Medium");
+      expect(normalizeModelSetupReasoningLevel("xHiGh")).toBe("XHigh");
+      expect(normalizeModelSetupReasoningLevel("MAX")).toBe("Max");
+    });
+    it("rejects unsupported levels instead of falling back to Medium", () => {
+      expect(() => normalizeModelSetupReasoningLevel("anything")).toThrow(
+        "Low / Medium / High / XHigh / Max",
+      );
     });
   });
 
@@ -214,6 +220,20 @@ describe("model-setup-runtime", () => {
       const msg = formatModelSetupMessage("intro", "en-US", setup);
       expect(msg).toContain("Model setup wizard");
       expect(msg).toContain("provider.env");
+    });
+    it("offers extended levels only for openai-compatible setup", () => {
+      const openAi = formatModelSetupMessage("reasoningPrompt", "en-US", {
+        ...setup,
+        values: { providerType: "openai-compatible" },
+      });
+      const gemini = formatModelSetupMessage("reasoningPrompt", "en-US", {
+        ...setup,
+        values: { providerType: "gemini" },
+      });
+      expect(openAi).toContain("Low / Medium / High / XHigh / Max");
+      expect(gemini).toContain("Low / Medium / High");
+      expect(gemini).not.toContain("XHigh");
+      expect(gemini).not.toContain("Max");
     });
     it("returns baseUrl prompt in Chinese", () => {
       const msg = formatModelSetupMessage("baseUrlPrompt", "zh-CN", setup);
