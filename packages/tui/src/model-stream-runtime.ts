@@ -183,8 +183,11 @@ import { summarizeEvidenceRecords } from "./task-status-presenter.js";
 import { createAssistantPrimaryTextSanitizer } from "./tool-output-presenter.js";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 import {
+  currentRequestUserActionConstraints,
   forbidsVerificationEvidence,
+  hasReadOnlyUserConstraint,
   parseUserActionConstraints,
+  type UserActionConstraints,
 } from "./user-action-constraints.js";
 import {
   createVerificationPlan,
@@ -1513,6 +1516,43 @@ function readRequestedVerificationLevel(
   return undefined;
 }
 
+function forbidsFinalGateVerificationEvidence(
+  constraints: UserActionConstraints,
+  level: FinalGateVerificationLevel,
+): boolean {
+  if (forbidsVerificationEvidence(constraints)) return true;
+  if (level === "test") return constraints.forbidTests;
+  if (level === "build") return constraints.forbidBuild;
+  if (level === "lint") return constraints.forbidLint;
+  if (level === "typecheck") return constraints.forbidTypecheck;
+  return constraints.forbidSmoke === true;
+}
+
+function hasAnyVerificationCommandRestriction(constraints: UserActionConstraints): boolean {
+  return (
+    forbidsVerificationEvidence(constraints) ||
+    constraints.forbidTests ||
+    constraints.forbidBuild ||
+    constraints.forbidLint ||
+    constraints.forbidTypecheck ||
+    constraints.forbidSmoke === true
+  );
+}
+
+function hasUserActionConstraint(constraints: UserActionConstraints): boolean {
+  return (
+    constraints.readonlyOnly ||
+    constraints.forbidWrite ||
+    constraints.forbidTests ||
+    constraints.forbidBuild ||
+    constraints.forbidLint ||
+    constraints.forbidTypecheck ||
+    constraints.forbidSmoke === true ||
+    constraints.forbidShell ||
+    constraints.forbidAllTools
+  );
+}
+
 function isVerificationEvidenceRecord(record: TuiContext["evidence"][number]): boolean {
   return record.kind === "test_result" || record.supportsClaims.some((claim) =>
     claim === "verification_passed" ||
@@ -1622,6 +1662,15 @@ function evaluateEngineeringFinalBoundary(
 ): { status: "passed" } | { status: "needs_disclaimer"; unsupportedKinds: string[]; message: string } {
   const signal = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal;
   if (!signal) return { status: "passed" };
+  const currentConstraints = currentRequestUserActionConstraints(context);
+  if (
+    context.lastMetaSchedulerDecision?.policyDecision.taskKind === "code_fact" &&
+    currentConstraints &&
+    hasReadOnlyUserConstraint(currentConstraints) &&
+    !signal.failureCategory
+  ) {
+    return { status: "passed" };
+  }
   const highRiskFinal =
     /(?:已完成|已修复|已生成|产物存在|测试通过|全部通过|验证通过|pass(?:ed)?|completed|fixed|generated|verified|tests? passed)/iu.test(
       assistantText,
@@ -1762,8 +1811,19 @@ export function planFinalGateEvidenceGapAction(input: {
       directive: createFinalGateEvidenceTaskDirective(result, language),
     };
   }
+  if (
+    (gap === "verification" || gap === "completion") &&
+    context.permissionMode === "plan"
+  ) {
+    return {
+      action: "blocked_explanation",
+      reason: "readonly_mode_blocks_verification",
+      directive: formatEvidenceGapBlocker("readonly_mode_blocks_verification", language),
+    };
+  }
   if (gap === "verification" || gap === "completion") {
-    if (forbidsVerificationEvidence(constraints)) {
+    const level = selectFinalGateVerificationLevel(result);
+    if (forbidsFinalGateVerificationEvidence(constraints, level)) {
       return {
         action: "blocked_explanation",
         reason: "user_forbid_commands",
@@ -2795,6 +2855,67 @@ export function beginForegroundRequestTurn(
   return requestTurnId;
 }
 
+const BARE_INTERRUPTED_TURN_RESUME_REQUESTS = new Set([
+  "继续",
+  "继续吧",
+  "接着",
+  "continue",
+  "resume",
+  "go on",
+]);
+
+const EXPLICIT_INTERRUPTED_TURN_RESUME_REQUESTS = new Set([
+  "继续上一轮",
+  "继续上次",
+  "继续刚才",
+  "继续前面",
+  "继续之前",
+  "继续刚掉线了",
+  "continue previous turn",
+  "resume previous turn",
+  "continue previous task",
+  "resume previous task",
+]);
+
+function isBareInterruptedTurnResumeRequest(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/^[`'"“”‘’]+|[`'"“”‘’]+$/gu, "")
+    .replace(/[。.!！?？]+$/gu, "")
+    .replace(/\s+/gu, " ")
+    .toLowerCase();
+  if (BARE_INTERRUPTED_TURN_RESUME_REQUESTS.has(normalized)) return true;
+  if (EXPLICIT_INTERRUPTED_TURN_RESUME_REQUESTS.has(normalized)) return true;
+  return EXPLICIT_INTERRUPTED_TURN_RESUME_REQUESTS.has(normalized.replace(/\s+/gu, ""));
+}
+
+function resumeInterruptedForegroundRequestTurn(
+  context: TuiContext,
+  userMessageId?: string,
+): string | undefined {
+  const interrupted = context.lastInterruptedTurn;
+  if (!interrupted) return undefined;
+  const requestTurnId = interrupted.requestTurnId;
+  const previousRequestTurnId = context.currentRequestTurnId;
+  if (previousRequestTurnId && previousRequestTurnId !== requestTurnId) {
+    clearRequestActivity(context, { kind: "foreground", requestTurnId: previousRequestTurnId });
+  }
+  context.runtimeContextId = requestTurnId;
+  context.currentRequestTurnId = requestTurnId;
+  context.currentRequestChangedFiles ??= [];
+  context.currentRequestMentionedFiles ??= [];
+  context.currentRequestUserMessageId = userMessageId;
+  if (
+    context.currentUserActionConstraintsRequestTurnId &&
+    context.currentUserActionConstraintsRequestTurnId !== requestTurnId
+  ) {
+    context.currentUserActionConstraints = undefined;
+    context.currentUserActionConstraintsRequestTurnId = undefined;
+  }
+  context.lastInterruptedTurn = undefined;
+  return requestTurnId;
+}
+
 function isCurrentForegroundRequestTurn(context: TuiContext, requestTurnId: string): boolean {
   return context.currentRequestTurnId === requestTurnId;
 }
@@ -2854,10 +2975,6 @@ export function clearForegroundRequestState(
     return;
   }
   clearRequestActivity(context, { kind: "foreground", requestTurnId });
-  if (context.currentUserActionConstraintsRequestTurnId === requestTurnId) {
-    context.currentUserActionConstraints = undefined;
-    context.currentUserActionConstraintsRequestTurnId = undefined;
-  }
   context.activeAbortController = undefined;
   context.foregroundAbortPendingUntilMs = undefined;
   context.tools.abortSignal = undefined;
@@ -3103,7 +3220,18 @@ export async function sendMessage(
     text: string;
     createdAt: string;
   };
-  const requestTurnId = beginForegroundRequestTurn(context, userMessageEvent.id);
+  const interruptedTurnToResume = context.lastInterruptedTurn &&
+    isBareInterruptedTurnResumeRequest(text)
+    ? context.lastInterruptedTurn
+    : undefined;
+  const requestTurnId = interruptedTurnToResume
+    ? resumeInterruptedForegroundRequestTurn(context, userMessageEvent.id) ??
+      beginForegroundRequestTurn(context, userMessageEvent.id)
+    : beginForegroundRequestTurn(context, userMessageEvent.id);
+  const resumedInterruptedTurn = requestTurnId === interruptedTurnToResume?.requestTurnId;
+  if (!resumedInterruptedTurn) {
+    context.lastInterruptedTurn = undefined;
+  }
   const memoryAutoLearningRuntime = (context.memoryAutoLearningRuntime ??= {});
   memoryAutoLearningRuntime.latestRequestTurnId = requestTurnId;
   const assistantEventId = randomUUID();
@@ -3379,8 +3507,15 @@ export async function sendMessage(
     });
   }
   if (await stopStaleRequest()) return;
-  context.currentUserActionConstraints = parseUserActionConstraints(text);
-  context.currentUserActionConstraintsRequestTurnId = requestTurnId;
+  const parsedActionConstraints = parseUserActionConstraints(text);
+  if (
+    !resumedInterruptedTurn ||
+    hasUserActionConstraint(parsedActionConstraints) ||
+    !currentRequestUserActionConstraints(context)
+  ) {
+    context.currentUserActionConstraints = parsedActionConstraints;
+    context.currentUserActionConstraintsRequestTurnId = requestTurnId;
+  }
     let consecutiveTodoOnlyRounds = 0;
     let todoOnlyHintSent = false;
     let todoOnlyWarningSent = false;
@@ -4544,7 +4679,13 @@ export async function sendMessage(
       markAgentCompletionNoticeReported(context, noticeId, reportedAt);
     }
   }
-  if (metaSchedulerDecision.shouldPreferVerifier && assistantText) {
+  const currentConstraints =
+    currentRequestUserActionConstraints(context) ?? parseUserActionConstraints(text);
+  if (
+    metaSchedulerDecision.shouldPreferVerifier &&
+    assistantText &&
+    !hasAnyVerificationCommandRestriction(currentConstraints)
+  ) {
     await appendSystemEvent(
       context,
       sessionId,
@@ -5314,6 +5455,9 @@ export async function buildModelMessagesWithRecentContext(
 
 function appendInterruptedTurnBoundaryHint(text: string, reason: string | undefined): string {
   if (!reason) return text;
+  if (isBareInterruptedTurnResumeRequest(text)) {
+    return `${text}\n\nPrevious foreground turn was interrupted (reason: ${reason}). This user message requests continuing that interrupted task. Continue from the prior request context instead of treating this short resume request as a new task.`;
+  }
   return `${text}\n\nPrevious foreground turn was interrupted (reason: ${reason}). Treat this user message as the authoritative task. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.`;
 }
 

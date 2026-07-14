@@ -2480,6 +2480,17 @@ describe("Phase 05 core tools", () => {
     expect(testPrint.command).toContain("Test-Path");
     expect(testPrint.command).toContain("PathType Leaf");
     expect(testPrint.command).toContain("Write-Output");
+
+    const auditProbe = adaptShellCommandForPlatform(
+      "pwd && git status --short",
+      "win32",
+    );
+    expect(auditProbe.adapter).toBe("powershell-adapted");
+    expect(auditProbe.command).toContain("Get-Location");
+    expect(auditProbe.command).toContain("& 'git'");
+    expect(auditProbe.command).toContain("'status'");
+    expect(auditProbe.command).toContain("'--short'");
+    expect(auditProbe.command).not.toContain("Unsupported pwd form");
   });
 
   it("wraps native PowerShell cmdlets on Windows before they reach cmd.exe", () => {

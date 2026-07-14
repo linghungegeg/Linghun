@@ -2472,6 +2472,10 @@ const WINDOWS_SHELL_ADAPTER_REGISTRY: WindowsShellAdapterRule[] = [
         : undefined,
   },
   {
+    name: "ReadOnlyAndChainAdapter",
+    adapt: (command) => convertReadOnlyAndChainForPowerShell(command),
+  },
+  {
     name: "UnsupportedReadOnlyAdapter",
     adapt: (command) => blockUnsupportedUnixReadOnlyCommand(command),
   },
@@ -2864,6 +2868,99 @@ function convertUnixReadOnlyCommandForPowerShell(command: string): ShellCommandA
     ].join(" "),
     adapter: "powershell-adapted",
   };
+}
+
+function convertReadOnlyAndChainForPowerShell(command: string): ShellCommandAdapter | undefined {
+  const segments = splitUnquotedAndChain(command);
+  if (!segments || segments.length < 2) return undefined;
+  const scripts = segments.map(convertReadOnlyChainSegmentForPowerShell);
+  if (scripts.some((script) => !script)) return undefined;
+  const body = scripts.flatMap((script) => script ?? []).join("; ");
+  return {
+    command: [
+      "powershell.exe -NoProfile -NonInteractive -Command",
+      quoteCmdArg(`$ErrorActionPreference='Stop'; ${body}`),
+    ].join(" "),
+    adapter: "powershell-adapted",
+    logCommand: "powershell.exe -NoProfile -NonInteractive -Command <readonly && adapter>",
+  };
+}
+
+function splitUnquotedAndChain(command: string): string[] | undefined {
+  const normalized = command.trim();
+  if (!normalized || /[\r\n|;<>]/u.test(normalized)) return undefined;
+  const segments: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    if (!char) continue;
+    if (quote) {
+      if (char === quote) quote = undefined;
+      current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "&" && normalized[index + 1] === "&") {
+      if (!current.trim()) return undefined;
+      segments.push(current.trim());
+      current = "";
+      index += 1;
+      continue;
+    }
+    current += char;
+  }
+  if (quote || !current.trim()) return undefined;
+  segments.push(current.trim());
+  return segments.length > 1 ? segments : undefined;
+}
+
+function convertReadOnlyChainSegmentForPowerShell(segment: string): string[] | undefined {
+  const tokens = tokenizeSimpleShellCommand(segment);
+  if (!tokens) return undefined;
+  const [program = "", ...args] = tokens;
+  const lowerProgram = program.toLowerCase();
+  if (lowerProgram === "pwd") {
+    return args.length === 0 ? ["Get-Location | ForEach-Object { $_.Path }"] : undefined;
+  }
+  if (lowerProgram === "git") {
+    const subcommand = args[0]?.toLowerCase();
+    if (
+      !subcommand ||
+      !["status", "rev-parse", "diff", "log", "show", "branch", "ls-files"].includes(subcommand)
+    ) {
+      return undefined;
+    }
+    return [
+      formatPowerShellNativeCommand(program, args),
+      "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+    ];
+  }
+  if (
+    (lowerProgram === "node" ||
+      lowerProgram === "npm" ||
+      lowerProgram === "pnpm" ||
+      lowerProgram === "corepack") &&
+    args.length === 1 &&
+    args[0] === "--version"
+  ) {
+    return [
+      formatPowerShellNativeCommand(program, args),
+      "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+    ];
+  }
+  return undefined;
+}
+
+function formatPowerShellNativeCommand(program: string, args: string[]): string {
+  return [
+    `& ${quotePowerShellString(program)}`,
+    ...args.map((arg) => quotePowerShellString(arg)),
+  ].join(" ");
 }
 
 function convertPosixTestPrintForPowerShell(command: string): string | undefined {

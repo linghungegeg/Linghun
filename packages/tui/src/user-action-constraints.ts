@@ -47,6 +47,14 @@ function anyClauseMatches(clauses: string[], pattern: RegExp): boolean {
   return clauses.some((clause) => pattern.test(clause));
 }
 
+function anyNegatedRunListMentions(clauses: string[], itemPattern: RegExp): boolean {
+  const text = clauses.join("，");
+  const segments = text.match(
+    /(?:(?:不要|别|不准|禁止|先别|不)\s*(?:再|继续|重新)?\s*(?:跑|运行|执行|做|进行)\s*[^。！？!?；;\n]{0,120}|(?:do\s+not|don't|dont|no)\s+run\s+[^.?!;\n]{0,120})/giu,
+  ) ?? [];
+  return segments.some((segment) => itemPattern.test(segment));
+}
+
 function isExplicitConstraintDirective(clause: string): boolean {
   if (
     /(?:关键词|正则|语义|解析|识别|判断|误触|误判|硬门控|硬限制|门控|约束机制|约束规则|这句话|这个说法|文案)|(?:regex|semantic|parser|parsing|wording|hard\s+(?:gate|constraint)|constraint\s+(?:parser|rule))/iu.test(
@@ -55,7 +63,7 @@ function isExplicitConstraintDirective(clause: string): boolean {
   ) {
     return false;
   }
-  return /^(?:(?:请|麻烦|本次|这次|当前(?:请求|任务)?|这个任务|该任务|我要求|用户要求|先|然后|再|也|并且|同时|但(?:是)?)\s*)*(?:只读|只\s*(?:看|检查|分析|审计|定位)|只允许|不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许)|^(?:(?:please|for\s+this\s+(?:request|task)|then|also|but)\s+)*(?:read[-\s]?only|audit\s+only|diagnose\s+only|inspect\s+only|do\s+not|don't|dont|no\s|cannot|can't|cant|not\s+allowed|may\s+not|must\s+not|without\s|answer\s+without|use\s+no)/iu.test(
+  return /^(?:(?:请|麻烦|本次|这次|当前(?:请求|任务)?|这个任务|该任务|我要求|用户要求|先|然后|再|也|并且|同时|但(?:是)?)\s*)*(?:只读|只\s*(?:看|检查|分析|审计|定位)|只允许|不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许|不\s*(?:跑|运行|执行|做|进行))|^(?:(?:please|for\s+this\s+(?:request|task)|then|also|but)\s+)*(?:read[-\s]?only|audit\s+only|diagnose\s+only|inspect\s+only|do\s+not|don't|dont|no\s|cannot|can't|cant|not\s+allowed|may\s+not|must\s+not|without\s|answer\s+without|use\s+no)/iu.test(
     clause,
   );
 }
@@ -249,23 +257,30 @@ export function parseUserActionConstraints(text: string | undefined): UserAction
       !/(?:smoke|冒烟)/iu.test(clause) &&
       (/(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:单元测试|测试|test)/iu.test(clause) ||
         /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?(?:(?:unit|integration|e2e|full)\s+)?(?:tests?|test\s+suite)/iu.test(clause)),
+  ) || anyNegatedRunListMentions(
+    constraintClauses,
+    /(?:单元测试|测试|\btests?\b|\btest\s+suite\b)/iu,
   );
 
   const forbidBuild =
     anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:build|构建|打包)/iu) ||
-    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?build/iu);
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?build/iu) ||
+    anyNegatedRunListMentions(constraintClauses, /(?:\bbuild\b|构建|打包)/iu);
 
   const forbidLint =
     anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:lint|检查格式)/iu) ||
-    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?lint/iu);
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?lint/iu) ||
+    anyNegatedRunListMentions(constraintClauses, /(?:\blint\b|检查格式)/iu);
 
   const forbidTypecheck =
     anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:type[-\s]?check|类型检查)/iu) ||
-    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?type[-\s]?check/iu);
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?type[-\s]?check/iu) ||
+    anyNegatedRunListMentions(constraintClauses, /(?:type[-\s]?check|类型检查)/iu);
 
   const forbidSmoke =
     anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:跑|运行|执行|做|进行)\s*)?(?:任何|所有|全部)?\s*(?:smoke|冒烟测试|冒烟)/iu) ||
-    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?smoke(?:\s+tests?)?/iu);
+    anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run\s+)?(?:(?:any|all|the)\s+)?smoke(?:\s+tests?)?/iu) ||
+    anyNegatedRunListMentions(constraintClauses, /(?:\bsmoke\b|冒烟测试|冒烟)/iu);
 
   const forbidShell =
     forbidAllTools ||

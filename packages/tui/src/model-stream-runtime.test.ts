@@ -1149,6 +1149,142 @@ describe("continuation abort ownership", () => {
     expect(context.interrupt).toEqual({ type: "idle" });
   });
 
+  it("reuses the interrupted request owner for a bare continue and keeps scoped evidence visible", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const requestContextIds: Array<string | undefined> = [];
+    const interruptedTurnId = "interrupted-turn";
+    context.lastInterruptedTurn = {
+      requestTurnId: interruptedTurnId,
+      reason: "model_timeout",
+      userMessageId: "user-old",
+      at: new Date(0).toISOString(),
+    };
+    context.currentRequestChangedFiles = ["src/a.ts"];
+    context.evidence.push(makeEvidence({
+      id: "old-verification",
+      kind: "test_result",
+      source: "Bash",
+      summary: "focused verification passed",
+      supportsClaims: ["verification_passed"],
+      ownerScope: {
+        ownerSessionId: context.sessionId!,
+        requestTurnId: interruptedTurnId,
+        cwd: context.projectPath,
+      },
+      data: {
+        verificationScope: {
+          ownerKey: `request:${context.sessionId!}:${interruptedTurnId}`,
+          cwd: context.projectPath,
+          changedFiles: ["src/a.ts"],
+          ownerSessionId: context.sessionId!,
+          requestTurnId: interruptedTurnId,
+        },
+      },
+    }));
+    const gateway = {
+      async *stream(_providerId: string, request: { requestContextId?: string }) {
+        requestContextIds.push(request.requestContextId);
+        yield {
+          type: "assistant_text_delta",
+          text: withClaims("验证通过。", [{ kind: "verification_claim", phrase: "验证通过" }]),
+        } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("继续", context, gateway, new MemoryOutput());
+
+    expect(requestContextIds).toEqual([interruptedTurnId]);
+    expect(context.lastInterruptedTurn).toBeUndefined();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "assistant_text_delta",
+        text: "验证通过。",
+      }),
+    );
+  }, 30_000);
+
+  it("treats a non-bare follow-up after an interrupt as a new request and consumes the marker", async () => {
+    const { context } = await makeSendMessageContext();
+    const requestContextIds: Array<string | undefined> = [];
+    context.lastInterruptedTurn = {
+      requestTurnId: "interrupted-turn",
+      reason: "user_interrupt",
+      userMessageId: "user-old",
+      at: new Date(0).toISOString(),
+    };
+    const gateway = {
+      async *stream(_providerId: string, request: { requestContextId?: string }) {
+        requestContextIds.push(request.requestContextId);
+        yield { type: "assistant_text_delta", text: "这是另一个问题的观察。" } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("检查另一个问题", context, gateway, new MemoryOutput());
+
+    expect(requestContextIds).toHaveLength(1);
+    expect(requestContextIds[0]).toEqual(expect.any(String));
+    expect(requestContextIds[0]).not.toBe("interrupted-turn");
+    expect(context.lastInterruptedTurn).toBeUndefined();
+  }, 30_000);
+
+  it("can record another interrupt after a bare continue reuses the same owner", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const interruptedTurnId = "interrupted-turn";
+    context.lastInterruptedTurn = {
+      requestTurnId: interruptedTurnId,
+      reason: "model_timeout",
+      userMessageId: "user-old",
+      at: new Date(0).toISOString(),
+    };
+    let enterStream: (() => void) | undefined;
+    const streamEntered = new Promise<void>((resolve) => {
+      enterStream = resolve;
+    });
+    const gateway = {
+      async *stream(_providerId: string, _request: unknown, signal: AbortSignal) {
+        enterStream?.();
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) {
+            resolve();
+            return;
+          }
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    const running = __testSendMessage("继续", context, gateway, new MemoryOutput());
+    await streamEntered;
+    expect(context.currentRequestTurnId).toBe(interruptedTurnId);
+
+    const result = await interruptAllActiveWork(context);
+    await running;
+
+    expect(result.abortSignalsSent).toBe(1);
+    expect(context.lastInterruptedTurn).toMatchObject({
+      requestTurnId: interruptedTurnId,
+      reason: "user_interrupt",
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "interrupt",
+        status: "cancelled",
+        message: expect.stringContaining(`requestTurnId=${interruptedTurnId}`),
+      }),
+    );
+  }, 30_000);
+
   it("does not clear a newer continuation signal generation with the same turn id", async () => {
     const { context } = await makeSendMessageContext();
     const requestTurnId = beginForegroundRequestTurn(context, "continuation-owner");
@@ -4213,6 +4349,49 @@ describe("model message prompt cache layout", () => {
     );
   });
 
+  it("treats a bare continue after an interrupt as a resume request in model history", async () => {
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            { type: "user_message", text: "old task" },
+            {
+              type: "interrupt",
+              status: "cancelled",
+              message:
+                "turn_interrupted: requestTurnId=turn-old; reason=model_timeout; userMessageId=user-old",
+            },
+            { type: "user_message", text: "继续" },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-interrupted-resume",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "继续",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+
+    expect(messages.at(-1)).toMatchObject({ role: "user" });
+    expect(messages.at(-1)?.content).toContain(
+      "This user message requests continuing that interrupted task.",
+    );
+    expect(messages.at(-1)?.content).not.toContain("Treat this user message as the authoritative task.");
+  });
+
   it("rebuilds the same interrupted user tail as stable history on the next turn", async () => {
     let events: Array<Record<string, unknown>> = [
       { type: "user_message", text: "old task" },
@@ -6765,6 +6944,26 @@ describe("final answer gate aggregation", () => {
     expect(plan.action).toBe("blocked_explanation");
     expect(plan.directive).toContain("只读/plan 模式");
     expect(plan.directive).toContain("请求授权");
+    expect(plan.evidenceAction).toBeUndefined();
+  });
+
+  it("downgrades verification gaps when the current readonly audit request forbids verification", () => {
+    const result = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      withClaims("验证通过。", [{ kind: "verification_claim", phrase: "验证通过" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: { ...makeGateContext(), permissionMode: "default", language: "zh-CN" } as never,
+      userText: "只读审计，不运行 build、test、typecheck、pack、publish 或真实 provider。",
+    });
+
+    expect(plan.action).toBe("blocked_explanation");
+    expect(plan.directive).toContain("用户明确限制");
     expect(plan.evidenceAction).toBeUndefined();
   });
 

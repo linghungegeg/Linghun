@@ -1566,12 +1566,15 @@ export function evaluateFinalAnswerClaims(
   evidence: EvidenceRecord[],
   now: Date = new Date(),
 ): FinalAnswerClaimVerdict {
+  const visible = stripStructuredFinalAnswerClaims(text);
   const inferred = inferVisibleFinalAnswerClaims(text);
   const visibleTargetedCodeFacts = inferred.filter(
     (claim) => claim.kind === "code_fact" && extractClaimTargets(claim).length > 0,
   );
   const structured = extractStructuredFinalAnswerClaims(text).filter(
     (claim) => claim.kind !== "architecture_boundary" && claim.kind !== "completeness",
+  ).filter(
+    (claim) => !isReadonlyAuditCompletionClaim(claim.kind, visible, claim.phrase),
   ).filter(
     (claim) =>
       claim.kind !== "code_fact" ||
@@ -1613,6 +1616,11 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
             claimText,
             match[0] ?? "",
             match.index ?? 0,
+          ) ||
+          isReadonlyAuditCompletionClaim(
+            kind,
+            claimText,
+            match[0] ?? "",
           )
         ) {
           continue;
@@ -1656,7 +1664,7 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
     "code_fact",
     /(?:(?:代码|函数|方法|类|模块|function|method|class|module).{0,100}(?:负责|会|调用|返回|实现|uses?|calls?|returns?|implements?|(?:(?:do|does)\s+not|don't|doesn't)\s+(?:call|use|reference|invoke))|[\p{L}\p{N}_$.-]{2,}.{0,40}(?:未(?:被)?|没有(?:被)?|不)(?:调用|引用|使用)|(?:未发现|未找到|找不到|没有(?:发现|找到|任何)?|不存在|无(?:任何)?)[^。；;\n]{0,80}(?:调用|引用|使用|匹配|callers?|references?|matches?)|(?:不|没有(?:被)?)(?:调用|引用|使用)[^。；;\n]{0,80}|(?:no\s+(?:calls?|callers?|invocations?|references?|matches?|usages?|uses?)|not\s+(?:used|using|referenced|called|invoked)|(?:(?:do|does)\s+not|don't|doesn't)\s+(?:call|use|reference|invoke)|[\p{L}\p{N}_$./\\-]{2,}[^.\n]{0,40}\bunused\b|\bunused\s+[\p{L}\p{N}_$./\\-]{2,})[^.\n]{0,80})/iu,
   );
-  add("completion_claim", /(?:已完成|已经完成|已修复|已经修复|completed|fixed|done)/iu);
+  add("completion_claim", /(?:已完成|已经完成|已修复|已经修复|(?:检查|审计|复核|核对)(?:完(?:成)?|结束)|completed|fixed|done)/iu);
   return claims;
 }
 
@@ -1675,6 +1683,28 @@ function isReadonlyInspectionOnlyClaim(
   if (!readonlyPattern.test(prefix)) return false;
   return /^(?:已|已经|successfully\s+)?(?:执行|ran|executed)(?:成功|了|过)?\s*$|^(?:已完成|已经完成|completed|done)\s*$/iu.test(
     matchText.trim(),
+  );
+}
+
+function isReadonlyAuditCompletionClaim(
+  kind: FinalAnswerClaimKind,
+  claimText: string,
+  matchText: string,
+): boolean {
+  if (kind !== "completion_claim") return false;
+  if (!/(?:完成|完|completed|done)/iu.test(matchText)) return false;
+  const normalizedMatch = matchText.trim().toLowerCase();
+  const matchingClauses = splitClaimClauses(claimText).filter((clause) =>
+    normalizedMatch ? clause.toLowerCase().includes(normalizedMatch) : false
+  );
+  const claimClauses = matchingClauses.length > 0 ? matchingClauses : [claimText];
+  if (claimClauses.some((clause) =>
+    /(?:修复|修改|改动|实现|写入|创建|删除|提交|发布|测试通过|验证通过|构建通过|fixed|repaired|modified|implemented|written|created|deleted|committed|published|tests?\s+passed|verified|build\s+passed)/iu.test(
+      clause,
+    )
+  )) return false;
+  return /(?:只读|审计|检查|核对|覆盖|源码|代码片段|读取|读到|audit|review|inspect(?:ion)?|check(?:ed)?|coverage|source\s+(?:read|inspection|review))/iu.test(
+    claimClauses.join(" "),
   );
 }
 
@@ -1717,7 +1747,7 @@ function splitClaimClauses(text: string): string[] {
 
 function isNegatedOrProspectiveClaim(text: string, sourceText: string): boolean {
   if (
-    /(?:未|没有|尚未|失败|需要|建议|计划|将要|准备|不得|不能|not\b|did\s+not|didn't|failed|need\s+to|should|plan(?:ned)?\s+to|will\s+)/iu.test(
+    /(?:未|没有|尚未|失败|需要|建议|计划|将要|准备|不得|不能|不(?:声明|声称)|not\b|did\s+not|didn't|(?:do|does)\s+not\s+claim|no\s+[^.\n。；;]{0,40}\bclaimed\b|failed|need\s+to|should|plan(?:ned)?\s+to|will\s+)/iu.test(
       text,
     )
   ) {

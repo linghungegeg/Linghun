@@ -258,6 +258,18 @@ describe("user-action-constraints", () => {
     expect(constraints.forbidTypecheck).toBe(false);
   });
 
+  it("carries a negated run directive across a verification command list", () => {
+    const constraints = parseUserActionConstraints(
+      "只读审计，不运行 build、test、typecheck、smoke。",
+    );
+
+    expect(constraints.forbidBuild).toBe(true);
+    expect(constraints.forbidTests).toBe(true);
+    expect(constraints.forbidTypecheck).toBe(true);
+    expect(constraints.forbidSmoke).toBe(true);
+    expect(constraints.forbidLint).toBe(false);
+  });
+
   it("keeps smoke as its own verification constraint kind", () => {
     const constraints = parseUserActionConstraints("不要 smoke，test 可以执行");
 

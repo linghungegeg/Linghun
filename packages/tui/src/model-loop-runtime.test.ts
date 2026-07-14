@@ -1012,6 +1012,34 @@ describe("model-loop-runtime", () => {
       }
     });
 
+    it("does not treat readonly audit coverage as engineering task completion", () => {
+      for (const text of [
+        "我已完成对 packages/tui/src/model-stream-runtime.ts 的只读审计覆盖。",
+        "这轮只读检查完，未声明修复完成。",
+        "只读审计完 packages/tui/src/model-stream-runtime.ts，没有改动。",
+        "本轮完成检查覆盖到的源码范围，不声明修复已完成。",
+        "I completed readonly audit coverage for packages/tui/src/model-stream-runtime.ts.",
+        "Completed source inspection coverage only; no fix is claimed.",
+      ]) {
+        const verdict = evaluateFinalAnswerClaims(text, []);
+        expect(verdict.unsupportedKinds).not.toContain("completion_claim");
+      }
+    });
+
+    it("keeps broad completion and verification claims blocked outside the readonly audit clause", () => {
+      const broadCompletion = evaluateFinalAnswerClaims(
+        withClaims("只读审计完成；任务完成。", [{ kind: "completion_claim", phrase: "任务完成" }]),
+        [],
+      );
+      expect(broadCompletion.unsupportedKinds).toContain("completion_claim");
+
+      const fixedClaim = evaluateFinalAnswerClaims("只读检查完；已修复。", []);
+      expect(fixedClaim.unsupportedKinds).toContain("completion_claim");
+
+      const testClaim = evaluateFinalAnswerClaims("只读检查完；测试通过。", []);
+      expect(testClaim.unsupportedKinds).toContain("test_claim");
+    });
+
     it("blocks completion/PASS without test/build evidence even if Read evidence exists", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({ kind: "file_read", supportsClaims: ["Read", "local_read"] }),
