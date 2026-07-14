@@ -375,6 +375,33 @@ describe("OpenAI compatible provider", () => {
     expect(request.stream_options).toEqual({ include_usage: true });
   });
 
+  it.each([
+    ["strict_openai_compatible", "XHigh"],
+    ["strict_openai_compatible", "Max"],
+    ["permissive_openai_compatible", "XHigh"],
+    ["permissive_openai_compatible", "Max"],
+  ] as const)("rejects %s chat reasoning level %s", (compatibilityProfile, reasoningLevel) => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+      endpointProfile: "chat_completions",
+      compatibilityProfile,
+      reasoningLevel,
+    });
+
+    expect(() =>
+      provider.createChatRequest({ messages: [{ role: "user", content: "hello" }] }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "MODEL_REASONING_LEVEL_UNSUPPORTED",
+        suggestion: expect.stringContaining("Low / Medium / High"),
+      }),
+    );
+  });
+
   it("constructs a responses request with native tool schema and reasoning effort", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",

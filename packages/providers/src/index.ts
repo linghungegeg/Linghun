@@ -1248,15 +1248,21 @@ export function resolveProviderRuntimeContract(
       streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
     };
   }
+  const normalizedReasoningLevel = reasoningLevel?.trim().toLowerCase();
   const reasoning =
-    compatibilityProfile === "permissive_openai_compatible"
-      ? resolveSendableReasoning(reasoningLevel, "openai-reasoning-effort", [
-          "low",
-          "medium",
-          "high",
-          "max",
-        ])
-      : ({ sendReasoning: false, reasoningTransport: "not-sent" } as const);
+    normalizedReasoningLevel === "xhigh" || normalizedReasoningLevel === "max"
+      ? ({
+          sendReasoning: false,
+          reasoningTransport: "not-sent",
+          unsupportedReasoningLevel: reasoningLevel,
+        } as const)
+      : compatibilityProfile === "permissive_openai_compatible"
+        ? resolveSendableReasoning(reasoningLevel, "openai-reasoning-effort", [
+            "low",
+            "medium",
+            "high",
+          ])
+        : ({ sendReasoning: false, reasoningTransport: "not-sent" } as const);
   return {
     profile:
       compatibilityProfile === "permissive_openai_compatible"
@@ -2327,9 +2333,7 @@ function assertReasoningCapability(contract: ProviderRuntimeContract): void {
   const supported =
     contract.profile === "openai_responses"
       ? "Low / Medium / High / XHigh / Max"
-      : contract.profile === "anthropic_messages" || contract.profile === "gemini_chat_completions"
-        ? "Low / Medium / High"
-        : "Low / Medium / High / Max";
+      : "Low / Medium / High";
   throw new LinghunError({
     code: "MODEL_REASONING_LEVEL_UNSUPPORTED",
     message: `Reasoning level ${JSON.stringify(level)} is unsupported for provider profile ${contract.profile}.`,
